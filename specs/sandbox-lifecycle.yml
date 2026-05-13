@@ -1540,6 +1540,15 @@ components:
             Access modes for auto-created PVCs (e.g. ["ReadWriteOnce"]).
             Defaults to ["ReadWriteOnce"] when omitted. Ignored for Docker
             volumes.
+        pv:
+          type: object
+          nullable: true
+          description: |
+            Static PersistentVolume spec for Kubernetes. When provided, the
+            server creates a PV with this spec bound to the auto-created PVC.
+            Defaults to dynamic provisioning when omitted. Ignored for Docker
+            volumes.
+          additionalProperties: true
       additionalProperties: false
 
     OSSFS:

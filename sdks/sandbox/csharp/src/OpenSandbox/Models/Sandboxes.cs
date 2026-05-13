@@ -185,6 +185,14 @@ public class PVC
     /// </summary>
     [JsonPropertyName("accessModes")]
     public IReadOnlyList<string>? AccessModes { get; set; }
+
+    /// <summary>
+    /// Gets or sets the static PersistentVolume spec for Kubernetes.
+    /// When provided, the server creates a PV with this spec bound to the auto-created PVC.
+    /// Defaults to dynamic provisioning when omitted. Ignored for Docker volumes.
+    /// </summary>
+    [JsonPropertyName("pv")]
+    public IReadOnlyDictionary<string, object>? Pv { get; set; }
 }
 
 /// <summary>

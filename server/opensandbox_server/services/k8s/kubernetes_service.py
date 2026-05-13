@@ -82,6 +82,7 @@ from opensandbox_server.services.validators import (
     ensure_metadata_labels,
     ensure_platform_valid,
     ensure_timeout_within_limit,
+    ensure_valid_host_path,
     ensure_volumes_valid,
 )
 from opensandbox_server.services.k8s.client import K8sClient
@@ -309,7 +310,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         for PVC operations (403), the check is skipped and volume resolution
         is left to the kubelet at pod scheduling time.
         """
-        from kubernetes.client import V1PersistentVolumeClaim, V1ObjectMeta
+        from kubernetes.client import V1PersistentVolume, V1PersistentVolumeClaim, V1ObjectMeta
         from kubernetes.client import ApiException
 
         default_size = self.app_config.storage.volume_default_size
@@ -341,10 +342,52 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             access_modes = vol.pvc.access_modes or ["ReadWriteOnce"]
             storage_class = vol.pvc.storage_class  # None = cluster default
 
+            pv_body = None
+            if vol.pvc.pv is not None:
+                allowed_paths = self.app_config.storage.allowed_host_paths
+                pv_spec_raw = vol.pvc.pv
+                for source_key, path_key in (("hostPath", "path"), ("local", "path")):
+                    source = pv_spec_raw.get(source_key)
+                    if isinstance(source, dict) and path_key in source:
+                        ensure_valid_host_path(source[path_key], allowed_paths)
+
+                pv_name = claim_name
+                if self.namespace is not None:
+                    pv_name = f"{claim_name}-{self.namespace}"
+                if len(pv_name) > 253:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": SandboxErrorCodes.INVALID_PARAMETER,
+                            "message": (
+                                f"Generated PV name '{pv_name}' exceeds Kubernetes' "
+                                f"253-character limit ({len(pv_name)} chars). "
+                                f"Use a shorter claimName."
+                            ),
+                        },
+                    )
+                spec = pv_spec_raw
+                spec["claimRef"] = {
+                    "name": claim_name,
+                    "namespace": self.namespace,
+                }
+                spec["accessModes"] = access_modes
+                spec["capacity"] = {"storage": storage}
+                if storage_class is not None:
+                    spec["storageClassName"] = storage_class
+                else:
+                    spec["storageClassName"] = ""
+                pv_body = V1PersistentVolume(
+                    metadata=V1ObjectMeta(name=pv_name),
+                    spec=spec,
+                )
+                if storage_class is None:
+                    storage_class = ""
+
             pvc_body = V1PersistentVolumeClaim(
                 metadata=V1ObjectMeta(
                     name=claim_name,
-                    namespace=self.namespace,
+                    namespace=self.namespace
                 ),
                 spec={
                     "accessModes": access_modes,
@@ -354,6 +397,24 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             if storage_class is not None:
                 pvc_body.spec["storageClassName"] = storage_class
 
+            if pv_body is not None:
+                try:
+                    self.k8s_client.create_pv(pv_body)
+                    logger.info(f"Auto-created PV '{pv_body.metadata.name}'")
+                except ApiException as e:
+                    if e.status == 409:
+                        logger.info(f"PV '{pv_body.metadata.name}' already exists, proceeding with PVC creation")
+                    elif e.status in (400, 422):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={
+                                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                                "message": f"Invalid PV spec for '{claim_name}': {e.reason}",
+                            },
+                        ) from e
+                    else:
+                        raise
+
             try:
                 self.k8s_client.create_pvc(self.namespace, pvc_body)
                 logger.info(
@@ -362,7 +423,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 )
             except ApiException as e:
                 if e.status == 409:
-                    # Race condition: another request created it between our check and create
                     logger.info(f"PVC '{claim_name}' was created concurrently, proceeding")
                 elif e.status == 403:
                     logger.warning(
@@ -440,7 +500,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 request.volumes,
                 self.app_config.storage.allowed_host_paths,
             )
-            
 
             # Auto-create PVCs that don't exist yet
             if request.volumes:

@@ -125,6 +125,7 @@ class SandboxModelConverter:
                 storage_class=volume.pvc.storage_class,
                 storage=volume.pvc.storage,
                 access_modes=volume.pvc.access_modes,
+                pv=volume.pvc.pv,
             )
 
         api_ossfs = UNSET

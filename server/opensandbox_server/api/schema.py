@@ -20,7 +20,7 @@ for request/response validation and serialization.
 """
 
 from datetime import datetime
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Any
 
 from pydantic import BaseModel, Field, RootModel, model_validator
 
@@ -211,6 +211,13 @@ class PVC(BaseModel):
         description=(
             "Access modes for auto-created PVCs (e.g. ['ReadWriteOnce']). "
             "Defaults to ['ReadWriteOnce'] when omitted. Ignored for Docker volumes."
+        ),
+    )
+    pv: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "static provisioning pv for auto-created PVCs. "
+            "Defaults dynamic provisioning when omitted. Ignored for Docker volumes."
         ),
     )
 

@@ -128,6 +128,12 @@ export interface PVC extends Record<string, unknown> {
    * Ignored for Docker.
    */
   accessModes?: string[] | null;
+  /**
+   * Static PersistentVolume spec for Kubernetes. When provided, the server
+   * creates a PV with this spec bound to the auto-created PVC.
+   * Defaults to dynamic provisioning when omitted. Ignored for Docker volumes.
+   */
+  pv?: Record<string, unknown> | null;
 }
 
 /**

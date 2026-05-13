@@ -21,7 +21,7 @@ Models for sandbox creation, configuration, status, and lifecycle management.
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -225,6 +225,13 @@ class PVC(BaseModel):
         description=(
             "Access modes for auto-created PVCs (e.g. ['ReadWriteOnce']). "
             "Ignored for Docker."
+        ),
+    )
+    pv: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "static provisioning pv for auto-created PVCs. "
+            "Defaults dynamic provisioning when omitted. Ignored for Docker volumes."
         ),
     )
 
