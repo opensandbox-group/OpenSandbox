@@ -406,7 +406,7 @@ class Host private constructor(
  * @property claimName Name of the platform volume. In Kubernetes this is the PVC name;
  * in Docker this is the named volume name.
  * @property createIfNotExists When true (default), auto-create volume if absent.
- * @property deleteOnSandboxTermination When true, delete auto-created Docker volume on sandbox deletion.
+ * @property deleteOnSandboxTermination When true, delete the auto-created volume (Docker named volume or Kubernetes PVC) on sandbox deletion. Pre-existing volumes are never removed.
  * @property storageClass Kubernetes StorageClass for auto-created PVCs. Null means default class.
  * @property storage PVC storage request for auto-created PVCs (e.g. "1Gi").
  * @property accessModes Access modes for auto-created PVCs (e.g. ["ReadWriteOnce"]).

@@ -220,6 +220,8 @@ class AgentSandboxProvider(WorkloadProvider):
         return {
             "name": created["metadata"]["name"],
             "uid": created["metadata"]["uid"],
+            "apiVersion": f"{self.group}/{self.version}",
+            "kind": "Sandbox",
         }
 
     def _apply_platform_node_selector(

@@ -140,9 +140,9 @@ class TestBatchSandboxProvider:
             expires_at=expires_at,
             execd_image="execd:latest",
         )
-
-        assert result == {"name": "test-id", "uid": "test-uid"}
-
+        
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
+        
         # Verify API call
         call_args = mock_k8s_client.create_custom_object.call_args
         body = call_args.kwargs["body"]
@@ -868,8 +868,8 @@ spec:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid"}
-
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
+    
     # ===== Workload List Tests =====
 
     def test_list_workloads_returns_items(self, mock_k8s_client, mock_batchsandbox_list_response):
@@ -1323,8 +1323,8 @@ spec:
         )
 
         # Should succeed and return workload info
-        assert result == {"name": "sandbox-test-id", "uid": "test-uid"}
-
+        assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
+        
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1355,8 +1355,8 @@ spec:
         )
 
         # Should succeed and return workload info
-        assert result == {"name": "sandbox-test-id", "uid": "test-uid"}
-
+        assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
+        
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1384,9 +1384,9 @@ spec:
             execd_image="execd:latest",
             extensions={"poolRef": "my-pool"},
         )
-
-        assert result == {"name": "sandbox-test-id", "uid": "test-uid"}
-
+        
+        assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
+        
         # Verify the call
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -2636,7 +2636,7 @@ spec:
             volumes=volumes,
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid"}
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
 
     def test_create_workload_poolref_rejects_platform(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
