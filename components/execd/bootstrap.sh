@@ -172,6 +172,27 @@ if ! touch "$EXECD_ENVS" 2>/dev/null; then
 fi
 export EXECD_ENVS
 
+# Run a user-defined pre-script before launching execd. The script is sourced
+# with POSIX `.` (not executed as a child process) so any variables it
+# `export`s propagate to execd and the chained command below — a subprocess
+# would lose those exports the moment it exits.
+if [ -n "${BOOTSTRAP_PRE_SCRIPT:-}" ]; then
+	if [ -f "$BOOTSTRAP_PRE_SCRIPT" ] && [ -r "$BOOTSTRAP_PRE_SCRIPT" ]; then
+		# Force `.` to read the literal path; without a slash it would fall
+		# back to a PATH search and could load the wrong file.
+		case "$BOOTSTRAP_PRE_SCRIPT" in
+		*/*) _pre_script="$BOOTSTRAP_PRE_SCRIPT" ;;
+		*) _pre_script="./$BOOTSTRAP_PRE_SCRIPT" ;;
+		esac
+		echo "sourcing pre-script $BOOTSTRAP_PRE_SCRIPT"
+		# shellcheck disable=SC1090
+		. "$_pre_script"
+		unset _pre_script
+	else
+		echo "warning: BOOTSTRAP_PRE_SCRIPT=$BOOTSTRAP_PRE_SCRIPT not found or not readable" >&2
+	fi
+fi
+
 echo "starting OpenSandbox Execd daemon at $EXECD."
 $EXECD &
 
