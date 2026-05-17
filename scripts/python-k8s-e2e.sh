@@ -1,5 +1,5 @@
 #!/bin/bash
-# trigger k8s e2e
+# trigger k8s e2e (2026-05-17)
 # Copyright 2026 Alibaba Group Holding Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
