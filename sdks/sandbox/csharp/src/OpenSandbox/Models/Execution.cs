@@ -171,6 +171,11 @@ public class Execution
     /// Gets or sets the command exit code when available.
     /// </summary>
     public int? ExitCode { get; set; }
+
+    /// <summary>
+    /// Gets or sets the highest event ID seen, used for SSE resume.
+    /// </summary>
+    public long LastEid { get; set; }
 }
 
 /// <summary>

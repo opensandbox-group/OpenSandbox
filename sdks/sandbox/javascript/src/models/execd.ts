@@ -35,6 +35,8 @@ export interface ServerStreamEvent extends Record<string, unknown> {
   text?: string;
   results?: Record<string, unknown>;
   error?: Record<string, unknown>;
+  /** Monotonic event ID for SSE resume. */
+  eid?: number;
 }
 
 export interface CodeContextRequest extends Record<string, unknown> {

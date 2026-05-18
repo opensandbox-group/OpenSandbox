@@ -74,6 +74,7 @@ func NewRouter(accessToken string) *gin.Engine {
 		command.POST("", withCode(func(c *controller.CodeInterpretingController) { c.RunCommand() }))
 		command.DELETE("", withCode(func(c *controller.CodeInterpretingController) { c.InterruptCommand() }))
 		command.GET("/status/:id", withCode(func(c *controller.CodeInterpretingController) { c.GetCommandStatus() }))
+		command.GET("/:id/resume", withCode(func(c *controller.CodeInterpretingController) { c.ResumeCommandStream() }))
 		command.GET("/:id/logs", withCode(func(c *controller.CodeInterpretingController) { c.GetBackgroundCommandOutput() }))
 	}
 

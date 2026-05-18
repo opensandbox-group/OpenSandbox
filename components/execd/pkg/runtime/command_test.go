@@ -133,10 +133,10 @@ func TestRunCommand_Echo(t *testing.T) {
 		Timeout: 5 * time.Second,
 		Hooks: ExecuteResultHook{
 			OnExecuteInit: func(s string) { sessionID = s },
-			OnExecuteStdout: func(s string) {
+			OnExecuteStdout: func(_ int64, s string) {
 				stdoutLines = append(stdoutLines, s)
 			},
-			OnExecuteStderr: func(s string) {
+			OnExecuteStderr: func(_ int64, s string) {
 				stderrLines = append(stderrLines, s)
 			},
 			OnExecuteError: func(err *execute.ErrorOutput) {
@@ -188,8 +188,8 @@ func TestRunCommand_Error(t *testing.T) {
 		Timeout: 5 * time.Second,
 		Hooks: ExecuteResultHook{
 			OnExecuteInit:   func(s string) { sessionID = s },
-			OnExecuteStdout: func(s string) { stdoutLines = append(stdoutLines, s) },
-			OnExecuteStderr: func(s string) { stderrLines = append(stderrLines, s) },
+			OnExecuteStdout: func(_ int64, s string) { stdoutLines = append(stdoutLines, s) },
+			OnExecuteStderr: func(_ int64, s string) { stderrLines = append(stderrLines, s) },
 			OnExecuteError: func(err *execute.ErrorOutput) {
 				gotErr = err
 				completeCh <- struct{}{}
@@ -241,8 +241,8 @@ func TestRunCommand_ExpandsHomeInCwd(t *testing.T) {
 		Timeout: 5 * time.Second,
 		Hooks: ExecuteResultHook{
 			OnExecuteInit:   func(_ string) {},
-			OnExecuteStdout: func(s string) { stdoutLines = append(stdoutLines, s) },
-			OnExecuteStderr: func(_ string) {},
+			OnExecuteStdout: func(_ int64, s string) { stdoutLines = append(stdoutLines, s) },
+			OnExecuteStderr: func(_ int64, _ string) {},
 			OnExecuteError: func(err *execute.ErrorOutput) {
 				require.Failf(t, "unexpected error hook", "%+v", err)
 			},
@@ -303,8 +303,8 @@ func TestRunCommand_ExpandsCwdFromRequestEnvWithHigherPriority(t *testing.T) {
 		},
 		Hooks: ExecuteResultHook{
 			OnExecuteInit:   func(_ string) {},
-			OnExecuteStdout: func(s string) { stdoutLines = append(stdoutLines, s) },
-			OnExecuteStderr: func(_ string) {},
+			OnExecuteStdout: func(_ int64, s string) { stdoutLines = append(stdoutLines, s) },
+			OnExecuteStderr: func(_ int64, _ string) {},
 			OnExecuteError: func(err *execute.ErrorOutput) {
 				gotErr = err
 			},

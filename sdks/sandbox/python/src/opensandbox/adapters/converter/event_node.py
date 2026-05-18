@@ -60,6 +60,7 @@ class EventNode(BaseModel):
     Corresponds to ServerStreamEvent in OpenAPI spec.
     """
 
+    eid: int | None = None
     type: str
     text: str | None = None
     execution_count: int | None = Field(default=None, alias="execution_count")

@@ -32,8 +32,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -411,5 +413,85 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
     fun `deleteSession should reject blank session id`() {
         val ex = assertThrows(InvalidArgumentException::class.java) { commandsAdapter.deleteSession(" ") }
         assertEquals("session_id cannot be empty", ex.message)
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE resume test
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `run should auto-resume on SSE disconnect`() {
+        val totalLines = 40
+        val allEvents = buildString {
+            appendLine("""{"type":"init","text":"cmd-resume","timestamp":1672531200000,"eid":1}""")
+            for (i in 1..totalLines) {
+                appendLine("""{"type":"stdout","text":"line$i","timestamp":1672531200000,"eid":${i + 1}}""")
+            }
+            appendLine("""{"type":"execution_complete","execution_time":100,"timestamp":1672531201000,"eid":${totalLines + 2}}""")
+        }
+
+        var resumeCalled = false
+        var lastAfterEid: Long? = null
+        var postRequestCount = 0
+
+        mockWebServer.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                return when {
+                    request.method == "POST" && request.path == "/command" -> {
+                        postRequestCount++
+                        MockResponse()
+                            .setResponseCode(200)
+                            .setBody(allEvents)
+                            .setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)
+                    }
+                    request.method == "GET" && request.path!!.contains("/resume") -> {
+                        resumeCalled = true
+                        lastAfterEid = request.requestUrl!!.queryParameter("after_eid")!!.toLong()
+                        val startEid = lastAfterEid!! + 1
+                        val remaining = buildString {
+                            for (eid in startEid..(totalLines + 1)) {
+                                appendLine("""{"type":"stdout","text":"line${eid - 1}","timestamp":1672531200000,"eid":$eid}""")
+                            }
+                            appendLine(
+                                """{"type":"execution_complete","execution_time":100,"timestamp":1672531201000,"eid":${totalLines + 2}}""",
+                            )
+                        }
+                        MockResponse()
+                            .setResponseCode(200)
+                            .setBody(remaining)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val receivedLines = mutableSetOf<String>()
+        val latch = CountDownLatch(1)
+        val handlers = ExecutionHandlers.builder()
+            .onStdout { msg -> receivedLines.add(msg.text) }
+            .onExecutionComplete { latch.countDown() }
+            .build()
+
+        val request = RunCommandRequest.builder()
+            .command("for i in 1..40; do echo line\$i; done")
+            .handlers(handlers)
+            .build()
+
+        val execution = commandsAdapter.run(request)
+
+        assertTrue(resumeCalled, "Expected resume to be called after disconnect")
+        assertTrue(latch.await(5, TimeUnit.SECONDS), "Timed out waiting for completion")
+        assertEquals(totalLines, receivedLines.size,
+            "Expected all $totalLines lines, got ${receivedLines.size}: $receivedLines")
+        for (i in 1..totalLines) {
+            assertTrue(receivedLines.contains("line$i"), "Missing line$i")
+        }
+        assertEquals("cmd-resume", execution.id)
+        assertEquals(0, execution.exitCode)
+        assertNotNull(execution.complete)
+        assertEquals(1, postRequestCount, "Should send exactly one POST /command")
+        assertNotNull(lastAfterEid)
+        assertTrue(lastAfterEid!! >= 1, "after_eid should be >= 1, got $lastAfterEid")
+        assertTrue(execution.lastEid >= totalLines + 1)
     }
 }

@@ -50,6 +50,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.slf4j.LoggerFactory
+import java.io.IOException
 import com.alibaba.opensandbox.sandbox.api.models.execd.CreateSessionRequest as CreateSessionRequestApi
 import com.alibaba.opensandbox.sandbox.api.models.execd.RunInSessionRequest as RunInSessionRequestApi
 
@@ -64,6 +65,8 @@ internal class CommandsAdapter(
     companion object {
         private const val RUN_COMMAND_PATH = "/command"
         private const val SESSION_PATH_SEGMENT = "session"
+        private const val RESUME_PATH = "/command/%s/resume"
+        private const val MAX_RESUME_RETRIES = 3
     }
 
     private val logger = LoggerFactory.getLogger(CommandsAdapter::class.java)
@@ -88,28 +91,68 @@ internal class CommandsAdapter(
         if (request.command.isEmpty()) {
             throw InvalidArgumentException("Command cannot be empty")
         }
-        try {
-            val httpRequest =
-                Request.Builder()
-                    .url("$execdBaseUrl$RUN_COMMAND_PATH")
-                    .post(
-                        jsonParser.encodeToString(request.toApiRunCommandRequest()).toRequestBody("application/json".toMediaType()),
-                    )
-                    .headers(execdEndpoint.headers.toHeaders())
-                    .build()
 
-            return executeStreamingRequest(
-                httpRequest = httpRequest,
-                handlers = request.handlers,
-                inferExitCode = !request.background,
-                failureMessage = { statusCode, errorBody ->
-                    "Failed to run commands. Status code: $statusCode, Body: $errorBody"
-                },
-            )
-        } catch (e: Exception) {
-            logger.error("Failed to run command (length: {})", request.command.length, e)
-            throw e.toSandboxException()
+        val execution = Execution()
+        var commandID: String? = null
+
+        for (attempt in 0..MAX_RESUME_RETRIES) {
+            try {
+                val httpRequest = if (attempt == 0) {
+                    Request.Builder()
+                        .url("$execdBaseUrl$RUN_COMMAND_PATH")
+                        .post(
+                            jsonParser.encodeToString(request.toApiRunCommandRequest())
+                                .toRequestBody("application/json".toMediaType()),
+                        )
+                        .headers(execdEndpoint.headers.toHeaders())
+                        .build()
+                } else {
+                    val resumeUrl = RESUME_PATH.format(commandID!!)
+                    Request.Builder()
+                        .url("$execdBaseUrl$resumeUrl?after_eid=${execution.lastEid}")
+                        .get()
+                        .headers(execdEndpoint.headers.toHeaders())
+                        .build()
+                }
+
+                streamEvents(
+                    httpRequest = httpRequest,
+                    execution = execution,
+                    handlers = request.handlers,
+                    failureMessage = { statusCode, errorBody ->
+                        "Failed to run commands. Status code: $statusCode, Body: $errorBody"
+                    },
+                )
+
+                if (!request.background) {
+                    execution.exitCode = inferForegroundExitCode(execution)
+                }
+                return execution
+            } catch (e: Exception) {
+                if (execution.id != null) {
+                    commandID = execution.id
+                }
+
+                if (e is SandboxApiException) {
+                    if (e.statusCode == 409 && attempt < MAX_RESUME_RETRIES) {
+                        retrySleep(1000L)
+                        continue
+                    }
+                    if (e.statusCode == 404 && attempt > 0) {
+                        return execution
+                    }
+                    logger.error("Failed to run command (length: {})", request.command.length, e)
+                    throw e
+                }
+
+                if (commandID == null || attempt >= MAX_RESUME_RETRIES || !isNetworkError(e)) {
+                    logger.error("Failed to run command (length: {})", request.command.length, e)
+                    throw e.toSandboxException()
+                }
+            }
         }
+
+        return execution
     }
 
     override fun interrupt(executionId: String) {
@@ -216,14 +259,17 @@ internal class CommandsAdapter(
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
-            return executeStreamingRequest(
+            val execution = Execution()
+            streamEvents(
                 httpRequest = httpRequest,
+                execution = execution,
                 handlers = request.handlers,
-                inferExitCode = true,
                 failureMessage = { statusCode, errorBody ->
                     "run_in_session failed. Status: $statusCode, Body: $errorBody"
                 },
             )
+            execution.exitCode = inferForegroundExitCode(execution)
+            return execution
         } catch (e: Exception) {
             logger.error("Failed to run in session", e)
             throw e.toSandboxException()
@@ -242,14 +288,12 @@ internal class CommandsAdapter(
         }
     }
 
-    private fun executeStreamingRequest(
+    private fun streamEvents(
         httpRequest: Request,
+        execution: Execution,
         handlers: ExecutionHandlers?,
-        inferExitCode: Boolean,
         failureMessage: (Int, String?) -> String,
-    ): Execution {
-        val execution = Execution()
-
+    ) {
         httpClientProvider.sseClient.newCall(httpRequest).execute().use { response ->
             ensureSuccessfulStreamingResponse(response, failureMessage)
 
@@ -266,11 +310,6 @@ internal class CommandsAdapter(
                 }
             }
         }
-
-        if (inferExitCode) {
-            execution.exitCode = inferForegroundExitCode(execution)
-        }
-        return execution
     }
 
     private fun ensureSuccessfulStreamingResponse(
@@ -323,6 +362,29 @@ internal class CommandsAdapter(
             execution.error?.value?.toIntOrNull()
         } else {
             if (execution.complete != null) 0 else null
+        }
+    }
+
+    private fun isNetworkError(e: Exception): Boolean {
+        if (e is IOException) return true
+        var cause: Throwable? = e.cause
+        while (cause != null) {
+            if (cause is IOException) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    private fun retrySleep(millis: Long) {
+        try {
+            Thread.sleep(millis)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw SandboxApiException(
+                message = "Interrupted during SSE resume retry sleep",
+                statusCode = 0,
+                error = SandboxError(UNEXPECTED_RESPONSE),
+            )
         }
     }
 }

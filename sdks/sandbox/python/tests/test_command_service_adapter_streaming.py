@@ -27,6 +27,68 @@ from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.sandboxes import SandboxEndpoint
 
 
+class _ErrorAfterAsyncStream(httpx.AsyncByteStream):
+    """Async byte stream that yields data then raises ReadError."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self._chunks = iter(chunks)
+
+    def __aiter__(self) -> httpx.AsyncByteStream:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            chunk = next(self._chunks)
+        except StopIteration:
+            raise httpx.ReadError("simulated disconnect") from None
+        if chunk is None:
+            raise httpx.ReadError("simulated disconnect")
+        return chunk
+
+
+class _ResumeTransport(httpx.AsyncBaseTransport):
+    """Simulates SSE disconnect then resume on GET /command/:id/resume."""
+
+    def __init__(self) -> None:
+        self.post_count = 0
+        self.resume_count = 0
+        self.last_resume_eid: int | None = None
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/command":
+            self.post_count += 1
+            partial = (
+                b'data: {"type":"init","text":"cmd-resume-1","timestamp":100}\n\n',
+                b'data: {"type":"stdout","eid":1,"text":"line1","timestamp":101}\n\n',
+                b'data: {"type":"stdout","eid":2,"text":"line2","timestamp":102}\n\n',
+                None,  # sentinel: disconnect after line2
+            )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=_ErrorAfterAsyncStream(*partial),
+                request=request,
+            )
+
+        if request.method == "GET" and "/resume" in request.url.path:
+            self.resume_count += 1
+            qp = request.url.params.get("after_eid")
+            if qp:
+                self.last_resume_eid = int(qp)
+            remaining = (
+                b'data: {"type":"stdout","eid":3,"text":"line3","timestamp":103}\n\n'
+                b'data: {"type":"execution_complete","eid":4,"execution_time":42,"timestamp":104}\n\n'
+            )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=remaining,
+                request=request,
+            )
+
+        return httpx.Response(500, content=b"unexpected", request=request)
+
+
 class _SseTransport(httpx.AsyncBaseTransport):
     def __init__(self) -> None:
         self.last_request: httpx.Request | None = None
@@ -217,3 +279,27 @@ async def test_run_in_session_non_zero_exit_updates_exit_code() -> None:
     assert execution.error.value == "7"
     assert execution.complete is None
     assert execution.exit_code == 7
+
+
+@pytest.mark.asyncio
+async def test_run_command_auto_resume_on_sse_disconnect() -> None:
+    """SSE drops after first two stdout lines; resume replays the rest transparently."""
+    transport = _ResumeTransport()
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    execution = await adapter.run("echo lines")
+
+    assert transport.post_count == 1, "should send POST /command"
+    assert transport.resume_count == 1, "should send GET /command/:id/resume"
+    assert transport.last_resume_eid == 2, "resume after_eid should match last received eid"
+
+    assert execution.id == "cmd-resume-1"
+    assert len(execution.logs.stdout) == 3
+    assert execution.logs.stdout[0].text == "line1"
+    assert execution.logs.stdout[1].text == "line2"
+    assert execution.logs.stdout[2].text == "line3"
+    assert execution.complete is not None
+    assert execution.complete.execution_time_in_millis == 42
+    assert execution.exit_code == 0

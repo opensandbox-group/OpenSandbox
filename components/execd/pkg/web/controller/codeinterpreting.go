@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -44,6 +45,11 @@ type CodeInterpretingController struct {
 
 	// chunkWriter serializes SSE event writes to prevent interleaved output.
 	chunkWriter sync.Mutex
+
+	resumeStreamMu sync.Mutex
+	resumeStreamID string
+	// resumeEnabled opts into disconnect resume (event buffer + live hub) for RunCommand.
+	resumeEnabled atomic.Bool
 }
 
 type codeExecutionRunner interface {
@@ -145,7 +151,7 @@ func (c *CodeInterpretingController) RunCode() {
 		})
 	}
 	runCodeRequest := c.buildExecuteCodeRequest(request)
-	eventsHandler := c.setServerEventsHandler(ctx)
+	eventsHandler := c.setServerEventsHandler(ctx, runCodeRequest)
 
 	// completeCh is closed when OnExecuteComplete fires, meaning the final SSE
 	// event has been written and flushed. We only wait for this callback as a
@@ -385,7 +391,7 @@ func (c *CodeInterpretingController) RunInSession() {
 			close(completeCh)
 		})
 	}
-	hooks := c.setServerEventsHandler(ctx)
+	hooks := c.setServerEventsHandler(ctx, runReq)
 	origComplete := hooks.OnExecuteComplete
 	hooks.OnExecuteComplete = func(executionTime time.Duration) {
 		origComplete(executionTime)

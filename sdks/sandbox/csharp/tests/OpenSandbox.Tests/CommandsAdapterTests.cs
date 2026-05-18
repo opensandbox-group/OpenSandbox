@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.IO;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -441,6 +442,62 @@ data: {"type":"error","error":{"ename":"CommandExecError","evalue":"7","tracebac
             .WithMessage("*sessionId*");
     }
 
+    [Fact]
+    public async Task RunAsync_ShouldAutoResumeOnDisconnect()
+    {
+        const int totalLines = 20;
+        var allEvents = new StringBuilder();
+        allEvents.AppendLine("""{"type":"init","text":"cmd-resume","timestamp":1,"eid":1}""");
+        for (int i = 1; i <= totalLines; i++)
+        {
+            allEvents.AppendLine($$"""{"type":"stdout","text":"line{{i}}","timestamp":1,"eid":{{i + 1}}}""");
+        }
+        allEvents.AppendLine($$"""{"type":"execution_complete","execution_time":100,"timestamp":1,"eid":{{totalLines + 2}}}""");
+
+        var handler = new StubHttpMessageHandler((request, _) =>
+        {
+            if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath == "/command")
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new TruncatedStreamContent(allEvents.ToString(), maxLines: 5)
+                });
+            }
+
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.Contains("/resume"))
+            {
+                var query = request.RequestUri!.Query;
+                var afterEid = long.Parse(query.Split('=')[1]);
+                var remaining = new StringBuilder();
+                for (long eid = afterEid + 1; eid <= totalLines + 1; eid++)
+                {
+                    remaining.AppendLine($$"""{"type":"stdout","text":"line{{eid - 1}}","timestamp":1,"eid":{{eid}}}""");
+                }
+                remaining.AppendLine($$"""{"type":"execution_complete","execution_time":100,"timestamp":1,"eid":{{totalLines + 2}}}""");
+
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(remaining.ToString(), Encoding.UTF8, "text/event-stream")
+                });
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        });
+
+        var adapter = CreateAdapter(handler);
+        var execution = await adapter.RunAsync("test command");
+
+        execution.Id.Should().Be("cmd-resume");
+        execution.ExitCode.Should().Be(0);
+        execution.Complete.Should().NotBeNull();
+        execution.Logs.Stdout.Should().HaveCount(totalLines);
+        for (int i = 1; i <= totalLines; i++)
+        {
+            execution.Logs.Stdout.Should().Contain(m => m.Text == $"line{i}");
+        }
+        execution.LastEid.Should().BeGreaterOrEqualTo(totalLines + 1);
+    }
+
     private static CommandsAdapter CreateAdapter(HttpMessageHandler httpHandler)
     {
         var baseUrl = "http://execd.local";
@@ -466,6 +523,35 @@ data: {"type":"error","error":{"ename":"CommandExecError","evalue":"7","tracebac
         {
             RequestUris.Add(request.RequestUri?.ToString() ?? string.Empty);
             return await _handler(request, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private sealed class TruncatedStreamContent : HttpContent
+    {
+        private readonly string _content;
+        private readonly int _maxLines;
+
+        public TruncatedStreamContent(string content, int maxLines)
+        {
+            _content = content;
+            _maxLines = maxLines;
+            Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("text/event-stream");
+        }
+
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            var lines = _content.Split('\n');
+            var truncated = string.Join("\n", lines.Take(_maxLines)) + "\n";
+            var bytes = Encoding.UTF8.GetBytes(truncated);
+            await stream.WriteAsync(bytes).ConfigureAwait(false);
+            await stream.FlushAsync().ConfigureAwait(false);
+            throw new IOException("Simulated disconnect for SSE resume test");
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = -1;
+            return false;
         }
     }
 }

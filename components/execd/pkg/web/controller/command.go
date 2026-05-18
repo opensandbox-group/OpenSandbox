@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
+	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -53,6 +55,11 @@ func (c *CodeInterpretingController) RunCommand() {
 
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
 	defer cancel()
+	c.resumeEnabled.Store(true)
+	defer func() {
+		deferResumeCleanup(c)
+		c.resumeEnabled.Store(false)
+	}()
 	execStart := time.Now()
 	var recordOnce sync.Once
 	recordExecution := func(result string) {
@@ -67,7 +74,7 @@ func (c *CodeInterpretingController) RunCommand() {
 	}
 
 	runCodeRequest := c.buildExecuteCommandRequest(request)
-	eventsHandler := c.setServerEventsHandler(ctx)
+	eventsHandler := c.setServerEventsHandler(ctx, runCodeRequest)
 	origComplete := eventsHandler.OnExecuteComplete
 	eventsHandler.OnExecuteComplete = func(executionTime time.Duration) {
 		origComplete(executionTime)
@@ -149,6 +156,80 @@ func (c *CodeInterpretingController) GetBackgroundCommandOutput() {
 	c.ctx.Header("EXECD-COMMANDS-TAIL-CURSOR", strconv.FormatInt(lastCursor, 10))
 	c.ctx.Header("Content-Type", "text/plain; charset=utf-8")
 	c.ctx.String(http.StatusOK, "%s", output)
+}
+
+// ResumeCommandStream sends buffered events after after_eid, then if the command is still running
+// and no other client holds the live slot, streams further events until completion or client disconnect.
+func (c *CodeInterpretingController) ResumeCommandStream() {
+	commandID := c.ctx.Param("id")
+	if commandID == "" {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "missing command execution id")
+		return
+	}
+	afterEid := c.QueryInt64(c.ctx.Query(model.CommandResumeAfterEidQuery), 0)
+
+	hub := commandStreams.getHub(commandID)
+	st, errSt := codeRunner.GetCommandStatus(commandID)
+	if errSt != nil && hub == nil {
+		c.RespondError(http.StatusNotFound, model.ErrorCodeInvalidRequest, errSt.Error())
+		return
+	}
+
+	events, bufferOK := resumeBuffer.EventsAfter(commandID, afterEid)
+	if !bufferOK && hub == nil {
+		c.RespondError(http.StatusNotFound, model.ErrorCodeInvalidRequest, "command stream resume buffer not available")
+		return
+	}
+
+	if st != nil && st.Running && hub != nil && hub.isHolderAlive() {
+		c.RespondError(
+			http.StatusConflict,
+			model.ErrorCodeInvalidRequest,
+			"primary SSE stream is still active; disconnect it before resuming",
+		)
+		return
+	}
+
+	c.setupSSEResponse()
+	lastReplayMaxEid := afterEid
+	for _, ev := range events {
+		c.writeSingleEvent("ResumeBuffer", ev.Payload, false, fmt.Sprintf("buffer eid=%d", ev.EID), 0)
+		if ev.EID > lastReplayMaxEid {
+			lastReplayMaxEid = ev.EID
+		}
+	}
+
+	st2, _ := codeRunner.GetCommandStatus(commandID)
+	if st2 == nil || !st2.Running {
+		if len(events) > 0 {
+			log.Info("resume stream: command_id=%s after_eid=%d snapshot_events=%d (replay only)",
+				commandID, afterEid, len(events))
+		}
+		return
+	}
+
+	hub = commandStreams.getHub(commandID)
+	if hub == nil {
+		return
+	}
+
+	h, err := commandStreams.tryAttachResume(commandID, c.ctx.Writer, c.ctx.Request.Context())
+	if err != nil {
+		if errors.Is(err, errLiveStreamPrimaryActive) {
+			log.Error("ResumeCommandStream: attach conflict after buffered history (another client may have attached)")
+		}
+		return
+	}
+
+	// Catch up events appended while the snapshot slice was replayed (holder still nil); same mutex as writeFrame.
+	tailN := h.flushResumeTail(commandID, lastReplayMaxEid)
+	log.Info("resume stream: command_id=%s after_eid=%d snapshot_events=%d post_attach_tail=%d (live)",
+		commandID, afterEid, len(events), tailN)
+
+	select {
+	case <-h.waitDone():
+	case <-c.ctx.Request.Context().Done():
+	}
 }
 
 func (c *CodeInterpretingController) buildExecuteCommandRequest(request model.RunCommandRequest) *runtime.ExecuteCodeRequest {

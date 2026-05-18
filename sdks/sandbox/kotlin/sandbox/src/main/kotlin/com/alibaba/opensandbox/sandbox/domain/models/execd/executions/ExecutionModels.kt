@@ -39,6 +39,7 @@ class Execution(
     var complete: ExecutionComplete? = null,
     var exitCode: Int? = null,
     val logs: ExecutionLogs = ExecutionLogs(),
+    var lastEid: Long = 0L,
 ) {
     /**
      * Adds a new execution result to this execution.

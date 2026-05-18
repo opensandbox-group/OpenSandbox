@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -73,6 +74,8 @@ internal sealed class CommandsAdapter : IExecdCommands
         }
     }
 
+    private const int MaxResumeRetries = 3;
+
     public async Task<Execution> RunAsync(
         string command,
         RunCommandOptions? options = null,
@@ -80,11 +83,78 @@ internal sealed class CommandsAdapter : IExecdCommands
         CancellationToken cancellationToken = default)
     {
         _logger.LogDebug("Running command (commandLength={CommandLength})", command.Length);
-        return await ConsumeExecutionAsync(
-            RunStreamAsync(command, options, cancellationToken),
-            handlers,
-            inferExitCode: !(options?.Background ?? false),
-            cancellationToken).ConfigureAwait(false);
+
+        var execution = new Execution();
+        string? commandId = null;
+        var inferExitCode = !(options?.Background ?? false);
+
+        for (int attempt = 0; attempt <= MaxResumeRetries; attempt++)
+        {
+            try
+            {
+                var stream = attempt == 0
+                    ? RunStreamAsync(command, options, cancellationToken)
+                    : ResumeStreamAsync(commandId!, execution.LastEid, cancellationToken);
+
+                await ConsumeExecutionIntoAsync(stream, execution, handlers, cancellationToken).ConfigureAwait(false);
+
+                if (inferExitCode)
+                {
+                    execution.ExitCode = InferForegroundExitCode(execution);
+                }
+                return execution;
+            }
+            catch (Exception ex)
+            {
+                if (execution.Id != null) commandId = execution.Id;
+
+                if (ex is SandboxApiException apiEx)
+                {
+                    if (apiEx.StatusCode == 409 && attempt < MaxResumeRetries)
+                    {
+                        await Task.Delay(1000, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+                    if (apiEx.StatusCode == 404 && attempt > 0)
+                    {
+                        return execution;
+                    }
+                    _logger.LogError(ex, "Failed to run command (length={CommandLength})", command.Length);
+                    throw;
+                }
+
+                if (commandId == null || attempt >= MaxResumeRetries || !IsNetworkError(ex))
+                {
+                    _logger.LogError(ex, "Failed to run command (length={CommandLength})", command.Length);
+                    throw;
+                }
+            }
+        }
+
+        return execution;
+    }
+
+    private async IAsyncEnumerable<ServerStreamEvent> ResumeStreamAsync(
+        string commandId,
+        long afterEid,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var url = $"{_baseUrl}/command/{Uri.EscapeDataString(commandId)}/resume?after_eid={afterEid}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+
+        request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+        foreach (var header in _headers)
+        {
+            request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
+
+        using var response = await _sseHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+
+        await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response, "Resume command failed", cancellationToken).ConfigureAwait(false))
+        {
+            yield return ev;
+        }
     }
 
     public async Task InterruptAsync(string sessionId, CancellationToken cancellationToken = default)
@@ -318,6 +388,20 @@ internal sealed class CommandsAdapter : IExecdCommands
         CancellationToken cancellationToken)
     {
         var execution = new Execution();
+        await ConsumeExecutionIntoAsync(stream, execution, handlers, cancellationToken).ConfigureAwait(false);
+        if (inferExitCode)
+        {
+            execution.ExitCode = InferForegroundExitCode(execution);
+        }
+        return execution;
+    }
+
+    private static async Task ConsumeExecutionIntoAsync(
+        IAsyncEnumerable<ServerStreamEvent> stream,
+        Execution execution,
+        ExecutionHandlers? handlers,
+        CancellationToken cancellationToken)
+    {
         var dispatcher = new ExecutionEventDispatcher(execution, handlers);
 
         await foreach (var ev in stream.WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -325,13 +409,21 @@ internal sealed class CommandsAdapter : IExecdCommands
             PreserveLegacyInitId(ev, execution);
             await dispatcher.DispatchAsync(ev).ConfigureAwait(false);
         }
+    }
 
-        if (inferExitCode)
+    private static bool IsNetworkError(Exception ex)
+    {
+        if (ex is OperationCanceledException) return false;
+        if (ex is IOException) return true;
+        if (ex is System.Net.Http.HttpRequestException) return true;
+
+        var inner = ex.InnerException;
+        while (inner != null)
         {
-            execution.ExitCode = InferForegroundExitCode(execution);
+            if (inner is IOException) return true;
+            inner = inner.InnerException;
         }
-
-        return execution;
+        return false;
     }
 
     private sealed record StreamingRequestSpec(string Url, object Body, string ErrorMessage);

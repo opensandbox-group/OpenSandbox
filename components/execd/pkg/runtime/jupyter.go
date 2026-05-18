@@ -122,9 +122,16 @@ func dispatchExecutionResultHooks(request *ExecuteCodeRequest, result *execute.E
 	for _, stream := range result.Stream {
 		switch stream.Name {
 		case execute.StreamStdout:
-			request.Hooks.OnExecuteStdout(stream.Text)
+			if stream.Text != "" && request.Hooks.OnExecuteStdout != nil {
+				eid := request.NextEventID()
+				request.Hooks.OnExecuteStdout(eid, stream.Text)
+			}
 		case execute.StreamStderr:
-			request.Hooks.OnExecuteStderr(stream.Text)
+			if stream.Text != "" && request.Hooks.OnExecuteStderr != nil {
+				eid := request.NextEventID()
+				request.Hooks.OnExecuteStderr(eid, stream.Text)
+			}
+		default:
 		}
 	}
 }

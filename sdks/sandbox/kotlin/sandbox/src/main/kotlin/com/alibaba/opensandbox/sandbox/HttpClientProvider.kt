@@ -81,11 +81,14 @@ class HttpClientProvider(
                 .writeTimeout(config.requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
                 .callTimeout(0, TimeUnit.MILLISECONDS)
                 .addInterceptor(ExtraHeadersInterceptor(getSseHeaders()))
+                .apply { sseInterceptors.forEach { addInterceptor(it) } }
                 .addLoggingInterceptor()
                 .build()
         }
 
     val sseClient: OkHttpClient by sseClientLazy
+
+    internal val sseInterceptors: MutableList<Interceptor> = mutableListOf()
 
     // --- Helper Extensions ---
 

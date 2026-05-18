@@ -113,6 +113,62 @@ test("CommandsAdapter.runInSession sends command and timeout fields", async () =
   assert.equal(execution.exitCode, 0);
 });
 
+test("CommandsAdapter.run auto-resumes on SSE disconnect", async () => {
+  const initialEvents = [
+    { type: "init", text: "cmd-resume", timestamp: 1, eid: 1 },
+    { type: "stdout", text: "before-disconnect", timestamp: 2, eid: 2 },
+  ];
+  const resumeEvents = [
+    { type: "stdout", text: "after-resume", timestamp: 3, eid: 3 },
+    { type: "execution_complete", timestamp: 4, execution_time: 10, eid: 4 },
+  ];
+
+  let callCount = 0;
+  const fetchImpl = async (url, init) => {
+    callCount++;
+    if (callCount === 1) {
+      const body = initialEvents.map(e => `data: ${JSON.stringify(e)}`).join("\n") + "\n";
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body));
+        },
+        pull(controller) {
+          controller.error(new TypeError("fetch failed"));
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    // Resume call
+    assert.ok(url.includes("/resume?after_eid=2"), `unexpected resume URL: ${url}`);
+    const body = resumeEvents.map(e => `data: ${JSON.stringify(e)}`).join("\n") + "\n\n";
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+
+  const adapter = new CommandsAdapter(
+    {},
+    {
+      baseUrl: "http://127.0.0.1:8080",
+      fetch: fetchImpl,
+    },
+  );
+
+  const execution = await adapter.run("echo test");
+
+  assert.equal(execution.id, "cmd-resume");
+  assert.equal(execution.logs.stdout.length, 2);
+  assert.equal(execution.logs.stdout[0].text, "before-disconnect");
+  assert.equal(execution.logs.stdout[1].text, "after-resume");
+  assert.equal(execution.lastEid, 4);
+  assert.equal(execution.exitCode, 0);
+  assert.equal(callCount, 2);
+});
+
 test("CommandsAdapter.runInSession infers non-zero exitCode from final error state", async () => {
   const adapter = createAdapter(
     [

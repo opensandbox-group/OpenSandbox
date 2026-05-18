@@ -33,6 +33,8 @@ data class EventNode(
     @SerialName("execution_count")
     val executionCount: Long? = null,
     val error: ErrorData? = null,
+    @SerialName("eid")
+    val eid: Long? = null,
 )
 
 @Serializable

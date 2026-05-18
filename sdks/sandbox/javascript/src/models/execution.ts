@@ -55,6 +55,8 @@ export interface Execution {
   error?: ExecutionError;
   complete?: ExecutionComplete;
   exitCode?: number | null;
+  /** Highest event ID seen, used for SSE resume. */
+  lastEid?: number;
 }
 
 export interface ExecutionHandlers {

@@ -56,7 +56,7 @@ func TestBashSession_NonZeroExitEmitsError(t *testing.T) {
 		Timeout:  5 * time.Second,
 		Hooks: ExecuteResultHook{
 			OnExecuteInit:   func(s string) { sessionID = s },
-			OnExecuteStdout: func(s string) { stdoutLine = s },
+			OnExecuteStdout: func(_ int64, s string) { stdoutLine = s },
 			OnExecuteError:  func(err *execute.ErrorOutput) { errCh <- err },
 			OnExecuteComplete: func(_ time.Duration) {
 				completeCh <- struct{}{}
@@ -105,7 +105,7 @@ func TestBashSession_envAndExitCode(t *testing.T) {
 			require.Equal(t, session.config.Session, ctx, "unexpected session in OnExecuteInit")
 			initCalls++
 		},
-		OnExecuteStdout: func(text string) {
+		OnExecuteStdout: func(_ int64, text string) {
 			t.Log(text)
 			stdoutLines = append(stdoutLines, text)
 		},
@@ -178,7 +178,7 @@ func TestBashSession_envLargeOutputChained(t *testing.T) {
 			require.Equal(t, session.config.Session, ctx, "unexpected session in OnExecuteInit")
 			initCalls++
 		},
-		OnExecuteStdout: func(text string) {
+		OnExecuteStdout: func(_ int64, text string) {
 			t.Log(text)
 			stdoutLines = append(stdoutLines, text)
 		},
@@ -223,7 +223,7 @@ func TestBashSession_cwdPersistsWithoutOverride(t *testing.T) {
 	targetDir := t.TempDir()
 	var stdoutLines []string
 	hooks := ExecuteResultHook{
-		OnExecuteStdout: func(line string) {
+		OnExecuteStdout: func(_ int64, line string) {
 			stdoutLines = append(stdoutLines, line)
 		},
 	}
@@ -265,7 +265,7 @@ func TestBashSession_requestCwdOverridesAfterCd(t *testing.T) {
 
 	var stdoutLines []string
 	hooks := ExecuteResultHook{
-		OnExecuteStdout: func(line string) {
+		OnExecuteStdout: func(_ int64, line string) {
 			stdoutLines = append(stdoutLines, line)
 		},
 	}
@@ -307,7 +307,7 @@ func TestBashSession_envDumpNotLeakedWhenNoTrailingNewline(t *testing.T) {
 
 	var stdoutLines []string
 	hooks := ExecuteResultHook{
-		OnExecuteStdout: func(line string) {
+		OnExecuteStdout: func(_ int64, line string) {
 			stdoutLines = append(stdoutLines, line)
 		},
 	}
@@ -335,7 +335,7 @@ func TestBashSession_envDumpNotLeakedWhenNoOutput(t *testing.T) {
 
 	var stdoutLines []string
 	hooks := ExecuteResultHook{
-		OnExecuteStdout: func(line string) {
+		OnExecuteStdout: func(_ int64, line string) {
 			stdoutLines = append(stdoutLines, line)
 		},
 	}
@@ -366,7 +366,7 @@ func TestBashSession_heredoc(t *testing.T) {
 	t.Cleanup(func() { _ = controller.DeleteBashSession(sessionID) })
 
 	hooks := ExecuteResultHook{
-		OnExecuteStdout: func(line string) {
+		OnExecuteStdout: func(_ int64, line string) {
 			fmt.Printf("[stdout] %s\n", line)
 		},
 		OnExecuteComplete: func(d time.Duration) {
@@ -419,7 +419,7 @@ func TestBashSession_execReplacesShell(t *testing.T) {
 
 	var stdoutLines []string
 	hooks := ExecuteResultHook{
-		OnExecuteStdout: func(line string) {
+		OnExecuteStdout: func(_ int64, line string) {
 			stdoutLines = append(stdoutLines, line)
 		},
 	}
@@ -459,7 +459,7 @@ func TestBashSession_complexExec(t *testing.T) {
 
 	var stdoutLines []string
 	hooks := ExecuteResultHook{
-		OnExecuteStdout: func(line string) {
+		OnExecuteStdout: func(_ int64, line string) {
 			stdoutLines = append(stdoutLines, line)
 		},
 	}

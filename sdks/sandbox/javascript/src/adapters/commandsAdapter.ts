@@ -15,6 +15,7 @@
 import type { ExecdClient } from "../openapi/execdClient.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 import { parseJsonEventStream } from "./sse.js";
+import { SandboxApiException } from "../core/exceptions.js";
 import type { paths as ExecdPaths } from "../api/execd.js";
 import type {
   CommandExecution,
@@ -105,10 +106,24 @@ function inferForegroundExitCode(execution: CommandExecution): number | null {
       : null;
 }
 
+const MAX_RESUME_RETRIES = 3;
+
 function assertNonBlank(value: string, field: string): void {
   if (!value.trim()) {
     throw new Error(`${field} cannot be empty`);
   }
+}
+
+function isNetworkError(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return false;
+  if (err instanceof TypeError) return true;
+  if (err instanceof Error) {
+    const msg = err.message.toLowerCase();
+    if (msg.includes("fetch failed") || msg.includes("econnreset") ||
+        msg.includes("socket") || msg.includes("connect") ||
+        msg.includes("network")) return true;
+  }
+  return false;
 }
 
 function parseOptionalDate(value: unknown, field: string): Date | undefined {
@@ -192,6 +207,30 @@ export class CommandsAdapter implements ExecdCommands {
     }
   }
 
+  private async *resumeStream(
+    commandId: string,
+    afterEid: number,
+    signal?: AbortSignal,
+  ): AsyncIterable<ServerStreamEvent> {
+    const url = joinUrl(
+      this.opts.baseUrl,
+      `/command/${encodeURIComponent(commandId)}/resume?after_eid=${afterEid}`,
+    );
+    const res = await this.fetch(url, {
+      method: "GET",
+      headers: {
+        accept: "text/event-stream",
+        ...(this.opts.headers ?? {}),
+      },
+      signal,
+    });
+    for await (const ev of parseJsonEventStream<ServerStreamEvent>(res, {
+      fallbackErrorMessage: "Resume command failed",
+    })) {
+      yield ev;
+    }
+  }
+
   private async consumeExecutionStream(
     stream: AsyncIterable<ServerStreamEvent>,
     handlers?: ExecutionHandlers,
@@ -201,6 +240,18 @@ export class CommandsAdapter implements ExecdCommands {
       logs: { stdout: [], stderr: [] },
       result: [],
     };
+    await this.consumeExecutionInto(stream, execution, handlers);
+    if (inferExitCode) {
+      execution.exitCode = inferForegroundExitCode(execution);
+    }
+    return execution;
+  }
+
+  private async consumeExecutionInto(
+    stream: AsyncIterable<ServerStreamEvent>,
+    execution: CommandExecution,
+    handlers?: ExecutionHandlers,
+  ): Promise<void> {
     const dispatcher = new ExecutionEventDispatcher(execution, handlers);
     for await (const ev of stream) {
       if (ev.type === "init" && (ev.text ?? "") === "" && execution.id) {
@@ -208,12 +259,6 @@ export class CommandsAdapter implements ExecdCommands {
       }
       await dispatcher.dispatch(ev as any);
     }
-
-    if (inferExitCode) {
-      execution.exitCode = inferForegroundExitCode(execution);
-    }
-
-    return execution;
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -280,11 +325,46 @@ export class CommandsAdapter implements ExecdCommands {
     handlers?: ExecutionHandlers,
     signal?: AbortSignal,
   ): Promise<CommandExecution> {
-    return this.consumeExecutionStream(
-      this.runStream(command, opts, signal),
-      handlers,
-      !opts?.background,
-    );
+    const inferExitCode = !opts?.background;
+    const execution: CommandExecution = {
+      logs: { stdout: [], stderr: [] },
+      result: [],
+    };
+    let commandId: string | undefined;
+
+    for (let attempt = 0; attempt <= MAX_RESUME_RETRIES; attempt++) {
+      try {
+        const stream = attempt === 0
+          ? this.runStream(command, opts, signal)
+          : this.resumeStream(commandId!, execution.lastEid ?? 0, signal);
+
+        await this.consumeExecutionInto(stream, execution, handlers);
+
+        if (inferExitCode) {
+          execution.exitCode = inferForegroundExitCode(execution);
+        }
+        return execution;
+      } catch (err) {
+        if (execution.id) commandId = execution.id;
+
+        if (err instanceof SandboxApiException) {
+          if (err.statusCode === 409 && attempt < MAX_RESUME_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            continue;
+          }
+          if (err.statusCode === 404 && attempt > 0) {
+            return execution;
+          }
+          throw err;
+        }
+
+        if (!commandId || attempt >= MAX_RESUME_RETRIES || !isNetworkError(err)) {
+          throw err;
+        }
+      }
+    }
+
+    return execution;
   }
 
   async createSession(options?: { workingDirectory?: string }): Promise<string> {

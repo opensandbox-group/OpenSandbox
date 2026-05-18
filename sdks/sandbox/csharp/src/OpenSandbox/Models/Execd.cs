@@ -62,6 +62,12 @@ public class ServerStreamEvent
     /// </summary>
     [JsonPropertyName("execution_time")]
     public long? ExecutionTime { get; set; }
+
+    /// <summary>
+    /// Gets or sets the monotonic event ID for SSE resume.
+    /// </summary>
+    [JsonPropertyName("eid")]
+    public long? Eid { get; set; }
 }
 
 /// <summary>

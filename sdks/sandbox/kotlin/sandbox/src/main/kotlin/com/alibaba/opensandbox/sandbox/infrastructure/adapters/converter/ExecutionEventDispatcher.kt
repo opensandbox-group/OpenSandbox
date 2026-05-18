@@ -30,6 +30,11 @@ class ExecutionEventDispatcher(
     private val handlers: ExecutionHandlers? = null,
 ) {
     fun dispatch(eventNode: EventNode) {
+        eventNode.eid?.let { eid ->
+            if (eid > execution.lastEid) {
+                execution.lastEid = eid
+            }
+        }
         val type = eventNode.type
         val timestamp = eventNode.timestamp
         when (type) {

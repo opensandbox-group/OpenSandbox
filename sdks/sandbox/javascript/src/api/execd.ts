@@ -266,6 +266,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/command/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resume command SSE stream (replay and optional live tail)
+         * @description Replays buffered events (stdout, stderr, execution_complete, execution_error) from
+         *     the server-side ring buffer for events with `eid` strictly greater than
+         *     `after_eid`, then—if the command is still running and no other client holds the
+         *     primary SSE slot—continues streaming live events until completion or client
+         *     disconnect. Event shape matches `POST /command` (`ServerStreamEvent`).
+         *
+         *     This endpoint is mutually exclusive with the primary `POST /command` SSE: if that
+         *     connection is still active, the server responds with 409 Conflict.
+         */
+        get: operations["resumeCommandStream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/command/{id}/logs": {
         parameters: {
             query?: never;
@@ -948,6 +975,21 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description Request conflicts with current server state (e.g. resource in use) */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                /**
+                 * @example {
+                 *       "code": "INVALID_REQUEST_BODY",
+                 *       "message": "primary SSE stream is still active; disconnect it before resuming"
+                 *     }
+                 */
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description Runtime server error during operation */
         InternalServerError: {
             headers: {
@@ -1339,6 +1381,46 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    resumeCommandStream: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only events with `eid` greater than this value are replayed. All event types
+                 *     (stdout, stderr, execution_complete, execution_error) carry monotonically
+                 *     increasing `eid` values. Omit or use `0` to replay from the oldest buffered
+                 *     events. After replay, if the command is still running and the primary SSE slot
+                 *     is free, live events continue to stream.
+                 * @example 42
+                 */
+                after_eid?: number;
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description Command ID returned by RunCommand
+                 * @example cmd-abc123
+                 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Stream of command execution events (replay then optional live continuation) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["ServerStreamEvent"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalServerError"];
         };
     };

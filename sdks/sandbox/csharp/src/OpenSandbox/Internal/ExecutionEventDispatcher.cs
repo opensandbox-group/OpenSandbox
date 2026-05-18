@@ -32,6 +32,11 @@ internal sealed class ExecutionEventDispatcher
 
     public async Task DispatchAsync(ServerStreamEvent ev)
     {
+        if (ev.Eid.HasValue && ev.Eid.Value > _execution.LastEid)
+        {
+            _execution.LastEid = ev.Eid.Value;
+        }
+
         var timestamp = ev.Timestamp ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         switch (ev.Type)

@@ -14,7 +14,38 @@
 
 package model
 
-import "time"
+import (
+	"errors"
+	"time"
+
+	"github.com/go-playground/validator/v10"
+)
+
+const CommandResumeAfterEidQuery = "after_eid"
+
+// RunCommandRequest represents a shell command execution request.
+type RunCommandRequest struct {
+	Command    string `json:"command" validate:"required"`
+	Cwd        string `json:"cwd,omitempty"`
+	Background bool   `json:"background,omitempty"`
+	// TimeoutMs caps execution duration; 0 uses server default.
+	TimeoutMs int64 `json:"timeout,omitempty" validate:"omitempty,gte=1"`
+
+	Uid  *uint32           `json:"uid,omitempty"`
+	Gid  *uint32           `json:"gid,omitempty"`
+	Envs map[string]string `json:"envs,omitempty"`
+}
+
+func (r *RunCommandRequest) Validate() error {
+	validate := validator.New()
+	if err := validate.Struct(r); err != nil {
+		return err
+	}
+	if r.Gid != nil && r.Uid == nil {
+		return errors.New("uid is required when gid is provided")
+	}
+	return nil
+}
 
 // CommandStatusResponse represents command status for REST APIs.
 type CommandStatusResponse struct {

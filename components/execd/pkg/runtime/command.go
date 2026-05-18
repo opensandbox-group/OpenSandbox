@@ -134,11 +134,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	wg.Add(2)
 	safego.Go(func() {
 		defer wg.Done()
-		c.tailStdPipe(stdoutPath, request.Hooks.OnExecuteStdout, done)
+		c.tailStdPipe(stdoutPath, request.wrapStdoutPipeHook(), done)
 	})
 	safego.Go(func() {
 		defer wg.Done()
-		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
+		c.tailStdPipe(stderrPath, request.wrapStderrPipeHook(), done)
 	})
 
 	err = cmd.Start()

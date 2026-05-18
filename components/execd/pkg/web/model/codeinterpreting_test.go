@@ -55,10 +55,11 @@ func TestRunCommandRequestValidateCwd(t *testing.T) {
 	req := RunCommandRequest{Command: "ls", Cwd: tmp}
 	require.NoError(t, req.Validate())
 
+	// Cwd is not validated for existence — the runtime resolves it. Only
+	// structural constraints (non-empty command, non-negative timeout, uid/gid)
+	// are enforced at the API layer.
 	req.Cwd = filepath.Join(tmp, "missing-subdir")
-	err := req.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "working directory")
+	require.NoError(t, req.Validate())
 }
 
 func ptr32(v uint32) *uint32 { return &v }
@@ -79,6 +80,7 @@ func TestRunCommandRequestValidateUidGid(t *testing.T) {
 
 func TestServerStreamEventToJSON(t *testing.T) {
 	event := ServerStreamEvent{
+		Eid:            42,
 		Type:           StreamEventTypeStdout,
 		Text:           "hello",
 		ExecutionCount: 3,
@@ -87,6 +89,7 @@ func TestServerStreamEventToJSON(t *testing.T) {
 	data := event.ToJSON()
 	var decoded ServerStreamEvent
 	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, event.Eid, decoded.Eid)
 	require.Equal(t, event.Type, decoded.Type)
 	require.Equal(t, event.Text, decoded.Text)
 	require.Equal(t, event.ExecutionCount, decoded.ExecutionCount)
@@ -102,11 +105,12 @@ func TestServerStreamEventSummary(t *testing.T) {
 		{
 			name: "basic stdout",
 			event: ServerStreamEvent{
+				Eid:            7,
 				Type:           StreamEventTypeStdout,
 				Text:           "hello",
 				ExecutionCount: 2,
 			},
-			contains: []string{"type=stdout", "text=hello"},
+			contains: []string{"type=stdout", "eid=7", "text=hello"},
 		},
 		{
 			name: "truncated text and error",

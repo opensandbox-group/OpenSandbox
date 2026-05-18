@@ -17,11 +17,14 @@ package opensandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2464,4 +2467,189 @@ func TestCreateSandbox_WithVolumes(t *testing.T) {
 		},
 	})
 	require.NoErrorf(t, err, "CreateSandbox with Volumes")
+}
+
+// errorReader is an io.Reader that always returns a net.Error, simulating a
+// TCP connection reset after a cleanly truncated response body.
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) {
+	return 0, &net.OpError{
+		Op:  "read",
+		Net: "tcp",
+		Err: errors.New("connection reset by peer"),
+	}
+}
+
+// disconnectInjectTransport wraps a real transport. On POST /command it buffers
+// the full SSE response, truncates it after maxEvents complete NDJSON events,
+// then appends an errorReader so the client sees a mid-stream disconnect.
+// On GET /resume it tracks the after_eid query parameter.
+type disconnectInjectTransport struct {
+	real         http.RoundTripper
+	maxEvents    int
+	postCount    *int
+	resumeCount  *int
+	lastAfterEid *int64
+	mu           *sync.Mutex
+}
+
+func (rt *disconnectInjectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.real.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	if req.Method == http.MethodPost && req.URL.Path == "/command" {
+		*rt.postCount++
+
+		full, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil || len(full) == 0 {
+			resp.Body = io.NopCloser(errorReader{})
+			return resp, nil
+		}
+
+		// Truncate after maxEvents complete events. Each NDJSON event is
+		// one line followed by a blank line, i.e. two consecutive \n chars.
+		maxNewlines := rt.maxEvents * 2
+		nl := 0
+		cut := len(full)
+		for i, b := range full {
+			if b == '\n' {
+				nl++
+				if nl >= maxNewlines {
+					cut = i + 1
+					break
+				}
+			}
+		}
+
+		if cut < len(full) {
+			resp.Body = io.NopCloser(io.MultiReader(
+				strings.NewReader(string(full[:cut])),
+				errorReader{},
+			))
+		} else {
+			resp.Body = io.NopCloser(strings.NewReader(string(full)))
+		}
+	} else if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/resume") {
+		*rt.resumeCount++
+		if q := req.URL.Query().Get("after_eid"); q != "" {
+			if eid, err := strconv.ParseInt(q, 10, 64); err == nil {
+				*rt.lastAfterEid = eid
+			}
+		}
+	}
+
+	return resp, nil
+}
+
+func TestRunCommand_AutoResumeOnDisconnect(t *testing.T) {
+	var mu sync.Mutex
+	var postCount, resumeCount int
+	var lastAfterEid int64
+
+	// writeEvents sends SSE events for eid range [first, last].
+	// eid=1 is init, 2..20 are line1..line19, 21 is execution_complete.
+	writeEvents := func(w io.Writer, first, last int64) {
+		flusher, _ := w.(http.Flusher)
+		for eid := first; eid <= last; eid++ {
+			switch {
+			case eid == 1:
+				fmt.Fprintf(w, `{"type":"init","text":"cmd-r1","eid":1,"timestamp":1}`+"\n\n")
+			case eid >= 2 && eid <= 20:
+				lineNum := eid - 1
+				fmt.Fprintf(w, `{"type":"stdout","text":"line%d","eid":%d,"timestamp":%d}`+"\n\n", lineNum, eid, lineNum*10)
+			case eid == 21:
+				fmt.Fprintf(w, `{"type":"execution_complete","eid":21,"timestamp":200,"execution_time":50}`+"\n\n")
+			}
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		path := r.URL.Path
+		if r.Method == http.MethodPost && path == "/command" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			writeEvents(w, 1, 21)
+		} else if r.Method == http.MethodGet && strings.Contains(path, "/resume") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			afterEidStr := r.URL.Query().Get("after_eid")
+			afterEid, _ := strconv.ParseInt(afterEidStr, 10, 64)
+			firstEid := afterEid + 1
+			if firstEid < 1 {
+				firstEid = 1
+			}
+			writeEvents(w, firstEid, 21)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	transport := &disconnectInjectTransport{
+		real:         srv.Client().Transport,
+		maxEvents:    4, // disconnect after init + 3 stdout lines
+		postCount:    &postCount,
+		resumeCount:  &resumeCount,
+		lastAfterEid: &lastAfterEid,
+		mu:           &mu,
+	}
+
+	execd := NewExecdClient(srv.URL, "test-token",
+		WithHTTPClient(&http.Client{Transport: transport}),
+	)
+
+	sb := &Sandbox{
+		id:     "test-sandbox",
+		config: &ConnectionConfig{Domain: srv.URL},
+		execd:  execd,
+	}
+
+	execution, err := sb.RunCommand(context.Background(), "echo test", nil)
+	require.NoErrorf(t, err, "RunCommand")
+
+	if postCount != 1 {
+		assert.Fail(t, fmt.Sprintf("postCount = %d, want 1", postCount))
+	}
+	if resumeCount < 1 {
+		assert.Fail(t, fmt.Sprintf("resumeCount = %d, want >= 1", resumeCount))
+	}
+	if lastAfterEid < 2 {
+		assert.Fail(t, fmt.Sprintf("lastAfterEid = %d, want >= 2", lastAfterEid))
+	}
+
+	if len(execution.Stdout) != 19 {
+		assert.Fail(t, fmt.Sprintf("len(Stdout) = %d, want 19", len(execution.Stdout)))
+	}
+	for i, msg := range execution.Stdout {
+		expected := fmt.Sprintf("line%d", i+1)
+		if msg.Text != expected {
+			assert.Fail(t, fmt.Sprintf("Stdout[%d].Text = %q, want %q", i, msg.Text, expected))
+		}
+	}
+
+	if execution.Complete == nil {
+		assert.Fail(t, "expected Complete to be set")
+	}
+	if execution.ExitCode == nil || *execution.ExitCode != 0 {
+		assert.Fail(t, fmt.Sprintf("ExitCode = %v, want 0", execution.ExitCode))
+	}
+	if execution.LastEid < 10 {
+		assert.Fail(t, fmt.Sprintf("LastEid = %d, want >= 10", execution.LastEid))
+	}
+
+	t.Logf("resume test: post=%d resume=%d afterEid=%d stdout=%d lastEid=%d",
+		postCount, resumeCount, lastAfterEid, len(execution.Stdout), execution.LastEid)
 }

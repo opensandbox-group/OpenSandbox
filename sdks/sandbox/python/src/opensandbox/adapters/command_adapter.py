@@ -21,6 +21,7 @@ This adapter handles command execution within sandboxes, providing both
 synchronous and streaming execution modes with proper session management.
 """
 
+import asyncio
 import json
 import logging
 from datetime import timedelta
@@ -137,6 +138,8 @@ class CommandsAdapter(Commands):
     INTERRUPT_COMMAND_PATH = "/command/{execution_id}/interrupt"
     SESSION_PATH = "/session"
     RUN_IN_SESSION_PATH = "/session/{session_id}/run"
+    _RESUME_PATH = "/command/{id}/resume"
+    _MAX_RESUME_RETRIES = 3
 
     def __init__(
         self,
@@ -225,30 +228,83 @@ class CommandsAdapter(Commands):
             result=[],
             error=None,
         )
-        client = await self._get_sse_client()
+        command_id: str | None = None
+        last_eid: int = 0
 
-        async with client.stream("POST", url, json=json_body) as response:
-            if response.status_code != 200:
-                await response.aread()
-                error_body = response.text
-                logger.error(
-                    "%s. Status: %s, Body: %s",
-                    failure_message,
-                    response.status_code,
-                    error_body,
-                )
-                raise SandboxApiException(
-                    message=f"{failure_message}. Status code: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
-                )
+        for attempt in range(self._MAX_RESUME_RETRIES + 1):
+            try:
+                if attempt == 0:
+                    client = await self._get_sse_client()
+                    response_ctx = client.stream("POST", url, json=json_body)
+                else:
+                    resume_url = self._get_execd_url(
+                        self._RESUME_PATH.format(id=command_id)
+                        + f"?after_eid={last_eid}"
+                    )
+                    logger.info(
+                        "SSE resume attempt %d/%d: command_id=%s after_eid=%d",
+                        attempt,
+                        self._MAX_RESUME_RETRIES,
+                        command_id,
+                        last_eid,
+                    )
+                    client = await self._get_sse_client()
+                    response_ctx = client.stream("GET", resume_url)
 
-            dispatcher = ExecutionEventDispatcher(execution, handlers)
-            async for line in response.aiter_lines():
-                event_node = _decode_sse_event_line(line)
-                if event_node is None:
-                    continue
-                await dispatcher.dispatch(event_node)
+                async with response_ctx as response:
+                    if response.status_code == 409:
+                        await response.aread()
+                        if attempt < self._MAX_RESUME_RETRIES:
+                            await asyncio.sleep(1)
+                            continue
+                        logger.warning("SSE resume: 409 conflict, primary still active after retries")
+                        break
+                    if response.status_code == 404 and attempt > 0:
+                        logger.info("SSE resume: 404, command finished or buffer expired")
+                        break
+                    if response.status_code != 200:
+                        await response.aread()
+                        error_body = response.text
+                        logger.error(
+                            "%s. Status: %s, Body: %s",
+                            failure_message,
+                            response.status_code,
+                            error_body,
+                        )
+                        raise SandboxApiException(
+                            message=f"{failure_message}. Status code: {response.status_code}",
+                            status_code=response.status_code,
+                            request_id=extract_request_id(response.headers),
+                        )
+
+                    dispatcher = ExecutionEventDispatcher(execution, handlers)
+                    async for line in response.aiter_lines():
+                        event_node = _decode_sse_event_line(line)
+                        if event_node is None:
+                            continue
+                        if event_node.type == "init" and not command_id:
+                            command_id = event_node.text
+                        if event_node.eid:
+                            last_eid = max(last_eid, event_node.eid)
+                        await dispatcher.dispatch(event_node)
+
+                # Stream completed normally
+                break
+
+            except (
+                httpx.ReadError,
+                httpx.RemoteProtocolError,
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+            ) as e:
+                if not command_id or attempt >= self._MAX_RESUME_RETRIES:
+                    raise
+                logger.warning(
+                    "SSE stream disconnected (attempt %d/%d): %s",
+                    attempt + 1,
+                    self._MAX_RESUME_RETRIES + 1,
+                    e,
+                )
 
         if infer_exit_code:
             execution.exit_code = _infer_foreground_exit_code(execution)

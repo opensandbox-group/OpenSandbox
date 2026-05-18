@@ -35,6 +35,10 @@ export class ExecutionEventDispatcher {
   ) {}
 
   async dispatch(ev: ServerStreamEvent): Promise<void> {
+    if (ev.eid != null && ev.eid > (this.execution.lastEid ?? 0)) {
+      this.execution.lastEid = ev.eid;
+    }
+
     await this.handlers?.onEvent?.(ev);
 
     const ts = ev.timestamp ?? Date.now();

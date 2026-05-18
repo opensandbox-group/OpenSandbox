@@ -502,6 +502,60 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /command/{id}/resume:
+    get:
+      summary: Resume command SSE stream (replay and optional live tail)
+      description: |
+        Replays buffered events (stdout, stderr, execution_complete, execution_error) from
+        the server-side ring buffer for events with `eid` strictly greater than
+        `after_eid`, then—if the command is still running and no other client holds the
+        primary SSE slot—continues streaming live events until completion or client
+        disconnect. Event shape matches `POST /command` (`ServerStreamEvent`).
+
+        This endpoint is mutually exclusive with the primary `POST /command` SSE: if that
+        connection is still active, the server responds with 409 Conflict.
+      operationId: resumeCommandStream
+      tags:
+        - Command
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Command ID returned by RunCommand
+          schema:
+            type: string
+          example: cmd-abc123
+        - name: after_eid
+          in: query
+          required: false
+          description: |
+            Only events with `eid` greater than this value are replayed. All event types
+            (stdout, stderr, execution_complete, execution_error) carry monotonically
+            increasing `eid` values. Omit or use `0` to replay from the oldest buffered
+            events. After replay, if the command is still running and the primary SSE slot
+            is free, live events continue to stream.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+          example: 42
+      responses:
+        "200":
+          description: Stream of command execution events (replay then optional live continuation)
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ServerStreamEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /command/{id}/logs:
     get:
       summary: Get background command stdout/stderr (non-streamed)
@@ -1395,6 +1449,16 @@ components:
           example:
             code: FILE_NOT_FOUND
             message: "file not found"
+
+    Conflict:
+      description: Request conflicts with current server state (e.g. resource in use)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: INVALID_REQUEST_BODY
+            message: "primary SSE stream is still active; disconnect it before resuming"
 
     InternalServerError:
       description: Runtime server error during operation

@@ -81,6 +81,9 @@ type Execution struct {
 
 	// ExitCode is the process exit code. Nil if not available.
 	ExitCode *int
+
+	// LastEid is the highest event ID seen so far, used for SSE resume.
+	LastEid int64
 }
 
 // Text returns the combined stdout text.
@@ -120,6 +123,7 @@ type sseEvent struct {
 	Type          string `json:"type"`
 	Text          string `json:"text"`
 	Timestamp     int64  `json:"timestamp"`
+	Eid           int64  `json:"eid,omitempty"`
 	ExitCode      *int   `json:"exit_code,omitempty"`
 	ExecutionTime int64  `json:"execution_time,omitempty"`
 
@@ -151,6 +155,10 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 			return handlers.OnStdout(msg)
 		}
 		return nil
+	}
+
+	if ev.Eid > exec.LastEid {
+		exec.LastEid = ev.Eid
 	}
 
 	switch ev.Type {

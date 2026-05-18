@@ -46,16 +46,23 @@ func (c *basicController) setupSSEResponse() {
 }
 
 // setServerEventsHandler adapts runtime callbacks to SSE events.
-func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context) runtime.ExecuteResultHook {
+func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context, req *runtime.ExecuteCodeRequest) runtime.ExecuteResultHook {
 	return runtime.ExecuteResultHook{
 		OnExecuteInit: func(session string) {
+			if c.resumeEnabled.Load() {
+				c.resumeStreamMu.Lock()
+				c.resumeStreamID = session
+				c.resumeStreamMu.Unlock()
+				commandStreams.registerPrimary(session, c.ctx.Writer, c.ctx.Request.Context())
+			}
+
 			event := model.ServerStreamEvent{
 				Type:      model.StreamEventTypeInit,
 				Text:      session,
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteInit", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteInit", payload, true, event.Summary(), 0)
 
 			safego.Go(func() { c.ping(ctx) })
 		},
@@ -80,7 +87,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 					Timestamp:      time.Now().UnixMilli(),
 				}
 				payload := event.ToJSON()
-				c.writeSingleEvent("OnExecuteResult", payload, true, event.Summary())
+				c.writeSingleEvent("OnExecuteResult", payload, true, event.Summary(), 0)
 			}
 			if len(mutated) > 0 {
 				event := model.ServerStreamEvent{
@@ -89,30 +96,34 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 					Timestamp: time.Now().UnixMilli(),
 				}
 				payload := event.ToJSON()
-				c.writeSingleEvent("OnExecuteResult", payload, true, event.Summary())
+				c.writeSingleEvent("OnExecuteResult", payload, true, event.Summary(), 0)
 			}
 		},
 		OnExecuteComplete: func(executionTime time.Duration) {
+			eid := req.NextEventID()
 			event := model.ServerStreamEvent{
+				Eid:           eid,
 				Type:          model.StreamEventTypeComplete,
 				ExecutionTime: executionTime.Milliseconds(),
 				Timestamp:     time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteComplete", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteComplete", payload, true, event.Summary(), eid)
 		},
 		OnExecuteError: func(err *execute.ErrorOutput) {
 			if err == nil {
 				return
 			}
 
+			eid := req.NextEventID()
 			event := model.ServerStreamEvent{
+				Eid:       eid,
 				Type:      model.StreamEventTypeError,
 				Error:     err,
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteError", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteError", payload, true, event.Summary(), eid)
 		},
 		OnExecuteStatus: func(status string) {
 			event := model.ServerStreamEvent{
@@ -121,40 +132,57 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteStatus", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteStatus", payload, true, event.Summary(), 0)
 		},
-		OnExecuteStdout: func(text string) {
+		OnExecuteStdout: func(eid int64, text string) {
 			if text == "" {
 				return
 			}
 
 			event := model.ServerStreamEvent{
+				Eid:       eid,
 				Type:      model.StreamEventTypeStdout,
 				Text:      text,
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteStdout", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteStdout", payload, true, event.Summary(), eid)
 		},
-		OnExecuteStderr: func(text string) {
+		OnExecuteStderr: func(eid int64, text string) {
 			if text == "" {
 				return
 			}
 
 			event := model.ServerStreamEvent{
+				Eid:       eid,
 				Type:      model.StreamEventTypeStderr,
 				Text:      text,
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteStderr", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteStderr", payload, true, event.Summary(), eid)
 		},
 	}
 }
 
-// writeSingleEvent serializes one SSE frame.
-func (c *CodeInterpretingController) writeSingleEvent(handler string, data []byte, verbose bool, summary string) {
+// writeSingleEvent serializes one SSE frame. When resumeStreamID is set, writes go through commandStreams (live hub + buffer).
+// bufEid is stdout/stderr event id for the resume buffer; 0 skips Append (control events, resume catch-up frames).
+func (c *CodeInterpretingController) writeSingleEvent(handler string, data []byte, verbose bool, summary string, bufEid int64) {
 	if c == nil || c.ctx == nil || c.ctx.Writer == nil {
+		return
+	}
+
+	var streamID string
+	if c.resumeEnabled.Load() {
+		c.resumeStreamMu.Lock()
+		streamID = c.resumeStreamID
+		c.resumeStreamMu.Unlock()
+	}
+	if streamID != "" {
+		commandStreams.writeSSE(streamID, data, bufEid, handler, summary)
+		if verbose {
+			log.Info("StreamEvent.%s write data %s", handler, summary)
+		}
 		return
 	}
 
@@ -167,11 +195,6 @@ func (c *CodeInterpretingController) writeSingleEvent(handler string, data []byt
 
 	c.chunkWriter.Lock()
 	defer c.chunkWriter.Unlock()
-	defer func() {
-		if flusher, ok := c.ctx.Writer.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}()
 
 	payload := append(data, '\n', '\n')
 	n, err := c.ctx.Writer.Write(payload)
@@ -181,10 +204,15 @@ func (c *CodeInterpretingController) writeSingleEvent(handler string, data []byt
 
 	if err != nil {
 		log.Error("StreamEvent.%s write data %s error: %v", handler, summary, err)
-	} else {
-		if verbose {
-			log.Info("StreamEvent.%s write data %s", handler, summary)
-		}
+		return
+	}
+
+	if flusher, ok := c.ctx.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	if verbose {
+		log.Info("StreamEvent.%s write data %s", handler, summary)
 	}
 }
 
@@ -200,6 +228,6 @@ func (c *CodeInterpretingController) ping(ctx context.Context) {
 			Timestamp: time.Now().UnixMilli(),
 		}
 		payload := event.ToJSON()
-		c.writeSingleEvent("Ping", payload, false, event.Summary())
+		c.writeSingleEvent("Ping", payload, false, event.Summary(), 0)
 	}, 3*time.Second, ctx.Done())
 }

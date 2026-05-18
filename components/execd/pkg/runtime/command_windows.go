@@ -58,10 +58,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 	done := make(chan struct{}, 1)
 	safego.Go(func() {
-		c.tailStdPipe(c.stdoutFileName(session), request.Hooks.OnExecuteStdout, done)
+		c.tailStdPipe(c.stdoutFileName(session), request.wrapStdoutPipeHook(), done)
 	})
 	safego.Go(func() {
-		c.tailStdPipe(c.stderrFileName(session), request.Hooks.OnExecuteStderr, done)
+		c.tailStdPipe(c.stderrFileName(session), request.wrapStderrPipeHook(), done)
 	})
 
 	err = cmd.Start()

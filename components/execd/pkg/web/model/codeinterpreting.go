@@ -16,14 +16,12 @@ package model
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
-	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
 
 // RunCodeRequest represents a code execution request.
@@ -48,30 +46,6 @@ type CodeContextRequest struct {
 	Cwd      string `json:"cwd,omitempty"`
 }
 
-// RunCommandRequest represents a shell command execution request.
-type RunCommandRequest struct {
-	Command    string `json:"command" validate:"required"`
-	Cwd        string `json:"cwd,omitempty"`
-	Background bool   `json:"background,omitempty"`
-	// TimeoutMs caps execution duration; 0 uses server default.
-	TimeoutMs int64 `json:"timeout,omitempty" validate:"omitempty,gte=1"`
-
-	Uid  *uint32           `json:"uid,omitempty"`
-	Gid  *uint32           `json:"gid,omitempty"`
-	Envs map[string]string `json:"envs,omitempty"`
-}
-
-func (r *RunCommandRequest) Validate() error {
-	validate := validator.New()
-	if err := validate.Struct(r); err != nil {
-		return err
-	}
-	if r.Gid != nil && r.Uid == nil {
-		return errors.New("uid is required when gid is provided")
-	}
-	return runtime.ValidateWorkingDir(r.Cwd)
-}
-
 type ServerStreamEventType string
 
 const (
@@ -88,6 +62,7 @@ const (
 
 // ServerStreamEvent is emitted to clients over SSE.
 type ServerStreamEvent struct {
+	Eid            int64                 `json:"eid,omitempty"`
 	Type           ServerStreamEventType `json:"type,omitempty"`
 	Text           string                `json:"text,omitempty"`
 	ExecutionCount int                   `json:"execution_count,omitempty"`
@@ -106,6 +81,9 @@ func (s ServerStreamEvent) ToJSON() []byte {
 // Summary renders a lightweight, log-friendly string without JSON.
 func (s ServerStreamEvent) Summary() string {
 	parts := []string{fmt.Sprintf("type=%s", s.Type)}
+	if s.Eid > 0 {
+		parts = append(parts, fmt.Sprintf("eid=%d", s.Eid))
+	}
 	if s.Text != "" {
 		parts = append(parts, fmt.Sprintf("text=%s", truncateString(s.Text, 100)))
 	}

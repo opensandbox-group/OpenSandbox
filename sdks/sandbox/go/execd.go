@@ -135,6 +135,13 @@ func (e *ExecdClient) RunCommand(ctx context.Context, req RunCommandRequest, han
 	return e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, handler)
 }
 
+// ResumeCommand resumes an interrupted SSE stream for the given command
+// starting from the specified event ID (exclusive).
+func (e *ExecdClient) ResumeCommand(ctx context.Context, commandID string, afterEid int64, handler EventHandler) error {
+	path := "/command/" + url.PathEscape(commandID) + "/resume?after_eid=" + strconv.FormatInt(afterEid, 10)
+	return e.client.doStreamRequest(ctx, http.MethodGet, path, nil, handler)
+}
+
 // InterruptCommand interrupts the currently running command execution.
 func (e *ExecdClient) InterruptCommand(ctx context.Context, sessionID string) error {
 	params := url.Values{}

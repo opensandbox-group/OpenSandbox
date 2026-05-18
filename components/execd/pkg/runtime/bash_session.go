@@ -252,7 +252,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 				continue
 			}
 			if request.Hooks.OnExecuteStdout != nil {
-				request.Hooks.OnExecuteStdout(line)
+				request.Hooks.OnExecuteStdout(request.NextEventID(), line)
 			}
 		}
 	}

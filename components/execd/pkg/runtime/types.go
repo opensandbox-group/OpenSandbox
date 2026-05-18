@@ -17,6 +17,7 @@ package runtime
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
@@ -27,8 +28,8 @@ type ExecuteResultHook struct {
 	OnExecuteInit     func(context string)
 	OnExecuteResult   func(result map[string]any, count int)
 	OnExecuteStatus   func(status string)
-	OnExecuteStdout   func(stdout string) //nolint:predeclared
-	OnExecuteStderr   func(stderr string) //nolint:predeclared
+	OnExecuteStdout   func(eid int64, stdout string) //nolint:predeclared
+	OnExecuteStderr   func(eid int64, stderr string) //nolint:predeclared
 	OnExecuteError    func(err *execute.ErrorOutput)
 	OnExecuteComplete func(executionTime time.Duration)
 }
@@ -44,6 +45,35 @@ type ExecuteCodeRequest struct {
 	Uid      *uint32           `json:"uid,omitempty"`
 	Gid      *uint32           `json:"gid,omitempty"`
 	Hooks    ExecuteResultHook
+
+	eventSeq atomic.Uint64
+}
+
+func (req *ExecuteCodeRequest) NextEventID() int64 {
+	if req == nil {
+		return 0
+	}
+	return int64(req.eventSeq.Add(1))
+}
+
+func (req *ExecuteCodeRequest) wrapStdoutPipeHook() func(string) {
+	return func(text string) {
+		if text == "" || req.Hooks.OnExecuteStdout == nil {
+			return
+		}
+		eid := req.NextEventID()
+		req.Hooks.OnExecuteStdout(eid, text)
+	}
+}
+
+func (req *ExecuteCodeRequest) wrapStderrPipeHook() func(string) {
+	return func(text string) {
+		if text == "" || req.Hooks.OnExecuteStderr == nil {
+			return
+		}
+		eid := req.NextEventID()
+		req.Hooks.OnExecuteStderr(eid, text)
+	}
 }
 
 // SetDefaultHooks installs stdout logging fallbacks for unset hooks.
@@ -55,10 +85,10 @@ func (req *ExecuteCodeRequest) SetDefaultHooks() {
 		req.Hooks.OnExecuteStatus = func(status string) { fmt.Printf("OnExecuteStatus: %s\n", status) }
 	}
 	if req.Hooks.OnExecuteStdout == nil {
-		req.Hooks.OnExecuteStdout = func(stdout string) { fmt.Printf("OnExecuteStdout: %s\n", stdout) }
+		req.Hooks.OnExecuteStdout = func(eid int64, stdout string) { fmt.Printf("OnExecuteStdout: eid=%d %s\n", eid, stdout) }
 	}
 	if req.Hooks.OnExecuteStderr == nil {
-		req.Hooks.OnExecuteStderr = func(stderr string) { fmt.Printf("OnExecuteStderr: %s\n", stderr) }
+		req.Hooks.OnExecuteStderr = func(eid int64, stderr string) { fmt.Printf("OnExecuteStderr: eid=%d %s\n", eid, stderr) }
 	}
 	if req.Hooks.OnExecuteError == nil {
 		req.Hooks.OnExecuteError = func(err *execute.ErrorOutput) { fmt.Printf("OnExecuteError: %++v\n", err) }

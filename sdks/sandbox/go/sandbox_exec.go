@@ -16,7 +16,11 @@ package opensandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"time"
 )
 
 // RunCommand executes a shell command and returns the structured result.
@@ -24,19 +28,83 @@ func (s *Sandbox) RunCommand(ctx context.Context, command string, handlers *Exec
 	return s.RunCommandWithOpts(ctx, RunCommandRequest{Command: command}, handlers)
 }
 
+const maxResumeRetries = 3
+
+// isNetworkError reports whether err is a transient network error that should
+// trigger SSE resume. Context cancellation and deadline errors are not retryable.
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	for {
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return true
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return true
+		}
+		unwrapped := errors.Unwrap(err)
+		if unwrapped == nil {
+			break
+		}
+		err = unwrapped
+	}
+	return false
+}
+
 // RunCommandWithOpts executes a command with full options.
+// Automatically resumes the SSE stream on transient network disconnects.
 func (s *Sandbox) RunCommandWithOpts(ctx context.Context, req RunCommandRequest, handlers *ExecutionHandlers) (*Execution, error) {
 	if s.execd == nil {
 		return nil, fmt.Errorf("opensandbox: execd client not initialized")
 	}
 
 	exec := &Execution{}
-	err := s.execd.RunCommand(ctx, req, func(event StreamEvent) error {
-		return processStreamEvent(exec, event, handlers)
-	})
-	if err != nil {
-		return exec, err
+	var commandID string
+
+	for attempt := 0; attempt <= maxResumeRetries; attempt++ {
+		var streamErr error
+		if attempt == 0 {
+			streamErr = s.execd.RunCommand(ctx, req, func(event StreamEvent) error {
+				return processStreamEvent(exec, event, handlers)
+			})
+		} else {
+			streamErr = s.execd.ResumeCommand(ctx, commandID, exec.LastEid, func(event StreamEvent) error {
+				return processStreamEvent(exec, event, handlers)
+			})
+		}
+
+		if streamErr == nil {
+			return exec, nil
+		}
+
+		if exec.ID != "" {
+			commandID = exec.ID
+		}
+
+		var apiErr *APIError
+		if errors.As(streamErr, &apiErr) {
+			if apiErr.StatusCode == 409 && attempt < maxResumeRetries {
+				if err := retrySleep(ctx, 1*time.Second); err != nil {
+					return exec, err
+				}
+				continue
+			}
+			if apiErr.StatusCode == 404 && attempt > 0 {
+				return exec, nil
+			}
+			return exec, streamErr
+		}
+
+		if commandID == "" || attempt >= maxResumeRetries || !isNetworkError(streamErr) {
+			return exec, streamErr
+		}
 	}
+
 	return exec, nil
 }
 
