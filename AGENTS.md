@@ -68,3 +68,13 @@ Never:
 - Flag protocol changes that are unnecessary, inconsistent, or hard to implement.
 - Flag changes that break source-of-truth boundaries or intended layering.
 - Call out missing tests and compatibility risks explicitly.
+
+## Git Guide
+
+Rules for AI agents. See `CONTRIBUTING.md` for the full human guide.
+
+- Branch off latest `main` as `<type>/<topic>` (e.g., `fix/execd-sse`). Never commit directly to `main`.
+- Run `git status` and `git diff` before staging. Stage explicit paths; avoid `git add -A`/`.` to keep secrets and unrelated edits out.
+- Commit messages use Conventional Commits: `<type>(<scope>): <subject>`. Keep them concise — state intent and motivation; omit implementation details (function names, line-by-line changes, file lists) since the diff already shows them. Pass multi-line messages via HEREDOC.
+- Never use `--no-verify`, `--amend` on pushed commits, or `git push --force` to `main`. Confirm with the user before any destructive op (`reset --hard`, `clean -fd`, `branch -D`, history rewrites).
+- Push and open PRs only when the user asks. Use the template in `.github/pull_request_template.md`; one topic per PR.
