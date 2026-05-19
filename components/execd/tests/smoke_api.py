@@ -98,9 +98,14 @@ def run_command_blank_lines():
     readFromPos fix that preserves empty lines (a\n\nb -> ["a", "\n", "b"]).
     """
     url = f"{BASE_URL}/command"
+    # Use Python so the smoke runs identically under POSIX shells and Windows
+    # cmd /C, where single-quote quoting and POSIX printf are not portable.
+    py_script = (
+        "import sys; "
+        "sys.stdout.write('a\\n\\nb\\n\\n\\nc\\n')"
+    )
     payload = {
-        # printf emits exact bytes: a\n\nb\n\n\nc\n
-        "command": "printf 'a\\n\\nb\\n\\n\\nc\\n'",
+        "command": f'python -c "{py_script}"',
         "background": False,
     }
 
