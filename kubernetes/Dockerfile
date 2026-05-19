@@ -55,7 +55,7 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
            CGO_CXXFLAGS="${CGO_CXXFLAGS:-${CXXFLAGS}}" \
            CGO_LDFLAGS="${CGO_LDFLAGS}"; \
     go build ${GOFLAGS} -trimpath -buildvcs=false \
-    -ldflags "${LDFLAGS} -buildid= -B none" \
+    -ldflags "${LDFLAGS} -buildid= -B none -R 0x10000" \
     -o server ${PACKAGE}
 
 # Use golang image as base to ensure nsenter (util-linux) is available

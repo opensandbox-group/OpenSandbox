@@ -30,7 +30,11 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell if [ -n "$$SOURCE_DATE_EPOCH" ]; then date -u -d "@$$SOURCE_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -r "$$SOURCE_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null; else date -u +"%Y-%m-%dT%H:%M:%SZ"; fi)
 PROJECT_GOFLAGS := -trimpath -buildvcs=false
-PROJECT_LDFLAGS := -buildid= -B none -X 'github.com/alibaba/opensandbox/internal/version.Version=$(VERSION)' \
+# -R 0x10000 pins ELF PT_LOAD segment alignment to 64KB so binaries load on
+# aarch64 kernels built with CONFIG_ARM64_64K_PAGES=y (e.g. NVIDIA Grace,
+# RHEL aarch64+64k). Go's internal linker honours this for ELF/PE; on Mach-O
+# the value just affects layout. See issue #853.
+PROJECT_LDFLAGS := -buildid= -B none -R 0x10000 -X 'github.com/alibaba/opensandbox/internal/version.Version=$(VERSION)' \
 	-X 'github.com/alibaba/opensandbox/internal/version.BuildTime=$(BUILD_TIME)' \
 	-X 'github.com/alibaba/opensandbox/internal/version.GitCommit=$(GIT_COMMIT)'
 GO_BUILD_FLAGS := $(strip $(GOFLAGS) $(PROJECT_GOFLAGS))

@@ -255,8 +255,11 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Build
 
 PROJECT_GOFLAGS := -trimpath -buildvcs=false
+# -R 0x10000 pins ELF PT_LOAD segment alignment to 64KB so binaries load on
+# aarch64 kernels built with CONFIG_ARM64_64K_PAGES=y (e.g. NVIDIA Grace,
+# RHEL aarch64+64k). See issue #853.
 GO_BUILD_FLAGS := $(strip $(GOFLAGS) $(PROJECT_GOFLAGS))
-GO_LDFLAGS := $(strip $(LDFLAGS) -buildid= -B none)
+GO_LDFLAGS := $(strip $(LDFLAGS) -buildid= -B none -R 0x10000)
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.

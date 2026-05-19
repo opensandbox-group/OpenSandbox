@@ -51,14 +51,14 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
            CGO_CXXFLAGS="${CGO_CXXFLAGS:-${CXXFLAGS}}" \
            CGO_LDFLAGS="${CGO_LDFLAGS}"; \
     go build ${GOFLAGS} -trimpath -buildvcs=false \
-    -ldflags "${LDFLAGS} -buildid= -B none \
+    -ldflags "${LDFLAGS} -buildid= -B none -R 0x10000 \
               -X 'github.com/alibaba/opensandbox/internal/version.Version=${VERSION}' \
               -X 'github.com/alibaba/opensandbox/internal/version.BuildTime=${BUILD_TIME}' \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /build/execd ./main.go
 
 RUN CGO_ENABLED=0 GOOS=windows go build ${GOFLAGS} -trimpath -buildvcs=false \
-    -ldflags "${LDFLAGS} -buildid= -B none \
+    -ldflags "${LDFLAGS} -buildid= -B none -R 0x10000 \
               -X 'github.com/alibaba/opensandbox/internal/version.Version=${VERSION}' \
               -X 'github.com/alibaba/opensandbox/internal/version.BuildTime=${BUILD_TIME}' \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \

@@ -28,7 +28,9 @@ RUN  GOPROXY=https://goproxy.cn,direct go mod download
 COPY cmd/image-committer/ cmd/image-committer/
 
 # Build binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/image-committer ./cmd/image-committer/
+# -R 0x10000 pins ELF PT_LOAD segment alignment to 64KB for aarch64 64K-page
+# kernel compatibility. See issue #853.
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-R 0x10000" -o /usr/local/bin/image-committer ./cmd/image-committer/
 
 # Runtime stage
 FROM alpine:3.19
