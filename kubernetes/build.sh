@@ -39,15 +39,20 @@ DOCKERHUB_REPO="opensandbox"
 ACR_REPO="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox"
 
 # Component specific settings
+DOCKERFILE="Dockerfile"
 if [ "$COMPONENT" == "controller" ]; then
     IMAGE_NAME="controller"
     BUILD_ARG="--build-arg PACKAGE=./cmd/controller"
 elif [ "$COMPONENT" == "task-executor" ]; then
     IMAGE_NAME="task-executor"
     BUILD_ARG="--build-arg PACKAGE=cmd/task-executor/main.go --build-arg USERID=0"
+elif [ "$COMPONENT" == "image-committer" ]; then
+    IMAGE_NAME="image-committer"
+    BUILD_ARG=""
+    DOCKERFILE="Dockerfile.image-committer"
 else
     echo "Error: Unknown component: $COMPONENT"
-    echo "Available components: controller, task-executor"
+    echo "Available components: controller, task-executor, image-committer"
     exit 1
 fi
 
@@ -71,7 +76,7 @@ if [ "$PUSH" == "true" ]; then
         -t "${ACR_REPO}/${IMAGE_NAME}:${TAG}" \
         --metadata-file "${BUILD_METADATA_FILE}" \
         --push \
-        -f Dockerfile \
+        -f "$DOCKERFILE" \
         .
     
     echo "========================================="
@@ -86,7 +91,7 @@ else
         $BUILD_ARG \
         "${BUILD_ARGS[@]}" \
         -t ${IMAGE_NAME}:${TAG} \
-        -f Dockerfile \
+        -f "$DOCKERFILE" \
         --load \
         .
     

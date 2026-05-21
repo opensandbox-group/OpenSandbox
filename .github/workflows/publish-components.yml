@@ -22,6 +22,7 @@ on:
           - egress
           - controller
           - task-executor
+          - image-committer
         default: 'execd'
       image_tag:
         description: 'Docker image tag'
@@ -35,6 +36,7 @@ on:
       - 'docker/egress/**'
       - 'k8s/controller/**'
       - 'k8s/task-executor/**'
+      - 'k8s/image-committer/**'
 
 jobs:
   publish:
@@ -116,6 +118,8 @@ jobs:
           elif [ "$COMPONENT" == "controller" ]; then
             cd kubernetes
           elif [ "$COMPONENT" == "task-executor" ]; then
+            cd kubernetes
+          elif [ "$COMPONENT" == "image-committer" ]; then
             cd kubernetes
           else
             cd sandboxes/$COMPONENT
