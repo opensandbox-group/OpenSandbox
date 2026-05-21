@@ -31,6 +31,7 @@ from opensandbox_server.services.k8s.egress_helper import (
     build_security_context_for_sandbox_container,
     prep_execd_init_for_egress,
 )
+from opensandbox_server.services.k8s.resource_utils import calculate_resource_requests
 from opensandbox_server.services.k8s.security_context import (
     build_security_context_from_dict,
     serialize_security_context_to_dict,
@@ -163,9 +164,10 @@ def _build_main_container(
     translated_limits = _translate_resource_limits_for_k8s(resource_limits)
     resources = None
     if translated_limits:
+        requests = calculate_resource_requests(translated_limits, fraction=0.25)
         resources = V1ResourceRequirements(
             limits=translated_limits,
-            requests=translated_limits,
+            requests=requests,
         )
 
     volume_mounts = [
