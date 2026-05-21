@@ -17,6 +17,8 @@
 package com.alibaba.opensandbox.sandbox.domain.models.execd.executions
 
 import kotlin.time.Duration
+import kotlin.time.DurationUnit
+import kotlin.time.toDuration
 
 /**
  * Parameters for command execution.
@@ -77,6 +79,14 @@ class RunCommandRequest private constructor(
          */
         fun timeout(timeout: Duration?): Builder {
             this.timeout = timeout
+            return this
+        }
+
+        /**
+         * Java-friendly timeout overload using java.time.Duration.
+         */
+        fun timeout(timeout: java.time.Duration?): Builder {
+            this.timeout = timeout?.toMillis()?.toDuration(DurationUnit.MILLISECONDS)
             return this
         }
 
