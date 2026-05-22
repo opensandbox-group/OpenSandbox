@@ -115,12 +115,16 @@ def _snapshot_record(
     state: SnapshotState,
     *,
     image: str | None = None,
+    access_owner: str | None = None,
+    access_team: str | None = None,
 ) -> SnapshotRecord:
     return SnapshotRecord(
         id=snapshot_id,
         source_sandbox_id="sbx-001",
         restore_config=SnapshotRestoreConfig(image=image),
         status=SnapshotStatusRecord(state=state),
+        access_owner=access_owner,
+        access_team=access_team,
     )
 
 
@@ -410,6 +414,8 @@ def test_snapshot_service_propagates_snapshot_delete_conflict(tmp_path) -> None:
         "snap-in-use",
         SnapshotState.READY,
         image="opensandbox-snapshots:snap-in-use",
+        access_owner="user-001",
+        access_team="team-001",
     )
     repo.create(record)
 
@@ -431,6 +437,8 @@ def test_snapshot_service_propagates_snapshot_delete_conflict(tmp_path) -> None:
     assert exc_info.value.status_code == 409
     assert stored is not None
     assert stored.status.state == SnapshotState.DELETING
+    assert stored.access_owner == "user-001"
+    assert stored.access_team == "team-001"
 
 
 def test_snapshot_service_recovers_delete_after_runtime_cleanup_succeeds(tmp_path) -> None:

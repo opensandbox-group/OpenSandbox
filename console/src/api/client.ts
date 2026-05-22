@@ -28,7 +28,13 @@ export interface SandboxListItem {
 
 export interface ListResponse {
   items: SandboxListItem[];
-  pagination?: { page: number; pageSize: number; total: number };
+  pagination?: {
+    page: number;
+    pageSize: number;
+    totalItems: number;
+    totalPages: number;
+    hasNextPage: boolean;
+  };
 }
 
 async function parseJson(res: Response): Promise<{ data: unknown; text: string }> {

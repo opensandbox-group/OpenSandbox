@@ -252,6 +252,8 @@ class PersistedSnapshotService(SnapshotService):
             ),
             created_at=record.created_at,
             updated_at=now,
+            access_owner=record.access_owner,
+            access_team=record.access_team,
         )
         if self._snapshot_repository.update_if_state(
             deleting_record,

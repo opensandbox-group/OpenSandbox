@@ -89,7 +89,9 @@ class SQLiteSnapshotRepository:
                     message,
                     last_transition_at,
                     created_at,
-                    updated_at
+                    updated_at,
+                    access_owner,
+                    access_team
                 FROM snapshots
                 WHERE id = ?
                 """,
@@ -147,7 +149,9 @@ class SQLiteSnapshotRepository:
                     message,
                     last_transition_at,
                     created_at,
-                    updated_at
+                    updated_at,
+                    access_owner,
+                    access_team
                 FROM snapshots
                 {where_clause}
                 ORDER BY created_at DESC, id DESC

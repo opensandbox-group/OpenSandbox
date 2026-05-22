@@ -106,7 +106,7 @@ export function ListPage() {
           </div>
           <div className="mb-3 flex flex-col gap-1 md:col-span-2">
             <label className="text-xs text-slate-600 dark:text-slate-400" htmlFor="f-meta">
-              Metadata filter (URL-encoded key=value&…)
+              Metadata filter (key=value&key2=value2)
             </label>
             <input
               className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-200 dark:border-[#3c3f44] dark:bg-[#202127] dark:text-slate-100 dark:focus:border-blue-300 dark:focus:ring-blue-900/40"
@@ -116,7 +116,7 @@ export function ListPage() {
                 setPage(1);
                 setMetaQuery(e.target.value);
               }}
-              placeholder="e.g. project%3Ddemo"
+              placeholder="e.g. project=demo"
             />
           </div>
         </div>
