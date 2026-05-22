@@ -30,14 +30,14 @@ import (
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/test/utils"
 )
 
-const (
-	pauseResumeNamespace = "default"
-	registryServiceAddr  = "docker-registry.default.svc.cluster.local:5000"
-	registryUsername     = "testuser"
-	registryPassword     = "testpass"
+var (
+	pauseResumeNamespace = utils.PauseResumeNamespace()
+	registryServiceAddr  = utils.PauseResumeRegistryAddr()
+	registryUsername     = utils.PauseResumeRegistryUser()
+	registryPassword     = utils.PauseResumeRegistryPass()
 )
 
-var _ = Describe("PauseResume", Ordered, func() {
+var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 	SetDefaultEventuallyTimeout(3 * time.Minute)
 	SetDefaultEventuallyPollingInterval(time.Second)
 
@@ -49,19 +49,34 @@ var _ = Describe("PauseResume", Ordered, func() {
 			Expect(err.Error()).To(ContainSubstring("AlreadyExists"))
 		}
 
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+		if pauseResumeNamespace != namespace {
+			By("creating pause-resume namespace")
+			cmd = exec.Command("kubectl", "create", "ns", pauseResumeNamespace)
+			_, err = utils.Run(cmd)
+			if err != nil {
+				Expect(err.Error()).To(ContainSubstring("AlreadyExists"))
+			}
+		}
+
+		if psa := utils.PodSecurityEnforce(); psa != "" {
+			By("labeling the namespace to enforce the " + psa + " security policy")
+			cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
+				"pod-security.kubernetes.io/enforce="+psa)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with "+psa+" policy")
+		} else {
+			By("skipping pod-security label (E2E_POD_SECURITY_ENFORCE is empty)")
+		}
 
 		By("installing CRDs")
-		cmd = exec.Command("kubectl", "apply", "-f", "config/crd/bases")
+		cmd = exec.Command("make", "install")
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
 		By("deploying the controller-manager")
-		cmd = exec.Command("kubectl", "apply", "-k", "config/default")
+		cmd = exec.Command("make", "deploy",
+			fmt.Sprintf("CONTROLLER_IMG=%s", utils.ControllerImage),
+			fmt.Sprintf("SNAPSHOT_REGISTRY=%s", registryServiceAddr))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
@@ -82,7 +97,10 @@ var _ = Describe("PauseResume", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("deploying Docker Registry")
-		registryYAML, err := renderTemplate("testdata/registry-deployment.yaml", nil)
+		registryYAML, err := renderTemplate("testdata/registry-deployment.yaml", map[string]interface{}{
+			"RegistryImage": utils.RegistrySourceImage(),
+			"Namespace":     pauseResumeNamespace,
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		registryFile := filepath.Join("/tmp", "test-registry.yaml")
@@ -126,11 +144,11 @@ var _ = Describe("PauseResume", Ordered, func() {
 		utils.Run(cmd)
 
 		By("undeploying the controller-manager")
-		cmd = exec.Command("kubectl", "delete", "-k", "config/default", "--ignore-not-found=true")
+		cmd = exec.Command("make", "undeploy")
 		utils.Run(cmd)
 
 		By("uninstalling CRDs")
-		cmd = exec.Command("kubectl", "delete", "-f", "config/crd/bases", "--ignore-not-found=true")
+		cmd = exec.Command("make", "uninstall")
 		utils.Run(cmd)
 
 		By("removing manager namespace")

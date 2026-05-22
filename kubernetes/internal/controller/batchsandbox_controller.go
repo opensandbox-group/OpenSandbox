@@ -66,10 +66,11 @@ type taskScheduleResult struct {
 // BatchSandboxReconciler reconciles a BatchSandbox object
 type BatchSandboxReconciler struct {
 	client.Client
-	Scheme         *runtime.Scheme
-	Recorder       record.EventRecorder
-	ProfileStore   *poolassign.ProfileStore
-	taskSchedulers sync.Map
+	Scheme              *runtime.Scheme
+	Recorder            record.EventRecorder
+	ProfileStore        *poolassign.ProfileStore
+	taskSchedulers      sync.Map
+	StatusRVExpectation expectations.ResourceVersionExpectation
 	// ResumePullSecret is the K8s Secret name for pulling snapshot images during resume.
 	ResumePullSecret string
 }
@@ -90,11 +91,13 @@ type BatchSandboxReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
-func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	log := logf.FromContext(ctx)
+	start := time.Now()
 	var aggErrors []error
 	defer func() {
 		_ = DurationStore.Pop(req.String())
+		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
 	batchSbx := &sandboxv1alpha1.BatchSandbox{}
 	if err := r.Get(ctx, client.ObjectKey{
@@ -192,6 +195,14 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	runtimeView := buildRuntimeView(batchSbx, pods)
+	// Ensure PauseObservedGeneration is up-to-date so the status patch ACKs the
+	// current generation without requiring a dedicated API call.
+	// Skip during Resuming: a newer generation may carry a queued pause request
+	// that must remain unacknowledged until resume completes and handlePause runs.
+	if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseResuming &&
+		runtimeView.status.PauseObservedGeneration < batchSbx.Generation {
+		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
+	}
 
 	if batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused {
 		r.deleteTaskScheduler(ctx, batchSbx)
@@ -210,9 +221,14 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	aggErrors = append(aggErrors, r.persistRuntimeView(ctx, batchSbx, runtimeView)...)
+	requeue, persistErrors := r.persistRuntimeView(ctx, batchSbx, runtimeView)
+	aggErrors = append(aggErrors, persistErrors...)
 
-	return reconcile.Result{RequeueAfter: DurationStore.Pop(req.String())}, gerrors.Join(aggErrors...)
+	requeueAfter := DurationStore.Pop(req.String())
+	if requeue > 0 && (requeueAfter == 0 || requeue < requeueAfter) {
+		requeueAfter = requeue
+	}
+	return reconcile.Result{RequeueAfter: requeueAfter}, gerrors.Join(aggErrors...)
 }
 
 func calPodIndex(poolStrategy strategy.PoolStrategy, batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod) (map[string]int, error) {

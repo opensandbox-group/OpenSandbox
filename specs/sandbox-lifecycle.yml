@@ -1177,17 +1177,25 @@ components:
 
     CreateSandboxRequest:
       type: object
-      required: [resourceLimits]
       description: |
-        Request to create a new sandbox from either a container image or a snapshot.
-        Exactly one of `image` or `snapshotId` must be provided.
+        Request to create a new sandbox from either a container image, a snapshot,
+        or a pre-configured pool (via `extensions.poolRef`).
+
+        **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
+        and `resourceLimits` is required.
 
         When `image` is provided, `entrypoint` is required. When `snapshotId` is
         provided, `entrypoint` is optional. If omitted, the server defaults the
         sandbox entrypoint to `["tail", "-f", "/dev/null"]`.
 
+        **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
+        a pre-configured pool. In this case `image`, `entrypoint`, and
+        `resourceLimits` are all optional (defined by the Pool CRD template).
+        `snapshotId` must not be provided together with `poolRef`.
+
         **Note**: Authentication can be API key (`OPEN-SANDBOX-API-KEY`) or trusted user headers
-        when `auth.mode = "api_key_and_user"` (Phase 1).
+        when `auth.mode = "api_key_and_user"` (Phase 1, OSEP-0006). API key-only mode requires
+        the `OPEN-SANDBOX-API-KEY` header.
       properties:
         image:
           $ref: '#/components/schemas/ImageSpec'
@@ -1227,6 +1235,8 @@ components:
           $ref: '#/components/schemas/ResourceLimits'
           description: |
             Runtime resource constraints for the sandbox instance.
+            Required when `extensions.poolRef` is not set.
+            Optional when using pool mode (resource limits are defined by the Pool CRD template).
             SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
 
         env:

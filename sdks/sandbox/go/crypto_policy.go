@@ -15,7 +15,6 @@
 package opensandbox
 
 import (
-	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
@@ -25,20 +24,18 @@ import (
 )
 
 const (
-	nistMinRSABits     = 2048
-	nistMinDLKeyBits   = 224
-	nistMinDLGroupBits = 2048
-	nistMinECBits      = 224
-	nistMinHashBits    = 224
+	nistMinRSABits  = 2048
+	nistMinECBits   = 224
+	nistMinHashBits = 224
 )
 
 func minHashBitsForSignatureAlgorithm(algo x509.SignatureAlgorithm) (int, error) {
 	switch algo {
 	case x509.MD2WithRSA, x509.MD5WithRSA:
 		return 128, nil
-	case x509.SHA1WithRSA, x509.DSAWithSHA1, x509.ECDSAWithSHA1:
+	case x509.SHA1WithRSA, x509.ECDSAWithSHA1:
 		return 160, nil
-	case x509.DSAWithSHA256, x509.SHA256WithRSA, x509.ECDSAWithSHA256:
+	case x509.SHA256WithRSA, x509.ECDSAWithSHA256:
 		return 256, nil
 	case x509.SHA384WithRSA, x509.ECDSAWithSHA384:
 		return 384, nil
@@ -101,26 +98,6 @@ func ensureCertPublicKeyMeetsNISTMinimums(cert *x509.Certificate) error {
 				"certificate EC key length %d bits is below NIST minimum %d bits",
 				bits,
 				nistMinECBits,
-			)
-		}
-	case *dsa.PublicKey:
-		if pub.Parameters.P == nil || pub.Parameters.Q == nil {
-			return fmt.Errorf("certificate DSA public key parameters are incomplete")
-		}
-		subgroupBits := pub.Parameters.Q.BitLen()
-		groupBits := pub.Parameters.P.BitLen()
-		if subgroupBits < nistMinDLKeyBits {
-			return fmt.Errorf(
-				"certificate DSA subgroup (Q) length %d bits is below NIST minimum %d bits",
-				subgroupBits,
-				nistMinDLKeyBits,
-			)
-		}
-		if groupBits < nistMinDLGroupBits {
-			return fmt.Errorf(
-				"certificate DSA group (P) length %d bits is below NIST minimum %d bits",
-				groupBits,
-				nistMinDLGroupBits,
 			)
 		}
 	case ed25519.PublicKey:

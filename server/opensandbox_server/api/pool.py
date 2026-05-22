@@ -88,7 +88,7 @@ def _get_pool_service():
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
-async def create_pool(
+def create_pool(
     request: CreatePoolRequest,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
 ) -> PoolResponse:
@@ -121,7 +121,7 @@ async def create_pool(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
-async def list_pools(
+def list_pools(
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
 ) -> ListPoolsResponse:
     """
@@ -151,7 +151,7 @@ async def list_pools(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
-async def get_pool(
+def get_pool(
     pool_name: str,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
 ) -> PoolResponse:
@@ -182,7 +182,7 @@ async def get_pool(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
-async def update_pool(
+def update_pool(
     pool_name: str,
     request: UpdatePoolRequest,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
@@ -217,7 +217,7 @@ async def update_pool(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
-async def delete_pool(
+def delete_pool(
     pool_name: str,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
 ) -> Response:

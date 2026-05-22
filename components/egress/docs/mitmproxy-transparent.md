@@ -30,8 +30,8 @@ By default, mitmproxy listens on `18081` and transparent redirect rules are set 
 # Optional: change listening port (default: 18081)
 export OPENSANDBOX_EGRESS_MITMPROXY_PORT=18081
 
-# Optional: enable mitm addon script (e.g., inject request headers)
-export OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT=/opt/opensandbox/mitmscripts/add_header.py
+# Optional: load an additional user-defined mitm addon (loaded after the system addon)
+export OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT=/path/to/your/addon.py
 
 # Optional: bypass decryption for selected domains (semicolon-separated regex list)
 export OPENSANDBOX_EGRESS_MITMPROXY_IGNORE_HOSTS='.*\.log\.aliyuncs\.com;.*\.example\.internal'
@@ -43,7 +43,7 @@ export OPENSANDBOX_EGRESS_MITMPROXY_IGNORE_HOSTS='.*\.log\.aliyuncs\.com;.*\.exa
 |------|----------|------|--------|
 | `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` | Yes | Enable transparent mitmproxy (`1/true/on`, etc.) | Disabled |
 | `OPENSANDBOX_EGRESS_MITMPROXY_PORT` | No | mitmdump listen port; `iptables` redirects `80/443` here | `18081` |
-| `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT` | No | mitm addon script path (`-s`) | Empty |
+| `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT` | No | Additional user mitm addon script path (`-s`); loaded after the system addon | Empty |
 | `OPENSANDBOX_EGRESS_MITMPROXY_IGNORE_HOSTS` | No | Host/IP regex list for TLS pass-through (`;` separated) | Empty |
 | `OPENSANDBOX_EGRESS_MITMPROXY_CONFDIR` | No | mitm config and CA directory (passed as `--set confdir=`, also used as `HOME`) | Default directory under `/var/lib/mitmproxy` |
 | `OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR` | No | Trust directory for upstream TLS verification (OpenSSL style) | `/etc/ssl/certs` |
@@ -62,23 +62,31 @@ Notes:
 export OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true
 ```
 
-### 2) Enable with Header Injection
+### 2) System Addon (Always On)
+
+The bundled system addon at `/var/egress/mitmscripts/system.py` is shipped in the egress image and loaded automatically whenever transparent mode is enabled. It stays wire-transparent (no headers added or altered) and currently provides:
+
+- Forces streaming (`flow.response.stream = True`) for SSE (`text/event-stream`) and chunked responses, so each chunk is forwarded immediately instead of being buffered up to the `stream_large_bodies=1m` threshold (critical for LLM streaming UX).
+
+The system addon is always loaded and cannot be disabled via configuration. To override its behavior, supply a user addon via `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT`; user addons are loaded after the system addon and may observe or override its hooks.
+
+### 3) Add a User Addon Alongside the System Addon
 
 ```bash
 export OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true
-export OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT=/opt/opensandbox/mitmscripts/add_header.py
+export OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT=/path/to/your/addon.py
 ```
 
-Built-in example script: `/opt/opensandbox/mitmscripts/add_header.py` (adds `X-OpenSandbox-Egress: 1`).
+The user addon is loaded after the system addon (`-s system.py -s user.py`), so user hooks observe and may override system behavior.
 
-### 3) Bypass Decryption for Specific Domains (e.g. log upload)
+### 4) Bypass Decryption for Specific Domains (e.g. log upload)
 
 ```bash
 export OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true
 export OPENSANDBOX_EGRESS_MITMPROXY_IGNORE_HOSTS='.*\.log\.aliyuncs\.com'
 ```
 
-### 4) Use a Fixed CA (consistent fingerprint across replicas)
+### 5) Use a Fixed CA (consistent fingerprint across replicas)
 
 If CA files already exist in `confdir`, mitmproxy reuses them instead of regenerating on each startup. Typical paths:
 

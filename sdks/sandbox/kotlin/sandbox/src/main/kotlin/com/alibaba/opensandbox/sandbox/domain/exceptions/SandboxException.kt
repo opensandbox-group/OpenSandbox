@@ -180,6 +180,9 @@ data class SandboxError(
         const val INVALID_ARGUMENT = "INVALID_ARGUMENT"
         const val UNEXPECTED_RESPONSE = "UNEXPECTED_RESPONSE"
 
+        /** The requested file or directory does not exist (server responds with HTTP 404). */
+        const val FILE_NOT_FOUND = "FILE_NOT_FOUND"
+
         /** Pool-specific: no idle sandbox and policy is FAIL_FAST. */
         const val POOL_EMPTY = "POOL_EMPTY"
 

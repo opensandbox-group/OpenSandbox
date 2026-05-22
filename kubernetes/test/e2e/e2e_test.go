@@ -34,7 +34,7 @@ import (
 // namespace where the project is deployed in
 const namespace = "opensandbox-system"
 
-var _ = Describe("Manager", Ordered, func() {
+var _ = Describe("Manager", Ordered, Label("Core"), func() {
 	var controllerPodName string
 
 	// Before running the tests, set up the environment by creating the namespace,
@@ -49,11 +49,15 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err.Error()).To(ContainSubstring("AlreadyExists"), "Failed to create namespace")
 		}
 
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+		if psa := utils.PodSecurityEnforce(); psa != "" {
+			By("labeling the namespace to enforce the " + psa + " security policy")
+			cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
+				"pod-security.kubernetes.io/enforce="+psa)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with "+psa+" policy")
+		} else {
+			By("skipping pod-security label (E2E_POD_SECURITY_ENFORCE is empty)")
+		}
 
 		By("installing CRDs")
 		cmd = exec.Command("make", "install")
@@ -132,7 +136,7 @@ var _ = Describe("Manager", Ordered, func() {
 	SetDefaultEventuallyTimeout(2 * time.Minute)
 	SetDefaultEventuallyPollingInterval(time.Second)
 
-	Context("Manager", func() {
+	Context("Manager", Label("Manager"), func() {
 		It("should run successfully", func() {
 			By("validating that the controller-manager pod is running as expected")
 			verifyControllerUp := func(g Gomega) {
@@ -167,7 +171,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("Pool", func() {
+	Context("Pool", Label("Pool"), func() {
 		BeforeAll(func() {
 			By("waiting for controller to be ready")
 			Eventually(func(g Gomega) {
@@ -869,7 +873,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("BatchSandbox", func() {
+	Context("BatchSandbox", Label("Batch"), func() {
 		BeforeAll(func() {
 			By("waiting for controller to be ready")
 			Eventually(func(g Gomega) {
@@ -1391,7 +1395,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("Task", func() {
+	Context("Task", Label("Task"), func() {
 		BeforeAll(func() {
 			By("waiting for controller to be ready")
 			Eventually(func(g Gomega) {
@@ -1557,7 +1561,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("Pool Update", func() {
+	Context("Pool Update", Label("Pool"), func() {
 		BeforeAll(func() {
 			By("waiting for controller to be ready")
 			Eventually(func(g Gomega) {
@@ -1815,7 +1819,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("Pool State Recovery", func() {
+	Context("Pool State Recovery", Label("Pool"), func() {
 		BeforeAll(func() {
 			By("waiting for controller to be ready")
 			Eventually(func(g Gomega) {
@@ -2440,7 +2444,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("Pool Recycle", func() {
+	Context("Pool Recycle", Label("Pool"), func() {
 		BeforeAll(func() {
 			By("waiting for controller to be ready")
 			Eventually(func(g Gomega) {
@@ -3084,7 +3088,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("Pool Allocator Integrity", func() {
+	Context("Pool Allocator Integrity", Label("Pool"), func() {
 		const testNamespace = "default"
 
 		BeforeAll(func() {
@@ -4362,7 +4366,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("Pool Auto-Assign", func() {
+	Context("Pool Auto-Assign", Label("Pool"), func() {
 		BeforeAll(func() {
 			By("waiting for controller to be ready")
 			Eventually(func(g Gomega) {

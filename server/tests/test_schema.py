@@ -601,3 +601,61 @@ class TestCreateSandboxRequestWithVolumes:
         assert request.timeout == 172800
 
 
+class TestCreateSandboxRequestPoolMode:
+    """Tests for pool mode (extensions.poolRef) validation."""
+
+    def test_pool_mode_accepts_only_pool_ref(self):
+        """Happy path: poolRef only, no image/entrypoint/resourceLimits required."""
+        request = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+        )
+        assert request.image is None
+        assert request.entrypoint is None
+        assert request.resource_limits is None
+        assert request.extensions["poolRef"] == "my-pool"
+
+    def test_pool_mode_accepts_pool_ref_with_optional_fields(self):
+        """poolRef with optional env/metadata/timeout should be valid."""
+        request = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+            env={"KEY": "value"},
+            metadata={"team": "test"},
+            timeout=600,
+        )
+        assert request.extensions["poolRef"] == "my-pool"
+        assert request.env == {"KEY": "value"}
+
+    def test_pool_mode_rejects_snapshot_id_with_pool_ref(self):
+        """snapshotId and poolRef cannot be used together."""
+        with pytest.raises(ValidationError) as exc_info:
+            CreateSandboxRequest(
+                snapshotId="snap-001",
+                extensions={"poolRef": "my-pool"},
+            )
+        errors = exc_info.value.errors()
+        assert any("snapshotId" in str(e) and "poolRef" in str(e) for e in errors)
+
+    def test_resource_limits_required_without_pool_ref(self):
+        """Without poolRef, resourceLimits is still required (image mode)."""
+        with pytest.raises(ValidationError):
+            CreateSandboxRequest(
+                image=ImageSpec(uri="python:3.11"),
+                entrypoint=["python"],
+            )
+
+    def test_pool_mode_normalizes_blank_snapshot_id(self):
+        """Blank snapshotId (e.g. whitespace) should be normalized to None in pool mode."""
+        req = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+            snapshotId="   ",
+        )
+        assert req.snapshot_id is None
+
+    def test_pool_mode_ignores_blank_pool_ref(self):
+        """Blank poolRef should not trigger pool mode."""
+        with pytest.raises(ValidationError):
+            CreateSandboxRequest(
+                extensions={"poolRef": "   "},
+            )
+
+

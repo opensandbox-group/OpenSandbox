@@ -67,6 +67,7 @@ spec:
           - --snapshot-registry-insecure=true
           - --snapshot-push-secret=registry-snapshot-push-secret
           - --resume-pull-secret=registry-pull-secret
+          - --image-committer-image=image-committer:dev
         image: controller:dev
         name: manager
         ports: []

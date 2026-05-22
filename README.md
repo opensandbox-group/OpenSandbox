@@ -122,6 +122,7 @@ Quick start:
 osb config init
 osb config set connection.domain localhost:8080
 osb config set connection.protocol http
+osb config set connection.api_key <your-api-key>
 osb sandbox create --image python:3.12 --timeout 30m -o json
 osb command run <sandbox-id> -o raw -- python -c "print(1 + 1)"
 ```

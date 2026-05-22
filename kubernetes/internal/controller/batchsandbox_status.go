@@ -18,12 +18,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -233,26 +233,47 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	status.Phase = sandboxv1alpha1.BatchSandboxPhasePending
 }
 
+// isInitialUnallocatedSandbox returns true when the sandbox has just been created
+// and no pods have been allocated yet. In this case we skip writing the initial
+// Pending status — the next reconcile after allocation will write Succeed directly.
+func isInitialUnallocatedSandbox(batchSbx *sandboxv1alpha1.BatchSandbox, view runtimeView) bool {
+	return view.status.Replicas == 0 && batchSbx.Status.Phase == "" &&
+		batchSbx.Spec.Replicas != nil && *batchSbx.Spec.Replicas > 0
+}
+
 func (r *BatchSandboxReconciler) persistRuntimeView(
 	ctx context.Context,
 	batchSbx *sandboxv1alpha1.BatchSandbox,
 	view runtimeView,
-) []error {
+) (time.Duration, []error) {
 	var aggErrors []error
 	log := logf.FromContext(ctx)
 	if err := r.patchBatchSandboxEndpoints(ctx, batchSbx, view.endpointIPs); err != nil {
 		aggErrors = append(aggErrors, err)
 	}
-	statusChanged := !equality.Semantic.DeepEqual(*view.status, batchSbx.Status)
-	if statusChanged {
-		log.Info("To update BatchSandbox status",
-			"replicas", view.status.Replicas,
-			"allocated", view.status.Allocated,
-			"ready", view.status.Ready,
-		)
-		if err := r.updateStatus(batchSbx, view.status); err != nil {
+	if !equality.Semantic.DeepEqual(*view.status, batchSbx.Status) {
+		if isInitialUnallocatedSandbox(batchSbx, view) {
+			return 0, aggErrors
+		}
+		// Skip redundant status writes caused by informer cache lag: if we recently
+		// patched status but the informer hasn't seen the new RV yet, the diff is a
+		// false positive. Allow a 10s safety valve in case the cache never catches up.
+		if satisfied, dur := r.StatusRVExpectation.IsSatisfied(batchSbx); !satisfied {
+			if dur < 10*time.Second {
+				log.Info("Skipping status update: informer cache is stale", "unsatisfiedDuration", dur.String())
+				return time.Second, aggErrors
+			}
+			log.Info("Proceeding with status update despite stale cache (timeout exceeded)", "unsatisfiedDuration", dur.String())
+			// Fetch the latest object so lifecycle conditions (PauseFailed/ResumeFailed)
+			// written by pause/resume handlers are not overwritten by the stale cache.
+			latest := &sandboxv1alpha1.BatchSandbox{}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}, latest); err == nil {
+				batchSbx = latest
+			}
+		}
+		if err := r.updateStatus(ctx, batchSbx, view.status); err != nil {
 			aggErrors = append(aggErrors, err)
-			return aggErrors
+			return 0, aggErrors
 		}
 	}
 
@@ -262,7 +283,7 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 			aggErrors = append(aggErrors, err)
 		}
 	}
-	return aggErrors
+	return 0, aggErrors
 }
 
 func (r *BatchSandboxReconciler) patchBatchSandboxEndpoints(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, endpointIPs []string) error {
@@ -270,7 +291,13 @@ func (r *BatchSandboxReconciler) patchBatchSandboxEndpoints(ctx context.Context,
 	if batchSbx.Annotations[AnnotationSandboxEndpoints] == string(raw) {
 		return nil
 	}
-
+	// Skip writing empty endpoints when annotation doesn't exist yet (e.g. sandbox just created, no pods assigned).
+	// Still allow clearing endpoints when annotation was previously set (e.g. pause scenario).
+	_, annotationExists := batchSbx.Annotations[AnnotationSandboxEndpoints]
+	if !annotationExists && string(raw) == "[]" {
+		return nil
+	}
+	log := logf.FromContext(ctx)
 	patchData, _ := json.Marshal(map[string]any{
 		"metadata": map[string]any{
 			"annotations": map[string]string{
@@ -278,21 +305,26 @@ func (r *BatchSandboxReconciler) patchBatchSandboxEndpoints(ctx context.Context,
 			},
 		},
 	})
+	log.Info("Patching BatchSandbox endpoints", "resourceVersion", batchSbx.ResourceVersion, "patchData", string(patchData))
 	obj := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Namespace: batchSbx.Namespace, Name: batchSbx.Name}}
 	return r.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData))
 }
 
-func (r *BatchSandboxReconciler) updateStatus(batchSandbox *sandboxv1alpha1.BatchSandbox, newStatus *sandboxv1alpha1.BatchSandboxStatus) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		clone := &sandboxv1alpha1.BatchSandbox{}
-		if err := r.Get(context.TODO(), types.NamespacedName{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}, clone); err != nil {
-			return err
-		}
-		mergedStatus := newStatus.DeepCopy()
-		mergedStatus.Conditions = mergeLifecycleConditions(mergedStatus.Conditions, clone.Status.Conditions)
-		clone.Status = *mergedStatus
-		return r.Status().Update(context.TODO(), clone)
-	})
+func (r *BatchSandboxReconciler) updateStatus(ctx context.Context, batchSandbox *sandboxv1alpha1.BatchSandbox, newStatus *sandboxv1alpha1.BatchSandboxStatus) error {
+	log := logf.FromContext(ctx)
+	mergedStatus := newStatus.DeepCopy()
+	mergedStatus.Conditions = mergeLifecycleConditions(mergedStatus.Conditions, batchSandbox.Status.Conditions)
+	patchData, err := json.Marshal(map[string]any{"status": mergedStatus})
+	if err != nil {
+		return fmt.Errorf("failed to marshal status patch: %w", err)
+	}
+	log.Info("Patching BatchSandbox status", "resourceVersion", batchSandbox.ResourceVersion, "phase", mergedStatus.Phase, "patchData", string(patchData))
+	obj := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}}
+	if err := r.Status().Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData)); err != nil {
+		return err
+	}
+	r.StatusRVExpectation.Expect(obj)
+	return nil
 }
 
 func mergeLifecycleConditions(

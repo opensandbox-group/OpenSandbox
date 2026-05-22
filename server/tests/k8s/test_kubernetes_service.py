@@ -224,7 +224,7 @@ class TestKubernetesSandboxServiceCreate:
         self, k8s_service, create_sandbox_request
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
-        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.0.11")
+        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.0.12")
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-id", "uid": "uid-1"
         }
@@ -298,7 +298,7 @@ class TestKubernetesSandboxServiceCreate:
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
         k8s_service.app_config.egress = EgressConfig(
-            image="opensandbox/egress:v1.0.11",
+            image="opensandbox/egress:v1.0.12",
             mode=EGRESS_MODE_DNS_NFT,
         )
         k8s_service.workload_provider.create_workload.return_value = {
@@ -524,6 +524,67 @@ class TestKubernetesSandboxServiceCreate:
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
         assert "configured maximum of 3600s" in exc_info.value.detail["message"]
         k8s_service.workload_provider.create_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_skips_image_and_entrypoint_validation(
+        self, k8s_service, mock_workload
+    ):
+        """Pool mode: poolRef only, no image/entrypoint/resourceLimits — should succeed."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+        )
+
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-pool",
+            "uid": "pool-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.5:8080"
+        k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        response = await k8s_service.create_sandbox(pool_request)
+
+        assert response.id is not None
+        assert response.status.state == "Running"
+        k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_image_auth_guard_no_error(
+        self, k8s_service, mock_workload
+    ):
+        """Pool mode with image=None should not raise AttributeError in _ensure_image_auth_support."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+        )
+        assert pool_request.image is None
+
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-pool2",
+            "uid": "pool-456",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.6:8080"
+        k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        # Should not raise AttributeError on None.auth
+        response = await k8s_service.create_sandbox(pool_request)
+        assert response.id is not None
 
 class TestWaitForSandboxReady:
     """_wait_for_sandbox_ready method tests"""
@@ -1236,3 +1297,62 @@ class TestSignedEndpoint:
         ep2 = k8s_service.get_endpoint("sbx-001", 8080, expires=2000000500)
 
         assert ep1.endpoint != ep2.endpoint
+
+
+class TestPatchSandboxMetadata:
+    """Verify patch_sandbox_metadata builds the JSON merge-patch body correctly
+    and uses the API server's PATCH response (not a cache-prone re-fetch)."""
+
+    @staticmethod
+    def _workload(labels: dict) -> dict:
+        return {
+            "metadata": {
+                "name": "sandbox-sbx-001",
+                "labels": dict(labels),
+                "creationTimestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            },
+            "spec": {},
+            "status": {"conditions": []},
+        }
+
+    @staticmethod
+    def _stub_provider_status(k8s_service) -> None:
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": None,
+            "message": None,
+            "last_transition_at": None,
+        }
+        k8s_service.workload_provider.get_expiration.return_value = None
+
+    def test_patch_body_sends_null_for_deleted_keys(self, k8s_service):
+        initial = {"opensandbox.io/id": "sbx-001", "team": "infra", "env": "dev"}
+        patched = {"opensandbox.io/id": "sbx-001", "env": "stage"}
+
+        k8s_service.workload_provider.get_workload.return_value = self._workload(initial)
+        k8s_service.workload_provider.patch_labels.return_value = self._workload(patched)
+        self._stub_provider_status(k8s_service)
+
+        k8s_service.patch_sandbox_metadata("sbx-001", {"env": "stage", "team": None})
+
+        k8s_service.workload_provider.patch_labels.assert_called_once()
+        body_labels = k8s_service.workload_provider.patch_labels.call_args.kwargs["labels"]
+        assert body_labels["env"] == "stage"
+        assert body_labels["team"] is None
+        assert body_labels["opensandbox.io/id"] == "sbx-001"
+
+    def test_returns_sandbox_from_patch_response(self, k8s_service):
+        """The PATCH response is authoritative; re-reading via get_workload
+        could hit a stale informer cache."""
+        initial = {"opensandbox.io/id": "sbx-001", "env": "dev"}
+        patched = {"opensandbox.io/id": "sbx-001", "env": "stage"}
+
+        k8s_service.workload_provider.get_workload.return_value = self._workload(initial)
+        k8s_service.workload_provider.patch_labels.return_value = self._workload(patched)
+        self._stub_provider_status(k8s_service)
+
+        sandbox = k8s_service.patch_sandbox_metadata("sbx-001", {"env": "stage"})
+
+        assert sandbox.metadata == {"env": "stage"}
+        # Pre-patch read only; no second get_workload after patch_labels.
+        assert k8s_service.workload_provider.get_workload.call_count == 1

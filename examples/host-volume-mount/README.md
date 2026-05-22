@@ -224,4 +224,4 @@ Sandbox sandbox = Sandbox.builder()
 
 - [OSEP-0003: Volume and VolumeBinding Support](../../oseps/0003-volume-and-volumebinding-support.md) — Design proposal
 - [Sandbox Lifecycle API Spec](../../specs/sandbox-lifecycle.yml) — OpenAPI schema for volume definitions
-- [Server Configuration](../../server/example.config.toml) — `[storage]` section for `allowed_host_paths`
+- [Server Configuration](../../server/opensandbox_server/examples/example.config.toml) — `[storage]` section for `allowed_host_paths`

@@ -14,9 +14,12 @@
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any, Dict, List, Optional
 
 from opensandbox_server.api.schema import PlatformSpec
+from opensandbox_server.services.k8s.provider_common import DEFAULT_ENTRYPOINT
 from opensandbox_server.services.windows_common import (
     inject_windows_resource_limits_env,
     inject_windows_user_ports,
@@ -26,7 +29,11 @@ from opensandbox_server.services.windows_common import (
 WINDOWS_OEM_VOLUME_NAME = "opensandbox-win-oem"
 WINDOWS_KVM_VOLUME_NAME = "opensandbox-win-kvm"
 WINDOWS_TUN_VOLUME_NAME = "opensandbox-win-tun"
+WINDOWS_STORAGE_VOLUME_NAME = "opensandbox-win-storage"
 WINDOWS_PROFILE_DEFAULT_USER_PORTS = ["44772", "8080", "3389/tcp", "3389/udp", "8006/tcp"]
+# Extra memory overhead (in Gi) reserved for QEMU process on top of guest RAM.
+WINDOWS_QEMU_MEMORY_OVERHEAD_GI = 2
+_SIZE_PATTERN = re.compile(r"^\s*(\d+)\s*([a-zA-Z]*)\s*$")
 
 
 def is_windows_profile(platform: Optional[PlatformSpec]) -> bool:
@@ -90,10 +97,36 @@ def apply_windows_profile_overrides(
     )
 
     main_container = containers[0]
-    main_container["command"] = list(entrypoint)
+    # Entrypoint handling for Windows profile:
+    # - If user provides a custom entrypoint, use it as container command
+    #   (e.g. for ENI network hack or other custom startup logic).
+    # - If no entrypoint or the SDK default, remove command to use image
+    #   ENTRYPOINT (dockur/windows starts QEMU via /run/entry.sh).
+    if entrypoint and entrypoint != DEFAULT_ENTRYPOINT:
+        main_container["command"] = entrypoint
+    else:
+        main_container.pop("command", None)
+    main_container.pop("args", None)
     main_container["env"] = windows_env if windows_env else None
-    main_container.pop("resources", None)
+    # Set pod resources from resource_limits for proper K8s scheduling.
+    # Memory includes overhead for the QEMU process itself.
+    if resource_limits:
+        limits: Dict[str, str] = {}
+        if resource_limits.get("cpu"):
+            limits["cpu"] = resource_limits["cpu"]
+        if resource_limits.get("memory"):
+            limits["memory"] = _memory_with_qemu_overhead(resource_limits["memory"])
+        if limits:
+            main_container["resources"] = {
+                "limits": limits,
+                "requests": dict(limits),
+            }
+        else:
+            main_container.pop("resources", None)
+    else:
+        main_container.pop("resources", None)
     security_context = main_container.setdefault("securityContext", {})
+    security_context["privileged"] = True
     capabilities = security_context.setdefault("capabilities", {})
     drop = capabilities.get("drop")
     if isinstance(drop, list):
@@ -110,6 +143,7 @@ def apply_windows_profile_overrides(
             {"name": WINDOWS_OEM_VOLUME_NAME, "mountPath": "/oem"},
             {"name": WINDOWS_KVM_VOLUME_NAME, "mountPath": "/dev/kvm"},
             {"name": WINDOWS_TUN_VOLUME_NAME, "mountPath": "/dev/net/tun"},
+            {"name": WINDOWS_STORAGE_VOLUME_NAME, "mountPath": "/storage"},
         ],
     )
 
@@ -125,8 +159,13 @@ def apply_windows_profile_overrides(
                 "name": WINDOWS_TUN_VOLUME_NAME,
                 "hostPath": {"path": "/dev/net/tun", "type": "CharDevice"},
             },
+            {"name": WINDOWS_STORAGE_VOLUME_NAME, "emptyDir": {}},
         ],
     )
+
+    # dockur/windows relies on container restart to complete multi-phase
+    # installation (first boot installs from ISO, second boot runs from disk).
+    pod_spec["restartPolicy"] = "Always"
 
 
 def apply_windows_profile_arch_selector(
@@ -181,6 +220,29 @@ def _merge_volume_mounts(container: Dict[str, Any], mounts_to_add: List[Dict[str
             continue
         mounts.append(mount)
         existing_names.add(name)
+
+
+def _memory_with_qemu_overhead(memory_value: str) -> str:
+    """Add QEMU process overhead to guest memory for K8s pod resource limits.
+
+    Parses the guest RAM value (e.g. '8G', '16Gi') and adds
+    WINDOWS_QEMU_MEMORY_OVERHEAD_GI. Returns a Gi-suffixed string suitable
+    for Kubernetes resource quantities.
+    """
+    match = _SIZE_PATTERN.match(memory_value)
+    if not match:
+        return memory_value
+    amount = int(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if unit in {"g", "gi", "gb"}:
+        total_gi = amount + WINDOWS_QEMU_MEMORY_OVERHEAD_GI
+    elif unit in {"m", "mi", "mb"}:
+        total_gi = math.ceil(amount / 1024) + WINDOWS_QEMU_MEMORY_OVERHEAD_GI
+    elif unit in {"t", "ti", "tb"}:
+        total_gi = amount * 1024 + WINDOWS_QEMU_MEMORY_OVERHEAD_GI
+    else:
+        return memory_value
+    return f"{total_gi}Gi"
 
 
 def _merge_volumes(pod_spec: Dict[str, Any], volumes_to_add: List[Dict[str, Any]]) -> None:

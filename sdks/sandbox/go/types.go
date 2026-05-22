@@ -55,6 +55,39 @@ type ImageAuth struct {
 	Password string `json:"password"`
 }
 
+// PlatformOS is the target operating system of a sandbox platform constraint.
+// The wire-level enum is enforced server-side; the constants below mirror the
+// spec so Go callers can avoid stringly-typed typos.
+type PlatformOS string
+
+const (
+	OSLinux   PlatformOS = "linux"
+	OSWindows PlatformOS = "windows"
+)
+
+// PlatformArch is the target CPU architecture of a sandbox platform
+// constraint.
+type PlatformArch string
+
+const (
+	ArchAMD64 PlatformArch = "amd64"
+	ArchARM64 PlatformArch = "arm64"
+)
+
+// PlatformSpec is a runtime platform constraint used for scheduling and
+// provisioning. It is independent from Image and expresses the expected
+// target OS and CPU architecture for sandbox execution.
+//
+// When omitted, the server applies its own default platform selection
+// behavior. When provided, the runtime must satisfy the constraint or the
+// request fails.
+//
+// See specs/sandbox-lifecycle.yml#/components/schemas/PlatformSpec.
+type PlatformSpec struct {
+	OS   PlatformOS   `json:"os"`
+	Arch PlatformArch `json:"arch"`
+}
+
 // ResourceLimits defines runtime resource constraints as key-value pairs.
 // Common keys: "cpu" (e.g. "500m"), "memory" (e.g. "512Mi"), "gpu" (e.g. "1").
 type ResourceLimits map[string]string
@@ -120,6 +153,7 @@ type CreateSandboxRequest struct {
 	NetworkPolicy  *NetworkPolicy    `json:"networkPolicy,omitempty"`
 	Volumes        []Volume          `json:"volumes,omitempty"`
 	Extensions     map[string]string `json:"extensions,omitempty"`
+	Platform       *PlatformSpec     `json:"platform,omitempty"`
 }
 
 // SandboxInfo represents a runtime execution environment provisioned from a
@@ -133,6 +167,7 @@ type SandboxInfo struct {
 	Entrypoint []string          `json:"entrypoint"`
 	ExpiresAt  *time.Time        `json:"expiresAt,omitempty"`
 	CreatedAt  time.Time         `json:"createdAt"`
+	Platform   *PlatformSpec     `json:"platform,omitempty"`
 }
 
 type SnapshotState string

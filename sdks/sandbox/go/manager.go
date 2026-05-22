@@ -88,4 +88,4 @@ func (m *SandboxManager) DeleteSnapshot(ctx context.Context, snapshotID string) 
 }
 
 // Close releases local resources. Currently a no-op placeholder.
-func (m *SandboxManager) Close() {}
+func (m *SandboxManager) Close() error { return nil }

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -207,3 +209,49 @@ def test_list_sandboxes_requires_api_key(client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "MISSING_API_KEY"
+
+
+def test_list_sandboxes_runs_in_threadpool_for_concurrency(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """Blocking list calls must run in the threadpool so concurrent requests
+    do not serialize on the event loop. With sync def routes, FastAPI offloads
+    the handler to anyio's threadpool; 8 calls each sleeping 200ms should
+    complete well under the 1.6s serial bound.
+    """
+    sleep_seconds = 0.2
+    concurrency = 8
+
+    class SlowService:
+        @staticmethod
+        def list_sandboxes(_request) -> ListSandboxesResponse:
+            time.sleep(sleep_seconds)
+            return ListSandboxesResponse(
+                items=[],
+                pagination=PaginationInfo(
+                    page=1,
+                    pageSize=20,
+                    totalItems=0,
+                    totalPages=0,
+                    hasNextPage=False,
+                ),
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", SlowService())
+
+    def call() -> int:
+        return client.get("/v1/sandboxes", headers=auth_headers).status_code
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        statuses = list(pool.map(lambda _: call(), range(concurrency)))
+    elapsed = time.monotonic() - started
+
+    assert statuses == [200] * concurrency
+    serial_floor = sleep_seconds * concurrency
+    assert elapsed < serial_floor * 0.6, (
+        f"list_sandboxes serialized: elapsed={elapsed:.2f}s, "
+        f"serial floor={serial_floor:.2f}s (threadpool offload broken)"
+    )

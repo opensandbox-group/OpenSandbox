@@ -35,6 +35,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Filesys
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toApiReplaceFileContentMap
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toEntryInfo
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toEntryInfoMap
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.isFileNotFound
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.json.buildJsonObject
@@ -108,7 +109,7 @@ internal class FilesystemAdapter(
                 return response.body?.source()?.readString(charset) ?: ""
             }
         } catch (e: Exception) {
-            logger.error("Failed to read file with encoding $encoding: $path", e)
+            logReadFailure("Failed to read file with encoding $encoding: $path", e)
             throw e.toSandboxException()
         }
     }
@@ -134,7 +135,7 @@ internal class FilesystemAdapter(
                 return response.body?.bytes() ?: ByteArray(0)
             }
         } catch (e: Exception) {
-            logger.error("Failed to read file as byte array: $path", e)
+            logReadFailure("Failed to read file as byte array: $path", e)
             throw e.toSandboxException()
         }
     }
@@ -167,7 +168,7 @@ internal class FilesystemAdapter(
             return response.body?.byteStream()
                 ?: throw IllegalStateException("Response body is null")
         } catch (e: Exception) {
-            logger.error("Failed to read file as stream: $path", e)
+            logReadFailure("Failed to read file as stream: $path", e)
             throw e.toSandboxException()
         }
     }
@@ -332,6 +333,26 @@ internal class FilesystemAdapter(
         } catch (e: Exception) {
             logger.error("Failed to get file info for {} paths", paths.size, e)
             throw e.toSandboxException()
+        }
+    }
+
+    /**
+     * Logs a failed read operation, distinguishing genuine failures from the expected
+     * "file does not exist" case.
+     *
+     * A missing file is a normal control-flow outcome (e.g. polling for a not-yet-created
+     * file), so it is logged at DEBUG level instead of ERROR to avoid flooding callers'
+     * error logs and monitoring with stack traces for a non-error condition. The exception
+     * is still propagated to the caller unchanged.
+     */
+    private fun logReadFailure(
+        message: String,
+        e: Exception,
+    ) {
+        if (e.isFileNotFound()) {
+            logger.debug(message, e)
+        } else {
+            logger.error(message, e)
         }
     }
 

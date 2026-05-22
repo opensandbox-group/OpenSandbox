@@ -42,27 +42,54 @@ _sudo() {
 	fi
 }
 
-# Install mitm egress CA into the system trust store (no extra env vars).
-# - Debian/Ubuntu/Alpine: update-ca-certificates + /usr/local/share/ca-certificates/
-# - RHEL/CentOS/Fedora/Alma/Rocky: update-ca-trust + /etc/pki/ca-trust/source/anchors/
+# Install mitm CA into the system trust store (for non-Python programs)
+# and set OPENSANDBOX_MERGED_CA to a PEM bundle containing a full root
+# set + mitm CA (for env vars like REQUESTS_CA_BUNDLE that *replace*
+# rather than append to the default roots).
+OPENSANDBOX_MERGED_CA=""
 trust_mitm_ca() {
 	cert="$1"
+	merged="/opt/opensandbox/merged-ca-certificates.pem"
+
+	# 1) Try to install into the system trust store (best-effort).
 	if command -v update-ca-certificates >/dev/null 2>&1; then
-		_sudo mkdir -p /usr/local/share/ca-certificates
-		_sudo cp "$cert" /usr/local/share/ca-certificates/opensandbox-mitmproxy-ca.crt
-		_sudo update-ca-certificates
-		return 0
-	fi
-	if command -v update-ca-trust >/dev/null 2>&1; then
-		_sudo mkdir -p /etc/pki/ca-trust/source/anchors
-		_sudo cp "$cert" /etc/pki/ca-trust/source/anchors/opensandbox-mitmproxy-ca.pem
-		if ! _sudo update-ca-trust extract; then
-			_sudo update-ca-trust
-		fi
-		return 0
+		_sudo mkdir -p /usr/local/share/ca-certificates \
+			&& _sudo cp "$cert" /usr/local/share/ca-certificates/opensandbox-mitmproxy-ca.crt \
+			&& _sudo update-ca-certificates \
+			|| echo "warning: update-ca-certificates failed; system trust store may not include mitm CA" >&2
+	elif command -v update-ca-trust >/dev/null 2>&1; then
+		_sudo mkdir -p /etc/pki/ca-trust/source/anchors \
+			&& _sudo cp "$cert" /etc/pki/ca-trust/source/anchors/opensandbox-mitmproxy-ca.pem \
+			&& { _sudo update-ca-trust extract || _sudo update-ca-trust; } \
+			|| echo "warning: update-ca-trust failed; system trust store may not include mitm CA" >&2
+	else
+		echo "warning: no system trust-store tooling found (need update-ca-certificates or update-ca-trust)" >&2
 	fi
 
-	echo "warning: cannot install mitm CA (need update-ca-certificates or update-ca-trust)" >&2
+	# 2) Build a merged bundle (complete root set + mitm CA).
+	#    Prefer certifi (full Mozilla root set) over system bundles which
+	#    may be incomplete in minimal Docker images.
+	certifi_ca=""
+	if command -v python3 >/dev/null 2>&1; then
+		certifi_ca="$(python3 -c 'import certifi; print(certifi.where())' 2>/dev/null)" || certifi_ca=""
+	elif command -v python >/dev/null 2>&1; then
+		certifi_ca="$(python -c 'import certifi; print(certifi.where())' 2>/dev/null)" || certifi_ca=""
+	fi
+
+	for candidate in \
+		"$certifi_ca" \
+		/etc/ssl/certs/ca-certificates.crt \
+		/etc/pki/tls/certs/ca-bundle.crt \
+		/etc/ssl/cert.pem \
+		/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
+		if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -s "$candidate" ]; then
+			cat "$candidate" "$cert" > "$merged"
+			OPENSANDBOX_MERGED_CA="$merged"
+			return 0
+		fi
+	done
+
+	echo "warning: could not locate any CA bundle to merge with mitm CA" >&2
 	return 0
 }
 
@@ -117,8 +144,18 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 
 	if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
 		trust_mitm_ca_nss "$MITM_CA" || true
-		export NODE_EXTRA_CA_CERTS="$MITM_CA"
-		export REQUESTS_CA_BUNDLE="$MITM_CA"
+		export NODE_EXTRA_CA_CERTS="$MITM_CA"  # additive — Node appends to built-in roots
+
+		# REQUESTS_CA_BUNDLE and SSL_CERT_FILE replace the default bundle,
+		# so use merged roots (certifi/system CA + mitm CA).
+		if [ -n "$OPENSANDBOX_MERGED_CA" ] && [ -f "$OPENSANDBOX_MERGED_CA" ]; then
+			export REQUESTS_CA_BUNDLE="$OPENSANDBOX_MERGED_CA"
+			export SSL_CERT_FILE="$OPENSANDBOX_MERGED_CA"
+		else
+			echo "warning: merged CA bundle not available; REQUESTS_CA_BUNDLE/SSL_CERT_FILE will only contain the mitm CA" >&2
+			export REQUESTS_CA_BUNDLE="$MITM_CA"
+			export SSL_CERT_FILE="$MITM_CA"
+		fi
 	fi
 fi
 
@@ -134,6 +171,27 @@ if ! touch "$EXECD_ENVS" 2>/dev/null; then
 	echo "warning: failed to touch EXECD_ENVS=$EXECD_ENVS" >&2
 fi
 export EXECD_ENVS
+
+# Run a user-defined pre-script before launching execd. The script is sourced
+# with POSIX `.` (not executed as a child process) so any variables it
+# `export`s propagate to execd and the chained command below — a subprocess
+# would lose those exports the moment it exits.
+if [ -n "${EXECD_BOOTSTRAP_PRE_SCRIPT:-}" ]; then
+	if [ -f "$EXECD_BOOTSTRAP_PRE_SCRIPT" ] && [ -r "$EXECD_BOOTSTRAP_PRE_SCRIPT" ]; then
+		# Force `.` to read the literal path; without a slash it would fall
+		# back to a PATH search and could load the wrong file.
+		case "$EXECD_BOOTSTRAP_PRE_SCRIPT" in
+		*/*) _pre_script="$EXECD_BOOTSTRAP_PRE_SCRIPT" ;;
+		*) _pre_script="./$EXECD_BOOTSTRAP_PRE_SCRIPT" ;;
+		esac
+		echo "sourcing pre-script $EXECD_BOOTSTRAP_PRE_SCRIPT"
+		# shellcheck disable=SC1090
+		. "$_pre_script"
+		unset _pre_script
+	else
+		echo "warning: EXECD_BOOTSTRAP_PRE_SCRIPT=$EXECD_BOOTSTRAP_PRE_SCRIPT not found or not readable" >&2
+	fi
+fi
 
 echo "starting OpenSandbox Execd daemon at $EXECD."
 $EXECD &

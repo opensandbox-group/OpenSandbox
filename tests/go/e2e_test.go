@@ -117,8 +117,16 @@ func TestE2E_FullLifecycle(t *testing.T) {
 	}
 	execClient := opensandbox.NewExecdClient(execdURL, execToken)
 
-	err = execClient.Ping(ctx)
-	require.NoError(t, err)
+	// This test bypasses the SDK's high-level CreateSandbox helper (which calls
+	// WaitUntilReady) and pings execd directly through the server-side proxy.
+	// The state-Running flag is satisfied as soon as the container is up, but
+	// execd's HTTP routes may register a few ms later and the proxy can drop
+	// the very first connection it sees ("connection reset by peer"). Poll
+	// until ping succeeds — real users go through CreateSandbox which already
+	// handles this.
+	require.Eventually(t, func() bool {
+		return execClient.Ping(ctx) == nil
+	}, 30*time.Second, 500*time.Millisecond, "execd ping never succeeded")
 	t.Log("Execd ping: OK")
 
 	// 6. Test Execd — run a command with SSE streaming
@@ -131,7 +139,6 @@ func TestE2E_FullLifecycle(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	t.Logf("Command raw output (%d bytes): %q", output.Len(), output.String())
 
 	// 7. Test Execd — file operations
 	fileInfoMap, err := execClient.GetFileInfo(ctx, "/etc/os-release")

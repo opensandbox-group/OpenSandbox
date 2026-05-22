@@ -25,7 +25,7 @@ server:
   # -- Server image configuration
   image:
     repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server
-    tag: "v0.1.13"
+    tag: "v0.1.14"
 
   # -- Number of server replicas
   replicaCount: 2
@@ -41,6 +41,8 @@ server:
 
   tolerations: []
   affinity: {}
+  volumeMounts: []
+  volumes: []
 
   # Gateway (components/ingress): when enabled, writes config [ingress] and deploys the gateway
   gateway:
@@ -83,7 +85,7 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.15"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.17"
 
   [kubernetes]
   kubeconfig_path = ""
@@ -96,5 +98,5 @@ configToml: |
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
   
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.0.11"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.0.12"
   mode = "dns+nft"

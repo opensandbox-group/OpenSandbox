@@ -67,6 +67,9 @@ type SandboxSnapshotReconciler struct {
 	// ImageCommitterImage is the image for image-committer (uses nerdctl to commit/push container images)
 	ImageCommitterImage string
 
+	// ContainerdSocketPath is containerd socket path for image-committer (nerdctl --address)
+	ContainerdSocketPath string
+
 	// CommitJobTimeout is the timeout for commit jobs (default: 10 minutes)
 	CommitJobTimeout time.Duration
 
@@ -90,8 +93,12 @@ type SandboxSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
 
-func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	log := logf.FromContext(ctx)
+	start := time.Now()
+	defer func() {
+		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
+	}()
 
 	snapshot := &sandboxv1alpha1.SandboxSnapshot{}
 	if err := r.Get(ctx, req.NamespacedName, snapshot); err != nil {

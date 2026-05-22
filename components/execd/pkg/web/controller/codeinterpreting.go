@@ -171,7 +171,9 @@ func (c *CodeInterpretingController) RunCode() {
 	}
 	runCodeRequest.Hooks = eventsHandler
 
-	c.setupSSEResponse()
+	// SSE headers are committed lazily on the first event write
+	// (see writeSingleEvent), so a synchronous error from Execute below can
+	// still be surfaced as a structured JSON error response.
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
@@ -400,7 +402,9 @@ func (c *CodeInterpretingController) RunInSession() {
 	}
 	runReq.Hooks = hooks
 
-	c.setupSSEResponse()
+	// SSE headers are committed lazily on the first event write
+	// (see writeSingleEvent), so a synchronous error from
+	// RunInBashSession can still be surfaced as a structured JSON error.
 	err := codeRunner.RunInBashSession(ctx, runReq)
 	if err != nil {
 		recordExecution("failure")

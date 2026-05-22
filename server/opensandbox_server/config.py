@@ -546,6 +546,52 @@ class ServerConfig(BaseModel):
             "Connections idle longer than this may be closed by the server."
         ),
     )
+    limit_concurrency: Optional[int] = Field(
+        default=1024,
+        ge=0,
+        description=(
+            "Maximum concurrent connections before returning 503. "
+            "Set to 0 to disable (TOML cannot express null). "
+            "Provides backpressure protection under burst load."
+        ),
+    )
+
+    @field_validator("limit_concurrency", mode="after")
+    @classmethod
+    def _zero_disables_limit_concurrency(cls, value: Optional[int]) -> Optional[int]:
+        # Translate the TOML-friendly sentinel 0 into None so uvicorn applies
+        # no concurrency cap. TOML has no null literal, so 0 is the only way
+        # to disable the limit from the config file.
+        return None if value == 0 else value
+    backlog: int = Field(
+        default=2048,
+        ge=1,
+        description="Socket listen backlog passed to uvicorn.",
+    )
+    thread_pool_size: int = Field(
+        default=200,
+        ge=1,
+        description=(
+            "Maximum size of the anyio default threadpool used by FastAPI "
+            "to run sync route handlers. Default anyio limit is 40, which "
+            "throttles bursts of blocking sandbox list/get/delete operations "
+            "under high concurrency."
+        ),
+    )
+    loop: Literal["auto", "uvloop", "asyncio"] = Field(
+        default="auto",
+        description=(
+            "Event loop implementation. 'auto' uses uvloop when available and "
+            "falls back to asyncio. 'asyncio' forces the stdlib loop."
+        ),
+    )
+    http: Literal["auto", "httptools", "h11"] = Field(
+        default="auto",
+        description=(
+            "HTTP protocol parser. 'auto' uses httptools when available and "
+            "falls back to h11."
+        ),
+    )
     api_key: Optional[str] = Field(
         default=None,
         description="Global API key for authenticating incoming lifecycle API calls.",

@@ -18,173 +18,211 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
+type uploadError struct {
+	status  int
+	code    model.ErrorCode
+	message string
+}
+
+func newUploadError(status int, code model.ErrorCode, message string) *uploadError {
+	return &uploadError{status: status, code: code, message: message}
+}
+
 // UploadFile uploads files with metadata to specified paths
 func (c *FilesystemController) UploadFile() {
 	rec := beginFilesystemMetric("upload")
 	defer rec.Finish(c.basicController)
 
-	form, err := c.ctx.MultipartForm()
-	if err != nil || form == nil {
-		c.RespondError(
-			http.StatusBadRequest,
-			model.ErrorCodeInvalidFile,
-			"multipart form is empty",
-		)
-		return
-	}
-
-	metadataParts := form.File["metadata"]
-	fileParts := form.File["file"]
-
-	if len(metadataParts) == 0 {
-		c.RespondError(
-			http.StatusBadRequest,
-			model.ErrorCodeInvalidFileMetadata,
-			"metadata file is missing",
-		)
-		return
-	}
-
-	if len(fileParts) == 0 {
-		c.RespondError(
-			http.StatusBadRequest,
-			model.ErrorCodeInvalidFileContent,
-			"file is missing",
-		)
-		return
-	}
-
-	if len(metadataParts) != len(fileParts) {
-		c.RespondError(
-			http.StatusBadRequest,
-			model.ErrorCodeInvalidFile,
-			fmt.Sprintf("metadata and file count mismatch: %d vs %d", len(metadataParts), len(fileParts)),
-		)
+	metadataParts, fileParts, uerr := c.parseUploadForm()
+	if uerr != nil {
+		c.RespondError(uerr.status, uerr.code, uerr.message)
 		return
 	}
 
 	for i := range metadataParts {
-		metadataHeader := metadataParts[i]
-		metadataFile, err := metadataHeader.Open()
-		if err != nil {
-			c.RespondError(
-				http.StatusBadRequest,
-				model.ErrorCodeInvalidFileMetadata,
-				fmt.Sprintf("error opening metadata file. %v", err),
-			)
-			return
-		}
-
-		metaBytes, err := io.ReadAll(metadataFile)
-		metadataFile.Close()
-		if err != nil {
-			c.RespondError(
-				http.StatusBadRequest,
-				model.ErrorCodeInvalidFileMetadata,
-				fmt.Sprintf("error reading metadata content. %v", err),
-			)
-			return
-		}
-
-		var meta model.FileMetadata
-		if err := json.Unmarshal(metaBytes, &meta); err != nil {
-			c.RespondError(
-				http.StatusBadRequest,
-				model.ErrorCodeInvalidFileMetadata,
-				fmt.Sprintf("invalid metadata format. %v", err),
-			)
-			return
-		}
-
-		targetPath := meta.Path
-		if targetPath == "" {
-			c.RespondError(
-				http.StatusBadRequest,
-				model.ErrorCodeInvalidFileMetadata,
-				"metadata path is empty",
-			)
-			return
-		}
-		resolvedPath, err := pathutil.ExpandPath(targetPath)
-		if err != nil {
-			c.RespondError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error resolving target path %s. %v", targetPath, err),
-			)
-			return
-		}
-
-		targetDir := filepath.Dir(resolvedPath)
-		if err := os.MkdirAll(targetDir, os.ModePerm); err != nil {
-			c.RespondError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error creating target directory %s. %v", targetDir, err),
-			)
-			return
-		}
-
-		fileHeader := fileParts[i]
-		file, err := fileHeader.Open()
-		if err != nil {
-			c.RespondError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error opening file %s. %v", fileHeader.Filename, err),
-			)
-			return
-		}
-
-		dst, err := os.OpenFile(resolvedPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.ModePerm)
-		if err != nil {
-			file.Close()
-			c.RespondError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error opening destination file %s. %v", resolvedPath, err),
-			)
-			return
-		}
-
-		if _, err := io.Copy(dst, file); err != nil {
-			dst.Close()
-			file.Close()
-			c.RespondError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error copying file %s. %v", resolvedPath, err),
-			)
-			return
-		}
-
-		if err := dst.Sync(); err != nil {
-			log.Error("failed to sync target file: %v", err)
-		}
-		if err := dst.Close(); err != nil {
-			log.Error("failed to close target file: %v", err)
-		}
-		file.Close()
-
-		if err := ChmodFile(resolvedPath, meta.Permission); err != nil {
-			c.RespondError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error chmoding file %s. %v", resolvedPath, err),
-			)
+		if uerr := c.processUploadPair(metadataParts[i], fileParts[i]); uerr != nil {
+			c.RespondError(uerr.status, uerr.code, uerr.message)
 			return
 		}
 	}
 
 	rec.MarkSuccess()
 	c.RespondSuccess(nil)
+}
+
+func (c *FilesystemController) parseUploadForm() ([]*multipart.FileHeader, []*multipart.FileHeader, *uploadError) {
+	form, err := c.ctx.MultipartForm()
+	if err != nil || form == nil {
+		return nil, nil, newUploadError(http.StatusBadRequest, model.ErrorCodeInvalidFile, "multipart form is empty")
+	}
+
+	metadataParts := form.File["metadata"]
+	fileParts := form.File["file"]
+
+	if len(metadataParts) == 0 {
+		return nil, nil, newUploadError(http.StatusBadRequest, model.ErrorCodeInvalidFileMetadata, "metadata file is missing")
+	}
+	if len(fileParts) == 0 {
+		return nil, nil, newUploadError(http.StatusBadRequest, model.ErrorCodeInvalidFileContent, "file is missing")
+	}
+	if len(metadataParts) != len(fileParts) {
+		return nil, nil, newUploadError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidFile,
+			fmt.Sprintf("metadata and file count mismatch: %d vs %d", len(metadataParts), len(fileParts)),
+		)
+	}
+	return metadataParts, fileParts, nil
+}
+
+func (c *FilesystemController) processUploadPair(metadataHeader, fileHeader *multipart.FileHeader) *uploadError {
+	meta, uerr := parseUploadMetadata(metadataHeader)
+	if uerr != nil {
+		return uerr
+	}
+
+	resolvedPath, uerr := resolveUploadTarget(meta.Path)
+	if uerr != nil {
+		return uerr
+	}
+
+	if uerr := writeUploadFile(resolvedPath, fileHeader); uerr != nil {
+		return uerr
+	}
+
+	return applyUploadPermission(resolvedPath, meta.Permission)
+}
+
+func parseUploadMetadata(header *multipart.FileHeader) (*model.FileMetadata, *uploadError) {
+	metadataFile, err := header.Open()
+	if err != nil {
+		return nil, newUploadError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidFileMetadata,
+			fmt.Sprintf("error opening metadata file. %v", err),
+		)
+	}
+	metaBytes, err := io.ReadAll(metadataFile)
+	metadataFile.Close()
+	if err != nil {
+		return nil, newUploadError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidFileMetadata,
+			fmt.Sprintf("error reading metadata content. %v", err),
+		)
+	}
+
+	var meta model.FileMetadata
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return nil, newUploadError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidFileMetadata,
+			fmt.Sprintf("invalid metadata format. %v", err),
+		)
+	}
+	if meta.Path == "" {
+		return nil, newUploadError(http.StatusBadRequest, model.ErrorCodeInvalidFileMetadata, "metadata path is empty")
+	}
+	return &meta, nil
+}
+
+func resolveUploadTarget(targetPath string) (string, *uploadError) {
+	resolvedPath, err := pathutil.ExpandPath(targetPath)
+	if err != nil {
+		return "", newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error resolving target path %s. %v", targetPath, err),
+		)
+	}
+	targetDir := filepath.Dir(resolvedPath)
+	if err := os.MkdirAll(targetDir, os.ModePerm); err != nil {
+		return "", newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error creating target directory %s. %v", targetDir, err),
+		)
+	}
+	return resolvedPath, nil
+}
+
+func writeUploadFile(resolvedPath string, fileHeader *multipart.FileHeader) *uploadError {
+	file, err := fileHeader.Open()
+	if err != nil {
+		return newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error opening file %s. %v", fileHeader.Filename, err),
+		)
+	}
+	defer file.Close()
+
+	dst, err := os.OpenFile(resolvedPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.ModePerm)
+	if err != nil {
+		return newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error opening destination file %s. %v", resolvedPath, err),
+		)
+	}
+
+	if _, err := io.Copy(dst, file); err != nil {
+		dst.Close()
+		return newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error copying file %s. %v", resolvedPath, err),
+		)
+	}
+
+	if err := dst.Sync(); err != nil {
+		log.Error("failed to sync target file: %v", err)
+	}
+	if err := dst.Close(); err != nil {
+		log.Error("failed to close target file: %v", err)
+	}
+
+	// fsync parent directory so the new dirent is durable and visible on
+	// weakly-coherent filesystems (virtio-fs, 9pfs, etc.). Best-effort:
+	// some filesystems return ENOTSUP for directory fsync.
+	targetDir := filepath.Dir(resolvedPath)
+	if d, err := os.Open(targetDir); err == nil {
+		if err := d.Sync(); err != nil {
+			log.Warning("failed to sync parent dir %s: %v", targetDir, err)
+		}
+		_ = d.Close()
+	}
+	return nil
+}
+
+// applyUploadPermission applies the metadata permission with one retry to
+// absorb metadata-propagation delay on weakly-coherent filesystems
+// (virtio-fs, 9pfs). ChmodFile always invokes chown under the hood, so a
+// freshly-created dirent that has not yet propagated will surface as ENOENT
+// here even though the file is fully written and synced.
+func applyUploadPermission(resolvedPath string, permission model.Permission) *uploadError {
+	chmodErr := ChmodFile(resolvedPath, permission)
+	if chmodErr != nil {
+		time.Sleep(20 * time.Millisecond)
+		chmodErr = ChmodFile(resolvedPath, permission)
+	}
+	if chmodErr != nil {
+		return newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error chmoding file %s. %v", resolvedPath, chmodErr),
+		)
+	}
+	return nil
 }

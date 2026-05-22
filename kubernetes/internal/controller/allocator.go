@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -268,24 +269,38 @@ func NewAnnoAllocationSyncer(client client.Client) AllocationSyncer {
 }
 
 func (syncer *annoAllocationSyncer) SetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, allocation *SandboxAllocation) error {
-	old, ok := sandbox.DeepCopyObject().(*sandboxv1alpha1.BatchSandbox)
-	if !ok {
-		return fmt.Errorf("invalid object")
+	js, err := json.Marshal(allocation)
+	if err != nil {
+		return err
 	}
 	anno := sandbox.GetAnnotations()
 	if anno == nil {
 		anno = make(map[string]string)
 	}
-	js, err := json.Marshal(allocation)
+	anno[AnnoAllocStatusKey] = string(js)
+	sandbox.SetAnnotations(anno)
+
+	needAddFinalizer := !controllerutil.ContainsFinalizer(sandbox, FinalizerPoolAllocation)
+	if needAddFinalizer {
+		sandbox.SetFinalizers(append(sandbox.GetFinalizers(), FinalizerPoolAllocation))
+	}
+
+	meta := map[string]any{
+		"annotations": map[string]string{
+			AnnoAllocStatusKey: string(js),
+		},
+	}
+	if needAddFinalizer {
+		meta["finalizers"] = sandbox.GetFinalizers()
+	}
+	patchData, err := json.Marshal(map[string]any{"metadata": meta})
 	if err != nil {
 		return err
 	}
-	anno[AnnoAllocStatusKey] = string(js)
-	sandbox.SetAnnotations(anno)
-	// Add finalizer to ensure the sandbox is not deleted before all pods are recycled.
-	controllerutil.AddFinalizer(sandbox, FinalizerPoolAllocation)
-	patch := client.MergeFrom(old)
-	return syncer.client.Patch(ctx, sandbox, patch)
+	obj := &sandboxv1alpha1.BatchSandbox{}
+	obj.Name = sandbox.Name
+	obj.Namespace = sandbox.Namespace
+	return syncer.client.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData))
 }
 
 func (syncer *annoAllocationSyncer) GetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (*SandboxAllocation, error) {
@@ -340,20 +355,18 @@ func (syncer *annoAllocationSyncer) GetReleased(ctx context.Context, sandbox *sa
 }
 
 func (syncer *annoAllocationSyncer) SetReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, released *AllocationReleased) error {
-	old, ok := sandbox.DeepCopyObject().(*sandboxv1alpha1.BatchSandbox)
-	if !ok {
-		return fmt.Errorf("invalid object")
+	js, err := json.Marshal(released)
+	if err != nil {
+		return err
 	}
 	anno := sandbox.GetAnnotations()
 	if anno == nil {
 		anno = make(map[string]string)
 	}
-	js, err := json.Marshal(released)
-	if err != nil {
-		return err
-	}
 	anno[AnnoAllocReleasedKey] = string(js)
 	sandbox.SetAnnotations(anno)
+
+	needRemoveFinalizer := false
 	// If the sandbox is being deleted and all allocated pods have been released,
 	// remove the finalizer so the sandbox can be garbage collected.
 	if !sandbox.DeletionTimestamp.IsZero() {
@@ -372,12 +385,34 @@ func (syncer *annoAllocationSyncer) SetReleased(ctx context.Context, sandbox *sa
 				break
 			}
 		}
-		if allReleased {
-			controllerutil.RemoveFinalizer(sandbox, FinalizerPoolAllocation)
+		if allReleased && controllerutil.ContainsFinalizer(sandbox, FinalizerPoolAllocation) {
+			needRemoveFinalizer = true
+			filtered := make([]string, 0, len(sandbox.GetFinalizers()))
+			for _, f := range sandbox.GetFinalizers() {
+				if f != FinalizerPoolAllocation {
+					filtered = append(filtered, f)
+				}
+			}
+			sandbox.SetFinalizers(filtered)
 		}
 	}
-	patch := client.MergeFrom(old)
-	return syncer.client.Patch(ctx, sandbox, patch)
+
+	meta := map[string]any{
+		"annotations": map[string]string{
+			AnnoAllocReleasedKey: string(js),
+		},
+	}
+	if needRemoveFinalizer {
+		meta["finalizers"] = sandbox.GetFinalizers()
+	}
+	patchData, err := json.Marshal(map[string]any{"metadata": meta})
+	if err != nil {
+		return err
+	}
+	obj := &sandboxv1alpha1.BatchSandbox{}
+	obj.Name = sandbox.Name
+	obj.Namespace = sandbox.Namespace
+	return syncer.client.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData))
 }
 
 type AllocSpec struct {

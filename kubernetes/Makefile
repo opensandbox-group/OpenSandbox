@@ -56,6 +56,8 @@ CONTROLLER_IMG ?= controller:dev
 TASK_EXECUTOR_IMG ?= task-executor:dev
 # IMAGE_COMMITTER_IMG defines the image for the image-committer service.
 IMAGE_COMMITTER_IMG ?= image-committer:dev
+# SNAPSHOT_REGISTRY defines the OCI registry used by the controller for snapshot images.
+SNAPSHOT_REGISTRY ?= docker-registry.default.svc.cluster.local:5000
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -364,7 +366,10 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${CONTROLLER_IMG}
-	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
+	$(KUSTOMIZE) build config/default | \
+		sed 's|--snapshot-registry=docker-registry.default.svc.cluster.local:5000|--snapshot-registry=$(SNAPSHOT_REGISTRY)|' | \
+		sed 's|--image-committer-image=image-committer:dev|--image-committer-image=$(IMAGE_COMMITTER_IMG)|' | \
+		$(KUBECTL) apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.

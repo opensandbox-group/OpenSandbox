@@ -36,6 +36,7 @@ import (
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	taskscheduler "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/scheduler"
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/expectations"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/fieldindex"
 	taskexecutor "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
@@ -52,9 +53,10 @@ func newTestReconciler(objs ...client.Object) *BatchSandboxReconciler {
 		WithObjects(objs...).
 		Build()
 	return &BatchSandboxReconciler{
-		Client:   fakeClient,
-		Scheme:   testscheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 }
 
@@ -222,7 +224,8 @@ func TestDispatchPauseResume_Case2_PauseFalse(t *testing.T) {
 }
 
 func TestDispatchPauseResume_Case3_PauseNil_ACKOnly(t *testing.T) {
-	// gen > pauseObservedGen, pause=nil → ACK only, continue normal flow (handled=false)
+	// gen > pauseObservedGen, pause=nil → no dedicated ACK API call, continue normal flow (handled=false).
+	// The ACK is deferred to persistRuntimeView in the main reconcile loop.
 	bs := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "test-bs",
@@ -247,11 +250,10 @@ func TestDispatchPauseResume_Case3_PauseNil_ACKOnly(t *testing.T) {
 	assert.False(t, handled, "ACK only should not block normal flow")
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify ACK happened
+	// Verify ACK is NOT written to server by dispatch (deferred to persistRuntimeView).
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
-	assert.Equal(t, int64(2), updated.Status.PauseObservedGeneration)
-	assert.Equal(t, int64(2), bs.Status.PauseObservedGeneration, "in-memory status should also reflect ACK for the rest of this reconcile")
+	assert.Equal(t, int64(1), updated.Status.PauseObservedGeneration, "server should not be updated by dispatch; ACK is deferred")
 }
 
 func TestDispatchPauseResume_Case4_GenEqual_PauseSet(t *testing.T) {
@@ -1034,9 +1036,10 @@ func TestContinueResume_UsesPatchedTemplateWhenCacheReturnsStaleObject(t *testin
 		}).
 		Build()
 	r := &BatchSandboxReconciler{
-		Client:   fakeClient,
-		Scheme:   testscheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
 	result, err := r.continueResume(context.Background(), bs)
@@ -1557,8 +1560,7 @@ func TestPersistRuntimeView_PreservesPauseFailedConditionFromLatestStatus(t *tes
 	}
 	r := newTestReconciler(bs, pod)
 
-	stale := bs.DeepCopy()
-
+	// Simulate pause handler writing PauseFailed condition to API server.
 	latest := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, latest))
 	latest.Status.Conditions = append(latest.Status.Conditions, sandboxv1alpha1.BatchSandboxCondition{
@@ -1570,10 +1572,15 @@ func TestPersistRuntimeView_PreservesPauseFailedConditionFromLatestStatus(t *tes
 	})
 	require.NoError(t, r.Status().Update(context.Background(), latest))
 
-	view := buildRuntimeView(stale, []*corev1.Pod{pod})
-	err := r.persistRuntimeView(context.Background(), stale, view)
-	require.Empty(t, err)
+	// Simulate second reconcile: informer has caught up, so we read latest state.
+	freshBS := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, freshBS))
 
+	view := buildRuntimeView(freshBS, []*corev1.Pod{pod})
+	_, errs := r.persistRuntimeView(context.Background(), freshBS, view)
+	require.Empty(t, errs)
+
+	// Verify PauseFailed is preserved after reconcile with fresh cache.
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 
@@ -1586,7 +1593,7 @@ func TestPersistRuntimeView_PreservesPauseFailedConditionFromLatestStatus(t *tes
 			assert.Equal(t, "Commit job failed", cond.Message)
 		}
 	}
-	assert.True(t, foundPauseFailed, "persistRuntimeView should preserve latest PauseFailed condition")
+	assert.True(t, foundPauseFailed, "persistRuntimeView should preserve PauseFailed condition once informer cache catches up")
 }
 
 func TestPersistRuntimeView_SkipsStatusUpdateWhenRuntimeStatusUnchanged(t *testing.T) {
@@ -1655,13 +1662,14 @@ func TestPersistRuntimeView_SkipsStatusUpdateWhenRuntimeStatusUnchanged(t *testi
 		}).
 		Build()
 	r := &BatchSandboxReconciler{
-		Client:   fakeClient,
-		Scheme:   testscheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
 	view := buildRuntimeView(bs.DeepCopy(), []*corev1.Pod{pod})
-	errs := r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
+	_, errs := r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
 	require.Empty(t, errs)
 	assert.Equal(t, 0, statusUpdates, "unchanged runtime status should not be persisted again")
 }
@@ -1709,7 +1717,7 @@ func TestPersistRuntimeView_RetriesSucceededPauseSnapshotCleanup(t *testing.T) {
 
 	status := bs.Status
 	view := runtimeView{status: &status}
-	errs := r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
+	_, errs := r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
 	require.Empty(t, errs)
 
 	stillPresent := &sandboxv1alpha1.SandboxSnapshot{}
@@ -2046,9 +2054,10 @@ func TestCompletePause_DeleteFailureLeavesPhasePausing(t *testing.T) {
 		}).
 		Build()
 	r := &BatchSandboxReconciler{
-		Client:   fakeClient,
-		Scheme:   testscheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
 	err := r.completePause(context.Background(), bs)
@@ -2174,9 +2183,10 @@ func TestCompletePause_PooledSandboxDoesNotDeleteSourcePod(t *testing.T) {
 		}).
 		Build()
 	r := &BatchSandboxReconciler{
-		Client:   fakeClient,
-		Scheme:   testscheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
 	err := r.completePause(context.Background(), bs)
@@ -2246,9 +2256,10 @@ func TestCompletePause_PooledSandboxAcknowledgesSpecPatchGeneration(t *testing.T
 		}).
 		Build()
 	r := &BatchSandboxReconciler{
-		Client:   fakeClient,
-		Scheme:   testscheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
 	require.NoError(t, r.completePause(context.Background(), bs))
@@ -2321,9 +2332,10 @@ func TestCompletePause_DoesNotAcknowledgeQueuedResumeGeneration(t *testing.T) {
 		}).
 		Build()
 	r := &BatchSandboxReconciler{
-		Client:   fakeClient,
-		Scheme:   testscheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
 	require.NoError(t, r.completePause(context.Background(), bs))
@@ -2490,9 +2502,10 @@ func TestSyncPauseOrClear_SnapshotFailedReturnsStatusUpdateError(t *testing.T) {
 		}).
 		Build()
 	r := &BatchSandboxReconciler{
-		Client:   fakeClient,
-		Scheme:   testscheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
 	result, err := r.syncPauseOrClear(context.Background(), bs)

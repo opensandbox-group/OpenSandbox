@@ -37,7 +37,9 @@ from opensandbox_server.config import (
     RuntimeConfig,
     ServerConfig,
     StorageConfig,
+    load_config,
 )
+from opensandbox_server.logging_config import configure_logging
 
 
 def _strip_optional(annotation: Any) -> Any:
@@ -284,15 +286,25 @@ def main() -> None:
     if args.config:
         os.environ[CONFIG_ENV_VAR] = args.config
 
-    from opensandbox_server import main as server_main  # local import after env is set
+    # Load config + logging without importing opensandbox_server.main: importing
+    # main eagerly constructs sandbox_service (restoring containers and starting
+    # expiration timers), which we defer to the actual worker process so the
+    # uvicorn reloader supervisor does not run them.
+    app_config = load_config()
+    log_config = configure_logging(app_config.log)
+    server_cfg = app_config.server
 
     uvicorn.run(
         "opensandbox_server.main:app",
-        host=server_main.app_config.server.host,
-        port=server_main.app_config.server.port,
+        host=server_cfg.host,
+        port=server_cfg.port,
         reload=args.reload,
-        log_config=server_main._log_config,
-        timeout_keep_alive=server_main.app_config.server.timeout_keep_alive,
+        log_config=log_config,
+        timeout_keep_alive=server_cfg.timeout_keep_alive,
+        limit_concurrency=server_cfg.limit_concurrency,
+        backlog=server_cfg.backlog,
+        loop=server_cfg.loop,
+        http=server_cfg.http,
     )
 
 

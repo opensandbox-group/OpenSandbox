@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
@@ -57,15 +58,21 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	done := make(chan struct{}, 1)
+	var wg sync.WaitGroup
+	wg.Add(2)
 	safego.Go(func() {
+		defer wg.Done()
 		c.tailStdPipe(c.stdoutFileName(session), request.Hooks.OnExecuteStdout, done)
 	})
 	safego.Go(func() {
+		defer wg.Done()
 		c.tailStdPipe(c.stderrFileName(session), request.Hooks.OnExecuteStderr, done)
 	})
 
 	err = cmd.Start()
 	if err != nil {
+		close(done)
+		wg.Wait()
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
 		log.Error("CommandExecError: error starting commands: %v", err)
 		return nil
@@ -80,6 +87,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 	err = cmd.Wait()
 	close(done)
+	wg.Wait()
 	if err != nil {
 		var eName, eValue string
 		var traceback []string

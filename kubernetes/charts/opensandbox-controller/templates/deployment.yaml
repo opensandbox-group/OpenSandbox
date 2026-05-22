@@ -61,6 +61,9 @@ spec:
         {{- if .Values.controller.snapshot.imageCommitterImage }}
         - --image-committer-image={{ .Values.controller.snapshot.imageCommitterImage }}
         {{- end }}
+        {{- if .Values.controller.snapshot.containerdSocketPath }}
+        - --containerd-socket-path={{ .Values.controller.snapshot.containerdSocketPath }}
+        {{- end }}
         {{- if .Values.controller.snapshot.commitJobTimeout }}
         - --commit-job-timeout={{ .Values.controller.snapshot.commitJobTimeout }}
         {{- end }}

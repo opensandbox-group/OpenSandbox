@@ -38,6 +38,9 @@ const (
 	// DefaultCodeInterpreterTimeoutSeconds is the default TTL for code interpreter sandboxes.
 	DefaultCodeInterpreterTimeoutSeconds = 900
 
+	// Version is the SDK version reported in the User-Agent header.
+	Version = "1.0.1"
+
 	// APIVersion is the lifecycle API version prefix.
 	APIVersion = "v1"
 

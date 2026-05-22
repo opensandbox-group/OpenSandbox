@@ -164,6 +164,67 @@ def test_server_config_defaults_include_max_sandbox_timeout():
     assert server_cfg.max_sandbox_timeout_seconds is None
 
 
+def test_server_config_uvicorn_tuning_defaults():
+    """ServerConfig exposes uvicorn concurrency knobs with sensible defaults."""
+    server_cfg = ServerConfig()
+    assert server_cfg.limit_concurrency == 1024
+    assert server_cfg.backlog == 2048
+    assert server_cfg.thread_pool_size == 200
+    assert server_cfg.loop == "auto"
+    assert server_cfg.http == "auto"
+
+
+def test_server_config_uvicorn_tuning_overrides():
+    server_cfg = ServerConfig(
+        limit_concurrency=256,
+        backlog=4096,
+        loop="uvloop",
+        http="httptools",
+    )
+    assert server_cfg.limit_concurrency == 256
+    assert server_cfg.backlog == 4096
+    assert server_cfg.loop == "uvloop"
+    assert server_cfg.http == "httptools"
+
+
+def test_server_config_limit_concurrency_zero_disables_cap():
+    """0 is the TOML-friendly disable sentinel and must collapse to None so
+    uvicorn applies no concurrency limit."""
+    cfg = ServerConfig(limit_concurrency=0)
+    assert cfg.limit_concurrency is None
+
+
+def test_server_config_limit_concurrency_accepts_none_and_positive():
+    cfg = ServerConfig(limit_concurrency=None)
+    assert cfg.limit_concurrency is None
+    cfg = ServerConfig(limit_concurrency=512)
+    assert cfg.limit_concurrency == 512
+
+
+def test_server_config_limit_concurrency_rejects_negative():
+    with pytest.raises(ValidationError):
+        ServerConfig(limit_concurrency=-1)
+
+
+def test_server_config_backlog_must_be_positive():
+    with pytest.raises(ValidationError):
+        ServerConfig(backlog=0)
+
+
+def test_server_config_thread_pool_size_must_be_positive():
+    with pytest.raises(ValidationError):
+        ServerConfig(thread_pool_size=0)
+    cfg = ServerConfig(thread_pool_size=512)
+    assert cfg.thread_pool_size == 512
+
+
+def test_server_config_loop_and_http_reject_unknown_values():
+    with pytest.raises(ValidationError):
+        ServerConfig(loop="trio")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        ServerConfig(http="hyper")  # type: ignore[arg-type]
+
+
 def test_store_defaults_to_sqlite():
     cfg = StoreConfig()
     assert cfg.type == "sqlite"

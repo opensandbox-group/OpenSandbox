@@ -22,6 +22,9 @@ type EgressClient struct {
 	*Client
 }
 
+// egressAuthHeader is the authentication header used by the Egress sidecar API.
+const egressAuthHeader = "OPENSANDBOX-EGRESS-AUTH"
+
 // NewEgressClient creates a new EgressClient.
 // baseURL is the sandbox-specific egress sidecar endpoint
 // (e.g. "http://localhost:18080").
@@ -29,7 +32,7 @@ type EgressClient struct {
 // if the sidecar does not require authentication.
 func NewEgressClient(baseURL, authToken string, opts ...Option) *EgressClient {
 	return &EgressClient{
-		Client: NewClient(baseURL, authToken, "OPENSANDBOX-EGRESS-AUTH", opts...),
+		Client: NewClient(baseURL, authToken, egressAuthHeader, opts...),
 	}
 }
 

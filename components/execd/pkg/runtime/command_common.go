@@ -32,13 +32,14 @@ func (c *Controller) tailStdPipe(file string, onExecute func(text string), done 
 	defer ticker.Stop()
 
 	mutex := &sync.Mutex{}
+	var lastWasCR bool
 	for {
 		select {
 		case <-done:
-			c.readFromPos(mutex, file, lastPos, onExecute, true)
+			c.readFromPos(mutex, file, lastPos, onExecute, true, &lastWasCR)
 			return
 		case <-ticker.C:
-			newPos := c.readFromPos(mutex, file, lastPos, onExecute, false)
+			newPos := c.readFromPos(mutex, file, lastPos, onExecute, false, &lastWasCR)
 			lastPos = newPos
 		}
 	}
@@ -104,7 +105,9 @@ func (c *Controller) combinedOutputFileName(session string) string {
 }
 
 // readFromPos streams new content from a file starting at startPos.
-func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos int64, onExecute func(string), flushIncomplete bool) int64 {
+// lastWasCR persists CRLF detection across calls so a \r\n pair split between
+// two polls does not surface a spurious blank line for the trailing \n.
+func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos int64, onExecute func(string), flushIncomplete bool, lastWasCR *bool) int64 {
 	if !mutex.TryLock() {
 		return -1
 	}
@@ -121,6 +124,15 @@ func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos in
 	reader := bufio.NewReader(file)
 	var buffer bytes.Buffer
 	var currentPos int64 = startPos
+	cr := false
+	if lastWasCR != nil {
+		cr = *lastWasCR
+	}
+	defer func() {
+		if lastWasCR != nil {
+			*lastWasCR = cr
+		}
+	}()
 
 	for {
 		b, err := reader.ReadByte()
@@ -138,15 +150,22 @@ func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos in
 
 		// Check if it's a line terminator (\n or \r)
 		if b == '\n' || b == '\r' {
-			// If buffer has content, output this line
-			if buffer.Len() > 0 {
+			switch {
+			case buffer.Len() > 0:
+				// Flush the line content without the terminator
 				onExecute(buffer.String())
 				buffer.Reset()
+			case b == '\n' && cr:
+				// Second half of a \r\n pair; already emitted on \r
+			default:
+				// Standalone blank line; surface it so callers see the gap
+				onExecute("\n")
 			}
-			// Skip line terminator
+			cr = (b == '\r')
 			continue
 		}
 
+		cr = false
 		buffer.WriteByte(b)
 	}
 

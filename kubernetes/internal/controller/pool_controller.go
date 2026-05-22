@@ -114,8 +114,12 @@ type PoolReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
 
-func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	log := logf.FromContext(ctx)
+	start := time.Now()
+	defer func() {
+		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
+	}()
 	// Fetch the Pool instance
 	pool := &sandboxv1alpha1.Pool{}
 	if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
@@ -674,8 +678,14 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	errs := make([]error, 0)
 	pods := args.pods
 	if satisfied, unsatisfiedDuration, dirtyPods := PoolScaleExpectations.SatisfiedExpectations(controllerutils.GetControllerKey(pool)); !satisfied {
-		log.Info("Pool scale is not ready, requeue", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
-		return fmt.Errorf("pool scale is not ready, %v", pool.Name)
+		if unsatisfiedDuration >= expectations.ExpectationTimeout {
+			log.Info("Pool scale expectations timed out, clearing stale expectations",
+				"unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
+			PoolScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(pool))
+		} else {
+			log.Info("Pool scale is not ready, requeue", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
+			return fmt.Errorf("pool scale is not ready, %v", pool.Name)
+		}
 	}
 	schedulableCnt := int32(len(args.pods))
 	totalPodCnt := args.totalPodCnt

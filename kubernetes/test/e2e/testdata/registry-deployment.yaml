@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: docker-registry
-  namespace: default
+  namespace: {{ .Namespace }}
 spec:
   replicas: 1
   selector:
@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: registry
-        image: registry:2
+        image: {{ .RegistryImage }}
         ports:
         - containerPort: 5000
         env:
@@ -41,12 +41,11 @@ apiVersion: v1
 kind: Service
 metadata:
   name: docker-registry
-  namespace: default
+  namespace: {{ .Namespace }}
 spec:
-  type: NodePort
+  type: ClusterIP
   ports:
   - port: 5000
     targetPort: 5000
-    nodePort: 30500
   selector:
     app: docker-registry

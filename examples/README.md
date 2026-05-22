@@ -21,6 +21,7 @@ Examples for common OpenSandbox use cases. Each subdirectory contains runnable c
 - 🦞 [**nullclaw**](nullclaw): Launch a Nullclaw Gateway inside a sandbox
 - 🦞 [**openclaw**](openclaw): Run an OpenClaw Gateway inside a sandbox
 - 🖥️ [**desktop**](desktop): Launch VNC desktop (Xvfb + x11vnc) for VNC client connections
+- 🪟 [**windows**](windows): Run a Windows guest VM via KVM/QEMU with RDP and web console access
 - <img src="https://playwright.dev/img/playwright-logo.svg" alt="Playwright" width="16" height="16" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:4px;" /> [**playwright**](playwright): Launch headless browser (Playwright + Chromium) to scrape web content
 - <img src="https://code.visualstudio.com/assets/favicon.ico" alt="VS Code" width="16" height="16" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:4px;" /> [**vscode**](vscode): Launch code-server (VS Code Web) to provide browser access
 - <img src="https://www.google.com/chrome/static/images/chrome-logo.svg" alt="Google Chrome" width="16" height="16" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:4px;" /> [**chrome**](chrome): Launch headless Chromium with DevTools port exposed for remote debugging

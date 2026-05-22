@@ -48,6 +48,8 @@ COPY internal/ internal/
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN echo "Building for $TARGETOS/$TARGETARCH"
 ARG PACKAGE=./cmd/controller
+ARG COMMIT_ID=unknown
+ARG BUILD_DATE=unknown
 RUN if [ -n "${CC}" ]; then export CC; fi; \
     if [ -n "${CXX}" ]; then export CXX; fi; \
     export CGO_ENABLED="${CGO_ENABLED}" GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
@@ -55,7 +57,7 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
            CGO_CXXFLAGS="${CGO_CXXFLAGS:-${CXXFLAGS}}" \
            CGO_LDFLAGS="${CGO_LDFLAGS}"; \
     go build ${GOFLAGS} -trimpath -buildvcs=false \
-    -ldflags "${LDFLAGS} -buildid= -B none" \
+    -ldflags "${LDFLAGS} -buildid= -B none -X main.commitID=${COMMIT_ID} -X main.buildDate=${BUILD_DATE}" \
     -o server ${PACKAGE}
 
 # Use golang image as base to ensure nsenter (util-linux) is available

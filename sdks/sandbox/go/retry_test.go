@@ -22,7 +22,6 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -637,6 +636,3 @@ func TestRetry_CustomRetryableStatusCodes(t *testing.T) {
 	require.Equal(t, "sbx-500-retried", got.ID)
 	require.Equal(t, int32(2), attempts.Load())
 }
-
-// suppress unused import warning
-var _ = json.Marshal

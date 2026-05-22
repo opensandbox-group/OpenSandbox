@@ -305,6 +305,13 @@ func (r *SandboxSnapshotReconciler) imageCommitterImage() string {
 	return "image-committer:dev"
 }
 
+func (r *SandboxSnapshotReconciler) containerdSocketPath() string {
+	if r.ContainerdSocketPath != "" {
+		return r.ContainerdSocketPath
+	}
+	return ContainerdSocketPath
+}
+
 func commitJobSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsUser:                ptrToInt64(0),
@@ -326,7 +333,7 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 		{
 			Name: "containerd-sock",
 			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: ContainerdSocketPath},
+				HostPath: &corev1.HostPathVolumeSource{Path: r.containerdSocketPath()},
 			},
 		},
 	}
@@ -462,7 +469,7 @@ func (r *SandboxSnapshotReconciler) buildUnpauseJob(snapshot *sandboxv1alpha1.Sa
 						{
 							Name: "containerd-sock",
 							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{Path: ContainerdSocketPath},
+								HostPath: &corev1.HostPathVolumeSource{Path: r.containerdSocketPath()},
 							},
 						},
 					},

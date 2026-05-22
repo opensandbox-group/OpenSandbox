@@ -329,7 +329,7 @@ class DockerContainerOpsMixin:
     def _resolve_resource_limits(
         self, request: CreateSandboxRequest
     ) -> tuple[Optional[int], Optional[int], Optional[int]]:
-        resource_limits = request.resource_limits.root or {}
+        resource_limits = (request.resource_limits.root if request.resource_limits else None) or {}
         mem_limit = parse_memory_limit(resource_limits.get("memory"))
         nano_cpus = parse_nano_cpus(resource_limits.get("cpu"))
         gpu_count = parse_gpu_request(resource_limits.get("gpu"))

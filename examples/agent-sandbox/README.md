@@ -23,7 +23,7 @@ opensandbox-server init-config ~/.sandbox.toml --example docker
 ```toml
 [runtime]
 type = "kubernetes"
-execd_image = "opensandbox/execd:v1.0.15"
+execd_image = "opensandbox/execd:v1.0.17"
 
 [kubernetes]
 namespace = "default"

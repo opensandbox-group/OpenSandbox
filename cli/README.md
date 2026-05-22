@@ -50,6 +50,7 @@ opensandbox-server
 osb config init
 osb config set connection.domain localhost:8080
 osb config set connection.protocol http
+osb config set connection.api_key <your-api-key>
 osb config show -o json
 ```
 

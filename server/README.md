@@ -221,11 +221,11 @@ Single source of truth for TOML: **[configuration.md](configuration.md)** (inclu
 
 ## Experimental features
 
-Optional **🧪 experimental** behavior; **off by default** in [`example.config.toml`](example.config.toml) (and mirrored copies under `opensandbox_server/examples/`). See release notes before production.
+Optional **🧪 experimental** behavior; **off by default** in [`example.config.toml`](opensandbox_server/examples/example.config.toml). See release notes before production.
 
 ### Auto-renew on access
 
-Extends sandbox TTL when traffic is observed (lifecycle **proxy** and/or **ingress** + optional **Redis** queue). Design and operations: **[OSEP-0009](../oseps/0009-auto-renew-sandbox-on-ingress-access.md)**. TOML keys (`[renew_intent]`, including nested `redis.*`): see **[configuration.md](configuration.md)** and [`example.config.toml`](example.config.toml).
+Extends sandbox TTL when traffic is observed (lifecycle **proxy** and/or **ingress** + optional **Redis** queue). Design and operations: **[OSEP-0009](../oseps/0009-auto-renew-sandbox-on-ingress-access.md)**. TOML keys (`[renew_intent]`, including nested `redis.*`): see **[configuration.md](configuration.md)** and [`example.config.toml`](opensandbox_server/examples/example.config.toml).
 
 Per-sandbox: on **create**, set `extensions["access.renew.extend.seconds"]` (string integer **300**–**86400**). Clients using the server proxy: request endpoints with `use_server_proxy=true` (REST) or SDK `ConnectionConfig(..., use_server_proxy=True)` — details in OSEP-0009.
 

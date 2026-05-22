@@ -209,10 +209,9 @@ func (r *BatchSandboxReconciler) dispatchPauseResume(ctx context.Context, bs *sa
 			result, err := r.handleResume(ctx, bs)
 			return result, true, err
 		}
-		log.Info("Dispatch: ACK only", "generation", generation, "pauseObservedGeneration", pauseObservedGen)
-		if err := r.ackPauseGeneration(ctx, bs); err != nil {
-			return ctrl.Result{}, true, err
-		}
+		// No pause intent — skip the dedicated ACK API call. The normal flow's
+		// persistRuntimeView will update PauseObservedGeneration in its status patch.
+		log.Info("Dispatch: no pause intent, deferring ACK to status patch", "generation", generation, "pauseObservedGeneration", pauseObservedGen)
 		return ctrl.Result{}, false, nil
 	}
 
@@ -479,8 +478,9 @@ func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv
 
 	r.deleteTaskScheduler(ctx, bs)
 
+	var latest *sandboxv1alpha1.BatchSandbox
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		latest := &sandboxv1alpha1.BatchSandbox{}
+		latest = &sandboxv1alpha1.BatchSandbox{}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, latest); err != nil {
 			return err
 		}
@@ -496,6 +496,7 @@ func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv
 	}); err != nil {
 		return err
 	}
+	r.StatusRVExpectation.Expect(latest)
 
 	return nil
 }
@@ -584,8 +585,9 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 }
 
 func (r *BatchSandboxReconciler) ackPauseGeneration(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) error {
+	var latest *sandboxv1alpha1.BatchSandbox
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		latest := &sandboxv1alpha1.BatchSandbox{}
+		latest = &sandboxv1alpha1.BatchSandbox{}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, latest); err != nil {
 			return err
 		}
@@ -595,14 +597,16 @@ func (r *BatchSandboxReconciler) ackPauseGeneration(ctx context.Context, bs *san
 	}); err != nil {
 		return err
 	}
+	r.StatusRVExpectation.Expect(latest)
 	bs.Status.PauseObservedGeneration = bs.Generation
 	applyBatchSandboxPhaseConditions(&bs.Status)
 	return nil
 }
 
 func (r *BatchSandboxReconciler) ackPauseWithPhase(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox, phase sandboxv1alpha1.BatchSandboxPhase, _ string) error {
+	var latest *sandboxv1alpha1.BatchSandbox
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		latest := &sandboxv1alpha1.BatchSandbox{}
+		latest = &sandboxv1alpha1.BatchSandbox{}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, latest); err != nil {
 			return err
 		}
@@ -613,6 +617,7 @@ func (r *BatchSandboxReconciler) ackPauseWithPhase(ctx context.Context, bs *sand
 	}); err != nil {
 		return err
 	}
+	r.StatusRVExpectation.Expect(latest)
 	bs.Status.PauseObservedGeneration = bs.Generation
 	bs.Status.Phase = phase
 	applyBatchSandboxPhaseConditions(&bs.Status)
@@ -640,8 +645,9 @@ func (r *BatchSandboxReconciler) setCondition(
 	reason string,
 	message string,
 ) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		latest := &sandboxv1alpha1.BatchSandbox{}
+	var latest *sandboxv1alpha1.BatchSandbox
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest = &sandboxv1alpha1.BatchSandbox{}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, latest); err != nil {
 			return err
 		}
@@ -674,5 +680,9 @@ func (r *BatchSandboxReconciler) setCondition(
 
 		latest.Status.Conditions = conditions
 		return r.Status().Update(ctx, latest)
-	})
+	}); err != nil {
+		return err
+	}
+	r.StatusRVExpectation.Expect(latest)
+	return nil
 }

@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -332,4 +333,91 @@ func TestRunInSessionReturnsBeforeGracefulShutdownTimeoutAfterImmediateError(t *
 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Less(t, elapsed, flag.ApiGracefulShutdownTimeout/2)
+}
+
+// TestRunCodeSyncErrorEmitsJSONNotSSE guards against regression of the bug
+// where Execute returning a synchronous error after setupSSEResponse caused
+// the client to receive a text/event-stream response with a JSON body, which
+// SDKs parsed as zero events ("empty sse stream"). Headers must stay
+// uncommitted until the first event so RespondError can produce a proper
+// application/json error response.
+func TestRunCodeSyncErrorEmitsJSONNotSSE(t *testing.T) {
+	previousRunner := codeRunner
+	codeRunner = &fakeCodeRunner{
+		execute: func(_ *runtime.ExecuteCodeRequest) error {
+			return errors.New("synchronous runtime failure")
+		},
+	}
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	body := []byte(`{"code":"print(1)","context":{"id":"ctx-1","language":"python"}}`)
+	ctx, w := newTestContext(http.MethodPost, "/code/run", body)
+	ctrl := NewCodeInterpretingController(ctx)
+
+	ctrl.RunCode()
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	contentType := w.Header().Get("Content-Type")
+	require.Contains(t, contentType, "application/json", "should not commit text/event-stream when no event fires")
+
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeRuntimeError, resp.Code)
+	require.Contains(t, resp.Message, "synchronous runtime failure")
+}
+
+// TestRunInSessionSyncErrorEmitsJSONNotSSE — see TestRunCodeSyncErrorEmitsJSONNotSSE.
+func TestRunInSessionSyncErrorEmitsJSONNotSSE(t *testing.T) {
+	previousRunner := codeRunner
+	codeRunner = &fakeCodeRunner{
+		runInBashSession: func(_ context.Context, _ *runtime.ExecuteCodeRequest) error {
+			return errors.New("synchronous session failure")
+		},
+	}
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	body := []byte(`{"command":"echo hi","timeout":0}`)
+	ctx, w := newTestContext(http.MethodPost, "/sessions/session-1/run", body)
+	ctx.Params = append(ctx.Params, gin.Param{Key: "sessionId", Value: "session-1"})
+	ctrl := NewCodeInterpretingController(ctx)
+
+	ctrl.RunInSession()
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	contentType := w.Header().Get("Content-Type")
+	require.Contains(t, contentType, "application/json", "should not commit text/event-stream when no event fires")
+
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeRuntimeError, resp.Code)
+	require.Contains(t, resp.Message, "synchronous session failure")
+}
+
+// TestRunCodeSuccessStillEmitsSSE confirms the lazy header path still produces
+// a text/event-stream response when at least one event fires.
+func TestRunCodeSuccessStillEmitsSSE(t *testing.T) {
+	previousRunner := codeRunner
+	previousTimeout := flag.ApiGracefulShutdownTimeout
+	codeRunner = &fakeCodeRunner{
+		execute: func(request *runtime.ExecuteCodeRequest) error {
+			request.Hooks.OnExecuteInit("session-1")
+			request.Hooks.OnExecuteComplete(time.Millisecond)
+			return nil
+		},
+	}
+	flag.ApiGracefulShutdownTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		codeRunner = previousRunner
+		flag.ApiGracefulShutdownTimeout = previousTimeout
+	})
+
+	body := []byte(`{"code":"print(1)","context":{"id":"ctx-1","language":"python"}}`)
+	ctx, w := newTestContext(http.MethodPost, "/code/run", body)
+	ctrl := NewCodeInterpretingController(ctx)
+
+	ctrl.RunCode()
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
+	require.NotEmpty(t, w.Body.Bytes(), "successful run should write SSE events")
 }

@@ -84,10 +84,12 @@ def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandb
 
 def _extract_platform_from_workload(workload: Any) -> Optional[PlatformSpec]:
     if isinstance(workload, dict):
-        spec = workload.get("spec", {})
+        spec = workload.get("spec") or {}
+        template = spec.get("template") or {}
+        pod_template = spec.get("podTemplate") or {}
         pod_spec = (
-            spec.get("template", {}).get("spec")
-            or spec.get("podTemplate", {}).get("spec")
+            (template.get("spec") if isinstance(template, dict) else None)
+            or (pod_template.get("spec") if isinstance(pod_template, dict) else None)
             or {}
         )
     else:

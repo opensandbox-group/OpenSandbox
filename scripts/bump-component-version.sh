@@ -36,16 +36,17 @@ elif [ $# -eq 2 ]; then
   COMPONENT="$1"
   NEW_VERSION="$2"
 else
-  echo "Usage: $0 [egress|execd|ingress|code-interpreter] NEW_VERSION" >&2
+  echo "Usage: $0 [egress|execd|ingress|code-interpreter|image-committer] NEW_VERSION" >&2
   echo "       $0 NEW_VERSION   # bumps egress" >&2
   echo "Example: $0 egress v1.0.2" >&2
   echo "Example: $0 execd 1.0.7" >&2
   echo "Example: $0 ingress v1.0.6" >&2
+  echo "Example: $0 image-committer v0.1.0" >&2
   exit 1
 fi
 
 case "$COMPONENT" in
-  egress|execd|ingress|code-interpreter) ;;
+  egress|execd|ingress|code-interpreter|image-committer) ;;
   *)
     echo "Error: unsupported component: $COMPONENT" >&2
     exit 0

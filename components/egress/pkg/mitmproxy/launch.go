@@ -34,11 +34,16 @@ const RunAsUser = "mitmproxy"
 // Loopback: transparent mode receives via REDIRECT; do not listen on 0.0.0.0 in the netns.
 const listenHostLoopback = "127.0.0.1"
 
+// systemScriptPath: bundled system addon shipped via the egress Dockerfile
+// (COPY components/egress/mitmscripts /var/egress/mitmscripts). Always loaded.
+const systemScriptPath = "/var/egress/mitmscripts/system.py"
+
 // Config: mitmdump --mode transparent; UserName must match iptables ! --uid-owner, ConfDir is mitm state/CA.
 type Config struct {
 	ListenPort int
 	UserName   string
 	ConfDir    string
+	// ScriptPath is an optional user-supplied addon, loaded after the system addon.
 	ScriptPath string
 	// OnExit is called (if non-nil) when mitmdump exits. Called from a background goroutine.
 	OnExit func(error)
@@ -120,8 +125,10 @@ func Launch(cfg Config) (*Running, error) {
 		args = append(args, "--set", "confdir="+cd)
 		homeEnv = cd
 	}
-	if strings.TrimSpace(cfg.ScriptPath) != "" {
-		args = append(args, "-s", strings.TrimSpace(cfg.ScriptPath))
+	// Load the system addon first so user addons can observe / override its hooks.
+	args = append(args, "-s", systemScriptPath)
+	if user := strings.TrimSpace(cfg.ScriptPath); user != "" {
+		args = append(args, "-s", user)
 	}
 
 	// Upstream passthrough: each pattern becomes --set ignore_hosts= (regex; IP ranges are practical in transparent mode).

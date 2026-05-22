@@ -270,11 +270,10 @@ public class SandboxE2ETest extends BaseE2ETest {
                         .readyTimeout(Duration.ofSeconds(60))
                         .networkPolicy(networkPolicy)
                         .build();
-        // Wait for NetworkPolicy sidecar to be fully initialized
-        try {
-            Thread.sleep(2000);
-        } catch (InterruptedException ignored) {
-        }
+        // Wait for NetworkPolicy sidecar to be fully initialized.
+        // The sidecar may accept the sandbox before iptables/proxy rules apply,
+        // so poll a denied target until the policy actually blocks it.
+        waitUntilEgressBlocks(policySandbox, "https://www.github.com", Duration.ofSeconds(30));
 
         try {
             NetworkPolicy initialPolicy = policySandbox.getEgressPolicy();
@@ -319,10 +318,8 @@ public class SandboxE2ETest extends BaseE2ETest {
                                     .target("pypi.org")
                                     .build()));
 
-            try {
-                Thread.sleep(2000);
-            } catch (InterruptedException ignored) {
-            }
+            // Poll until the patched rule takes effect (pypi now blocked).
+            waitUntilEgressBlocks(policySandbox, "https://pypi.org", Duration.ofSeconds(30));
 
             NetworkPolicy patchedPolicy = policySandbox.getEgressPolicy();
             assertNotNull(patchedPolicy);
@@ -393,10 +390,8 @@ public class SandboxE2ETest extends BaseE2ETest {
                         .readyTimeout(Duration.ofSeconds(60))
                         .networkPolicy(networkPolicy)
                         .build();
-        try {
-            Thread.sleep(2000);
-        } catch (InterruptedException ignored) {
-        }
+        // Wait for NetworkPolicy sidecar/iptables rules to be active.
+        waitUntilEgressBlocks(policySandbox, "https://www.github.com", Duration.ofSeconds(30));
 
         try {
             SandboxEndpoint egressEndpoint = policySandbox.getEndpoint(18080);
@@ -447,10 +442,8 @@ public class SandboxE2ETest extends BaseE2ETest {
                                     .target("pypi.org")
                                     .build()));
 
-            try {
-                Thread.sleep(2000);
-            } catch (InterruptedException ignored) {
-            }
+            // Poll until patched rule applied (pypi now blocked).
+            waitUntilEgressBlocks(policySandbox, "https://pypi.org", Duration.ofSeconds(30));
 
             NetworkPolicy patchedPolicy = policySandbox.getEgressPolicy();
             assertNotNull(patchedPolicy.getEgress());
@@ -1596,5 +1589,34 @@ public class SandboxE2ETest extends BaseE2ETest {
             }
         }
         return result;
+    }
+
+    /**
+     * Polls the sandbox running curl until the given URL is blocked by the
+     * network policy. Returns once curl reports an error (egress active), or
+     * fails the test if the timeout elapses.
+     */
+    private void waitUntilEgressBlocks(Sandbox sandbox, String url, Duration timeout) {
+        long deadline = System.currentTimeMillis() + timeout.toMillis();
+        Execution last = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                last = sandbox.commands().run(
+                        RunCommandRequest.builder().command("curl -I " + url).build());
+                if (last != null && last.getError() != null) {
+                    return;
+                }
+            } catch (Exception ignored) {
+                // Transient SDK/SSE errors during sidecar warmup — keep polling.
+            }
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        fail("Egress policy did not block " + url + " within " + timeout
+                + " (last execution error=" + (last == null ? "null" : last.getError()) + ")");
     }
 }

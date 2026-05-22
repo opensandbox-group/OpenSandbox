@@ -163,7 +163,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
 
         try
         {
-            await Task.Delay(5000);
+            await WaitUntilEgressBlocksAsync(policySandbox, "https://www.github.com", TimeSpan.FromSeconds(30));
 
             var initialPolicy = await policySandbox.GetEgressPolicyAsync();
             Assert.NotNull(initialPolicy);
@@ -184,7 +184,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
                 new() { Action = NetworkRuleAction.Allow, Target = "www.github.com" },
                 new() { Action = NetworkRuleAction.Deny, Target = "pypi.org" }
             });
-            await Task.Delay(2000);
+            await WaitUntilEgressBlocksAsync(policySandbox, "https://pypi.org", TimeSpan.FromSeconds(30));
 
             var patchedPolicy = await policySandbox.GetEgressPolicyAsync();
             Assert.NotNull(patchedPolicy.Egress);
@@ -233,7 +233,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
 
         try
         {
-            await Task.Delay(5000);
+            await WaitUntilEgressBlocksAsync(policySandbox, "https://www.github.com", TimeSpan.FromSeconds(30));
 
             var egressEndpoint = await policySandbox.GetEndpointAsync(Constants.DefaultEgressPort);
             Assert.Contains(
@@ -259,7 +259,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
                 new() { Action = NetworkRuleAction.Allow, Target = "www.github.com" },
                 new() { Action = NetworkRuleAction.Deny, Target = "pypi.org" }
             });
-            await Task.Delay(2000);
+            await WaitUntilEgressBlocksAsync(policySandbox, "https://pypi.org", TimeSpan.FromSeconds(30));
 
             var patchedPolicy = await policySandbox.GetEgressPolicyAsync();
             Assert.NotNull(patchedPolicy.Egress);
@@ -1111,6 +1111,35 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
                 await Task.Delay(delayMs);
         }
         return result!;
+    }
+
+    /// <summary>
+    /// Polls curl against <paramref name="url"/> until the egress sidecar blocks
+    /// it (Execution.Error becomes non-null), or the timeout elapses. NetworkPolicy
+    /// sidecars sometimes accept connections before iptables/proxy rules apply,
+    /// so a fixed sleep is flaky.
+    /// </summary>
+    private static async Task WaitUntilEgressBlocksAsync(Sandbox sandbox, string url, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        Execution? last = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                last = await sandbox.Commands.RunAsync($"curl -I {url}");
+                if (last?.Error != null)
+                {
+                    return;
+                }
+            }
+            catch
+            {
+                // Transient SDK/SSE errors during sidecar warmup — keep polling.
+            }
+            await Task.Delay(500);
+        }
+        Assert.Fail($"Egress policy did not block {url} within {timeout} (last error={last?.Error?.ToString() ?? "null"})");
     }
 }
 

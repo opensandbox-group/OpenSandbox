@@ -40,6 +40,7 @@ from opensandbox_server.services.k8s.egress_helper import (
     apply_egress_to_spec,
 )
 from opensandbox_server.services.k8s.provider_common import (
+    DEFAULT_ENTRYPOINT,
     _build_execd_init_container,
     _build_main_container,
     _container_to_dict,
@@ -317,7 +318,7 @@ class BatchSandboxProvider(WorkloadProvider):
             template_spec=template_spec if isinstance(template_spec, dict) else {},
             platform=platform,
         )
-    
+
     def _create_workload_from_pool(
         self,
         batchsandbox_name: str,
@@ -333,8 +334,10 @@ class BatchSandboxProvider(WorkloadProvider):
         spec: Dict[str, Any] = {
             "replicas": 1,
             "poolRef": pool_ref,
-            "taskTemplate": self._build_task_template(entrypoint, env),
         }
+        needs_task_template = env or entrypoint != DEFAULT_ENTRYPOINT
+        if needs_task_template:
+            spec["taskTemplate"] = self._build_task_template(entrypoint, env)
         if expires_at is not None:
             spec["expireTime"] = expires_at.isoformat()
         runtime_manifest = {

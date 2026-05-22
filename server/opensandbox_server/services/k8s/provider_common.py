@@ -36,6 +36,9 @@ from opensandbox_server.services.k8s.security_context import (
     serialize_security_context_to_dict,
 )
 
+# Default entrypoint auto-filled by the SDK when user does not provide one.
+DEFAULT_ENTRYPOINT = ["tail", "-f", "/dev/null"]
+
 _GPU_RESOURCE_LIMIT_KEY = "gpu"
 # Canonical extended-resource name advertised by the NVIDIA device plugin.
 # Hardcoded for parity with the Docker runtime fix (#775), which targets

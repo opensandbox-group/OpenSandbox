@@ -48,6 +48,8 @@ controller:
   snapshot:
     # -- Image used for commit operations (must contain nerdctl tool)
     imageCommitterImage: "image-committer:dev"
+    # -- Containerd socket path of host
+    containerdSocketPath: "/var/run/containerd/containerd.sock"
     # -- Timeout duration for commit jobs
     commitJobTimeout: "10m"
     # -- OCI registry prefix used for snapshot images.
