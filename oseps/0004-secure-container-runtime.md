@@ -180,7 +180,7 @@ Extension to `~/.sandbox.toml`. A single `[secure_runtime]` section configures t
 ```toml
 [runtime]
 type = "docker"  # or "kubernetes"
-execd_image = "opensandbox/execd:v1.0.5"
+execd_image = "opensandbox/execd:v1.0.18"
 
 # Secure container runtime configuration.
 # When enabled, ALL sandboxes on this server use the specified runtime.
@@ -210,7 +210,7 @@ Example 1 — gVisor on Docker:
 # ~/.sandbox.toml
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.5"
+execd_image = "opensandbox/execd:v1.0.18"
 
 [secure_runtime]
 type = "gvisor"
@@ -224,7 +224,7 @@ Example 2 — Kata Containers (QEMU) on Kubernetes:
 # ~/.sandbox.toml
 [runtime]
 type = "kubernetes"
-execd_image = "opensandbox/execd:v1.0.5"
+execd_image = "opensandbox/execd:v1.0.18"
 
 [secure_runtime]
 type = "kata"
@@ -559,7 +559,7 @@ def validate_secure_runtime_on_startup(config: AppConfig, docker_client=None, k8
 
 ### Docker Mode Implementation
 
-Changes to `server/src/services/docker.py`. The runtime is read from server config, not from the request:
+Changes to `server/opensandbox_server/services/docker.py`. The runtime is read from server config, not from the request:
 
 ```python
 class DockerSandboxService(SandboxService):
@@ -585,7 +585,7 @@ Both Kubernetes workload providers inject `runtimeClassName` from server config.
 
 #### BatchSandboxProvider
 
-Changes to `server/src/services/k8s/batchsandbox_provider.py`:
+Changes to `server/opensandbox_server/services/k8s/batchsandbox_provider.py`:
 
 - **CRD**: `sandbox.opensandbox.io/v1alpha1` BatchSandbox
 - **Pod spec path**: `spec.template.spec`
@@ -608,7 +608,7 @@ class BatchSandboxProvider:
 
 #### AgentSandboxProvider
 
-Changes to `server/src/services/k8s/agent_sandbox_provider.py`:
+Changes to `server/opensandbox_server/services/k8s/agent_sandbox_provider.py`:
 
 - **CRD**: `agents.x-k8s.io/v1alpha1` Sandbox
 - **Pod spec path**: `spec.podTemplate.spec`

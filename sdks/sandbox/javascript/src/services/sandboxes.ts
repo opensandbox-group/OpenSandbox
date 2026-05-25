@@ -13,21 +13,30 @@
 // limitations under the License.
 
 import type {
+  CreateSnapshotRequest,
   CreateSandboxRequest,
   CreateSandboxResponse,
   Endpoint,
+  ListSnapshotsParams,
+  ListSnapshotsResponse,
   ListSandboxesParams,
   ListSandboxesResponse,
   RenewSandboxExpirationRequest,
   RenewSandboxExpirationResponse,
+  SnapshotInfo,
   SandboxId,
   SandboxInfo,
+  SandboxMetadataPatch,
 } from "../models/sandboxes.js";
 
 export interface Sandboxes {
   createSandbox(req: CreateSandboxRequest): Promise<CreateSandboxResponse>;
   getSandbox(sandboxId: SandboxId): Promise<SandboxInfo>;
   listSandboxes(params?: ListSandboxesParams): Promise<ListSandboxesResponse>;
+  patchSandboxMetadata(
+    sandboxId: SandboxId,
+    patch: SandboxMetadataPatch,
+  ): Promise<SandboxInfo>;
   deleteSandbox(sandboxId: SandboxId): Promise<void>;
 
   pauseSandbox(sandboxId: SandboxId): Promise<void>;
@@ -38,9 +47,24 @@ export interface Sandboxes {
     req: RenewSandboxExpirationRequest,
   ): Promise<RenewSandboxExpirationResponse>;
 
+  createSnapshot(
+    sandboxId: SandboxId,
+    req?: CreateSnapshotRequest,
+  ): Promise<SnapshotInfo>;
+
+  getSnapshot(snapshotId: string): Promise<SnapshotInfo>;
+  listSnapshots(params?: ListSnapshotsParams): Promise<ListSnapshotsResponse>;
+  deleteSnapshot(snapshotId: string): Promise<void>;
+
   getSandboxEndpoint(
     sandboxId: SandboxId,
     port: number,
     useServerProxy?: boolean
+  ): Promise<Endpoint>;
+
+  getSignedEndpoint(
+    sandboxId: SandboxId,
+    port: number,
+    expires: number
   ): Promise<Endpoint>;
 }

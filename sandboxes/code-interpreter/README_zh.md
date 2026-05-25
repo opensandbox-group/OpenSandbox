@@ -11,6 +11,7 @@
 - **版本切换**：无需重新构建，支持运行时快速切换版本
 - **Jupyter 集成**：内置 Jupyter Notebook 并支持多语言内核
 - **多架构支持**：同时支持 amd64 和 arm64 架构
+- **clone3-workaround（仅 amd64）**：在 **linux/amd64** 镜像中安装 [AkihiroSuda/clone3-workaround](https://github.com/AkihiroSuda/clone3-workaround) v1.0.0 至 `/usr/local/bin/clone3-workaround`（上游无 arm64 预编译包），并安装 **`libseccomp2`**（上游二进制动态链接 `libseccomp`）。在极旧 Docker/containerd 宿主机上可用其包裹命令，例如 `clone3-workaround apt-get update`。
 - **生产就绪**：针对容器化执行环境进行了优化
 
 ## 支持的语言与版本
@@ -56,6 +57,10 @@ docker run -it --rm \
   -e GO_VERSION=1.24 \
   sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:latest
 ```
+
+### `EXECD_CLONE3_COMPAT`（clone3-workaround）
+
+若将 `EXECD_CLONE3_COMPAT` 设为 `1`、`true`、`yes`、`on` 或 `reexec`（与 [execd](../../components/execd/README_zh.md#沙箱内的-linux-clone3-兼容) 一致），入口脚本会在启动 Jupyter/内核前用 **`/usr/local/bin/clone3-workaround` 重新 `exec` 自身**。**linux/amd64** 镜像内含该二进制；**arm64** 构建会打印警告并跳过包装。包装成功后脚本会在当前进程树中 **`unset` `EXECD_CLONE3_COMPAT`**。设为 `0`、`false`、`off`、`no` 或不设置则关闭此逻辑。
 
 ## 如何切换版本
 

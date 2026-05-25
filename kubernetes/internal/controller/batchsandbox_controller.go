@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	gerrors "errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -44,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+	poolassign "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/poolassign"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/strategy"
 	taskscheduler "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/scheduler"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
@@ -58,16 +57,27 @@ var (
 	DurationStore                 = requeueduration.DurationStore{}
 )
 
+const batchSandboxFirstPodIndex = 0
+
+type taskScheduleResult struct {
+	Running, Failed, Succeed, Unknown, Pending int32
+}
+
 // BatchSandboxReconciler reconciles a BatchSandbox object
 type BatchSandboxReconciler struct {
 	client.Client
-	Scheme         *runtime.Scheme
-	Recorder       record.EventRecorder
-	taskSchedulers sync.Map
+	Scheme              *runtime.Scheme
+	Recorder            record.EventRecorder
+	ProfileStore        *poolassign.ProfileStore
+	taskSchedulers      sync.Map
+	StatusRVExpectation expectations.ResourceVersionExpectation
+	// ResumePullSecret is the K8s Secret name for pulling snapshot images during resume.
+	ResumePullSecret string
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=sandbox.opensandbox.io,resources=batchsandboxes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sandbox.opensandbox.io,resources=batchsandboxes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sandbox.opensandbox.io,resources=batchsandboxes/finalizers,verbs=update
@@ -81,11 +91,13 @@ type BatchSandboxReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
-func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	log := logf.FromContext(ctx)
+	start := time.Now()
 	var aggErrors []error
 	defer func() {
 		_ = DurationStore.Pop(req.String())
+		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
 	batchSbx := &sandboxv1alpha1.BatchSandbox{}
 	if err := r.Get(ctx, client.ObjectKey{
@@ -121,6 +133,16 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// pool strategy
 	poolStrategy := strategy.NewPoolStrategy(batchSbx)
 
+	if profileName := poolStrategy.AssignProfile(); profileName != "" {
+		updated, err := r.assignPool(ctx, batchSbx, profileName)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to auto-assign pool: %w", err)
+		}
+		if updated {
+			return ctrl.Result{}, nil
+		}
+	}
+
 	// handle finalizers
 	if batchSbx.DeletionTimestamp == nil {
 		if taskStrategy.NeedTaskScheduling() {
@@ -140,6 +162,16 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	// Pause/Resume dispatch: handles pause/resume intent before normal scaling.
+	if result, handled, err := r.dispatchPauseResume(ctx, batchSbx); handled {
+		return result, err
+	}
+
+	// dispatchPauseResume may patch BatchSandbox spec/state (for example resume detaches a pooled
+	// sandbox from its pool). Recompute strategies from the latest object before listing pods so
+	// normal reconciliation does not keep using a stale pre-dispatch view.
+	taskStrategy = strategy.NewTaskSchedulingStrategy(batchSbx)
+
 	pods, err := r.listPods(ctx, poolStrategy, batchSbx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to list pods %w", err)
@@ -152,99 +184,51 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		utils.WithPodIndexSorter(podIndex),
 		utils.PodNameSorter,
 	}).Sort)
-	// Normal Mode need scale Pods
-	if !poolStrategy.IsPooledMode() {
+	// Normal mode owns pod lifecycle except while a sandbox is fully paused. In Paused, the
+	// snapshot-backed runtime is quiesced and pods must stay absent until resume rewrites the
+	// template images and transitions back through Resuming.
+	if !poolStrategy.IsPooledMode() && batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused {
 		err := r.scaleBatchSandbox(ctx, batchSbx, batchSbx.Spec.Template, pods)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to scale batch sandbox %w", err)
 		}
 	}
 
-	// TODO merge task status update
-	newStatus := batchSbx.Status.DeepCopy()
-	newStatus.ObservedGeneration = batchSbx.Generation
-	newStatus.Replicas = 0
-	newStatus.Allocated = 0
-	newStatus.Ready = 0
-	ipList := make([]string, len(pods))
-	for i, pod := range pods {
-		newStatus.Replicas++
-		if utils.IsAssigned(pod) {
-			newStatus.Allocated++
-			ipList[i] = pod.Status.PodIP
-		}
-		if pod.Status.Phase == corev1.PodRunning && utils.IsPodReady(pod) {
-			newStatus.Ready++
-		}
-	}
-	raw, _ := json.Marshal(ipList)
-	if batchSbx.Annotations[AnnotationSandboxEndpoints] != string(raw) {
-		patchData, _ := json.Marshal(map[string]any{
-			"metadata": map[string]any{
-				"annotations": map[string]string{
-					AnnotationSandboxEndpoints: string(raw),
-				},
-			},
-		})
-		obj := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Namespace: batchSbx.Namespace, Name: batchSbx.Name}}
-		if err := r.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData)); err != nil {
-			log.Error(err, "failed to patch annotation", "annotation", AnnotationSandboxEndpoints, "body", string(patchData))
-			aggErrors = append(aggErrors, err)
-		}
-	}
-	if !reflect.DeepEqual(newStatus, batchSbx.Status) {
-		log.Info("To update BatchSandbox status", "replicas", newStatus.Replicas, "allocated", newStatus.Allocated, "ready", newStatus.Ready)
-		if err := r.updateStatus(batchSbx, newStatus); err != nil {
-			aggErrors = append(aggErrors, err)
-		}
+	runtimeView := buildRuntimeView(batchSbx, pods)
+	// Ensure PauseObservedGeneration is up-to-date so the status patch ACKs the
+	// current generation without requiring a dedicated API call.
+	// Skip during Resuming: a newer generation may carry a queued pause request
+	// that must remain unacknowledged until resume completes and handlePause runs.
+	if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseResuming &&
+		runtimeView.status.PauseObservedGeneration < batchSbx.Generation {
+		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
 	}
 
-	if taskStrategy.NeedTaskScheduling() {
-		// Because tasks are in-memory and there is no event mechanism, periodic reconciliation is required.
-		DurationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), 3*time.Second)
-		sch, err := r.getTaskScheduler(ctx, batchSbx, pods)
+	if batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused {
+		r.deleteTaskScheduler(ctx, batchSbx)
+	}
+
+	if taskStrategy.NeedTaskScheduling() && batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused {
+		ts, err := r.reconcileTasks(ctx, batchSbx, pods)
 		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if batchSbx.DeletionTimestamp != nil {
-			stoppingTasks := sch.StopTask()
-			if len(stoppingTasks) > 0 {
-				log.Info("stopping tasks", "count", len(stoppingTasks))
-			}
-		}
-		now := time.Now()
-		if err = r.scheduleTasks(ctx, sch, batchSbx); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to schedule tasks, err %w", err)
-		} else {
-			log.Info("schedule tasks completed", "costMs", time.Since(now).Milliseconds())
-		}
-		// check task cleanup is finished
-		if batchSbx.DeletionTimestamp != nil {
-			unfinishedTasks := r.getTasksCleanupUnfinished(batchSbx, sch)
-			if len(unfinishedTasks) > 0 {
-				log.Info("tasks cleanup is unfinished", "unfinishedCount", len(unfinishedTasks))
-			} else {
-				var err error
-				if controllerutil.ContainsFinalizer(batchSbx, FinalizerTaskCleanup) {
-					err = utils.UpdateFinalizer(r.Client, batchSbx, utils.RemoveFinalizerOpType, FinalizerTaskCleanup)
-					if err != nil {
-						if errors.IsNotFound(err) {
-							err = nil
-						} else {
-							log.Error(err, "failed to remove finalizer", "finalizer", FinalizerTaskCleanup)
-						}
-					}
-				}
-				if err == nil {
-					r.deleteTaskScheduler(ctx, batchSbx)
-					log.Info("task cleanup is finished, removed finalizer", "finalizer", FinalizerTaskCleanup)
-				}
-				return ctrl.Result{}, err
-			}
+			aggErrors = append(aggErrors, err)
+		} else if ts != nil {
+			runtimeView.status.TaskRunning = ts.Running
+			runtimeView.status.TaskFailed = ts.Failed
+			runtimeView.status.TaskSucceed = ts.Succeed
+			runtimeView.status.TaskUnknown = ts.Unknown
+			runtimeView.status.TaskPending = ts.Pending
 		}
 	}
 
-	return reconcile.Result{RequeueAfter: DurationStore.Pop(req.String())}, gerrors.Join(aggErrors...)
+	requeue, persistErrors := r.persistRuntimeView(ctx, batchSbx, runtimeView)
+	aggErrors = append(aggErrors, persistErrors...)
+
+	requeueAfter := DurationStore.Pop(req.String())
+	if requeue > 0 && (requeueAfter == 0 || requeue < requeueAfter) {
+		requeueAfter = requeue
+	}
+	return reconcile.Result{RequeueAfter: requeueAfter}, gerrors.Join(aggErrors...)
 }
 
 func calPodIndex(poolStrategy strategy.PoolStrategy, batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod) (map[string]int, error) {
@@ -269,6 +253,64 @@ func calPodIndex(poolStrategy strategy.PoolStrategy, batchSbx *sandboxv1alpha1.B
 		}
 	}
 	return podIndex, nil
+}
+
+func (r *BatchSandboxReconciler) reconcileTasks(
+	ctx context.Context,
+	batchSbx *sandboxv1alpha1.BatchSandbox,
+	pods []*corev1.Pod,
+) (*taskScheduleResult, error) {
+	log := logf.FromContext(ctx)
+
+	sch, err := r.getTaskScheduler(ctx, batchSbx, pods)
+	if err != nil {
+		return nil, err
+	}
+
+	// Because tasks are in-memory and there is no event mechanism, periodic reconciliation is required.
+	DurationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), 3*time.Second)
+
+	if batchSbx.DeletionTimestamp != nil {
+		stoppingTasks := sch.StopTask()
+		if len(stoppingTasks) > 0 {
+			log.Info("stopping tasks", "count", len(stoppingTasks))
+		}
+	}
+
+	now := time.Now()
+	ts, err := r.scheduleTasks(ctx, sch, batchSbx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to schedule tasks, err %w", err)
+	}
+	log.Info("schedule tasks completed", "costMs", time.Since(now).Milliseconds(), "task schedule result", utils.DumpJSON(ts))
+
+	// check task cleanup is finished
+	if batchSbx.DeletionTimestamp != nil {
+		unfinishedTasks := r.getTasksCleanupUnfinished(batchSbx, sch)
+		if len(unfinishedTasks) > 0 {
+			log.Info("tasks cleanup is unfinished", "unfinishedCount", len(unfinishedTasks))
+		} else {
+			var cleanupErr error
+			if controllerutil.ContainsFinalizer(batchSbx, FinalizerTaskCleanup) {
+				cleanupErr = utils.UpdateFinalizer(r.Client, batchSbx, utils.RemoveFinalizerOpType, FinalizerTaskCleanup)
+				if cleanupErr != nil {
+					if errors.IsNotFound(cleanupErr) {
+						cleanupErr = nil
+					} else {
+						log.Error(cleanupErr, "failed to remove finalizer", "finalizer", FinalizerTaskCleanup)
+					}
+				}
+			}
+			if cleanupErr == nil {
+				r.deleteTaskScheduler(ctx, batchSbx)
+				log.Info("task cleanup is finished, removed finalizer", "finalizer", FinalizerTaskCleanup)
+			}
+			// all tasks are cleaned up; skip returning task schedule result so the caller doesn't overwrite status
+			return nil, cleanupErr
+		}
+	}
+
+	return ts, nil
 }
 
 func (r *BatchSandboxReconciler) listPods(ctx context.Context, poolStrategy strategy.PoolStrategy, batchSbx *sandboxv1alpha1.BatchSandbox) ([]*corev1.Pod, error) {
@@ -347,21 +389,32 @@ func (r *BatchSandboxReconciler) getTaskScheduler(ctx context.Context, batchSbx 
 		}
 		// Update the pods list for this scheduler
 		tSch.UpdatePods(pods)
+		// Handle scale-out: register task specs for any replicas added since the
+		// scheduler was first created. Already-tracked task names are skipped.
+		taskStrategy := strategy.NewTaskSchedulingStrategy(batchSbx)
+		taskSpecs, err := taskStrategy.GenerateTaskSpecs()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate task specs for scale-out: %w", err)
+		}
+		if err := tSch.AddTasks(taskSpecs); err != nil {
+			return nil, fmt.Errorf("failed to add tasks on scale-out: %w", err)
+		}
 	}
 	return tSch, nil
 }
 
 func (r *BatchSandboxReconciler) deleteTaskScheduler(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox) {
-	log := logf.FromContext(ctx)
-	log.Info("delete task scheduler")
 	key := types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String()
-	r.taskSchedulers.Delete(key)
+	if _, ok := r.taskSchedulers.LoadAndDelete(key); ok {
+		log := logf.FromContext(ctx)
+		log.Info("delete task scheduler")
+	}
 }
 
-func (r *BatchSandboxReconciler) scheduleTasks(ctx context.Context, tSch taskscheduler.TaskScheduler, batchSbx *sandboxv1alpha1.BatchSandbox) error {
+func (r *BatchSandboxReconciler) scheduleTasks(ctx context.Context, tSch taskscheduler.TaskScheduler, batchSbx *sandboxv1alpha1.BatchSandbox) (*taskScheduleResult, error) {
 	log := logf.FromContext(ctx)
 	if err := tSch.Schedule(); err != nil {
-		return err
+		return nil, err
 	}
 	tasks := tSch.ListTask()
 	toReleasedPods := []string{}
@@ -393,25 +446,17 @@ func (r *BatchSandboxReconciler) scheduleTasks(ctx context.Context, tSch tasksch
 	if len(toReleasedPods) > 0 {
 		log.Info("try to release Pods", "count", len(toReleasedPods))
 		if err := r.releasePods(ctx, batchSbx, toReleasedPods); err != nil {
-			return err
+			return nil, err
 		}
 		log.Info("successfully released Pods", "count", len(toReleasedPods))
 	}
-	oldStatus := batchSbx.Status
-	newStatus := oldStatus.DeepCopy()
-	newStatus.ObservedGeneration = batchSbx.Generation
-	newStatus.TaskRunning = running
-	newStatus.TaskFailed = failed
-	newStatus.TaskSucceed = succeed
-	newStatus.TaskUnknown = unknown
-	newStatus.TaskPending = pending
-	if !reflect.DeepEqual(newStatus, oldStatus) {
-		log.Info("To update BatchSandbox status", "replicas", newStatus.Replicas, "task_running", newStatus.TaskRunning, "task_succeed", newStatus.TaskSucceed, "task_failed", newStatus.TaskFailed, "task_unknown", newStatus.TaskUnknown, "task_pending", newStatus.TaskPending)
-		if err := r.updateStatus(batchSbx, newStatus); err != nil {
-			return err
-		}
-	}
-	return nil
+	return &taskScheduleResult{
+		Running: running,
+		Failed:  failed,
+		Succeed: succeed,
+		Unknown: unknown,
+		Pending: pending,
+	}, nil
 }
 
 func (r *BatchSandboxReconciler) getTasksCleanupUnfinished(batchSbx *sandboxv1alpha1.BatchSandbox, tSch taskscheduler.TaskScheduler) []taskscheduler.Task {
@@ -464,7 +509,6 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 	for i := range pods {
 		pod := pods[i]
 		BatchSandboxScaleExpectations.ObserveScale(controllerutils.GetControllerKey(batchSandbox), expectations.Create, pod.Name)
-		pods = append(pods, pod)
 		idx, err := parseIndex(pod)
 		if err != nil {
 			return fmt.Errorf("failed to parse idx Pod %s, err %w", pod.Name, err)
@@ -513,6 +557,7 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 			return err
 		}
 		pod.Labels[LabelBatchSandboxPodIndexKey] = strconv.Itoa(idx)
+		pod.Labels[LabelBatchSandboxNameKey] = batchSandbox.Name
 		pod.Namespace = batchSandbox.Namespace
 		pod.Name = fmt.Sprintf("%s-%d", batchSandbox.Name, idx)
 		BatchSandboxScaleExpectations.ExpectScale(controllerutils.GetControllerKey(batchSandbox), expectations.Create, pod.Name)
@@ -537,23 +582,48 @@ func parseIndex(pod *corev1.Pod) (int, error) {
 	return strconv.Atoi(pod.Name[idx+1:])
 }
 
-func (r *BatchSandboxReconciler) updateStatus(batchSandbox *sandboxv1alpha1.BatchSandbox, newStatus *sandboxv1alpha1.BatchSandboxStatus) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		clone := &sandboxv1alpha1.BatchSandbox{}
-		if err := r.Get(context.TODO(), types.NamespacedName{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}, clone); err != nil {
-			return err
-		}
-		clone.Status = *newStatus
-		return r.Status().Update(context.TODO(), clone)
-	})
+// assignPool selects a Pool for the BatchSandbox using the assign package and writes
+// the result back to spec.poolRef. Returns (true, nil) when the update was applied,
+// which triggers a new reconcile with the concrete poolRef.
+func (r *BatchSandboxReconciler) assignPool(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, profileName string) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	poolList := &sandboxv1alpha1.PoolList{}
+	if err := r.List(ctx, poolList, client.InNamespace(batchSbx.Namespace)); err != nil {
+		return false, fmt.Errorf("failed to list pools: %w", err)
+	}
+
+	pools := make([]*sandboxv1alpha1.Pool, 0, len(poolList.Items))
+	for i := range poolList.Items {
+		pools = append(pools, &poolList.Items[i])
+	}
+
+	profile := r.ProfileStore.GetProfile(profileName)
+	assigner := poolassign.NewDefaultAssigner(profile)
+
+	poolName, err := assigner.AssignPool(ctx, batchSbx, pools)
+	if err != nil {
+		return false, err
+	}
+
+	oldSbx := batchSbx.DeepCopy()
+	batchSbx.Spec.PoolRef = poolName
+	patch := client.MergeFrom(oldSbx)
+	if err := r.Patch(ctx, batchSbx, patch); err != nil {
+		return false, fmt.Errorf("failed to patch poolRef: %w", err)
+	}
+
+	log.Info("auto-assigned pool", "pool", poolName)
+	return true, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.BatchSandbox{}).
 		Named("batchsandbox").
 		Owns(&corev1.Pod{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 32}).
+		Owns(&sandboxv1alpha1.SandboxSnapshot{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Complete(r)
 }

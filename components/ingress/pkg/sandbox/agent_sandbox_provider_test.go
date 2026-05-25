@@ -17,6 +17,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,7 +68,7 @@ func TestAgentSandboxProvider_Start_Success(t *testing.T) {
 		obj,
 	)
 
-	provider := newAgentSandboxProviderWithClient(fakeDyn, namespace, 30*time.Second)
+	provider := newAgentSandboxProviderWithClient(fakeDyn, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -85,8 +86,6 @@ func TestAgentSandboxProvider_Start_Success(t *testing.T) {
 }
 
 func TestAgentSandboxProvider_Start_ContextCancelled(t *testing.T) {
-	namespace := "test-ns"
-
 	scheme := runtime.NewScheme()
 	gvr := schema.GroupVersionResource{
 		Group:    agentSandboxGroup,
@@ -100,7 +99,7 @@ func TestAgentSandboxProvider_Start_ContextCancelled(t *testing.T) {
 		},
 	)
 
-	provider := newAgentSandboxProviderWithClient(fakeDyn, namespace, 30*time.Second)
+	provider := newAgentSandboxProviderWithClient(fakeDyn, 30*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before start
@@ -135,7 +134,7 @@ func TestAgentSandboxProvider_GetEndpoint_ServiceFQDN(t *testing.T) {
 		},
 	)
 
-	provider := newAgentSandboxProviderWithClient(fakeDyn, namespace, 30*time.Second)
+	provider := newAgentSandboxProviderWithClient(fakeDyn, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -148,12 +147,10 @@ func TestAgentSandboxProvider_GetEndpoint_ServiceFQDN(t *testing.T) {
 
 	endpoint, err := provider.GetEndpoint("demo")
 	assert.NoError(t, err)
-	assert.Equal(t, "sandbox.demo.svc.cluster.local", endpoint)
+	assert.Equal(t, "sandbox.demo.svc.cluster.local", endpoint.Endpoint)
 }
 
 func TestAgentSandboxProvider_GetEndpoint_NotFound(t *testing.T) {
-	namespace := "test-ns"
-
 	scheme := runtime.NewScheme()
 	gvr := schema.GroupVersionResource{
 		Group:    agentSandboxGroup,
@@ -167,7 +164,7 @@ func TestAgentSandboxProvider_GetEndpoint_NotFound(t *testing.T) {
 		},
 	)
 
-	provider := newAgentSandboxProviderWithClient(fakeDyn, namespace, 30*time.Second)
+	provider := newAgentSandboxProviderWithClient(fakeDyn, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -197,7 +194,7 @@ func TestAgentSandboxProvider_GetEndpoint_NoServiceFQDN(t *testing.T) {
 		},
 	)
 
-	provider := newAgentSandboxProviderWithClient(fakeDyn, namespace, 30*time.Second)
+	provider := newAgentSandboxProviderWithClient(fakeDyn, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -241,7 +238,7 @@ func TestAgentSandboxProvider_GetEndpoint_NotReadyCondition(t *testing.T) {
 		},
 	)
 
-	provider := newAgentSandboxProviderWithClient(fakeDyn, namespace, 30*time.Second)
+	provider := newAgentSandboxProviderWithClient(fakeDyn, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -255,4 +252,112 @@ func TestAgentSandboxProvider_GetEndpoint_NotReadyCondition(t *testing.T) {
 	_, err = provider.GetEndpoint("demo")
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrSandboxNotReady))
+}
+
+func TestAgentSandboxProvider_GetEndpoint_GlobalWatchAcrossNamespaces(t *testing.T) {
+	actualNamespace := "another-ns"
+	obj := buildUnstructuredSandbox("demo", actualNamespace)
+	obj.Object["status"] = map[string]any{
+		"serviceFQDN": "sandbox.demo.svc.cluster.local",
+		"conditions": []any{
+			map[string]any{
+				"type":   "Ready",
+				"status": "True",
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	gvr := schema.GroupVersionResource{
+		Group:    agentSandboxGroup,
+		Version:  agentSandboxVersion,
+		Resource: agentSandboxResource,
+	}
+	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		scheme,
+		map[schema.GroupVersionResource]string{
+			gvr: "SandboxList",
+		},
+	)
+	provider := newAgentSandboxProviderWithClient(fakeDyn, 30*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	assert.NoError(t, provider.Start(ctx))
+	assert.NoError(t, provider.informer.GetStore().Add(obj))
+
+	endpoint, err := provider.GetEndpoint("demo")
+	assert.NoError(t, err)
+	assert.Equal(t, "sandbox.demo.svc.cluster.local", endpoint.Endpoint)
+}
+
+func TestAgentSandboxProvider_GetEndpoint_AmbiguousAcrossNamespaces(t *testing.T) {
+	name := "demo"
+	first := buildUnstructuredSandbox(name, "ns-a")
+	first.Object["status"] = map[string]any{
+		"serviceFQDN": "sandbox.demo.ns-a.svc.cluster.local",
+		"conditions": []any{
+			map[string]any{
+				"type":   "Ready",
+				"status": "True",
+			},
+		},
+	}
+	second := buildUnstructuredSandbox(name, "ns-b")
+	second.Object["status"] = map[string]any{
+		"serviceFQDN": "sandbox.demo.ns-b.svc.cluster.local",
+		"conditions": []any{
+			map[string]any{
+				"type":   "Ready",
+				"status": "True",
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	gvr := schema.GroupVersionResource{
+		Group:    agentSandboxGroup,
+		Version:  agentSandboxVersion,
+		Resource: agentSandboxResource,
+	}
+	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		scheme,
+		map[schema.GroupVersionResource]string{
+			gvr: "SandboxList",
+		},
+	)
+	provider := newAgentSandboxProviderWithClient(fakeDyn, 30*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	assert.NoError(t, provider.Start(ctx))
+	assert.NoError(t, provider.informer.GetStore().Add(first))
+	assert.NoError(t, provider.informer.GetStore().Add(second))
+
+	_, err := provider.GetEndpoint(name)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous sandbox id")
+}
+
+func TestToDNS1035Label_HashOnSymbolOnlyIDs(t *testing.T) {
+	name1 := toDNS1035Label("!!!", agentSandboxNamePrefix)
+	name2 := toDNS1035Label("???", agentSandboxNamePrefix)
+
+	assert.NotEqual(t, name1, name2)
+	assert.Regexp(t, `^sandbox-[0-9a-f]{8}$`, name1)
+	assert.Regexp(t, `^sandbox-[0-9a-f]{8}$`, name2)
+}
+
+func TestToDNS1035Label_PrefixesDigitStart(t *testing.T) {
+	name := toDNS1035Label("1234", agentSandboxNamePrefix)
+	assert.Equal(t, "sandbox-1234", name)
+}
+
+func TestToDNS1035Label_TruncatesWithHashSuffix(t *testing.T) {
+	input := "A" + strings.Repeat("b", 100)
+	name := toDNS1035Label(input, agentSandboxNamePrefix)
+
+	assert.LessOrEqual(t, len(name), 63)
+	assert.Regexp(t, `^[a-z][a-z0-9-]*$`, name)
+	assert.Regexp(t, `[0-9a-f]{8}$`, name)
 }

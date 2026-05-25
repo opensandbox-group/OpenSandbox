@@ -16,6 +16,7 @@
 set -euxo pipefail
 
 TAG=${TAG:-latest}
+RUN_CODE_INTERPRETER_E2E=${RUN_CODE_INTERPRETER_E2E:-false}
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -45,7 +46,8 @@ echo "-------- JAVASCRIPT E2E test logs for execd --------" > /tmp/opensandbox-e
 
 # setup server
 cd server
-uv sync && uv run python -m src.main > server.log 2>&1 &
+export OPENSANDBOX_INSECURE_SERVER=YES
+uv sync && uv run python -m opensandbox_server.main > server.log 2>&1 &
 cd ..
 
 # wait for server
@@ -68,5 +70,13 @@ pnpm -C ../../sdks install --frozen-lockfile
 export OPENSANDBOX_TEST_API_KEY=""
 export OPENSANDBOX_SANDBOX_DEFAULT_IMAGE="opensandbox/code-interpreter:${TAG}"
 
-pnpm test:ci
-
+if [ "${RUN_CODE_INTERPRETER_E2E}" = "true" ]; then
+  pnpm test:ci
+else
+  pnpm run prep:sdk
+  test_files=$(find tests -name "*.test.ts" ! -name "test_code_interpreter_e2e.test.ts" -print | sort)
+  pnpm exec vitest run ${test_files} \
+    --reporter=default \
+    --reporter=junit \
+    --outputFile=build/test-results/junit.xml
+fi

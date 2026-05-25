@@ -7,10 +7,10 @@ Run [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli) (Moonshot AI) inside
 Pre-pull the code-interpreter image (includes Python 3.12+):
 
 ```shell
-docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1
+docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2
 
 # use docker hub
-# docker pull opensandbox/code-interpreter:v1.0.1
+# docker pull opensandbox/code-interpreter:v1.0.2
 ```
 
 Then start the local OpenSandbox server, stdout logs will be visible in the terminal:
@@ -37,7 +37,7 @@ The script installs Kimi Code CLI (`pip install kimi-cli`) at runtime (Python 3.
 
 - `SANDBOX_DOMAIN`: Sandbox service address (default: `localhost:8080`)
 - `SANDBOX_API_KEY`: API key if your server requires authentication (optional for local)
-- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1`)
+- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2`)
 - `KIMI_API_KEY`: Your Moonshot AI / Kimi API key (required)
 - `KIMI_BASE_URL`: Kimi API endpoint (optional; defaults to Kimi's official endpoint)
 - `KIMI_MODEL_NAME`: Model to use (default: `kimi-k2.5`)

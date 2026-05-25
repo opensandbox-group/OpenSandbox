@@ -2,6 +2,14 @@
   "name": "opensandbox-docs",
   "private": true,
   "packageManager": "pnpm@9.15.0",
+  "pnpm": {
+    "overrides": {
+      "rollup": "4.60.2",
+      "postcss": "8.5.10",
+      "esbuild": "0.25.2",
+      "vite": "6.4.2"
+    }
+  },
   "scripts": {
     "docs:sync": "node .vitepress/scripts/docs-manifest.mjs",
     "docs:spec": "node ../scripts/spec-doc/generate-spec.js --output docs/public/api/spec-inline.js",

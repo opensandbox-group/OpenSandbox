@@ -72,6 +72,30 @@ public class ExceptionTests
     }
 
     [Fact]
+    public void SandboxException_ShouldContainRequestId()
+    {
+        // Arrange & Act
+        var exception = new SandboxException("Exception message", requestId: "req-base-123");
+
+        // Assert
+        exception.RequestId.Should().Be("req-base-123");
+    }
+
+    [Fact]
+    public void SandboxException_ShouldDeclareLegacyConstructor_ForBinaryCompatibility()
+    {
+        var constructor = typeof(SandboxException).GetConstructor(
+            new[]
+            {
+                typeof(string),
+                typeof(Exception),
+                typeof(SandboxError)
+            });
+
+        constructor.Should().NotBeNull();
+    }
+
+    [Fact]
     public void SandboxException_WithoutError_ShouldCreateDefaultError()
     {
         // Arrange & Act
@@ -98,6 +122,18 @@ public class ExceptionTests
         exception.RequestId.Should().Be("req-123");
         exception.RawBody.Should().Be("Not found");
         exception.Error.Code.Should().Be(SandboxErrorCodes.UnexpectedResponse);
+    }
+
+    [Fact]
+    public void SandboxApiException_ShouldDeclareRequestIdProperty_ForBinaryCompatibility()
+    {
+        var requestIdProperty = typeof(SandboxApiException).GetProperty(
+            "RequestId",
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.DeclaredOnly);
+
+        requestIdProperty.Should().NotBeNull();
     }
 
     [Fact]

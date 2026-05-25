@@ -44,7 +44,7 @@ async def main() -> None:
     claude_model_name = os.getenv("ANTHROPIC_MODEL", "claude_sonnet4")
     image = os.getenv(
         "SANDBOX_IMAGE",
-        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
+        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2",
     )
 
     config = ConnectionConfig(

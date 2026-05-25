@@ -18,10 +18,10 @@ package dnsproxy
 
 import (
 	"net"
-	"time"
 )
 
-// Non-linux: no SO_MARK; return basic dialer.
-func (p *Proxy) dialerWithMark() *net.Dialer {
-	return &net.Dialer{Timeout: 5 * time.Second}
+// No SO_MARK: plain dialer (UNIX/Windows test builds; Linux path is in proxy_linux.go).
+func (p *Proxy) dialerForUpstream(upstreamAddr string) *net.Dialer {
+	_ = upstreamAddr
+	return &net.Dialer{Timeout: p.upstreamExchangeTimeout}
 }

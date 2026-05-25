@@ -69,6 +69,15 @@ const manualEntries = [
     titleZh: "架构设计",
   },
   {
+    key: "guide-release-verification",
+    sectionId: "overview",
+    slug: "overview/release-verification",
+    enPath: "docs/release-verification.md",
+    zhPath: null,
+    titleEn: "Release Verification",
+    titleZh: "发布验签",
+  },
+  {
     key: "guide-network",
     sectionId: "modules",
     slug: "design/single-host-network",
@@ -139,6 +148,7 @@ const shortTitleByPath = {
   "sdks/sandbox/python/README.md": "Sandbox Python SDK",
   "sdks/sandbox/csharp/README.md": "Sandbox C# SDK",
   "sdks/mcp/sandbox/python/README.md": "MCP Sandbox Python SDK",
+  "cli/README.md": "CLI (Python)",
   "sdks/sandbox/kotlin/sandbox-api/build/generated/api/execd/README.md": "Sandbox Execd API (Kotlin)",
   "sdks/sandbox/kotlin/sandbox-api/build/generated/api/lifecycle/README.md": "Sandbox Lifecycle API (Kotlin)",
 
@@ -152,7 +162,6 @@ const shortTitleByPath = {
   "examples/gemini-cli/README.md": "Gemini CLI",
   "examples/google-adk/README.md": "Google ADK",
   "examples/host-volume-mount/README.md": "Host Volume Mount",
-  "examples/iflow-cli/README.md": "iFlow CLI",
   "examples/langgraph/README.md": "LangGraph",
   "examples/playwright/README.md": "Playwright",
   "examples/README.md": "Examples Overview",
@@ -183,6 +192,7 @@ const shortTitleByPathZh = {
   "sdks/sandbox/python/README.md": "沙箱 Python SDK",
   "sdks/sandbox/csharp/README.md": "沙箱 C# SDK",
   "sdks/mcp/sandbox/python/README.md": "MCP 沙箱 Python SDK",
+  "cli/README.md": "CLI（Python）",
   "sdks/sandbox/kotlin/sandbox-api/build/generated/api/execd/README.md": "沙箱 Execd API（Kotlin）",
   "sdks/sandbox/kotlin/sandbox-api/build/generated/api/lifecycle/README.md": "沙箱生命周期 API（Kotlin）",
 
@@ -196,7 +206,6 @@ const shortTitleByPathZh = {
   "examples/gemini-cli/README.md": "Gemini CLI",
   "examples/google-adk/README.md": "Google ADK",
   "examples/host-volume-mount/README.md": "宿主机目录挂载",
-  "examples/iflow-cli/README.md": "iFlow CLI",
   "examples/langgraph/README.md": "LangGraph",
   "examples/playwright/README.md": "Playwright",
   "examples/README.md": "示例总览",

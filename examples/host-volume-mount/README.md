@@ -17,8 +17,8 @@ This example demonstrates how to mount host directories into sandbox containers 
 ```shell
 git clone git@github.com:alibaba/OpenSandbox.git
 cd OpenSandbox/server
-cp example.config.toml ~/.sandbox.toml
-uv sync && uv run python -m src.main
+cp opensandbox_server/examples/example.config.toml ~/.sandbox.toml
+uv sync && uv run python -m opensandbox_server.main
 ```
 
 ### 2. Configure Allowed Host Paths
@@ -224,4 +224,4 @@ Sandbox sandbox = Sandbox.builder()
 
 - [OSEP-0003: Volume and VolumeBinding Support](../../oseps/0003-volume-and-volumebinding-support.md) — Design proposal
 - [Sandbox Lifecycle API Spec](../../specs/sandbox-lifecycle.yml) — OpenAPI schema for volume definitions
-- [Server Configuration](../../server/example.config.toml) — `[storage]` section for `allowed_host_paths`
+- [Server Configuration](../../server/opensandbox_server/examples/example.config.toml) — `[storage]` section for `allowed_host_paths`

@@ -55,7 +55,7 @@ public class QuickStart {
         // Use try-with-resources to ensure sandbox is closed
         try (Sandbox sandbox = Sandbox.builder()
                 .connectionConfig(config)
-                .image("opensandbox/code-interpreter:v1.0.1")
+                .image("opensandbox/code-interpreter:v1.0.2")
                 .entrypoint("/opt/opensandbox/code-interpreter.sh")
                 .env("PYTHON_VERSION", "3.11") // Select specific language version
                 .build()) {
@@ -102,6 +102,28 @@ The Code Interpreter SDK relies on a specialized environment. Ensure your sandbo
 
 For detailed information about supported languages and versions, please refer to the [Environment Documentation](../../../sandboxes/code-interpreter/README.md).
 
+### Troubleshooting: `pip: command not found`
+
+If you are using the Kotlin/Java client and run shell commands such as
+`pip install pandas`, make sure the sandbox is created from the
+`opensandbox/code-interpreter` image (or a derivative) and uses the
+Code Interpreter entrypoint:
+
+```java
+Sandbox sandbox = Sandbox.builder()
+    .image("opensandbox/code-interpreter:v1.0.2")
+    .entrypoint("/opt/opensandbox/code-interpreter.sh")
+    .env("PYTHON_VERSION", "3.11")
+    .build();
+```
+
+The plain Sandbox SDK can also talk to generic sandbox images, but those
+images are not guaranteed to include Python or `pip`. In that case,
+commands such as `pip install ...` will fail with `pip: command not found`.
+Use the package manager that matches the image you launched, or switch to the
+Code Interpreter image when you need Python package installation/runtime
+behavior.
+
 ### Language Version Selection
 
 You can specify the desired version of a programming language by setting the corresponding environment variable when building the `Sandbox`.
@@ -115,7 +137,7 @@ You can specify the desired version of a programming language by setting the cor
 
 ```java
 Sandbox sandbox = Sandbox.builder()
-    .image("opensandbox/code-interpreter:v1.0.1")
+    .image("opensandbox/code-interpreter:v1.0.2")
     .entrypoint("/opt/opensandbox/code-interpreter.sh")
     .env("JAVA_VERSION", "17")
     .env("GO_VERSION", "1.23")

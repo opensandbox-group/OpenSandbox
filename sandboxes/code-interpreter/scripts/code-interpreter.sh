@@ -13,6 +13,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# If EXECD_CLONE3_COMPAT is set (same accepted values as execd's pkg/clone3compat), re-exec this
+# script under AkihiroSuda/clone3-workaround so the rest of startup runs with clone3 -> ENOSYS.
+# See https://github.com/AkihiroSuda/clone3-workaround — binary is /usr/local/bin/clone3-workaround (amd64 image only).
+_execd_clone3_compat_normalized=$(
+	echo "${EXECD_CLONE3_COMPAT:-}" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+)
+case "${_execd_clone3_compat_normalized}" in
+"" | 0 | false | off | no) ;;
+1 | true | yes | on | reexec)
+	if [ -z "${_CODE_INTERPRETER_CLONE3_WRAPPED:-}" ]; then
+		_ci_script=${BASH_SOURCE[0]}
+		if command -v readlink >/dev/null 2>&1 && _rp=$(readlink -f "${_ci_script}" 2>/dev/null); then
+			_ci_script=${_rp}
+		fi
+		if [ -x /usr/local/bin/clone3-workaround ]; then
+			export _CODE_INTERPRETER_CLONE3_WRAPPED=1
+			exec /usr/local/bin/clone3-workaround /bin/bash "${_ci_script}" "$@"
+		else
+			echo "code-interpreter: EXECD_CLONE3_COMPAT is set but /usr/local/bin/clone3-workaround is missing (not installed for this architecture); continuing without wrapper" >&2
+		fi
+	fi
+	unset _ci_script _rp
+	;;
+*)
+	echo "code-interpreter: invalid EXECD_CLONE3_COMPAT=${EXECD_CLONE3_COMPAT:-} (use 1, true, yes, on, or reexec)" >&2
+	exit 1
+	;;
+esac
+unset _execd_clone3_compat_normalized
+
+if [ -n "${_CODE_INTERPRETER_CLONE3_WRAPPED:-}" ]; then
+	unset EXECD_CLONE3_COMPAT
+fi
+
 declare -a pids=()
 BASHRC_FILE=${BASHRC_FILE:-/root/.bashrc}
 

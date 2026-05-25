@@ -19,15 +19,19 @@ import type { Codes } from "../services/codes.js";
 
 export class DefaultAdapterFactory implements AdapterFactory {
   createCodes(opts: CreateCodesStackOptions): Codes {
+    const headers: Record<string, string> = {
+      ...(opts.sandbox.connectionConfig.headers ?? {}),
+      ...(opts.endpointHeaders ?? {}),
+    };
     const client = createExecdClient({
       baseUrl: opts.execdBaseUrl,
-      headers: opts.sandbox.connectionConfig.headers,
+      headers,
       fetch: opts.sandbox.connectionConfig.fetch,
     });
 
     return new CodesAdapter(client, {
       baseUrl: opts.execdBaseUrl,
-      headers: opts.sandbox.connectionConfig.headers,
+      headers,
       // Streaming calls (SSE) use a dedicated fetch, aligned with Kotlin/Python SDKs.
       fetch: opts.sandbox.connectionConfig.sseFetch,
     });

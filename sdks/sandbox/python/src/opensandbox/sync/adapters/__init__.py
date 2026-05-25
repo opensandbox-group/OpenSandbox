@@ -18,6 +18,7 @@ Synchronous adapter implementations.
 """
 
 from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
+from opensandbox.sync.adapters.egress_adapter import EgressAdapterSync
 from opensandbox.sync.adapters.factory import AdapterFactorySync
 from opensandbox.sync.adapters.filesystem_adapter import FilesystemAdapterSync
 from opensandbox.sync.adapters.health_adapter import HealthAdapterSync
@@ -26,6 +27,7 @@ from opensandbox.sync.adapters.sandboxes_adapter import SandboxesAdapterSync
 
 __all__ = [
     "CommandsAdapterSync",
+    "EgressAdapterSync",
     "FilesystemAdapterSync",
     "HealthAdapterSync",
     "MetricsAdapterSync",

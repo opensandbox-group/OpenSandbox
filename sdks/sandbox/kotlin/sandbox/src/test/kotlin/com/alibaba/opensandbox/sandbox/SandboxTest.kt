@@ -18,11 +18,16 @@ package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.services.Commands
+import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
+import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.Health
 import com.alibaba.opensandbox.sandbox.domain.services.Metrics
@@ -35,6 +40,7 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.verify
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -61,6 +67,12 @@ class SandboxTest {
     lateinit var metricsService: Metrics
 
     @MockK
+    lateinit var egressService: Egress
+
+    @MockK
+    lateinit var diagnosticsService: Diagnostics
+
+    @MockK
     lateinit var httpClientProvider: HttpClientProvider
 
     private lateinit var sandbox: Sandbox
@@ -68,6 +80,14 @@ class SandboxTest {
 
     @BeforeEach
     fun setUp() {
+        every {
+            httpClientProvider.config
+        } returns
+            ConnectionConfig.builder()
+                .domain("localhost:8080")
+                .useServerProxy(false)
+                .build()
+
         sandbox =
             Sandbox(
                 id = sandboxId,
@@ -76,8 +96,10 @@ class SandboxTest {
                 commandService = commandService,
                 healthService = healthService,
                 metricsService = metricsService,
+                egressService = egressService,
                 customHealthCheck = null,
                 httpClientProvider = httpClientProvider,
+                diagnosticsService = diagnosticsService,
             )
     }
 
@@ -94,6 +116,11 @@ class SandboxTest {
     @Test
     fun `metrics should return metrics service`() {
         assertSame(metricsService, sandbox.metrics())
+    }
+
+    @Test
+    fun `diagnostics should return diagnostics service`() {
+        assertSame(diagnosticsService, sandbox.diagnostics())
     }
 
     @Test
@@ -138,6 +165,28 @@ class SandboxTest {
     }
 
     @Test
+    fun `getDiagnosticLogs should delegate to diagnosticsService`() {
+        val expected = mockk<DiagnosticContent>()
+        every { diagnosticsService.getLogs(sandboxId, "container") } returns expected
+
+        val result = sandbox.getDiagnosticLogs("container")
+
+        assertSame(expected, result)
+        verify { diagnosticsService.getLogs(sandboxId, "container") }
+    }
+
+    @Test
+    fun `getDiagnosticEvents should delegate to diagnosticsService`() {
+        val expected = mockk<DiagnosticContent>()
+        every { diagnosticsService.getEvents(sandboxId, "runtime") } returns expected
+
+        val result = sandbox.getDiagnosticEvents("runtime")
+
+        assertSame(expected, result)
+        verify { diagnosticsService.getEvents(sandboxId, "runtime") }
+    }
+
+    @Test
     fun `renew should delegate to sandboxService`() {
         val timeout = Duration.ofMinutes(10)
         val expectedRenew = mockk<SandboxRenewResponse>()
@@ -146,6 +195,41 @@ class SandboxTest {
         val actualRenew = sandbox.renew(timeout)
 
         assertSame(expectedRenew, actualRenew)
+    }
+
+    @Test
+    fun `getEgressPolicy should delegate to egressService`() {
+        val expectedPolicy = mockk<NetworkPolicy>()
+        every { egressService.getPolicy() } returns expectedPolicy
+
+        val result = sandbox.getEgressPolicy()
+
+        assertSame(expectedPolicy, result)
+        verify { egressService.getPolicy() }
+    }
+
+    @Test
+    fun `patchEgressRules should delegate to egressService`() {
+        val rules = listOf(mockk<NetworkRule>())
+        every { egressService.patchRules(rules) } just Runs
+
+        sandbox.patchEgressRules(rules)
+
+        verify { egressService.patchRules(rules) }
+    }
+
+    @Test
+    fun `builder manualCleanup should clear timeout`() {
+        val builder =
+            Sandbox.builder()
+                .image("python:3.12")
+                .timeout(Duration.ofMinutes(5))
+                .manualCleanup()
+
+        val timeoutField = builder.javaClass.getDeclaredField("timeout")
+        timeoutField.isAccessible = true
+
+        assertNull(timeoutField.get(builder))
     }
 
     @Test
@@ -207,5 +291,39 @@ class SandboxTest {
         assertThrows(SandboxReadyTimeoutException::class.java) {
             sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
         }
+    }
+
+    @Test
+    fun `checkReady timeout should include connection context and bridge hint`() {
+        every { healthService.ping(sandboxId) } throws RuntimeException("connect ECONNREFUSED")
+
+        val ex =
+            assertThrows(SandboxReadyTimeoutException::class.java) {
+                sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
+            }
+
+        assertTrue(ex.message!!.contains("Connection context: domain=localhost:8080, useServerProxy=false"))
+        assertTrue(ex.message!!.contains("useServerProxy=true"))
+        assertTrue(ex.message!!.contains("[docker].host_ip"))
+        assertTrue(ex.message!!.contains("Last error: connect ECONNREFUSED"))
+    }
+
+    @Test
+    fun `checkReady timeout should omit host_ip hint when server proxy is enabled`() {
+        val proxyEnabledConfig =
+            ConnectionConfig.builder()
+                .domain("localhost:8080")
+                .useServerProxy(true)
+                .build()
+        every { httpClientProvider.config } returns proxyEnabledConfig
+        every { healthService.ping(sandboxId) } returns false
+
+        val ex =
+            assertThrows(SandboxReadyTimeoutException::class.java) {
+                sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
+            }
+
+        assertTrue(ex.message!!.contains("useServerProxy=true"))
+        assertFalse(ex.message!!.contains("[docker].host_ip"))
     }
 }

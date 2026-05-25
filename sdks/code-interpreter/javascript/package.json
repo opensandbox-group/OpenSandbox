@@ -1,6 +1,6 @@
 {
   "name": "@alibaba-group/opensandbox-code-interpreter",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "OpenSandbox Code Interpreter TypeScript/JavaScript SDK",
   "license": "Apache-2.0",
   "type": "module",
@@ -34,17 +34,19 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "tsup",
+    "test": "pnpm run build && node --test tests/*.test.mjs",
     "lint": "eslint src --max-warnings 0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
     "@alibaba-group/opensandbox": "workspace:^"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
-    "eslint": "^9.39.2",
-    "tsup": "^8.5.0",
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
+    "tsup": "^8.5.1",
     "typescript": "^5.7.2",
-    "typescript-eslint": "^8.52.0"
+    "typescript-eslint": "^8.59.0"
   }
 }

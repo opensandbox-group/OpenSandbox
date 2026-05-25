@@ -1,0 +1,30 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: {{.BatchSandboxName}}
+  namespace: {{.Namespace}}
+spec:
+  replicas: {{.Replicas}}
+  poolRef: "*"
+  template:
+    spec:
+      containers:
+      - name: main
+        image: {{.SandboxImage}}
+        command: ["sleep", "3600"]
+        {{- if .Resources }}
+        resources:
+          requests:
+            {{- range $key, $val := .Resources }}
+            {{ $key }}: "{{ $val }}"
+            {{- end }}
+        {{- end }}
+      {{- if .NodeSelector }}
+      nodeSelector:
+        {{- range $key, $val := .NodeSelector }}
+        {{ $key }}: "{{ $val }}"
+        {{- end }}
+      {{- end }}
+      {{- if .AffinityYAML }}
+      affinity:{{ .AffinityYAML }}
+      {{- end }}

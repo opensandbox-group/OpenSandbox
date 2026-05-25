@@ -122,6 +122,24 @@ public sealed class SandboxManager : IAsyncDisposable
     }
 
     /// <summary>
+    /// Patches metadata for a sandbox.
+    /// </summary>
+    /// <param name="sandboxId">The sandbox ID.</param>
+    /// <param name="patch">Metadata merge patch. Non-null values add or replace keys; null values delete keys.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The current sandbox information after applying the patch.</returns>
+    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="sandboxId"/> is null or empty.</exception>
+    /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
+    public Task<SandboxInfo> PatchSandboxMetadataAsync(
+        string sandboxId,
+        IReadOnlyDictionary<string, string?> patch,
+        CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Patching sandbox metadata: {SandboxId}", sandboxId);
+        return _sandboxes.PatchSandboxMetadataAsync(sandboxId, patch, cancellationToken);
+    }
+
+    /// <summary>
     /// Terminates a sandbox.
     /// </summary>
     /// <param name="sandboxId">The sandbox ID.</param>
@@ -185,6 +203,38 @@ public sealed class SandboxManager : IAsyncDisposable
         {
             ExpiresAt = expiresAt
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<SnapshotInfo> CreateSnapshotAsync(
+        string sandboxId,
+        string? name = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.CreateSnapshotAsync(
+            sandboxId,
+            new CreateSnapshotRequest { Name = name },
+            cancellationToken);
+    }
+
+    public Task<SnapshotInfo> GetSnapshotAsync(
+        string snapshotId,
+        CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.GetSnapshotAsync(snapshotId, cancellationToken);
+    }
+
+    public Task<ListSnapshotsResponse> ListSnapshotsAsync(
+        ListSnapshotsParams? filter = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.ListSnapshotsAsync(filter, cancellationToken);
+    }
+
+    public Task DeleteSnapshotAsync(
+        string snapshotId,
+        CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.DeleteSnapshotAsync(snapshotId, cancellationToken);
     }
 
     /// <summary>

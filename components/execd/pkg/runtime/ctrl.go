@@ -35,14 +35,16 @@ var kernelWaitingBackoff = wait.Backoff{
 
 // Controller manages code execution across runtimes.
 type Controller struct {
-	baseURL                        string
-	token                          string
-	mu                             sync.RWMutex
-	jupyterClientMap               map[string]*jupyterKernel
-	defaultLanguageJupyterSessions map[Language]string
-	commandClientMap               map[string]*commandKernel
-	db                             *sql.DB
-	dbOnce                         sync.Once
+	baseURL                 string
+	token                   string
+	mu                      sync.RWMutex
+	jupyterClientMap        sync.Map // map[sessionID]*jupyterKernel
+	defaultLanguageSessions sync.Map // map[Language]string
+	commandClientMap        sync.Map // map[sessionID]*commandKernel
+	bashSessionClientMap    sync.Map // map[sessionID]*bashSession
+	ptySessionMap           sync.Map // map[sessionID]*ptySession
+	db                      *sql.DB
+	dbOnce                  sync.Once
 }
 
 type jupyterKernel struct {
@@ -70,10 +72,6 @@ func NewController(baseURL, token string) *Controller {
 	return &Controller{
 		baseURL: baseURL,
 		token:   token,
-
-		jupyterClientMap:               make(map[string]*jupyterKernel),
-		defaultLanguageJupyterSessions: make(map[Language]string),
-		commandClientMap:               make(map[string]*commandKernel),
 	}
 }
 

@@ -102,7 +102,16 @@ from importlib.metadata import version as _pkg_version
 from opensandbox.manager import SandboxManager
 from opensandbox.pool_manager import PoolManager
 from opensandbox.sandbox import Sandbox
-from opensandbox.sync import SandboxManagerSync, SandboxSync, PoolManagerSync
+from opensandbox.sync import SandboxManagerSync, SandboxSync, PoolManagerSync, SandboxPoolSync
+from opensandbox.pool import (
+    AcquirePolicy,
+    AsyncSandboxPool,
+    InMemoryAsyncPoolStateStore,
+    InMemoryPoolStateStore,
+    PoolCreationSpec,
+    SandboxPool,
+    SandboxPoolAsync,
+)
 
 try:
     __version__ = _pkg_version("opensandbox")
@@ -117,4 +126,12 @@ __all__ = [
     "SandboxManagerSync",
     "PoolManager",
     "PoolManagerSync",
+    "SandboxPoolSync",
+    "SandboxPoolAsync",
+    "AsyncSandboxPool",
+    "SandboxPool",
+    "AcquirePolicy",
+    "PoolCreationSpec",
+    "InMemoryAsyncPoolStateStore",
+    "InMemoryPoolStateStore",
 ]

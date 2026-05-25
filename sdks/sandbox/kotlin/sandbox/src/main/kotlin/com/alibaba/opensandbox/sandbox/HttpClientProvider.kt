@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
 import okhttp3.ConnectionPool
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -106,6 +107,7 @@ class HttpClientProvider(
                     // Redact sensitive headers in logs
                     redactHeader("OPEN-SANDBOX-API-KEY")
                     redactHeader("Authorization")
+                    redactHeader(SECURE_ACCESS_HEADER)
                 }
             addInterceptor(loggingInterceptor)
         }

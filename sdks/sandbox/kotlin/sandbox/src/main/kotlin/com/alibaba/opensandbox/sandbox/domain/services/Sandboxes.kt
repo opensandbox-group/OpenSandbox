@@ -18,12 +18,16 @@ package com.alibaba.opensandbox.sandbox.domain.services
 
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxCreateResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import java.time.Duration
 import java.time.OffsetDateTime
@@ -42,23 +46,29 @@ interface Sandboxes {
      * @param entrypoint The command to run as the sandbox's main process (e.g. `["python", "/app/main.py"]`)
      * @param env Environment variables injected into the sandbox runtime
      * @param metadata User-defined metadata used for management and filtering
-     * @param timeout Sandbox lifetime. The server may terminate the sandbox when it expires
+     * @param timeout Sandbox lifetime. Pass null to require explicit cleanup.
      * @param resource Runtime resource limits (e.g. cpu/memory). Exact semantics are server-defined
+     * @param platform Optional runtime platform constraint used for provisioning
      * @param networkPolicy Optional outbound network policy (egress)
+     * @param secureAccess Whether to enable secured access for sandbox endpoints
      * @param extensions Opaque extension parameters passed through to the server as-is. Prefer namespaced keys
      * @param volumes Optional list of volume mounts for persistent storage
+     * @param snapshotId Optional snapshot identifier used to restore a sandbox instead of booting from an image
      * @return Sandbox creation response containing the sandbox id
      */
     fun createSandbox(
-        spec: SandboxImageSpec,
-        entrypoint: List<String>,
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
         env: Map<String, String>,
         metadata: Map<String, String>,
-        timeout: Duration,
+        timeout: Duration?,
         resource: Map<String, String>,
         networkPolicy: NetworkPolicy?,
         extensions: Map<String, String>,
         volumes: List<Volume>?,
+        platform: PlatformSpec? = null,
+        secureAccess: Boolean = false,
+        snapshotId: String? = null,
     ): SandboxCreateResponse
 
     /**
@@ -76,6 +86,29 @@ interface Sandboxes {
      * @return List of sandbox information matching the filter
      */
     fun listSandboxes(filter: SandboxFilter): PagedSandboxInfos
+
+    /**
+     * Patches sandbox metadata.
+     *
+     * @param sandboxId Unique identifier of the sandbox
+     * @param patch Metadata merge patch. Non-null values add or replace keys; null values delete keys
+     * @return Current sandbox information after applying the patch
+     */
+    fun patchSandboxMetadata(
+        sandboxId: String,
+        patch: Map<String, String?>,
+    ): SandboxInfo
+
+    fun createSnapshot(
+        sandboxId: String,
+        name: String? = null,
+    ): SnapshotInfo
+
+    fun getSnapshot(snapshotId: String): SnapshotInfo
+
+    fun listSnapshots(filter: SnapshotFilter): PagedSnapshotInfos
+
+    fun deleteSnapshot(snapshotId: String)
 
     /**
      * Get sandbox endpoint
@@ -101,6 +134,22 @@ interface Sandboxes {
         sandboxId: String,
         port: Int,
         useServerProxy: Boolean,
+    ): SandboxEndpoint
+
+    /**
+     * Get signed sandbox endpoint with an OSEP-0011 route token.
+     *
+     * @param sandboxId sandbox id
+     * @param port endpoint port number
+     * @param expires Unix epoch seconds for the signed route token expiry
+     * @param useServerProxy whether to use server proxy for endpoint (default false)
+     * @return Target sandbox endpoint
+     */
+    fun getSignedSandboxEndpoint(
+        sandboxId: String,
+        port: Int,
+        expires: Long,
+        useServerProxy: Boolean = false,
     ): SandboxEndpoint
 
     /**

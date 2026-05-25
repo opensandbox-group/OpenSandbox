@@ -1,0 +1,72 @@
+# Copyright 2025 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example Docker Runtime Configuration for OpenSandbox Server
+#
+# Full configuration reference: https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md
+
+[server]
+host = "127.0.0.1"
+port = 8080
+max_sandbox_timeout_seconds = 86400
+
+# Optional: Uncomment to enable API key authentication
+# api_key = "your-secret-api-key"
+# If api_key stays empty, startup requires explicit acknowledgment:
+# - Interactive TTY: type YES when prompted
+# - Non-interactive: set OPENSANDBOX_INSECURE_SERVER=YES
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:v1.0.18"
+
+[storage]
+# Allowlist of host path prefixes permitted for bind mounts.
+# If empty, all host paths are allowed (not recommended for production).
+# Example: allowed_host_paths = ["/data/opensandbox", "/tmp/sandbox"]
+allowed_host_paths = []
+
+# Default storage size for auto-created Kubernetes PVCs (when caller omits size).
+volume_default_size = "1Gi"
+
+[store]
+type = "sqlite"
+path = "~/.opensandbox/opensandbox.db"
+
+[docker]
+network_mode = "bridge"
+# Drop dangerous capabilities and block privilege escalation
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+no_new_privileges = true
+# Optional: set an AppArmor profile name (e.g., "docker-default") when AppArmor is enabled
+apparmor_profile = ""
+# Limit process count to reduce host impact from fork bombs; set to null to disable
+pids_limit = 4096
+# Seccomp profile: empty string uses Docker default; set to an absolute path for a custom profile
+seccomp_profile = ""
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "opensandbox/egress:v1.0.12"
+mode = "dns"
+
+# 🧪 [EXPERIMENTAL] Renew-on-access. Off by default — see server/README.md.
+[renew_intent]
+enabled = false
+min_interval_seconds = 60

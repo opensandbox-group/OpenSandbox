@@ -1,0 +1,92 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  labels:
+    app.kubernetes.io/name: sandbox-k8s
+    app.kubernetes.io/managed-by: kustomize
+  name: pool-win-example
+  namespace: opensandbox
+spec:
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+      - env:
+        - name: VERSION
+          value: "11"
+        - name: CPU_CORES
+          value: "8"
+        - name: RAM_SIZE
+          value: 16G
+        - name: DISK_SIZE
+          value: 64G
+        - name: USER_PORTS
+          value: 44772,8080,3389,8006
+        image: dockurr/windows:latest
+        imagePullPolicy: IfNotPresent
+        name: sandbox
+        resources:
+          limits:
+            cpu: "8"
+            memory: 18Gi
+          requests:
+            cpu: "8"
+            memory: 18Gi
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+          privileged: true
+        volumeMounts:
+        - mountPath: /opt/opensandbox/bin
+          name: opensandbox-bin
+        - mountPath: /oem
+          name: opensandbox-win-oem
+        - mountPath: /dev/kvm
+          name: opensandbox-win-kvm
+        - mountPath: /dev/net/tun
+          name: opensandbox-win-tun
+        - mountPath: /storage
+          name: opensandbox-win-storage
+      initContainers:
+      - args:
+        - cp ./install.bat /oem/install.bat && cp ./execd.exe /oem/execd.exe && chmod
+          0644 /oem/install.bat /oem/execd.exe
+        command:
+        - /bin/sh
+        - -c
+        image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18
+        name: execd-installer
+        volumeMounts:
+        - mountPath: /opt/opensandbox/bin
+          name: opensandbox-bin
+        - mountPath: /oem
+          name: opensandbox-win-oem
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      restartPolicy: Always
+      tolerations:
+      - operator: Exists
+      volumes:
+      - emptyDir: {}
+        name: opensandbox-bin
+      - emptyDir: {}
+        name: opensandbox-win-oem
+      - hostPath:
+          path: /dev/kvm
+          type: CharDevice
+        name: opensandbox-win-kvm
+      - hostPath:
+          path: /dev/net/tun
+          type: CharDevice
+        name: opensandbox-win-tun
+      - emptyDir: {}
+        name: opensandbox-win-storage
+  capacitySpec:
+    bufferMax: 3
+    bufferMin: 1
+    poolMax: 5
+    poolMin: 0

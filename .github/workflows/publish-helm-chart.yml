@@ -25,6 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -115,8 +118,13 @@ jobs:
           CHART_PATH="${{ steps.chart_path.outputs.path }}"
           helm package $CHART_PATH
 
+      - name: Attest packaged Helm chart
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.parse_tag.outputs.component }}-*.tgz
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: helm/${{ steps.parse_tag.outputs.component }}/${{ steps.parse_tag.outputs.app_version }}
           name: Helm Chart ${{ steps.parse_tag.outputs.component }} ${{ steps.chart_version.outputs.version }} (App v${{ steps.parse_tag.outputs.app_version }})

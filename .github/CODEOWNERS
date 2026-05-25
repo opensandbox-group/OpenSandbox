@@ -5,7 +5,7 @@
 * @jwx0925 @hittyt @hellomypastor @Pangjiping @ninan-nn
 
 # Control plane (server)
-/server/ @Pangjiping @hittyt @jwx0925 @Generalwin
+/server/ @Pangjiping @hittyt @jwx0925 @Generalwin @ninan-nn
 
 # Runtime agent (execd) and sandbox images
 /components/execd/ @Pangjiping @hittyt @ninan-nn
@@ -14,10 +14,10 @@
 /sandboxes/ @Pangjiping @ninan-nn @jwx0925 @hittyt @hellomypastor
 
 # Kubernetes controller
-/kubernetes/ @Spground @Generalwin @fengcone @kevinlynx
+/kubernetes/ @Spground @Generalwin @fengcone @kevinlynx @ninan-nn @hittyt @Pangjiping
 
 # SDKs
-/sdks/ @ninan-nn @jwx0925 @hittyt @hellomypastor
+/sdks/ @ninan-nn @jwx0925 @hittyt @hellomypastor @Pangjiping
 
 # Specs and docs
 /specs/ @jwx0925 @hittyt @ninan-nn

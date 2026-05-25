@@ -56,6 +56,7 @@ generate-api: ## Generate API clients from OpenAPI specs (using openapi-python-c
 
 clean-api: ## Clean generated API client code
 	rm -rf src/opensandbox/api/execd/
+	rm -rf src/opensandbox/api/egress/
 	rm -rf src/opensandbox/api/lifecycle/
 
 # Docker targets

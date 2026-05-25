@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
 
 // loadExtraEnvFromFile reads key=value lines from EXECD_ENVS (if set).
@@ -29,10 +30,15 @@ func loadExtraEnvFromFile() map[string]string {
 	if path == "" {
 		return nil
 	}
-
-	data, err := os.ReadFile(path)
+	resolvedPath, err := pathutil.ExpandPath(path)
 	if err != nil {
-		log.Warn("EXECD_ENVS: failed to read file %s: %v", path, err)
+		log.Warn("EXECD_ENVS: failed to resolve file path %s: %v", path, err)
+		return nil
+	}
+
+	data, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		log.Warn("EXECD_ENVS: failed to read file %s: %v", resolvedPath, err)
 		return nil
 	}
 
@@ -78,4 +84,21 @@ func mergeEnvs(base []string, extra map[string]string) []string {
 	}
 
 	return out
+}
+
+// mergeExtraEnvs merges environment maps from file and request-level overrides.
+func mergeExtraEnvs(fromFile, fromRequest map[string]string) map[string]string {
+	if len(fromRequest) == 0 {
+		return fromFile
+	}
+
+	merged := make(map[string]string, len(fromFile)+len(fromRequest))
+	for k, v := range fromFile {
+		merged[k] = v
+	}
+	for k, v := range fromRequest {
+		merged[k] = v
+	}
+
+	return merged
 }

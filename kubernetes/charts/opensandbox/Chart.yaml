@@ -16,8 +16,8 @@ apiVersion: v2
 name: opensandbox
 description: All-in-one Helm chart for deploying OpenSandbox controller and server
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 
 keywords:
   - sandbox
@@ -40,7 +40,7 @@ kubeVersion: ">=1.21.1-0"
 
 dependencies:
   - name: opensandbox-controller
-    version: "0.1.0"
+    version: "0.2.0"
     repository: "file://../opensandbox-controller"
   - name: opensandbox-server
     version: "0.1.0"

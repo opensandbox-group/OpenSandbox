@@ -44,6 +44,7 @@ interface SandboxExceptionOpts {
   message?: string;
   cause?: unknown;
   error?: SandboxError;
+  requestId?: string;
 }
 
 /**
@@ -55,32 +56,32 @@ export class SandboxException extends Error {
   readonly name: string = "SandboxException";
   readonly error: SandboxError;
   readonly cause?: unknown;
+  readonly requestId?: string;
 
   constructor(opts: SandboxExceptionOpts = {}) {
     super(opts.message);
     this.cause = opts.cause;
     this.error = opts.error ?? new SandboxError(SandboxError.INTERNAL_UNKNOWN_ERROR);
+    this.requestId = opts.requestId;
   }
 }
 
 export class SandboxApiException extends SandboxException {
   readonly name: string = "SandboxApiException";
   readonly statusCode?: number;
-  readonly requestId?: string;
   readonly rawBody?: unknown;
 
   constructor(opts: SandboxExceptionOpts & {
     statusCode?: number;
-    requestId?: string;
     rawBody?: unknown;
   }) {
     super({
       message: opts.message,
       cause: opts.cause,
       error: opts.error ?? new SandboxError(SandboxError.UNEXPECTED_RESPONSE, opts.message),
+      requestId: opts.requestId,
     });
     this.statusCode = opts.statusCode;
-    this.requestId = opts.requestId;
     this.rawBody = opts.rawBody;
   }
 }

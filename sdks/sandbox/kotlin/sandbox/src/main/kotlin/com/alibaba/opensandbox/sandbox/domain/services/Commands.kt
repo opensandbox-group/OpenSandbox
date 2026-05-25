@@ -20,6 +20,9 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLog
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
+import java.time.Duration
+import kotlin.time.toJavaDuration
 
 /**
  * Command execution operations for sandbox environments.
@@ -80,4 +83,70 @@ interface Commands {
         executionId: String,
         cursor: Long? = null,
     ): CommandLogs
+
+    /**
+     * Creates a new bash session with optional working directory.
+     *
+     * The session maintains shell state (e.g. working directory, environment) across multiple
+     * [runInSession] calls. Use [deleteSession] when done to release resources.
+     *
+     * @param workingDirectory Optional working directory for the session
+     * @return Session ID for use with [runInSession] and [deleteSession]
+     */
+    fun createSession(workingDirectory: String? = null): String
+
+    /**
+     * Runs a shell command in an existing bash session and streams output via SSE.
+     *
+     * @param sessionId Session ID from [createSession]
+     * @param request Code to execute and optional workingDirectory/timeout/handlers
+     * @return Execution result with stdout/stderr and completion status
+     */
+    fun runInSession(
+        sessionId: String,
+        request: RunInSessionRequest,
+    ): Execution
+
+    /**
+     * Convenience overload for running a command in a session with minimal options.
+     */
+    fun runInSession(
+        sessionId: String,
+        command: String,
+        workingDirectory: String? = null,
+        timeout: Duration? = null,
+    ): Execution {
+        val builder =
+            RunInSessionRequest.builder()
+                .command(command)
+                .workingDirectory(workingDirectory)
+        if (timeout != null) {
+            builder.timeout(timeout)
+        }
+        return runInSession(sessionId, builder.build())
+    }
+
+    @Deprecated(
+        message = "Use java.time.Duration instead.",
+        replaceWith =
+            ReplaceWith(
+                "runInSession(sessionId, command, workingDirectory, timeout.toJavaDuration())",
+                "kotlin.time.toJavaDuration",
+            ),
+    )
+    fun runInSession(
+        sessionId: String,
+        command: String,
+        workingDirectory: String? = null,
+        timeout: kotlin.time.Duration,
+    ): Execution {
+        return runInSession(sessionId, command, workingDirectory, timeout.toJavaDuration())
+    }
+
+    /**
+     * Deletes a bash session and releases resources.
+     *
+     * @param sessionId Session ID to delete (from [createSession])
+     */
+    fun deleteSession(sessionId: String)
 }

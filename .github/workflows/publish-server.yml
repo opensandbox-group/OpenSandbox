@@ -1,17 +1,3 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 name: Publish Server
 
 on:
@@ -21,6 +7,9 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   publish-pypi:
@@ -45,6 +34,12 @@ jobs:
         run: |
           uv build
 
+      - name: Attest built package
+        if: startsWith(github.ref, 'refs/tags/server/v')
+        uses: actions/attest@v4
+        with:
+          subject-path: server/dist/*
+
       - name: Publish to PyPI
         working-directory: server
         env:
@@ -63,6 +58,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Install Cosign
+        if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/server/v')
+        uses: sigstore/cosign-installer@v4.1.1
 
       - name: Login to DockerHub
         uses: docker/login-action@v3
@@ -98,9 +97,101 @@ jobs:
           fi
 
       - name: Build and push to registries
+        id: build
         working-directory: server
         env:
           TAG: ${{ steps.parse_tag.outputs.image_tag }}
+          BUILD_METADATA_FILE: ${{ runner.temp }}/opensandbox-server-image-metadata.json
         run: |
           chmod +x build.sh
           ./build.sh
+
+          DIGEST="$(jq -r '."containerimage.digest" // empty' "$BUILD_METADATA_FILE")"
+          if [[ -z "$DIGEST" ]]; then
+            echo "Unable to resolve image digest from $BUILD_METADATA_FILE" >&2
+            cat "$BUILD_METADATA_FILE" >&2
+            exit 1
+          fi
+
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "dockerhub_image=docker.io/opensandbox/server" >> "$GITHUB_OUTPUT"
+          echo "acr_image=sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server" >> "$GITHUB_OUTPUT"
+
+      - name: Sign release images
+        if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/server/v') && steps.parse_tag.outputs.image_tag != 'latest' && steps.parse_tag.outputs.image_tag != ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          DOCKERHUB_IMAGE: ${{ steps.build.outputs.dockerhub_image }}
+          ACR_IMAGE: ${{ steps.build.outputs.acr_image }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${DOCKERHUB_IMAGE}@${DIGEST}" "${ACR_IMAGE}@${DIGEST}"
+
+      - name: Attest Docker Hub image
+        if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/server/v') && steps.parse_tag.outputs.image_tag != 'latest' && steps.parse_tag.outputs.image_tag != ''
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.build.outputs.dockerhub_image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest ACR image
+        if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/server/v') && steps.parse_tag.outputs.image_tag != 'latest' && steps.parse_tag.outputs.image_tag != ''
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.build.outputs.acr_image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+  bump-server-chart:
+    if: startsWith(github.ref, 'refs/tags/server/v')
+    needs: publish-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Parse tag and set variables
+        id: parse_tag
+        run: |
+          TAG_PATH="${{ github.ref }}"
+          TAG_PATH="${TAG_PATH#refs/tags/}"
+          IMAGE_TAG="${TAG_PATH#server/}"
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "failed to parse image tag from $TAG_PATH" >&2
+            exit 1
+          fi
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Bump server chart image tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IMAGE_TAG="${{ steps.parse_tag.outputs.image_tag }}"
+          if [[ "$IMAGE_TAG" =~ ^v ]]; then
+            VERSION="$IMAGE_TAG"
+          else
+            VERSION="v${IMAGE_TAG}"
+          fi
+
+          chmod +x scripts/bump-server-chart.sh
+          ./scripts/bump-server-chart.sh "$VERSION"
+
+          BRANCH="bump/server-chart-${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add kubernetes/charts/opensandbox-server/values.yaml
+          git diff --staged --quiet && echo "No changes to commit" && exit 0
+          git commit -m "chore(chart): bump opensandbox-server image to ${VERSION}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "chore(chart): bump opensandbox-server image to ${VERSION}" \
+            --body "Auto-generated after publishing server image \`${VERSION}\` (tag \`${{ github.ref_name }}\`)." \
+            --base "$(gh api repos/${{ github.repository }} --jq .default_branch)"

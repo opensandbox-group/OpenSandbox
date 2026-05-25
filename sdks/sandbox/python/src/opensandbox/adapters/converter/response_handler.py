@@ -28,12 +28,29 @@ import logging
 from http import HTTPStatus
 from typing import Any, TypeVar
 
-from opensandbox.exceptions import SandboxApiException
+from opensandbox.exceptions import SandboxApiException, SandboxError
 
 logger = logging.getLogger(__name__)
 
 
 T = TypeVar("T")
+
+
+def extract_request_id(headers: Any) -> str | None:
+    """
+    Extract X-Request-ID from response headers in a case-insensitive way.
+    """
+    if not headers:
+        return None
+    try:
+        # httpx.Headers supports case-insensitive lookup.
+        value = headers.get("X-Request-ID") or headers.get("x-request-id")
+        if isinstance(value, str):
+            value = value.strip()
+        return value or None
+    except Exception:
+        return None
+
 
 def _status_code_to_int(status_code: Any) -> int:
     """
@@ -63,17 +80,20 @@ def require_parsed(response_obj: Any, expected_type: type[T], operation_name: st
     - parsed payload must match the expected type
     """
     status_code = _status_code_to_int(getattr(response_obj, "status_code", 0))
+    request_id = extract_request_id(getattr(response_obj, "headers", None))
 
     parsed = getattr(response_obj, "parsed", None)
     if parsed is None:
         raise SandboxApiException(
             message=f"{operation_name} failed: empty response",
             status_code=status_code,
+            request_id=request_id,
         )
     if not isinstance(parsed, expected_type):
         raise SandboxApiException(
             message=f"{operation_name} failed: unexpected response type",
             status_code=status_code,
+            request_id=request_id,
         )
     return parsed
 
@@ -92,21 +112,33 @@ def handle_api_error(response_obj: Any, operation_name: str = "API call") -> Non
         SandboxApiException: If the response indicates an error
     """
     status_code = _status_code_to_int(getattr(response_obj, "status_code", 0))
+    request_id = extract_request_id(getattr(response_obj, "headers", None))
 
     logger.debug(f"{operation_name} response: status={status_code}")
 
     if status_code >= 300:
         error_message = f"{operation_name} failed: HTTP {status_code}"
+        sandbox_error: SandboxError | None = None
 
         if hasattr(response_obj, "parsed") and response_obj.parsed is not None:
-            if hasattr(response_obj.parsed, "message"):
-                error_message = (
-                    f"{operation_name} failed: {response_obj.parsed.message}"
+            parsed = response_obj.parsed
+            parsed_code = getattr(parsed, "code", None)
+            parsed_message = getattr(parsed, "message", None)
+
+            if parsed_message:
+                error_message = f"{operation_name} failed: {parsed_message}"
+            elif parsed_code:
+                error_message = f"{operation_name} failed: {parsed_code}"
+
+            if parsed_code:
+                sandbox_error = SandboxError(
+                    code=str(parsed_code),
+                    message=str(parsed_message or ""),
                 )
-            elif hasattr(response_obj.parsed, "code"):
-                error_message = f"{operation_name} failed: {response_obj.parsed.code}"
 
         raise SandboxApiException(
             message=error_message,
             status_code=status_code,
+            request_id=request_id,
+            error=sandbox_error,
         )

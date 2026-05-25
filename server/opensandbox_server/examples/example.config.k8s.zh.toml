@@ -1,0 +1,91 @@
+# Copyright 2025 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example Kubernetes Runtime Configuration for OpenSandbox Server
+#
+# 完整配置参考：https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md
+
+[server]
+host = "0.0.0.0"
+port = 8080
+max_sandbox_timeout_seconds = 86400
+
+# 可选：取消注释以启用 API Key 认证
+# api_key = "your-secret-api-key"
+# 若 api_key 为空，启动时需要显式确认：
+# - 交互式 TTY：按提示输入 YES
+# - 非交互环境：设置 OPENSANDBOX_INSECURE_SERVER=YES
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "kubernetes"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18"
+
+[storage]
+# 允许进行 bind mount 的宿主机路径前缀白名单。
+# 如果为空，则允许所有路径（不建议在生产环境使用）。
+# 示例：allowed_host_paths = ["/data/opensandbox", "/tmp/sandbox"]
+allowed_host_paths = []
+
+# 自动创建 Kubernetes PVC 时的默认存储大小（当调用方未指定时使用）。
+volume_default_size = "1Gi"
+
+[kubernetes]
+# Path to kubeconfig file. Leave as null to use in-cluster configuration
+kubeconfig_path = "~/.kube/config"
+
+# Namespace for sandbox workloads
+namespace = "opensandbox"
+
+# [Beta] 启用 informer 缓存以减少 API 调用。
+# 如需关闭 watch 缓存，将该项设为 false。
+informer_enabled = true
+informer_resync_seconds = 300
+informer_watch_timeout_seconds = 60
+
+# Workload provider type: available providers are registered in the provider factory
+# If not specified, uses the first registered provider (typically "batchsandbox")
+workload_provider = "batchsandbox"
+
+# BatchSandbox 主容器的镜像拉取策略。
+# 可选值："Always"、"IfNotPresent"、"Never"。
+image_pull_policy = "IfNotPresent"
+
+# public snapshot 等待超时时间。应大于 Kubernetes controller 的
+# snapshot commit-job-timeout。
+snapshot_create_timeout_seconds = 900
+
+# Path to the BatchSandbox template file
+# Replace with your path
+batchsandbox_template_file = "~/batchsandbox-template.yaml"
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.0.12"
+mode = "dns"
+# Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
+# disable_ipv6 = false
+
+# 🧪 [EXPERIMENTAL] 按访问续期。默认关闭 — 见 server/README_zh.md。
+[renew_intent]
+enabled = false
+min_interval_seconds = 60
+redis.enabled = false
+# redis.dsn = "redis://127.0.0.1:6379/0"
+# redis.queue_key = "opensandbox:renew:intent"
+# redis.consumer_concurrency = 8

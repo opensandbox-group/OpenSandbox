@@ -27,7 +27,9 @@ import (
 const (
 	jupyterHostEnv             = "JUPYTER_HOST"
 	jupyterTokenEnv            = "JUPYTER_TOKEN"
+	accessTokenEnv             = "EXECD_ACCESS_TOKEN"
 	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
+	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
 )
 
 // InitFlags registers CLI flags and env overrides.
@@ -37,6 +39,7 @@ func InitFlags() {
 	ServerLogLevel = 6
 	ServerAccessToken = ""
 	ApiGracefulShutdownTimeout = time.Second * 1
+	JupyterIdlePollInterval = 100 * time.Millisecond
 
 	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
@@ -48,6 +51,10 @@ func InitFlags() {
 
 	if jupyterTokenFromEnv := os.Getenv(jupyterTokenEnv); jupyterTokenFromEnv != "" {
 		JupyterServerToken = jupyterTokenFromEnv
+	}
+
+	if accessTokenFromEnv := os.Getenv(accessTokenEnv); accessTokenFromEnv != "" {
+		ServerAccessToken = accessTokenFromEnv
 	}
 
 	// Then define flags with current values as defaults
@@ -65,12 +72,29 @@ func InitFlags() {
 		ApiGracefulShutdownTimeout = duration
 	}
 
-	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 3s)")
+	if idlePollInterval := os.Getenv(jupyterIdlePollIntervalEnv); idlePollInterval != "" {
+		duration, err := time.ParseDuration(idlePollInterval)
+		if err != nil {
+			stdlog.Panicf("Failed to parse jupyter idle poll interval from env: %v", err)
+		}
+		if duration <= 0 {
+			stdlog.Printf("Invalid %s=%s; fallback to default %s", jupyterIdlePollIntervalEnv, idlePollInterval, JupyterIdlePollInterval)
+		} else {
+			JupyterIdlePollInterval = duration
+		}
+	}
+
+	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 1s)")
+	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
 
 	// Parse flags - these will override environment variables if provided
 	flag.Parse()
+	if JupyterIdlePollInterval <= 0 {
+		stdlog.Printf("Invalid --jupyter-idle-poll-interval=%s; fallback to default %s", JupyterIdlePollInterval, 100*time.Millisecond)
+		JupyterIdlePollInterval = 100 * time.Millisecond
+	}
 
 	// Log final values
 	log.Info("Jupyter server host is: %s", JupyterServerHost)
-	log.Info("Jupyter server token is: %s", JupyterServerToken)
+	log.Info("Jupyter server token is: %s", log.MaskToken(JupyterServerToken))
 }

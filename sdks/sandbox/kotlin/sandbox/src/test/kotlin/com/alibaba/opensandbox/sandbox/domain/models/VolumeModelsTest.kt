@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.domain.models
 
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Host
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PVC
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -32,6 +33,24 @@ class VolumeModelsTest {
     fun `Host should require absolute path`() {
         val backend = Host.of("/data/shared")
         assertEquals("/data/shared", backend.path)
+    }
+
+    @Test
+    fun `Host should accept windows path with backslashes`() {
+        val backend = Host.of("D:\\sandbox-mnt\\ReMe")
+        assertEquals("D:\\sandbox-mnt\\ReMe", backend.path)
+    }
+
+    @Test
+    fun `Host should accept windows path with forward slashes`() {
+        val backend = Host.of("D:/sandbox-mnt/ReMe")
+        assertEquals("D:/sandbox-mnt/ReMe", backend.path)
+    }
+
+    @Test
+    fun `Host should accept windows drive root`() {
+        val backend = Host.of("Z:\\")
+        assertEquals("Z:\\", backend.path)
     }
 
     @Test
@@ -93,6 +112,55 @@ class VolumeModelsTest {
     }
 
     @Test
+    fun `OSSFS should require inline credentials and default to version 2_0`() {
+        val backend =
+            OSSFS.builder()
+                .bucket("bucket-a")
+                .endpoint("oss-cn-hangzhou.aliyuncs.com")
+                .accessKeyId("ak")
+                .accessKeySecret("sk")
+                .build()
+
+        assertEquals("bucket-a", backend.bucket)
+        assertEquals("oss-cn-hangzhou.aliyuncs.com", backend.endpoint)
+        assertEquals("ak", backend.accessKeyId)
+        assertEquals("sk", backend.accessKeySecret)
+        assertEquals(OSSFS.VERSION_2_0, backend.version)
+        assertNull(backend.options)
+    }
+
+    @Test
+    fun `Volume with OSSFS backend should be created correctly`() {
+        val volume =
+            Volume.builder()
+                .name("oss")
+                .ossfs(
+                    OSSFS.builder()
+                        .bucket("bucket-a")
+                        .endpoint("oss-cn-hangzhou.aliyuncs.com")
+                        .accessKeyId("ak")
+                        .accessKeySecret("sk")
+                        .version(OSSFS.VERSION_1_0)
+                        .options("allow_other", "max_stat_cache_size=0")
+                        .build(),
+                )
+                .mountPath("/mnt/oss")
+                .subPath("prefix")
+                .build()
+
+        assertEquals("oss", volume.name)
+        assertNull(volume.host)
+        assertNull(volume.pvc)
+        assertNotNull(volume.ossfs)
+        assertEquals("bucket-a", volume.ossfs?.bucket)
+        assertEquals(OSSFS.VERSION_1_0, volume.ossfs?.version)
+        assertEquals(listOf("allow_other", "max_stat_cache_size=0"), volume.ossfs?.options)
+        assertEquals("/mnt/oss", volume.mountPath)
+        assertFalse(volume.readOnly)
+        assertEquals("prefix", volume.subPath)
+    }
+
+    @Test
     fun `Volume should reject blank name`() {
         assertThrows(IllegalArgumentException::class.java) {
             Volume.builder()
@@ -131,6 +199,14 @@ class VolumeModelsTest {
                 .name("test")
                 .host(Host.of("/data"))
                 .pvc(PVC.of("my-pvc"))
+                .ossfs(
+                    OSSFS.builder()
+                        .bucket("bucket-a")
+                        .endpoint("oss-cn-hangzhou.aliyuncs.com")
+                        .accessKeyId("ak")
+                        .accessKeySecret("sk")
+                        .build(),
+                )
                 .mountPath("/mnt")
                 .build()
         }

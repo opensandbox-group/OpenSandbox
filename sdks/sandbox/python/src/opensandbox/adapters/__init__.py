@@ -20,6 +20,7 @@ Implements the service protocols using HTTP API calls.
 """
 
 from opensandbox.adapters.command_adapter import CommandsAdapter
+from opensandbox.adapters.egress_adapter import EgressAdapter
 from opensandbox.adapters.factory import AdapterFactory
 from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.adapters.health_adapter import HealthAdapter
@@ -31,6 +32,7 @@ __all__ = [
     "SandboxesAdapter",
     "FilesystemAdapter",
     "CommandsAdapter",
+    "EgressAdapter",
     "HealthAdapter",
     "MetricsAdapter",
 ]

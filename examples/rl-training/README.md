@@ -30,7 +30,7 @@ The script provisions a sandbox, installs RL dependencies, trains a DQN agent on
 
 - `SANDBOX_DOMAIN`: Sandbox service address (default: `localhost:8080`)
 - `SANDBOX_API_KEY`: API key if your server requires authentication
-- `SANDBOX_IMAGE`: Docker image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1`)
+- `SANDBOX_IMAGE`: Docker image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2`)
 - `RL_TIMESTEPS`: Training timesteps to run (default: `5000`)
 
 ## TensorBoard

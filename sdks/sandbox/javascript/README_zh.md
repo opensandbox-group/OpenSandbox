@@ -55,6 +55,7 @@ try {
 } catch (err) {
   if (err instanceof SandboxException) {
     console.error(`沙箱错误: [${err.error.code}] ${err.error.message ?? ""}`);
+    console.error(`Request ID: ${err.requestId ?? "N/A"}`);
   } else {
     console.error(err);
   }
@@ -80,6 +81,21 @@ const resumed = await sandbox.resume();
 
 // renew：expiresAt = now + timeoutSeconds
 await resumed.renew(30 * 60);
+
+// 获取当前状态
+const info = await resumed.getInfo();
+console.log("状态:", info.status.state);
+console.log("过期时间:", info.expiresAt); // 使用手动清理模式时为 null
+```
+
+通过传入 `timeoutSeconds: null` 创建一个不会自动过期的沙箱：
+
+```ts
+const manual = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  timeoutSeconds: null,
+});
 ```
 
 ### 2. 自定义健康检查
@@ -150,7 +166,32 @@ const { endpoint } = await sandbox.getEndpoint(44772);
 const url = await sandbox.getEndpointUrl(44772);
 ```
 
-### 6. 沙箱管理（Admin）
+### 6. Volume 挂载
+
+`volumes` 现在支持 `host`、`pvc` 和 `ossfs` 三种 backend。每个 volume 必须且只能指定其中一种。
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  volumes: [
+    {
+      name: "oss-data",
+      ossfs: {
+        bucket: "bucket-a",
+        endpoint: "oss-cn-hangzhou.aliyuncs.com",
+        accessKeyId: process.env.OSS_ACCESS_KEY_ID!,
+        accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET!,
+        version: "2.0",
+      },
+      mountPath: "/mnt/oss",
+      subPath: "prefix",
+    },
+  ],
+});
+```
+
+### 7. 沙箱管理（Admin）
 
 使用 `SandboxManager` 进行管理操作，如查询现有沙箱列表。
 
@@ -223,6 +264,8 @@ const config2 = new ConnectionConfig({
 | `readyTimeoutSeconds`        | 等待就绪最大时间                     | 30 秒                        |
 | `healthCheckPollingInterval` | 就绪轮询间隔（毫秒）                 | 200 ms                       |
 
+注意：`opensandbox.io/` 前缀下的 metadata key 属于系统保留标签，服务端会拒绝用户传入。
+
 ```ts
 const sandbox = await Sandbox.create({
   connectionConfig: config,
@@ -234,7 +277,21 @@ const sandbox = await Sandbox.create({
 });
 ```
 
-### 3. 资源清理
+### 3. 运行时 Egress 策略更新
+
+运行时的 egress 查询和 patch 会直接访问沙箱内的 egress sidecar。
+SDK 会先解析 `18080` 端口对应的 sandbox endpoint，再调用 sidecar 的 `/policy` API。
+
+```ts
+const policy = await sandbox.getEgressPolicy();
+
+await sandbox.patchEgressRules([
+  { action: "allow", target: "www.github.com" },
+  { action: "deny", target: "pypi.org" },
+]);
+```
+
+### 4. 资源清理
 
 在 Node.js 环境下，`Sandbox` 和 `SandboxManager` 会拥有各自的 HTTP agent，因此即使多个实例共享同一个 `ConnectionConfig` 也不会互相影响。SDK 会借助 `ConnectionConfig.withTransportIfMissing()` 复刻每个实例的 transport。完成使用后调用 `sandbox.close()` / `manager.close()` 来释放底层连接池；
 

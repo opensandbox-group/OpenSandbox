@@ -103,5 +103,6 @@ class ExecutionEventDispatcherSync:
             timestamp=timestamp,
             execution_time_in_millis=event_node.execution_time_in_millis or 0,
         )
+        self.execution.complete = complete
         if self.handlers and self.handlers.on_execution_complete:
             self.handlers.on_execution_complete(complete)

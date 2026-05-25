@@ -65,6 +65,7 @@ public class QuickStart {
         } catch (SandboxException e) {
             // 处理 Sandbox 特定异常
             System.err.println("沙箱错误: [" + e.getError().getCode() + "] " + e.getError().getMessage());
+            System.err.println("Request ID: " + e.getRequestId());
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -92,6 +93,17 @@ sandbox.resume();
 // 获取当前状态
 SandboxInfo info = sandbox.getInfo();
 System.out.println("当前状态: " + info.getStatus().getState());
+System.out.println("过期时间: " + info.getExpiresAt()); // 使用手动清理模式时为 null
+```
+
+通过传入 `timeout(null)` 创建一个不会自动过期的沙箱：
+
+```java
+Sandbox manual = Sandbox.builder()
+    .connectionConfig(config)
+    .image("ubuntu")
+    .timeout(null)
+    .build();
 ```
 
 ### 2. 自定义健康检查
@@ -204,6 +216,56 @@ sandboxes.getSandboxInfos().forEach(info -> {
 // manager.close();
 ```
 
+### 6. Sandbox Pool（客户端池化）
+
+你可以使用 `SandboxPool` 维护就绪沙箱的空闲缓冲区，以降低 `acquire` 延迟。
+
+> ⚠ 实验性能力：`SandboxPool` 仍在根据真实生产场景持续演进，后续版本可能存在 breaking changes。
+
+```java
+import com.alibaba.opensandbox.sandbox.pool.SandboxPool;
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolCreationSpec;
+import com.alibaba.opensandbox.sandbox.domain.pool.AcquirePolicy;
+import com.alibaba.opensandbox.sandbox.infrastructure.pool.InMemoryPoolStateStore;
+
+SandboxPool pool = SandboxPool.builder()
+    .poolName("demo-pool")
+    .ownerId("worker-1")
+    .maxIdle(3)
+    .warmupReadyTimeout(Duration.ofSeconds(45))
+    .stateStore(new InMemoryPoolStateStore()) // 单机实现
+    .connectionConfig(config)
+    .creationSpec(
+        PoolCreationSpec.builder()
+            .image("ubuntu:22.04")
+            .entrypoint(java.util.List.of("tail", "-f", "/dev/null"))
+            .extension("storage.id", "dataset-001")
+            .build()
+    )
+    .build();
+
+pool.start();
+Sandbox sb = pool.acquire(Duration.ofMinutes(10), AcquirePolicy.FAIL_FAST);
+try {
+    sb.commands().run("echo pool-ok");
+} finally {
+    sb.kill();
+    sb.close();
+}
+pool.shutdown(true);
+```
+
+池状态语义：
+- `acquire()` 仅允许在 `RUNNING` 状态调用。
+- 在 `DRAINING` / `STOPPED` 状态，`acquire()` 会抛出 `PoolNotRunningException`。
+- `ownerId` 表示主锁持有者身份（节点/进程标识），不是池子标识；
+  如果不传，SDK 会自动生成基于 UUID 的默认值。
+- 如果你需要在 warmup 成功后、`putIdle` 之前对沙箱做预处理，可以使用 `warmupSandboxPreparer(...)`。
+
+
+> 在分布式部署场景下，可以使用可选模块 `com.alibaba.opensandbox:sandbox-pool-redis`，也可以自行提供 `PoolStateStore` 实现。Redis 模块接收业务方自己创建和管理的 Jedis client，因此 Redis 连接配置和生命周期仍由业务方负责。共享同一池命名空间的节点必须使用相同的 sandbox 创建与 warmup 定义；如果定义发生变化，建议使用新的 `poolName` 或命名空间。建议将 `primaryLockTtl` 配置为大于 `warmupReadyTimeout` 加上预期 warmup preparer 耗时和缓冲时间，否则节点可能在创建 idle sandbox 过程中失去主锁。
+> 分布式模式下，`resize(maxIdle)` 可以在任意节点调用；调用返回只表示目标值已写入共享状态存储，实际补池或缩容由当前主节点在周期性 reconcile 中执行。如果需要清空分布式 idle buffer，建议调用 `resize(0)` 并等待 `snapshot().idleCount == 0`；`releaseAllIdle()` 只适合作为 best-effort 的兜底清理。
+
 ## 配置说明
 
 ### 1. 连接配置 (Connection Configuration)
@@ -237,6 +299,10 @@ ConnectionPool sharedPool = new ConnectionPool(50, 30, TimeUnit.SECONDS);
 ConnectionConfig sharedConfig = ConnectionConfig.builder()
     .apiKey("your-key")
     .domain("api.opensandbox.io")
+    .headers(Map.of(
+        "X-Custom-Header", "value",
+        "X-Request-ID", "trace-123"
+    ))
     .connectionPool(sharedPool) // 注入共享连接池
     .build();
 ```
@@ -255,6 +321,8 @@ ConnectionConfig sharedConfig = ConnectionConfig.builder()
 | `metadata`     | 自定义元数据标签       | 空                              |
 | `networkPolicy` | 可选的出站网络策略（egress） | -                         |
 | `readyTimeout` | 等待沙箱就绪的最大时间 | 30 秒                           |
+
+注意：`opensandbox.io/` 前缀下的 metadata key 属于系统保留标签，服务端会拒绝用户传入。
 
 ```java
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy;
@@ -282,4 +350,20 @@ Sandbox sandbox = Sandbox.builder()
             .build()
     )
     .build();
+```
+
+### 3. 运行时 Egress 策略更新
+
+运行时的 egress 查询和 patch 会直接访问沙箱内的 egress sidecar。
+SDK 会先解析 `18080` 端口对应的 sandbox endpoint，再调用 sidecar 的 `/policy` API。
+
+```java
+NetworkPolicy policy = sandbox.getEgressPolicy();
+
+sandbox.patchEgressRules(
+    List.of(
+        NetworkRule.builder().action(NetworkRule.Action.ALLOW).target("www.github.com").build(),
+        NetworkRule.builder().action(NetworkRule.Action.DENY).target("pypi.org").build()
+    )
+);
 ```

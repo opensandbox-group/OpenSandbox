@@ -71,10 +71,18 @@ export interface paths {
         };
         put?: never;
         /**
-         * Create a sandbox from a container image
-         * @description Creates a new sandbox from a container image with optional resource limits,
-         *     environment variables, and metadata. Sandboxes are provisioned directly from
-         *     the specified image without requiring a pre-created template.
+         * Create a sandbox
+         * @description Creates a new sandbox from a container image or restores one from a
+         *     persistent sandbox snapshot with optional resource limits, environment
+         *     variables, and metadata.
+         *
+         *     Exactly one startup source must be provided:
+         *     - `image` to provision directly from a container image.
+         *     - `snapshotId` to restore from a previously created snapshot.
+         *
+         *     When `image` is provided, `entrypoint` is required. When `snapshotId` is
+         *     provided, `entrypoint` is optional. If omitted, the server defaults the
+         *     sandbox entrypoint to `["tail", "-f", "/dev/null"]`.
          *
          *     ## Authentication
          *
@@ -99,15 +107,15 @@ export interface paths {
                  *
                  *     The returned sandbox includes:
                  *     - `id`: Unique sandbox identifier
-                 *     - `status.state: "Pending"` (auto-starting provisioning)
+                 *     - `status.state: "Pending"` (auto-starting provisioning or restore)
                  *     - `status.reason` and `status.message` indicating initialization stage
                  *     - `metadata`, `expiresAt`, `createdAt`: Core sandbox information
                  *
-                 *     Note: `image` and `updatedAt` are not included in the create response.
-                 *     Use GET /sandboxes/{sandboxId} to retrieve the complete sandbox information including image spec.
+                 *     Note: startup source details and `updatedAt` are not included in the create response.
+                 *     Use GET /sandboxes/{sandboxId} to retrieve the complete sandbox information.
                  *
                  *     To track provisioning progress, poll GET /sandboxes/{sandboxId}.
-                 *     The sandbox will automatically transition to `Running` state once provisioning completes.
+                 *     The sandbox will automatically transition to `Running` state once provisioning or restore completes.
                  */
                 202: {
                     headers: {
@@ -131,6 +139,149 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List snapshots
+         * @description List all snapshots with optional filtering and pagination using query parameters.
+         *     Snapshots are persistent captures of sandbox state and may outlive the source sandbox.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Filter snapshots by source sandbox identifier */
+                    sandboxId?: string;
+                    /**
+                     * @description Filter by snapshot lifecycle state. Pass multiple times for OR logic.
+                     *     Example: `?state=Ready&state=Failed`
+                     */
+                    state?: components["schemas"]["SnapshotState"][];
+                    /** @description Page number for pagination */
+                    page?: number;
+                    /** @description Number of items per page */
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Paginated collection of snapshots */
+                200: {
+                    headers: {
+                        "X-Request-ID": components["headers"]["XRequestId"];
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ListSnapshotsResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/snapshots/{snapshotId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique snapshot identifier */
+                snapshotId: components["parameters"]["SnapshotId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Fetch a snapshot by id
+         * @description Returns snapshot state and metadata.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Unique snapshot identifier */
+                    snapshotId: components["parameters"]["SnapshotId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Snapshot current state and metadata */
+                200: {
+                    headers: {
+                        "X-Request-ID": components["headers"]["XRequestId"];
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Snapshot"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /**
+         * Delete a snapshot
+         * @description Delete a persistent sandbox snapshot by id. Snapshots that are still
+         *     being created cannot be deleted.
+         *
+         *     For Kubernetes-backed snapshots, deletion removes OpenSandbox metadata
+         *     and Kubernetes coordination resources, but does not guarantee removal
+         *     of pushed OCI images from the configured registry. Use registry
+         *     retention or garbage collection policies for image lifecycle cleanup.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Unique snapshot identifier */
+                    snapshotId: components["parameters"]["SnapshotId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Snapshot successfully deleted */
+                204: {
+                    headers: {
+                        "X-Request-ID": components["headers"]["XRequestId"];
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sandboxes/{sandboxId}": {
         parameters: {
             query?: never;
@@ -145,7 +296,7 @@ export interface paths {
          * Fetch a sandbox by id
          * @description Returns the complete sandbox information including:
          *     - `id`, `status`, `metadata`, `expiresAt`, `createdAt`: Core information
-         *     - `image`: Container image specification (not included in create response)
+         *     - `image` or `snapshotId`: Startup source information (not included in create response)
          *     - `entrypoint`: Entry process specification
          *
          *     This is the complete representation of the sandbox resource.
@@ -220,6 +371,149 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sandboxes/{sandboxId}/metadata": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Unique sandbox identifier */
+                sandboxId: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch sandbox metadata
+         * @description Update sandbox metadata using JSON Merge Patch semantics (RFC 7396).
+         *
+         *     **Merge Patch rules:**
+         *     | Request body key/value | Behavior |
+         *     |---|---|
+         *     | `"key": "value"` | Add or replace the key |
+         *     | `"key": null` | Delete the key (silently ignored if key does not exist) |
+         *     | key absent | Keep current value (no change) |
+         *     | Empty `{}` | No-op, returns current metadata |
+         *
+         *     Metadata keys and values must comply with Kubernetes label rules:
+         *     - Keys must be valid DNS label names or prefixed DNS subdomains
+         *     - Keys with the `opensandbox.io/` prefix are reserved and rejected
+         *     - Values must be 63 characters or less, matching `[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?`
+         *
+         *     This operation does not restart or recreate the sandbox container/pod.
+         *
+         *     **Concurrency:** This endpoint uses read-modify-write without optimistic
+         *     locking (no `resourceVersion` check). Concurrent PATCH requests may
+         *     interleave and silently drop updates. Use a single writer or coordinate
+         *     out-of-band when concurrent modifications to the same key are expected.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Unique sandbox identifier */
+                    sandboxId: components["parameters"]["SandboxId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PatchSandboxMetadataRequest"];
+                };
+            };
+            responses: {
+                /**
+                 * @description Metadata patched successfully. Returns the complete sandbox resource
+                 *     with updated metadata.
+                 */
+                200: {
+                    headers: {
+                        "X-Request-ID": components["headers"]["XRequestId"];
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Sandbox"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        trace?: never;
+    };
+    "/sandboxes/{sandboxId}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a snapshot from a sandbox
+         * @description Create a persistent point-in-time snapshot from the sandbox's current state.
+         *     The source sandbox must be `Running`. The returned snapshot id identifies
+         *     the created artifact. Snapshot creation may temporarily pause the sandbox
+         *     while the runtime captures provider-supported state, then the source
+         *     sandbox continues running.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Unique sandbox identifier */
+                    sandboxId: components["parameters"]["SandboxId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["CreateSnapshotRequest"];
+                };
+            };
+            responses: {
+                /**
+                 * @description Snapshot creation accepted.
+                 *
+                 *     The returned snapshot includes `status.state: "Creating"`.
+                 *     Poll GET /snapshots/{snapshotId} to track progress until the snapshot
+                 *     transitions to `Ready` or `Failed`.
+                 */
+                202: {
+                    headers: {
+                        "X-Request-ID": components["headers"]["XRequestId"];
+                        Location: components["headers"]["Location"];
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Snapshot"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sandboxes/{sandboxId}/pause": {
         parameters: {
             query?: never;
@@ -231,7 +525,7 @@ export interface paths {
         put?: never;
         /**
          * Pause execution while retaining state
-         * @description Pause a running sandbox while preserving its state. Poll GET /sandboxes/{sandboxId} to track state transition to Paused.
+         * @description Pause a running sandbox while preserving its state. Poll GET /sandboxes/{sandboxId} to track state transition through Pausing and eventually Paused.
          */
         post: {
             parameters: {
@@ -248,7 +542,7 @@ export interface paths {
                 /**
                  * @description Pause operation accepted.
                  *
-                 *     Sandbox will transition to Pausing state.
+                 *     Sandbox will transition to Pausing state and eventually Paused.
                  *     Poll GET /sandboxes/{sandboxId} to track progress.
                  */
                 202: {
@@ -282,7 +576,7 @@ export interface paths {
         put?: never;
         /**
          * Resume a paused sandbox
-         * @description Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition to Running.
+         * @description Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition through Resuming and eventually Running.
          */
         post: {
             parameters: {
@@ -299,7 +593,7 @@ export interface paths {
                 /**
                  * @description Resume operation accepted.
                  *
-                 *     Sandbox will transition from Paused → Running.
+                 *     Sandbox will transition from Paused → Resuming → Running.
                  *     Poll GET /sandboxes/{sandboxId} to track progress.
                  */
                 202: {
@@ -397,6 +691,14 @@ export interface paths {
                 query?: {
                     /** @description Whether to return a server-proxied URL */
                     use_server_proxy?: boolean;
+                    /**
+                     * @description Optional. When set, the server **issues a signed** access route (OSEP-0011). The value
+                     *     is **Linux / Unix epoch seconds** — a decimal `uint64` count of **whole seconds** since
+                     *     the Unix epoch (`1970-01-01 00:00:00` UTC, same as POSIX / `time(2)`), not
+                     *     milliseconds. Normalized to `expires_b36` for the four-segment route token. Omit to
+                     *     get the unsigned/legacy response shape.
+                     */
+                    expires?: string;
                 };
                 header?: never;
                 path: {
@@ -423,6 +725,7 @@ export interface paths {
                         "application/json": components["schemas"]["Endpoint"];
                     };
                 };
+                400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
@@ -445,6 +748,10 @@ export interface components {
             items: components["schemas"]["Sandbox"][];
             pagination: components["schemas"]["PaginationInfo"];
         };
+        ListSnapshotsResponse: {
+            items: components["schemas"]["Snapshot"][];
+            pagination: components["schemas"]["PaginationInfo"];
+        };
         /** @description Pagination metadata for list responses */
         PaginationInfo: {
             /** @description Current page number */
@@ -458,7 +765,7 @@ export interface components {
             /** @description Whether there are more pages after the current one */
             hasNextPage: boolean;
         };
-        /** @description Response from creating a new sandbox. Contains essential information without image and updatedAt. */
+        /** @description Response from creating a new sandbox. Contains essential information without startup source details and updatedAt. */
         CreateSandboxResponse: {
             /** @description Unique sandbox identifier */
             id: string;
@@ -469,27 +776,99 @@ export interface components {
                 [key: string]: string;
             };
             /**
-             * Format: date-time
-             * @description Timestamp when sandbox will auto-terminate
+             * @description Platform constraint echoed from request or workload template.
+             *     Null when no scheduling constraint is provided.
              */
-            expiresAt: string;
+            platform?: components["schemas"]["PlatformSpec"];
+            /**
+             * Format: date-time
+             * @description Timestamp when sandbox will auto-terminate. Omitted when manual cleanup is enabled.
+             */
+            expiresAt?: string;
             /**
              * Format: date-time
              * @description Sandbox creation timestamp
              */
             createdAt: string;
-            /** @description Entry process specification from creation request */
+            /**
+             * @description Entry process specification for the sandbox. For image-created sandboxes,
+             *     this is copied from the creation request. For snapshot-created sandboxes,
+             *     this is restored from the snapshot.
+             */
             entrypoint: string[];
         };
-        /** @description Runtime execution environment provisioned from a container image */
+        /** @description Optional settings for creating a sandbox snapshot. */
+        CreateSnapshotRequest: {
+            /** @description Optional human-readable snapshot name. */
+            name?: string;
+        };
+        /** @description Persistent point-in-time capture of a sandbox. */
+        Snapshot: {
+            /** @description Unique snapshot identifier */
+            id: string;
+            /** @description Source sandbox identifier used to create this snapshot */
+            sandboxId: string;
+            /** @description Optional human-readable snapshot name */
+            name?: string;
+            /** @description Current snapshot lifecycle status and detailed state information */
+            status: components["schemas"]["SnapshotStatus"];
+            /**
+             * Format: date-time
+             * @description Snapshot creation timestamp
+             */
+            createdAt: string;
+        };
+        /**
+         * @description Snapshot lifecycle state.
+         *
+         *     Common state values:
+         *     - Creating: Snapshot creation has been accepted and runtime capture is in progress.
+         *     - Deleting: Snapshot deletion has been requested and cleanup is in progress.
+         *     - Ready: Snapshot is available for restoring sandboxes.
+         *     - Failed: Snapshot creation failed.
+         *
+         *     Note: New state values may be added in future versions.
+         *     Clients should handle unknown state values gracefully.
+         */
+        SnapshotState: string;
+        /** @description Detailed snapshot status information with lifecycle state and transition details. */
+        SnapshotStatus: {
+            /** @description Current lifecycle state of the snapshot */
+            state: components["schemas"]["SnapshotState"];
+            /**
+             * @description Short machine-readable reason code for the current state.
+             *     Examples: "snapshot_accepted", "snapshot_ready", "snapshot_capture_failed"
+             */
+            reason?: string;
+            /** @description Human-readable message describing the current state or failure reason */
+            message?: string;
+            /**
+             * Format: date-time
+             * @description Timestamp of the last state transition
+             */
+            lastTransitionAt?: string;
+        };
+        /** @description Runtime execution environment provisioned from a container image or restored from a snapshot */
         Sandbox: {
             /** @description Unique sandbox identifier */
             id: string;
             /**
              * @description Container image specification used to provision this sandbox.
-             *     Only present in responses for GET/LIST operations. Not returned in createSandbox response.
+             *     Present when the sandbox was created directly from a container image.
+             *     Not returned in createSandbox response.
              */
-            image: components["schemas"]["ImageSpec"];
+            image?: components["schemas"]["ImageSpec"];
+            /**
+             * @description Snapshot identifier used to restore this sandbox.
+             *     Present when the sandbox was restored from a snapshot.
+             *     Not returned in createSandbox response.
+             */
+            snapshotId?: string;
+            /**
+             * @description Platform constraint echoed from request or workload template.
+             *     Null when no scheduling constraint is provided.
+             */
+            platform?: components["schemas"]["PlatformSpec"];
             /** @description Current lifecycle status and detailed state information */
             status: components["schemas"]["SandboxStatus"];
             /** @description Custom metadata from creation request */
@@ -498,14 +877,16 @@ export interface components {
             };
             /**
              * @description The command to execute as the sandbox's entry process.
-             *     Always present in responses since entrypoint is required in creation requests.
+             *     Always present in responses. For image-created sandboxes, this is copied
+             *     from the creation request. For snapshot-created sandboxes, this is restored
+             *     from the snapshot.
              */
             entrypoint: string[];
             /**
              * Format: date-time
-             * @description Timestamp when sandbox will auto-terminate
+             * @description Timestamp when sandbox will auto-terminate. Omitted when manual cleanup is enabled.
              */
-            expiresAt: string;
+            expiresAt?: string;
             /**
              * Format: date-time
              * @description Sandbox creation timestamp
@@ -520,6 +901,7 @@ export interface components {
          *     - Running: Sandbox is running and ready to accept requests
          *     - Pausing: Sandbox is in the process of pausing
          *     - Paused: Sandbox has been paused while retaining its state
+         *     - Resuming: Sandbox is being restored after a pause
          *     - Stopping: Sandbox is being terminated
          *     - Terminated: Sandbox has been successfully terminated
          *     - Failed: Sandbox encountered a critical error
@@ -528,10 +910,11 @@ export interface components {
          *     - Pending → Running (after creation completes)
          *     - Running → Pausing (when pause is requested)
          *     - Pausing → Paused (pause operation completes)
-         *     - Paused → Running (when resume is requested)
+         *     - Paused → Resuming (when resume is requested)
+         *     - Resuming → Running (when resume operation completes)
          *     - Running/Paused → Stopping (when kill is requested or TTL expires)
          *     - Stopping → Terminated (kill/timeout operation completes)
-         *     - Pending/Running/Paused → Failed (on error)
+         *     - Pending/Running/Paused/Resuming → Failed (on error)
          *
          *     Note: New state values may be added in future versions.
          *     Clients should handle unknown state values gracefully.
@@ -579,18 +962,89 @@ export interface components {
             };
         };
         /**
-         * @description Request to create a new sandbox from a container image.
+         * @description Runtime platform constraint used for scheduling/provisioning.
+         *
+         *     This field is independent from `image` and expresses the expected target
+         *     OS and CPU architecture for sandbox execution.
+         *
+         *     Behavioral notes:
+         *     - If omitted, the runtime applies its own default platform selection behavior.
+         *       For Docker, requests are created without an explicit platform override.
+         *       For Kubernetes, no `kubernetes.io/os` or `kubernetes.io/arch` constraint
+         *       is injected unless provided by request or workload template.
+         *     - If provided and cannot be satisfied by runtime/template/pool constraints,
+         *       request must fail explicitly.
+         */
+        PlatformSpec: {
+            /**
+             * @description Target operating system (for example `linux` or `windows`).
+             * @example linux
+             * @enum {string}
+             */
+            os: "linux" | "windows";
+            /**
+             * @description Target CPU architecture (for example `amd64` or `arm64`).
+             * @example arm64
+             * @enum {string}
+             */
+            arch: "amd64" | "arm64";
+        };
+        /**
+         * @description JSON Merge Patch (RFC 7396) request body for updating sandbox metadata.
+         *
+         *     The request body is the metadata object itself:
+         *     - Present keys with non-null values add or replace
+         *     - Keys with `null` values are deleted
+         *     - Absent keys are left unchanged
+         *
+         *     Keys with the `opensandbox.io/` prefix are reserved and rejected.
+         * @example {
+         *       "project": "new-project",
+         *       "team": null,
+         *       "environment": "production"
+         *     }
+         */
+        PatchSandboxMetadataRequest: {
+            [key: string]: string | null;
+        };
+        /**
+         * @description Request to create a new sandbox from either a container image or a snapshot.
+         *     Exactly one of `image` or `snapshotId` must be provided.
+         *
+         *     When `image` is provided, `entrypoint` is required. When `snapshotId` is
+         *     provided, `entrypoint` is optional. If omitted, the server defaults the
+         *     sandbox entrypoint to `["tail", "-f", "/dev/null"]`.
          *
          *     **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
          */
         CreateSandboxRequest: {
-            /** @description Container image specification for the sandbox */
-            image: components["schemas"]["ImageSpec"];
+            /**
+             * @description Container image specification for the sandbox.
+             *     Mutually exclusive with `snapshotId`.
+             */
+            image?: components["schemas"]["ImageSpec"];
+            /**
+             * @description Snapshot identifier to restore from.
+             *     Mutually exclusive with `image`.
+             */
+            snapshotId?: string;
+            /**
+             * @description Optional platform constraint for sandbox scheduling/runtime selection.
+             *
+             *     If omitted, runtime default behavior applies (runtime-specific and not
+             *     a fixed architecture guarantee). If specified, the runtime must satisfy
+             *     this constraint or fail explicitly.
+             *     This field is only meaningful when scheduling constraints are set.
+             */
+            platform?: components["schemas"]["PlatformSpec"];
             /**
              * @description Sandbox timeout in seconds. The sandbox will automatically terminate after this duration.
-             *     SDK clients should provide a default value (e.g., 3600 seconds / 1 hour).
+             *     The maximum is controlled by the server configuration (`server.max_sandbox_timeout_seconds`).
+             *     Omit this field or set it to null to disable automatic expiration and require explicit cleanup.
+             *     Note: manual cleanup support is runtime-dependent; Kubernetes providers may reject
+             *     omitted or null timeout when the underlying workload provider does not support non-expiring sandboxes.
              */
-            timeout: number;
+            timeout?: number | null;
             /**
              * @description Runtime resource constraints for the sandbox instance.
              *     SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
@@ -621,7 +1075,12 @@ export interface components {
                 [key: string]: string;
             };
             /**
-             * @description The command to execute as the sandbox's entry process (required).
+             * @description The command to execute as the sandbox's entry process.
+             *
+             *     Required when `image` is provided.
+             *
+             *     Optional when `snapshotId` is provided. If omitted for snapshot
+             *     restore, the server defaults to `["tail", "-f", "/dev/null"]`.
              *
              *     Explicitly specifies the user's expected main process, allowing the sandbox management
              *     service to reliably inject control processes before executing this command.
@@ -638,13 +1097,25 @@ export interface components {
              *       "/app/main.py"
              *     ]
              */
-            entrypoint: string[];
+            entrypoint?: string[];
             /**
              * @description Optional outbound network policy for the sandbox.
              *     Shape matches the sidecar `/policy` endpoint. If omitted or empty,
              *     the sidecar starts in allow-all mode until updated.
              */
             networkPolicy?: components["schemas"]["NetworkPolicy"];
+            /**
+             * @description Opts the sandbox into secured access for endpoint access.
+             *     This is currently supported only for Kubernetes sandboxes exposed
+             *     through ingress gateway mode. When enabled, the server provisions
+             *     access credentials and returns the required request headers with
+             *     endpoint responses. Clients must include those endpoint headers when
+             *     calling the sandbox. When omitted or false, endpoints remain
+             *     accessible without the additional access token for backward
+             *     compatibility.
+             * @default false
+             */
+            secureAccess: boolean;
             /**
              * @description Storage mounts for the sandbox. Each volume entry specifies a named backend-specific
              *     storage source and common mount settings. Exactly one backend type must be specified
@@ -659,6 +1130,9 @@ export interface components {
              *     **Best Practices**:
              *     - **Namespacing**: Use prefixed keys (e.g., `storage.id`) to prevent collisions.
              *     - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
+             *
+             *     **Well-known keys**:
+             *     - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24 hours inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit to disable. Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint via `validate_extensions` in server `src/extensions/validation.py`).
              */
             extensions?: {
                 [key: string]: string;
@@ -758,7 +1232,7 @@ export interface components {
         /**
          * @description Storage mount definition for a sandbox. Each volume entry contains:
          *     - A unique name identifier
-         *     - Exactly one backend struct (host, pvc, etc.) with backend-specific fields
+         *     - Exactly one backend struct (host, pvc, ossfs, etc.) with backend-specific fields
          *     - Common mount settings (mountPath, readOnly, subPath)
          */
         Volume: {
@@ -769,6 +1243,7 @@ export interface components {
             name: string;
             host?: components["schemas"]["Host"];
             pvc?: components["schemas"]["PVC"];
+            ossfs?: components["schemas"]["OSSFS"];
             /**
              * @description Absolute path inside the container where the volume is mounted.
              *     Must start with '/'.
@@ -781,6 +1256,7 @@ export interface components {
             readOnly: boolean;
             /**
              * @description Optional subdirectory under the backend path to mount.
+             *     For `ossfs` backend, this field is used as the bucket prefix.
              *     Must be a relative path without '..' components.
              */
             subPath?: string;
@@ -795,22 +1271,92 @@ export interface components {
         Host: {
             /**
              * @description Absolute path on the host filesystem to mount.
-             *     Must start with '/' and be under an allowed prefix.
+             *     Must start with '/' (Unix) or a drive letter such as 'C:\' or 'D:/'
+             *     (Windows), and be under an allowed prefix.
              */
             path: string;
         };
         /**
-         * @description Kubernetes PersistentVolumeClaim mount backend. References an existing
-         *     PVC in the same namespace as the sandbox pod.
+         * @description Platform-managed named volume backend. A runtime-neutral abstraction
+         *     for referencing a platform-managed named volume. If `createIfNotExists`
+         *     is true (the default) and the volume does not yet exist, it will be
+         *     created automatically using the provisioning hints below.
          *
-         *     Only available in Kubernetes runtime.
+         *     - Kubernetes: maps to a PersistentVolumeClaim in the same namespace.
+         *     - Docker: maps to a Docker named volume (created via `docker volume create`).
          */
         PVC: {
             /**
-             * @description Name of the PersistentVolumeClaim in the same namespace.
-             *     Must be a valid Kubernetes resource name.
+             * @description Name of the volume on the target platform.
+             *     In Kubernetes this is the PVC name; in Docker this is the named
+             *     volume name. Must be a valid DNS label.
              */
             claimName: string;
+            /**
+             * @description When true (the default), the volume is automatically created if
+             *     it does not exist. When false, referencing a non-existent volume
+             *     fails with an error.
+             * @default true
+             */
+            createIfNotExists: boolean;
+            /**
+             * @description When true, the volume is automatically removed when the sandbox
+             *     is deleted. Only applies to volumes that were auto-created by the
+             *     server (Docker only). Pre-existing volumes are never removed.
+             *     Has no effect on Kubernetes PVCs, whose lifecycle is managed by
+             *     the StorageClass reclaim policy.
+             * @default false
+             */
+            deleteOnSandboxTermination: boolean;
+            /**
+             * @description Kubernetes StorageClass name for auto-created PVCs. Null means
+             *     use the cluster default. Ignored for Docker volumes.
+             */
+            storageClass?: string | null;
+            /**
+             * @description Storage capacity request for auto-created PVCs (e.g. "1Gi",
+             *     "10Gi"). Defaults to the server-configured `volume_default_size`
+             *     when omitted. Ignored for Docker volumes.
+             */
+            storage?: string | null;
+            /**
+             * @description Access modes for auto-created PVCs (e.g. ["ReadWriteOnce"]).
+             *     Defaults to ["ReadWriteOnce"] when omitted. Ignored for Docker
+             *     volumes.
+             */
+            accessModes?: string[] | null;
+        };
+        /**
+         * @description Alibaba Cloud OSS mount backend via ossfs.
+         *
+         *     The runtime mounts a host-side OSS path under `storage.ossfs_mount_root`
+         *     and bind-mounts the resolved path into the sandbox container.
+         *     Prefix selection is expressed via `Volume.subPath`.
+         *     In Docker runtime, OSSFS backend requires OpenSandbox Server to run on a Linux host with FUSE support.
+         */
+        OSSFS: {
+            /** @description OSS bucket name. */
+            bucket: string;
+            /** @description OSS endpoint (e.g., `oss-cn-hangzhou.aliyuncs.com`). */
+            endpoint: string;
+            /**
+             * @description ossfs major version used by runtime mount integration.
+             * @default 2.0
+             * @enum {string}
+             */
+            version: "1.0" | "2.0";
+            /**
+             * @description Additional ossfs mount options.
+             *     Runtime encodes options by `version`:
+             *     - `1.0`: mounts with `ossfs ... -o <option>`
+             *     - `2.0`: mounts with `ossfs2 mount ... -c <config-file>` and encodes options as `--<option>` lines in the config file
+             *     Option values must be provided as raw payloads without leading `-`.
+             */
+            options?: string[];
+            /** @description OSS access key ID for inline credentials mode. */
+            accessKeyId: string;
+            /** @description OSS access key secret for inline credentials mode. */
+            accessKeySecret: string;
         };
     };
     responses: {
@@ -887,6 +1433,8 @@ export interface components {
     parameters: {
         /** @description Unique sandbox identifier */
         SandboxId: string;
+        /** @description Unique snapshot identifier */
+        SnapshotId: string;
     };
     requestBodies: never;
     headers: {

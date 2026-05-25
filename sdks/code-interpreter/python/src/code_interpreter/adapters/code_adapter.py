@@ -22,6 +22,7 @@ API clients and handling SSE streaming for real-time code execution.
 
 import json
 import logging
+import time
 
 import httpx
 from opensandbox.adapters.converter.event_node import EventNode
@@ -32,6 +33,7 @@ from opensandbox.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcher,
 )
 from opensandbox.adapters.converter.response_handler import (
+    extract_request_id,
     handle_api_error,
     require_parsed,
 )
@@ -47,6 +49,22 @@ from code_interpreter.models.code import CodeContext, SupportedLanguage
 from code_interpreter.services.code import Codes
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_sse_event(event_dict: dict) -> dict:
+    if "type" in event_dict and "timestamp" in event_dict:
+        return event_dict
+    if "code" in event_dict and "message" in event_dict:
+        return {
+            "type": "error",
+            "timestamp": int(time.time() * 1000),
+            "error": {
+                "ename": str(event_dict["code"]),
+                "evalue": str(event_dict["message"]),
+                "traceback": [],
+            },
+        }
+    return event_dict
 
 
 class CodesAdapter(Codes):
@@ -88,6 +106,7 @@ class CodesAdapter(Codes):
         headers = {
             "User-Agent": self.connection_config.user_agent,
             **self.connection_config.headers,
+            **self.execd_endpoint.headers,
         }
 
         # Execd API does not require authentication
@@ -287,6 +306,7 @@ class CodesAdapter(Codes):
                     raise SandboxApiException(
                         message=f"Failed to run code. Status code: {response.status_code}",
                         status_code=response.status_code,
+                        request_id=extract_request_id(response.headers),
                     )
 
                 dispatcher = ExecutionEventDispatcher(execution, handlers)
@@ -301,7 +321,7 @@ class CodesAdapter(Codes):
                         data = data[5:].strip()
 
                     try:
-                        event_dict = json.loads(data)
+                        event_dict = _normalize_sse_event(json.loads(data))
                         event_node = EventNode(**event_dict)
                         await dispatcher.dispatch(event_node)
                     except json.JSONDecodeError:

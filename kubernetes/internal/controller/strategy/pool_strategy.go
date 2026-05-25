@@ -16,4 +16,5 @@ package strategy
 
 type PoolStrategy interface {
 	IsPooledMode() bool
+	AssignProfile() string
 }

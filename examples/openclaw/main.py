@@ -22,16 +22,28 @@ from opensandbox.models.sandboxes import NetworkPolicy, NetworkRule
 import requests
 
 
-def check_openclaw(sbx: SandboxSync) -> bool:
+# Configuration defaults - can be overridden via environment variables
+DEFAULT_SERVER = os.getenv("OPENCLAW_SERVER", "http://localhost:8080")
+DEFAULT_IMAGE = os.getenv("OPENCLAW_IMAGE", "ghcr.io/openclaw/openclaw:latest")
+DEFAULT_TIMEOUT = int(os.getenv("OPENCLAW_TIMEOUT", "3600"))
+DEFAULT_TOKEN = os.getenv("OPENCLAW_TOKEN", "dummy-token-for-sandbox")
+DEFAULT_PORT = int(os.getenv("OPENCLAW_PORT", "18789"))
+
+
+def check_openclaw(sbx: SandboxSync, port: int = DEFAULT_PORT) -> bool:
     """
     Health check: poll openclaw until it returns 200.
+
+    Args:
+        sbx: SandboxSync instance
+        port: Gateway port to check
 
     Returns:
         True  when ready
         False on timeout or any exception
     """
     try:
-        endpoint = sbx.get_endpoint(18789)
+        endpoint = sbx.get_endpoint(port)
         start = time.perf_counter()
         url = f"http://{endpoint.endpoint}"
         for _ in range(150):  # max for ~30s
@@ -51,19 +63,24 @@ def check_openclaw(sbx: SandboxSync) -> bool:
 
 
 def main() -> None:
-    server = "http://localhost:8080"
-    image = "ghcr.io/openclaw/openclaw:latest"
-    timeout_seconds = 3600  # 1 hour
-    token = os.getenv("OPENCLAW_GATEWAY_TOKEN", "dummy-token-for-sandbox")
+    server = DEFAULT_SERVER
+    image = DEFAULT_IMAGE
+    timeout_seconds = DEFAULT_TIMEOUT
+    token = os.getenv("OPENCLAW_GATEWAY_TOKEN", DEFAULT_TOKEN)
+    port = DEFAULT_PORT
 
     print(f"Creating openclaw sandbox with image={image} on OpenSandbox server {server}...")
+    print(f"  Token: {token[:16]}..." if len(token) > 16 else f"  Token: {token}")
+    print(f"  Port: {port}")
+    print(f"  Timeout: {timeout_seconds}s")
+    
     sandbox = SandboxSync.create(
         image=image,
         timeout=timedelta(seconds=timeout_seconds),
         metadata={"example": "openclaw"},
-        entrypoint=["node dist/index.js gateway --bind=lan --port 18789 --allow-unconfigured --verbose"],
+        entrypoint=[f"node dist/index.js gateway --bind=lan --port {port} --allow-unconfigured --verbose"],
         connection_config=ConnectionConfigSync(domain=server),
-        health_check=check_openclaw,
+        health_check=lambda sbx: check_openclaw(sbx, port),
         # env for openclaw
         env={
             "OPENCLAW_GATEWAY_TOKEN": token
@@ -71,11 +88,16 @@ def main() -> None:
         # use network policy to limit openclaw network accesses
         network_policy=NetworkPolicy(
             defaultAction="deny",
-            egress=[NetworkRule(action="allow", target="pypi.org")],
+            egress=[
+                NetworkRule(action="allow", target="pypi.org"),
+                NetworkRule(action="allow", target="pypi.python.org"),
+                NetworkRule(action="allow", target="github.com"),
+                NetworkRule(action="allow", target="api.github.com"),
+            ],
         ),
     )
 
-    endpoint = sandbox.get_endpoint(18789)
+    endpoint = sandbox.get_endpoint(port)
     print(f"Openclaw started finished. Please refer to {endpoint.endpoint}")
 
 if __name__ == "__main__":

@@ -66,6 +66,11 @@ opensandbox-controller:
   controller:
     logLevel: debug
     replicaCount: 2
+    snapshot:
+      registry: my-registry/snapshots
+      registryInsecure: false
+      snapshotPushSecret: registry-snapshot-push-secret
+      resumePullSecret: registry-pull-secret
 
 opensandbox-server:
   server:
@@ -104,6 +109,7 @@ Note: CRDs are kept by default. To remove them:
 ```bash
 kubectl delete crd batchsandboxes.sandbox.opensandbox.io
 kubectl delete crd pools.sandbox.opensandbox.io
+kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 ```
 
 ## License

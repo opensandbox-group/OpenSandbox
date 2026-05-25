@@ -16,6 +16,7 @@ package strategy
 
 import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+	poolassign "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/poolassign"
 )
 
 type DefaultPoolStrategy struct {
@@ -30,4 +31,11 @@ func NewDefaultPoolStrategy(batchSandbox *sandboxv1alpha1.BatchSandbox) *Default
 
 func (s *DefaultPoolStrategy) IsPooledMode() bool {
 	return s.Spec.PoolRef != ""
+}
+
+func (s *DefaultPoolStrategy) AssignProfile() string {
+	if s.Spec.PoolRef == "*" {
+		return poolassign.DefaultProfileName
+	}
+	return ""
 }

@@ -143,15 +143,15 @@ internal sealed class CodesAdapter : ICodes
         await _client.DeleteAsync("/code/contexts", queryParams, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task InterruptAsync(string contextId, CancellationToken cancellationToken = default)
+    public async Task InterruptAsync(string executionId, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(contextId))
+        if (string.IsNullOrWhiteSpace(executionId))
         {
-            throw new InvalidArgumentException("contextId cannot be empty");
+            throw new InvalidArgumentException("executionId cannot be empty");
         }
 
-        _logger.LogInformation("Interrupting code execution for context: {ContextId}", contextId);
-        var queryParams = new Dictionary<string, string?> { ["id"] = contextId };
+        _logger.LogInformation("Interrupting code execution: {ExecutionId}", executionId);
+        var queryParams = new Dictionary<string, string?> { ["id"] = executionId };
         await _client.DeleteAsync("/code", queryParams, cancellationToken).ConfigureAwait(false);
     }
 

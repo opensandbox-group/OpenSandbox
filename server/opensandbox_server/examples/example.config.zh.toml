@@ -1,0 +1,70 @@
+# Copyright 2025 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example Docker Runtime Configuration for OpenSandbox Server
+#
+# 完整配置参考：https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md
+
+[server]
+host = "127.0.0.1"
+port = 8080
+max_sandbox_timeout_seconds = 86400
+
+# 可选：取消注释以启用 API Key 认证
+# api_key = "your-secret-api-key"
+# 若 api_key 为空，启动时需要显式确认：
+# - 交互式 TTY：按提示输入 YES
+# - 非交互环境：设置 OPENSANDBOX_INSECURE_SERVER=YES
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "docker"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18"
+
+[storage]
+allowed_host_paths = []
+
+# 自动创建 Kubernetes PVC 时的默认存储大小（当调用方未指定时使用）。
+volume_default_size = "1Gi"
+
+[store]
+type = "sqlite"
+path = "~/.opensandbox/opensandbox.db"
+
+[docker]
+# Supported values for network_mode: "host", "bridge"
+network_mode = "bridge"
+# Drop dangerous capabilities and block privilege escalation
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+no_new_privileges = true
+# Optional: set an AppArmor profile name (e.g., "docker-default") when AppArmor is enabled
+apparmor_profile = ""
+# Limit process count to reduce host impact from fork bombs; set to null to disable
+pids_limit = 4096
+# Seccomp profile: empty string uses Docker default; set to an absolute path for a custom profile
+seccomp_profile = ""
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.0.12"
+mode = "dns"
+
+# 🧪 [EXPERIMENTAL] 按访问续期。默认关闭 — 见 server/README_zh.md。
+[renew_intent]
+enabled = false
+min_interval_seconds = 60

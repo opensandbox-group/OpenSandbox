@@ -1,80 +1,19 @@
-# OSEP (OpenSandbox Enhancement Proposals)
+# OpenSandbox Enhancement Proposals
 
-Use this directory to draft, review, and store enhancement proposals before they
-undergo broader discussion.
+See the [OSEP contributing](CONTRIBUTING.md) for information on OSEPs and how to create and merge them.
 
-> [!NOTE]
-> The OSEP process and template structure is inspired by
-> [Tekton Enhancement Proposals (TEPs)](https://github.com/tektoncd/community/tree/main/teps).
+This is the complete list of OpenSandbox Enhancement Proposals:
 
-> [!IMPORTANT]
-> **When is an OSEP required?**
->
-> Use the OSEP process for changes that:
-> - Introduce new features or major enhancements
-> - Modify the core sandbox API or runtime behavior
-> - Affect the security model or isolation guarantees
->
-> Small bug fixes, documentation updates, and minor refactors can be submitted
-> directly as Pull Requests without an OSEP.
-
-## Getting started
-
-1. Run the init script to create a new proposal:
-
-   ```bash
-   oseps/init-osep.sh "Proposal Title"
-   ```
-
-   This copies the template, fills in metadata, and creates a sequentially
-   numbered `0001-proposal-title.md` draft.
-
-2. Fill in each section from the template (`Summary`, `Motivation`, …).
-3. Once ready, submit the resulting file in a PR for community review.
-
-**Available options:**
-
-```bash
-oseps/init-osep.sh --help
-oseps/init-osep.sh --status provisional --author "@username" "My Feature"
-```
-
-## Template
-
-The template used for new proposals lives at `oseps/osep-template.md.template`
-and mirrors Tekton's TEP structure while capturing the key sections needed
-for OpenSandbox planning. Each generated file starts with YAML front matter
-followed by the title and TOC:
-
-```yaml
----
-title: My First Proposal
-authors:
-  - "@your-github-handle"
-creation-date: 2025-12-21
-last-updated: 2025-12-21
-status: draft
----
-
-# OSEP-0001: My First Proposal
-
-<!-- toc -->
-- [Summary](#summary)
-...
-<!-- /toc -->
-```
-
-This YAML front matter renders as a table on GitHub and keeps the proposal
-metadata (status, authors, dates) visible at the top of the document.
-
-## Status lifecycle
-
-| Status | Description |
-|--------|-------------|
-| `draft` | Work in progress; not yet under formal review. |
-| `provisional` | Maintainers agree with the direction; design details still pending. |
-| `implementable` | Design approved and compliance checks passed; ready for implementation. |
-| `implementing` | Code is being merged and SDKs are being synchronized. |
-| `implemented` | Feature has reached GA status with complete documentation. |
-| `withdrawn` | Author has withdrawn the proposal. |
-| `rejected` | Maintainers have declined the proposal. |
+|                            OSEP                            |                   Title                    |    Status     | Last Updated |
+|:----------------------------------------------------------:|:------------------------------------------:|:-------------:|:------------:|
+|       [OSEP-0001](0001-fqdn-based-egress-control.md)       |         FQDN-based Egress Control          |  implemented  |  2026-01-22  |
+| [OSEP-0002](0002-kubernetes-sigs-agent-sandbox-support.md) |   kubernetes-sigs/agent-sandbox Support    |  implemented  |  2026-01-23  |
+|   [OSEP-0003](0003-volume-and-volumebinding-support.md)    |               Volume Support               | implementing  |  2026-02-11  |
+|       [OSEP-0004](0004-secure-container-runtime.md)        | Pluggable Secure Container Runtime Support |  implemented  |  2026-02-09  |
+|       [OSEP-0005](0005-client-side-sandbox-pool.md)        |          Client-Side Sandbox Pool          | implementing  |  2026-03-09  |
+|           [OSEP-0006](0006-developer-console.md)           |  Developer Console for Sandbox Operations  | implementable |  2026-03-06  |
+|     [OSEP-0007](0007-fast-sandbox-runtime-support.md)      |        Fast Sandbox Runtime Support        |  provisional  |  2026-02-08  |
+|     [OSEP-0008](0008-pause-resume-rootfs-snapshot.md)      |    Pause and Resume via Rootfs Snapshot    | implementing  |  2026-03-13  |
+| [OSEP-0009](0009-auto-renew-sandbox-on-ingress-access.md)  |    Auto-Renew Sandbox on Ingress Access    |  implemented  |  2026-03-23  |
+| [OSEP-0010](0010-opentelemetry-instrumentation.md)             |      OpenTelemetry Metrics and Logs (execd, egress, and ingress)           | implementing  |  2026-04-12  |
+| [OSEP-0011](0011-secure-access-endpoint.md)                    |      Secure Access on GetEndpoint and Signed Endpoint                     |  implemented  |  2026-04-25  |

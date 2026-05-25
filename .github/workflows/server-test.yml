@@ -4,8 +4,7 @@ on:
   pull_request:
     branches: [ main ]
     paths:
-      - 'server/src/**'
-      - 'server/tests/**'
+      - 'server/**'
 
 permissions:
   contents: read
@@ -42,13 +41,27 @@ jobs:
           cd server
           uv sync --all-groups
           uv run ruff check
-          uv run pytest
+          mkdir -p reports
+          uv run pytest \
+            --cov=opensandbox_server \
+            --cov-report=term \
+            --cov-report=xml:reports/coverage.xml \
+            --cov-fail-under=80
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage-${{ matrix.os }}
+          path: server/reports/coverage.xml
 
   docker-smoke:
     strategy:
       matrix:
         network: [host, bridge]
     runs-on: ubuntu-latest
+    env:
+      OPENSANDBOX_INSECURE_SERVER: YES
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -77,8 +90,9 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 32888
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:latest"
@@ -91,7 +105,7 @@ jobs:
           EOF
 
           # Start server in background
-          uv run python -m src.main > app.log 2>&1 &
+          uv run python -m opensandbox_server.main > app.log 2>&1 &
 
           # Wait for server to start
           sleep 10

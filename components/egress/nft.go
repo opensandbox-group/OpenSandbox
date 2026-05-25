@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
@@ -27,29 +28,33 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
 
-// createNftManager returns an nft manager for dns+nft mode, or nil for dns-only.
+// createNftManager is non-nil only when mode includes the nft token (e.g. dns+nft).
 func createNftManager(mode string) nftApplier {
-	if mode != constants.PolicyDnsNft {
+	if !constants.ModeUsesNft(mode) {
 		return nil
 	}
 	return nftables.NewManagerWithOptions(parseNftOptions())
 }
 
-// setupNft applies static policy to nft and wires DNS-resolved IPs into the proxy when nft is enabled.
-// nameserverIPs are merged into the allow set at startup so system DNS works (client + proxy upstream, e.g. private DNS).
-func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.NetworkPolicy, proxy *dnsproxy.Proxy, nameserverIPs []netip.Addr) {
+// setupNft: apply static policy to nft, then wire allowed DNS answers to AddResolvedIPs (dynamic allow sets).
+// nameserverIPs and always-deny/allow follow the same merge rules as the policy API (MergeAlwaysOverlay + WithExtraAllowIPs).
+func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.NetworkPolicy, proxy *dnsproxy.Proxy, nameserverIPs []netip.Addr, alwaysDeny, alwaysAllow []policy.EgressRule) {
 	if nftMgr == nil {
 		log.Warnf("nftables disabled (dns-only mode)")
 		return
 	}
+
 	log.Infof("applying nftables static policy (dns+nft mode) with %d nameserver IP(s) merged into allow set", len(nameserverIPs))
-	policyWithNS := initialPolicy.WithExtraAllowIPs(nameserverIPs)
+	merged := policy.MergeAlwaysOverlay(initialPolicy, alwaysDeny, alwaysAllow)
+	policyWithNS := merged.WithExtraAllowIPs(nameserverIPs)
 	if err := nftMgr.ApplyStatic(ctx, policyWithNS); err != nil {
 		log.Fatalf("nftables static apply failed: %v", err)
 	}
 	log.Infof("nftables static policy applied (table inet opensandbox); DNS-resolved IPs will be added to dynamic allow sets")
 	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) {
-		if err := nftMgr.AddResolvedIPs(ctx, ips); err != nil {
+		addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := nftMgr.AddResolvedIPs(addCtx, ips); err != nil {
 			log.Warnf("[dns] add resolved IPs to nft failed for domain %q: %v", domain, err)
 		}
 	})
@@ -57,7 +62,7 @@ func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.Netw
 
 func parseNftOptions() nftables.Options {
 	opts := nftables.Options{BlockDoT: true}
-	if isTruthy(os.Getenv(constants.EnvBlockDoH443)) {
+	if constants.IsTruthy(os.Getenv(constants.EnvBlockDoH443)) {
 		opts.BlockDoH443 = true
 	}
 	if raw := os.Getenv(constants.EnvDoHBlocklist); strings.TrimSpace(raw) != "" {

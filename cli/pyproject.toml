@@ -1,0 +1,136 @@
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opensandbox-cli"
+dynamic = ["version"]
+description = "OpenSandbox CLI - Command-line interface for managing sandboxes"
+authors = [
+    { name = "OpenSandbox Team", email = "ninan.nn@alibaba-inc.com" }
+]
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["sandbox", "cli", "opensandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = [
+    "opensandbox>=0.1.9,<0.2.0",
+    "click>=8.1.0,<9.0",
+    "rich>=13.0.0,<14.0",
+    "pyyaml>=6.0,<7.0",
+    "tomli>=2.0.0; python_version < '3.11'",
+]
+
+[project.urls]
+Homepage = "https://open-sandbox.ai"
+Repository = "https://github.com/alibaba/OpenSandbox"
+Documentation = "https://open-sandbox.ai"
+Issues = "https://github.com/alibaba/OpenSandbox/issues"
+
+[project.scripts]
+opensandbox = "opensandbox_cli.main:cli"
+osb = "opensandbox_cli.main:cli"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+root = ".."
+tag_regex = "^cli/v(?P<version>\\d+\\.\\d+\\.\\d+(?:[\\.\\w\\+\\-]*)?)$"
+git_describe_command = 'git describe --dirty --tags --long --match "cli/v*"'
+fallback_version = "0.1.1"
+
+[tool.hatch.build]
+include = [
+    "LICENSE",
+    "src/**/py.typed",
+    "src/opensandbox_cli",
+    "src/opensandbox_cli/skills/**",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/opensandbox_cli"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.14.8",
+    "pyright>=1.1.0",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501", # line too long, handled by formatter
+    "B008", # do not perform function calls in argument defaults
+    "C901", # too complex
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.pyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.10"
+pythonPlatform = "All"
+include = ["src"]
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+]
+reportMissingImports = true
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --strict-markers --strict-config"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.uv.sources]
+opensandbox = { path = "../sdks/sandbox/python", editable = true }

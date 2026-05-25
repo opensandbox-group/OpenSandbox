@@ -4,23 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "docs/**"
-      - "specs/**"
-      - "scripts/spec-doc/**"
-      - "README.md"
-      - "CONTRIBUTING.md"
-      - "CODE_OF_CONDUCT.md"
-      - "server/**/README*.md"
-      - "server/**/DEVELOPMENT.md"
-      - "components/**/README*.md"
-      - "components/**/DEVELOPMENT.md"
-      - "sdks/**/README*.md"
-      - "sandboxes/**/README*.md"
-      - "kubernetes/**/README*.md"
-      - "examples/**/README*.md"
-      - "specs/**/README*.md"
-      - "oseps/**/*.md"
   workflow_dispatch:
 
 permissions:

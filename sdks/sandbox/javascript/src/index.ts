@@ -30,20 +30,29 @@ export { ConnectionConfig } from "./config/connection.js";
 export type { ConnectionConfigOptions, ConnectionProtocol } from "./config/connection.js";
 
 export type {
+  CreateSnapshotRequest,
   CreateSandboxRequest,
   CreateSandboxResponse,
   Endpoint,
   Host,
+  ListSnapshotsParams,
+  ListSnapshotsResponse,
   ListSandboxesParams,
   ListSandboxesResponse,
   NetworkPolicy,
   NetworkRule,
   NetworkRuleAction,
+  OSSFS,
+  PlatformSpec,
   PVC,
   RenewSandboxExpirationRequest,
   RenewSandboxExpirationResponse,
+  SnapshotInfo,
+  SnapshotState,
+  SnapshotStatus,
   SandboxId,
   SandboxInfo,
+  SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
 
@@ -91,6 +100,7 @@ export { ExecutionEventDispatcher } from "./models/executionEventDispatcher.js";
 
 export {
   DEFAULT_ENTRYPOINT,
+  DEFAULT_EGRESS_PORT,
   DEFAULT_EXECD_PORT,
   DEFAULT_RESOURCE_LIMITS,
   DEFAULT_TIMEOUT_SECONDS,

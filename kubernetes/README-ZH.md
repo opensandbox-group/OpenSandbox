@@ -10,6 +10,7 @@ OpenSandbox Kubernetes 控制器，通过自定义资源管理沙箱环境。它
 - **批处理和单个交付**：支持单个沙箱（用于真实用户交互）和批处理沙箱交付（用于高吞吐量智能体强化学习场景）
 - **可选任务调度**：集成任务编排，支持可选的分片任务模板以实现异构任务分发和定制化沙箱交付（例如，进程注入）
 - **资源池化**：维护预热的资源池以实现快速沙箱供应
+- **暂停和恢复**：通过 rootfs 快照持久化沙箱文件系统状态，在会话之间释放集群资源
 - **全面监控**：实时跟踪沙箱和任务状态
 
 ## 功能特性
@@ -30,6 +31,21 @@ Pool 自定义资源维护一个预热的计算资源池，以实现快速沙箱
 - 基于需求的自动资源分配和释放
 - 实时状态监控，显示总数、已分配和可用资源
 
+### Pod 驱逐
+Pool 支持优雅的 Pod 驱逐，适用于节点维护或资源回收等场景：
+
+**工作原理：**
+- 用户通过给 Pod 打上 `pool.opensandbox.io/evict` 标签请求驱逐
+- 控制器会跳过已分配给 BatchSandbox 的 Pod（保护使用中的工作负载）
+- 空闲 Pod 将被删除，触发池补充容量
+- 标记驱逐的 Pod 不会被分配给新的 BatchSandbox
+
+**自定义驱逐行为：**
+您可以通过以下方式实现自定义驱逐策略：
+1. 在 Pool 上设置 `pool.opensandbox.io/eviction-handler` 标签选择您的处理器
+2. 实现 `EvictionHandler` 接口，包含 `NeedsEviction()` 和 `Evict()` 方法
+3. 在工厂函数中注册您的处理器
+
 ### 任务编排
 集成的任务管理系统，在沙箱内执行自定义工作负载：
 - **可选执行**：任务调度完全可选 - 可以在不带任务的情况下创建沙箱
@@ -41,6 +57,123 @@ Pool 自定义资源维护一个预热的计算资源池，以实现快速沙箱
 - 最小和最大缓冲区设置，以确保资源可用性同时控制成本
 - 池范围的容量限制，防止资源耗尽
 - 基于需求的自动扩展
+
+## 暂停和恢复（Rootfs 快照）
+
+OpenSandbox 支持通过将容器根文件系统持久化为 OCI 镜像来实现 Kubernetes 沙箱的**暂停和恢复**功能。
+
+```text
+时间 ---------------------------------------------------------------->
+
+沙箱生命周期：   [运行中]--[暂停中]--[已暂停]--[恢复中]--[运行中]
+                         |                     |
+                  提交 rootfs          重写模板镜像
+                  推送到 registry      基于快照重建运行时
+                  释放 Pod/池化分配
+```
+
+### 工作原理
+
+1. **暂停**：服务器 patch `BatchSandbox.spec.pause=true`。控制器创建内部 `SandboxSnapshot`，在同一节点上启动 commit Job，提交容器 rootfs 并推送到配置的 OCI registry。快照就绪后，控制器将同一个 `BatchSandbox` 置为 `Paused`，并释放运行时 Pod / 池化分配。
+2. **恢复**：服务器 patch `BatchSandbox.spec.pause=false`。控制器读取最新的 `SandboxSnapshot`，把 `BatchSandbox` 模板镜像重写为快照镜像 URI，重建运行时，并将沙箱恢复到 `Running`。公共 `sandboxId` 在暂停/恢复周期中保持稳定。
+
+当前暂停/恢复仅支持 `BatchSandbox.spec.replicas=1`。OpenSandbox server 创建的 Kubernetes 沙箱会固定使用 `replicas: 1`；如果直接创建 `BatchSandbox` CR 并设置为其他副本数，控制器会在 pause 入口拒绝请求，因为内部 pause snapshot 只记录一个源 Pod 的容器镜像状态。
+
+### SandboxSnapshot CRD
+
+`SandboxSnapshot` CR 是暂停/恢复生命周期的核心资源：
+
+| 字段 | 位置 | 描述 |
+|-------|----------|-------------|
+| `spec.sandboxName` | Spec | 同命名空间下目标 `BatchSandbox` 的名称 |
+| `status.phase` | Status | `Pending` → `Committing` → `Succeed` / `Failed` |
+| `status.conditions` | Status | 带有 reason 和 message 的 `Ready` / `Failed` 条件 |
+| `status.containers` | Status | 每个容器已提交的镜像 URI |
+| `status.sourcePodName` | Status | 控制器解析的 Pod 名称 |
+| `status.sourceNodeName` | Status | commit Job 选择的节点 |
+
+### 前置条件
+
+1. **OCI Registry**：用于存储快照镜像的可访问容器 registry。
+2. **Kubernetes Secrets**：用于推送和拉取访问的 Docker 配置 secrets。
+3. **控制器配置**：为 controller manager 配置快照 registry 和 secret 参数。
+4. **控制器 RBAC**：控制器需要 `secrets: get` 权限（已包含在 Helm chart 和 `make manifests` 输出中）。
+
+### 控制器配置
+
+快照控制器支持以下命令行参数：
+
+| 参数 | 默认值 | 描述 |
+|------|---------|-------------|
+| `--snapshot-registry` | `""` | 快照镜像使用的 OCI registry 前缀 |
+| `--snapshot-push-secret` | `""` | commit Job 推送快照时使用的 Secret 名称 |
+| `--resume-pull-secret` | `""` | 恢复后沙箱拉取镜像时注入的 Secret 名称 |
+| `--image-committer-image` | `image-committer:dev` | 用于 commit 操作的镜像（必须包含 `nerdctl` 工具） |
+| `--commit-job-timeout` | `10m` | commit Job 的超时时间 |
+| `--snapshot-registry-insecure` | `false` | 是否让快照 commit Job 使用 insecure registry 模式 |
+
+这些参数在控制器启动时配置。`image-committer-image` 必须是受信任的、包含 `nerdctl` 的容器镜像，以执行 rootfs commit 和推送操作。Commit Job 会在源 Pod 所在节点挂载宿主机 containerd socket，因此该镜像实际拥有节点级 runtime 访问能力。生产环境建议使用 digest pinning，或通过镜像仓库/准入策略限制来源。
+
+本地开发时，示例 manager manifest 会直接传入这些 registry 和 secret 参数：
+
+```yaml
+- --snapshot-registry=<your-registry>/sandboxes
+- --snapshot-registry-insecure=true # 仅用于 HTTP 或自签名证书的本地 registry
+- --snapshot-push-secret=registry-snapshot-push-secret
+- --resume-pull-secret=registry-pull-secret
+```
+
+当前 Helm chart 已直接暴露 `controller.snapshot.*` 这组 values，包括 `imageCommitterImage`、`commitJobTimeout`、`registry`、`registryInsecure`、`snapshotPushSecret` 和 `resumePullSecret`。
+
+**源码 / Kustomize 部署：**
+
+如果通过源码执行 `make deploy` 部署，Makefile 目前只会改写 `CONTROLLER_IMG`。快照相关 flags 仍然来自 `config/manager/manager.yaml`（或您自己的 Kustomize overlay / patch）。如果需要修改 registry、secret 或 image-committer 设置，请先更新该 manifest，再执行：
+
+```sh
+make deploy CONTROLLER_IMG=<controller-image>
+```
+
+### 快速设置
+
+```bash
+# 创建推送 secret
+kubectl create secret docker-registry registry-snapshot-push-secret \
+  --docker-server=<your-registry> \
+  --docker-username=<user> \
+  --docker-password=<token>
+
+# 创建拉取 secret（可以复用推送 secret）
+kubectl create secret docker-registry registry-pull-secret \
+  --docker-server=<your-registry> \
+  --docker-username=<user> \
+  --docker-password=<token>
+```
+
+然后为 controller manager 配置：
+
+```yaml
+- --snapshot-registry=<your-registry>/sandboxes
+- --snapshot-registry-insecure=true # 仅用于 HTTP 或自签名证书的本地 registry
+- --snapshot-push-secret=registry-snapshot-push-secret
+- --resume-pull-secret=registry-pull-secret
+```
+
+快照镜像的保留策略由 registry 管理。删除 `SandboxSnapshot` 只会清理 Kubernetes commit/unpause Job，不会删除已经推送到 registry 的 OCI 镜像。请根据环境为 `snap-gen<N>` 这类标签配置 registry retention/GC。
+
+### CRD 清理
+
+卸载时删除 SandboxSnapshot CRD：
+
+```bash
+kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
+```
+
+有关包括故障排除和失败场景在内的完整指南，请参见 [`docs/pause-resume.md`](../docs/pause-resume.md)。
+
+## 运行时 API 支持说明
+
+- Kubernetes 运行时通过 rootfs 快照支持 `pause` / `resume` 生命周期 API。参见上面的[暂停和恢复](#暂停和恢复rootfs-快照)。
+- Docker 运行时支持 cgroup 级别的冻结（`pause`/`resume`），但不会在重启之间持久化文件系统状态。
 
 
 ## 与 [kubernates-sigs/agent-sandbox](kubernates-sigs/agent-sandbox) 的关系
@@ -132,7 +265,7 @@ kind load docker-image <controller-image-name>:<tag>
 kind load docker-image <task-executor-image-name>:<tag>
 ```
 
-例如，如果您使用 `make docker-build IMG=my-controller:latest` 构建镜像，则使用以下命令加载：
+例如，如果您使用 `make docker-build CONTROLLER_IMG=my-controller:latest` 构建镜像，则使用以下命令加载：
 ```sh
 kind load docker-image my-controller:latest
 ```
@@ -235,7 +368,7 @@ helm install opensandbox-controller \
 1. **构建和推送您的镜像：**
    ```sh
    # 构建和推送控制器镜像
-   make docker-build docker-push IMG=<some-registry>/opensandbox-controller:tag
+   make docker-build docker-push CONTROLLER_IMG=<some-registry>/opensandbox-controller:tag
    
    # 构建和推送任务执行器镜像
    make docker-build-task-executor docker-push-task-executor TASK_EXECUTOR_IMG=<some-registry>/opensandbox-task-executor:tag
@@ -283,7 +416,7 @@ helm uninstall opensandbox-controller -n opensandbox-system
 1. **构建和推送您的镜像：**
    ```sh
    # 构建和推送控制器镜像
-   make docker-build docker-push IMG=<some-registry>/opensandbox-controller:tag
+   make docker-build docker-push CONTROLLER_IMG=<some-registry>/opensandbox-controller:tag
    
    # 构建和推送任务执行器镜像
    make docker-build-task-executor docker-push-task-executor TASK_EXECUTOR_IMG=<some-registry>/opensandbox-task-executor:tag
@@ -298,10 +431,10 @@ helm uninstall opensandbox-controller -n opensandbox-system
 
 3. **将管理器部署到集群：**
    ```sh
-   make deploy IMG=<some-registry>/opensandbox-controller:tag TASK_EXECUTOR_IMG=<some-registry>/opensandbox-task-executor:tag
+   make deploy CONTROLLER_IMG=<some-registry>/opensandbox-controller:tag
    ```
 
-   **注意**：您可能需要授予自己集群管理员权限或以管理员身份登录以确保您在运行命令之前具有集群管理员权限。
+   **注意**：`make deploy` 只会改写 controller 镜像。如果您的 Pool / BatchSandbox 模板会引用 `TASK_EXECUTOR_IMG`，请单独构建并推送该镜像。您也可能需要在执行这些命令前具备集群管理员权限。
 
 **Kind 用户的重要说明**：如果您使用的是 kind 集群，需要在构建镜像后将两个镜像都加载到 kind 节点中：
 ```sh
@@ -390,6 +523,14 @@ spec:
 ```sh
 kubectl apply -f pool-example.yaml
 ```
+
+**可选：配置扩容速率控制** - 添加 `scaleStrategy` 限制扩容节奏：
+```yaml
+  scaleStrategy:
+    maxUnavailable: "20%"  # 或绝对数量如 5
+```
+
+该配置控制扩容过程中允许不可用的 Pod 数量。例如，当 `poolMax=50` 且 `maxUnavailable=20%` 时，每次最多扩容 10 个 Pod。
 
 使用资源池创建一批沙箱：
 

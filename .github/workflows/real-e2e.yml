@@ -4,13 +4,20 @@ permissions:
   contents: read
 
 on:
+  workflow_dispatch:
+    inputs:
+      run_code_interpreter_e2e:
+        description: 'Run code-interpreter E2E tests'
+        required: false
+        type: boolean
+        default: false
   pull_request:
     branches: [ main ]
     paths:
-      - 'server/src/**'
+      - 'server/opensandbox_server/**'
       - 'components/execd/**'
-      - 'sdks/code-interpreter/**'
-      - 'sdks/sandbox/**'
+      - 'components/egress/**'
+      - 'sdks/**'
       - 'tests/**'
   push:
     branches: [ main ]
@@ -25,6 +32,7 @@ jobs:
     runs-on: self-hosted
     env:
       UV_BIN: /home/admin/.local/bin
+      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -39,8 +47,28 @@ jobs:
       - name: Clean up previous E2E resources
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
           # Remove root-owned files from previous sandbox runs by mounting parent dir
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
+
+      - name: Build local egress image
+        run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
+
+      - name: Start Redis for Python pool E2E
+        run: |
+          docker rm -f opensandbox-e2e-redis || true
+          docker run -d --name opensandbox-e2e-redis -p 127.0.0.1::6379 redis:7-alpine
+          REDIS_PORT="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "6379/tcp") 0).HostPort}}' opensandbox-e2e-redis)"
+          echo "OPENSANDBOX_TEST_REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0" >> "$GITHUB_ENV"
+          for i in {1..30}; do
+            if docker exec opensandbox-e2e-redis redis-cli ping | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs opensandbox-e2e-redis
+          exit 1
 
       - name: Run tests
         run: |
@@ -51,17 +79,22 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
           [egress]
-          image = "opensandbox/egress:latest"
+          image = "opensandbox/egress:local"
+          mode = "dns"
           [docker]
           network_mode = "bridge"
           [storage]
           allowed_host_paths = ["/tmp/opensandbox-e2e"]
+          [renew_intent]
+          enabled = true
+          min_interval_seconds = 60
           EOF
 
           ./scripts/python-e2e.sh
@@ -82,15 +115,16 @@ jobs:
         if: always()
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
-          pkill -f "python -m src.main" || true
+          pkill -f "python -m opensandbox_server.main" || true
 
   java-e2e:
     name: Java E2E (docker bridge)
     runs-on: self-hosted
     env:
       UV_BIN: /home/admin/.local/bin
-      JAVA_VERSION: "17.0.14+7"
+      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -102,48 +136,65 @@ jobs:
           uv --version
           uv run python --version
 
-      - name: Set up JDK
-        run: |
-          # Adoptium Temurin JDK 17 for Linux x64
-          JAVA_MAJOR="${JAVA_VERSION%%.*}"
-          JAVA_URL_VERSION=$(echo "${JAVA_VERSION}" | sed 's/+/%2B/')
-          JAVA_DIR="/home/admin/.local/jdk-${JAVA_VERSION}"
-          if [ -x "${JAVA_DIR}/bin/java" ]; then
-            echo "JDK ${JAVA_VERSION} already cached"
-          else
-            echo "Downloading Temurin JDK ${JAVA_VERSION}..."
-            mkdir -p /home/admin/.local
-            curl -fsSL "https://api.adoptium.net/v3/binary/version/jdk-${JAVA_URL_VERSION}/linux/x64/jdk/hotspot/normal/eclipse?project=jdk" \
-              | tar -xzf - -C /home/admin/.local/
-          fi
-          echo "${JAVA_DIR}/bin" >> "$GITHUB_PATH"
-          echo "JAVA_HOME=${JAVA_DIR}" >> "$GITHUB_ENV"
-          export PATH="${JAVA_DIR}/bin:${PATH}"
-          java -version
+      - name: Set up JDK 8
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
 
       - name: Clean up previous E2E resources
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
+
+      - name: Build local egress image
+        run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
+
+      - name: Start Redis for Java pool E2E
+        run: |
+          docker rm -f opensandbox-e2e-redis || true
+          docker run -d --name opensandbox-e2e-redis -p 127.0.0.1::6379 redis:7-alpine
+          REDIS_PORT="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "6379/tcp") 0).HostPort}}' opensandbox-e2e-redis)"
+          echo "OPENSANDBOX_TEST_REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0" >> "$GITHUB_ENV"
+          for i in {1..30}; do
+            if docker exec opensandbox-e2e-redis redis-cli ping | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs opensandbox-e2e-redis
+          exit 1
 
       - name: Run tests
         env:
           GRADLE_USER_HOME: ${{ github.workspace }}/.gradle-user-home
+          OPENSANDBOX_TEST_SECURE_ACCESS_VERIFIABLE: "false"
         run: |
           set -e
+          export GRADLE_OPTS="-Dorg.gradle.java.installations.auto-detect=true -Dorg.gradle.java.installations.auto-download=false -Dorg.gradle.java.installations.paths=${JAVA_HOME_8_X64},${JAVA_HOME_17_X64}"
 
           # Create config file
           cat <<EOF > ~/.sandbox.toml
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
           [egress]
-          image = "opensandbox/egress:latest"
+          image = "opensandbox/egress:local"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -176,8 +227,9 @@ jobs:
         if: always()
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
-          pkill -f "python -m src.main" || true
+          pkill -f "python -m opensandbox_server.main" || true
 
   javascript-e2e:
     name: JavaScript E2E (docker bridge)
@@ -185,6 +237,7 @@ jobs:
     env:
       UV_BIN: /home/admin/.local/bin
       NODE_VERSION: "20.19.0"
+      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -216,6 +269,10 @@ jobs:
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
+
+      - name: Build local egress image
+        run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
 
       - name: Run tests
         run: |
@@ -226,13 +283,14 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
           [egress]
-          image = "opensandbox/egress:latest"
+          image = "opensandbox/egress:local"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -266,13 +324,14 @@ jobs:
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
-          pkill -f "python -m src.main" || true
+          pkill -f "python -m opensandbox_server.main" || true
 
   csharp-e2e:
     name: C# E2E (docker bridge)
     runs-on: self-hosted
     env:
       UV_BIN: /home/admin/.local/bin
+      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -295,6 +354,10 @@ jobs:
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
+
+      - name: Build local egress image
+        run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
 
       - name: Run tests
         run: |
@@ -304,13 +367,14 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
           [egress]
-          image = "opensandbox/egress:latest"
+          image = "opensandbox/egress:local"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -344,4 +408,90 @@ jobs:
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
-          pkill -f "python -m src.main" || true
+          pkill -f "python -m opensandbox_server.main" || true
+
+  go-e2e:
+    name: Go E2E (docker bridge)
+    runs-on: self-hosted
+    env:
+      UV_BIN: /home/admin/.local/bin
+      HOME: /home/admin/actions-runner
+      GOCACHE: /home/admin/actions-runner/_temp/go-build
+      GOMODCACHE: /home/admin/actions-runner/_temp/go-mod-cache
+      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up uv PATH and verify
+        run: |
+          echo "${UV_BIN}" >> "$GITHUB_PATH"
+          export PATH="${UV_BIN}:${PATH}"
+          uv --version
+          uv run python --version
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: Clean up previous E2E resources
+        run: |
+          docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
+
+      - name: Build local egress image
+        run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
+
+      - name: Run tests
+        run: |
+          set -e
+
+          cat <<EOF > ~/.sandbox.toml
+          [server]
+          host = "127.0.0.1"
+          port = 8080
+          api_key = ""
+          [log]
+          level = "INFO"
+          [runtime]
+          type = "docker"
+          execd_image = "opensandbox/execd:local"
+          [egress]
+          image = "opensandbox/egress:local"
+          [docker]
+          network_mode = "bridge"
+          [storage]
+          allowed_host_paths = ["/tmp/opensandbox-e2e"]
+          EOF
+
+          bash ./scripts/go-e2e.sh
+
+      - name: Eval server logs
+        if: ${{ always() }}
+        run: cat server/server.log
+
+      - name: Upload Test Report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-test-report
+          path: tests/go/reports/
+          retention-days: 5
+
+      - name: Upload execd logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: execd-log-for-go-e2e
+          path: /tmp/opensandbox-e2e/logs/
+          retention-days: 5
+
+      - name: Clean up after E2E
+        if: always()
+        run: |
+          docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          pkill -f "python -m opensandbox_server.main" || true

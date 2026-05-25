@@ -48,7 +48,7 @@ async def main() -> None:
 
     # 2. 创建 Sandbox（必须使用 code-interpreter 镜像），并指定语言版本
     sandbox = await Sandbox.create(
-        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
+        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2",
         connection_config=config,
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
         env={
@@ -108,7 +108,7 @@ config = ConnectionConfigSync(
 )
 
 sandbox = SandboxSync.create(
-    "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
+    "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2",
     connection_config=config,
     entrypoint=["/opt/opensandbox/code-interpreter.sh"],
     env={"PYTHON_VERSION": "3.11"},

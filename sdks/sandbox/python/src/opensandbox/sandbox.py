@@ -26,24 +26,31 @@ from typing import Any
 
 from opensandbox.adapters.factory import AdapterFactory
 from opensandbox.config import ConnectionConfig
-from opensandbox.constants import DEFAULT_EXECD_PORT
+from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
 from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxException,
     SandboxInternalException,
     SandboxReadyTimeoutException,
 )
+from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import (
+    CreateSnapshotRequest,
     NetworkPolicy,
+    NetworkRule,
+    PlatformSpec,
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
     SandboxMetrics,
     SandboxRenewResponse,
+    SnapshotInfo,
     Volume,
 )
 from opensandbox.services import (
     Commands,
+    Diagnostics,
+    Egress,
     Filesystem,
     Health,
     Metrics,
@@ -111,7 +118,9 @@ class Sandbox:
         command_service: Commands,
         health_service: Health,
         metrics_service: Metrics,
+        egress_service: Egress,
         connection_config: ConnectionConfig,
+        diagnostics_service: Diagnostics | None = None,
         custom_health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
     ) -> None:
         """
@@ -123,7 +132,11 @@ class Sandbox:
         self._command_service = command_service
         self._health_service = health_service
         self._metrics_service = metrics_service
+        self._egress_service = egress_service
         self._connection_config = connection_config
+        self._diagnostics_service = diagnostics_service or AdapterFactory(
+            connection_config
+        ).create_diagnostics_service()
         self._custom_health_check = custom_health_check
 
     @property
@@ -152,6 +165,13 @@ class Sandbox:
         Allows retrieving resource usage statistics (CPU, memory) and other performance metrics.
         """
         return self._metrics_service
+
+    @property
+    def diagnostics(self) -> Diagnostics:
+        """
+        Provides access to sandbox diagnostic log and event descriptors.
+        """
+        return self._diagnostics_service
 
     @property
     def connection_config(self) -> ConnectionConfig:
@@ -187,6 +207,24 @@ class Sandbox:
             self.id, port, self.connection_config.use_server_proxy
         )
 
+    async def get_signed_endpoint(self, port: int, expires: int) -> SandboxEndpoint:
+        """
+        Get a signed endpoint URL with an OSEP-0011 route token.
+
+        Args:
+            port: The port number to get the endpoint for
+            expires: Unix epoch seconds for the signed route token expiry
+
+        Returns:
+            Endpoint information with a signed URL
+
+        Raises:
+            SandboxException: if endpoint cannot be retrieved
+        """
+        return await self._sandbox_service.get_signed_sandbox_endpoint(
+            self.id, port, expires, self.connection_config.use_server_proxy
+        )
+
     async def get_metrics(self) -> SandboxMetrics:
         """
         Get the current resource usage metrics for this sandbox.
@@ -198,6 +236,24 @@ class Sandbox:
             SandboxException: if metrics cannot be retrieved
         """
         return await self._metrics_service.get_metrics(self.id)
+
+    async def get_diagnostic_logs(self, scope: str) -> DiagnosticContent:
+        """
+        Get diagnostic log content for this sandbox.
+
+        Args:
+            scope: Required diagnostic scope such as "container", "lifecycle", or "all".
+        """
+        return await self._diagnostics_service.get_logs(self.id, scope)
+
+    async def get_diagnostic_events(self, scope: str) -> DiagnosticContent:
+        """
+        Get diagnostic event content for this sandbox.
+
+        Args:
+            scope: Required diagnostic scope such as "runtime", "lifecycle", or "all".
+        """
+        return await self._diagnostics_service.get_events(self.id, scope)
 
     async def renew(self, timeout: timedelta) -> SandboxRenewResponse:
         """
@@ -220,6 +276,39 @@ class Sandbox:
             f"Renewing sandbox {self.id} timeout, estimated expiration: {new_expiration}"
         )
         return await self._sandbox_service.renew_sandbox_expiration(self.id, new_expiration)
+
+    async def patch_metadata(self, patch: dict[str, str | None]) -> SandboxInfo:
+        """
+        Patch sandbox metadata.
+
+        String values add or replace keys; None deletes keys.
+        """
+        return await self._sandbox_service.patch_sandbox_metadata(self.id, patch)
+
+    async def create_snapshot(self, name: str | None = None) -> SnapshotInfo:
+        """Create a persistent snapshot from this sandbox."""
+        return await self._sandbox_service.create_snapshot(
+            self.id, CreateSnapshotRequest(name=name)
+        )
+
+    async def get_egress_policy(self) -> NetworkPolicy:
+        """
+        Get current egress policy for this sandbox.
+        """
+        return await self._egress_service.get_policy()
+
+    async def patch_egress_rules(self, rules: list[NetworkRule]) -> None:
+        """
+        Patch egress rules for this sandbox using sidecar merge semantics.
+
+        Rules in this patch payload take priority over existing rules with the
+        same target. Existing rules for other targets remain unchanged. Within a
+        single patch payload, the first rule for a target wins.
+
+        This operation does not replace the entire policy and does not change
+        the current defaultAction.
+        """
+        await self._egress_service.patch_rules(rules)
 
     async def pause(self) -> None:
         """
@@ -341,10 +430,26 @@ class Sandbox:
             if last_exception
             else "Health check returned false continuously"
         )
+        connection_detail = (
+            f"ConnectionConfig(domain={self.connection_config.get_domain()}, "
+            f"use_server_proxy={self.connection_config.use_server_proxy})"
+        )
+        if self.connection_config.use_server_proxy:
+            hint = (
+                "Hint: server proxy mode is enabled. Check server-to-sandbox connectivity "
+                "and server API key/auth configuration."
+            )
+        else:
+            hint = (
+                "Hint: direct sandbox endpoint access is enabled. If the SDK cannot directly "
+                "reach sandbox network/ports, set ConnectionConfig(use_server_proxy=True). "
+                "For Docker bridge deployments where server runs in a container, also configure "
+                "server [docker].host_ip to a host-reachable address."
+            )
 
         final_message = (
             f"Sandbox health check timed out after {timeout.total_seconds()}s "
-            f"({attempt} attempts). {error_detail}"
+            f"({attempt} attempts). {error_detail}. {connection_detail}. {hint}"
         )
 
         logger.error(final_message)
@@ -353,15 +458,18 @@ class Sandbox:
     @classmethod
     async def create(
         cls,
-        image: SandboxImageSpec | str,
+        image: SandboxImageSpec | str | None = None,
         *,
-        timeout: timedelta = timedelta(minutes=10),
+        snapshot_id: str | None = None,
+        timeout: timedelta | None = timedelta(minutes=10),
         ready_timeout: timedelta = timedelta(seconds=30),
         env: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
         resource: dict[str, str] | None = None,
+        platform: PlatformSpec | None = None,
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
+        secure_access: bool = False,
         entrypoint: list[str] | None = None,
         volumes: list[Volume] | None = None,
         connection_config: ConnectionConfig | None = None,
@@ -374,7 +482,7 @@ class Sandbox:
 
         Args:
             image: Container image specification including image reference and optional auth
-            timeout: Maximum sandbox lifetime
+            timeout: Maximum sandbox lifetime. Pass None to require explicit cleanup.
             ready_timeout: Maximum time to wait for sandbox to become ready
             env: Environment variables for the sandbox
             metadata: Custom metadata for the sandbox
@@ -382,9 +490,10 @@ class Sandbox:
             network_policy: Optional outbound network policy (egress).
             extensions: Opaque extension parameters passed through to the server as-is.
                 Prefer namespaced keys (e.g. ``storage.id``).
+            secure_access: Whether to enable secured access for sandbox endpoints.
             entrypoint: Command to run as entrypoint
             volumes: Optional list of volume mounts for persistent storage.
-                Each volume specifies a backend (host path or PVC) and mount configuration.
+                Each volume specifies a backend (host path, PVC, or OSSFS) and mount configuration.
             connection_config: Connection configuration
             health_check: Custom async health check function
             health_check_polling_interval: Time between health check attempts
@@ -396,6 +505,11 @@ class Sandbox:
         Raises:
             SandboxException: if sandbox creation or initialization fails
         """
+        if (image is None) == (snapshot_id is None):
+            raise InvalidArgumentException(
+                "Exactly one of image or snapshot_id must be specified"
+            )
+
         config = (connection_config or ConnectionConfig()).with_transport_if_missing()
         entrypoint = entrypoint or ["tail", "-f", "/dev/null"]
         env = env or {}
@@ -406,8 +520,12 @@ class Sandbox:
         if isinstance(image, str):
             image = SandboxImageSpec(image=image)
 
+        startup_source = image.image if image is not None else snapshot_id
+        timeout_log = "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
         logger.info(
-            f"Creating sandbox with image: {image.image} (timeout: {timeout.total_seconds()}s)"
+            "Creating sandbox with startup source: %s (timeout: %s)",
+            startup_source,
+            timeout_log,
         )
         factory = AdapterFactory(config)
         sandbox_id: str | None = None
@@ -416,20 +534,26 @@ class Sandbox:
         try:
             sandbox_service = factory.create_sandbox_service()
             response = await sandbox_service.create_sandbox(
-                image,
-                entrypoint,
-                env,
-                metadata,
-                timeout,
-                resource,
-                network_policy,
-                extensions,
-                volumes,
+                spec=image,
+                entrypoint=entrypoint,
+                env=env,
+                metadata=metadata,
+                timeout=timeout,
+                resource=resource,
+                network_policy=network_policy,
+                extensions=extensions,
+                volumes=volumes,
+                platform=platform,
+                secure_access=secure_access,
+                snapshot_id=snapshot_id,
             )
             sandbox_id = response.id
 
             execd_endpoint = await sandbox_service.get_sandbox_endpoint(
                 response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+            )
+            egress_endpoint = await sandbox_service.get_sandbox_endpoint(
+                response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
             )
 
             sandbox = cls(
@@ -439,6 +563,8 @@ class Sandbox:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
+                egress_service=factory.create_egress_service(egress_endpoint),
+                diagnostics_service=factory.create_diagnostics_service(),
                 connection_config=config,
                 custom_health_check=health_check,
             )
@@ -453,7 +579,7 @@ class Sandbox:
                 )
 
             return sandbox
-        except Exception as e:
+        except BaseException as e:
             if sandbox_id and sandbox_service:
                 try:
                     logger.warning(
@@ -469,7 +595,11 @@ class Sandbox:
                     )
 
             await config.close_transport_if_owned()
+            if isinstance(e, asyncio.CancelledError):
+                raise
             if isinstance(e, SandboxException):
+                raise
+            if not isinstance(e, Exception):
                 raise
             logger.error("Unexpected exception during sandbox creation", exc_info=e)
             raise SandboxInternalException(
@@ -519,6 +649,9 @@ class Sandbox:
             execd_endpoint = await sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             )
+            egress_endpoint = await sandbox_service.get_sandbox_endpoint(
+                sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+            )
 
             sandbox = cls(
                 sandbox_id=sandbox_id,
@@ -527,6 +660,8 @@ class Sandbox:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
+                egress_service=factory.create_egress_service(egress_endpoint),
+                diagnostics_service=factory.create_diagnostics_service(),
                 connection_config=config,
                 custom_health_check=health_check,
             )
@@ -590,6 +725,9 @@ class Sandbox:
             execd_endpoint = await sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             )
+            egress_endpoint = await sandbox_service.get_sandbox_endpoint(
+                sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+            )
 
             sandbox = cls(
                 sandbox_id=sandbox_id,
@@ -598,6 +736,8 @@ class Sandbox:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
+                egress_service=factory.create_egress_service(egress_endpoint),
+                diagnostics_service=factory.create_diagnostics_service(),
                 connection_config=config,
                 custom_health_check=health_check,
             )

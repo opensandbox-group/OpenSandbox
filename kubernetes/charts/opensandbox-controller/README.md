@@ -1,6 +1,6 @@
 # OpenSandbox Controller Helm Chart
 
-A Helm chart for deploying the OpenSandbox Kubernetes Controller, which manages sandbox environments with resource pooling and batch delivery capabilities.
+A Helm chart for deploying the OpenSandbox Kubernetes Controller, which manages sandbox environments with resource pooling, batch delivery, and pause/resume capabilities.
 
 ## Introduction
 
@@ -9,6 +9,7 @@ This chart bootstraps an OpenSandbox Controller deployment on a Kubernetes clust
 - **Batch Sandbox Management**: Create and manage multiple identical sandbox environments
 - **Resource Pooling**: Maintain pre-warmed resource pools for rapid sandbox provisioning
 - **Task Orchestration**: Optional task execution within sandboxes
+- **Pause and Resume**: Persist sandbox filesystem state via rootfs snapshot, releasing cluster resources between sessions
 - **High Performance**: O(1) time complexity for batch sandbox delivery
 
 ## Prerequisites
@@ -46,6 +47,7 @@ To also remove the CRDs:
 ```bash
 kubectl delete crd batchsandboxes.sandbox.opensandbox.io
 kubectl delete crd pools.sandbox.opensandbox.io
+kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 ```
 
 ## Parameters
@@ -71,6 +73,14 @@ kubectl delete crd pools.sandbox.opensandbox.io
 | `controller.resources.requests.cpu` | CPU resource requests | `10m` |
 | `controller.resources.requests.memory` | Memory resource requests | `64Mi` |
 | `controller.logLevel` | Can be one of 'debug', 'info', 'error' | `info` |
+| `controller.kubeClient.qps` | QPS for Kubernetes client rate limiter | `100` |
+| `controller.kubeClient.burst` | Burst for Kubernetes client rate limiter | `200` |
+| `controller.snapshot.imageCommitterImage` | Image used by snapshot commit Jobs | `image-committer:dev` |
+| `controller.snapshot.commitJobTimeout` | Timeout duration for snapshot commit Jobs | `10m` |
+| `controller.snapshot.registry` | OCI registry prefix used for snapshot images | `""` |
+| `controller.snapshot.registryInsecure` | Use insecure registry mode for snapshot pushes | `false` |
+| `controller.snapshot.snapshotPushSecret` | Secret name used by commit Jobs to push snapshots | `""` |
+| `controller.snapshot.resumePullSecret` | Secret name injected into resumed sandboxes for image pulls | `""` |
 | `controller.leaderElection.enabled` | Enable leader election | `true` |
 | `controller.nodeSelector` | Node labels for pod assignment | `{}` |
 | `controller.tolerations` | Tolerations for pod assignment | `[]` |
@@ -122,6 +132,19 @@ controller:
       memory: 128Mi
 ```
 
+### Custom Kubernetes Client Rate Limiter
+
+Configure the QPS and Burst for the Kubernetes client to handle high-throughput scenarios:
+
+```yaml
+controller:
+  kubeClient:
+    qps: 100
+    burst: 250
+```
+
+> Note: Default values are QPS=100, Burst=200.
+
 ### Use Private Registry
 
 ```yaml
@@ -133,6 +156,30 @@ controller:
 imagePullSecrets:
   - name: myregistrykey
 ```
+
+### Pause/Resume Snapshot Configuration
+
+The chart exposes the snapshot-related settings below:
+
+```yaml
+controller:
+  snapshot:
+    imageCommitterImage: my-registry/image-committer:v0.1.0
+    commitJobTimeout: 15m
+    registry: my-registry/snapshots
+    registryInsecure: false
+    snapshotPushSecret: registry-snapshot-push-secret
+    resumePullSecret: registry-pull-secret
+```
+
+These values render directly to the controller flags:
+
+- `--image-committer-image`
+- `--commit-job-timeout`
+- `--snapshot-registry`
+- `--snapshot-registry-insecure`
+- `--snapshot-push-secret`
+- `--resume-pull-secret`
 
 ### Node Affinity
 
@@ -219,6 +266,8 @@ kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-con
 
 - [OpenSandbox GitHub](https://github.com/alibaba/OpenSandbox)
 - [Documentation](https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/README.md)
+- [Pause and Resume Guide](https://github.com/alibaba/OpenSandbox/blob/main/docs/pause-resume.md)
+- [Server Configuration Reference](https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md)
 - [Examples](https://github.com/alibaba/OpenSandbox/tree/main/kubernetes/config/samples)
 
 ## License

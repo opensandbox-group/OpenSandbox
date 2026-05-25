@@ -39,7 +39,7 @@ async def main() -> None:
     api_key = os.getenv("SANDBOX_API_KEY")
     image = os.getenv(
         "SANDBOX_IMAGE",
-        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
+        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2",
     )
     model_name = os.getenv("GOOGLE_ADK_MODEL", "gemini-2.5-flash")
 

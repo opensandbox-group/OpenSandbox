@@ -92,7 +92,7 @@ def sync_detailed(
     """Pause execution while retaining state
 
      Pause a running sandbox while preserving its state. Poll GET /sandboxes/{sandboxId} to track state
-    transition to Paused.
+    transition through Pausing and eventually Paused.
 
     Args:
         sandbox_id (str):
@@ -124,7 +124,7 @@ def sync(
     """Pause execution while retaining state
 
      Pause a running sandbox while preserving its state. Poll GET /sandboxes/{sandboxId} to track state
-    transition to Paused.
+    transition through Pausing and eventually Paused.
 
     Args:
         sandbox_id (str):
@@ -151,7 +151,7 @@ async def asyncio_detailed(
     """Pause execution while retaining state
 
      Pause a running sandbox while preserving its state. Poll GET /sandboxes/{sandboxId} to track state
-    transition to Paused.
+    transition through Pausing and eventually Paused.
 
     Args:
         sandbox_id (str):
@@ -181,7 +181,7 @@ async def asyncio(
     """Pause execution while retaining state
 
      Pause a running sandbox while preserving its state. Poll GET /sandboxes/{sandboxId} to track state
-    transition to Paused.
+    transition through Pausing and eventually Paused.
 
     Args:
         sandbox_id (str):

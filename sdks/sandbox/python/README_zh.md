@@ -90,6 +90,142 @@ with sandbox:
     sandbox.kill()
 ```
 
+### 同步 Sandbox Pool
+
+`SandboxPoolSync` 会维护一组已就绪的 idle sandbox，用于降低 acquire 延迟。
+Pool API 是同步 API，并对齐 Kotlin `SandboxPool` 的语义：任意节点都可以
+acquire，实际的补池和缩容由 store 的主锁持有者执行。
+
+```python
+from datetime import timedelta
+
+from opensandbox import (
+    AcquirePolicy,
+    InMemoryPoolStateStore,
+    PoolCreationSpec,
+    SandboxPoolSync,
+)
+from opensandbox.config import ConnectionConfigSync
+
+pool = SandboxPoolSync(
+    pool_name="demo-pool",
+    owner_id="worker-1",
+    max_idle=2,
+    state_store=InMemoryPoolStateStore(),  # 仅适合单进程
+    connection_config=ConnectionConfigSync(domain="api.opensandbox.io"),
+    creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+    reconcile_interval=timedelta(seconds=5),
+)
+
+pool.start()
+try:
+    sandbox = pool.acquire(
+        sandbox_timeout=timedelta(minutes=30),
+        policy=AcquirePolicy.FAIL_FAST,
+    )
+    try:
+        result = sandbox.commands.run("echo pool-ok")
+        print(result.logs.stdout[0].text)
+    finally:
+        sandbox.kill()
+        sandbox.close()
+finally:
+    pool.shutdown(graceful=True)
+```
+
+asyncio 应用请使用 `SandboxPoolAsync`，避免 pool acquire、warmup、健康检查和
+生命周期 API 调用阻塞事件循环：
+
+```python
+from datetime import timedelta
+
+from opensandbox import (
+    AcquirePolicy,
+    InMemoryAsyncPoolStateStore,
+    PoolCreationSpec,
+    SandboxPoolAsync,
+)
+from opensandbox.config import ConnectionConfig
+
+pool = SandboxPoolAsync(
+    pool_name="demo-pool",
+    owner_id="worker-1",
+    max_idle=2,
+    state_store=InMemoryAsyncPoolStateStore(),  # 仅适合单事件循环
+    connection_config=ConnectionConfig(domain="api.opensandbox.io"),
+    creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+)
+
+await pool.start()
+try:
+    sandbox = await pool.acquire(
+        sandbox_timeout=timedelta(minutes=30),
+        policy=AcquirePolicy.FAIL_FAST,
+    )
+    try:
+        result = await sandbox.commands.run("echo pool-ok")
+        print(result.logs.stdout[0].text)
+    finally:
+        await sandbox.kill()
+        await sandbox.close()
+finally:
+    await pool.shutdown(graceful=True)
+```
+
+Python 生产服务如果是多进程或多 Pod 部署，建议使用 Redis-backed pool state。
+先安装可选依赖：
+
+```bash
+pip install "opensandbox[pool-redis]"
+```
+
+Redis client 由业务方自己创建和配置，然后传给 `RedisPoolStateStore`。Store
+不会创建或关闭 Redis client。
+
+```python
+import redis
+
+from opensandbox import PoolCreationSpec, SandboxPoolSync
+from opensandbox.config import ConnectionConfigSync
+from opensandbox.pool_redis import RedisPoolStateStore
+
+redis_client = redis.Redis.from_url(
+    "redis://user:password@redis.example.com:6379/0",
+    decode_responses=True,
+)
+
+pool = SandboxPoolSync(
+    pool_name="prod-pool",
+    owner_id="worker-1",
+    max_idle=10,
+    state_store=RedisPoolStateStore(redis_client, key_prefix="opensandbox:pool:prod"),
+    connection_config=ConnectionConfigSync(domain="api.opensandbox.io"),
+    creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+    primary_lock_ttl=timedelta(seconds=60),
+)
+```
+
+async pool 使用 `AsyncRedisPoolStateStore`，并传入 `redis.asyncio` client。
+
+注意事项：
+
+- `InMemoryPoolStateStore` 只适合单进程开发和测试，不适合作为 gunicorn、
+  uvicorn workers、Celery 或 Kubernetes 多实例下的全局池。
+- `max_idle` 表示已就绪 idle sandbox 的目标值/上限，不是 borrowed sandbox
+  或 direct-create sandbox 的全局总量上限。
+- 分布式部署时，同一个逻辑池的所有节点必须使用相同的 `key_prefix` 和 `pool_name`。
+- 每个运行进程都应使用唯一的 `owner_id`；它表示主锁持有者身份，不是 pool 标识。
+- 共享同一 pool 的所有节点必须使用相同的 creation/warmup 定义；如果定义变化，
+  建议使用新的 `pool_name` 或 `key_prefix`，并 drain 旧池。
+- `resize(max_idle)` 可以在任意节点调用。调用返回只表示新的 idle 目标已写入共享
+  state store，当前 primary 会在周期性 reconcile 中执行补池或缩容。
+- 分布式 drain idle buffer 时，建议先 `resize(0)`，再等待
+  `snapshot().idle_count == 0`。`release_all_idle()` 在分布式模式下只是
+  best-effort cleanup，因为如果共享目标值没有先降下来，其他 primary 可能并发放入新的 idle sandbox。
+- `primary_lock_ttl` 应大于 `warmup_ready_timeout` 加上预期 warmup preparer
+  耗时和缓冲时间。
+- Redis 故障会以 pool state store 错误暴露；pool 会 fail closed，不会绕过共享状态。
+
 ## 核心功能示例
 
 ### 1. 生命周期管理
@@ -115,6 +251,17 @@ sandbox = await Sandbox.resume(
 # 获取当前状态
 info = await sandbox.get_info()
 print(f"当前状态: {info.status.state}")
+print(f"过期时间: {info.expires_at}")  # 使用手动清理模式时为 None
+```
+
+通过传入 `timeout=None` 创建一个不会自动过期的沙箱：
+
+```python
+manual = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+    timeout=None,
+)
 ```
 
 ### 2. 自定义健康检查
@@ -294,6 +441,8 @@ config = ConnectionConfig(
 | `network_policy` | 可选的出站网络策略（egress） | -                         |
 | `ready_timeout` | 等待沙箱就绪的最大时间 | 30 秒                           |
 
+注意：`opensandbox.io/` 前缀下的 metadata key 属于系统保留标签，服务端会拒绝用户传入。
+
 ```python
 from datetime import timedelta
 
@@ -310,5 +459,20 @@ sandbox = await Sandbox.create(
         defaultAction="deny",
         egress=[NetworkRule(action="allow", target="pypi.org")],
     ),
+)
+```
+
+### 3. 运行时 Egress 策略更新
+
+运行时的 egress 查询和 patch 不再通过 lifecycle API 转发，而是由 SDK 先解析沙箱在 `18080` 端口上的 endpoint，再直接调用 sidecar 的 `/policy` API。
+
+```python
+policy = await sandbox.get_egress_policy()
+
+await sandbox.patch_egress_rules(
+    [
+        NetworkRule(action="allow", target="www.github.com"),
+        NetworkRule(action="deny", target="pypi.org"),
+    ]
 )
 ```

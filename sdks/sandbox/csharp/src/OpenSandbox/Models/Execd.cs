@@ -133,6 +133,25 @@ public class RunCommandRequest
     /// </summary>
     [JsonPropertyName("timeout")]
     public long? Timeout { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Unix user ID used to run the command process.
+    /// </summary>
+    [JsonPropertyName("uid")]
+    public int? Uid { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Unix group ID used to run the command process.
+    /// Requires <see cref="Uid"/> to be set.
+    /// </summary>
+    [JsonPropertyName("gid")]
+    public int? Gid { get; set; }
+
+    /// <summary>
+    /// Gets or sets environment variables injected into the command process.
+    /// </summary>
+    [JsonPropertyName("envs")]
+    public Dictionary<string, string>? Envs { get; set; }
 }
 
 /// <summary>
@@ -155,6 +174,22 @@ public class RunCommandOptions
     /// The server terminates the command when this duration is reached.
     /// </summary>
     public int? TimeoutSeconds { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Unix user ID used to run the command process.
+    /// </summary>
+    public int? Uid { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Unix group ID used to run the command process.
+    /// Requires <see cref="Uid"/> to be set.
+    /// </summary>
+    public int? Gid { get; set; }
+
+    /// <summary>
+    /// Gets or sets environment variables injected into the command process.
+    /// </summary>
+    public Dictionary<string, string>? Envs { get; set; }
 }
 
 /// <summary>
@@ -330,4 +365,61 @@ public class SandboxMetrics
 public class PingResponse
 {
     // Empty response - ping just returns 200 OK
+}
+
+// --- Bash session API (create_session, run_in_session, delete_session) ---
+
+/// <summary>
+/// Options for creating a bash session.
+/// </summary>
+public class CreateSessionOptions
+{
+    /// <summary>
+    /// Gets or sets the optional working directory for the session.
+    /// </summary>
+    public string? WorkingDirectory { get; set; }
+}
+
+/// <summary>
+/// Response from create_session (POST /session).
+/// </summary>
+public class CreateSessionResponse
+{
+    /// <summary>
+    /// Gets or sets the session ID for run_in_session and delete_session.
+    /// </summary>
+    [JsonPropertyName("session_id")]
+    public required string SessionId { get; set; }
+}
+
+/// <summary>
+/// Options for running code in an existing bash session.
+/// </summary>
+public class RunInSessionOptions
+{
+    /// <summary>
+    /// Gets or sets the optional working directory override for this run.
+    /// </summary>
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum execution time in seconds.
+    /// </summary>
+    public int? TimeoutSeconds { get; set; }
+
+}
+
+/// <summary>
+/// Request body for run_in_session (POST /session/{sessionId}/run).
+/// </summary>
+internal class RunInSessionRequest
+{
+    [JsonPropertyName("command")]
+    public required string Command { get; set; }
+
+    [JsonPropertyName("cwd")]
+    public string? Cwd { get; set; }
+
+    [JsonPropertyName("timeout")]
+    public long? Timeout { get; set; }
 }

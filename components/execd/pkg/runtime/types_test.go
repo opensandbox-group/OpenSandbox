@@ -17,6 +17,8 @@ package runtime
 import (
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestExecuteCodeRequest_SetDefaultHooks(t *testing.T) {
@@ -30,13 +32,10 @@ func TestExecuteCodeRequest_SetDefaultHooks(t *testing.T) {
 
 	req.SetDefaultHooks()
 
-	if req.Hooks.OnExecuteStdout == nil || req.Hooks.OnExecuteStderr == nil || req.Hooks.OnExecuteError == nil {
-		t.Fatalf("expected default hooks to be populated")
-	}
-	if req.Hooks.OnExecuteResult == nil {
-		t.Fatalf("expected OnExecuteResult to remain set")
-	}
-	if reflect.ValueOf(req.Hooks.OnExecuteResult).Pointer() != reflect.ValueOf(customResult).Pointer() {
-		t.Fatalf("default hooks should not override existing ones")
-	}
+	require.NotNil(t, req.Hooks.OnExecuteStdout)
+	require.NotNil(t, req.Hooks.OnExecuteStderr)
+	require.NotNil(t, req.Hooks.OnExecuteError)
+	require.NotNil(t, req.Hooks.OnExecuteResult, "expected OnExecuteResult to remain set")
+	require.Equal(t, reflect.ValueOf(customResult).Pointer(), reflect.ValueOf(req.Hooks.OnExecuteResult).Pointer(),
+		"default hooks should not override existing ones")
 }

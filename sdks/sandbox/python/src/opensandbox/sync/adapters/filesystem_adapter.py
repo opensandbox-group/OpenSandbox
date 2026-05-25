@@ -32,7 +32,10 @@ from opensandbox.adapters.converter.exception_converter import (
 from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
 )
-from opensandbox.adapters.converter.response_handler import handle_api_error
+from opensandbox.adapters.converter.response_handler import (
+    extract_request_id,
+    handle_api_error,
+)
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
@@ -154,6 +157,7 @@ class FilesystemAdapterSync(FilesystemSync):
             raise SandboxApiException(
                 f"Failed to stream file {path}: {response.status_code}",
                 status_code=response.status_code,
+                request_id=extract_request_id(response.headers),
             )
 
         def _iter() -> Iterator[bytes]:
@@ -311,7 +315,10 @@ class FilesystemAdapterSync(FilesystemSync):
                 return []
             if isinstance(parsed, list) and all(isinstance(x, FileInfo) for x in parsed):
                 return FilesystemModelConverter.to_entry_info_list(parsed)
-            raise SandboxApiException(message="Search files failed: unexpected response type")
+            raise SandboxApiException(
+                message="Search files failed: unexpected response type",
+                request_id=extract_request_id(getattr(response_obj, "headers", None)),
+            )
         except Exception as e:
             logger.error("Failed to search files", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e

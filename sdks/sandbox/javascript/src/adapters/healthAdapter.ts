@@ -20,7 +20,7 @@ export class HealthAdapter implements ExecdHealth {
   constructor(private readonly client: ExecdClient) {}
 
   async ping(): Promise<boolean> {
-    const { error, response } = await this.client.GET("/ping");
+    const { error, response } = await this.client.GET("/ping", { parseAs: "text" });
     throwOnOpenApiFetchError({ error, response }, "Execd ping failed");
     return true;
   }

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExecuteSelectSQLQuery_Success(t *testing.T) {
@@ -58,32 +59,20 @@ func TestExecuteSelectSQLQuery_Success(t *testing.T) {
 		},
 	}
 
-	if err := c.executeSelectSQLQuery(context.Background(), req); err != nil {
-		t.Fatalf("executeSelectSQLQuery returned error: %v", err)
-	}
+	require.NoError(t, c.executeSelectSQLQuery(context.Background(), req))
 
-	if gotError != nil {
-		t.Fatalf("unexpected error hook: %+v", gotError)
-	}
-	if !completed {
-		t.Fatalf("expected completion hook to be triggered")
-	}
+	require.Nil(t, gotError, "unexpected error hook")
+	require.True(t, completed, "expected completion hook to be triggered")
 
 	raw, ok := gotResult["text/plain"]
-	if !ok {
-		t.Fatalf("expected text/plain payload")
-	}
+	require.True(t, ok, "expected text/plain payload")
 	var qr QueryResult
-	if err := json.Unmarshal([]byte(raw.(string)), &qr); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(raw.(string)), &qr))
 
-	if len(qr.Columns) != 2 || qr.Columns[0] != "id" || qr.Columns[1] != "name" {
-		t.Fatalf("unexpected columns: %#v", qr.Columns)
-	}
-	if len(qr.Rows) != 2 || qr.Rows[0][0] != "1" || qr.Rows[1][1] != "bob" {
-		t.Fatalf("unexpected rows: %#v", qr.Rows)
-	}
+	require.Equal(t, []string{"id", "name"}, qr.Columns, "unexpected columns")
+	require.Len(t, qr.Rows, 2, "unexpected rows")
+	require.Equal(t, "1", qr.Rows[0][0])
+	require.Equal(t, "bob", qr.Rows[1][1])
 }
 
 func TestExecuteUpdateSQLQuery_Success(t *testing.T) {
@@ -116,30 +105,18 @@ func TestExecuteUpdateSQLQuery_Success(t *testing.T) {
 		},
 	}
 
-	if err := c.executeUpdateSQLQuery(context.Background(), req); err != nil {
-		t.Fatalf("executeUpdateSQLQuery returned error: %v", err)
-	}
+	require.NoError(t, c.executeUpdateSQLQuery(context.Background(), req))
 
-	if gotError != nil {
-		t.Fatalf("unexpected error hook: %+v", gotError)
-	}
-	if !completed {
-		t.Fatalf("expected completion hook to be triggered")
-	}
+	require.Nil(t, gotError, "unexpected error hook")
+	require.True(t, completed, "expected completion hook to be triggered")
 
 	raw, ok := gotResult["text/plain"]
-	if !ok {
-		t.Fatalf("expected text/plain payload")
-	}
+	require.True(t, ok, "expected text/plain payload")
 	var qr QueryResult
-	if err := json.Unmarshal([]byte(raw.(string)), &qr); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(raw.(string)), &qr))
 
-	if len(qr.Columns) != 1 || qr.Columns[0] != "affected_rows" {
-		t.Fatalf("unexpected columns: %#v", qr.Columns)
-	}
-	if len(qr.Rows) != 1 || len(qr.Rows[0]) != 1 || qr.Rows[0][0] != float64(3) {
-		t.Fatalf("unexpected affected rows: %#v", qr.Rows)
-	}
+	require.Equal(t, []string{"affected_rows"}, qr.Columns, "unexpected columns")
+	require.Len(t, qr.Rows, 1, "unexpected rows length")
+	require.Len(t, qr.Rows[0], 1, "unexpected row entry length")
+	require.Equal(t, float64(3), qr.Rows[0][0])
 }

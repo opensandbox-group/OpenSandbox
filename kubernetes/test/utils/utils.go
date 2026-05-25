@@ -163,8 +163,15 @@ func IsCertManagerCRDsInstalled() bool {
 	return false
 }
 
-// LoadImageToKindClusterWithName loads a local docker image to the kind cluster
+// LoadImageToKindClusterWithName loads a local docker image to the kind cluster.
+// When E2E_MODE is not "kind" this is a no-op: the image is expected to live in
+// a registry the target cluster can pull from, so there is no Kind node to
+// load into.
 func LoadImageToKindClusterWithName(name string) error {
+	if IsExternal() {
+		_, _ = fmt.Fprintf(GinkgoWriter, "skipping kind load for %q (E2E_MODE=%s)\n", name, Mode())
+		return nil
+	}
 	cluster := "kind"
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
 		cluster = v

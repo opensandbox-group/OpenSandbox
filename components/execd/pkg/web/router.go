@@ -29,7 +29,7 @@ func NewRouter(accessToken string) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(logMiddleware(), accessTokenMiddleware(accessToken), ProxyMiddleware())
+	r.Use(logMiddleware(), otelHTTPMetricsMiddleware(), accessTokenMiddleware(accessToken), ProxyMiddleware())
 
 	r.GET("/ping", controller.PingHandler)
 
@@ -62,6 +62,13 @@ func NewRouter(accessToken string) *gin.Engine {
 		code.GET("/contexts/:contextId", withCode(func(c *controller.CodeInterpretingController) { c.GetContext() }))
 	}
 
+	session := r.Group("/session")
+	{
+		session.POST("", withCode(func(c *controller.CodeInterpretingController) { c.CreateSession() }))
+		session.POST("/:sessionId/run", withCode(func(c *controller.CodeInterpretingController) { c.RunInSession() }))
+		session.DELETE("/:sessionId", withCode(func(c *controller.CodeInterpretingController) { c.DeleteSession() }))
+	}
+
 	command := r.Group("/command")
 	{
 		command.POST("", withCode(func(c *controller.CodeInterpretingController) { c.RunCommand() }))
@@ -74,6 +81,14 @@ func NewRouter(accessToken string) *gin.Engine {
 	{
 		metric.GET("", withMetric(func(c *controller.MetricController) { c.GetMetrics() }))
 		metric.GET("/watch", withMetric(func(c *controller.MetricController) { c.WatchMetrics() }))
+	}
+
+	pty := r.Group("/pty")
+	{
+		pty.POST("", withPTY(func(c *controller.PTYController) { c.CreatePTYSession() }))
+		pty.GET("/:sessionId", withPTY(func(c *controller.PTYController) { c.GetPTYSessionStatus() }))
+		pty.DELETE("/:sessionId", withPTY(func(c *controller.PTYController) { c.DeletePTYSession() }))
+		pty.GET("/:sessionId/ws", controller.PTYSessionWebSocket)
 	}
 
 	return r
@@ -94,6 +109,12 @@ func withCode(fn func(*controller.CodeInterpretingController)) gin.HandlerFunc {
 func withMetric(fn func(*controller.MetricController)) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		fn(controller.NewMetricController(ctx))
+	}
+}
+
+func withPTY(fn func(*controller.PTYController)) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		fn(controller.NewPTYController(ctx))
 	}
 }
 

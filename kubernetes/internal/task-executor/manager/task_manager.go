@@ -327,9 +327,19 @@ func (m *taskManager) recoverTasks(ctx context.Context) error {
 			continue
 		}
 
+		persistedState := task.Status.State
 		status, err := m.executor.Inspect(ctx, task)
 		if err != nil {
 			klog.ErrorS(err, "failed to inspect task during recovery", "name", task.Name)
+			continue
+		}
+
+		if shouldDropRecoveredTask(task, persistedState, status.State) {
+			klog.InfoS("dropping recovered task with lost active runtime state",
+				"name", task.Name, "persistedState", persistedState, "recoveredState", status.State)
+			if err := m.store.Delete(ctx, task.Name); err != nil {
+				klog.ErrorS(err, "failed to delete stale recovered task from store", "name", task.Name)
+			}
 			continue
 		}
 
@@ -342,6 +352,21 @@ func (m *taskManager) recoverTasks(ctx context.Context) error {
 
 	klog.InfoS("task recovery completed", "count", len(m.tasks))
 	return nil
+}
+
+func shouldDropRecoveredTask(task *types.Task, persistedState, recoveredState types.TaskState) bool {
+	if task == nil || task.DeletionTimestamp != nil {
+		return false
+	}
+	if persistedState != types.TaskStatePending && persistedState != types.TaskStateRunning {
+		return false
+	}
+	switch recoveredState {
+	case types.TaskStatePending, types.TaskStateFailed, types.TaskStateNotFound:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *taskManager) reconcileLoop(ctx context.Context) {

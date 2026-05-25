@@ -12,42 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Unit tests for provider_factory.
-"""
-
 import pytest
 from unittest.mock import patch
 
-from src.config import AgentSandboxRuntimeConfig
-from src.services.k8s.provider_factory import (
+from opensandbox_server.config import AgentSandboxRuntimeConfig
+from opensandbox_server.services.k8s.provider_factory import (
     register_provider,
     create_workload_provider,
     list_available_providers,
     PROVIDER_TYPE_BATCHSANDBOX,
     PROVIDER_TYPE_AGENT_SANDBOX,
 )
-from src.services.k8s.workload_provider import WorkloadProvider
-from src.services.k8s.batchsandbox_provider import BatchSandboxProvider
-from src.services.k8s.agent_sandbox_provider import AgentSandboxProvider
-
-
-
-
+from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
+from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
 
 class TestProviderFactory:
-    """provider_factory unit tests"""
     
-    def test_register_and_create_batchsandbox_provider(self, mock_k8s_client, k8s_runtime_config):
-        """
-        Test case: Register and create BatchSandbox provider
-        
-        Purpose: Verify that BatchSandbox provider can be created through factory method
-        """
+    def test_register_and_create_batchsandbox_provider(self, mock_k8s_client, k8s_app_config):
         provider = create_workload_provider(
             PROVIDER_TYPE_BATCHSANDBOX,
             mock_k8s_client,
-            k8s_runtime_config
+            k8s_app_config,
         )
         
         assert isinstance(provider, BatchSandboxProvider)
@@ -56,14 +42,9 @@ class TestProviderFactory:
     def test_register_and_create_agent_sandbox_provider(
         self,
         mock_k8s_client,
-        agent_sandbox_runtime_config,
+        agent_sandbox_app_config,
         tmp_path,
     ):
-        """
-        Test case: Register and create agent-sandbox provider
-
-        Purpose: Verify that AgentSandbox provider can be created through factory method
-        """
         template_file = tmp_path / "agent_sandbox_template.yaml"
         template_file.write_text(
             """
@@ -83,63 +64,40 @@ spec:
             shutdown_policy="Retain",
             ingress_enabled=True,
         )
+        agent_sandbox_app_config.agent_sandbox = agent_config
         provider = create_workload_provider(
             PROVIDER_TYPE_AGENT_SANDBOX,
             mock_k8s_client,
-            agent_sandbox_runtime_config,
-            agent_config,
+            agent_sandbox_app_config,
         )
 
         assert isinstance(provider, AgentSandboxProvider)
         assert provider.k8s_client == mock_k8s_client
         assert provider.shutdown_policy == "Retain"
-        assert provider.service_account == agent_sandbox_runtime_config.service_account
-        assert provider._enable_informer is True
+        assert provider.service_account == agent_sandbox_app_config.kubernetes.service_account
     
-    def test_create_provider_case_insensitive(self, mock_k8s_client, k8s_runtime_config):
-        """
-        Test case: Case-insensitive provider creation
-        
-        Purpose: Verify that provider type name is case-insensitive
-        """
-        provider1 = create_workload_provider("BatchSandbox", mock_k8s_client, k8s_runtime_config)
-        provider2 = create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_runtime_config)
-        provider3 = create_workload_provider("BATCHSANDBOX", mock_k8s_client, k8s_runtime_config)
+    def test_create_provider_case_insensitive(self, mock_k8s_client, k8s_app_config):
+        provider1 = create_workload_provider("BatchSandbox", mock_k8s_client, k8s_app_config)
+        provider2 = create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_app_config)
+        provider3 = create_workload_provider("BATCHSANDBOX", mock_k8s_client, k8s_app_config)
         
         assert isinstance(provider1, BatchSandboxProvider)
         assert isinstance(provider2, BatchSandboxProvider)
         assert isinstance(provider3, BatchSandboxProvider)
     
-    def test_create_provider_with_none_type_uses_default(self, mock_k8s_client, k8s_runtime_config):
-        """
-        Test case: None type uses default provider
-        
-        Purpose: Verify that the first registered provider is used when provider_type is None
-        """
-        provider = create_workload_provider(None, mock_k8s_client, k8s_runtime_config)
+    def test_create_provider_with_none_type_uses_default(self, mock_k8s_client, k8s_app_config):
+        provider = create_workload_provider(None, mock_k8s_client, k8s_app_config)
         
         # Should use the first registered provider (batchsandbox)
         assert isinstance(provider, BatchSandboxProvider)
     
     def test_create_provider_with_invalid_type_raises_error(self, mock_k8s_client):
-        """
-        Test case: Invalid provider type raises exception
-        
-        Purpose: Verify that ValueError is raised when passing unregistered provider type
-        """
         with pytest.raises(ValueError, match="Unsupported workload provider type"):
             create_workload_provider("invalid", mock_k8s_client)
     
-    def test_create_batchsandbox_with_template_file(self, mock_k8s_client, k8s_runtime_config, tmp_path):
-        """
-        Test case: Create BatchSandbox provider with template file
-        
-        Purpose: Verify that factory method correctly passes template file path to BatchSandboxProvider
-        """
-        # Create temporary template file
+    def test_create_batchsandbox_with_template_file(self, mock_k8s_client, k8s_app_config, tmp_path):
         template_file = tmp_path / "test_template.yaml"
-        template_file.write_text("""
-apiVersion: execution.alibaba-inc.com/v1alpha1
+        template_file.write_text("""apiVersion: execution.alibaba-inc.com/v1alpha1
 kind: BatchSandbox
 metadata:
   name: test-template
@@ -149,27 +107,18 @@ spec:
       nodeSelector:
         gpu: "true"
 """)
-        
-        k8s_runtime_config.batchsandbox_template_file = str(template_file)
-        
+
+        k8s_app_config.kubernetes.batchsandbox_template_file = str(template_file)
+
         with patch.object(BatchSandboxProvider, '__init__', return_value=None) as mock_init:
-            create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_runtime_config)
+            create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_app_config)
             
-            # Verify that template_file_path parameter was passed
+            # Verify that app_config carrying the template path was passed
             mock_init.assert_called_once()
             call_kwargs = mock_init.call_args.kwargs
-            assert 'template_file_path' in call_kwargs
-            assert call_kwargs['template_file_path'] == str(template_file)
-            assert call_kwargs['enable_informer'] is True
-            assert call_kwargs['informer_resync_seconds'] == k8s_runtime_config.informer_resync_seconds
-            assert call_kwargs['informer_watch_timeout_seconds'] == k8s_runtime_config.informer_watch_timeout_seconds
+            assert call_kwargs['app_config'].kubernetes.batchsandbox_template_file == str(template_file)
     
     def test_list_available_providers(self):
-        """
-        Test case: Get registered providers
-        
-        Purpose: Verify that list of all registered provider types can be retrieved
-        """
         providers = list_available_providers()
 
         assert isinstance(providers, list)
@@ -177,11 +126,6 @@ spec:
         assert PROVIDER_TYPE_AGENT_SANDBOX in providers
     
     def test_register_custom_provider(self, mock_k8s_client, isolated_registry):
-        """
-        Test case: Register custom provider
-        
-        Purpose: Verify that new provider type can be dynamically registered
-        """
         # Create a custom provider class
         class CustomProvider(WorkloadProvider):
             def __init__(self, k8s_client):
@@ -221,24 +165,14 @@ spec:
         # Verify it's registered
         assert "custom" in list_available_providers()
     
-    def test_create_batchsandbox_with_config(self, mock_k8s_client, k8s_runtime_config):
-        """
-        Test case: Create BatchSandbox provider with explicit config
-        
-        Purpose: Verify that provider creation works when k8s_config is provided
-        """
-        provider = create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_runtime_config)
+    def test_create_batchsandbox_with_config(self, mock_k8s_client, k8s_app_config):
+        provider = create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_app_config)
         
         assert isinstance(provider, BatchSandboxProvider)
         assert provider.k8s_client == mock_k8s_client
     
     def test_create_provider_with_empty_registry_raises_error(self, mock_k8s_client, isolated_registry):
-        """
-        Test case: Creating provider with empty registry raises exception
-        
-        Purpose: Verify that ValueError is raised when no provider is registered and type is None
-        """
-        from src.services.k8s import provider_factory
+        from opensandbox_server.services.k8s import provider_factory
         
         # Clear the registry to test empty registry scenario
         provider_factory._PROVIDER_REGISTRY.clear()

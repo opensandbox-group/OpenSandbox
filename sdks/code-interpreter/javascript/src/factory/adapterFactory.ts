@@ -18,6 +18,7 @@ import type { Codes } from "../services/codes.js";
 export interface CreateCodesStackOptions {
   sandbox: Sandbox;
   execdBaseUrl: string;
+  endpointHeaders?: Record<string, string>;
 }
 
 /**

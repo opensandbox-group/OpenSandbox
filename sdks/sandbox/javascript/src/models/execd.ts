@@ -63,6 +63,18 @@ export interface RunCommandOpts {
    * If omitted, the server will not enforce any timeout.
    */
   timeoutSeconds?: number;
+  /**
+   * Unix user ID used to run the command process.
+   */
+  uid?: number;
+  /**
+   * Unix group ID used to run the command process. Requires `uid`.
+   */
+  gid?: number;
+  /**
+   * Environment variables injected into the command process.
+   */
+  envs?: Record<string, string>;
 }
 
 export interface CommandStatus {

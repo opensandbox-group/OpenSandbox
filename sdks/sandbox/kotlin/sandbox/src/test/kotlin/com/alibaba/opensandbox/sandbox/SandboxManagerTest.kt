@@ -16,6 +16,7 @@
 
 package com.alibaba.opensandbox.sandbox
 
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PaginationInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
@@ -24,6 +25,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxStatus
+import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import io.mockk.Runs
 import io.mockk.every
@@ -46,13 +48,16 @@ class SandboxManagerTest {
     lateinit var sandboxService: Sandboxes
 
     @MockK
+    lateinit var diagnosticsService: Diagnostics
+
+    @MockK
     lateinit var httpClientProvider: HttpClientProvider
 
     private lateinit var sandboxManager: SandboxManager
 
     @BeforeEach
     fun setUp() {
-        sandboxManager = SandboxManager(sandboxService, httpClientProvider)
+        sandboxManager = SandboxManager(sandboxService, httpClientProvider, diagnosticsService)
     }
 
     @Test
@@ -108,6 +113,30 @@ class SandboxManagerTest {
 
         assertEquals(expectedInfo, result)
         verify { sandboxService.getSandboxInfo(sandboxId) }
+    }
+
+    @Test
+    fun `getDiagnosticLogs should return logs from diagnostics service`() {
+        val sandboxId = "sandbox-id"
+        val expected = mockk<DiagnosticContent>()
+        every { diagnosticsService.getLogs(sandboxId, "container") } returns expected
+
+        val result = sandboxManager.getDiagnosticLogs(sandboxId, "container")
+
+        assertSame(expected, result)
+        verify { diagnosticsService.getLogs(sandboxId, "container") }
+    }
+
+    @Test
+    fun `getDiagnosticEvents should return events from diagnostics service`() {
+        val sandboxId = "sandbox-id"
+        val expected = mockk<DiagnosticContent>()
+        every { diagnosticsService.getEvents(sandboxId, "runtime") } returns expected
+
+        val result = sandboxManager.getDiagnosticEvents(sandboxId, "runtime")
+
+        assertSame(expected, result)
+        verify { diagnosticsService.getEvents(sandboxId, "runtime") }
     }
 
     @Test

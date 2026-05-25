@@ -74,7 +74,11 @@ function readEnv(name: string): string | undefined {
 }
 
 function stripTrailingSlashes(s: string): string {
-  return s.replace(/\/+$/, "");
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === s.length ? s : s.slice(0, end);
 }
 
 function stripV1Suffix(s: string): string {

@@ -546,7 +546,7 @@ spec:
       runtimeClassName: gvisor
       containers:
         - name: sandbox-container
-          image: opensandbox/code-interpreter:v1.0.1
+          image: opensandbox/code-interpreter:v1.0.2
   capacitySpec:
     bufferMax: 10
     bufferMin: 2
@@ -714,17 +714,6 @@ sudo containerd config dump
 sudo systemctl restart containerd
 ```
 
-### Performance Comparison
-
-| Runtime | Cold Start | Warm Start (from Pool) | Memory per Sandbox |
-|---------|-----------|------------------------|-------------------|
-| runc | ~500ms | ~50ms | ~5MB |
-| gVisor | ~550ms | ~100ms | ~50MB |
-| Kata (QEMU) | ~1000ms | ~200ms | ~20-50MB |
-| Kata (Firecracker) | ~625ms | ~125ms | ~5MB |
-
-**Recommendation**: Use Pools for production workloads to avoid cold start penalties.
-
 ### Compatibility Matrix
 
 | Feature | runc | gVisor | Kata (QEMU) | Kata (CLH) | Kata (FC) |
@@ -740,4 +729,4 @@ sudo systemctl restart containerd
 
 - **Documentation**: [OpenSandbox GitHub](https://github.com/alibaba/OpenSandbox)
 - **Issues**: Report bugs via [GitHub Issues](https://github.com/alibaba/OpenSandbox/issues)
-- **Design Document**: See [OSEP-0004](../oseps/0004-secure-container-runtime.md) for complete design details
+- **Design Document**: See [OSEP-0004](/oseps/0004-secure-container-runtime) for complete design details

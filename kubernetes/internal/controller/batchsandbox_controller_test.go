@@ -173,10 +173,14 @@ var _ = Describe("BatchSandbox Controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 		It("should successfully correctly create new Pod and update batch sandbox status when user scale out", func() {
-			bs := &sandboxv1alpha1.BatchSandbox{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, bs)).Should(Succeed())
-			*bs.Spec.Replicas = *bs.Spec.Replicas + 1 // scale out
-			Expect(k8sClient.Update(ctx, bs)).Should(Succeed())
+			Expect(retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+				bs := &sandboxv1alpha1.BatchSandbox{}
+				if err := k8sClient.Get(ctx, typeNamespacedName, bs); err != nil {
+					return err
+				}
+				*bs.Spec.Replicas = *bs.Spec.Replicas + 1 // scale out using the latest resourceVersion
+				return k8sClient.Update(ctx, bs)
+			})).Should(Succeed())
 			Eventually(func(g Gomega) {
 				batchsandbox := &sandboxv1alpha1.BatchSandbox{}
 				if err := k8sClient.Get(ctx, typeNamespacedName, batchsandbox); err != nil {
@@ -186,6 +190,8 @@ var _ = Describe("BatchSandbox Controller", func() {
 				g.Expect(batchsandbox.Status.Replicas).To(Equal(*batchsandbox.Spec.Replicas))
 			}, timeout, interval).Should(Succeed())
 			Eventually(func(g Gomega) {
+				bs := &sandboxv1alpha1.BatchSandbox{}
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, bs)).To(Succeed())
 				pods := &v1.PodList{}
 				g.Expect(k8sClient.List(ctx, pods, &client.ListOptions{
 					Namespace:     bs.Namespace,
@@ -622,6 +628,7 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 		fields              fields
 		args                args
 		wantErr             bool
+		wantTaskStatus      *taskScheduleResult
 		batchSandboxChecker func(bsbx *sandboxv1alpha1.BatchSandbox) error
 	}{
 		{
@@ -653,6 +660,7 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 				}(),
 				batchSbx: fakeBatchSandbox.DeepCopy(),
 			},
+			wantTaskStatus: &taskScheduleResult{Succeed: 1},
 			batchSandboxChecker: func(bsbx *sandboxv1alpha1.BatchSandbox) error {
 				release, err := parseSandboxReleased(bsbx)
 				if err != nil {
@@ -660,13 +668,6 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 				}
 				if len(release.Pods) != 1 || release.Pods[0] != "pod-0" {
 					return fmt.Errorf("expect pod-0, actual %v", release.Pods)
-				}
-				//  check status
-				if bsbx.Status.TaskSucceed != 1 {
-					return fmt.Errorf("expect status.succeed=1, actual %d", bsbx.Status.TaskRunning)
-				}
-				if bsbx.Status.TaskRunning != 0 || bsbx.Status.TaskFailed != 0 || bsbx.Status.TaskUnknown != 0 {
-					return fmt.Errorf("expect status.running=0,failed=0,unknown=0, actual %v", bsbx.Status)
 				}
 				return nil
 			},
@@ -680,8 +681,15 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 				Scheme:   tt.fields.Scheme,
 				Recorder: tt.fields.Recorder,
 			}
-			if err := r.scheduleTasks(tt.args.ctx, tt.args.tSch, tt.args.batchSbx); (err != nil) != tt.wantErr {
+			gotTaskStatus, err := r.scheduleTasks(tt.args.ctx, tt.args.tSch, tt.args.batchSbx)
+			if (err != nil) != tt.wantErr {
 				t.Errorf("BatchSandboxReconciler.scheduleTasks() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && !reflect.DeepEqual(gotTaskStatus, tt.wantTaskStatus) {
+				t.Errorf("BatchSandboxReconciler.scheduleTasks() = %v, want %v", gotTaskStatus, tt.wantTaskStatus)
+			}
+			if tt.wantErr && gotTaskStatus != nil {
+				t.Errorf("BatchSandboxReconciler.scheduleTasks() = %v, want nil when error", gotTaskStatus)
 			}
 			if tt.batchSandboxChecker != nil {
 				bsbx := &sandboxv1alpha1.BatchSandbox{}
@@ -690,6 +698,101 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 				}
 				if err := tt.batchSandboxChecker(bsbx); err != nil {
 					t.Errorf("BatchSandboxReconciler batchSandboxChecker() error = %v, wantErr %v", err, nil)
+				}
+			}
+		})
+	}
+}
+
+func TestBatchSandboxReconciler_reconcileTasks(t *testing.T) {
+	ctx := context.Background()
+
+	type fields struct {
+		Client   client.Client
+		Scheme   *runtime.Scheme
+		Recorder record.EventRecorder
+	}
+	type args struct {
+		ctx      context.Context
+		batchSbx *sandboxv1alpha1.BatchSandbox
+		pods     []*corev1.Pod
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		wantErr bool
+		checker func(r *BatchSandboxReconciler, batchSbx *sandboxv1alpha1.BatchSandbox) error
+	}{
+		{
+			name: "deletion with finalizer cleanup success",
+			fields: func() fields {
+				return fields{
+					Client: fake.NewClientBuilder().WithScheme(testscheme).Build(),
+				}
+			}(),
+			args: func() args {
+				return args{
+					ctx:  ctx,
+					pods: []*corev1.Pod{},
+				}
+			}(),
+			wantErr: false,
+			checker: func(r *BatchSandboxReconciler, batchSbx *sandboxv1alpha1.BatchSandbox) error {
+				// Verify finalizer is removed by getting from client
+				updated := &sandboxv1alpha1.BatchSandbox{}
+				if err := r.Client.Get(context.Background(), types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}, updated); err != nil {
+					return fmt.Errorf("failed to get updated batchsandbox: %w", err)
+				}
+				if controllerutil.ContainsFinalizer(updated, FinalizerTaskCleanup) {
+					return fmt.Errorf("finalizer should be removed after cleanup, finalizers: %v", updated.Finalizers)
+				}
+				return nil
+			},
+		},
+	}
+
+	for i := range tests {
+		tt := &tests[i]
+		t.Run(tt.name, func(t *testing.T) {
+			r := &BatchSandboxReconciler{
+				Client:   tt.fields.Client,
+				Scheme:   tt.fields.Scheme,
+				Recorder: tt.fields.Recorder,
+			}
+
+			// Setup: create BatchSandbox with finalizer
+			bsbx := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-batch-cleanup",
+					Namespace:  "default",
+					UID:        types.UID("test-uid-cleanup"),
+					Finalizers: []string{FinalizerTaskCleanup},
+				},
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					Replicas: ptr.To(int32(0)),
+				},
+			}
+
+			if err := r.Client.Create(ctx, bsbx); err != nil {
+				t.Fatalf("failed to create batchsandbox: %v", err)
+			}
+
+			// Set deletion timestamp after creation (fake client doesn't preserve it during Create)
+			now := metav1.Now()
+			bsbx.DeletionTimestamp = &now
+
+			got, err := r.reconcileTasks(tt.args.ctx, bsbx, tt.args.pods)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("BatchSandboxReconciler.reconcileTasks() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got == nil && tt.checker == nil {
+				t.Errorf("BatchSandboxReconciler.reconcileTasks() = nil, want non-nil")
+			}
+			if tt.checker != nil {
+				if err := tt.checker(r, bsbx); err != nil {
+					t.Errorf("BatchSandboxReconciler checker() error = %v", err)
 				}
 			}
 		})

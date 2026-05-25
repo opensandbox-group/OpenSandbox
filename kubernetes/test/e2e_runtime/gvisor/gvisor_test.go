@@ -22,10 +22,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/alibaba/OpenSandbox/sandbox-k8s/test/e2e_runtime"
 )
 
 // runKubectl executes a kubectl command from the project root directory
@@ -97,7 +96,7 @@ spec:
   - name: test-container
     image: %s
     command: ["sleep", "3600"]
-`, podName, testNamespace, RuntimeClassName, e2e_runtime.SandboxImage)
+`, podName, testNamespace, RuntimeClassName, utils.SandboxImage)
 
 			podFile := filepath.Join("/tmp", fmt.Sprintf("test-pod-%s.yaml", podName))
 			err := os.WriteFile(podFile, []byte(podYAML), 0644)
@@ -165,7 +164,7 @@ spec:
     bufferMin: 1
     poolMax: 5
     poolMin: 1
-`, poolName, testNamespace, RuntimeClassName, e2e_runtime.SandboxImage)
+`, poolName, testNamespace, RuntimeClassName, utils.SandboxImage)
 
 			poolFile := filepath.Join("/tmp", fmt.Sprintf("test-pool-%s.yaml", poolName))
 			err := os.WriteFile(poolFile, []byte(poolYAML), 0644)

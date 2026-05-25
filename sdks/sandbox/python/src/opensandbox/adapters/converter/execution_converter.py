@@ -43,6 +43,9 @@ class ExecutionConverter:
     @staticmethod
     def to_api_run_command_request(command: str, opts: RunCommandOpts) -> ApiRunCommandRequest:
         """Convert domain command + options to API RunCommandRequest."""
+        from opensandbox.api.execd.models.run_command_request_envs import (
+            RunCommandRequestEnvs,
+        )
         from opensandbox.api.execd.types import UNSET
 
         # Convert working_directory to cwd, handling None
@@ -58,11 +61,29 @@ class ExecutionConverter:
         if opts.timeout is not None:
             timeout_milliseconds = int(opts.timeout.total_seconds() * 1000)
 
+        uid = UNSET
+        if opts.uid is not None:
+            uid = opts.uid
+
+        gid = UNSET
+        if opts.gid is not None:
+            gid = opts.gid
+
+        envs = UNSET
+        if opts.envs is not None:
+            envs_payload = RunCommandRequestEnvs()
+            for key, value in opts.envs.items():
+                envs_payload[key] = value
+            envs = envs_payload
+
         return ApiRunCommandRequest(
             command=command,
             background=background,
             cwd=cwd,  # Domain uses 'working_directory', API uses 'cwd'
             timeout=timeout_milliseconds,
+            uid=uid,
+            gid=gid,
+            envs=envs,
             # Note: handlers are not included in API request as they are for local processing
         )
 

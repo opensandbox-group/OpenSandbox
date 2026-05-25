@@ -79,4 +79,21 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             Metrics = metrics
         };
     }
+
+    /// <inheritdoc />
+    public EgressStack CreateEgressStack(CreateEgressStackOptions options)
+    {
+        var headers = options.EgressHeaders ?? options.ConnectionConfig.Headers;
+
+        var clientWrapper = new HttpClientWrapper(
+            options.HttpClientProvider.HttpClient,
+            options.EgressBaseUrl,
+            headers,
+            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"));
+
+        return new EgressStack
+        {
+            Egress = new EgressAdapter(clientWrapper)
+        };
+    }
 }

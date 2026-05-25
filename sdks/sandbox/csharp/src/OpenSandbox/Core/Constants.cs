@@ -25,6 +25,11 @@ public static class Constants
     public const int DefaultExecdPort = 44772;
 
     /// <summary>
+    /// Default port for the egress sidecar service.
+    /// </summary>
+    public const int DefaultEgressPort = 18080;
+
+    /// <summary>
     /// Default entrypoint command for sandbox containers.
     /// </summary>
     public static readonly string[] DefaultEntrypoint = new[] { "tail", "-f", "/dev/null" };
@@ -61,7 +66,7 @@ public static class Constants
     /// <summary>
     /// Default user agent string for SDK HTTP requests.
     /// </summary>
-    public const string DefaultUserAgent = "OpenSandbox-CSharp-SDK/0.1.0";
+    public const string DefaultUserAgent = "OpenSandbox-CSharp-SDK/0.1.2";
 
     /// <summary>
     /// Environment variable name for the OpenSandbox domain.

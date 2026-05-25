@@ -16,7 +16,16 @@ import { ConnectionConfig, type ConnectionConfigOptions } from "./config/connect
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 import type { AdapterFactory } from "./factory/adapterFactory.js";
 
-import type { ListSandboxesResponse, SandboxId, SandboxInfo } from "./models/sandboxes.js";
+import type {
+  CreateSnapshotRequest,
+  ListSandboxesResponse,
+  ListSnapshotsParams,
+  ListSnapshotsResponse,
+  SandboxId,
+  SandboxInfo,
+  SandboxMetadataPatch,
+  SnapshotInfo,
+} from "./models/sandboxes.js";
 import type { Sandboxes } from "./services/sandboxes.js";
 
 export interface SandboxManagerOptions {
@@ -96,6 +105,13 @@ export class SandboxManager {
     return this.sandboxes.getSandbox(sandboxId);
   }
 
+  patchSandboxMetadata(
+    sandboxId: SandboxId,
+    patch: SandboxMetadataPatch,
+  ): Promise<SandboxInfo> {
+    return this.sandboxes.patchSandboxMetadata(sandboxId, patch);
+  }
+
   killSandbox(sandboxId: SandboxId): Promise<void> {
     return this.sandboxes.deleteSandbox(sandboxId);
   }
@@ -114,6 +130,22 @@ export class SandboxManager {
   async renewSandbox(sandboxId: SandboxId, timeoutSeconds: number): Promise<void> {
     const expiresAt = new Date(Date.now() + timeoutSeconds * 1000).toISOString();
     await this.sandboxes.renewSandboxExpiration(sandboxId, { expiresAt });
+  }
+
+  createSnapshot(sandboxId: SandboxId, req?: CreateSnapshotRequest): Promise<SnapshotInfo> {
+    return this.sandboxes.createSnapshot(sandboxId, req);
+  }
+
+  getSnapshot(snapshotId: string): Promise<SnapshotInfo> {
+    return this.sandboxes.getSnapshot(snapshotId);
+  }
+
+  listSnapshots(filter: ListSnapshotsParams = {}): Promise<ListSnapshotsResponse> {
+    return this.sandboxes.listSnapshots(filter);
+  }
+
+  deleteSnapshot(snapshotId: string): Promise<void> {
+    return this.sandboxes.deleteSnapshot(snapshotId);
   }
 
   /**

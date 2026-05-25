@@ -13,15 +13,25 @@
 // limitations under the License.
 
 import { createExecdClient } from "../openapi/execdClient.js";
+import { createEgressClient } from "../openapi/egressClient.js";
 import { createLifecycleClient } from "../openapi/lifecycleClient.js";
 
 import { CommandsAdapter } from "../adapters/commandsAdapter.js";
+import { EgressAdapter } from "../adapters/egressAdapter.js";
 import { FilesystemAdapter } from "../adapters/filesystemAdapter.js";
 import { HealthAdapter } from "../adapters/healthAdapter.js";
 import { MetricsAdapter } from "../adapters/metricsAdapter.js";
 import { SandboxesAdapter } from "../adapters/sandboxesAdapter.js";
 
-import type { AdapterFactory, CreateExecdStackOptions, CreateLifecycleStackOptions, ExecdStack, LifecycleStack } from "./adapterFactory.js";
+import type {
+  AdapterFactory,
+  CreateEgressStackOptions,
+  CreateExecdStackOptions,
+  CreateLifecycleStackOptions,
+  EgressStack,
+  ExecdStack,
+  LifecycleStack,
+} from "./adapterFactory.js";
 
 export class DefaultAdapterFactory implements AdapterFactory {
   createLifecycleStack(opts: CreateLifecycleStackOptions): LifecycleStack {
@@ -64,6 +74,21 @@ export class DefaultAdapterFactory implements AdapterFactory {
       files,
       health,
       metrics,
+    };
+  }
+
+  createEgressStack(opts: CreateEgressStackOptions): EgressStack {
+    const headers: Record<string, string> = {
+      ...(opts.connectionConfig.headers ?? {}),
+      ...(opts.endpointHeaders ?? {}),
+    };
+    const egressClient = createEgressClient({
+      baseUrl: opts.egressBaseUrl,
+      headers,
+      fetch: opts.connectionConfig.fetch,
+    });
+    return {
+      egress: new EgressAdapter(egressClient),
     };
   }
 }

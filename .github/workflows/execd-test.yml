@@ -24,28 +24,36 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24.0'
+          go-version: '1.25.9'
+
+      - name: Check gofmt
+        working-directory: components/execd
+        run: |
+          files="$(gofmt -l . ../internal)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
 
       - name: Run golint
+        working-directory: components/execd
         run: |
-          cd components/execd
           make golint
 
       - name: Build (Multi platform compile)
+        working-directory: components/execd
         run: |
-          cd components/execd
-          #
           make multi-build
 
       - name: Run tests with coverage
+        working-directory: components/execd
         run: |
-          cd components/execd
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
       - name: Calculate coverage and generate summary
+        working-directory: components/execd
         id: coverage
         run: |
-          cd components/execd
           # Extract total coverage percentage
           TOTAL_COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}')
           echo "total_coverage=$TOTAL_COVERAGE" >> $GITHUB_OUTPUT
@@ -76,7 +84,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24.0'
+          go-version: '1.25.9'
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -89,18 +97,25 @@ jobs:
         run: choco install make -y
 
       - name: Build
+        working-directory: components/execd
         run: |
-          cd components/execd
           make build
 
       - name: Run smoke test
+        working-directory: components/execd
         run: |
-          cd components/execd
           chmod +x tests/smoke.sh
           ./tests/smoke.sh
 
           sleep 5
           python3 tests/smoke_api.py
+      - name: SIGTERM forward test
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: components/execd
+        run: |
+          chmod +x tests/sigterm_forward.sh
+          ./tests/sigterm_forward.sh
+
       - name: Show logs
         if: always()
         run: |

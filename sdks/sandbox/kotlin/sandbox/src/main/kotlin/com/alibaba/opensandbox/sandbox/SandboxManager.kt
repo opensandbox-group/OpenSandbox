@@ -19,10 +19,15 @@ package com.alibaba.opensandbox.sandbox
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
+import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import com.alibaba.opensandbox.sandbox.infrastructure.factory.AdapterFactory
 import org.slf4j.LoggerFactory
@@ -71,6 +76,7 @@ import java.time.OffsetDateTime
 class SandboxManager internal constructor(
     private val sandboxService: Sandboxes,
     private val httpClientProvider: HttpClientProvider,
+    private val diagnosticsService: Diagnostics,
 ) : AutoCloseable {
     private val logger = LoggerFactory.getLogger(SandboxManager::class.java)
 
@@ -89,7 +95,8 @@ class SandboxManager internal constructor(
             val httpClientProvider = HttpClientProvider(connectionConfig)
             val factory = AdapterFactory(httpClientProvider)
             val sandboxService = factory.createSandboxes()
-            return SandboxManager(sandboxService, httpClientProvider)
+            val diagnosticsService = factory.createDiagnostics()
+            return SandboxManager(sandboxService, httpClientProvider, diagnosticsService)
         }
     }
 
@@ -107,6 +114,52 @@ class SandboxManager internal constructor(
     fun getSandboxInfo(sandboxId: String): SandboxInfo {
         logger.debug("Getting info for sandbox: {}", sandboxId)
         return sandboxService.getSandboxInfo(sandboxId)
+    }
+
+    /**
+     * Gets diagnostic log content for a sandbox by ID.
+     *
+     * @param sandboxId Sandbox ID to retrieve diagnostics for
+     * @param scope Required diagnostic scope such as "container", "lifecycle", or "all"
+     * @return Diagnostic log content descriptor
+     * @throws SandboxException if the operation fails
+     */
+    fun getDiagnosticLogs(
+        sandboxId: String,
+        scope: String,
+    ): DiagnosticContent {
+        return diagnosticsService.getLogs(sandboxId, scope)
+    }
+
+    /**
+     * Gets diagnostic event content for a sandbox by ID.
+     *
+     * @param sandboxId Sandbox ID to retrieve diagnostics for
+     * @param scope Required diagnostic scope such as "runtime", "lifecycle", or "all"
+     * @return Diagnostic event content descriptor
+     * @throws SandboxException if the operation fails
+     */
+    fun getDiagnosticEvents(
+        sandboxId: String,
+        scope: String,
+    ): DiagnosticContent {
+        return diagnosticsService.getEvents(sandboxId, scope)
+    }
+
+    /**
+     * Patches metadata for a single sandbox.
+     *
+     * @param sandboxId Sandbox ID to patch
+     * @param patch Metadata merge patch. Non-null values add or replace keys; null values delete keys
+     * @return SandboxInfo for the patched sandbox
+     * @throws SandboxException if the operation fails
+     */
+    fun patchSandboxMetadata(
+        sandboxId: String,
+        patch: Map<String, String?>,
+    ): SandboxInfo {
+        logger.info("Patching metadata for sandbox: {}", sandboxId)
+        return sandboxService.patchSandboxMetadata(sandboxId, patch)
     }
 
     /**
@@ -159,6 +212,17 @@ class SandboxManager internal constructor(
         logger.info("Resuming sandbox: {}", sandboxId)
         sandboxService.resumeSandbox(sandboxId)
     }
+
+    fun createSnapshot(
+        sandboxId: String,
+        name: String? = null,
+    ): SnapshotInfo = sandboxService.createSnapshot(sandboxId, name)
+
+    fun getSnapshot(snapshotId: String): SnapshotInfo = sandboxService.getSnapshot(snapshotId)
+
+    fun listSnapshots(filter: SnapshotFilter): PagedSnapshotInfos = sandboxService.listSnapshots(filter)
+
+    fun deleteSnapshot(snapshotId: String) = sandboxService.deleteSnapshot(snapshotId)
 
     /**
      * Closes this resource, relinquishing any underlying resources.

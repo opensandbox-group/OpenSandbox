@@ -114,6 +114,7 @@ class ExecutionEventDispatcher(
                 executionTimeInMillis = eventNode.executionTimeInMillis ?: 0L,
                 timestamp = timestamp,
             )
+        execution.complete = complete
         handlers?.onExecutionComplete?.handle(complete)
     }
 }

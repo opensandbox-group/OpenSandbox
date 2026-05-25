@@ -59,32 +59,15 @@ internal sealed class CommandsAdapter : IExecdCommands
         RunCommandOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var url = $"{_baseUrl}/command";
+        ValidateRunOptions(options);
         _logger.LogDebug("Running command stream (commandLength={CommandLength})", command.Length);
-        var requestBody = new RunCommandRequest
-        {
-            Command = command,
-            Cwd = options?.WorkingDirectory,
-            Background = options?.Background,
-            Timeout = options?.TimeoutSeconds.HasValue == true ? options.TimeoutSeconds.Value * 1000L : null
-        };
 
-        var json = JsonSerializer.Serialize(requestBody, JsonOptions);
-        using var request = new HttpRequestMessage(HttpMethod.Post, url)
-        {
-            Content = new StringContent(json, Encoding.UTF8, "application/json")
-        };
+        var spec = new StreamingRequestSpec(
+            Url: $"{_baseUrl}/command",
+            Body: BuildRunCommandRequest(command, options),
+            ErrorMessage: "Run command failed");
 
-        request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
-
-        foreach (var header in _headers)
-        {
-            request.Headers.TryAddWithoutValidation(header.Key, header.Value);
-        }
-
-        using var response = await _sseHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-
-        await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response, "Run command failed", cancellationToken).ConfigureAwait(false))
+        await foreach (var ev in StreamExecutionAsync(spec, cancellationToken).ConfigureAwait(false))
         {
             yield return ev;
         }
@@ -97,21 +80,11 @@ internal sealed class CommandsAdapter : IExecdCommands
         CancellationToken cancellationToken = default)
     {
         _logger.LogDebug("Running command (commandLength={CommandLength})", command.Length);
-        var execution = new Execution();
-        var dispatcher = new ExecutionEventDispatcher(execution, handlers);
-
-        await foreach (var ev in RunStreamAsync(command, options, cancellationToken).ConfigureAwait(false))
-        {
-            // Keep legacy behavior: if server sends "init" with empty id, preserve previous id
-            if (ev.Type == ServerStreamEventTypes.Init && string.IsNullOrEmpty(ev.Text) && !string.IsNullOrEmpty(execution.Id))
-            {
-                ev.Text = execution.Id;
-            }
-
-            await dispatcher.DispatchAsync(ev).ConfigureAwait(false);
-        }
-
-        return execution;
+        return await ConsumeExecutionAsync(
+            RunStreamAsync(command, options, cancellationToken),
+            handlers,
+            inferExitCode: !(options?.Background ?? false),
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async Task InterruptAsync(string sessionId, CancellationToken cancellationToken = default)
@@ -119,6 +92,85 @@ internal sealed class CommandsAdapter : IExecdCommands
         _logger.LogInformation("Interrupting execution: {ExecutionId}", sessionId);
         var queryParams = new Dictionary<string, string?> { ["id"] = sessionId };
         await _client.DeleteAsync("/command", queryParams, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<string> CreateSessionAsync(
+        CreateSessionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Creating bash session (workingDirectory={WorkingDirectory})", options?.WorkingDirectory);
+        var response = await _client.PostAsync<CreateSessionResponse>("/session", BuildCreateSessionBody(options), cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(response?.SessionId))
+        {
+            throw new SandboxApiException(
+                message: "Create session returned empty session_id",
+                statusCode: 200,
+                error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Create session returned empty session_id"));
+        }
+
+        return response!.SessionId;
+    }
+
+    public async IAsyncEnumerable<ServerStreamEvent> RunInSessionStreamAsync(
+        string sessionId,
+        string command,
+        RunInSessionOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidArgumentException("sessionId cannot be empty");
+        }
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            throw new InvalidArgumentException("command cannot be empty");
+        }
+
+        var spec = new StreamingRequestSpec(
+            Url: $"{_baseUrl}/session/{Uri.EscapeDataString(sessionId)}/run",
+            Body: BuildRunInSessionRequest(command, options),
+            ErrorMessage: "Run in session failed");
+
+        await foreach (var ev in StreamExecutionAsync(spec, cancellationToken).ConfigureAwait(false))
+        {
+            yield return ev;
+        }
+    }
+
+    public async Task<Execution> RunInSessionAsync(
+        string sessionId,
+        string command,
+        RunInSessionOptions? options = null,
+        ExecutionHandlers? handlers = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidArgumentException("sessionId cannot be empty");
+        }
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            throw new InvalidArgumentException("command cannot be empty");
+        }
+
+        _logger.LogDebug("Running in session: {SessionId} (commandLength={CommandLength})", sessionId, command.Length);
+        return await ConsumeExecutionAsync(
+            RunInSessionStreamAsync(sessionId, command, options, cancellationToken),
+            handlers,
+            inferExitCode: true,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidArgumentException("sessionId cannot be empty");
+        }
+
+        _logger.LogDebug("Deleting bash session: {SessionId}", sessionId);
+        var path = $"/session/{Uri.EscapeDataString(sessionId)}";
+        await _client.DeleteAsync(path, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     public Task<CommandStatus> GetCommandStatusAsync(string executionId, CancellationToken cancellationToken = default)
@@ -167,6 +219,122 @@ internal sealed class CommandsAdapter : IExecdCommands
             Cursor = parsedCursor
         };
     }
+
+    private async IAsyncEnumerable<ServerStreamEvent> StreamExecutionAsync(
+        StreamingRequestSpec spec,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var json = JsonSerializer.Serialize(spec.Body, JsonOptions);
+        using var request = new HttpRequestMessage(HttpMethod.Post, spec.Url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+
+        request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+        foreach (var header in _headers)
+        {
+            request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
+
+        using var response = await _sseHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+
+        await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response, spec.ErrorMessage, cancellationToken).ConfigureAwait(false))
+        {
+            yield return ev;
+        }
+    }
+
+    private static void ValidateRunOptions(RunCommandOptions? options)
+    {
+        if (options?.Gid.HasValue == true && options.Uid.HasValue != true)
+        {
+            throw new InvalidArgumentException("uid is required when gid is provided");
+        }
+        if (options?.Uid.HasValue == true && options.Uid.Value < 0)
+        {
+            throw new InvalidArgumentException("uid must be >= 0");
+        }
+        if (options?.Gid.HasValue == true && options.Gid.Value < 0)
+        {
+            throw new InvalidArgumentException("gid must be >= 0");
+        }
+    }
+
+    private static object? BuildCreateSessionBody(CreateSessionOptions? options)
+    {
+        var workingDirectory = options?.WorkingDirectory;
+        return !string.IsNullOrEmpty(workingDirectory) ? new { cwd = workingDirectory } : null;
+    }
+
+    private static RunCommandRequest BuildRunCommandRequest(string command, RunCommandOptions? options)
+    {
+        return new RunCommandRequest
+        {
+            Command = command,
+            Cwd = options?.WorkingDirectory,
+            Background = options?.Background,
+            Timeout = options?.TimeoutSeconds.HasValue == true ? options.TimeoutSeconds.Value * 1000L : null,
+            Uid = options?.Uid,
+            Gid = options?.Gid,
+            Envs = options?.Envs
+        };
+    }
+
+    private static RunInSessionRequest BuildRunInSessionRequest(string command, RunInSessionOptions? options)
+    {
+        return new RunInSessionRequest
+        {
+            Command = command,
+            Cwd = options?.WorkingDirectory,
+            Timeout = options?.TimeoutSeconds is not null
+                ? options.TimeoutSeconds.Value * 1000L
+                : null
+        };
+    }
+
+    private static int? InferForegroundExitCode(Execution execution)
+    {
+        if (execution.Error != null)
+        {
+            return int.TryParse(execution.Error.Value, out var exitCode) ? exitCode : null;
+        }
+
+        return execution.Complete != null ? 0 : null;
+    }
+
+    private static void PreserveLegacyInitId(ServerStreamEvent ev, Execution execution)
+    {
+        if (ev.Type == ServerStreamEventTypes.Init && string.IsNullOrEmpty(ev.Text) && !string.IsNullOrEmpty(execution.Id))
+        {
+            ev.Text = execution.Id;
+        }
+    }
+
+    private async Task<Execution> ConsumeExecutionAsync(
+        IAsyncEnumerable<ServerStreamEvent> stream,
+        ExecutionHandlers? handlers,
+        bool inferExitCode,
+        CancellationToken cancellationToken)
+    {
+        var execution = new Execution();
+        var dispatcher = new ExecutionEventDispatcher(execution, handlers);
+
+        await foreach (var ev in stream.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            PreserveLegacyInitId(ev, execution);
+            await dispatcher.DispatchAsync(ev).ConfigureAwait(false);
+        }
+
+        if (inferExitCode)
+        {
+            execution.ExitCode = InferForegroundExitCode(execution);
+        }
+
+        return execution;
+    }
+
+    private sealed record StreamingRequestSpec(string Url, object Body, string ErrorMessage);
 
     private static SandboxApiException CreateApiException(HttpResponseMessage response, string content)
     {

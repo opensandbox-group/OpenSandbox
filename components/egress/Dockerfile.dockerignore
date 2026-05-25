@@ -1,0 +1,5 @@
+**
+!components/egress/**
+!components/internal/**
+!egress/**
+!internal/**

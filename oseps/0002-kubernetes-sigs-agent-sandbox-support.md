@@ -4,7 +4,7 @@ authors:
   - "@jwx0925"
 creation-date: 2026-01-23
 last-updated: 2026-01-23
-status: implementing
+status: implemented
 ---
 
 # OSEP-0002: kubernetes-sigs/agent-sandbox Support

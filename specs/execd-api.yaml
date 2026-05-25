@@ -282,6 +282,116 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /session:
+    post:
+      summary: Create bash session (create_session)
+      description: |
+        Creates a new bash session and returns a session ID for subsequent run_in_session requests.
+        The session maintains shell state (e.g. working directory, environment) across multiple
+        code executions. Request body is optional; an empty body uses default options (no cwd override).
+      operationId: createSession
+      tags:
+        - Command
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+            examples:
+              default:
+                summary: Default (empty body allowed)
+                value: {}
+              with_cwd:
+                summary: With working directory
+                value:
+                  cwd: /workspace
+      responses:
+        "200":
+          description: Session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /session/{sessionId}/run:
+    post:
+      summary: Run command in bash session (run_in_session)
+      description: |
+        Executes a shell command in an existing bash session and streams the output in real-time via SSE
+        (Server-Sent Events). The session must have been created by create_session. Supports
+        optional working directory override and timeout (milliseconds).
+      operationId: runInSession
+      tags:
+        - Command
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Session ID returned by create_session
+          schema:
+            type: string
+          example: session-abc123
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunInSessionRequest"
+            examples:
+              simple:
+                summary: Run shell command
+                value:
+                  command: echo "Hello from session"
+              with_options:
+                summary: With cwd and timeout
+                value:
+                  command: ls -la
+                  cwd: /workspace
+                  timeout: 30000
+      responses:
+        "200":
+          description: Stream of execution events
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ServerStreamEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /session/{sessionId}:
+    delete:
+      summary: Delete bash session (delete_session)
+      description: |
+        Deletes an existing bash session by ID. Terminates the underlying shell process
+        and releases resources. The session ID must have been returned by create_session.
+      operationId: deleteSession
+      tags:
+        - Command
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Session ID to delete
+          schema:
+            type: string
+          example: session-abc123
+      responses:
+        "200":
+          description: Session deleted successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /command:
     post:
       summary: Execute shell command
@@ -290,7 +400,8 @@ paths:
         The command can run in foreground or background mode. The response includes stdout, stderr,
         execution status, and completion events.
         Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
-        terminate the process when the timeout is reached.
+        terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
+        with specific user/group IDs, and `envs` to inject environment variables.
       operationId: runCommand
       tags:
         - Command
@@ -308,6 +419,11 @@ paths:
                   cwd: /workspace
                   background: false
                   timeout: 30000
+                  uid: 1000
+                  gid: 1000
+                  envs:
+                    PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                    PYTHONUNBUFFERED: "1"
               background:
                 summary: Background command
                 value:
@@ -315,6 +431,10 @@ paths:
                   cwd: /app
                   background: true
                   timeout: 120000
+                  uid: 1000
+                  envs:
+                    APP_ENV: production
+                    LOG_LEVEL: info
       responses:
         "200":
           description: Stream of command execution events
@@ -874,6 +994,47 @@ components:
         with a valid token. The token is configured during server initialization.
 
   schemas:
+    CreateSessionRequest:
+      type: object
+      description: Request to create a bash session (optional body; empty treated as defaults)
+      properties:
+        cwd:
+          type: string
+          description: Working directory for the session (optional)
+          example: /workspace
+
+    CreateSessionResponse:
+      type: object
+      description: Response for create_session
+      properties:
+        session_id:
+          type: string
+          description: Unique session ID for run_in_session and delete_session
+          example: session-abc123
+      required:
+        - session_id
+
+    RunInSessionRequest:
+      type: object
+      description: Request to run a command in an existing bash session
+      required:
+        - command
+      properties:
+        command:
+          type: string
+          description: Shell command to execute in the session
+          example: echo "Hello"
+        cwd:
+          type: string
+          description: Working directory override for this run (optional)
+          example: /workspace
+        timeout:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Maximum execution time in milliseconds (optional; server may not enforce if omitted)
+          example: 30000
+
     CodeContextRequest:
       type: object
       description: Request to create a code execution context
@@ -938,6 +1099,28 @@ components:
           format: int64
           description: Maximum allowed execution time in milliseconds before the command is forcefully terminated by the server. If omitted, the server will not enforce any timeout.
           example: 60000
+        uid:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            Unix user ID used to run the command. If `gid` is provided, `uid` is required.
+          example: 1000
+        gid:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            Unix group ID used to run the command. Requires `uid` to be provided.
+          example: 1000
+        envs:
+          type: object
+          description: Environment variables injected into the command process.
+          additionalProperties:
+            type: string
+          example:
+            PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            PYTHONUNBUFFERED: "1"
 
     CommandStatusResponse:
       type: object

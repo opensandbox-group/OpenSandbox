@@ -1,6 +1,6 @@
 {
   "name": "@alibaba-group/opensandbox",
-  "version": "0.1.4",
+  "version": "0.1.7",
   "description": "OpenSandbox TypeScript/JavaScript SDK (sandbox lifecycle + execd APIs)",
   "license": "Apache-2.0",
   "type": "module",
@@ -41,20 +41,22 @@
   "scripts": {
     "gen:api": "node ./scripts/generate-api.mjs",
     "build": "pnpm run gen:api && tsup",
+    "test": "pnpm run build && node --test tests/*.test.mjs",
     "lint": "eslint src scripts --max-warnings 0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
     "openapi-fetch": "^0.14.1",
-    "undici": "^7.18.2"
+    "undici": "^7.25.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
-    "eslint": "^9.39.2",
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
     "globals": "^17.0.0",
-    "openapi-typescript": "^7.9.1",
-    "tsup": "^8.5.0",
+    "openapi-typescript": "^7.13.0",
+    "tsup": "^8.5.1",
     "typescript": "^5.7.2",
-    "typescript-eslint": "^8.52.0"
+    "typescript-eslint": "^8.59.0"
   }
 }

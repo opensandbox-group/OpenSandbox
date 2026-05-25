@@ -4,6 +4,7 @@
 resources:
 - bases/sandbox.opensandbox.io_batchsandboxes.yaml
 - bases/sandbox.opensandbox.io_pools.yaml
+- bases/sandbox.opensandbox.io_sandboxsnapshots.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

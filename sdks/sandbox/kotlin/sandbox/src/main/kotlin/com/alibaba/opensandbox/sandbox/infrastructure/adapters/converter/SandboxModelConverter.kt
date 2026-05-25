@@ -23,15 +23,20 @@ import com.alibaba.opensandbox.sandbox.api.models.Endpoint
 import com.alibaba.opensandbox.sandbox.api.models.ImageSpec
 import com.alibaba.opensandbox.sandbox.api.models.ImageSpecAuth
 import com.alibaba.opensandbox.sandbox.api.models.ListSandboxesResponse
+import com.alibaba.opensandbox.sandbox.api.models.ListSnapshotsResponse
 import com.alibaba.opensandbox.sandbox.api.models.RenewSandboxExpirationRequest
 import com.alibaba.opensandbox.sandbox.api.models.RenewSandboxExpirationResponse
+import com.alibaba.opensandbox.sandbox.api.models.Snapshot
 import com.alibaba.opensandbox.sandbox.api.models.execd.Metrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Host
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PVC
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PaginationInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxCreateResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageAuth
@@ -39,17 +44,23 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotStatus
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import java.time.Duration
 import java.time.OffsetDateTime
 import com.alibaba.opensandbox.sandbox.api.models.Host as ApiHost
 import com.alibaba.opensandbox.sandbox.api.models.NetworkPolicy as ApiNetworkPolicy
 import com.alibaba.opensandbox.sandbox.api.models.NetworkRule as ApiNetworkRule
+import com.alibaba.opensandbox.sandbox.api.models.OSSFS as ApiOSSFS
 import com.alibaba.opensandbox.sandbox.api.models.PVC as ApiPVC
 import com.alibaba.opensandbox.sandbox.api.models.PaginationInfo as ApiPaginationInfo
+import com.alibaba.opensandbox.sandbox.api.models.PlatformSpec as ApiPlatformSpec
 import com.alibaba.opensandbox.sandbox.api.models.Sandbox as ApiSandbox
 import com.alibaba.opensandbox.sandbox.api.models.SandboxStatus as ApiSandboxStatus
 import com.alibaba.opensandbox.sandbox.api.models.Volume as ApiVolume
+import com.alibaba.opensandbox.sandbox.api.models.egress.NetworkPolicy as ApiEgressNetworkPolicy
+import com.alibaba.opensandbox.sandbox.api.models.egress.NetworkRule as ApiEgressNetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxStatus as DomainSandboxStatus
 
 internal object SandboxModelConverter {
@@ -106,6 +117,76 @@ internal object SandboxModelConverter {
         )
     }
 
+    fun NetworkRule.toApiNetworkRule(): ApiNetworkRule {
+        val action =
+            when (this.action) {
+                NetworkRule.Action.ALLOW -> ApiNetworkRule.Action.allow
+                NetworkRule.Action.DENY -> ApiNetworkRule.Action.deny
+            }
+        return ApiNetworkRule(action = action, target = this.target)
+    }
+
+    fun NetworkRule.toApiEgressNetworkRule(): ApiEgressNetworkRule {
+        val action =
+            when (this.action) {
+                NetworkRule.Action.ALLOW -> ApiEgressNetworkRule.Action.allow
+                NetworkRule.Action.DENY -> ApiEgressNetworkRule.Action.deny
+            }
+        return ApiEgressNetworkRule(action = action, target = this.target)
+    }
+
+    fun ApiNetworkRule.toDomainNetworkRule(): NetworkRule {
+        val action =
+            when (this.action) {
+                ApiNetworkRule.Action.allow -> NetworkRule.Action.ALLOW
+                ApiNetworkRule.Action.deny -> NetworkRule.Action.DENY
+            }
+        return NetworkRule
+            .builder()
+            .action(action)
+            .target(this.target)
+            .build()
+    }
+
+    fun ApiNetworkPolicy.toDomainNetworkPolicy(): NetworkPolicy {
+        val defaultAction =
+            when (this.defaultAction) {
+                ApiNetworkPolicy.DefaultAction.allow -> NetworkPolicy.DefaultAction.ALLOW
+                ApiNetworkPolicy.DefaultAction.deny, null -> NetworkPolicy.DefaultAction.DENY
+            }
+        return NetworkPolicy
+            .builder()
+            .defaultAction(defaultAction)
+            .egress(this.egress?.map { it.toDomainNetworkRule() } ?: emptyList())
+            .build()
+    }
+
+    fun ApiEgressNetworkRule.toDomainEgressNetworkRule(): NetworkRule {
+        val action =
+            when (this.action) {
+                ApiEgressNetworkRule.Action.allow -> NetworkRule.Action.ALLOW
+                ApiEgressNetworkRule.Action.deny -> NetworkRule.Action.DENY
+            }
+        return NetworkRule
+            .builder()
+            .action(action)
+            .target(this.target)
+            .build()
+    }
+
+    fun ApiEgressNetworkPolicy.toDomainEgressNetworkPolicy(): NetworkPolicy {
+        val defaultAction =
+            when (this.defaultAction) {
+                ApiEgressNetworkPolicy.DefaultAction.allow -> NetworkPolicy.DefaultAction.ALLOW
+                ApiEgressNetworkPolicy.DefaultAction.deny, null -> NetworkPolicy.DefaultAction.DENY
+            }
+        return NetworkPolicy
+            .builder()
+            .defaultAction(defaultAction)
+            .egress(this.egress?.map { it.toDomainEgressNetworkRule() } ?: emptyList())
+            .build()
+    }
+
     /**
      * Converts Domain Host -> API Host
      */
@@ -117,7 +198,33 @@ internal object SandboxModelConverter {
      * Converts Domain PVC -> API PVC
      */
     fun PVC.toApiPVC(): ApiPVC {
-        return ApiPVC(claimName = this.claimName)
+        return ApiPVC(
+            claimName = this.claimName,
+            createIfNotExists = this.createIfNotExists,
+            deleteOnSandboxTermination = this.deleteOnSandboxTermination,
+            storageClass = this.storageClass,
+            storage = this.storage,
+            accessModes = this.accessModes,
+        )
+    }
+
+    /**
+     * Converts Domain OSSFS -> API OSSFS
+     */
+    fun OSSFS.toApiOSSFS(): ApiOSSFS {
+        return ApiOSSFS(
+            bucket = this.bucket,
+            endpoint = this.endpoint,
+            accessKeyId = this.accessKeyId,
+            accessKeySecret = this.accessKeySecret,
+            version =
+                when (this.version) {
+                    OSSFS.VERSION_1_0 -> ApiOSSFS.Version._1Period0
+                    OSSFS.VERSION_2_0 -> ApiOSSFS.Version._2Period0
+                    else -> throw IllegalArgumentException("Unsupported OSSFS version: ${this.version}")
+                },
+            options = this.options,
+        )
     }
 
     /**
@@ -130,32 +237,66 @@ internal object SandboxModelConverter {
             readOnly = this.readOnly,
             host = this.host?.toApiHost(),
             pvc = this.pvc?.toApiPVC(),
+            ossfs = this.ossfs?.toApiOSSFS(),
             subPath = this.subPath,
         )
     }
 
     fun toApiCreateSandboxRequest(
-        spec: SandboxImageSpec,
-        entrypoint: List<String>,
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
         env: Map<String, String>,
         metadata: Map<String, String>,
-        timeout: Duration,
+        timeout: Duration?,
         resource: Map<String, String>,
+        platform: PlatformSpec?,
         networkPolicy: NetworkPolicy?,
+        secureAccess: Boolean,
         extensions: Map<String, String>,
         volumes: List<Volume>?,
+        snapshotId: String?,
     ): CreateSandboxRequest {
         return CreateSandboxRequest(
-            image = spec.toApiImageSpec(),
+            image = spec?.toApiImageSpec(),
+            snapshotId = snapshotId,
             entrypoint = entrypoint,
+            timeout = timeout?.seconds?.toInt(),
             env = env,
             metadata = metadata,
-            timeout = timeout.seconds.toInt(),
             resourceLimits = resource,
+            platform = platform?.toApiPlatformSpec(),
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
+            secureAccess = secureAccess,
             extensions = extensions,
             volumes = volumes?.map { it.toApiVolume() },
         )
+    }
+
+    private fun PlatformSpec.toApiPlatformSpec(): ApiPlatformSpec {
+        val osValue =
+            when (this.os.lowercase()) {
+                "linux" -> ApiPlatformSpec.Os.linux
+                "windows" -> ApiPlatformSpec.Os.windows
+                else -> throw IllegalArgumentException("Unsupported platform os: ${this.os}")
+            }
+        val archValue =
+            when (this.arch.lowercase()) {
+                "amd64" -> ApiPlatformSpec.Arch.amd64
+                "arm64" -> ApiPlatformSpec.Arch.arm64
+                else -> throw IllegalArgumentException("Unsupported platform arch: ${this.arch}")
+            }
+        return ApiPlatformSpec(
+            os = osValue,
+            arch = archValue,
+        )
+    }
+
+    private fun ApiPlatformSpec.toDomainPlatformSpec(): PlatformSpec {
+        return PlatformSpec
+            .builder()
+            .os(this.os.toString())
+            .arch(this.arch.toString())
+            .build()
     }
 
     /**
@@ -167,7 +308,9 @@ internal object SandboxModelConverter {
             entrypoint = this.entrypoint,
             expiresAt = this.expiresAt,
             createdAt = this.createdAt,
-            image = this.image.toImageSpec(),
+            image = this.image?.toImageSpec(),
+            snapshotId = this.snapshotId,
+            platform = this.platform?.toDomainPlatformSpec(),
             status = this.status.toSandboxStatus(),
             metadata = metadata,
         )
@@ -218,6 +361,7 @@ internal object SandboxModelConverter {
     fun CreateSandboxResponse.toSandboxCreateResponse(): SandboxCreateResponse {
         return SandboxCreateResponse(
             id = this.id,
+            platform = this.platform?.toDomainPlatformSpec(),
         )
     }
 
@@ -237,6 +381,29 @@ internal object SandboxModelConverter {
     fun ListSandboxesResponse.toPagedSandboxInfos(): PagedSandboxInfos {
         return PagedSandboxInfos(
             items.map { it.toSandboxInfo() },
+            pagination.toPaginationInfo(),
+        )
+    }
+
+    fun Snapshot.toSnapshotInfo(): SnapshotInfo {
+        return SnapshotInfo(
+            id = this.id,
+            sandboxId = this.sandboxId,
+            name = this.name,
+            status =
+                SnapshotStatus(
+                    state = this.status.state,
+                    reason = this.status.reason,
+                    message = this.status.message,
+                    lastTransitionAt = this.status.lastTransitionAt,
+                ),
+            createdAt = this.createdAt,
+        )
+    }
+
+    fun ListSnapshotsResponse.toPagedSnapshotInfos(): PagedSnapshotInfos {
+        return PagedSnapshotInfos(
+            items.map { it.toSnapshotInfo() },
             pagination.toPaginationInfo(),
         )
     }

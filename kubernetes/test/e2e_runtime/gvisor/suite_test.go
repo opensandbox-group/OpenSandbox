@@ -20,10 +20,9 @@ import (
 	"os/exec"
 	"testing"
 
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/alibaba/OpenSandbox/sandbox-k8s/test/e2e_runtime"
 )
 
 const (
@@ -55,7 +54,7 @@ var _ = BeforeSuite(func() {
 	dockerBuildArgs := os.Getenv("DOCKER_BUILD_ARGS")
 
 	By("building task-executor image")
-	makeArgs := []string{"docker-build-task-executor", fmt.Sprintf("TASK_EXECUTOR_IMG=%s", e2e_runtime.TaskExecutorImage)}
+	makeArgs := []string{"docker-build-task-executor", fmt.Sprintf("TASK_EXECUTOR_IMG=%s", utils.TaskExecutorImage)}
 	if dockerBuildArgs != "" {
 		makeArgs = append(makeArgs, fmt.Sprintf("DOCKER_BUILD_ARGS=%s", dockerBuildArgs))
 	}
@@ -66,7 +65,7 @@ var _ = BeforeSuite(func() {
 
 	By("loading task-executor image on Kind")
 	// Use kind command directly to load image, avoiding utils.GetProjectDir() path issues
-	cmd = exec.Command("kind", "load", "docker-image", "--name", KindCluster, e2e_runtime.TaskExecutorImage)
+	cmd = exec.Command("kind", "load", "docker-image", "--name", KindCluster, utils.TaskExecutorImage)
 	cmd.Dir = "../../.." // Navigate from test/e2e_runtime/gvisor to project root
 	output, err = cmd.CombinedOutput()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load task-executor image into Kind: %s", string(output))

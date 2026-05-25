@@ -17,6 +17,7 @@ package policy
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/netip"
 	"strings"
 )
@@ -35,16 +36,20 @@ const (
 	targetCIDR
 )
 
-// DefaultDenyPolicy returns a new policy that denies all traffic.
+// DefaultDenyPolicy is deny-by-default with an empty egress list.
 func DefaultDenyPolicy() *NetworkPolicy {
-	return &NetworkPolicy{DefaultAction: ActionDeny}
+	return &NetworkPolicy{
+		DefaultAction: ActionDeny,
+		domainIndex:   compileDomainIndex(nil),
+	}
 }
 
-// NetworkPolicy is the minimal MVP shape for egress control.
-// Only domain/wildcard targets are honored in this MVP.
+// NetworkPolicy: JSON defaultAction + egress; domain rules use first-match (see compiled index).
 type NetworkPolicy struct {
 	Egress        []EgressRule `json:"egress"`
 	DefaultAction string       `json:"defaultAction"`
+
+	domainIndex *compiledDomainIndex
 }
 
 type EgressRule struct {
@@ -56,8 +61,7 @@ type EgressRule struct {
 	prefix     netip.Prefix
 }
 
-// ParsePolicy parses JSON from env/config into a NetworkPolicy.
-// Default action falls back to "deny" to align with proposal.
+// ParsePolicy unmarshals JSON; empty/null/{} → default deny. defaultAction defaults to deny if unset in JSON.
 func ParsePolicy(raw string) (*NetworkPolicy, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" || trimmed == "null" || trimmed == "{}" {
@@ -74,21 +78,24 @@ func ParsePolicy(raw string) (*NetworkPolicy, error) {
 	return ensureDefaults(&p), nil
 }
 
-// Evaluate returns allow/deny for a given domain (lowercased).
+// Evaluate returns allow or deny for a query name (FQDN with or without trailing dot, lowercased).
 func (p *NetworkPolicy) Evaluate(domain string) string {
 	if p == nil {
 		return ActionDeny
 	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
-	for _, r := range p.Egress {
-		if r.targetKind != targetDomain {
-			continue
-		}
-		if r.matchesDomain(domain) {
-			if r.Action == "" {
+
+	if p.domainIndex != nil {
+		if action, ok := p.domainIndex.match(domain); ok {
+			if action == "" {
 				return ActionDeny
 			}
-			return r.Action
+			return action
+		}
+	} else {
+		// Keep compatibility for policies built manually without ParsePolicy/ensureDefaults.
+		if action, ok := p.evaluateLinear(domain); ok {
+			return action
 		}
 	}
 	if p.DefaultAction == "" {
@@ -97,7 +104,21 @@ func (p *NetworkPolicy) Evaluate(domain string) string {
 	return p.DefaultAction
 }
 
-// ensureDefaults guarantees a policy always has a default action.
+func (p *NetworkPolicy) evaluateLinear(domain string) (string, bool) {
+	for _, r := range p.Egress {
+		if r.targetKind != targetDomain {
+			continue
+		}
+		if r.matchesDomain(domain) {
+			if r.Action == "" {
+				return ActionDeny, true
+			}
+			return r.Action, true
+		}
+	}
+	return "", false
+}
+
 func ensureDefaults(p *NetworkPolicy) *NetworkPolicy {
 	if p == nil {
 		return DefaultDenyPolicy()
@@ -105,6 +126,7 @@ func ensureDefaults(p *NetworkPolicy) *NetworkPolicy {
 	if p.DefaultAction == "" {
 		p.DefaultAction = ActionDeny
 	}
+	p.domainIndex = compileDomainIndex(p.Egress)
 	return p
 }
 
@@ -143,14 +165,18 @@ func normalizePolicy(p *NetworkPolicy) error {
 	return nil
 }
 
-// WithExtraAllowIPs returns a copy of the policy with additional allow rules for each IP.
-// Used at startup to whitelist system nameservers so client DNS and proxy upstream work with private DNS.
+// WithExtraAllowIPs appends per-IP allow rules (e.g. resolv nameservers, explicit upstream) so client and
+// proxy can reach the same address; does not change domain-mode egress rules.
 func (p *NetworkPolicy) WithExtraAllowIPs(ips []netip.Addr) *NetworkPolicy {
 	if p == nil || len(ips) == 0 {
 		return p
 	}
 	out := *p
-	out.Egress = make([]EgressRule, len(p.Egress), len(p.Egress)+len(ips))
+	n, m := len(p.Egress), len(ips)
+	if m > math.MaxInt-n {
+		panic("policy: egress rule slice capacity overflow")
+	}
+	out.Egress = make([]EgressRule, n, n+m)
 	copy(out.Egress, p.Egress)
 	for _, ip := range ips {
 		out.Egress = append(out.Egress, EgressRule{
@@ -163,8 +189,7 @@ func (p *NetworkPolicy) WithExtraAllowIPs(ips []netip.Addr) *NetworkPolicy {
 	return &out
 }
 
-// StaticIPSets splits static IP/CIDR rules into allow/deny IPv4/IPv6 buckets.
-// Empty or nil policy returns empty slices.
+// StaticIPSets buckets static IP/CIDR egress into allow/deny v4/v6 for nft element generation.
 func (p *NetworkPolicy) StaticIPSets() (allowV4, allowV6, denyV4, denyV6 []string) {
 	if p == nil {
 		return

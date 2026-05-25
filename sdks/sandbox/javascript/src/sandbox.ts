@@ -14,6 +14,7 @@
 
 import {
   DEFAULT_ENTRYPOINT,
+  DEFAULT_EGRESS_PORT,
   DEFAULT_EXECD_PORT,
   DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS,
   DEFAULT_READY_TIMEOUT_SECONDS,
@@ -22,6 +23,7 @@ import {
 } from "./core/constants.js";
 import { ConnectionConfig, type ConnectionConfigOptions } from "./config/connection.js";
 import type { SandboxFiles } from "./services/filesystem.js";
+import type { Egress } from "./services/egress.js";
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 import type { AdapterFactory } from "./factory/adapterFactory.js";
 
@@ -33,12 +35,17 @@ import type {
   CreateSandboxRequest,
   Endpoint,
   NetworkPolicy,
+  NetworkRule,
+  PlatformSpec,
   RenewSandboxExpirationResponse,
   SandboxId,
   SandboxInfo,
+  SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
 import { SandboxReadyTimeoutException } from "./core/exceptions.js";
+
+const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
 
 export interface SandboxCreateOptions {
   /**
@@ -53,9 +60,14 @@ export interface SandboxCreateOptions {
   /**
    * Container image uri, e.g. `python:3.11`
    */
-  image:
+  image?:
     | string
     | { uri: string; auth?: { username: string; password: string } };
+  /**
+   * Snapshot identifier to restore from.
+   * Mutually exclusive with `image`.
+   */
+  snapshotId?: string;
 
   /**
    * Entrypoint command for the sandbox (defaults to tail -f /dev/null).
@@ -76,13 +88,21 @@ export interface SandboxCreateOptions {
   networkPolicy?: NetworkPolicy;
   /**
    * Optional list of volume mounts for persistent storage.
-   * Each volume specifies a backend (host path or PVC) and mount configuration.
+   * Each volume specifies a backend (host path, PVC, or OSSFS) and mount configuration.
    */
   volumes?: Volume[];
   /**
    * Opaque extension parameters passed through to the server as-is.
    */
   extensions?: Record<string, string>;
+  /**
+   * Optional runtime platform constraint used for provisioning.
+   */
+  platform?: PlatformSpec;
+  /**
+   * Whether to enable secured access for sandbox endpoints.
+   */
+  secureAccess?: boolean;
 
   /**
    * Resource limits applied to the sandbox container.
@@ -91,9 +111,9 @@ export interface SandboxCreateOptions {
    */
   resource?: Record<string, string>;
   /**
-   * Sandbox timeout in seconds.
+   * Sandbox timeout in seconds. Set to `null` to require explicit cleanup.
    */
-  timeoutSeconds?: number;
+  timeoutSeconds?: number | null;
 
   /**
    * Skip readiness checks during create/connect.
@@ -150,8 +170,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 function toImageSpec(
-  image: SandboxCreateOptions["image"]
-): CreateSandboxRequest["image"] {
+  image: NonNullable<SandboxCreateOptions["image"]>
+): NonNullable<CreateSandboxRequest["image"]> {
   if (typeof image === "string") return { uri: image };
   return { uri: image.uri, auth: image.auth };
 }
@@ -187,6 +207,7 @@ export class Sandbox {
       adapterFactory: AdapterFactory;
       lifecycleBaseUrl: string;
       execdBaseUrl: string;
+      egress: Egress;
     }
   >();
 
@@ -201,6 +222,7 @@ export class Sandbox {
     files: SandboxFiles;
     health: ExecdHealth;
     metrics: ExecdMetrics;
+    egress: Egress;
   }) {
     this.id = opts.id;
     this.connectionConfig = opts.connectionConfig;
@@ -208,6 +230,7 @@ export class Sandbox {
       adapterFactory: opts.adapterFactory,
       lifecycleBaseUrl: opts.lifecycleBaseUrl,
       execdBaseUrl: opts.execdBaseUrl,
+      egress: opts.egress,
     });
 
     this.sandboxes = opts.sandboxes;
@@ -218,6 +241,32 @@ export class Sandbox {
   }
 
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
+    if ((opts.image == null) === (opts.snapshotId == null)) {
+      throw new Error("Exactly one of image or snapshotId must be provided");
+    }
+
+    // Validate volumes before allocating transport resources.
+    if (opts.volumes) {
+      for (const vol of opts.volumes) {
+        const backendsSpecified = [vol.host, vol.pvc, vol.ossfs].filter((b) => b != null).length;
+        if (backendsSpecified === 0) {
+          throw new Error(
+            `Volume '${vol.name}' must specify exactly one backend (host, pvc, ossfs), but none was provided.`
+          );
+        }
+        if (backendsSpecified > 1) {
+          throw new Error(
+            `Volume '${vol.name}' must specify exactly one backend (host, pvc, ossfs), but multiple were provided.`
+          );
+        }
+        if (vol.host && !HOST_PATH_PATTERN.test(vol.host.path)) {
+          throw new Error(
+            "Host path must be an absolute path starting with '/' or a Windows drive letter (e.g. 'C:\\' or 'D:/')"
+          );
+        }
+      }
+    }
+
     const baseConnectionConfig =
       opts.connectionConfig instanceof ConnectionConfig
         ? opts.connectionConfig
@@ -237,28 +286,23 @@ export class Sandbox {
       throw err;
     }
 
-    // Validate volumes: exactly one backend must be specified per volume
-    if (opts.volumes) {
-      for (const vol of opts.volumes) {
-        const backendsSpecified = [vol.host, vol.pvc].filter((b) => b !== undefined).length;
-        if (backendsSpecified === 0) {
-          throw new Error(
-            `Volume '${vol.name}' must specify exactly one backend (host, pvc), but none was provided.`
-          );
-        }
-        if (backendsSpecified > 1) {
-          throw new Error(
-            `Volume '${vol.name}' must specify exactly one backend (host, pvc), but multiple were provided.`
-          );
-        }
-      }
+    const rawTimeout = opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
+    const timeoutSeconds =
+      opts.timeoutSeconds === null
+        ? null
+        : Math.floor(rawTimeout);
+    if (timeoutSeconds !== null && !Number.isFinite(timeoutSeconds)) {
+      throw new Error(
+        `timeoutSeconds must be a finite number, got ${opts.timeoutSeconds}`
+      );
     }
 
     const req: CreateSandboxRequest = {
-      image: toImageSpec(opts.image),
+      image: opts.image == null ? undefined : toImageSpec(opts.image),
+      snapshotId: opts.snapshotId,
       entrypoint: opts.entrypoint ?? DEFAULT_ENTRYPOINT,
-      timeout: Math.floor(opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS),
       resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
+      secureAccess: opts.secureAccess ?? false,
       env: opts.env ?? {},
       metadata: opts.metadata ?? {},
       networkPolicy: opts.networkPolicy
@@ -269,7 +313,11 @@ export class Sandbox {
         : undefined,
       volumes: opts.volumes,
       extensions: opts.extensions ?? {},
+      platform: opts.platform,
     };
+    if (timeoutSeconds !== null) {
+      req.timeout = timeoutSeconds;
+    }
 
     let sandboxId: SandboxId | undefined;
     try {
@@ -281,7 +329,13 @@ export class Sandbox {
         DEFAULT_EXECD_PORT,
         connectionConfig.useServerProxy
       );
+      const egressEndpoint = await sandboxes.getSandboxEndpoint(
+        sandboxId,
+        DEFAULT_EGRESS_PORT,
+        connectionConfig.useServerProxy
+      );
       const execdBaseUrl = `${connectionConfig.protocol}://${endpoint.endpoint}`;
+      const egressBaseUrl = `${connectionConfig.protocol}://${egressEndpoint.endpoint}`;
 
       const { commands, files, health, metrics } =
         adapterFactory.createExecdStack({
@@ -289,6 +343,11 @@ export class Sandbox {
           execdBaseUrl,
           endpointHeaders: endpoint.headers,
         });
+      const { egress } = adapterFactory.createEgressStack({
+        connectionConfig,
+        egressBaseUrl,
+        endpointHeaders: egressEndpoint.headers,
+      });
 
       const sbx = new Sandbox({
         id: sandboxId,
@@ -301,6 +360,7 @@ export class Sandbox {
         files,
         health,
         metrics,
+        egress,
       });
 
       if (!(opts.skipHealthCheck ?? false)) {
@@ -354,13 +414,24 @@ export class Sandbox {
         DEFAULT_EXECD_PORT,
         connectionConfig.useServerProxy
       );
+      const egressEndpoint = await sandboxes.getSandboxEndpoint(
+        opts.sandboxId,
+        DEFAULT_EGRESS_PORT,
+        connectionConfig.useServerProxy
+      );
       const execdBaseUrl = `${connectionConfig.protocol}://${endpoint.endpoint}`;
+      const egressBaseUrl = `${connectionConfig.protocol}://${egressEndpoint.endpoint}`;
       const { commands, files, health, metrics } =
         adapterFactory.createExecdStack({
           connectionConfig,
           execdBaseUrl,
           endpointHeaders: endpoint.headers,
         });
+      const { egress } = adapterFactory.createEgressStack({
+        connectionConfig,
+        egressBaseUrl,
+        endpointHeaders: egressEndpoint.headers,
+      });
 
       const sbx = new Sandbox({
         id: opts.sandboxId,
@@ -373,6 +444,7 @@ export class Sandbox {
         files,
         health,
         metrics,
+        egress,
       });
 
       if (!(opts.skipHealthCheck ?? false)) {
@@ -486,6 +558,18 @@ export class Sandbox {
     return await this.sandboxes.renewSandboxExpiration(this.id, { expiresAt });
   }
 
+  async patchMetadata(patch: SandboxMetadataPatch): Promise<SandboxInfo> {
+    return await this.sandboxes.patchSandboxMetadata(this.id, patch);
+  }
+
+  async getEgressPolicy(): Promise<NetworkPolicy> {
+    return await Sandbox._priv.get(this)!.egress.getPolicy();
+  }
+
+  async patchEgressRules(rules: NetworkRule[]): Promise<void> {
+    await Sandbox._priv.get(this)!.egress.patchRules(rules);
+  }
+
   /**
    * Get sandbox endpoint for a port (STRICT: no scheme), e.g. "localhost:44772" or "domain/route/.../44772".
    */
@@ -495,6 +579,13 @@ export class Sandbox {
       port,
       this.connectionConfig.useServerProxy
     );
+  }
+
+  /**
+   * Get signed endpoint URL with an OSEP-0011 route token that expires at the given Unix epoch timestamp (seconds).
+   */
+  async getSignedEndpoint(port: number, expires: number): Promise<Endpoint> {
+    return await this.sandboxes.getSignedEndpoint(this.id, port, expires);
   }
 
   /**
@@ -511,24 +602,43 @@ export class Sandbox {
     healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>;
   }): Promise<void> {
     const deadline = Date.now() + opts.readyTimeoutSeconds * 1000;
+    let attempt = 0;
+    let errorDetail = "Health check returned false continuously.";
+
+    const buildTimeoutMessage = () => {
+      const context = `domain=${this.connectionConfig.domain}, useServerProxy=${this.connectionConfig.useServerProxy}`;
+      let suggestion =
+        "If this sandbox runs in Docker bridge or remote-network mode, consider enabling useServerProxy=true.";
+      if (!this.connectionConfig.useServerProxy) {
+        suggestion += " You can also configure server-side [docker].host_ip for direct endpoint access.";
+      }
+      return `Sandbox health check timed out after ${opts.readyTimeoutSeconds}s (${attempt} attempts). ${errorDetail} Connection context: ${context}. ${suggestion}`;
+    };
 
     // Wait until execd becomes reachable and passes health check.
     while (true) {
       if (Date.now() > deadline) {
         throw new SandboxReadyTimeoutException({
-          message: `Sandbox not ready: timed out waiting for health check (timeoutSeconds=${opts.readyTimeoutSeconds})`,
+          message: buildTimeoutMessage(),
         });
       }
+      attempt++;
       try {
         if (opts.healthCheck) {
           const ok = await opts.healthCheck(this);
-          if (ok) return;
+          if (ok) {
+            return;
+          }
         } else {
           const ok = await this.health.ping();
-          if (ok) return;
+          if (ok) {
+            return;
+          }
         }
-      } catch {
-        // ignore and retry
+        errorDetail = "Health check returned false continuously.";
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        errorDetail = `Last health check error: ${message}`;
       }
       await sleep(opts.pollingIntervalMillis);
     }

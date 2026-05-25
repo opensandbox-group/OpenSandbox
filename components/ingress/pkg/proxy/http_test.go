@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,18 +32,38 @@ import (
 
 // mockProvider implements sandbox.Provider interface for testing
 type mockProvider struct {
-	endpoints map[string]string // sandboxName -> IP
-	notReady  map[string]bool   // sandboxName -> notReady flag
+	endpoints   map[string]string // sandboxName -> IP
+	notReady    map[string]bool   // sandboxName -> notReady flag
+	accessToken map[string]string // sandboxName -> opensandbox.io/secure-access-token value (non-empty => verification required)
 }
 
-func (m *mockProvider) GetEndpoint(sandboxId string) (string, error) {
+func (m *mockProvider) sandboxExists(sandboxId string) bool {
 	if m.notReady != nil && m.notReady[sandboxId] {
-		return "", fmt.Errorf("%w: %s", sandbox.ErrSandboxNotReady, sandboxId)
+		return true
 	}
-	if ip, ok := m.endpoints[sandboxId]; ok {
-		return ip, nil
+	_, ok := m.endpoints[sandboxId]
+	return ok
+}
+
+func (m *mockProvider) GetEndpoint(sandboxId string) (*sandbox.EndpointInfo, error) {
+	if m.notReady != nil && m.notReady[sandboxId] {
+		return nil, fmt.Errorf("%w: %s", sandbox.ErrSandboxNotReady, sandboxId)
 	}
-	return "", fmt.Errorf("%w: %s", sandbox.ErrSandboxNotFound, sandboxId)
+	if !m.sandboxExists(sandboxId) {
+		return nil, fmt.Errorf("%w: %s", sandbox.ErrSandboxNotFound, sandboxId)
+	}
+	ip := m.endpoints[sandboxId]
+	token := ""
+	if m.accessToken != nil {
+		token = strings.TrimSpace(m.accessToken[sandboxId])
+	}
+	if ip == "" {
+		return nil, fmt.Errorf("%w: %s", sandbox.ErrSandboxNotFound, sandboxId)
+	}
+	return &sandbox.EndpointInfo{
+		Endpoint:          ip,
+		SecureAccessToken: token,
+	}, nil
 }
 
 func (m *mockProvider) Start(_ context.Context) error {
@@ -73,7 +94,7 @@ func httpProxyWithHeaderMode(t *testing.T) {
 
 	ctx := context.Background()
 	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
-	proxy := NewProxy(ctx, provider, ModeHeader)
+	proxy := NewProxy(ctx, provider, ModeHeader, nil, nil)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)
@@ -147,7 +168,7 @@ func httpProxyWithURIMode(t *testing.T) {
 
 	ctx := context.Background()
 	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
-	proxy := NewProxy(ctx, provider, ModeURI)
+	proxy := NewProxy(ctx, provider, ModeURI, nil, nil)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)

@@ -24,6 +24,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
 const (
@@ -39,48 +40,35 @@ const (
 
 type runner func(ctx context.Context, script string) ([]byte, error)
 
-// Options controls nftables enforcement extras.
 type Options struct {
-	// BlockDoT drops tcp/udp 853 to prevent DNS-over-TLS bypass.
-	BlockDoT bool
-	// BlockDoH443 drops HTTPS DoH endpoints; when blocklist is empty and enabled, 443 is dropped.
+	BlockDoT       bool
 	BlockDoH443    bool
 	DoHBlocklistV4 []string
 	DoHBlocklistV6 []string
 }
 
-// Manager applies static IP/CIDR policy into nftables and dynamic DNS-learned IPs.
 type Manager struct {
 	run  runner
 	opts Options
 	mu   sync.Mutex
 }
 
-// NewManager builds an nftables manager that shells out to `nft -f -` with defaults.
 func NewManager() *Manager {
 	return &Manager{run: defaultRunner, opts: Options{BlockDoT: true}}
 }
 
-// NewManagerWithRunner is for tests; allows capturing the rendered ruleset (defaults to BlockDoT=true).
 func NewManagerWithRunner(r runner) *Manager {
 	return &Manager{run: r, opts: Options{BlockDoT: true}}
 }
 
-// NewManagerWithRunnerAndOptions is for tests needing custom options.
 func NewManagerWithRunnerAndOptions(r runner, opts Options) *Manager {
 	return &Manager{run: r, opts: opts}
 }
 
-// NewManagerWithOptions allows customizing behavior (used by main()).
 func NewManagerWithOptions(opts Options) *Manager {
 	return &Manager{run: defaultRunner, opts: opts}
 }
 
-// ApplyStatic reconciles static allow/deny IP and CIDR entries into nftables.
-// It creates a dedicated table/chain and overwrites previous state.
-// Uses the same mutex as AddResolvedIPs so a /policy update never overlaps a DNS
-// callback: without this, add-element could run while the table is being deleted/recreated
-// and fail, causing a transient deny for a client that already got an allowed DNS answer.
 func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) error {
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
@@ -90,25 +78,29 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 		p.DefaultAction, len(allowV4), len(allowV6), len(denyV4), len(denyV6))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	script := buildRuleset(p, m.opts)
+	script, err := buildRuleset(p, m.opts)
+	if err != nil {
+		return err
+	}
 	if _, err := m.run(ctx, script); err != nil {
-		// On a fresh host the delete-table may fail; retry once without the delete line.
 		if isMissingTableError(err) {
 			fallback := removeDeleteTableLine(script)
 			if fallback != script {
 				if _, retryErr := m.run(ctx, fallback); retryErr == nil {
+					telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
+					telemetry.RecordNftablesUpdate()
 					return nil
 				}
 			}
 		}
 		return err
 	}
+	telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
+	telemetry.RecordNftablesUpdate()
 	log.Infof("nftables: static policy applied successfully")
 	return nil
 }
 
-// AddResolvedIPs adds DNS-learned IPs to dynamic allow sets with TTL-based timeout.
-// TTL is clamped to minTTLSec–maxTTLSec. Call only when table exists (dns+nft mode).
 func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 	if len(ips) == 0 {
 		return nil
@@ -120,16 +112,60 @@ func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 	if script == "" {
 		return nil
 	}
-	log.Infof("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(ips), script)
+	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(ips), script)
 	_, err := m.run(ctx, script)
+	if err == nil {
+		telemetry.RecordNftablesUpdate()
+	}
 	return err
 }
 
-func buildRuleset(p *policy.NetworkPolicy, opts Options) string {
+// RemoveEnforcement drops inet opensandbox; missing table is not an error.
+func (m *Manager) RemoveEnforcement(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	script := fmt.Sprintf("delete table inet %s\n", tableName)
+	_, err := m.run(ctx, script)
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such file") || strings.Contains(msg, "does not exist") {
+			return nil
+		}
+		return err
+	}
+	log.Infof("nftables: removed table inet %s", tableName)
+	return nil
+}
+
+func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
+	var err error
+	if allowV4, err = normalizeNFTIntervalSet(allowV4); err != nil {
+		return "", err
+	}
+	if allowV6, err = normalizeNFTIntervalSet(allowV6); err != nil {
+		return "", err
+	}
+	if denyV4, err = normalizeNFTIntervalSet(denyV4); err != nil {
+		return "", err
+	}
+	if denyV6, err = normalizeNFTIntervalSet(denyV6); err != nil {
+		return "", err
+	}
+	dohBlockV4 := opts.DoHBlocklistV4
+	dohBlockV6 := opts.DoHBlocklistV6
+	if len(dohBlockV4) > 0 {
+		if dohBlockV4, err = normalizeNFTIntervalSet(dohBlockV4); err != nil {
+			return "", err
+		}
+	}
+	if len(dohBlockV6) > 0 {
+		if dohBlockV6, err = normalizeNFTIntervalSet(dohBlockV6); err != nil {
+			return "", err
+		}
+	}
 
 	var b strings.Builder
-	// Reset and re-create table, sets, and chain.
 	fmt.Fprintf(&b, "delete table inet %s\n", tableName)
 	fmt.Fprintf(&b, "add table inet %s\n", tableName)
 
@@ -140,10 +176,10 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) string {
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr; timeout %ds; }\n", tableName, dynAllowV4Set, dynSetTimeoutS)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr; timeout %ds; }\n", tableName, dynAllowV6Set, dynSetTimeoutS)
 
-	if len(opts.DoHBlocklistV4) > 0 {
+	if len(dohBlockV4) > 0 {
 		fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr; flags interval; }\n", tableName, dohBlockV4Set)
 	}
-	if len(opts.DoHBlocklistV6) > 0 {
+	if len(dohBlockV6) > 0 {
 		fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr; flags interval; }\n", tableName, dohBlockV6Set)
 	}
 
@@ -151,8 +187,8 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) string {
 	writeElements(&b, denyV4Set, denyV4)
 	writeElements(&b, allowV6Set, allowV6)
 	writeElements(&b, denyV6Set, denyV6)
-	writeElements(&b, dohBlockV4Set, opts.DoHBlocklistV4)
-	writeElements(&b, dohBlockV6Set, opts.DoHBlocklistV6)
+	writeElements(&b, dohBlockV4Set, dohBlockV4)
+	writeElements(&b, dohBlockV6Set, dohBlockV6)
 
 	chainPolicy := "drop"
 	if p.DefaultAction == policy.ActionAllow {
@@ -167,14 +203,14 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) string {
 		fmt.Fprintf(&b, "add rule inet %s %s udp dport 853 drop\n", tableName, chainName)
 	}
 	if opts.BlockDoH443 {
-		if len(opts.DoHBlocklistV4) == 0 && len(opts.DoHBlocklistV6) == 0 {
+		if len(dohBlockV4) == 0 && len(dohBlockV6) == 0 {
 			// strict: drop all 443 when enabled but no blocklist provided
 			fmt.Fprintf(&b, "add rule inet %s %s tcp dport 443 drop\n", tableName, chainName)
 		} else {
-			if len(opts.DoHBlocklistV4) > 0 {
+			if len(dohBlockV4) > 0 {
 				fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s tcp dport 443 drop\n", tableName, chainName, dohBlockV4Set)
 			}
-			if len(opts.DoHBlocklistV6) > 0 {
+			if len(dohBlockV6) > 0 {
 				fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s tcp dport 443 drop\n", tableName, chainName, dohBlockV6Set)
 			}
 		}
@@ -189,7 +225,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) string {
 		fmt.Fprintf(&b, "add rule inet %s %s counter drop\n", tableName, chainName)
 	}
 
-	return b.String()
+	return b.String(), nil
 }
 
 func writeElements(b *strings.Builder, setName string, elems []string) {

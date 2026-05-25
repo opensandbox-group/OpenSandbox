@@ -48,6 +48,11 @@ dependencies = [
     "httpx>=0.27.0,<1.0",
 ]
 
+[project.optional-dependencies]
+pool-redis = [
+    "redis>=5.0,<6.0",
+]
+
 [project.urls]
 Homepage = "https://open-sandbox.ai"
 Repository = "https://github.com/alibaba/OpenSandbox"
@@ -62,7 +67,7 @@ source = "vcs"
 root = "../../.."
 tag_regex = "^python/sandbox/v(?P<version>\\d+\\.\\d+\\.\\d+(?:[\\.\\w\\+\\-]*)?)$"
 git_describe_command = 'git describe --dirty --tags --long --match "python/sandbox/v*"'
-fallback_version = "0.1.0"
+fallback_version = "0.1.9"
 
 [tool.hatch.build]
 include = [
@@ -137,6 +142,7 @@ branch = true
 
 [dependency-groups]
 dev = [
+    "redis>=5.0,<6.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",

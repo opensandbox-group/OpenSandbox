@@ -45,7 +45,7 @@ async def main() -> None:
         "opensandbox/desktop:latest",
     )
     python_version = os.getenv("PYTHON_VERSION", "3.11")
-    vnc_password = os.getenv("VNC_PASSWORD", "opensandbox")
+    vnc_password = _required_env("VNC_PASSWORD")
 
     config = ConnectionConfig(
         domain=domain,
