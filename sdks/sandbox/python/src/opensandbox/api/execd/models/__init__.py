@@ -20,6 +20,8 @@ from .chmod_files_body import ChmodFilesBody
 from .code_context import CodeContext
 from .code_context_request import CodeContextRequest
 from .command_status_response import CommandStatusResponse
+from .create_session_request import CreateSessionRequest
+from .create_session_response import CreateSessionResponse
 from .error_response import ErrorResponse
 from .file_info import FileInfo
 from .file_metadata import FileMetadata
@@ -32,6 +34,8 @@ from .replace_content_body import ReplaceContentBody
 from .replace_file_content_item import ReplaceFileContentItem
 from .run_code_request import RunCodeRequest
 from .run_command_request import RunCommandRequest
+from .run_command_request_envs import RunCommandRequestEnvs
+from .run_in_session_request import RunInSessionRequest
 from .server_stream_event import ServerStreamEvent
 from .server_stream_event_error import ServerStreamEventError
 from .server_stream_event_results import ServerStreamEventResults
@@ -43,6 +47,8 @@ __all__ = (
     "CodeContext",
     "CodeContextRequest",
     "CommandStatusResponse",
+    "CreateSessionRequest",
+    "CreateSessionResponse",
     "ErrorResponse",
     "FileInfo",
     "FileMetadata",
@@ -55,6 +61,8 @@ __all__ = (
     "ReplaceFileContentItem",
     "RunCodeRequest",
     "RunCommandRequest",
+    "RunCommandRequestEnvs",
+    "RunInSessionRequest",
     "ServerStreamEvent",
     "ServerStreamEventError",
     "ServerStreamEventResults",

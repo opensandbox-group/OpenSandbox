@@ -36,6 +36,12 @@ class CreateSandboxRequestExtensions:
     - **Namespacing**: Use prefixed keys (e.g., `storage.id`) to prevent collisions.
     - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
 
+    **Well-known keys**:
+    - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24 hours
+    inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit to disable.
+    Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint via
+    `validate_extensions` in server `src/extensions/validation.py`).
+
     """
 
     additional_properties: dict[str, str] = _attrs_field(init=False, factory=dict)

@@ -24,9 +24,12 @@ import (
 const (
 	dynAllowV4Set  = "dyn_allow_v4"
 	dynAllowV6Set  = "dyn_allow_v6"
-	dynSetTimeoutS = 300
+	dynSetTimeoutS = 360
+	// nftTTLSlackSec is added to the DNS TTL before clamping, so allow entries
+	// slightly outlive the resolver cache and reduce races with short TTLs.
+	nftTTLSlackSec = 60
 	minTTLSec      = 60
-	maxTTLSec      = 300
+	maxTTLSec      = 360 // max DNS TTL (300) + nftTTLSlackSec
 )
 
 // ResolvedIP is a single IP learned from DNS with TTL for dynamic nft set.
@@ -58,7 +61,7 @@ func buildAddResolvedIPsScript(table string, ips []ResolvedIP) string {
 }
 
 func clampTTL(d time.Duration) int {
-	sec := int(d.Seconds())
+	sec := int(d.Seconds()) + nftTTLSlackSec
 	if sec < minTTLSec {
 		return minTTLSec
 	}

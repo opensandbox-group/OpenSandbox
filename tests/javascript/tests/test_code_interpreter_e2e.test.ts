@@ -50,6 +50,7 @@ function sandboxCreateOptions() {
       NODE_VERSION: "22",
       PYTHON_VERSION: "3.12",
       EXECD_LOG_FILE: "/tmp/opensandbox-e2e/logs/execd.log",
+      EXECD_API_GRACE_SHUTDOWN: "3s", EXECD_JUPYTER_IDLE_POLL_INTERVAL: "200ms",
     },
     healthCheckPollingInterval: 200,
     volumes: [
@@ -103,6 +104,11 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function shouldIsolateSandboxPerTest(testName: string): boolean {
+  // Isolate high-flakiness categories only: run + concurrent + interrupt.
+  return /^0[2-7]\s/.test(testName);
+}
+
 /**
  * Retry an async operation up to ``maxRetries`` times.  On retryable socket /
  * session errors the sandbox is health-checked (and recreated if dead) before
@@ -137,7 +143,11 @@ beforeAll(async () => {
   await recreateSandbox();
 }, 10 * 60_000);
 
-beforeEach(async () => {
+beforeEach(async (ctx) => {
+  if (shouldIsolateSandboxPerTest(ctx.task.name)) {
+    await recreateSandbox();
+    return;
+  }
   await ensureSandboxAlive();
 }, 5 * 60_000);
 
@@ -219,6 +229,8 @@ test("02 java code execution", async () => {
   );
   expect(r.id).toBeTruthy();
   expect(r.error).toBeUndefined();
+  expect(r.exitCode ?? null).toBeNull();
+  expect(r.complete).toBeTruthy();
   const resultText = r.result[0]?.text?.trim();
   const hasResultFromStdout = stdout.some((s) => s.includes("2 + 2 = 4"));
   expect(resultText === "4" || hasResultFromStdout).toBe(true);
@@ -231,6 +243,7 @@ test("02 java code execution", async () => {
   });
   expect(err.error).toBeTruthy();
   expect(err.error?.name).toBe("EvalException");
+  expect(err.exitCode ?? null).toBeNull();
 });
 
 test("03 python code execution + direct language + persistence", async () => {
@@ -243,6 +256,8 @@ test("03 python code execution + direct language + persistence", async () => {
   );
   expect(direct.error).toBeUndefined();
   expect(direct.result[0]?.text).toBe("4");
+  expect(direct.exitCode ?? null).toBeNull();
+  expect(direct.complete).toBeTruthy();
 
   // Persistence: retry the whole block as a unit so that a sandbox restart
   // mid-way gets a fresh context instead of a stale one.
@@ -252,12 +267,15 @@ test("03 python code execution + direct language + persistence", async () => {
     return ci!.codes.run("result = x\nresult", { context: ctx });
   });
   expect(r.result[0]?.text).toBe("42");
+  expect(r.exitCode ?? null).toBeNull();
+  expect(r.complete).toBeTruthy();
 
   const bad = await withRetry(async () => {
     const ctx2 = await ci!.codes.createContext(SupportedLanguages.PYTHON);
     return ci!.codes.run("print(undefined_variable)", { context: ctx2 });
   });
   expect(bad.error).toBeTruthy();
+  expect(bad.exitCode ?? null).toBeNull();
 });
 
 test("04 go and typescript execution (smoke)", async () => {

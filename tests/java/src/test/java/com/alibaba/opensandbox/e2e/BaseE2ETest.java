@@ -57,6 +57,17 @@ public abstract class BaseE2ETest {
         return testProperties.getProperty(PROP_IMG_DEFAULT);
     }
 
+    protected static ConnectionConfig createConnectionConfig(boolean useServerProxy) {
+        String protocol = testProperties.getProperty(PROP_PROTOCOL, "https");
+        return ConnectionConfig.builder()
+                .apiKey(testProperties.getProperty(PROP_API_KEY))
+                .domain(testProperties.getProperty(PROP_DOMAIN))
+                .requestTimeout(Duration.ofMinutes(1))
+                .protocol(protocol)
+                .useServerProxy(useServerProxy)
+                .build();
+    }
+
     private static void loadTestProperties() {
         try (InputStream input =
                 BaseE2ETest.class.getClassLoader().getResourceAsStream("test.properties")) {

@@ -24,15 +24,67 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/alibaba/opensandbox/internal/safego"
+
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
-	"github.com/alibaba/opensandbox/execd/pkg/util/safego"
+	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
+
+// getShell returns the preferred shell, falling back to sh if bash is not available.
+// This is needed for Alpine-based Docker images that only have sh by default.
+func getShell() string {
+	if _, err := exec.LookPath("bash"); err == nil {
+		return "bash"
+	}
+	return "sh"
+}
+
+func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
+	if uid == nil && gid == nil {
+		return nil, nil //nolint:nilnil
+	}
+
+	cred := &syscall.Credential{}
+	if uid != nil {
+		cred.Uid = *uid
+		// Load user info to get primary GID and supplemental groups
+		u, err := user.LookupId(strconv.FormatUint(uint64(*uid), 10))
+		if err == nil {
+			// Set primary GID if not explicitly provided
+			if gid == nil {
+				primaryGid, err := strconv.ParseUint(u.Gid, 10, 32)
+				if err == nil {
+					cred.Gid = uint32(primaryGid)
+				}
+			}
+
+			// Load supplemental groups
+			gids, err := u.GroupIds()
+			if err == nil {
+				for _, g := range gids {
+					id, err := strconv.ParseUint(g, 10, 32)
+					if err == nil {
+						cred.Groups = append(cred.Groups, uint32(id))
+					}
+				}
+			}
+		}
+	}
+
+	// Override Gid if explicitly provided
+	if gid != nil {
+		cred.Gid = *gid
+	}
+
+	return cred, nil
+}
 
 // runCommand executes shell commands and streams their output.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
@@ -47,16 +99,35 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		return fmt.Errorf("failed to get stdlog descriptor: %w", err)
 	}
+	defer stdout.Close()
+	defer stderr.Close()
 	stdoutPath := c.stdoutFileName(session)
 	stderrPath := c.stderrFileName(session)
 
 	startAt := time.Now()
-	log.Info("received command: %v", request.Code)
-	cmd := exec.CommandContext(ctx, "bash", "-c", request.Code)
+	log.Info("received command: %v", log.SanitizeCommand(request.Code))
+	shell := getShell()
+	cmd := exec.CommandContext(ctx, shell, "-c", request.Code)
+	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
+	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	if err != nil {
+		return fmt.Errorf("resolve request cwd %s: %w", request.Cwd, err)
+	}
+
+	// Configure credentials and process group
+	cred, err := buildCredential(request.Uid, request.Gid)
+	if err != nil {
+		return fmt.Errorf("failed to build credential: %w", err)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:    true,
+		Credential: cred,
+	}
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = mergeEnvs(os.Environ(), loadExtraEnvFromFile())
+	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
+	cmd.Dir = cwd
 
 	done := make(chan struct{}, 1)
 	var wg sync.WaitGroup
@@ -70,14 +141,16 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
 	})
 
-	cmd.Dir = request.Cwd
-	// use a dedicated process group so signals propagate to children.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
 	err = cmd.Start()
 	if err != nil {
+		close(done)
+		wg.Wait()
 		request.Hooks.OnExecuteInit(session)
-		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
+		request.Hooks.OnExecuteError(&execute.ErrorOutput{
+			EName:     "CommandExecError",
+			EValue:    err.Error(),
+			Traceback: []string{err.Error()},
+		})
 		log.Error("CommandExecError: error starting commands: %v", err)
 		return nil
 	}
@@ -94,10 +167,35 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	c.storeCommandKernel(session, kernel)
 	request.Hooks.OnExecuteInit(session)
 
-	go func() {
+	safego.Go(func() {
 		for {
 			select {
+			case <-done:
+				// cmd.Wait() has returned (or start failed). The pid is
+				// about to be — or already has been — reaped, so we
+				// must not signal it. Execute()'s defer cancel() fires
+				// after every foreground command, including successful
+				// ones, so without this gate the SIGKILL below would
+				// run on a recycled pid/pgid and could kill an
+				// unrelated process group.
+				return
 			case <-ctx.Done():
+				// Re-check `done` to avoid a race with cmd.Wait()
+				// returning concurrently. If cmd.Wait() has just
+				// finished, the leader pid may be reaped and recycled
+				// at any moment; signaling -pid would then target a
+				// foreign process group.
+				select {
+				case <-done:
+					return
+				default:
+				}
+				// Genuine cancellation (timeout, client disconnect,
+				// Interrupt). Kill the whole process group so children
+				// don't outlive the cancelled context.
+				if cmd.Process != nil {
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
 				return
 			case sig := <-signals:
 				if sig == nil {
@@ -109,7 +207,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 				}
 			}
 		}
-	}()
+	})
 
 	err = cmd.Wait()
 	close(done)
@@ -167,17 +265,37 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	defer signal.Reset()
 
 	startAt := time.Now()
-	log.Info("received command: %v", request.Code)
-	cmd := exec.CommandContext(ctx, "bash", "-c", request.Code)
+	log.Info("received command: %v", log.SanitizeCommand(request.Code))
+	shell := getShell()
+	cmd := exec.CommandContext(ctx, shell, "-c", request.Code)
+	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
+	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("resolve cwd: %w", err)
+	}
+	cmd.Dir = cwd
+	// Configure credentials and process group
+	cred, err := buildCredential(request.Uid, request.Gid)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("build credential: %w", err)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:    true,
+		Credential: cred,
+	}
 
-	cmd.Dir = request.Cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = pipe
 	cmd.Stderr = pipe
-	cmd.Env = mergeEnvs(os.Environ(), loadExtraEnvFromFile())
+	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	// use DevNull as stdin so interactive programs exit immediately.
-	cmd.Stdin = os.NewFile(uintptr(syscall.Stdin), os.DevNull)
+	devNull, err := os.Open(os.DevNull)
+	if err == nil {
+		cmd.Stdin = devNull
+		defer devNull.Close()
+	}
 
 	err = cmd.Start()
 	kernel := &commandKernel{

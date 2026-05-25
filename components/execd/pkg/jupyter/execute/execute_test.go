@@ -23,6 +23,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
+
+	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
 )
 
 // Create WebSocket test server
@@ -155,4 +158,143 @@ func TestExecuteCodeStream(t *testing.T) {
 	if resultCount < 4 {
 		t.Errorf("expected at least 4 results, got %d", resultCount)
 	}
+}
+
+func TestExecuteCodeStreamWaitsForLateExecuteResultUsingConfiguredPollInterval(t *testing.T) {
+	previousPollInterval := execdflag.JupyterIdlePollInterval
+	execdflag.JupyterIdlePollInterval = time.Millisecond
+	t.Cleanup(func() {
+		execdflag.JupyterIdlePollInterval = previousPollInterval
+	})
+
+	server := createTestServer(t, func(conn *websocket.Conn) {
+		var executeRequest Message
+		err := conn.ReadJSON(&executeRequest)
+		if err != nil {
+			t.Fatalf("failed to read execution request: %v", err)
+		}
+
+		statusContent, _ := json.Marshal(StatusUpdate{ExecutionState: StateIdle})
+		statusMsg := Message{
+			Header: Header{
+				MessageID:   "status-msg-id",
+				Session:     executeRequest.Header.Session,
+				MessageType: string(MsgStatus),
+			},
+			ParentHeader: executeRequest.Header,
+			Content:      json.RawMessage(statusContent),
+		}
+		require.NoError(t, conn.WriteJSON(statusMsg))
+
+		time.Sleep(15 * time.Millisecond)
+
+		resultContent, _ := json.Marshal(ExecuteResult{
+			ExecutionCount: 1,
+			Data: map[string]interface{}{
+				"text/plain": "Completed late",
+			},
+			Metadata: map[string]interface{}{},
+		})
+		executeResultMsg := Message{
+			Header: Header{
+				MessageID:   "result-msg-id",
+				Session:     executeRequest.Header.Session,
+				MessageType: string(MsgExecuteResult),
+			},
+			ParentHeader: executeRequest.Header,
+			Content:      json.RawMessage(resultContent),
+		}
+		require.NoError(t, conn.WriteJSON(executeResultMsg))
+	})
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/test-kernel-id/channels"
+	executor := NewExecutor(wsURL, nil)
+	require.NoError(t, executor.Connect())
+	defer executor.Disconnect()
+
+	resultChan := make(chan *ExecutionResult, 10)
+	require.NoError(t, executor.ExecuteCodeStream("print('late result')", resultChan))
+
+	start := time.Now()
+	var gotLateResult bool
+	for result := range resultChan {
+		if result != nil && result.ExecutionCount == 1 {
+			gotLateResult = true
+		}
+	}
+	elapsed := time.Since(start)
+
+	require.True(t, gotLateResult, "expected late execute_result to be delivered before stream close")
+	require.Less(t, elapsed, 100*time.Millisecond, "expected stream to close promptly after late execute_result")
+}
+
+func TestExecuteCodeStreamFallsBackWhenPollIntervalIsNonPositive(t *testing.T) {
+	previousPollInterval := execdflag.JupyterIdlePollInterval
+	execdflag.JupyterIdlePollInterval = 0
+	t.Cleanup(func() {
+		execdflag.JupyterIdlePollInterval = previousPollInterval
+	})
+
+	server := createTestServer(t, func(conn *websocket.Conn) {
+		var executeRequest Message
+		err := conn.ReadJSON(&executeRequest)
+		if err != nil {
+			t.Fatalf("failed to read execution request: %v", err)
+		}
+
+		statusContent, _ := json.Marshal(StatusUpdate{ExecutionState: StateIdle})
+		statusMsg := Message{
+			Header: Header{
+				MessageID:   "status-msg-id",
+				Session:     executeRequest.Header.Session,
+				MessageType: string(MsgStatus),
+			},
+			ParentHeader: executeRequest.Header,
+			Content:      json.RawMessage(statusContent),
+		}
+		require.NoError(t, conn.WriteJSON(statusMsg))
+
+		time.Sleep(15 * time.Millisecond)
+
+		resultContent, _ := json.Marshal(ExecuteResult{
+			ExecutionCount: 1,
+			Data: map[string]interface{}{
+				"text/plain": "Completed with fallback",
+			},
+			Metadata: map[string]interface{}{},
+		})
+		executeResultMsg := Message{
+			Header: Header{
+				MessageID:   "result-msg-id",
+				Session:     executeRequest.Header.Session,
+				MessageType: string(MsgExecuteResult),
+			},
+			ParentHeader: executeRequest.Header,
+			Content:      json.RawMessage(resultContent),
+		}
+		require.NoError(t, conn.WriteJSON(executeResultMsg))
+	})
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/test-kernel-id/channels"
+	executor := NewExecutor(wsURL, nil)
+	require.NoError(t, executor.Connect())
+	defer executor.Disconnect()
+
+	resultChan := make(chan *ExecutionResult, 10)
+	require.NoError(t, executor.ExecuteCodeStream("print('fallback')", resultChan))
+
+	start := time.Now()
+	var gotLateResult bool
+	for result := range resultChan {
+		if result != nil && result.ExecutionCount == 1 {
+			gotLateResult = true
+		}
+	}
+	elapsed := time.Since(start)
+
+	require.True(t, gotLateResult, "expected late execute_result to be delivered before stream close")
+	require.GreaterOrEqual(t, elapsed, 90*time.Millisecond, "expected non-positive poll interval to fall back to runtime default (100ms)")
+	require.Less(t, elapsed, 300*time.Millisecond, "expected fallback poll interval to still close stream promptly")
 }

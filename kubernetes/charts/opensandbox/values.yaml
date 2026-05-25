@@ -8,6 +8,14 @@ opensandbox-controller:
   controller:
     logLevel: info
     replicaCount: 1
+    snapshot:
+      # DockerHub: opensandbox/image-committer:v0.1.0
+      imageCommitterImage: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.0
+      commitJobTimeout: 10m
+      registry: ""
+      registryInsecure: false
+      snapshotPushSecret: ""
+      resumePullSecret: ""
 
 # Server component values
 opensandbox-server:

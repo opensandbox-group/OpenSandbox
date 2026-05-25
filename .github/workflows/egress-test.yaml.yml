@@ -24,7 +24,16 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24.0'
+          go-version: '1.25.9'
+
+      - name: Check gofmt
+        working-directory: components/egress
+        run: |
+          files="$(gofmt -l . ../internal)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
 
       - name: Run Build
         working-directory: components/egress
@@ -38,7 +47,7 @@ jobs:
           go test ./...
 
   smoke:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -60,6 +69,12 @@ jobs:
         run: |
           chmod +x tests/smoke-dynamic-ip.sh
           ./tests/smoke-dynamic-ip.sh
+
+      - name: Run dns upstream probe test
+        working-directory: components/egress
+        run: |
+          chmod +x tests/smoke-dns-upstream-probe.sh
+          ./tests/smoke-dns-upstream-probe.sh
 
   bench:
     runs-on: ubuntu-latest

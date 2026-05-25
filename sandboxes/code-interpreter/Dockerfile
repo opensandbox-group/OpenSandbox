@@ -16,6 +16,19 @@
 
 FROM opensandbox/code-interpreter-base:latest
 
+ARG TARGETARCH
+# Prebuilt binary from https://github.com/AkihiroSuda/clone3-workaround/releases/tag/v1.0.0 (amd64 only).
+# The binary is linked against libseccomp (runtime package libseccomp2 on Ubuntu).
+RUN set -eux; \
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends libseccomp2 && rm -rf /var/lib/apt/lists/*; \
+        curl -fsSL -o /usr/local/bin/clone3-workaround \
+            https://github.com/AkihiroSuda/clone3-workaround/releases/download/v1.0.0/clone3-workaround.x86_64; \
+        chmod 755 /usr/local/bin/clone3-workaround; \
+    else \
+        echo "Skipping clone3-workaround: upstream provides amd64/x86_64 binary only (TARGETARCH=${TARGETARCH})"; \
+    fi
+
 # Install Python kernels
 RUN set -euo pipefail \
     && echo "Setting up ipykernel for Python 3.10, 3.11, 3.12, 3.13, 3.14" \

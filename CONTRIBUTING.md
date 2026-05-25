@@ -73,15 +73,15 @@ cd server
 # Install dependencies
 uv sync
 
-# Copy example configuration
-cp example.config.toml ~/.sandbox.toml
+# Copy example configuration from the source tree
+cp server/opensandbox_server/examples/example.config.toml ~/.sandbox.toml
 
 # Edit configuration for development
-# Set log_level = "DEBUG" and api_key
+# Set [log] level = "DEBUG" and [server] api_key
 nano ~/.sandbox.toml
 
 # Run server
-uv run python -m src.main
+uv run python -m opensandbox_server.main
 ```
 
 See [server/DEVELOPMENT.md](server/DEVELOPMENT.md) for detailed server development guide.
@@ -226,10 +226,37 @@ refactor(sdk): simplify filesystem API
 
 ## Coding Standards
 
-### Python (Server, Python SDKs)
+Contributions are required to generally comply with the coding standards for
+the language and component they touch. Generated files are excluded where the
+local tool configuration excludes them; update the source specification or
+generator and regenerate those files instead of hand-editing generated output.
 
-- **Style Guide**: Follow [PEP 8](https://pep8.org/)
-- **Formatter**: Use `ruff` for formatting and linting
+### Required Style Guides
+
+| Area | Primary language | Required style guide |
+| --- | --- | --- |
+| Server, CLI, Python SDKs, Python tests | Python | [PEP 8](https://peps.python.org/pep-0008/) plus Google-style docstrings for public APIs |
+| Go components, Kubernetes controller, Go SDK | Go | [Effective Go](https://go.dev/doc/effective_go) and [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments) |
+| JavaScript/TypeScript SDKs | JavaScript/TypeScript | [TypeScript ESLint recommended and stylistic rule sets](https://typescript-eslint.io/users/configs/) |
+| Kotlin SDKs | Kotlin | [Kotlin Coding Conventions](https://kotlinlang.org/docs/coding-conventions.html) |
+| C# SDKs | C# | [Microsoft C# coding conventions](https://learn.microsoft.com/dotnet/csharp/fundamentals/coding-style/coding-conventions) |
+
+### Automated Enforcement
+
+| Area | Tooling and CI entry point |
+| --- | --- |
+| Server | `server/pyproject.toml`; `.github/workflows/server-test.yml` runs `uv run ruff check` |
+| CLI and Python SDKs | package `pyproject.toml` files; `.github/workflows/sdk-tests.yml` runs `uv run ruff check` and `uv run pyright` |
+| Go components and Kubernetes | `gofmt`, `go vet`, and `golangci-lint` where configured; component workflows run format, lint, build, and test checks |
+| Go SDK | `.github/workflows/sdk-tests.yml` runs `gofmt`, `go vet`, and tests |
+| JavaScript/TypeScript SDKs | `sdks/eslint.base.mjs` and package `eslint.config.mjs`; `.github/workflows/sdk-tests.yml` runs `pnpm run lint` and `pnpm run typecheck` |
+| Kotlin SDKs | Gradle Spotless with ktlint; `.github/workflows/sdk-tests.yml` runs `./gradlew spotlessCheck ...` |
+| C# SDKs | `.editorconfig`, `Directory.Build.props`, and .NET analyzers; `.github/workflows/sdk-tests.yml` runs `dotnet build ... /warnaserror` |
+
+### Python (Server, CLI, Python SDKs)
+
+- **Style Guide**: Follow [PEP 8](https://peps.python.org/pep-0008/)
+- **Linter/Formatter**: Use `ruff` for linting and formatting
 - **Type Hints**: Always use type hints for function signatures
 - **Docstrings**: Use Google-style docstrings for public APIs
 
@@ -259,13 +286,13 @@ def create_sandbox(
 
 ```bash
 cd server
-uv run ruff check src tests
-uv run ruff format src tests
+uv run ruff check
+uv run ruff format opensandbox_server tests
 ```
 
-### Go (execd)
+### Go (components, Kubernetes, Go SDK)
 
-- **Style Guide**: Follow [Effective Go](https://golang.org/doc/effective_go)
+- **Style Guide**: Follow [Effective Go](https://go.dev/doc/effective_go)
 - **Formatter**: Use `gofmt` for formatting
 - **Imports**: Organize in three groups (stdlib, third-party, internal)
 - **Error Handling**: Always handle errors explicitly
@@ -291,6 +318,20 @@ gofmt -w .
 make fmt
 ```
 
+### JavaScript/TypeScript (SDKs)
+
+- **Style Guide**: Follow the TypeScript ESLint recommended and stylistic rule sets configured in `sdks/eslint.base.mjs`
+- **Linter**: Use `eslint` for JavaScript/TypeScript linting
+- **Type Checking**: Run `tsc` with the package `tsconfig.json`
+
+**Running Checks:**
+
+```bash
+cd sdks
+pnpm run lint:js
+pnpm run typecheck:js
+```
+
 ### Java/Kotlin (Java/Kotlin SDKs)
 
 - **Style Guide**: Follow [Kotlin Coding Conventions](https://kotlinlang.org/docs/coding-conventions.html)
@@ -307,6 +348,22 @@ suspend fun createSandbox(
 }
 ```
 
+### C# (C# SDKs)
+
+- **Style Guide**: Follow [Microsoft C# coding conventions](https://learn.microsoft.com/dotnet/csharp/fundamentals/coding-style/coding-conventions)
+- **Formatting**: Follow the SDK `.editorconfig` files
+- **Analyzers**: Keep .NET analyzers enabled and treat build warnings as errors in CI
+
+**Running Checks:**
+
+```bash
+cd sdks/sandbox/csharp
+dotnet build OpenSandbox.sln --configuration Release /warnaserror
+
+cd ../../code-interpreter/csharp
+dotnet build OpenSandbox.CodeInterpreter.sln --configuration Release /warnaserror
+```
+
 ### General Guidelines
 
 - **Naming Conventions**:
@@ -318,6 +375,49 @@ suspend fun createSandbox(
 - **Comments**: Write clear, concise comments explaining "why", not "what"
 - **Error Messages**: Provide actionable error messages with context
 - **Logging**: Use appropriate log levels (DEBUG, INFO, WARNING, ERROR)
+
+## Build System Standards
+
+OpenSandbox produces native Go binaries for `components/execd`, `components/ingress`,
+`components/egress`, `kubernetes`, and `sdks/sandbox/go`. These build systems must
+preserve caller-provided build flags and only append project-required flags.
+
+### Build Variables
+
+- Go builds pass caller-provided `GOFLAGS` to `go build` and append project flags such as `-trimpath` and `-buildvcs=false`.
+- Go linker builds pass caller-provided `LDFLAGS` to `go build -ldflags` and append project metadata flags.
+- When CGO is enabled, the Go toolchain honors `CC`, `CXX`, `CGO_CFLAGS`, `CGO_CXXFLAGS`, and `CGO_LDFLAGS`. Docker-based builds also accept `CFLAGS` and `CXXFLAGS` as fallbacks for `CGO_CFLAGS` and `CGO_CXXFLAGS`.
+- Docker build scripts forward these variables as build arguments when they are present in the environment.
+
+### Debug Information
+
+Default project builds must not strip debug information. Do not add `strip`,
+`install -s`, or Go linker flags such as `-s -w` to the default build path.
+Distribution-specific packaging may strip binaries only outside the default
+developer and CI build path.
+
+### Build Dependency Graph
+
+Use package-aware build tools instead of recursive independent builds:
+
+- Go packages are built through `go build ./...` or explicit Go package entry points.
+- Kotlin projects use Gradle task dependencies.
+- JavaScript and TypeScript SDKs use pnpm workspace dependencies.
+- C# SDKs use solution/project references through `dotnet build`.
+
+Subdirectory-specific Make targets may delegate to these tools, but they must not
+replace the build tool's dependency graph with independent recursive directory
+builds where cross-directory dependencies exist.
+
+### Repeatable Builds
+
+Native Go binary builds include `-trimpath`, `-buildvcs=false`, and `-ldflags`
+with `-buildid= -B none` so that source paths, VCS metadata, and build IDs or
+Mach-O UUIDs do not make binaries differ. For repeatable release metadata, set `SOURCE_DATE_EPOCH`
+or set `BUILD_TIME`, `VERSION`, and `GIT_COMMIT` explicitly before invoking
+Makefile or Docker build scripts. When `SOURCE_DATE_EPOCH` is set and
+`BUILD_TIME` is unset, build scripts derive `BUILD_TIME` from
+`SOURCE_DATE_EPOCH`.
 
 ## Testing Guidelines
 

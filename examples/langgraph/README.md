@@ -9,10 +9,10 @@ a decision node to retry with a fallback command if the run step fails.
 Pre-pull the code-interpreter image (includes Python):
 
 ```shell
-docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1
+docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2
 
 # use docker hub
-# docker pull opensandbox/code-interpreter:v1.0.1
+# docker pull opensandbox/code-interpreter:v1.0.2
 ```
 
 Start the local OpenSandbox server, logs will be visible in the terminal:
@@ -42,7 +42,7 @@ The workflow writes files, executes a job, retries with a fallback command on fa
 
 - `SANDBOX_DOMAIN`: Sandbox service address (default: `localhost:8080`)
 - `SANDBOX_API_KEY`: API key if your server requires authentication (optional for local)
-- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1`)
+- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2`)
 - `ANTHROPIC_API_KEY`: Your Anthropic API key (required if `ANTHROPIC_AUTH_TOKEN` is unset)
 - `ANTHROPIC_AUTH_TOKEN`: Alternate Anthropic auth token (uses `Authorization` header)
 - `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` should not be set together

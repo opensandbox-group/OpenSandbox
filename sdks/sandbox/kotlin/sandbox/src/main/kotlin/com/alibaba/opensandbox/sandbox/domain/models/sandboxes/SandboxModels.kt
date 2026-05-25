@@ -218,6 +218,47 @@ class SandboxImageAuth private constructor(
 }
 
 /**
+ * Runtime platform constraint for sandbox provisioning.
+ *
+ * @property os Target operating system (linux or windows)
+ * @property arch Target CPU architecture (amd64 or arm64)
+ */
+class PlatformSpec private constructor(
+    val os: String,
+    val arch: String,
+) {
+    companion object {
+        @JvmStatic
+        fun builder(): Builder = Builder()
+    }
+
+    class Builder {
+        private var os: String? = null
+        private var arch: String? = null
+
+        fun os(os: String): Builder {
+            require(os == "linux" || os == "windows") { "Platform os must be one of: linux, windows" }
+            this.os = os
+            return this
+        }
+
+        fun arch(arch: String): Builder {
+            require(arch == "amd64" || arch == "arm64") {
+                "Platform arch must be one of: amd64, arm64"
+            }
+            this.arch = arch
+            return this
+        }
+
+        fun build(): PlatformSpec {
+            val osValue = os ?: throw IllegalArgumentException("Platform os must be specified")
+            val archValue = arch ?: throw IllegalArgumentException("Platform arch must be specified")
+            return PlatformSpec(os = osValue, arch = archValue)
+        }
+    }
+}
+
+/**
  * Egress rule for matching network targets.
  *
  * @property action Whether to allow or deny matching targets.
@@ -328,6 +369,8 @@ class Host private constructor(
     val path: String,
 ) {
     companion object {
+        private val HOST_PATH_PATTERN = Regex("""^(/|[A-Za-z]:[\\/])""")
+
         @JvmStatic
         fun builder(): Builder = Builder()
 
@@ -339,7 +382,9 @@ class Host private constructor(
         private var path: String? = null
 
         fun path(path: String): Builder {
-            require(path.startsWith("/")) { "Host path must be an absolute path starting with '/'" }
+            require(HOST_PATH_PATTERN.containsMatchIn(path)) {
+                "Host path must be an absolute path starting with '/' or a Windows drive letter (e.g. 'C:\\' or 'D:/')"
+            }
             this.path = path
             return this
         }
@@ -352,15 +397,27 @@ class Host private constructor(
 }
 
 /**
- * Kubernetes PersistentVolumeClaim mount backend.
+ * Platform-managed named volume backend.
  *
- * References an existing PVC in the same namespace as the sandbox pod.
- * Only available in Kubernetes runtime.
+ * Runtime-neutral abstraction for referencing a pre-existing named volume:
+ * - Kubernetes: maps to a PersistentVolumeClaim in the same namespace.
+ * - Docker: maps to a Docker named volume.
  *
- * @property claimName Name of the PersistentVolumeClaim in the same namespace
+ * @property claimName Name of the platform volume. In Kubernetes this is the PVC name;
+ * in Docker this is the named volume name.
+ * @property createIfNotExists When true (default), auto-create volume if absent.
+ * @property deleteOnSandboxTermination When true, delete auto-created Docker volume on sandbox deletion.
+ * @property storageClass Kubernetes StorageClass for auto-created PVCs. Null means default class.
+ * @property storage PVC storage request for auto-created PVCs (e.g. "1Gi").
+ * @property accessModes Access modes for auto-created PVCs (e.g. ["ReadWriteOnce"]).
  */
 class PVC private constructor(
     val claimName: String,
+    val createIfNotExists: Boolean,
+    val deleteOnSandboxTermination: Boolean,
+    val storageClass: String?,
+    val storage: String?,
+    val accessModes: List<String>?,
 ) {
     companion object {
         @JvmStatic
@@ -372,6 +429,11 @@ class PVC private constructor(
 
     class Builder {
         private var claimName: String? = null
+        private var createIfNotExists: Boolean = true
+        private var deleteOnSandboxTermination: Boolean = false
+        private var storageClass: String? = null
+        private var storage: String? = null
+        private var accessModes: List<String>? = null
 
         fun claimName(claimName: String): Builder {
             require(claimName.isNotBlank()) { "Claim name cannot be blank" }
@@ -379,9 +441,140 @@ class PVC private constructor(
             return this
         }
 
+        fun createIfNotExists(createIfNotExists: Boolean): Builder {
+            this.createIfNotExists = createIfNotExists
+            return this
+        }
+
+        fun deleteOnSandboxTermination(deleteOnSandboxTermination: Boolean): Builder {
+            this.deleteOnSandboxTermination = deleteOnSandboxTermination
+            return this
+        }
+
+        fun storageClass(storageClass: String?): Builder {
+            this.storageClass = storageClass
+            return this
+        }
+
+        fun storage(storage: String?): Builder {
+            this.storage = storage
+            return this
+        }
+
+        fun accessModes(accessModes: List<String>?): Builder {
+            this.accessModes = accessModes
+            return this
+        }
+
+        fun accessModes(vararg accessModes: String): Builder {
+            this.accessModes = accessModes.toList()
+            return this
+        }
+
         fun build(): PVC {
             val claimNameValue = claimName ?: throw IllegalArgumentException("Claim name must be specified")
-            return PVC(claimName = claimNameValue)
+            return PVC(
+                claimName = claimNameValue,
+                createIfNotExists = createIfNotExists,
+                deleteOnSandboxTermination = deleteOnSandboxTermination,
+                storageClass = storageClass,
+                storage = storage,
+                accessModes = accessModes,
+            )
+        }
+    }
+}
+
+/**
+ * Alibaba Cloud OSS mount backend via ossfs.
+ *
+ * @property bucket OSS bucket name
+ * @property endpoint OSS endpoint (for example, `oss-cn-hangzhou.aliyuncs.com`)
+ * @property accessKeyId OSS access key ID for inline credentials mode
+ * @property accessKeySecret OSS access key secret for inline credentials mode
+ * @property version ossfs major version used by runtime mount integration
+ * @property options Additional ossfs mount options
+ */
+class OSSFS private constructor(
+    val bucket: String,
+    val endpoint: String,
+    val accessKeyId: String,
+    val accessKeySecret: String,
+    val version: String,
+    val options: List<String>?,
+) {
+    companion object {
+        const val VERSION_1_0 = "1.0"
+        const val VERSION_2_0 = "2.0"
+
+        @JvmStatic
+        fun builder(): Builder = Builder()
+    }
+
+    class Builder {
+        private var bucket: String? = null
+        private var endpoint: String? = null
+        private var accessKeyId: String? = null
+        private var accessKeySecret: String? = null
+        private var version: String = VERSION_2_0
+        private var options: List<String>? = null
+
+        fun bucket(bucket: String): Builder {
+            require(bucket.isNotBlank()) { "Bucket cannot be blank" }
+            this.bucket = bucket
+            return this
+        }
+
+        fun endpoint(endpoint: String): Builder {
+            require(endpoint.isNotBlank()) { "Endpoint cannot be blank" }
+            this.endpoint = endpoint
+            return this
+        }
+
+        fun accessKeyId(accessKeyId: String): Builder {
+            require(accessKeyId.isNotBlank()) { "Access key ID cannot be blank" }
+            this.accessKeyId = accessKeyId
+            return this
+        }
+
+        fun accessKeySecret(accessKeySecret: String): Builder {
+            require(accessKeySecret.isNotBlank()) { "Access key secret cannot be blank" }
+            this.accessKeySecret = accessKeySecret
+            return this
+        }
+
+        fun version(version: String): Builder {
+            require(version == VERSION_1_0 || version == VERSION_2_0) {
+                "OSSFS version must be one of: 1.0, 2.0"
+            }
+            this.version = version
+            return this
+        }
+
+        fun options(options: List<String>?): Builder {
+            this.options = options
+            return this
+        }
+
+        fun options(vararg options: String): Builder {
+            this.options = options.toList()
+            return this
+        }
+
+        fun build(): OSSFS {
+            val bucketValue = bucket ?: throw IllegalArgumentException("Bucket must be specified")
+            val endpointValue = endpoint ?: throw IllegalArgumentException("Endpoint must be specified")
+            val accessKeyIdValue = accessKeyId ?: throw IllegalArgumentException("Access key ID must be specified")
+            val accessKeySecretValue =
+                accessKeySecret ?: throw IllegalArgumentException("Access key secret must be specified")
+            return OSSFS(
+                bucket = bucketValue,
+                endpoint = endpointValue,
+                accessKeyId = accessKeyIdValue,
+                accessKeySecret = accessKeySecretValue,
+                version = version,
+                options = options,
+            )
         }
     }
 }
@@ -391,7 +584,7 @@ class PVC private constructor(
  *
  * Each volume entry contains:
  * - A unique name identifier
- * - Exactly one backend (host, pvc) with backend-specific fields
+ * - Exactly one backend (host, pvc, ossfs) with backend-specific fields
  * - Common mount settings (mountPath, readOnly, subPath)
  *
  * Example usage:
@@ -413,8 +606,9 @@ class PVC private constructor(
  * ```
  *
  * @property name Unique identifier for the volume within the sandbox
- * @property host Host path bind mount backend (mutually exclusive with pvc)
- * @property pvc Kubernetes PVC mount backend (mutually exclusive with host)
+ * @property host Host path bind mount backend (mutually exclusive with pvc/ossfs)
+ * @property pvc Kubernetes PVC mount backend (mutually exclusive with host/ossfs)
+ * @property ossfs OSSFS mount backend (mutually exclusive with host/pvc)
  * @property mountPath Absolute path inside the container where the volume is mounted
  * @property readOnly If true, the volume is mounted as read-only. Defaults to false (read-write).
  * @property subPath Optional subdirectory under the backend path to mount
@@ -423,6 +617,7 @@ class Volume private constructor(
     val name: String,
     val host: Host?,
     val pvc: PVC?,
+    val ossfs: OSSFS?,
     val mountPath: String,
     val readOnly: Boolean,
     val subPath: String?,
@@ -436,6 +631,7 @@ class Volume private constructor(
         private var name: String? = null
         private var host: Host? = null
         private var pvc: PVC? = null
+        private var ossfs: OSSFS? = null
         private var mountPath: String? = null
         private var readOnly: Boolean = false
         private var subPath: String? = null
@@ -453,6 +649,11 @@ class Volume private constructor(
 
         fun pvc(pvc: PVC): Builder {
             this.pvc = pvc
+            return this
+        }
+
+        fun ossfs(ossfs: OSSFS): Builder {
+            this.ossfs = ossfs
             return this
         }
 
@@ -477,18 +678,23 @@ class Volume private constructor(
             val mountPathValue = mountPath ?: throw IllegalArgumentException("Mount path must be specified")
 
             // Validate exactly one backend is specified
-            val backendsSpecified = listOfNotNull(host, pvc).size
+            val backendsSpecified = listOfNotNull(host, pvc, ossfs).size
             if (backendsSpecified == 0) {
-                throw IllegalArgumentException("Exactly one backend (host, pvc) must be specified, but none was provided")
+                throw IllegalArgumentException(
+                    "Exactly one backend (host, pvc, ossfs) must be specified, but none was provided",
+                )
             }
             if (backendsSpecified > 1) {
-                throw IllegalArgumentException("Exactly one backend (host, pvc) must be specified, but multiple were provided")
+                throw IllegalArgumentException(
+                    "Exactly one backend (host, pvc, ossfs) must be specified, but multiple were provided",
+                )
             }
 
             return Volume(
                 name = nameValue,
                 host = host,
                 pvc = pvc,
+                ossfs = ossfs,
                 mountPath = mountPathValue,
                 readOnly = readOnly,
                 subPath = subPath,
@@ -503,18 +709,21 @@ class Volume private constructor(
  * @property id Unique identifier of the sandbox
  * @property status Current status of the sandbox
  * @property entrypoint Command line arguments used to start the sandbox
- * @property expiresAt Timestamp when the sandbox is scheduled for automatic termination
+ * @property expiresAt Timestamp when the sandbox is scheduled for automatic termination. Null means manual cleanup mode.
  * @property createdAt Timestamp when the sandbox was created
  * @property image Image specification used to create this sandbox
+ * @property platform Effective platform used for sandbox provisioning
  * @property metadata Custom metadata attached to the sandbox
  */
 class SandboxInfo(
     val id: String,
     val status: SandboxStatus,
     val entrypoint: List<String>,
-    val expiresAt: OffsetDateTime,
+    val expiresAt: OffsetDateTime?,
     val createdAt: OffsetDateTime,
-    val image: SandboxImageSpec,
+    val image: SandboxImageSpec? = null,
+    val snapshotId: String? = null,
+    val platform: PlatformSpec? = null,
     val metadata: Map<String, String>? = null,
 )
 
@@ -537,9 +746,79 @@ class SandboxStatus(
  * Response returned when a sandbox is created.
  *
  * @property id Unique identifier of the newly created sandbox
+ * @property platform Effective platform used for sandbox provisioning
  */
 class SandboxCreateResponse(
     val id: String,
+    val platform: PlatformSpec? = null,
+)
+
+class SnapshotStatus(
+    val state: String,
+    val reason: String?,
+    val message: String?,
+    val lastTransitionAt: OffsetDateTime?,
+)
+
+class SnapshotInfo(
+    val id: String,
+    val sandboxId: String,
+    val name: String? = null,
+    val status: SnapshotStatus,
+    val createdAt: OffsetDateTime,
+)
+
+class SnapshotFilter private constructor(
+    val sandboxId: String?,
+    val states: List<String>?,
+    val pageSize: Int?,
+    val page: Int?,
+) {
+    companion object {
+        @JvmStatic
+        fun builder(): Builder = Builder()
+    }
+
+    class Builder {
+        private var sandboxId: String? = null
+        private var states: List<String>? = null
+        private var pageSize: Int? = null
+        private var page: Int? = null
+
+        fun sandboxId(sandboxId: String): Builder {
+            this.sandboxId = sandboxId
+            return this
+        }
+
+        fun states(states: List<String>): Builder {
+            this.states = states
+            return this
+        }
+
+        fun states(vararg states: String): Builder {
+            this.states = states.toList()
+            return this
+        }
+
+        fun pageSize(pageSize: Int): Builder {
+            require(pageSize > 0) { "Page size must be positive" }
+            this.pageSize = pageSize
+            return this
+        }
+
+        fun page(page: Int): Builder {
+            require(page > 0) { "Page must be positive" }
+            this.page = page
+            return this
+        }
+
+        fun build(): SnapshotFilter = SnapshotFilter(sandboxId, states, pageSize, page)
+    }
+}
+
+class PagedSnapshotInfos(
+    val snapshotInfos: List<SnapshotInfo>,
+    val pagination: PaginationInfo,
 )
 
 /**

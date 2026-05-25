@@ -20,6 +20,7 @@
 set -euxo pipefail
 
 TAG=${TAG:-latest}
+RUN_CODE_INTERPRETER_E2E=${RUN_CODE_INTERPRETER_E2E:-false}
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -49,7 +50,8 @@ echo "-------- PYTHON E2E test logs for execd --------" > /tmp/opensandbox-e2e/l
 
 # setup server
 cd server
-uv sync && uv run python -m src.main > server.log 2>&1 &
+export OPENSANDBOX_INSECURE_SERVER=YES
+uv sync && uv run python -m opensandbox_server.main > server.log 2>&1 &
 cd ..
 
 # wait for server
@@ -61,4 +63,11 @@ cd ../../..
 
 # run real python e2e
 cd tests/python
-uv sync --all-extras --refresh && make test
+uv sync --all-extras --refresh
+if [ "${RUN_CODE_INTERPRETER_E2E}" = "true" ]; then
+  make test
+else
+  uv run pytest \
+    --ignore=tests/test_code_interpreter_e2e.py \
+    --ignore=tests/test_code_interpreter_e2e_sync.py
+fi

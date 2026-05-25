@@ -1,0 +1,70 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: sandbox-k8s
+  name: pool-sample
+  namespace: opensandbox
+spec:
+  capacitySpec:
+    bufferMax: 3
+    bufferMin: 1
+    poolMax: 5
+    poolMin: 1
+  recycleStrategy:
+    type: Restart
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+        - command:
+            - /bin/sh
+            - -c
+            - |
+              exec /opt/opensandbox/bin/task-executor -listen-addr=0.0.0.0:5758 >/tmp/task-executor.log 2>&1
+          env:
+            - name: SANDBOX_MAIN_CONTAINER
+              value: main
+            - name: EXECD_ENVS
+              value: /opt/opensandbox/.env
+            - name: EXECD
+              value: /opt/opensandbox/bin/execd
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2
+          name: sandbox
+          volumeMounts:
+            - mountPath: /var/lib/sandbox
+              name: sandbox-storage
+            - mountPath: /opt/opensandbox/bin
+              name: opensandbox-bin
+      initContainers:
+        - args:
+            - "cp /workspace/server /opt/opensandbox/bin/task-executor && \nchmod +x /opt/opensandbox/bin/task-executor\n"
+          command:
+            - /bin/sh
+            - -c
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/task-executor:v0.1.0
+          name: task-executor-installer
+          volumeMounts:
+            - mountPath: /opt/opensandbox/bin
+              name: opensandbox-bin
+        - args:
+            - "cp ./execd /opt/opensandbox/bin/execd && \ncp ./bootstrap.sh /opt/opensandbox/bin/bootstrap.sh
+          &&\nchmod +x /opt/opensandbox/bin/execd &&\nchmod +x /opt/opensandbox/bin/bootstrap.sh\n"
+          command:
+            - /bin/sh
+            - -c
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18
+          name: execd-installer
+          volumeMounts:
+            - mountPath: /opt/opensandbox/bin
+              name: opensandbox-bin
+      tolerations:
+        - operator: Exists
+      volumes:
+        - emptyDir: {}
+          name: sandbox-storage
+        - emptyDir: {}
+          name: opensandbox-bin

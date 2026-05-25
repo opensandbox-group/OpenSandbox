@@ -18,6 +18,7 @@ Synchronous OpenSandbox SDK entrypoints.
 """
 
 from opensandbox.sync.manager import SandboxManagerSync
+from opensandbox.sync.pool import SandboxPoolSync
 from opensandbox.sync.sandbox import SandboxSync
 
-__all__ = ["SandboxSync", "SandboxManagerSync"]
+__all__ = ["SandboxSync", "SandboxManagerSync", "SandboxPoolSync"]

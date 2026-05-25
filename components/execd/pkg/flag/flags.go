@@ -34,4 +34,8 @@ var (
 
 	// ApiGracefulShutdownTimeout waits before tearing down SSE streams.
 	ApiGracefulShutdownTimeout time.Duration
+
+	// JupyterIdlePollInterval controls how often ExecuteCodeStream checks for
+	// late execute_result/error messages after receiving idle status.
+	JupyterIdlePollInterval time.Duration
 )

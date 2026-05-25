@@ -22,6 +22,7 @@ dependencies {
     constraints {
         api(project(":sandbox"))
         api(project(":sandbox-api"))
+        api(project(":sandbox-pool-redis"))
 
         api(libs.kotlin.stdlib)
         api(libs.okhttp)

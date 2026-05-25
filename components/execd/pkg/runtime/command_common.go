@@ -17,6 +17,7 @@ package runtime
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -31,13 +32,14 @@ func (c *Controller) tailStdPipe(file string, onExecute func(text string), done 
 	defer ticker.Stop()
 
 	mutex := &sync.Mutex{}
+	var lastWasCR bool
 	for {
 		select {
 		case <-done:
-			c.readFromPos(mutex, file, lastPos, onExecute, true)
+			c.readFromPos(mutex, file, lastPos, onExecute, true, &lastWasCR)
 			return
 		case <-ticker.C:
-			newPos := c.readFromPos(mutex, file, lastPos, onExecute, false)
+			newPos := c.readFromPos(mutex, file, lastPos, onExecute, false, &lastWasCR)
 			lastPos = newPos
 		}
 	}
@@ -45,28 +47,35 @@ func (c *Controller) tailStdPipe(file string, onExecute func(text string), done 
 
 // getCommandKernel retrieves a command execution context.
 func (c *Controller) getCommandKernel(sessionID string) *commandKernel {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.commandClientMap[sessionID]
+	if v, ok := c.commandClientMap.Load(sessionID); ok {
+		if kernel, ok := v.(*commandKernel); ok {
+			return kernel
+		}
+	}
+	return nil
 }
 
 // storeCommandKernel registers a command execution context.
 func (c *Controller) storeCommandKernel(sessionID string, kernel *commandKernel) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.commandClientMap[sessionID] = kernel
+	c.commandClientMap.Store(sessionID, kernel)
 }
 
 // stdLogDescriptor creates temporary files for capturing command output.
+// It ensures the temp directory exists before opening files, so that commands
+// continue to work even after the /tmp directory has been removed and recreated.
 func (c *Controller) stdLogDescriptor(session string) (io.WriteCloser, io.WriteCloser, error) {
+	logDir := os.TempDir()
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return nil, nil, fmt.Errorf("failed to create temp dir %s: %w", logDir, err)
+	}
+
 	stdout, err := os.OpenFile(c.stdoutFileName(session), os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.ModePerm)
 	if err != nil {
 		return nil, nil, err
 	}
 	stderr, err := os.OpenFile(c.stderrFileName(session), os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.ModePerm)
 	if err != nil {
+		stdout.Close()
 		return nil, nil, err
 	}
 
@@ -74,6 +83,10 @@ func (c *Controller) stdLogDescriptor(session string) (io.WriteCloser, io.WriteC
 }
 
 func (c *Controller) combinedOutputDescriptor(session string) (io.WriteCloser, error) {
+	logDir := os.TempDir()
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create temp dir %s: %w", logDir, err)
+	}
 	return os.OpenFile(c.combinedOutputFileName(session), os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.ModePerm)
 }
 
@@ -92,7 +105,9 @@ func (c *Controller) combinedOutputFileName(session string) string {
 }
 
 // readFromPos streams new content from a file starting at startPos.
-func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos int64, onExecute func(string), flushIncomplete bool) int64 {
+// lastWasCR persists CRLF detection across calls so a \r\n pair split between
+// two polls does not surface a spurious blank line for the trailing \n.
+func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos int64, onExecute func(string), flushIncomplete bool, lastWasCR *bool) int64 {
 	if !mutex.TryLock() {
 		return -1
 	}
@@ -109,6 +124,15 @@ func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos in
 	reader := bufio.NewReader(file)
 	var buffer bytes.Buffer
 	var currentPos int64 = startPos
+	cr := false
+	if lastWasCR != nil {
+		cr = *lastWasCR
+	}
+	defer func() {
+		if lastWasCR != nil {
+			*lastWasCR = cr
+		}
+	}()
 
 	for {
 		b, err := reader.ReadByte()
@@ -126,15 +150,22 @@ func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos in
 
 		// Check if it's a line terminator (\n or \r)
 		if b == '\n' || b == '\r' {
-			// If buffer has content, output this line
-			if buffer.Len() > 0 {
+			switch {
+			case buffer.Len() > 0:
+				// Flush the line content without the terminator
 				onExecute(buffer.String())
 				buffer.Reset()
+			case b == '\n' && cr:
+				// Second half of a \r\n pair; already emitted on \r
+			default:
+				// Standalone blank line; surface it so callers see the gap
+				onExecute("\n")
 			}
-			// Skip line terminator
+			cr = (b == '\r')
 			continue
 		}
 
+		cr = false
 		buffer.WriteByte(b)
 	}
 

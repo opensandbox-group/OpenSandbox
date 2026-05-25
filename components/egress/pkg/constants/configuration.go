@@ -14,15 +14,41 @@
 
 package constants
 
+import (
+	"os"
+	"strconv"
+	"strings"
+)
+
 const (
-	EnvBlockDoH443    = "OPENSANDBOX_EGRESS_BLOCK_DOH_443"
-	EnvDoHBlocklist   = "OPENSANDBOX_EGRESS_DOH_BLOCKLIST" // comma-separated IP/CIDR
-	EnvEgressMode     = "OPENSANDBOX_EGRESS_MODE"          // dns | dns+nft
-	EnvEgressHTTPAddr = "OPENSANDBOX_EGRESS_HTTP_ADDR"
-	EnvEgressToken    = "OPENSANDBOX_EGRESS_TOKEN"
-	EnvEgressRules    = "OPENSANDBOX_EGRESS_RULES"
-	EnvEgressLogLevel = "OPENSANDBOX_EGRESS_LOG_LEVEL"
-	EnvMaxNameservers = "OPENSANDBOX_EGRESS_MAX_NS"
+	EnvBlockDoH443             = "OPENSANDBOX_EGRESS_BLOCK_DOH_443"
+	EnvDoHBlocklist            = "OPENSANDBOX_EGRESS_DOH_BLOCKLIST"
+	EnvEgressMode              = "OPENSANDBOX_EGRESS_MODE"
+	EnvEgressHTTPAddr          = "OPENSANDBOX_EGRESS_HTTP_ADDR"
+	EnvEgressToken             = "OPENSANDBOX_EGRESS_TOKEN"
+	EnvEgressRules             = "OPENSANDBOX_EGRESS_RULES"
+	EnvEgressPolicyFile        = "OPENSANDBOX_EGRESS_POLICY_FILE"
+	EnvEgressLogLevel          = "OPENSANDBOX_EGRESS_LOG_LEVEL"
+	EnvMaxEgressRules          = "OPENSANDBOX_EGRESS_MAX_RULES"
+	EnvBlockedWebhook          = "OPENSANDBOX_EGRESS_DENY_WEBHOOK"
+	EnvSandboxID               = "OPENSANDBOX_EGRESS_SANDBOX_ID"
+	EnvEgressMetricsExtraAttrs = "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS"
+	EnvNameserverExempt        = "OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT"
+
+	// MITM: mitmdump transparent; Linux + CAP_NET_ADMIN, runs as a dedicated user.
+	EnvMitmproxyTransparent      = "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT"
+	EnvMitmproxyPort             = "OPENSANDBOX_EGRESS_MITMPROXY_PORT"
+	EnvMitmproxyConfDir          = "OPENSANDBOX_EGRESS_MITMPROXY_CONFDIR"
+	EnvMitmproxyScript           = "OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT"
+	EnvMitmproxyUpstreamTrustDir = "OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR"
+	EnvMitmproxyIgnoreHosts      = "OPENSANDBOX_EGRESS_MITMPROXY_IGNORE_HOSTS"
+	EnvMitmproxySslInsecure      = "OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE"
+
+	// Comma-separated upstream resolvers: literal IP only (optional :port) — no hostnames (see dnsproxy REDIRECT note).
+	EnvDNSUpstream                 = "OPENSANDBOX_EGRESS_DNS_UPSTREAM"
+	EnvDNSUpstreamTimeout          = "OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT"
+	EnvDNSUpstreamProbe            = "OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE"
+	EnvDNSUpstreamProbeIntervalSec = "OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC"
 )
 
 const (
@@ -31,6 +57,32 @@ const (
 )
 
 const (
-	DefaultEgressServerAddr = ":18080"
-	DefaultMaxNameservers   = 3
+	DefaultEgressServerAddr      = ":18080"
+	DefaultMitmproxyPort         = 18081
+	ResolvNameserverCap          = 10
+	DefaultMaxEgressRules        = 4096
+	DefaultDNSUpstreamTimeoutSec = 5
+
+	OpenSandboxRootDir = "/opt/opensandbox"
 )
+
+func EnvIntOrDefault(key string, defaultVal int) int {
+	s := strings.TrimSpace(os.Getenv(key))
+	if s == "" {
+		return defaultVal
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return defaultVal
+	}
+	return v
+}
+
+func IsTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}

@@ -1,0 +1,8 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: {{.BatchSandboxName}}
+  namespace: {{.Namespace}}
+spec:
+  replicas: {{.Replicas}}
+  poolRef: "*"

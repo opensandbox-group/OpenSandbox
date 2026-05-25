@@ -16,16 +16,28 @@ package main
 
 import (
 	"context"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
+
+	_ "github.com/alibaba/opensandbox/egress/hooks"
+	_ "github.com/alibaba/opensandbox/internal/safego"
+	_ "go.uber.org/automaxprocs/maxprocs"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/events"
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/startup"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
+	"github.com/alibaba/opensandbox/internal/safego"
 	"github.com/alibaba/opensandbox/internal/version"
 )
 
@@ -38,17 +50,35 @@ func main() {
 	ctx = withLogger(ctx)
 	defer log.Logger.Sync()
 
-	initialRules, err := dnsproxy.LoadPolicyFromEnvVar(constants.EnvEgressRules)
+	otelShutdown, err := telemetry.Init(ctx)
 	if err != nil {
-		log.Fatalf("failed to parse %s: %v", constants.EnvEgressRules, err)
+		log.Warnf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
+		otelShutdown = nil
+	}
+	if otelShutdown != nil {
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			_ = otelShutdown(shutdownCtx)
+		}()
 	}
 
-	allowIPs := AllowIPsForNft("/etc/resolv.conf")
+	initialRules, _, err := policy.LoadInitialPolicyDetailed(os.Getenv(constants.EnvEgressPolicyFile), constants.EnvEgressRules)
+	if err != nil {
+		log.Fatalf("failed to load initial egress policy: %v", err)
+	}
+	logEgressLoaded(initialRules)
 
+	alwaysDeny, alwaysAllow, err := policy.LoadAlwaysRuleFiles()
+	if err != nil {
+		log.Fatalf("failed to load always allow/deny rule files: %v", err)
+	}
+
+	allowIPs := allowIps()
 	mode := parseMode()
 	log.Infof("enforcement mode: %s", mode)
 	nftMgr := createNftManager(mode)
-	proxy, err := dnsproxy.New(initialRules, "")
+	proxy, err := dnsproxy.New(initialRules, "", alwaysDeny, alwaysAllow)
 	if err != nil {
 		log.Fatalf("failed to init dns proxy: %v", err)
 	}
@@ -57,28 +87,59 @@ func main() {
 	}
 	log.Infof("dns proxy started on 127.0.0.1:15353")
 
-	if err := iptables.SetupRedirect(15353); err != nil {
+	if blockWebhookURL := strings.TrimSpace(os.Getenv(constants.EnvBlockedWebhook)); blockWebhookURL != "" {
+		blockedBroadcaster := events.NewBroadcaster(ctx, events.BroadcasterConfig{QueueSize: 256})
+		blockedBroadcaster.AddSubscriber(events.NewWebhookSubscriber(blockWebhookURL))
+		proxy.SetBlockedBroadcaster(blockedBroadcaster)
+		defer blockedBroadcaster.Close()
+		log.Infof("denied hostname webhook enabled")
+	}
+
+	exemptDst := dnsproxy.ParseNameserverExemptList()
+	if len(exemptDst) > 0 {
+		log.Infof("nameserver exempt list: %v (proxy upstream in this list will not set SO_MARK)", exemptDst)
+	}
+	if err := iptables.SetupRedirect(15353, exemptDst); err != nil {
 		log.Fatalf("failed to install iptables redirect: %v", err)
 	}
 	log.Infof("iptables redirect configured (OUTPUT 53 -> 15353) with SO_MARK bypass for proxy upstream traffic")
 
-	setupNft(ctx, nftMgr, initialRules, proxy, allowIPs)
+	setupNft(ctx, nftMgr, initialRules, proxy, allowIPs, alwaysDeny, alwaysAllow)
 
-	// start policy server
 	httpAddr := envOrDefault(constants.EnvEgressHTTPAddr, constants.DefaultEgressServerAddr)
-	if err = startPolicyServer(ctx, proxy, nftMgr, mode, httpAddr, os.Getenv(constants.EnvEgressToken), allowIPs); err != nil {
+	mitmGate := mitmproxy.NewHealthGate()
+	policySrv, err := startPolicyServer(proxy, nftMgr, mode, httpAddr, os.Getenv(constants.EnvEgressToken), allowIPs, os.Getenv(constants.EnvEgressPolicyFile), alwaysDeny, alwaysAllow, mitmGate)
+	if err != nil {
 		log.Fatalf("failed to start policy server: %v", err)
 	}
 	log.Infof("policy server listening on %s (POST /policy)", httpAddr)
 
-	<-ctx.Done()
-	log.Infof("received shutdown signal; exiting")
-	_ = os.Stderr.Sync()
+	mitm, err := startMitmproxyTransparentIfEnabled()
+	if err != nil {
+		log.Fatalf("mitmproxy transparent: %v", err)
+	}
+	mitmGate.MarkStackReady()
+	if mitm != nil {
+		mitm.watchMitmproxy(ctx, mitmGate)
+	}
+
+	if err := startup.RunPost(ctx); err != nil {
+		log.Errorf("startup hooks (post) error: %v", err)
+	}
+
+	waitForShutdown(ctx, proxy, policySrv, exemptDst, nftMgr, mitm)
 }
 
 func withLogger(ctx context.Context) context.Context {
 	level := envOrDefault(constants.EnvEgressLogLevel, "info")
-	logger := slogger.MustNew(slogger.Config{Level: level}).Named("opensandbox.egress")
+	cfg := slogger.Config{Level: level}
+	base := slogger.MustNew(cfg)
+	// Baseline log fields (e.g. sandbox_id, OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS) for every line.
+	if extra := telemetry.EgressLogFields(); len(extra) > 0 {
+		base = base.With(extra...)
+	}
+	logger := base.Named("opensandbox.egress")
+	safego.InitPanicLogger(ctx, logger)
 	return log.WithLogger(ctx, logger)
 }
 
@@ -89,24 +150,21 @@ func envOrDefault(key, defaultVal string) string {
 	return defaultVal
 }
 
-func isTruthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
+func containsAddr(addrs []netip.Addr, a netip.Addr) bool {
+	for _, x := range addrs {
+		if x == a {
+			return true
+		}
 	}
+	return false
 }
 
 func parseMode() string {
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv(constants.EnvEgressMode)))
-	switch mode {
-	case "", constants.PolicyDnsOnly:
-		return constants.PolicyDnsOnly
-	case constants.PolicyDnsNft:
-		return constants.PolicyDnsNft
-	default:
-		log.Warnf("invalid %s=%s, falling back to dns", constants.EnvEgressMode, mode)
+	raw := os.Getenv(constants.EnvEgressMode)
+	normalized, err := constants.ParseEgressMode(raw)
+	if err != nil {
+		log.Warnf("invalid %s=%q: %v; falling back to %s", constants.EnvEgressMode, raw, err, constants.PolicyDnsOnly)
 		return constants.PolicyDnsOnly
 	}
+	return normalized
 }

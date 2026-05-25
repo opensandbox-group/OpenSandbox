@@ -28,3 +28,23 @@ async def test_code_service_eager_init_and_client_available() -> None:
 
     client = await adapter._get_client()
     assert client is not None
+
+
+@pytest.mark.asyncio
+async def test_code_service_eager_init_merges_endpoint_headers() -> None:
+    cfg = ConnectionConfig(
+        protocol="http", headers={"X-Base": "base", "X-Shared": "base"}
+    )
+    endpoint = SandboxEndpoint(
+        endpoint="localhost:44772",
+        port=44772,
+        headers={"X-Endpoint": "endpoint", "X-Shared": "endpoint"},
+    )
+    adapter = CodesAdapter(endpoint, cfg)
+
+    client = await adapter._get_client()
+    httpx_client = client.get_async_httpx_client()
+
+    assert httpx_client.headers["X-Base"] == "base"
+    assert httpx_client.headers["X-Endpoint"] == "endpoint"
+    assert httpx_client.headers["X-Shared"] == "endpoint"

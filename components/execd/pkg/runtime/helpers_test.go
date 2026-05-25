@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 type stubDriver struct {
@@ -109,8 +111,6 @@ func newStubDB(t *testing.T, d *stubDriver) *sql.DB {
 	driverName := fmt.Sprintf("stub-%d", time.Now().UnixNano())
 	sql.Register(driverName, &stubConnector{d: d})
 	db, err := sql.Open(driverName, "")
-	if err != nil {
-		t.Fatalf("open stub db: %v", err)
-	}
+	require.NoError(t, err)
 	return db
 }

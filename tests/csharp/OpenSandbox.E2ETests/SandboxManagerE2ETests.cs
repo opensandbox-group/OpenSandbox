@@ -135,6 +135,18 @@ public class SandboxManagerE2ETests : IClassFixture<SandboxManagerE2ETestFixture
         });
         var createdIds = new HashSet<string> { s1.Id, s2.Id, s3.Id };
         Assert.DoesNotContain(noneMatch.Items, info => createdIds.Contains(info.Id));
+
+        var patched = await manager.PatchSandboxMetadataAsync(s2.Id, new Dictionary<string, string?>
+        {
+            ["env"] = "stage",
+            ["team"] = null
+        });
+        Assert.Equal("stage", patched.Metadata!["env"]);
+        Assert.False(patched.Metadata!.ContainsKey("team"));
+
+        var refreshed = await manager.GetSandboxInfoAsync(s2.Id);
+        Assert.Equal("stage", refreshed.Metadata!["env"]);
+        Assert.False(refreshed.Metadata!.ContainsKey("team"));
     }
 
     [Fact(Timeout = 2 * 60 * 1000)]
@@ -234,7 +246,7 @@ public sealed class SandboxManagerE2ETestFixture : IAsyncLifetime
             TimeoutSeconds = _baseFixture.DefaultTimeoutSeconds,
             ReadyTimeoutSeconds = _baseFixture.DefaultReadyTimeoutSeconds,
             Metadata = metadata,
-            Env = new Dictionary<string, string> { ["E2E_TEST"] = "true" },
+            Env = new Dictionary<string, string> { ["E2E_TEST"] = "true", ["EXECD_API_GRACE_SHUTDOWN"] = "3s", ["EXECD_JUPYTER_IDLE_POLL_INTERVAL"] = "200ms" },
             HealthCheckPollingInterval = 500
         });
     }

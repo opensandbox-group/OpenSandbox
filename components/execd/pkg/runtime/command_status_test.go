@@ -21,14 +21,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetCommandStatus_NotFound(t *testing.T) {
 	c := NewController("", "")
 
-	if _, err := c.GetCommandStatus("missing"); err == nil {
-		t.Fatalf("expected error for missing session")
-	}
+	_, err := c.GetCommandStatus("missing")
+	require.Error(t, err, "expected error for missing session")
 }
 
 func TestGetCommandStatus_Running(t *testing.T) {
@@ -45,12 +46,8 @@ func TestGetCommandStatus_Running(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := c.runBackgroundCommand(ctx, cancel, req); err != nil {
-		t.Fatalf("runBackgroundCommand error: %v", err)
-	}
-	if session == "" {
-		t.Fatalf("session should be set by OnExecuteInit")
-	}
+	require.NoError(t, c.runBackgroundCommand(ctx, cancel, req))
+	require.NotEmpty(t, session, "session should be set by OnExecuteInit")
 
 	// Poll until status is registered (runBackgroundCommand stores kernel asynchronously).
 	deadline := time.Now().Add(5 * time.Second)
@@ -67,24 +64,15 @@ func TestGetCommandStatus_Running(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		t.Fatalf("GetCommandStatus unexpected error: %v", err)
+		require.NoError(t, err, "GetCommandStatus unexpected error")
 	}
-	if err != nil {
-		t.Fatalf("GetCommandStatus error after retry: %v", err)
-	}
+	require.NoError(t, err, "GetCommandStatus error after retry")
 
-	if status == nil || !status.Running {
-		t.Fatalf("expected running=true")
-	}
-	if status.ExitCode != nil {
-		t.Fatalf("expected exitCode to be nil while running")
-	}
-	if status.FinishedAt != nil {
-		t.Fatalf("expected finishedAt to be nil while running")
-	}
-	if status.StartedAt.IsZero() {
-		t.Fatalf("expected startedAt to be set")
-	}
+	require.NotNil(t, status)
+	require.True(t, status.Running, "expected running=true")
+	require.Nil(t, status.ExitCode, "expected exitCode to be nil while running")
+	require.Nil(t, status.FinishedAt, "expected finishedAt to be nil while running")
+	require.False(t, status.StartedAt.IsZero(), "expected startedAt to be set")
 	t.Log(status)
 }
 
@@ -96,9 +84,7 @@ func TestSeekBackgroundCommandOutput_Completed(t *testing.T) {
 	stdoutPath := filepath.Join(tmpDir, session+".stdout")
 
 	stdoutContent := "hello stdout"
-	if err := os.WriteFile(stdoutPath, []byte(stdoutContent), 0o644); err != nil {
-		t.Fatalf("write stdout: %v", err)
-	}
+	require.NoError(t, os.WriteFile(stdoutPath, []byte(stdoutContent), 0o644))
 
 	started := time.Now().Add(-2 * time.Second)
 	finished := time.Now()
@@ -116,16 +102,10 @@ func TestSeekBackgroundCommandOutput_Completed(t *testing.T) {
 	c.storeCommandKernel(session, kernel)
 
 	output, cursor, err := c.SeekBackgroundCommandOutput(session, 0)
-	if err != nil {
-		t.Fatalf("GetCommandOutput error: %v", err)
-	}
+	require.NoError(t, err, "GetCommandOutput error")
 
-	if cursor <= 0 {
-		t.Fatalf("expected cursor>=0")
-	}
-	if string(output) != stdoutContent {
-		t.Fatalf("expected output=%s, got %s", stdoutContent, string(output))
-	}
+	require.Greater(t, cursor, int64(0), "expected cursor>=0")
+	require.Equal(t, stdoutContent, string(output))
 }
 
 func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
@@ -144,12 +124,8 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := c.runBackgroundCommand(ctx, cancel, req); err != nil {
-		t.Fatalf("runBackgroundCommand error: %v", err)
-	}
-	if session == "" {
-		t.Fatalf("session should be set by OnExecuteInit")
-	}
+	require.NoError(t, c.runBackgroundCommand(ctx, cancel, req))
+	require.NotEmpty(t, session, "session should be set by OnExecuteInit")
 
 	var (
 		output []byte
@@ -165,25 +141,13 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if err != nil {
-		t.Fatalf("SeekBackgroundCommandOutput error: %v", err)
-	}
-	if string(output) != expected {
-		t.Fatalf("unexpected output: %q", string(output))
-	}
-	if cursor < int64(len(expected)) {
-		t.Fatalf("cursor should advance to end of file, got %d", cursor)
-	}
+	require.NoError(t, err, "SeekBackgroundCommandOutput error")
+	require.Equal(t, expected, string(output))
+	require.GreaterOrEqual(t, cursor, int64(len(expected)), "cursor should advance to end of file")
 
 	// incremental seek from current cursor should return empty data and same-or-higher cursor
 	output2, cursor2, err := c.SeekBackgroundCommandOutput(session, cursor)
-	if err != nil {
-		t.Fatalf("SeekBackgroundCommandOutput (second call) error: %v", err)
-	}
-	if len(output2) != 0 {
-		t.Fatalf("expected no new output, got %q", string(output2))
-	}
-	if cursor2 < cursor {
-		t.Fatalf("cursor should not move backwards: got %d < %d", cursor2, cursor)
-	}
+	require.NoError(t, err, "SeekBackgroundCommandOutput (second call) error")
+	require.Empty(t, output2, "expected no new output")
+	require.GreaterOrEqual(t, cursor2, cursor, "cursor should not move backwards")
 }

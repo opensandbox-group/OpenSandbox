@@ -15,8 +15,8 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.config import AppConfig, IngressConfig, RuntimeConfig, ServerConfig
-from src.middleware.auth import AuthMiddleware
+from opensandbox_server.config import AppConfig, IngressConfig, RuntimeConfig, ServerConfig
+from opensandbox_server.middleware.auth import AuthMiddleware
 
 
 def _app_config_with_api_key() -> AppConfig:

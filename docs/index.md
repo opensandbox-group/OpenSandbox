@@ -26,6 +26,8 @@ features:
 
 ## Typical Scenarios
 
+OpenSandbox is now listed in the [CNCF Landscape](https://landscape.cncf.io/?item=orchestration-management--scheduling-orchestration--opensandbox).
+
 <div class="scenario-grid">
   <a class="scenario-card" href="./examples/claude-code/readme">
     <h3>Coding Agents</h3>

@@ -29,9 +29,8 @@ func (c *Controller) runJupyter(ctx context.Context, request *ExecuteCodeRequest
 		return errors.New("language runtime server not configured, please check your image runtime")
 	}
 	if request.Context == "" {
-		if _, exists := c.defaultLanguageJupyterSessions[request.Language]; !exists {
-			err := c.createDefaultLanguageContext(request.Language)
-			if err != nil {
+		if c.getDefaultLanguageSession(request.Language) == "" {
+			if err := c.createDefaultLanguageJupyterContext(request.Language); err != nil {
 				return err
 			}
 		}
@@ -39,7 +38,7 @@ func (c *Controller) runJupyter(ctx context.Context, request *ExecuteCodeRequest
 
 	var targetSessionID string
 	if request.Context == "" {
-		targetSessionID = c.defaultLanguageJupyterSessions[request.Language]
+		targetSessionID = c.getDefaultLanguageSession(request.Language)
 	} else {
 		targetSessionID = request.Context
 	}
@@ -83,34 +82,7 @@ func (c *Controller) runJupyterCode(ctx context.Context, kernel *jupyterKernel, 
 			if result == nil {
 				return nil
 			}
-
-			if result.ExecutionCount > 0 || len(result.ExecutionData) > 0 {
-				request.Hooks.OnExecuteResult(result.ExecutionData, result.ExecutionCount)
-			}
-
-			if result.Status != "" {
-				request.Hooks.OnExecuteStatus(result.Status)
-			}
-
-			if result.ExecutionTime > 0 {
-				request.Hooks.OnExecuteComplete(result.ExecutionTime)
-			}
-
-			if result.Error != nil {
-				request.Hooks.OnExecuteError(result.Error)
-			}
-
-			if len(result.Stream) > 0 {
-				for _, stream := range result.Stream {
-					switch stream.Name {
-					case execute.StreamStdout:
-						request.Hooks.OnExecuteStdout(stream.Text)
-					case execute.StreamStderr:
-						request.Hooks.OnExecuteStderr(stream.Text)
-					default:
-					}
-				}
-			}
+			dispatchExecutionResultHooks(request, result)
 
 		case <-ctx.Done():
 			log.Warning("context cancelled, try to interrupt kernel")
@@ -128,6 +100,35 @@ func (c *Controller) runJupyterCode(ctx context.Context, kernel *jupyterKernel, 
 	}
 }
 
+func dispatchExecutionResultHooks(request *ExecuteCodeRequest, result *execute.ExecutionResult) {
+	if result.ExecutionCount > 0 || len(result.ExecutionData) > 0 {
+		request.Hooks.OnExecuteResult(result.ExecutionData, result.ExecutionCount)
+	}
+
+	if result.Status != "" {
+		request.Hooks.OnExecuteStatus(result.Status)
+	}
+
+	if result.Error != nil {
+		request.Hooks.OnExecuteError(result.Error)
+	}
+
+	// Treat completion as success-only terminal signal. For failed executions,
+	// error should be the terminal event to avoid losing error delivery.
+	if result.ExecutionTime > 0 && result.Error == nil {
+		request.Hooks.OnExecuteComplete(result.ExecutionTime)
+	}
+
+	for _, stream := range result.Stream {
+		switch stream.Name {
+		case execute.StreamStdout:
+			request.Hooks.OnExecuteStdout(stream.Text)
+		case execute.StreamStderr:
+			request.Hooks.OnExecuteStderr(stream.Text)
+		}
+	}
+}
+
 // setWorkingDir configures the working directory for a kernel session.
 func (c *Controller) setWorkingDir(_ *jupyterKernel, _ *CreateContextRequest) error {
 	return nil
@@ -135,10 +136,12 @@ func (c *Controller) setWorkingDir(_ *jupyterKernel, _ *CreateContextRequest) er
 
 // getJupyterKernel retrieves a kernel connection from the session map.
 func (c *Controller) getJupyterKernel(sessionID string) *jupyterKernel {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.jupyterClientMap[sessionID]
+	if v, ok := c.jupyterClientMap.Load(sessionID); ok {
+		if kernel, ok := v.(*jupyterKernel); ok {
+			return kernel
+		}
+	}
+	return nil
 }
 
 // searchKernel finds a kernel spec name for the given language.

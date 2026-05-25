@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OutputMessage(BaseModel):
@@ -150,13 +150,23 @@ class Execution(BaseModel):
 
     id: str | None = Field(default=None, description="Unique execution identifier")
     execution_count: int | None = Field(
-        default=None, description="Sequential execution counter", alias="execution_count"
+        default=None,
+        description="Sequential execution counter",
+        alias="execution_count",
     )
     result: list["ExecutionResult"] = Field(
         default_factory=list, description="Execution results"
     )
     error: ExecutionError | None = Field(
         default=None, description="Error information if failed"
+    )
+    complete: ExecutionComplete | None = Field(
+        default=None, description="Completion metadata if execution completed"
+    )
+    exit_code: int | None = Field(
+        default=None,
+        description="Command exit code when available",
+        alias="exit_code",
     )
     logs: ExecutionLogs = Field(
         default_factory=ExecutionLogs, description="Output logs"
@@ -165,6 +175,42 @@ class Execution(BaseModel):
     def add_result(self, result: ExecutionResult) -> None:
         """Add a new execution result."""
         self.result.append(result)
+
+    @property
+    def text(self) -> str:
+        """Return combined stdout and result text.
+
+        Includes both stdout log messages and execution results,
+        stripping trailing newlines from each chunk to avoid double
+        line breaks when messages already contain trailing newlines
+        (e.g. code-interpreter streaming output).
+        """
+        chunks: list[str] = []
+
+        for msg in self.logs.stdout:
+            chunks.append(msg.text.rstrip("\n"))
+
+        for res in self.result:
+            if res.text:
+                chunks.append(res.text.rstrip("\n"))
+
+        return "\n".join(chunks)
+
+    def __str__(self) -> str:
+        """Return a human-readable summary of the execution."""
+        parts: list[str] = []
+
+        if self.logs.stdout or self.result:
+            parts.append(self.text)
+
+        if self.logs.stderr:
+            stderr_text = "\n".join(msg.text.rstrip("\n") for msg in self.logs.stderr)
+            parts.append(f"[stderr]\n{stderr_text}")
+
+        if self.error:
+            parts.append(f"[error] {self.error.name}: {self.error.value}")
+
+        return "\n".join(parts)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -222,6 +268,7 @@ class RunCommandOpts(BaseModel):
     """
     Parameters for command execution.
     """
+
     background: bool = Field(
         default=False, description="Whether to run in background (detached)"
     )
@@ -234,6 +281,27 @@ class RunCommandOpts(BaseModel):
         default=None,
         description="Maximum execution time; server will terminate the command when reached. If omitted, the server will not enforce any timeout.",
     )
+    uid: int | None = Field(
+        default=None,
+        ge=0,
+        description="Unix user ID used to run the command process.",
+    )
+    gid: int | None = Field(
+        default=None,
+        ge=0,
+        description="Unix group ID used to run the command process. Requires uid to be set.",
+    )
+    envs: dict[str, str] | None = Field(
+        default=None,
+        description="Environment variables injected into the command process.",
+    )
+
+    @model_validator(mode="after")
+    def validate_uid_gid_dependency(self) -> "RunCommandOpts":
+        """Ensure gid is not used without uid to match server contract."""
+        if self.gid is not None and self.uid is None:
+            raise ValueError("uid is required when gid is provided")
+        return self
 
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
@@ -245,11 +313,15 @@ class CommandStatus(BaseModel):
 
     id: str | None = Field(default=None, description="Command ID")
     content: str | None = Field(default=None, description="Original command content")
-    running: bool | None = Field(default=None, description="True if command is still running")
+    running: bool | None = Field(
+        default=None, description="True if command is still running"
+    )
     exit_code: int | None = Field(
         default=None, description="Exit code if the command has finished"
     )
-    error: str | None = Field(default=None, description="Error message if the command failed")
+    error: str | None = Field(
+        default=None, description="Error message if the command failed"
+    )
     started_at: datetime | None = Field(
         default=None, description="Command start time (RFC3339)", alias="started_at"
     )

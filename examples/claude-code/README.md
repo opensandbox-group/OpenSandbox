@@ -7,10 +7,10 @@ Access Claude via the `claude-cli` npm package in OpenSandbox.
 Pre-pull the code-interpreter image (includes Node.js):
 
 ```shell
-docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1
+docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2
 
 # use docker hub
-# docker pull opensandbox/code-interpreter:v1.0.1
+# docker pull opensandbox/code-interpreter:v1.0.2
 ```
 
 Then start the local OpenSandbox server, stdout logs will be visible in the terminal:
@@ -39,7 +39,7 @@ The script installs the Claude CLI (`npm i -g @anthropic-ai/claude-code@latest`)
 
 - `SANDBOX_DOMAIN`: Sandbox service address (default: `localhost:8080`)
 - `SANDBOX_API_KEY`: API key if your server requires authentication (optional for local)
-- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1`)
+- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2`)
 - `ANTHROPIC_AUTH_TOKEN`: Your Anthropic auth token (required)
 - `ANTHROPIC_BASE_URL`: Anthropic API endpoint (optional; e.g., self-hosted proxy)
 - `ANTHROPIC_MODEL`: Model name (default: `claude_sonnet4`)

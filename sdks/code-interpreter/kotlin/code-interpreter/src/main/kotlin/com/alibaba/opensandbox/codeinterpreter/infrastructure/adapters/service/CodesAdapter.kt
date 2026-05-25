@@ -34,6 +34,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Executi
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
+import okhttp3.Headers.Companion.toHeaders
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -49,8 +50,19 @@ class CodesAdapter(
     }
 
     private val logger = LoggerFactory.getLogger(CodesAdapter::class.java)
+    private val baseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
+    private val apiClient =
+        httpClientProvider.httpClient.newBuilder()
+            .addInterceptor { chain ->
+                val requestBuilder = chain.request().newBuilder()
+                execdEndpoint.headers.forEach { (key, value) ->
+                    requestBuilder.header(key, value)
+                }
+                chain.proceed(requestBuilder.build())
+            }
+            .build()
     private val api =
-        CodeInterpretingApi("${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}", httpClientProvider.httpClient)
+        CodeInterpretingApi(baseUrl, apiClient)
 
     override fun getContext(id: String): CodeContext {
         try {
@@ -94,7 +106,7 @@ class CodesAdapter(
 
     override fun deleteContexts(language: String) {
         try {
-            deleteContexts(language)
+            api.deleteContextsByLanguage(language)
         } catch (e: Exception) {
             logger.error("Failed to delete contexts", e)
             throw e.toSandboxException()
@@ -109,10 +121,11 @@ class CodesAdapter(
             val apiRequest = request.toApiRunCodeRequest()
             val httpRequest =
                 Request.Builder()
-                    .url("${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}$RUN_CODE_PATH")
+                    .url("$baseUrl$RUN_CODE_PATH")
                     .post(
                         jsonParser.encodeToString(apiRequest).toRequestBody("application/json".toMediaType()),
                     )
+                    .headers(execdEndpoint.headers.toHeaders())
                     .build()
 
             val execution = Execution()
@@ -126,6 +139,7 @@ class CodesAdapter(
                         message = message,
                         statusCode = response.code,
                         error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
+                        requestId = response.header("X-Request-ID"),
                     )
                 }
 

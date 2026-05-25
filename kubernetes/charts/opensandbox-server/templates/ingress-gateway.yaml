@@ -13,10 +13,9 @@ metadata:
     app.kubernetes.io/part-of: opensandbox
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
-  name: {{ include "opensandbox-server.ingressGatewayFullname" . }}-reader
-  namespace: {{ .Values.server.gateway.dataplaneNamespace }}
+  name: {{ include "opensandbox-server.ingressGatewayFullname" . }}-reader-full
   labels:
     app.kubernetes.io/name: {{ include "opensandbox-server.ingressGatewayFullname" . }}
     app.kubernetes.io/part-of: opensandbox
@@ -29,17 +28,16 @@ rules:
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
-  name: {{ include "opensandbox-server.ingressGatewayFullname" . }}-reader
-  namespace: {{ .Values.server.gateway.dataplaneNamespace }}
+  name: {{ include "opensandbox-server.ingressGatewayFullname" . }}-reader-full
   labels:
     app.kubernetes.io/name: {{ include "opensandbox-server.ingressGatewayFullname" . }}
     app.kubernetes.io/part-of: opensandbox
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "opensandbox-server.ingressGatewayFullname" . }}-reader
+  kind: ClusterRole
+  name: {{ include "opensandbox-server.ingressGatewayFullname" . }}-reader-full
 subjects:
   - kind: ServiceAccount
     name: {{ include "opensandbox-server.ingressGatewayFullname" . }}
@@ -78,6 +76,9 @@ spec:
             - "--provider-type={{ .Values.server.gateway.providerType }}"
             - "--mode={{ .Values.server.gateway.gatewayRouteMode }}"
             - "--log-level={{ .Values.server.gateway.logLevel }}"
+{{- if .Values.server.gateway.secureAccess.keys }}
+            - "--secure-access-keys={{- range $i, $k := .Values.server.gateway.secureAccess.keys }}{{ if $i }},{{ end }}{{ $k.key_id }}={{ $k.key }}{{- end }}"
+{{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.server.gateway.port }}

@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!chrome.sh
+!go.mod
+!go.sum
+!**/*.go
+!examples/chrome/Dockerfile
+!examples/chrome/chrome.sh
+!examples/chrome/go.mod
+!examples/chrome/go.sum
+!examples/chrome/**/*.go

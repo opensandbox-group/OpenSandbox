@@ -23,7 +23,7 @@ spotless = "6.23.3"
 maven-publish = "0.35.0"
 dokka = "1.9.10"
 jackson = "2.18.2"
-sandbox = "1.0.4"
+sandbox = "1.0.11"
 junit-platform = "1.13.4"
 
 [libraries]

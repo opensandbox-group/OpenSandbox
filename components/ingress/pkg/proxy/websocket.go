@@ -35,6 +35,10 @@ var (
 	defaultUpgrader = &websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		// Allow any Origin: ingress sits behind trusted gateways where Host/Origin
+		// often diverge (e.g. browser UI vs internal target). gorilla's default
+		// same-origin check rejects those upgrades.
+		CheckOrigin: func(_ *http.Request) bool { return true },
 	}
 )
 

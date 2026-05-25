@@ -47,13 +47,31 @@ class ConnectionConfig private constructor(
      */
     val useServerProxy: Boolean = false,
 ) {
+    /**
+     * Creates a copy of this ConnectionConfig without copying the connectionPool.
+     * The returned config will have connectionPool set to null and connectionPoolManagedByUser set to false.
+     */
+    fun copyWithoutConnectionPool(): ConnectionConfig =
+        ConnectionConfig(
+            apiKey = this.apiKey,
+            domain = this.domain,
+            protocol = this.protocol,
+            requestTimeout = this.requestTimeout,
+            debug = this.debug,
+            userAgent = this.userAgent,
+            headers = this.headers,
+            connectionPool = null,
+            connectionPoolManagedByUser = false,
+            useServerProxy = this.useServerProxy,
+        )
+
     companion object {
         private const val DEFAULT_DOMAIN = "localhost:8080"
         private const val DEFAULT_PROTOCOL = "http"
         private const val ENV_API_KEY = "OPEN_SANDBOX_API_KEY"
         private const val ENV_DOMAIN = "OPEN_SANDBOX_DOMAIN"
 
-        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.4"
+        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.12"
         private const val API_VERSION = "v1"
 
         @JvmStatic

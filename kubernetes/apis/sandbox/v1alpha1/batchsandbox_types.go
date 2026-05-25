@@ -20,6 +20,65 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
+// +kubebuilder:validation:Enum=Pending;Succeed;Pausing;Paused;Resuming;Failed
+// BatchSandboxPhase defines the overall phase of a BatchSandbox.
+type BatchSandboxPhase string
+
+const (
+	BatchSandboxPhasePending  BatchSandboxPhase = "Pending"
+	BatchSandboxPhaseSucceed  BatchSandboxPhase = "Succeed"
+	BatchSandboxPhasePausing  BatchSandboxPhase = "Pausing"
+	BatchSandboxPhasePaused   BatchSandboxPhase = "Paused"
+	BatchSandboxPhaseResuming BatchSandboxPhase = "Resuming"
+	BatchSandboxPhaseFailed   BatchSandboxPhase = "Failed"
+)
+
+// ConditionStatus represents the status of a condition
+// +kubebuilder:validation:Enum=True;False
+const (
+	ConditionTrue  = "True"
+	ConditionFalse = "False"
+)
+
+// BatchSandboxConditionType represents the type of BatchSandbox condition.
+// +kubebuilder:validation:Enum=Ready;Progressing;Paused;PauseFailed;ResumeFailed;PodFailed
+type BatchSandboxConditionType string
+
+const (
+	// BatchSandboxConditionReady reflects whether the sandbox is currently available.
+	BatchSandboxConditionReady BatchSandboxConditionType = "Ready"
+	// BatchSandboxConditionProgressing reflects whether the sandbox is transitioning between states.
+	BatchSandboxConditionProgressing BatchSandboxConditionType = "Progressing"
+	// BatchSandboxConditionPaused reflects whether the sandbox is fully paused.
+	BatchSandboxConditionPaused BatchSandboxConditionType = "Paused"
+	// BatchSandboxConditionPauseFailed is set when pause operation fails
+	BatchSandboxConditionPauseFailed BatchSandboxConditionType = "PauseFailed"
+	// BatchSandboxConditionResumeFailed is set when resume operation fails
+	BatchSandboxConditionResumeFailed BatchSandboxConditionType = "ResumeFailed"
+	// BatchSandboxConditionPodFailed is set when the sandbox pod enters a failed state.
+	BatchSandboxConditionPodFailed BatchSandboxConditionType = "PodFailed"
+)
+
+// BatchSandboxCondition represents a condition of a BatchSandbox
+type BatchSandboxCondition struct {
+	// Type is the condition type
+	// +kubebuilder:validation:Required
+	Type BatchSandboxConditionType `json:"type"`
+	// Status is the condition status
+	// +kubebuilder:validation:Enum=True;False
+	// +kubebuilder:validation:Required
+	Status string `json:"status"`
+	// Reason is a brief reason for the condition
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// Message is a human-readable message about the condition
+	// +optional
+	Message string `json:"message,omitempty"`
+	// LastTransitionTime is the last time the condition transitioned
+	// +optional
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+}
+
 // BatchSandboxSpec defines the desired state of BatchSandbox.
 type BatchSandboxSpec struct {
 	// Replicas is the number of desired replicas.
@@ -70,6 +129,14 @@ type BatchSandboxSpec struct {
 	// +kubebuilder:default=Retain
 	// +kubebuilder:validation:Optional
 	TaskResourcePolicyWhenCompleted *TaskResourcePolicy `json:"taskResourcePolicyWhenCompleted,omitempty"`
+
+	// Pause is the pause/resume intent written by Server and executed by Controller.
+	// nil = no operation / server retry bridge
+	// true = request Pause
+	// false = request Resume
+	// Controller never clears this field; Server may temporarily patch nil to force a new generation for retries.
+	// +optional
+	Pause *bool `json:"pause,omitempty"`
 }
 
 type TaskResourcePolicy string
@@ -100,6 +167,22 @@ type BatchSandboxStatus struct {
 	TaskPending int32 `json:"taskPending"`
 	// TaskUnknown is the number of Unknown task
 	TaskUnknown int32 `json:"taskUnknown"`
+
+	// Phase is the overall phase of the BatchSandbox, aggregated and written by Controller.
+	// Server reads this field directly without combining multiple fields.
+	// +optional
+	Phase BatchSandboxPhase `json:"phase,omitempty"`
+
+	// PauseObservedGeneration is the generation most recently ACKed by the Controller
+	// when entering pause/resume dispatch logic. Written immediately to prevent reentry (idempotent gating).
+	// +optional
+	PauseObservedGeneration int64 `json:"pauseObservedGeneration,omitempty"`
+
+	// Conditions records operation failure context
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []BatchSandboxCondition `json:"conditions,omitempty"`
 }
 
 // +genclient

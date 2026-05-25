@@ -40,7 +40,7 @@ try
     await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
     {
         ConnectionConfig = config,
-        Image = "opensandbox/code-interpreter:v1.0.1",
+        Image = "opensandbox/code-interpreter:v1.0.2",
         Entrypoint = new[] { "/opt/opensandbox/code-interpreter.sh" },
         Env = new Dictionary<string, string>
         {
@@ -88,7 +88,7 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 {
     ConnectionConfig = new ConnectionConfig(),
-    Image = "opensandbox/code-interpreter:v1.0.1",
+    Image = "opensandbox/code-interpreter:v1.0.2",
     Entrypoint = new[] { "/opt/opensandbox/code-interpreter.sh" },
     Diagnostics = new SdkDiagnosticsOptions
     {
@@ -238,13 +238,24 @@ Stop a running code execution:
 var context = await interpreter.Codes.CreateContextAsync(SupportedLanguage.Python);
 
 // Start a long-running task
+var executionId = new TaskCompletionSource<string>();
 var task = interpreter.Codes.RunAsync(
     "import time\nwhile True: time.sleep(1)",
-    new RunCodeOptions { Context = context });
+    new RunCodeOptions
+    {
+        Context = context,
+        Handlers = new ExecutionHandlers
+        {
+            OnInit = init =>
+            {
+                executionId.TrySetResult(init.Id);
+                return Task.CompletedTask;
+            }
+        }
+    });
 
 // Interrupt after some time
-await Task.Delay(2000);
-await interpreter.Codes.InterruptAsync(context.Id!);
+await interpreter.Codes.InterruptAsync(await executionId.Task);
 ```
 
 ### Access Sandbox Services
@@ -299,7 +310,7 @@ Console.WriteLine($"CPU: {metrics.CpuUsedPercentage}%, Memory: {metrics.MemoryUs
 | `DeleteContextsAsync(language)` | Deletes all contexts for a language |
 | `RunAsync(code, options?)` | Executes code and returns the result |
 | `RunStreamAsync(request)` | Executes code with streaming output |
-| `InterruptAsync(contextId)` | Interrupts a running execution |
+| `InterruptAsync(executionId)` | Interrupts a running execution by execution ID |
 
 > All async methods support `CancellationToken`.
 

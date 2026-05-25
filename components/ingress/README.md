@@ -2,7 +2,7 @@
 
 ## Overview
 - HTTP/WebSocket reverse proxy that routes to sandbox instances.
-- Watches sandbox CRs (BatchSandbox or AgentSandbox, chosen by `--provider-type`) in a target Namespace:
+- Watches sandbox CRs (BatchSandbox or AgentSandbox, chosen by `--provider-type`) across all namespaces:
   - BatchSandbox: reads endpoints from `sandbox.opensandbox.io/endpoints` annotation.
   - AgentSandbox: reads `status.serviceFQDN`.
 - Exposes `/status.ok` health check; prints build metadata (version, commit, time, Go/platform) at startup.
@@ -10,7 +10,7 @@
 ## Quick Start
 ```bash
 go run main.go \
-  --namespace <target-namespace> \
+  --namespace <any-value-kept-for-compatibility> \
   --provider-type <batchsandbox|agent-sandbox> \
   --mode <header|uri> \
   --port 28888 \
@@ -72,6 +72,29 @@ wss://ingress.opensandbox.io/my-sandbox/8080/ws
 - When you need path-based routing
 - For simpler client configuration without custom headers
 
+## Auto-Renew on Ingress Access (OSEP-0009)
+
+When enabled, the ingress publishes **renew-intent** events to a Redis list on each proxied request (after resolving the sandbox). The OpenSandbox server consumes these events and may extend sandbox expiration for sandboxes that opted in at creation time. See [OSEP-0009](https://github.com/alibaba/opensandbox/blob/main/oseps/0009-auto-renew-sandbox-on-ingress-access.md) for the full design.
+
+**Requirements:** The server must have `renew_intent` (and Redis consumer for ingress mode) enabled; the sandbox must opt in via `extensions["access.renew.extend.seconds"]` (decimal integer string between **300** and **86400** seconds, see OSEP-0009). This feature is best-effort and disabled by default.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--renew-intent-enabled` | `false` | Enable publishing renew-intent events to Redis |
+| `--renew-intent-redis-dsn` | `redis://127.0.0.1:6379/0` | Redis DSN (may include `user:password@`) |
+| `--renew-intent-queue-key` | `opensandbox:renew:intent` | Redis List key for intent payloads |
+| `--renew-intent-queue-max-len` | `0` | Max list length (0 = no cap); LTRIM applied when &gt; 0 |
+| `--renew-intent-min-interval` | `60` | Min seconds between intents per sandbox (client-side throttle) |
+
+**Example (with Redis):**
+```bash
+go run main.go \
+  --namespace opensandbox \
+  --renew-intent-enabled \
+  --renew-intent-redis-dsn "redis://user:pass@redis:6379/0" \
+  --renew-intent-min-interval 120
+```
+
 ## Build
 ```bash
 cd components/ingress
@@ -99,8 +122,8 @@ TAG=local VERSION=1.2.3 GIT_COMMIT=abc BUILD_TIME=2025-01-01T00:00:00Z bash buil
 
 ## Runtime Requirements
 - Access to Kubernetes API (in-cluster or via KUBECONFIG).
-- If `--provider-type=batchsandbox`: BatchSandbox CRs in the specified Namespace with `sandbox.opensandbox.io/endpoints` annotation containing Pod IPs.
-- If `--provider-type=agent-sandbox`: AgentSandbox CRs with `status.serviceFQDN` populated.
+- If `--provider-type=batchsandbox`: BatchSandbox CRs in any namespace with `sandbox.opensandbox.io/endpoints` annotation containing Pod IPs.
+- If `--provider-type=agent-sandbox`: AgentSandbox CRs in any namespace with `status.serviceFQDN` populated.
 
 ## Implementation Notes
 

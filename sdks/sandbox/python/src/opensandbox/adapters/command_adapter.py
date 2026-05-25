@@ -23,12 +23,11 @@ synchronous and streaming execution modes with proper session management.
 
 import json
 import logging
+from datetime import timedelta
 
 import httpx
 
-from opensandbox.adapters.converter.command_model_converter import (
-    to_command_status,
-)
+from opensandbox.adapters.converter.command_model_converter import to_command_status
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
@@ -39,7 +38,10 @@ from opensandbox.adapters.converter.execution_converter import (
 from opensandbox.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcher,
 )
-from opensandbox.adapters.converter.response_handler import handle_api_error
+from opensandbox.adapters.converter.response_handler import (
+    extract_request_id,
+    handle_api_error,
+)
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import (
@@ -53,6 +55,70 @@ from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.command import Commands
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, timedelta):
+        timeout_ms = int(timeout.total_seconds() * 1000)
+        if timeout_ms < 0:
+            raise InvalidArgumentException("timeout must be positive")
+        return timeout_ms
+    raise InvalidArgumentException(
+        "timeout must be a datetime.timedelta or None"
+    )
+
+
+def _infer_foreground_exit_code(execution: Execution) -> int | None:
+    if execution.error is not None:
+        try:
+            return int(execution.error.value)
+        except (TypeError, ValueError):
+            return None
+    if execution.complete is not None:
+        return 0
+    return None
+
+
+def _build_run_command_request_body(command: str, opts: RunCommandOpts):
+    return ExecutionConverter.to_api_run_command_request(command, opts)
+
+
+def _build_run_in_session_request_body(
+    command: str,
+    working_directory: str | None,
+    timeout: int | None,
+):
+    from opensandbox.api.execd.models.run_in_session_request import (
+        RunInSessionRequest,
+    )
+    from opensandbox.api.execd.types import UNSET
+
+    return RunInSessionRequest(
+        command=command,
+        cwd=working_directory if working_directory else UNSET,
+        timeout=timeout if timeout is not None else UNSET,
+    )
+
+
+def _decode_sse_event_line(line: str) -> EventNode | None:
+    if not line.strip():
+        return None
+
+    if line.startswith((":", "event:", "id:", "retry:")):
+        return None
+
+    data = line[5:].strip() if line.startswith("data:") else line
+    if not data:
+        return None
+
+    try:
+        event_dict = json.loads(data)
+        return EventNode(**event_dict)
+    except Exception as e:
+        logger.error("Failed to parse SSE line: %s", line, exc_info=e)
+        return None
 
 
 class CommandsAdapter(Commands):
@@ -69,6 +135,8 @@ class CommandsAdapter(Commands):
 
     RUN_COMMAND_PATH = "/command"
     INTERRUPT_COMMAND_PATH = "/command/{execution_id}/interrupt"
+    SESSION_PATH = "/session"
+    RUN_IN_SESSION_PATH = "/session/{session_id}/run"
 
     def __init__(
         self,
@@ -142,6 +210,51 @@ class CommandsAdapter(Commands):
         """Return SSE client (read timeout disabled) for execd streaming."""
         return self._sse_client
 
+    async def _execute_streaming_request(
+        self,
+        *,
+        url: str,
+        json_body: dict,
+        handlers: ExecutionHandlers | None,
+        infer_exit_code: bool,
+        failure_message: str,
+    ) -> Execution:
+        execution = Execution(
+            id=None,
+            execution_count=None,
+            result=[],
+            error=None,
+        )
+        client = await self._get_sse_client()
+
+        async with client.stream("POST", url, json=json_body) as response:
+            if response.status_code != 200:
+                await response.aread()
+                error_body = response.text
+                logger.error(
+                    "%s. Status: %s, Body: %s",
+                    failure_message,
+                    response.status_code,
+                    error_body,
+                )
+                raise SandboxApiException(
+                    message=f"{failure_message}. Status code: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
+
+            dispatcher = ExecutionEventDispatcher(execution, handlers)
+            async for line in response.aiter_lines():
+                event_node = _decode_sse_event_line(line)
+                if event_node is None:
+                    continue
+                await dispatcher.dispatch(event_node)
+
+        if infer_exit_code:
+            execution.exit_code = _infer_foreground_exit_code(execution)
+
+        return execution
+
     async def run(
         self,
         command: str,
@@ -158,55 +271,16 @@ class CommandsAdapter(Commands):
             raise InvalidArgumentException("Command cannot be empty")
 
         try:
-            # Convert domain model to API model
             opts = opts or RunCommandOpts()
-            json_body = ExecutionConverter.to_api_run_command_json(command, opts)
-
-            # Prepare URL
+            json_body = _build_run_command_request_body(command, opts).to_dict()
             url = self._get_execd_url(self.RUN_COMMAND_PATH)
-
-            execution = Execution(
-                id=None,
-                execution_count=None,
-                result=[],
-                error=None,
+            return await self._execute_streaming_request(
+                url=url,
+                json_body=json_body,
+                handlers=handlers,
+                infer_exit_code=not opts.background,
+                failure_message="Failed to run command",
             )
-
-            # Use SSE client for streaming responses (read timeout disabled)
-            client = await self._get_sse_client()
-
-            # Use streaming request for SSE
-            async with client.stream("POST", url, json=json_body) as response:
-                if response.status_code != 200:
-                    await response.aread()
-                    error_body = response.text
-                    logger.error(
-                        f"Failed to run command. Status: {response.status_code}, Body: {error_body}"
-                    )
-                    raise SandboxApiException(
-                        message=f"Failed to run command. Status code: {response.status_code}",
-                        status_code=response.status_code,
-                    )
-
-                dispatcher = ExecutionEventDispatcher(execution, handlers)
-
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-
-                    # Handle potential SSE format "data: ..."
-                    data = line
-                    if data.startswith("data:"):
-                        data = data[5:].strip()
-
-                    try:
-                        event_dict = json.loads(data)
-                        event_node = EventNode(**event_dict)
-                        await dispatcher.dispatch(event_node)
-                    except Exception as e:
-                        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
-
-            return execution
 
         except Exception as e:
             logger.error(
@@ -282,4 +356,88 @@ class CommandsAdapter(Commands):
             return CommandLogs(content=content, cursor=next_cursor)
         except Exception as e:
             logger.error("Failed to get command logs", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def create_session(self, *, working_directory: str | None = None) -> str:
+        from opensandbox.api.execd.api.command.create_session import (
+            asyncio as create_session_asyncio,
+        )
+        from opensandbox.api.execd.models.create_session_request import (
+            CreateSessionRequest,
+        )
+        from opensandbox.api.execd.models.create_session_response import (
+            CreateSessionResponse,
+        )
+        from opensandbox.api.execd.types import UNSET
+
+        body = (
+            CreateSessionRequest(cwd=working_directory)
+            if working_directory
+            else UNSET
+        )
+        try:
+            client = await self._get_client()
+            parsed = await create_session_asyncio(client=client, body=body)
+            if parsed is None:
+                raise SandboxApiException(
+                    message="create_session returned no body",
+                    status_code=0,
+                )
+            if isinstance(parsed, CreateSessionResponse):
+                return parsed.session_id
+            handle_api_error(parsed, "create_session")
+            raise SandboxApiException(
+                message="create_session unexpected response",
+                status_code=200,
+            )
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def run_in_session(
+        self,
+        session_id: str,
+        command: str,
+        *,
+        working_directory: str | None = None,
+        timeout: timedelta | None = None,
+        handlers: ExecutionHandlers | None = None,
+    ) -> Execution:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        if not (command and command.strip()):
+            raise InvalidArgumentException("command cannot be empty")
+
+        timeout_ms = _resolve_run_in_session_timeout(timeout)
+        body = _build_run_in_session_request_body(
+            command, working_directory, timeout_ms
+        )
+        url = self._get_execd_url(
+            self.RUN_IN_SESSION_PATH.format(session_id=session_id)
+        )
+        try:
+            return await self._execute_streaming_request(
+                url=url,
+                json_body=body.to_dict(),
+                handlers=handlers,
+                infer_exit_code=True,
+                failure_message="run_in_session failed",
+            )
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def delete_session(self, session_id: str) -> None:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        from opensandbox.api.execd.api.command.delete_session import (
+            asyncio as delete_session_asyncio,
+        )
+
+        try:
+            client = await self._get_client()
+            parsed = await delete_session_asyncio(
+                client=client, session_id=session_id
+            )
+            if parsed is not None:
+                handle_api_error(parsed, "delete_session")
+        except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e

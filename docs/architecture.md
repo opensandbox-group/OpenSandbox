@@ -1,528 +1,395 @@
 # OpenSandbox Architecture
 
-OpenSandbox is a universal sandbox platform designed for AI application scenarios, providing a complete solution with multi-language SDKs, standardized sandbox protocols, and flexible runtime implementations. This document describes the overall architecture and design philosophy of OpenSandbox.
+OpenSandbox is a general-purpose sandbox platform for AI applications. It provides client SDKs and tools, protocol definitions, a lifecycle control plane, Docker and Kubernetes runtime backends, and in-sandbox execution components for commands, files, code interpreters, browser automation, desktop environments, and training workloads.
+
+This document describes the current repository architecture and the main boundaries between public contracts, server implementation, runtime providers, and sandbox data-plane components.
 
 ## Architecture Overview
 
-![OpenSandbox Architecture](assets/architecture.svg)
+![OpenSandbox Architecture](assets/architecture-overview.svg)
 
-The OpenSandbox architecture consists of four main layers:
+OpenSandbox is organized around six practical surfaces:
 
-1. **SDKs Layer** - Client libraries for interacting with sandboxes
-2. **Specs Layer** - OpenAPI specifications defining the protocols
-3. **Runtime Layer** - Server implementations managing sandbox lifecycle
-4. **Sandbox Instances Layer** - Running sandbox containers with injected execution daemons
+1. **Client surface** - SDKs, the `osb` CLI, and the MCP server used by applications, agents, and operators.
+2. **Protocol surface** - OpenAPI contracts under `specs/` for lifecycle, diagnostics, in-sandbox execution, and egress policy.
+3. **Lifecycle control plane** - the FastAPI server under `server/` that authenticates requests, validates config, persists server-managed records, and delegates lifecycle work to a configured runtime service.
+4. **Runtime backends** - Docker for local and single-host deployments, and Kubernetes through workload providers such as BatchSandbox and `kubernetes-sigs/agent-sandbox`.
+5. **Sandbox data plane** - the user workload container plus the injected `execd` daemon, optional Jupyter/code-interpreter runtime, volumes, and optional egress sidecar.
+6. **Network and security plane** - endpoint resolution, server proxying, Kubernetes ingress gateway routing, secure endpoint access, egress policy enforcement, resource limits, and secure container runtimes.
 
-## 1. OpenSandbox SDKs
+The split is intentional: SDKs and tools should depend on the public contracts, the server should own lifecycle orchestration, runtime providers should own platform-specific resource creation, and `execd`/egress should own operations that happen from inside the sandbox network and filesystem namespace.
 
-The SDK layer provides high-level abstractions for developers to interact with sandboxes. It handles communication with both the Sandbox Lifecycle API and the Sandbox Execution API.
+## 1. Client Surface
 
-### Core SDK Components
+The client surface is the developer-facing entry point for OpenSandbox.
 
-#### 1.1 Sandbox
+### 1.1 Sandbox SDKs
 
-The `Sandbox` class is the primary entry point for managing sandbox lifecycle:
+The sandbox SDKs wrap lifecycle operations and in-sandbox operations behind language-native APIs:
 
-- **Create**: Provision new sandbox instances from container images
-- **Manage**: Monitor sandbox state, renew expiration, retrieve endpoints
-- **Destroy**: Terminate sandbox instances when no longer needed
+- Python: `sdks/sandbox/python`
+- JavaScript/TypeScript: `sdks/sandbox/javascript`
+- Java/Kotlin: `sdks/sandbox/kotlin`
+- C#/.NET: `sdks/sandbox/csharp`
+- Go: `sdks/sandbox/go`
 
-**Key Features:**
-- Async/await support for non-blocking operations
-- Automatic state polling for provisioning progress
-- Resource quota management (CPU, memory, GPU)
-- Metadata and environment variable injection
-- TTL-based automatic expiration with renewal
+Common capabilities include:
 
-#### 1.2 Filesystem
+- Create, list, inspect, pause, resume, renew, and delete sandboxes.
+- Resolve service endpoints for sandbox ports.
+- Execute commands with streamed output and background status/log polling.
+- Manage files and directories.
+- Read resource metrics from `execd`.
+- Inspect or patch runtime egress policy when an egress sidecar is attached.
 
-The `Filesystem` component provides comprehensive file operations within sandboxes:
+Generated OpenAPI clients live beside handwritten adapters. Generated code handles ordinary request/response APIs; handwritten layers cover SDK ergonomics, streaming, transport lifecycle, error mapping, and high-level models.
 
-- **CRUD Operations**: Create, read, update, and delete files and directories
-- **Bulk Operations**: Upload/download multiple files efficiently
-- **Search**: Glob-based file searching with pattern matching
-- **Permissions**: Manage file ownership, group, and mode (chmod)
-- **Metadata**: Retrieve file info including size, timestamps, permissions
+### 1.2 Code Interpreter SDKs
 
-**Use Cases:**
-- Uploading code files and dependencies
-- Downloading execution results and artifacts
-- Managing workspace directories
-- Searching for files by pattern
+The code-interpreter SDKs build on the sandbox SDKs and `execd` code execution APIs. They manage code execution contexts and expose language-oriented code execution helpers.
 
-#### 1.3 Commands
+The official code-interpreter image is under `sandboxes/code-interpreter/`. It provides Python, Java, Node.js, and Go runtimes, and Jupyter kernels for Python, Java, TypeScript/JavaScript, Go, and Bash. Exact language versions are image-controlled and selected through environment variables such as `PYTHON_VERSION`, `JAVA_VERSION`, `NODE_VERSION`, and `GO_VERSION`.
 
-The `Commands` component enables shell command execution within sandboxes:
+### 1.3 CLI and MCP
 
-- **Foreground Execution**: Run commands synchronously with real-time output streaming
-- **Background Execution**: Launch long-running processes in detached mode
-- **Stream Support**: Capture stdout/stderr via Server-Sent Events (SSE)
-- **Process Control**: Interrupt running commands via context cancellation
-- **Working Directory**: Specify custom working directory for command execution
+The `osb` CLI under `cli/` is a terminal interface for day-to-day sandbox operations:
 
-**Use Cases:**
-- Running build commands (e.g., `npm install`, `pip install`)
-- Executing system utilities (e.g., `git`, `docker`)
-- Starting web servers or services
-- Running test suites
+- `osb sandbox`: lifecycle and endpoint management
+- `osb command`: command execution, background logs, and shell sessions
+- `osb file`: file and directory operations
+- `osb egress`: runtime egress policy inspection and mutation
+- `osb devops`: low-level diagnostics
+- `osb skills`: OpenSandbox-specific agent skill installation
 
-#### 1.4 CodeInterpreter
+The MCP server under `sdks/mcp/sandbox/python` exposes focused sandbox lifecycle, command, and text-file tools to MCP-capable clients such as Claude Code and Cursor.
 
-The `CodeInterpreter` component provides stateful code execution across multiple programming languages:
+## 2. Protocol Surface
 
-- **Multi-Language Support**: Python, Java, JavaScript, TypeScript, Go, Bash
-- **Session Management**: Maintain execution state across multiple code blocks
-- **Jupyter Integration**: Built on Jupyter kernel protocol for robust execution
-- **Result Streaming**: Real-time output via SSE with execution counts
-- **Error Handling**: Structured error responses with tracebacks
+OpenSandbox treats `specs/` as the public contract source of truth.
 
-**Key Features:**
-- Variable persistence across executions within same session
-- Display data in multiple MIME types (text, HTML, images)
-- Execution interruption support
-- Execution timing and performance metrics
+### 2.1 Lifecycle API
 
-**Use Cases:**
-- Interactive coding environments (e.g., Jupyter notebooks)
-- AI code generation and execution
-- Data analysis and visualization
-- Educational coding platforms
+`specs/sandbox-lifecycle.yml` defines the lifecycle API, served by the server with the base path `/v1`.
 
-### SDK Language Support
+Main resource groups:
 
-OpenSandbox provides SDKs in multiple languages:
+- **Sandboxes**: create from an image or snapshot, list, get, delete, pause, resume, renew expiration, and resolve port endpoints.
+- **Snapshots**: create a persistent snapshot from a sandbox, list snapshots, get snapshot state, and delete snapshots.
 
-- **Python SDK** (`sdks/sandbox/python`, `sdks/code-interpreter/python`)
-- **Java/Kotlin SDK** (`sdks/sandbox/kotlin`, `sdks/code-interpreter/kotlin`)
-- **TypeScript SDK** (Roadmap)
+Important request features:
 
-All SDKs follow the same design patterns and provide consistent APIs across languages.
+- `image` or `snapshotId` startup source.
+- `entrypoint`, environment variables, metadata, and opaque `extensions`.
+- `resourceLimits` for CPU, memory, GPU, and future resource keys.
+- `platform` constraints.
+- `volumes` for host paths, platform-managed named volumes/PVCs, and OSSFS.
+- `networkPolicy` for egress sidecar configuration.
+- `secureAccess` for Kubernetes ingress gateway deployments that require endpoint credentials.
 
-## 2. OpenSandbox Specs
+### 2.2 Diagnostics API
 
-The Specs layer defines two core OpenAPI specifications that establish the contract between SDKs and runtime implementations.
+`specs/diagnostic-api.yml` defines best-effort diagnostic descriptors for sandbox logs and events. The server also exposes practical DevOps diagnostics routes that return plain text for operators and AI troubleshooting workflows.
 
-### 2.1 Sandbox Lifecycle Spec
+### 2.3 Execd API
 
-**File**: `specs/sandbox-lifecycle.yml`
-
-The Lifecycle Spec defines the API for managing sandbox instances throughout their lifecycle.
-
-#### Core Operations
-
-| Operation | Endpoint | Description |
-|-----------|----------|-------------|
-| **Create** | `POST /sandboxes` | Create a new sandbox from a container image |
-| **List** | `GET /sandboxes` | List sandboxes with filtering and pagination |
-| **Get** | `GET /sandboxes/{id}` | Retrieve sandbox details and status |
-| **Delete** | `DELETE /sandboxes/{id}` | Terminate a sandbox |
-| **Pause** | `POST /sandboxes/{id}/pause` | Pause a running sandbox |
-| **Resume** | `POST /sandboxes/{id}/resume` | Resume a paused sandbox |
-| **Renew** | `POST /sandboxes/{id}/renew-expiration` | Extend sandbox TTL |
-| **Endpoint** | `GET /sandboxes/{id}/endpoints/{port}` | Get public URL for a port |
+`specs/execd-api.yaml` defines the in-sandbox execution API exposed by `components/execd/`.
 
-### 2.2 Sandbox Execution Spec
+Main capabilities:
 
-**File**: `specs/execd-api.yaml`
+- Health check: `GET /ping`
+- Code contexts and execution: `/code/contexts`, `/code/context`, `/code`
+- Bash sessions: `/session`
+- Commands: `/command`, command status, and background command logs
+- Files and directories: `/files/*`, `/directories`
+- Metrics: `/metrics`, `/metrics/watch`
 
-The Execution Spec defines the API for interacting with running sandbox instances. This API is implemented by the `execd` daemon injected into each sandbox.
+Command and code execution use Server-Sent Events for streaming output. The current `execd` implementation also includes interactive PTY WebSocket endpoints under `/pty` for long-lived shell sessions.
 
-#### API Categories
+### 2.4 Egress API
 
-**Health**
-- `GET /ping` - Health check
+`specs/egress-api.yaml` defines the runtime policy API exposed directly by the egress sidecar:
 
-**Code Interpreting**
-- `POST /code/context` - Create execution context
-- `POST /code` - Execute code with streaming output
-- `DELETE /code` - Interrupt code execution
+- `GET /policy`
+- `PATCH /policy`
 
-**Command Execution**
-- `POST /command` - Execute shell command
-- `DELETE /command` - Interrupt command
+The API is reached by resolving the sandbox endpoint for the egress sidecar port. When sidecar authentication is enabled, callers must include the endpoint headers returned by the lifecycle endpoint resolution API.
 
-**Filesystem**
-- `GET /files/info` - Get file metadata
-- `DELETE /files` - Remove files
-- `POST /files/permissions` - Change permissions
-- `POST /files/mv` - Rename/move files
-- `GET /files/search` - Search files by glob pattern
-- `POST /files/replace` - Replace file content
-- `POST /files/upload` - Upload files
-- `GET /files/download` - Download files
-- `POST /directories` - Create directories
-- `DELETE /directories` - Remove directories
+## 3. Lifecycle Control Plane
 
-**Metrics**
-- `GET /metrics` - Get system metrics snapshot
-- `GET /metrics/watch` - Stream metrics via SSE
+The lifecycle server under `server/` is a FastAPI application. It owns request validation, API-key authentication, server configuration, lifecycle orchestration, endpoint formatting, diagnostics, and server-managed persistence.
 
-## 3. OpenSandbox Runtime
+### 3.1 Server Structure
 
-The Runtime layer implements the Sandbox Lifecycle Spec and manages the orchestration of sandbox containers.
+Key packages:
 
-### 3.1 Server Architecture
+- `opensandbox_server/main.py`: app startup, middleware, router registration, runtime validation, and renew-intent startup.
+- `opensandbox_server/api/`: lifecycle routes, proxy routes, pool routes, diagnostics routes, and request/response schemas.
+- `opensandbox_server/services/`: lifecycle service interfaces and Docker/Kubernetes implementations.
+- `opensandbox_server/services/k8s/`: Kubernetes workload providers, endpoint resolution, volume/egress helpers, informer support, and provider-specific mapping.
+- `opensandbox_server/repositories/`: persistence adapters, currently used for server-managed snapshot records.
+- `opensandbox_server/integrations/renew_intent/`: optional auto-renew-on-access integration.
+- `opensandbox_server/middleware/`: API-key authentication and request ID middleware.
 
-**Location**: `server/`
+### 3.2 Runtime Service Selection
 
-The OpenSandbox server is a FastAPI-based service providing:
+The server selects exactly one lifecycle implementation from `[runtime].type`:
 
-- **Lifecycle Management**: Create, monitor, pause, resume, and terminate sandboxes
-- **Pluggable Runtimes**: Docker (production-ready), Kubernetes (production-ready)
-- **Async Provisioning**: Background creation to reduce latency
-- **Automatic Expiration**: Configurable TTL with renewal support
-- **Access Control**: API key authentication
-- **Observability**: Unified status tracking with transition logging
+- `docker` -> `DockerSandboxService`
+- `kubernetes` -> `KubernetesSandboxService`
 
-### 3.2 Runtime Implementations
+Both implementations satisfy the same `SandboxService` interface, so API routes stay thin and delegate behavior to services. Runtime-specific details stay behind the service boundary.
 
-#### Docker Runtime (Ready)
+### 3.3 Server Persistence
 
-**Features:**
-- Direct Docker API integration
-- Two networking modes:
-  - **Host Mode**: Containers share host network (single instance)
-  - **Bridge Mode**: Isolated networking with HTTP routing
-- Container lifecycle management
-- Resource quota enforcement
-- Private registry authentication
-- Volume mounting for execd injection
-- Automatic cleanup on expiration
+The `[store]` configuration selects the server-managed metadata store. The default is SQLite at `~/.opensandbox/opensandbox.db`. Snapshot metadata is the first persisted server resource; future persistent records should reuse the same repository boundary.
 
-**Key Responsibilities:**
-1. Pull container images (with auth support)
-2. Create containers with resource limits
-3. Inject execd binary and start script
-4. Monitor container state
-5. Handle pause/resume operations
-6. Clean up terminated containers
+### 3.4 Server Proxy and Endpoint Resolution
 
-#### Kubernetes Runtime (Ready)
+The lifecycle endpoint API returns the reachable address for a service port inside a sandbox. Depending on runtime and configuration, the endpoint may be:
 
-**Features:**
-- Built-in **[BatchSandbox](https://github.com/alibaba/OpenSandbox/tree/main/kubernetes)** runtime with sandbox pooling, high-throughput batch creation, and heterogeneous task orchestration; also compatible with **[SIG agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)** as an alternative runtime
-- Support for different secure container runtimes (e.g., kata-containers, gVisor)
-- Helm-based deployment for controller and server, see [documentation](https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/charts/opensandbox/README.md)
+- A Docker host/bridge mapped endpoint.
+- A Kubernetes ingress gateway endpoint.
+- A server-proxied URL under `/sandboxes/{sandboxId}/proxy/{port}` when `use_server_proxy=true`.
 
-**Planned Features:**
-- Unified network storage mounting (ossfs, NAS, custom PVC) in both pooled and non-pooled modes
-- Pause/resume support
+The server proxy supports HTTP and WebSocket traffic and is also integrated with optional renew-on-access behavior.
 
-#### Custom Runtime
+## 4. Runtime Backends
 
-The pluggable architecture allows implementing custom runtimes by:
-1. Implementing the Lifecycle Spec APIs
-2. Managing sandbox provisioning and cleanup
-3. Injecting execd into sandbox instances
-4. Reporting sandbox state transitions
+### 4.1 Docker Runtime
 
-### 3.3 Networking and Routing
+The Docker runtime is the local and single-host backend. It talks directly to the Docker daemon and manages containers, timers, labels, volumes, ports, optional sidecars, and snapshots.
 
-#### Sandbox Router
+Core responsibilities:
 
-**Purpose**: Provides HTTP/HTTPS load balancing to sandbox instance ports.
+- Pull public or private images, including per-request registry authentication.
+- Create containers with CPU, memory, GPU, platform, capability, AppArmor, seccomp, PID, and secure-runtime settings.
+- Stage the `execd` binary from `[runtime].execd_image` into the sandbox and install a bootstrap launcher before starting the user entrypoint.
+- Support network modes `host`, `bridge`, and custom user-defined networks.
+- Allocate host ports for `execd` and user service endpoints in non-host network modes.
+- Restore expiration timers for existing managed containers after server restart.
+- Support host bind mounts, Docker named volumes via the `pvc` volume model, and OSSFS-backed mounts.
+- Attach an egress sidecar when `networkPolicy` is requested and Docker networking is compatible.
+- Create Docker-backed persistent snapshots as local images and restore sandboxes from those snapshot images.
 
-**Features:**
-- Dynamic endpoint generation based on sandbox ID and port
-- Supports both domain-based and wildcard routing
-- Reverse proxy to sandbox container ports
-- Automatic cleanup when sandbox terminates
+Docker pause/resume uses container-level pause/resume. Docker snapshots are exposed through the public snapshot API.
 
-**Endpoint Format**: `{domain}/sandboxes/{sandboxId}/port/{port}`
+### 4.2 Kubernetes Runtime
 
-**Use Cases:**
-- Accessing web applications running in sandboxes
-- Connecting to development servers (e.g., VS Code Server)
-- Exposing APIs and services
-- VNC and remote desktop access
+The Kubernetes runtime delegates actual workload creation to a workload provider selected by `kubernetes.workload_provider`.
 
-## 4. Sandbox Instances
+Supported providers:
 
-Sandbox instances are running containers that host user workloads with an injected execution daemon.
+- `batchsandbox` - the default provider backed by OpenSandbox's Kubernetes controller and `BatchSandbox` CRD.
+- `agent-sandbox` - a provider for `kubernetes-sigs/agent-sandbox`.
 
-### 4.1 Container Structure
+The Kubernetes server path handles:
 
-Each sandbox instance consists of:
+- Kubernetes client initialization and optional informer-backed reads.
+- Workload creation from image requests; `snapshotId` startup resolves to a stored restorable image when the snapshot record supports restore.
+- Template merging for BatchSandbox and agent-sandbox manifests.
+- Per-request image pull secrets where the provider supports them.
+- Resource limits and GPU translation to Kubernetes extended resources.
+- Platform constraints and RuntimeClass integration for secure runtimes.
+- Volumes, egress sidecars, and secure endpoint access annotations.
+- Endpoint resolution through direct workload data or ingress gateway configuration.
+- Pause/resume delegation to providers.
+- Plain-text diagnostics from Kubernetes resources.
 
-1. **Base Container**: User-specified image (e.g., `ubuntu:22.04`, `python:3.11`)
-2. **execd Daemon**: Injected execution agent implementing the Execution Spec
-3. **Entrypoint Process**: User-defined main process
+### 4.3 BatchSandbox Controller
 
-### 4.2 execd - Execution Daemon
+The Kubernetes controller under `kubernetes/` implements OpenSandbox-specific CRDs for high-throughput and pooled sandbox delivery:
 
-**Location**: `components/execd/`
+- `BatchSandbox`: create one or many sandbox replicas from a pod template.
+- `Pool`: maintain pre-warmed resources for fast allocation.
+- `SandboxSnapshot`: internal rootfs snapshot records used by Kubernetes pause/resume.
 
-execd is a Go-based HTTP daemon built on the Beego framework.
+BatchSandbox supports both template-based creation and pool-based creation via `extensions.poolRef`. It also supports optional task orchestration for batch and RL-style workloads.
 
-#### Core Responsibilities
+Kubernetes pause/resume is implemented through rootfs snapshots for `BatchSandbox.spec.replicas=1`: pause commits the sandbox root filesystem to an OCI image and releases runtime resources; resume rewrites the workload template to use the snapshot image and recreates the runtime while preserving the sandbox ID.
 
-1. **Code Execution**: Manage Jupyter kernel sessions for multi-language code execution
-2. **Command Execution**: Run shell commands with output streaming
-3. **File Operations**: Provide filesystem API for remote file management
-4. **Metrics Collection**: Monitor and report CPU, memory usage
+The public snapshot API currently has a Docker-backed runtime implementation. Kubernetes pause/resume uses the controller's internal `SandboxSnapshot` flow; a general Kubernetes implementation of the public snapshot API is a separate runtime concern.
 
-#### Architecture
+## 5. Sandbox Data Plane
 
-**Technology Stack:**
-- **Language**: Go 1.24+
-- **Web Framework**: Beego
-- **Jupyter Integration**: WebSocket-based Jupyter protocol client
-- **Streaming**: Server-Sent Events (SSE)
+Each sandbox runs the user's image and entrypoint, with OpenSandbox control processes injected around it.
 
-**Package Structure:**
-- `pkg/flag/` - Configuration and CLI flags
-- `pkg/web/` - HTTP layer (controllers, models, router)
-- `pkg/runtime/` - Execution dispatcher
-- `pkg/jupyter/` - Jupyter kernel client
-- `pkg/util/` - Utilities and helpers
+### 5.1 Execd
 
-#### Jupyter Integration
+`components/execd/` is a Go daemon built with Gin. It runs inside the sandbox and exposes the execution API.
 
-execd integrates with Jupyter Server running inside the container:
+Responsibilities:
 
-1. **Session Management**: Create and maintain kernel sessions
-2. **WebSocket Communication**: Real-time bidirectional communication
-3. **Message Protocol**: Jupyter message spec implementation
-4. **Stream Parsing**: Parse execution results, outputs, errors
+- Shell command execution with SSE streaming.
+- Background command status and incremental log retrieval.
+- Persistent bash sessions.
+- Interactive PTY sessions over WebSocket.
+- File and directory operations.
+- Jupyter-backed code contexts and code execution.
+- Local CPU/memory metrics and optional OpenTelemetry metrics export.
+- Optional shared access token enforcement through `X-EXECD-ACCESS-TOKEN`.
 
-**Supported Kernels:**
-- Python (IPython)
-- Java (IJava)
-- JavaScript (IJavaScript)
-- TypeScript (ITypeScript)
-- Go (gophernotes)
-- Bash
+In Docker, the server stages `execd` into the container and installs a bootstrap script. In Kubernetes BatchSandbox template mode, an init container copies `execd` and `bootstrap.sh` from the configured `execd_image` into an `emptyDir` volume mounted by the main sandbox container.
 
-### 4.3 Injection Mechanism
+### 5.2 Code Interpreter Runtime
 
-The execd daemon is injected into sandbox containers during creation:
+The code-interpreter sandbox image starts Jupyter inside the sandbox. `execd` talks to Jupyter over HTTP/WebSocket and translates Jupyter kernel messages into OpenSandbox streaming events.
 
-**Docker Runtime Injection Process:**
+The Code Interpreter SDKs are optional high-level clients. The lower-level execution API remains available through the sandbox SDKs and direct `execd` clients.
 
-1. **Pull execd Image**: Retrieve the execd container image
-2. **Extract Binary**: Copy execd binary from image to temporary location
-3. **Volume Mount**: Mount execd binary and startup script into target container
-4. **Entrypoint Override**: Modify container entrypoint to start execd first
-5. **User Process Launch**: execd forks and executes the user's entrypoint
+### 5.3 Volumes
 
-**Startup Sequence:**
+The lifecycle API exposes runtime-neutral volume models:
 
-```bash
-# Container starts with modified entrypoint
-/opt/opensandbox/start.sh
-  ↓
-# Start Jupyter Server
-jupyter notebook --port=54321 --no-browser --ip=0.0.0.0
-  ↓
-# Start execd daemon
-/opt/opensandbox/execd --jupyter-host=http://127.0.0.1:54321 --port=44772
-  ↓
-# Execute user entrypoint
-exec "${USER_ENTRYPOINT[@]}"
+- `host`: bind a permitted host path.
+- `pvc`: platform-managed named storage. Docker maps this to a Docker named volume; Kubernetes maps it to a PersistentVolumeClaim.
+- `ossfs`: mount Alibaba Cloud OSS through the server/runtime integration.
+
+Runtime providers validate and materialize these volume definitions differently, but the API shape stays shared.
+
+### 5.4 Egress Sidecar
+
+`components/egress/` enforces outbound network policy from the sandbox network namespace.
+
+Capabilities:
+
+- FQDN and wildcard-domain allow/deny rules.
+- `dns` mode for DNS filtering.
+- `dns+nft` mode for DNS plus nftables enforcement of resolved IPs and CIDR/IP rules where supported.
+- Runtime policy inspection and patching through `/policy`.
+- Optional sidecar authentication.
+- Optional platform-enforced always-allow and always-deny overlays.
+- Experimental transparent HTTPS MITM mode.
+
+Docker starts the egress sidecar as a separate container and runs the main sandbox container in the sidecar network namespace. Kubernetes appends the egress sidecar to the pod spec and drops `NET_ADMIN` from the main sandbox container so only the sidecar mutates network rules.
+
+## 6. Networking and Access
+
+### 6.1 Ingress
+
+`components/ingress/` is a Kubernetes-oriented HTTP/WebSocket reverse proxy. It watches sandbox resources and routes traffic to sandbox ports.
+
+Supported routing modes:
+
+- Header mode: `OpenSandbox-Ingress-To: <sandbox-id>-<port>` or host parsing.
+- URI mode: `/<sandbox-id>/<port>/<path>`.
+- Wildcard host mode through server endpoint formatting.
+
+For `BatchSandbox`, ingress reads endpoint data from the `sandbox.opensandbox.io/endpoints` annotation. For `agent-sandbox`, it reads `status.serviceFQDN`.
+
+### 6.2 Secure Access
+
+`secureAccess` is currently supported for Kubernetes sandboxes exposed through ingress gateway mode. When enabled, the server provisions endpoint credentials and returns required headers with endpoint responses. Signed route tokens are also supported when gateway secure-access signing keys are configured.
+
+### 6.3 Auto-Renew on Access
+
+The optional renew-intent integration extends sandbox TTL when access is observed. It can be triggered by server proxy requests or by ingress gateway events delivered through Redis. Per-sandbox opt-in is controlled by the `extensions["access.renew.extend.seconds"]` create parameter.
+
+## 7. Core Flows
+
+### 7.1 Sandbox Creation
+
+```text
+Client / SDK / CLI / MCP
+  -> POST /v1/sandboxes
+  -> FastAPI lifecycle server validates request and config
+  -> selected runtime service creates Docker container or Kubernetes workload
+  -> runtime stages execd and optional egress/volume/network configuration
+  -> sandbox reaches Running or reports Failed with status reason/message
 ```
 
-**Benefits:**
-- Transparent to user code
-- No image modification required
-- Dynamic injection at runtime
-- Works with any base image
+Creation is asynchronous from the API perspective. Clients should poll `GET /v1/sandboxes/{sandboxId}` or use SDK readiness helpers.
 
-## 5. Communication Flow
+### 7.2 Command, File, and Code Execution
 
-### 5.1 Sandbox Creation Flow
-
-```
-User/SDK
-   │
-   │ 1. POST /sandboxes (image, entrypoint, resources)
-   ▼
-Server (Lifecycle API)
-   │
-   │ 2. Pull container image
-   │ 3. Inject execd binary
-   │ 4. Create container with entrypoint override
-   │ 5. Start container
-   ▼
-Sandbox Instance
-   │
-   │ 6. Start execd daemon
-   │ 7. Start Jupyter Server
-   │ 8. Execute user entrypoint
-   ▼
-Running (State)
+```text
+Client
+  -> resolve execd endpoint from sandbox metadata or server proxy
+  -> call execd API with X-EXECD-ACCESS-TOKEN when required
+  -> execd runs command, file operation, session, PTY, or Jupyter code execution
+  -> execd streams SSE/WebSocket output or returns structured responses
 ```
 
-### 5.2 Code Execution Flow
+### 7.3 Service Exposure
 
-```
-User/SDK
-   │
-   │ 1. Create sandbox
-   │ 2. Get execd endpoint
-   ▼
-CodeInterpreter SDK
-   │
-   │ 3. POST /code/context (create session)
-   │ 4. POST /code (execute code)
-   ▼
-execd (Execution API)
-   │
-   │ 5. Route to Jupyter runtime
-   ▼
-Jupyter Runtime
-   │
-   │ 6. WebSocket to Jupyter Server
-   │ 7. Send execute_request
-   ▼
-Jupyter Kernel (Python/Java/etc.)
-   │
-   │ 8. Execute code
-   │ 9. Stream output events
-   ▼
-execd
-   │
-   │ 10. Convert to SSE events
-   │ 11. Stream to client
-   ▼
-CodeInterpreter SDK
-   │
-   │ 12. Parse events
-   │ 13. Return result to user
-   ▼
-User/Application
+```text
+Client
+  -> GET /v1/sandboxes/{sandboxId}/endpoints/{port}
+  -> server returns Docker-mapped, ingress-gateway, or server-proxy endpoint
+  -> client includes returned headers when secure access or sidecar auth requires them
+  -> HTTP/WebSocket traffic reaches the target sandbox port
 ```
 
-### 5.3 File Operations Flow
+### 7.4 Egress Policy
 
-```
-User/SDK
-   │
-   │ 1. Upload files
-   ▼
-Filesystem SDK
-   │
-   │ 2. POST /files/upload (multipart)
-   ▼
-execd (Execution API)
-   │
-   │ 3. Write to filesystem
-   │ 4. Set permissions
-   ▼
-Sandbox Container Filesystem
+```text
+Create request with networkPolicy
+  -> server validates [egress] config
+  -> runtime attaches egress sidecar with initial policy
+  -> sandbox outbound DNS/network traffic is filtered by sidecar
+  -> clients may resolve the egress endpoint and PATCH /policy at runtime
 ```
 
-## 6. Design Principles
+### 7.5 Pause, Resume, and Snapshots
 
-### 6.1 Protocol-First Design
+```text
+Pause / resume
+  -> lifecycle server delegates to runtime provider
+  -> Docker pauses/resumes the container
+  -> BatchSandbox uses rootfs snapshot commit/recreate for supported single-replica sandboxes
 
-- All interactions defined by OpenAPI specifications
-- Clear contracts between components
-- Enables polyglot implementations
-- Supports custom runtime implementations
+Public snapshot API
+  -> server persists snapshot metadata
+  -> Docker runtime commits the sandbox to a restorable image
+  -> create-from-snapshot resolves that image and starts a new sandbox
+```
 
-### 6.2 Separation of Concerns
+## 8. Design Principles
 
-- **SDK**: Client-side abstraction and convenience
-- **Specs**: Protocol definition and documentation
-- **Runtime**: Sandbox orchestration and lifecycle
-- **execd**: In-sandbox execution and operations
+### Protocol First
 
-### 6.3 Extensibility
+Public behavior starts from OpenAPI contracts in `specs/`. SDKs and clients should align to those contracts, and generated outputs should be regenerated from source specs rather than patched as the only fix.
 
-- Pluggable runtime implementations
-- Custom sandbox images
-- Multiple SDK languages
-- Additional Jupyter kernels
+### Control Plane vs Data Plane
 
-### 6.4 Security
+The lifecycle server should orchestrate and validate. Platform-specific provisioning belongs in runtime services/providers. In-sandbox operations belong in `execd` and egress sidecars.
 
-- API key authentication for lifecycle operations
-- Token-based authentication for execution operations
-- Isolated sandbox environments
-- Resource quota enforcement
-- Network isolation options
+### Runtime Neutral API, Runtime Specific Execution
 
-### 6.5 Observability
+The lifecycle API uses shared concepts such as resource limits, volumes, endpoints, network policy, and metadata. Docker and Kubernetes can materialize those concepts differently while preserving the API contract.
 
-- Structured state transitions
-- Real-time metrics streaming
-- Comprehensive logging
-- Health check endpoints
+### Secure Defaults with Explicit Escape Hatches
 
-## 7. Use Cases
+The server supports API-key authentication, startup guardrails for unauthenticated mode, resource limits, capability drops, optional secure runtimes, egress controls, endpoint headers, and platform-specific network isolation. Less restrictive modes are intended for local development or explicit operator choice.
 
-### 7.1 AI Code Generation and Execution
+### Observable Failures
 
-AI models (like Claude, GPT-4, Gemini) generate code that needs to be executed safely:
+Sandbox state includes `state`, `reason`, `message`, and transition time. `execd` exposes metrics, the server exposes diagnostics, ingress/egress/execd support logs and OpenTelemetry metrics where implemented, and request IDs are propagated for debugging.
 
-- **Isolation**: Run untrusted AI-generated code in sandboxes
-- **Multi-Language**: Support various programming languages
-- **Iteration**: Maintain state across multiple code generations
-- **Feedback**: Capture execution results and errors for AI refinement
+## 9. Common Use Cases
 
-**Examples**: [claude-code](../examples/claude-code/), [gemini-cli](../examples/gemini-cli/), [codex-cli](../examples/codex-cli/)
+- **Coding agents**: run Claude Code, Gemini CLI, Codex CLI, Qwen Code, Kimi CLI, or other agent tools in isolated sandboxes.
+- **AI code execution**: execute model-generated code with command/file/code-interpreter APIs and streamed feedback.
+- **Browser automation**: run Chrome or Playwright with controlled filesystem and network behavior.
+- **Remote development**: expose VS Code Web, desktops, VNC, or development servers through sandbox endpoints.
+- **RL and evaluation workloads**: use Kubernetes BatchSandbox, Pool, and task orchestration for high-throughput sandbox delivery.
+- **Enterprise isolation**: combine secure runtimes, ingress, egress, endpoint access headers, and Kubernetes deployment controls.
 
-### 7.2 Interactive Coding Environments
+## 10. References
 
-Build web-based coding platforms and notebooks:
-
-- **Code Execution**: Run code in isolated environments
-- **File Management**: Upload/download project files
-- **Terminal Access**: Execute shell commands
-- **Collaboration**: Share sandbox instances
-
-**Examples**: [code-interpreter](../examples/code-interpreter/)
-
-### 7.3 Browser Automation and Testing
-
-Automate web browsers for testing and scraping:
-
-- **Headless Browsers**: Chrome, Playwright
-- **Remote Debugging**: DevTools protocol
-- **VNC Access**: Visual debugging
-- **Network Isolation**: Controlled environment
-
-**Examples**: [chrome](../examples/chrome/), [playwright](../examples/playwright/)
-
-### 7.4 Remote Development Environments
-
-Provide cloud-based development workspaces:
-
-- **VS Code Server**: Full IDE in browser
-- **Desktop Environments**: VNC-based desktops
-- **Tool Pre-installation**: Language runtimes, build tools
-- **Port Forwarding**: Access development servers
-
-**Examples**: [vscode](../examples/vscode/), [desktop](../examples/desktop/)
-
-### 7.5 Continuous Integration and Testing
-
-Run build and test pipelines in isolated environments:
-
-- **Reproducible Builds**: Consistent container images
-- **Parallel Execution**: Multiple sandbox instances
-- **Artifact Collection**: Download build outputs
-- **Resource Limits**: Prevent resource exhaustion
-
-## 8. Conclusion
-
-OpenSandbox provides a complete, production-ready platform for building AI-powered applications that require safe code execution, file management, and command execution in isolated environments. The architecture is designed to be:
-
-- **Universal**: Works with any container image
-- **Extensible**: Pluggable runtimes and custom implementations
-- **Developer-Friendly**: Multi-language SDKs with consistent APIs
-- **Production-Ready**: Robust lifecycle management and observability
-- **Secure**: Isolated environments with access control
-
-The protocol-first design ensures that all components can evolve independently while maintaining compatibility. Whether you're building AI coding assistants, interactive notebooks, or remote development environments, OpenSandbox provides the foundation you need.
-
-## 9. References
-
-- [Contributing Guide](contributing.md)
+- [Root README](../README.md)
 - [Sandbox Lifecycle Spec](../specs/sandbox-lifecycle.yml)
+- [Diagnostics Spec](../specs/diagnostic-api.yml)
 - [Sandbox Execution Spec](../specs/execd-api.yaml)
+- [Egress Spec](../specs/egress-api.yaml)
 - [Server Documentation](../server/README.md)
+- [Server Configuration](https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md)
 - [execd Documentation](../components/execd/README.md)
-- [Python SDK](../sdks/sandbox/python/README.md)
-- [Java/Kotlin SDK](../sdks/sandbox/kotlin/README.md)
+- [Ingress Documentation](../components/ingress/README.md)
+- [Egress Documentation](../components/egress/README.md)
+- [Kubernetes Controller](../kubernetes/README.md)
+- [Pause and Resume](pause-resume.md)
+- [Secure Container Runtime Guide](secure-container.md)
+- [Network Isolation for Kubernetes](network-isolation-for-kubernetes.md)
+- [CLI README](../cli/README.md)
+- [MCP README](../sdks/mcp/sandbox/python/README.md)
 - [Examples](../examples/README.md)

@@ -14,6 +14,7 @@
 
 import type { ConnectionConfig } from "../config/connection.js";
 import type { SandboxFiles } from "../services/filesystem.js";
+import type { Egress } from "../services/egress.js";
 import type { ExecdCommands } from "../services/execdCommands.js";
 import type { ExecdHealth } from "../services/execdHealth.js";
 import type { ExecdMetrics } from "../services/execdMetrics.js";
@@ -43,6 +44,16 @@ export interface ExecdStack {
   metrics: ExecdMetrics;
 }
 
+export interface CreateEgressStackOptions {
+  connectionConfig: ConnectionConfig;
+  egressBaseUrl: string;
+  endpointHeaders?: Record<string, string>;
+}
+
+export interface EgressStack {
+  egress: Egress;
+}
+
 /**
  * Factory abstraction to keep `Sandbox` and `SandboxManager` decoupled from concrete adapter implementations.
  *
@@ -51,4 +62,5 @@ export interface ExecdStack {
 export interface AdapterFactory {
   createLifecycleStack(opts: CreateLifecycleStackOptions): LifecycleStack;
   createExecdStack(opts: CreateExecdStackOptions): ExecdStack;
+  createEgressStack(opts: CreateEgressStackOptions): EgressStack;
 }

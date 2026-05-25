@@ -28,6 +28,11 @@ class SandboxError:
     UNHEALTHY = "UNHEALTHY"
     INVALID_ARGUMENT = "INVALID_ARGUMENT"
     UNEXPECTED_RESPONSE = "UNEXPECTED_RESPONSE"
+    POOL_EMPTY = "POOL_EMPTY"
+    POOL_ACQUIRE_FAILED = "POOL_ACQUIRE_FAILED"
+    POOL_STATE_STORE_UNAVAILABLE = "POOL_STATE_STORE_UNAVAILABLE"
+    POOL_STATE_STORE_CONTENTION = "POOL_STATE_STORE_CONTENTION"
+    POOL_NOT_RUNNING = "POOL_NOT_RUNNING"
 
     def __init__(self, code: str, message: str | None = None) -> None:
         self.code = code
@@ -50,10 +55,12 @@ class SandboxException(Exception):
         message: str | None = None,
         cause: Exception | None = None,
         error: SandboxError | None = None,
+        request_id: str | None = None,
     ) -> None:
         super().__init__(message)
         self.__cause__ = cause
         self.error = error or SandboxError(SandboxError.INTERNAL_UNKNOWN_ERROR)
+        self.request_id = request_id
 
 
 class SandboxApiException(SandboxException):
@@ -68,9 +75,13 @@ class SandboxApiException(SandboxException):
         cause: Exception | None = None,
         status_code: int | None = None,
         error: SandboxError | None = None,
+        request_id: str | None = None,
     ) -> None:
         super().__init__(
-            message, cause, error or SandboxError(SandboxError.UNEXPECTED_RESPONSE)
+            message,
+            cause,
+            error or SandboxError(SandboxError.UNEXPECTED_RESPONSE),
+            request_id=request_id,
         )
         self.status_code = status_code
 
@@ -131,4 +142,71 @@ class InvalidArgumentException(SandboxException):
     ) -> None:
         super().__init__(
             message, cause, SandboxError(SandboxError.INVALID_ARGUMENT, message)
+        )
+
+
+class PoolEmptyException(SandboxException):
+    """Thrown when FAIL_FAST acquire sees no idle sandbox."""
+
+    def __init__(
+        self,
+        message: str | None = "No idle sandbox available and policy is FAIL_FAST",
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(message, cause, SandboxError(SandboxError.POOL_EMPTY, message))
+
+
+class PoolAcquireFailedException(SandboxException):
+    """Thrown when FAIL_FAST acquire sees an unusable idle sandbox candidate."""
+
+    def __init__(
+        self,
+        message: str | None = "Acquire failed due to unusable idle sandbox candidate(s)",
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message, cause, SandboxError(SandboxError.POOL_ACQUIRE_FAILED, message)
+        )
+
+
+class PoolStateStoreUnavailableException(SandboxException):
+    """Thrown when the pool state store is unavailable."""
+
+    def __init__(
+        self,
+        message: str | None = None,
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            cause,
+            SandboxError(SandboxError.POOL_STATE_STORE_UNAVAILABLE, message),
+        )
+
+
+class PoolStateStoreContentionException(SandboxException):
+    """Thrown when atomic store operations encounter contention."""
+
+    def __init__(
+        self,
+        message: str | None = None,
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            cause,
+            SandboxError(SandboxError.POOL_STATE_STORE_CONTENTION, message),
+        )
+
+
+class PoolNotRunningException(SandboxException):
+    """Thrown when acquire is called while the pool is not running."""
+
+    def __init__(
+        self,
+        message: str | None = "Pool is not running",
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message, cause, SandboxError(SandboxError.POOL_NOT_RUNNING, message)
         )

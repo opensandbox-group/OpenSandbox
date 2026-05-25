@@ -47,10 +47,12 @@ dependencies = [
     "httpx[socks]",
     "kubernetes",
     "pydantic",
+    "redis>=5",
     "pydantic-settings",
     "pyyaml",
     "tomli; python_version < \"3.11\"",
-    "uvicorn",
+    "uvicorn[standard]",
+    "websockets>=14.0",
 ]
 
 [project.urls]
@@ -59,7 +61,7 @@ Repository = "https://github.com/alibaba/OpenSandbox"
 Issues = "https://github.com/alibaba/OpenSandbox/issues"
 
 [project.scripts]
-opensandbox-server = "src.cli:main"
+opensandbox-server = "opensandbox_server.cli:main"
 
 [tool.hatch.version]
 source = "vcs"
@@ -74,24 +76,11 @@ fallback_version = "0.1.0.dev0"
 [tool.hatch.build]
 include = [
     "LICENSE",
-    "example.config.toml",
-    "example.config.zh.toml",
-    "example.config.k8s.toml",
-    "example.config.k8s.zh.toml",
-    "example.batchsandbox-template.yaml",
-    "src/**/py.typed",
-    "src",
+    "opensandbox_server",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"example.config.toml" = "example.config.toml"
-"example.config.zh.toml" = "example.config.zh.toml"
-"example.config.k8s.toml" = "example.config.k8s.toml"
-"example.config.k8s.zh.toml" = "example.config.k8s.zh.toml"
-"example.batchsandbox-template.yaml" = "example.batchsandbox-template.yaml"
+packages = ["opensandbox_server"]
 
 [dependency-groups]
 dev = [
@@ -105,7 +94,7 @@ dev = [
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-src = ["src", "tests"]
+src = ["opensandbox_server", "tests"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
@@ -115,7 +104,7 @@ typeCheckingMode = "standard"
 pythonVersion = "3.10"
 pythonPlatform = "All"
 
-include = ["src", "tests"]
+include = ["opensandbox_server", "tests"]
 
 exclude = [
     "**/node_modules",

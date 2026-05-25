@@ -1,0 +1,90 @@
+# Copyright 2025 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example Kubernetes Runtime Configuration for OpenSandbox Server
+#
+# Full configuration reference: https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md
+
+[server]
+host = "0.0.0.0"
+port = 8080
+max_sandbox_timeout_seconds = 86400
+
+# Optional: Uncomment to enable API key authentication
+# api_key = "your-secret-api-key"
+# If api_key stays empty, startup requires explicit acknowledgment:
+# - Interactive TTY: type YES when prompted
+# - Non-interactive: set OPENSANDBOX_INSECURE_SERVER=YES
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "kubernetes"
+execd_image = "opensandbox/execd:v1.0.18"
+
+[storage]
+# Allowlist of host path prefixes permitted for bind mounts.
+# If empty, all host paths are allowed (not recommended for production).
+# Example: allowed_host_paths = ["/data/opensandbox", "/tmp/sandbox"]
+allowed_host_paths = []
+
+# Default storage size for auto-created Kubernetes PVCs (when caller omits size).
+volume_default_size = "1Gi"
+
+[kubernetes]
+# Path to kubeconfig file. Leave as null to use in-cluster configuration
+kubeconfig_path = "~/.kube/config"
+
+# Namespace for sandbox workloads
+namespace = "opensandbox"
+
+# [Beta] Enable informer-backed cache to reduce API calls.
+# Set to false to disable the watch-based cache.
+informer_enabled = true
+informer_resync_seconds = 300
+informer_watch_timeout_seconds = 60
+
+# Workload provider type: available providers are registered in the provider factory
+# If not specified, uses the first registered provider (typically "batchsandbox")
+workload_provider = "batchsandbox"
+
+# Image pull policy for the BatchSandbox main container.
+# Values: "Always", "IfNotPresent", "Never".
+image_pull_policy = "IfNotPresent"
+
+# Public snapshot wait timeout. Keep this greater than the Kubernetes
+# controller snapshot commit-job-timeout.
+snapshot_create_timeout_seconds = 900
+
+# Path to the BatchSandbox template file
+batchsandbox_template_file = "~/batchsandbox-template.yaml"
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "opensandbox/egress:v1.0.12"
+mode = "dns"
+# Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
+# disable_ipv6 = false
+
+# 🧪 [EXPERIMENTAL] Renew-on-access. Off by default — see server/README.md.
+[renew_intent]
+enabled = false
+min_interval_seconds = 60
+redis.enabled = false
+# redis.dsn = "redis://127.0.0.1:6379/0"
+# redis.queue_key = "opensandbox:renew:intent"
+# redis.consumer_concurrency = 8

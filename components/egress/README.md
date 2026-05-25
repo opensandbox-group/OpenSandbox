@@ -1,15 +1,15 @@
 # OpenSandbox Egress Sidecar
 
-The **Egress Sidecar** is a core component of OpenSandbox that provides **FQDN-based egress control**. It runs alongside the sandbox application container (sharing the same network namespace) and enforces declared network policies.
+The **Egress** is a core component of OpenSandbox that provides **FQDN-based egress control**. 
 
-> **Status**: Implementing. Currently supports Layer 1 (DNS Proxy). Layer 2 (Network Filter) is on the roadmap.
-> See [OSEP-0001: FQDN-based Egress Control](../../oseps/0001-fqdn-based-egress-control.md) for the detailed design.
+It runs alongside the sandbox application container (sharing the same network namespace) and enforces declared network policies.
 
 ## Features
 
 - **FQDN-based Allowlist**: Control outbound traffic by domain name (e.g., `api.github.com`).
 - **Wildcard Support**: Allow subdomains using wildcards (e.g., `*.pypi.org`).
 - **Transparent Interception**: Uses transparent DNS proxying; no application configuration required.
+- **Experimental: Transparent HTTPS MITM (mitmproxy)**: Optional transparent TLS interception for outbound `80/443` traffic in the sidecar network namespace. See [mitmproxy transparent mode](docs/mitmproxy-transparent.md).
 - **Dynamic DNS (dns+nft mode)**: When a domain is allowed and the proxy resolves it, the resolved A/AAAA IPs are added to nftables with TTL so that default-deny + domain-allow is enforced at the network layer.
 - **Privilege Isolation**: Requires `CAP_NET_ADMIN` only for the sidecar; the application container runs unprivileged.
 - **Graceful Degradation**: If `CAP_NET_ADMIN` is missing, it warns and disables enforcement instead of crashing.
@@ -36,58 +36,55 @@ The egress control is implemented as a **Sidecar** that shares the network names
 
 ## Configuration
 
-- Policy bootstrap & runtime:
-  - Default deny-all. Seed initial policy via `OPENSANDBOX_EGRESS_RULES` (JSON, same shape as `/policy`); empty/`{}`/`null` stays deny-all.
-  - `/policy` at runtime; empty body resets to default deny-all.
-- HTTP service:
-  - Listen address: `OPENSANDBOX_EGRESS_HTTP_ADDR` (default `:18080`).
-  - Auth: `OPENSANDBOX_EGRESS_TOKEN` with header `OPENSANDBOX-EGRESS-AUTH: <token>`; if unset, endpoint is open.
-- Mode (`OPENSANDBOX_EGRESS_MODE`, default `dns`):
-  - `dns`: DNS proxy only, no nftables (IP/CIDR rules have no effect at L2).
-  - `dns+nft`: enable nftables; if nft apply fails, fallback to `dns`. IP/CIDR enforcement and DoH/DoT blocking require this mode.
-- **DNS and nft mode (nameserver whitelist)**  
-  In `dns+nft` mode, the sidecar automatically allows:
-  - **127.0.0.1** — so packets redirected by iptables to the proxy (127.0.0.1:15353) are accepted by nft.
-  - **Nameserver IPs** from `/etc/resolv.conf` — so client DNS and proxy upstream work (e.g. private DNS).  
-  Nameserver IPs are validated (unspecified and loopback are skipped) and capped. Use `OPENSANDBOX_EGRESS_MAX_NS` (default `3`; `0` = no cap, `1`–`10` = cap). See [SECURITY-RISKS.md](SECURITY-RISKS.md) for trust and scope of this whitelist.
-- DoH/DoT blocking:
-  - DoT (tcp/udp 853) blocked by default.
-  - Optional DoH over 443: `OPENSANDBOX_EGRESS_BLOCK_DOH_443=true`. If enabled without blocklist, all 443 is dropped.
-  - DoH blocklist (IP/CIDR, comma-separated): `OPENSANDBOX_EGRESS_DOH_BLOCKLIST="9.9.9.9,1.1.1.1/32,2001:db8::/32"`.
+Most deployments only need these settings:
+
+- **Mode**: `OPENSANDBOX_EGRESS_MODE`
+  - `dns` (default): DNS filtering only
+  - `dns+nft`: DNS + nftables IP/CIDR enforcement (recommended for strict default-deny)
+- **Initial policy**:
+  - `OPENSANDBOX_EGRESS_RULES` (JSON, same shape as `POST /policy`)
+  - or `OPENSANDBOX_EGRESS_POLICY_FILE` (if valid file exists, it takes precedence at startup)
+- **HTTP API**:
+  - `OPENSANDBOX_EGRESS_HTTP_ADDR` (default `:18080`)
+  - `OPENSANDBOX_EGRESS_TOKEN` (optional auth via `OPENSANDBOX-EGRESS-AUTH`)
+- **Rule limit**:
+  - `OPENSANDBOX_EGRESS_MAX_RULES` for `POST/PATCH /policy` (default `4096`, `0` disables cap)
+
+Optional advanced features:
+
+- Nameserver bypass: `OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT`
+- Denied hostname webhook: `OPENSANDBOX_EGRESS_DENY_WEBHOOK`, `OPENSANDBOX_EGRESS_SANDBOX_ID`
+- DoH/DoT controls: `OPENSANDBOX_EGRESS_BLOCK_DOH_443`, `OPENSANDBOX_EGRESS_DOH_BLOCKLIST`
 
 ### Runtime HTTP API
 
-- Default listen address: `:18080` (override with `OPENSANDBOX_EGRESS_HTTP_ADDR`).
-- Endpoints:
-  - `GET /policy` — returns the current policy.
-  - `POST /policy` — replaces the policy. Empty/whitespace/`{}`/`null` resets to default deny-all.
+- `GET /policy`: get current policy
+- `POST /policy`: replace policy (`{}`, `null`, empty body => reset to deny-all)
+- `PATCH /policy`: merge/append rules (body is JSON array of egress rules)
 
-Examples:
+Quick example:
 
-- DNS allowlist (default deny):
-  ```bash
-  curl -XPOST http://127.0.0.1:18080/policy \
-    -d '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.bing.com"}]}'
-  ```
-- DNS blocklist (default allow):
-  ```bash
-  curl -XPOST http://127.0.0.1:18080/policy \
-    -d '{"defaultAction":"allow","egress":[{"action":"deny","target":"*.bing.com"}]}'
-  ```
-- IP/CIDR only:
-  ```bash
-  curl -XPOST http://127.0.0.1:18080/policy \
-    -d '{"defaultAction":"deny","egress":[{"action":"allow","target":"1.1.1.1"},{"action":"deny","target":"10.0.0.0/8"}]}'
-  ```
-- Mixed DNS + IP/CIDR:
-  ```bash
-  curl -XPOST http://127.0.0.1:18080/policy \
-    -d '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.example.com"},{"action":"allow","target":"203.0.113.0/24"},{"action":"deny","target":"*.bad.com"}]}'
-  ```
+```bash
+curl -XPOST http://127.0.0.1:18080/policy \
+  -d '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.example.com"}]}'
+```
+
+### Experimental: Transparent MITM (mitmproxy)
+
+> Status: **Experimental**. APIs, environment variables, and behavior may change.
+
+Optional transparent HTTPS interception for outbound `80/443` traffic in the sidecar network namespace.
+See [docs/mitmproxy-transparent.md](docs/mitmproxy-transparent.md) for configuration and limitations.
+
+### Observability (OpenTelemetry)
+
+Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). **OTLP log export is not used.**
+
+See **[Egress OpenTelemetry reference](docs/opentelemetry.md)** for metrics, structured log fields, and how to enable OTLP metrics (`OTEL_EXPORTER_OTLP_*`, `OPENSANDBOX_EGRESS_SANDBOX_ID`, etc.).
 
 ## Build & Run
 
-### 1. Build Docker Image
+### Build Docker Image
 
 ```bash
 # Build locally
@@ -97,48 +94,37 @@ docker build -t opensandbox/egress:local .
 ./build.sh
 ```
 
-### 2. Run Locally (Docker)
+### Run Locally
 
-To test the sidecar with a sandbox application:
+1. Start sidecar:
 
-1.  **Start the Sidecar** (creates the network namespace):
+```bash
+docker run -d --name sandbox-egress \
+  --cap-add=NET_ADMIN \
+  opensandbox/egress:local
+```
 
-    ```bash
-    docker run -d --name sandbox-egress \
-      --cap-add=NET_ADMIN \
-      opensandbox/egress:local
-    ```
+2. Apply policy:
 
-    *Note: `CAP_NET_ADMIN` is required for `iptables` redirection.*
+```bash
+curl -XPOST http://127.0.0.1:18080/policy \
+  -d '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.google.com"}]}'
+```
 
-    After start, push policy via HTTP (empty body resets to deny-all):
+3. Run app container in the same network namespace:
 
-    ```bash
-    curl -XPOST http://11.167.84.130:18080/policy \
-      -H "OPENSANDBOX-EGRESS-AUTH: $OPENSANDBOX_EGRESS_TOKEN" \
-      -d '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.bing.com"}]}'
-    ```
+```bash
+docker run --rm -it \
+  --network container:sandbox-egress \
+  curlimages/curl sh
+```
 
-2.  **Start Application** (shares sidecar's network):
+4. Verify from app container:
 
-    ```bash
-    docker run --rm -it \
-      --network container:sandbox-egress \
-      curlimages/curl \
-      sh
-    ```
-
-3.  **Verify**:
-
-    Inside the application container:
-
-    ```bash
-    # Allowed domain
-    curl -I https://google.com  # Should succeed
-
-    # Denied domain
-    curl -I https://github.com  # Should fail (resolve error)
-    ```
+```bash
+curl -I https://google.com
+curl -I https://github.com
+```
 
 ## Development
 
@@ -168,8 +154,6 @@ More details in [docs/benchmark.md](docs/benchmark.md).
 
 ## Troubleshooting
 
-- **"iptables setup failed"**: Ensure the sidecar container has `--cap-add=NET_ADMIN`.
-- **DNS resolution fails for all domains**:  
-  - Check if the upstream DNS (from `/etc/resolv.conf`) is reachable.  
-  - In `dns+nft` mode, the sidecar whitelists nameserver IPs from resolv.conf at startup; check logs for `[dns] whitelisting proxy listen + N nameserver(s)` and ensure `/etc/resolv.conf` is readable and contains valid, reachable nameservers. The proxy prefers the first non-loopback nameserver from resolv.conf; if only loopback exists (e.g. Docker 127.0.0.11), it is used (proxy upstream traffic bypasses the redirect). Fallback to 8.8.8.8 only when resolv.conf is empty or unreadable.
-- **Traffic not blocked**: If nftables apply fails, the sidecar falls back to dns; check logs, `nft list table inet opensandbox`, and `CAP_NET_ADMIN`.
+- **"iptables setup failed"**: ensure sidecar has `--cap-add=NET_ADMIN`.
+- **DNS fails for all domains**: check sidecar upstream DNS reachability and logs.
+- **Traffic not blocked as expected**: in `dns+nft`, verify nft applied (`nft list table inet opensandbox`) and check sidecar logs for fallback.

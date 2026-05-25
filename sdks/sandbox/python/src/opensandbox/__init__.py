@@ -100,8 +100,17 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
 from opensandbox.manager import SandboxManager
+from opensandbox.pool import (
+    AcquirePolicy,
+    AsyncSandboxPool,
+    InMemoryAsyncPoolStateStore,
+    InMemoryPoolStateStore,
+    PoolCreationSpec,
+    SandboxPool,
+    SandboxPoolAsync,
+)
 from opensandbox.sandbox import Sandbox
-from opensandbox.sync import SandboxManagerSync, SandboxSync
+from opensandbox.sync import SandboxManagerSync, SandboxPoolSync, SandboxSync
 
 try:
     __version__ = _pkg_version("opensandbox")
@@ -114,4 +123,12 @@ __all__ = [
     "SandboxManager",
     "SandboxSync",
     "SandboxManagerSync",
+    "SandboxPoolSync",
+    "SandboxPoolAsync",
+    "AsyncSandboxPool",
+    "SandboxPool",
+    "AcquirePolicy",
+    "PoolCreationSpec",
+    "InMemoryAsyncPoolStateStore",
+    "InMemoryPoolStateStore",
 ]

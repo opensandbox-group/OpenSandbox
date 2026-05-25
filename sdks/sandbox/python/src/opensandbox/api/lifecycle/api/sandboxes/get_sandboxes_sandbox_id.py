@@ -94,7 +94,7 @@ def sync_detailed(
 
      Returns the complete sandbox information including:
     - `id`, `status`, `metadata`, `expiresAt`, `createdAt`: Core information
-    - `image`: Container image specification (not included in create response)
+    - `image` or `snapshotId`: Startup source information (not included in create response)
     - `entrypoint`: Entry process specification
 
     This is the complete representation of the sandbox resource.
@@ -130,7 +130,7 @@ def sync(
 
      Returns the complete sandbox information including:
     - `id`, `status`, `metadata`, `expiresAt`, `createdAt`: Core information
-    - `image`: Container image specification (not included in create response)
+    - `image` or `snapshotId`: Startup source information (not included in create response)
     - `entrypoint`: Entry process specification
 
     This is the complete representation of the sandbox resource.
@@ -161,7 +161,7 @@ async def asyncio_detailed(
 
      Returns the complete sandbox information including:
     - `id`, `status`, `metadata`, `expiresAt`, `createdAt`: Core information
-    - `image`: Container image specification (not included in create response)
+    - `image` or `snapshotId`: Startup source information (not included in create response)
     - `entrypoint`: Entry process specification
 
     This is the complete representation of the sandbox resource.
@@ -195,7 +195,7 @@ async def asyncio(
 
      Returns the complete sandbox information including:
     - `id`, `status`, `metadata`, `expiresAt`, `createdAt`: Core information
-    - `image`: Container image specification (not included in create response)
+    - `image` or `snapshotId`: Startup source information (not included in create response)
     - `entrypoint`: Entry process specification
 
     This is the complete representation of the sandbox resource.

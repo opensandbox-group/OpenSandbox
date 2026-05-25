@@ -16,12 +16,14 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
 
 // RunCodeRequest represents a code execution request.
@@ -53,11 +55,21 @@ type RunCommandRequest struct {
 	Background bool   `json:"background,omitempty"`
 	// TimeoutMs caps execution duration; 0 uses server default.
 	TimeoutMs int64 `json:"timeout,omitempty" validate:"omitempty,gte=1"`
+
+	Uid  *uint32           `json:"uid,omitempty"`
+	Gid  *uint32           `json:"gid,omitempty"`
+	Envs map[string]string `json:"envs,omitempty"`
 }
 
 func (r *RunCommandRequest) Validate() error {
 	validate := validator.New()
-	return validate.Struct(r)
+	if err := validate.Struct(r); err != nil {
+		return err
+	}
+	if r.Gid != nil && r.Uid == nil {
+		return errors.New("uid is required when gid is provided")
+	}
+	return runtime.ValidateWorkingDir(r.Cwd)
 }
 
 type ServerStreamEventType string

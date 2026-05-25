@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.Json;
 using FluentAssertions;
 using OpenSandbox.Models;
 using Xunit;
@@ -35,6 +36,7 @@ public class ModelsTests
         execution.Results.Should().BeEmpty();
         execution.Error.Should().BeNull();
         execution.Complete.Should().BeNull();
+        execution.ExitCode.Should().BeNull();
     }
 
     [Fact]
@@ -133,6 +135,7 @@ public class ModelsTests
         {
             Id = "sandbox-123",
             Image = new ImageSpec { Uri = "ubuntu:latest" },
+            Platform = new PlatformSpec { Os = "linux", Arch = "amd64" },
             Entrypoint = new List<string> { "tail", "-f", "/dev/null" },
             Status = new SandboxStatus { State = "Running" },
             CreatedAt = DateTime.UtcNow,
@@ -143,6 +146,8 @@ public class ModelsTests
         // Assert
         info.Id.Should().Be("sandbox-123");
         info.Image.Uri.Should().Be("ubuntu:latest");
+        info.Platform.Should().NotBeNull();
+        info.Platform!.Os.Should().Be("linux");
         info.Entrypoint.Should().HaveCount(3);
         info.Status.State.Should().Be("Running");
         info.Metadata.Should().ContainKey("key");
@@ -205,6 +210,45 @@ public class ModelsTests
         policy.Egress.Should().HaveCount(2);
         policy.Egress![0].Action.Should().Be(NetworkRuleAction.Allow);
         policy.Egress[0].Target.Should().Be("example.com");
+    }
+
+    [Fact]
+    public void Volume_WithOssfs_ShouldSerializeExpectedPayload()
+    {
+        var request = new CreateSandboxRequest
+        {
+            Image = new ImageSpec { Uri = "python:3.11" },
+            ResourceLimits = new Dictionary<string, string>(),
+            Entrypoint = new List<string> { "python" },
+            Platform = new PlatformSpec { Os = "linux", Arch = "arm64" },
+            Volumes = new List<Volume>
+            {
+                new()
+                {
+                    Name = "oss-data",
+                    MountPath = "/mnt/oss",
+                    SubPath = "prefix",
+                    Ossfs = new OSSFS
+                    {
+                        Bucket = "bucket-a",
+                        Endpoint = "oss-cn-hangzhou.aliyuncs.com",
+                        AccessKeyId = "ak",
+                        AccessKeySecret = "sk",
+                        Options = new List<string> { "allow_other" }
+                    }
+                }
+            }
+        };
+
+        string json = JsonSerializer.Serialize(request);
+
+        json.Should().Contain("\"ossfs\":");
+        json.Should().Contain("\"bucket\":\"bucket-a\"");
+        json.Should().Contain("\"endpoint\":\"oss-cn-hangzhou.aliyuncs.com\"");
+        json.Should().Contain("\"accessKeyId\":\"ak\"");
+        json.Should().Contain("\"accessKeySecret\":\"sk\"");
+        json.Should().Contain("\"version\":\"2.0\"");
+        json.Should().Contain("\"platform\":{\"os\":\"linux\",\"arch\":\"arm64\"}");
     }
 
     [Fact]
@@ -307,13 +351,46 @@ public class ModelsTests
         {
             WorkingDirectory = "/home/user",
             Background = true,
-            TimeoutSeconds = 30
+            TimeoutSeconds = 30,
+            Uid = 1000,
+            Gid = 1000,
+            Envs = new Dictionary<string, string>
+            {
+                ["APP_ENV"] = "test"
+            }
         };
 
         // Assert
         options.WorkingDirectory.Should().Be("/home/user");
         options.Background.Should().BeTrue();
         options.TimeoutSeconds.Should().Be(30);
+        options.Uid.Should().Be(1000);
+        options.Gid.Should().Be(1000);
+        options.Envs.Should().ContainKey("APP_ENV");
+    }
+
+    [Fact]
+    public void CreateSessionOptions_ShouldStoreWorkingDirectory()
+    {
+        var options = new CreateSessionOptions
+        {
+            WorkingDirectory = "/workspace"
+        };
+
+        options.WorkingDirectory.Should().Be("/workspace");
+    }
+
+    [Fact]
+    public void RunInSessionOptions_ShouldStoreProperties()
+    {
+        var options = new RunInSessionOptions
+        {
+            WorkingDirectory = "/workspace",
+            TimeoutSeconds = 5
+        };
+
+        options.WorkingDirectory.Should().Be("/workspace");
+        options.TimeoutSeconds.Should().Be(5);
     }
 
     [Fact]

@@ -52,7 +52,7 @@ async def main() -> None:
 
     # 2. Create a Sandbox with the code-interpreter image + runtime versions
     sandbox = await Sandbox.create(
-        "opensandbox/code-interpreter:v1.0.1",
+        "opensandbox/code-interpreter:v1.0.2",
         connection_config=config,
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
         env={
@@ -113,7 +113,7 @@ config = ConnectionConfigSync(
 )
 
 sandbox = SandboxSync.create(
-    "opensandbox/code-interpreter:v1.0.1",
+    "opensandbox/code-interpreter:v1.0.2",
     connection_config=config,
     entrypoint=["/opt/opensandbox/code-interpreter.sh"],
     env={"PYTHON_VERSION": "3.11"},

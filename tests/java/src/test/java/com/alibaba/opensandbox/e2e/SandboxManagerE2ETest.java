@@ -68,6 +68,8 @@ public class SandboxManagerE2ETest extends BaseE2ETest {
                         .readyTimeout(Duration.ofSeconds(60))
                         .metadata(Map.of("tag", tag, "team", "t1", "env", "prod"))
                         .env("E2E_TEST", "true")
+                        .env("EXECD_API_GRACE_SHUTDOWN", "3s")
+                        .env("EXECD_JUPYTER_IDLE_POLL_INTERVAL", "200ms")
                         .healthCheckPollingInterval(Duration.ofMillis(500))
                         .build();
         s2 =
@@ -79,6 +81,8 @@ public class SandboxManagerE2ETest extends BaseE2ETest {
                         .readyTimeout(Duration.ofSeconds(60))
                         .metadata(Map.of("tag", tag, "team", "t1", "env", "dev"))
                         .env("E2E_TEST", "true")
+                        .env("EXECD_API_GRACE_SHUTDOWN", "3s")
+                        .env("EXECD_JUPYTER_IDLE_POLL_INTERVAL", "200ms")
                         .healthCheckPollingInterval(Duration.ofMillis(500))
                         .build();
         s3 =
@@ -90,6 +94,8 @@ public class SandboxManagerE2ETest extends BaseE2ETest {
                         .readyTimeout(Duration.ofSeconds(60))
                         .metadata(Map.of("tag", tag, "env", "prod"))
                         .env("E2E_TEST", "true")
+                        .env("EXECD_API_GRACE_SHUTDOWN", "3s")
+                        .env("EXECD_JUPYTER_IDLE_POLL_INTERVAL", "200ms")
                         .healthCheckPollingInterval(Duration.ofMillis(500))
                         .build();
 
@@ -236,6 +242,17 @@ public class SandboxManagerE2ETest extends BaseE2ETest {
         for (SandboxInfo info : noneMatch.getSandboxInfos()) {
             assertFalse(Set.of(s1.getId(), s2.getId(), s3.getId()).contains(info.getId()));
         }
+
+        Map<String, String> patch = new HashMap<>();
+        patch.put("env", "stage");
+        patch.put("team", null);
+        SandboxInfo patched = sandboxManager.patchSandboxMetadata(s2.getId(), patch);
+        assertEquals("stage", patched.getMetadata().get("env"));
+        assertFalse(patched.getMetadata().containsKey("team"));
+
+        SandboxInfo refreshed = sandboxManager.getSandboxInfo(s2.getId());
+        assertEquals("stage", refreshed.getMetadata().get("env"));
+        assertFalse(refreshed.getMetadata().containsKey("team"));
     }
 
     @Test

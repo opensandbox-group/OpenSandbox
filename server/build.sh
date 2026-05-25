@@ -16,6 +16,8 @@
 set -ex
 
 TAG=${TAG:-latest}
+BUILD_METADATA_FILE=${BUILD_METADATA_FILE:-build/server-image-metadata.json}
+mkdir -p "$(dirname "${BUILD_METADATA_FILE}")"
 
 docker buildx rm server-builder || true
 
@@ -35,5 +37,6 @@ docker buildx build \
   -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server:${TAG} \
   "${LATEST_TAGS[@]}" \
   --platform linux/amd64,linux/arm64 \
+  --metadata-file "${BUILD_METADATA_FILE}" \
   --push \
   .

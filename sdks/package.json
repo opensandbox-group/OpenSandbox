@@ -4,15 +4,28 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build:js": "pnpm -r --filter @alibaba-group/opensandbox-code-interpreter... --sort run build",
+    "test:js": "pnpm -r --filter @alibaba-group/opensandbox-code-interpreter... run test",
     "lint:js": "pnpm -r --filter @alibaba-group/opensandbox-code-interpreter... run lint",
+    "typecheck:js": "pnpm -r --filter @alibaba-group/opensandbox-code-interpreter... run typecheck",
     "clean:js": "pnpm -r --filter @alibaba-group/opensandbox-code-interpreter... --sort run clean",
     "publish:js": "pnpm -r --filter @alibaba-group/opensandbox-code-interpreter... publish --access public --no-git-checks"
   },
+  "pnpm": {
+    "overrides": {
+      "minimatch@^5.0.0": "5.1.8",
+      "rollup@^4.0.0": "4.60.2",
+      "picomatch@^4.0.0": "4.0.4",
+      "brace-expansion@^1.0.0": "1.1.13",
+      "brace-expansion@^2.0.0": "2.0.3",
+      "flatted@^3.0.0": "3.4.2",
+      "fast-uri@^3.0.0": "3.1.2"
+    }
+  },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
-    "eslint": "^9.39.2",
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
     "globals": "^17.0.0",
     "typescript": "^5.7.2",
-    "typescript-eslint": "^8.52.0"
+    "typescript-eslint": "^8.59.0"
   }
 }

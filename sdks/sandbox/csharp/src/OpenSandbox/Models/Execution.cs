@@ -166,6 +166,11 @@ public class Execution
     /// Gets or sets the completion information.
     /// </summary>
     public ExecutionComplete? Complete { get; set; }
+
+    /// <summary>
+    /// Gets or sets the command exit code when available.
+    /// </summary>
+    public int? ExitCode { get; set; }
 }
 
 /// <summary>

@@ -17,12 +17,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.run_command_request_envs import RunCommandRequestEnvs
+
 
 T = TypeVar("T", bound="RunCommandRequest")
 
@@ -37,12 +41,21 @@ class RunCommandRequest:
         background (bool | Unset): Whether to run command in detached mode Default: False.
         timeout (int | Unset): Maximum allowed execution time in milliseconds before the command is forcefully
             terminated by the server. If omitted, the server will not enforce any timeout. Example: 60000.
+        uid (int | Unset): Unix user ID used to run the command. If `gid` is provided, `uid` is required.
+             Example: 1000.
+        gid (int | Unset): Unix group ID used to run the command. Requires `uid` to be provided.
+             Example: 1000.
+        envs (RunCommandRequestEnvs | Unset): Environment variables injected into the command process. Example: {'PATH':
+            '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'PYTHONUNBUFFERED': '1'}.
     """
 
     command: str
     cwd: str | Unset = UNSET
     background: bool | Unset = False
     timeout: int | Unset = UNSET
+    uid: int | Unset = UNSET
+    gid: int | Unset = UNSET
+    envs: RunCommandRequestEnvs | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +66,14 @@ class RunCommandRequest:
         background = self.background
 
         timeout = self.timeout
+
+        uid = self.uid
+
+        gid = self.gid
+
+        envs: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.envs, Unset):
+            envs = self.envs.to_dict()
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -67,11 +88,19 @@ class RunCommandRequest:
             field_dict["background"] = background
         if timeout is not UNSET:
             field_dict["timeout"] = timeout
+        if uid is not UNSET:
+            field_dict["uid"] = uid
+        if gid is not UNSET:
+            field_dict["gid"] = gid
+        if envs is not UNSET:
+            field_dict["envs"] = envs
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.run_command_request_envs import RunCommandRequestEnvs
+
         d = dict(src_dict)
         command = d.pop("command")
 
@@ -81,11 +110,25 @@ class RunCommandRequest:
 
         timeout = d.pop("timeout", UNSET)
 
+        uid = d.pop("uid", UNSET)
+
+        gid = d.pop("gid", UNSET)
+
+        _envs = d.pop("envs", UNSET)
+        envs: RunCommandRequestEnvs | Unset
+        if isinstance(_envs, Unset):
+            envs = UNSET
+        else:
+            envs = RunCommandRequestEnvs.from_dict(_envs)
+
         run_command_request = cls(
             command=command,
             cwd=cwd,
             background=background,
             timeout=timeout,
+            uid=uid,
+            gid=gid,
+            envs=envs,
         )
 
         run_command_request.additional_properties = d

@@ -136,7 +136,7 @@ async def _install_requirements(sandbox: Sandbox) -> bool:
 async def main() -> None:
     domain = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
     api_key = os.getenv("SANDBOX_API_KEY")
-    image = os.getenv("SANDBOX_IMAGE", "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1")
+    image = os.getenv("SANDBOX_IMAGE", "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2")
     timesteps = os.getenv("RL_TIMESTEPS", "5000")
 
     config = ConnectionConfig(

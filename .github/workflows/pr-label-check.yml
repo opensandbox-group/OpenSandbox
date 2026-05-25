@@ -1,0 +1,125 @@
+name: PR Label Check
+
+on:
+  pull_request_target:
+    types: [opened, reopened, labeled, unlabeled, synchronize]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  check-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const labels = pr.labels;
+            const prNumber = pr.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const marker = "<!-- LABEL_CHECK_BOT -->";
+
+            function suggestLabels(files) {
+              const dirs = new Set();
+              for (const f of files) {
+                const p = f.filename.split("/");
+                dirs.add(p[0]);
+                if (p.length >= 2) dirs.add(p[0] + "/" + p[1]);
+              }
+              const s = [];
+
+              if (dirs.has("docs") || dirs.has("oseps") || dirs.has("specs") ||
+                  dirs.has("examples")) {
+                s.push("documentation");
+              }
+
+              if (dirs.has("components/egress")) s.push("component/egress");
+              if (dirs.has("components/ingress")) s.push("component/ingress");
+              if (dirs.has("components/execd")) s.push("component/execd");
+              if (dirs.has("components/code-interpreter")) s.push("component/code-interpreter");
+              if (dirs.has("components/internal")) {
+                s.push("component/egress", "component/ingress");
+              }
+
+              // k8s / server
+              if (dirs.has("kubernetes")) s.push("component/k8s");
+              if (dirs.has("server")) s.push("component/server");
+
+              // SDK
+              if (dirs.has("sdks")) {
+                s.push("sdks");
+                if (dirs.has("sdks/go")) s.push("sdk/go");
+                if (dirs.has("sdks/java")) s.push("sdk/java");
+                if (dirs.has("sdks/python")) s.push("sdk/python");
+                if (dirs.has("sdks/js")) s.push("sdk/js");
+                if (dirs.has("sdks/csharp")) s.push("sdk/c#");
+              }
+
+              return [...new Set(s)].sort();
+            }
+
+            if (labels.length === 0) {
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner, repo, pull_number: prNumber,
+              });
+              const suggested = suggestLabels(files);
+
+              const { data: allLabels } = await github.rest.issues.listLabelsForRepo({
+                owner, repo,
+              });
+
+              let tip = "";
+              const suggestedSet = new Set(suggested);
+              const allow = ["bug", "documentation", "feature", "dependencies", "packages"];
+              const otherLabels = allLabels.filter(l =>
+                !suggestedSet.has(l.name) && allow.includes(l.name)
+              );
+              if (suggested.length > 0) {
+                tip = `\n\n📋 **Recommended labels** (based on changed files):\n`;
+                for (const name of suggested) {
+                  tip += `- \`${name}\` ⬅️\n`;
+                }
+                if (otherLabels.length > 0) {
+                  tip += `\nOther available labels:\n`;
+                  for (const lab of otherLabels) {
+                    const desc = lab.description ? ` - ${lab.description}` : "";
+                    tip += `- \`${lab.name}\`${desc}\n`;
+                  }
+                }
+              }
+
+              const touchedDirs = [...new Set(files.map(f => f.filename.split("/")[0]))].join("、");
+              const hint = `\n\n💡 Tip: Use \`feature\` for new functionality or improvements, \`bug\` for fixes.`;
+              const { data: comments } = await github.rest.issues.listComments({
+                owner, repo, issue_number: prNumber,
+              });
+              const existing = comments.filter(
+                c => c.user?.type === "Bot" && c.body?.includes(marker)
+              );
+              if (existing.length === 0) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: prNumber,
+                  body: `${marker}
+            ⚠️  This PR has no labels. Please add one based on the changes.
+
+            Changed directories: ${touchedDirs}.${tip}${hint}
+
+            cc @${pr.user.login}`,
+                });
+              }
+            } else {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner, repo, issue_number: prNumber,
+              });
+              const botComments = comments.filter(
+                c => c.user?.type === "Bot" && c.body?.includes(marker)
+              );
+              for (const c of botComments) {
+                await github.rest.issues.deleteComment({
+                  owner, repo, comment_id: c.id,
+                });
+              }
+            }

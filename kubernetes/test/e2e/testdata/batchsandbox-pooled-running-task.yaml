@@ -1,0 +1,13 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: {{.BatchSandboxName}}
+  namespace: {{.Namespace}}
+spec:
+  replicas: {{.Replicas}}
+  poolRef: {{.PoolName}}
+  taskTemplate:
+    spec:
+      process:
+        command: ["/bin/sh"]
+        args: ["-c", "sleep 3600"]

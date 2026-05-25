@@ -95,9 +95,11 @@ public interface ICodes
     /// <summary>
     /// Interrupts a running code execution.
     /// </summary>
-    /// <param name="contextId">The context ID to interrupt.</param>
+    /// <param name="executionId">
+    /// The execution ID to interrupt, typically obtained from the run result or the <c>init</c> event.
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="contextId"/> is null or empty.</exception>
+    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="executionId"/> is null or empty.</exception>
     /// <exception cref="SandboxException">Thrown when the sandbox service request fails.</exception>
-    Task InterruptAsync(string contextId, CancellationToken cancellationToken = default);
+    Task InterruptAsync(string executionId, CancellationToken cancellationToken = default);
 }

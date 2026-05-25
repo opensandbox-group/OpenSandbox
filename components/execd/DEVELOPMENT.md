@@ -116,11 +116,13 @@ import (
     // Standard library
     "context"
     "fmt"
+    "net/http"
 
     // Third-party
-    "github.com/beego/beego/v2/core/logs"
+    "github.com/gin-gonic/gin"
 
     // Internal
+    "github.com/alibaba/opensandbox/execd/pkg/log"
     "github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
 ```
@@ -133,7 +135,7 @@ Always handle errors explicitly:
 // Good
 result, err := someOperation()
 if err != nil {
-    logs.Error("operation failed: %v", err)
+    log.Error("operation failed: %v", err)
     return fmt.Errorf("failed to do something: %w", err)
 }
 
@@ -143,13 +145,13 @@ result, _ := someOperation()
 
 #### Logging
 
-Use Beego's structured logger:
+Use execd's package logger, which wraps the shared structured logger used by the Gin HTTP layer and runtime code:
 
 ```go
-logs.Info("starting execution: sessionID=%s", sessionID)
-logs.Warning("session busy: sessionID=%s", sessionID)
-logs.Error("execution failed: error=%v", err)
-logs.Debug("received event: type=%s", eventType)
+log.Info("starting execution: sessionID=%s", sessionID)
+log.Warning("session busy: sessionID=%s", sessionID)
+log.Error("execution failed: error=%v", err)
+log.Debug("received event: type=%s", eventType)
 ```
 
 ### Concurrency Best Practices
@@ -159,7 +161,7 @@ logs.Debug("received event: type=%s", eventType)
 Always use `safego.Go` to prevent panics:
 
 ```go
-import "github.com/alibaba/opensandbox/execd/pkg/util/safego"
+import "github.com/alibaba/opensandbox/internal/safego"
 
 safego.Go(func() {
     processInBackground()
@@ -577,7 +579,7 @@ make build
 
 ### External Documentation
 
-- [Beego Documentation](https://beego.wiki/)
+- [Gin Documentation](https://gin-gonic.com/docs/)
 - [Jupyter Kernel Protocol](https://jupyter-client.readthedocs.io/en/stable/messaging.html)
 - [Go Best Practices](https://golang.org/doc/effective_go)
 - [Server-Sent Events Spec](https://html.spec.whatwg.org/multipage/server-sent-events.html)

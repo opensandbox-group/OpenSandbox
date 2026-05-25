@@ -1,0 +1,184 @@
+openapi: 3.1.0
+info:
+  title: OpenSandbox Egress API
+  version: 0.1.0
+  description: |
+    The OpenSandbox Egress API exposes the runtime policy interface served by the
+    egress sidecar inside a sandbox. Unlike the lifecycle API, these operations are
+    performed by connecting to a sandbox endpoint for the egress port and calling
+    the sidecar directly.
+
+    This API is intended for runtime inspection and mutation of outbound network
+    policy after sandbox creation. Initial egress policy configuration during sandbox
+    provisioning remains part of the Sandbox Lifecycle API create request.
+
+    ## Access Model
+
+    Clients typically access this API in two steps:
+
+    1. Use the Sandbox Lifecycle API to resolve the sandbox endpoint for the egress
+       service port.
+    2. Send requests directly to that endpoint's `/policy` route.
+
+    ## Authentication
+
+    The sidecar may optionally require the `OPENSANDBOX-EGRESS-AUTH` header. When
+    the sandbox endpoint resolver returns required headers, clients must forward
+    them on every egress API request.
+servers:
+  - url: http://localhost:18080
+    description: Local egress sidecar
+tags:
+  - name: Policy
+    description: Inspect and mutate sandbox egress policy at runtime
+paths:
+  /policy:
+    get:
+      tags: [Policy]
+      summary: Get current egress policy
+      description: |
+        Returns the currently enforced egress policy and the sidecar's derived
+        runtime mode metadata.
+      responses:
+        '200':
+          description: Current policy returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyStatusResponse'
+              examples:
+                deny-with-allowlist:
+                  summary: Current deny-by-default policy
+                  value:
+                    status: ok
+                    mode: deny_all
+                    enforcementMode: dns
+                    policy:
+                      defaultAction: deny
+                      egress:
+                        - action: allow
+                          target: pypi.org
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    patch:
+      tags: [Policy]
+      summary: Patch egress rules
+      description: |
+        Merge incoming egress rules with the currently enforced policy.
+
+        This endpoint uses merge semantics:
+        - Existing rules remain unless overridden by incoming rules.
+        - Incoming rules are applied with higher priority than existing rules.
+        - If multiple incoming rules refer to the same `target`, the first one wins.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/NetworkRule'
+            examples:
+              duplicate-target-first-wins:
+                summary: First rule wins for duplicate target within the same patch payload
+                value:
+                  - action: allow
+                    target: example.com
+                  - action: deny
+                    target: example.com
+      responses:
+        '200':
+          description: Patch applied successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyStatusResponse'
+              examples:
+                patched:
+                  summary: Patch applied
+                  value:
+                    status: ok
+                    mode: deny_all
+                    enforcementMode: dns
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  responses:
+    BadRequest:
+      description: The request was invalid or malformed.
+      content:
+        text/plain:
+          schema:
+            type: string
+    Unauthorized:
+      description: Authentication failed for the egress sidecar.
+      content:
+        text/plain:
+          schema:
+            type: string
+    InternalServerError:
+      description: The sidecar failed to apply or fetch policy state.
+      content:
+        text/plain:
+          schema:
+            type: string
+  schemas:
+    PolicyStatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          description: Operation status reported by the sidecar.
+          example: ok
+        mode:
+          type: string
+          description: Derived runtime mode for the current policy.
+          example: deny_all
+        enforcementMode:
+          type: string
+          description: Egress sidecar enforcement backend mode.
+          example: dns
+        reason:
+          type: string
+          description: Optional human-readable reason when the sidecar returns extra context.
+        policy:
+          $ref: '#/components/schemas/NetworkPolicy'
+      additionalProperties: false
+    NetworkPolicy:
+      type: object
+      description: |
+        Egress network policy matching the sidecar `/policy` request body.
+        If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
+        object or null results in allow-all behavior at startup.
+      properties:
+        defaultAction:
+          type: string
+          enum: [allow, deny]
+          description: Default action when no egress rule matches. Defaults to "deny".
+        egress:
+          type: array
+          description: List of egress rules evaluated in order.
+          items:
+            $ref: '#/components/schemas/NetworkRule'
+      additionalProperties: false
+    NetworkRule:
+      type: object
+      properties:
+        action:
+          type: string
+          enum: [allow, deny]
+          description: Whether to allow or deny matching targets.
+        target:
+          type: string
+          description: |
+            FQDN or wildcard domain (e.g., "example.com", "*.example.com").
+            IP/CIDR not yet supported in the egress MVP.
+      required: [action, target]
+      additionalProperties: false

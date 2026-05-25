@@ -1,0 +1,7 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: SandboxSnapshot
+metadata:
+  name: {{.SnapshotName}}
+  namespace: {{.Namespace}}
+spec:
+  sandboxName: {{.SandboxName}}

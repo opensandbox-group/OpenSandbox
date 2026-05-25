@@ -21,12 +21,17 @@ var (
 	// Port controls the HTTP listener port.
 	Port int
 
-	// Namespace filters the target sandbox instances.
-	Namespace string
-
 	// ProviderType specifies the sandbox provider type (e.g., batchsandbox).
 	ProviderType string
 
 	// Mode specifies the sandbox service discovery mode (e.g., header, uri).
 	Mode string
+
+	RenewIntentEnabled        bool
+	RenewIntentRedisDSN       string
+	RenewIntentQueueKey       string
+	RenewIntentQueueMaxLen    int
+	RenewIntentMinIntervalSec int
+
+	SecureAccessKeys string
 )

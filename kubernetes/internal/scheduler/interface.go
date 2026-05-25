@@ -27,6 +27,10 @@ type TaskScheduler interface {
 	UpdatePods(pod []*corev1.Pod)
 	ListTask() []Task
 	StopTask() []Task
+	// AddTasks registers task specs that are not yet tracked by the scheduler.
+	// Tasks whose names are already tracked are silently skipped, making this
+	// safe to call with the full task list during a scale-out reconciliation.
+	AddTasks(tasks []*apis.Task) error
 }
 
 func NewTaskScheduler(name string, tasks []*apis.Task, pods []*corev1.Pod, resPolicyWhenTaskCompleted sandboxv1alpha1.TaskResourcePolicy, logger logr.Logger) (TaskScheduler, error) {

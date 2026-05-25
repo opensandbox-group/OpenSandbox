@@ -14,7 +14,7 @@
 
 from datetime import datetime, timezone
 
-from src.services.helpers import parse_timestamp
+from opensandbox_server.services.helpers import parse_timestamp
 
 
 def test_parse_timestamp_truncates_nanoseconds():

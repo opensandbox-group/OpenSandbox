@@ -20,6 +20,7 @@ Defines the contract for **blocking** command execution operations inside a sand
 This is the sync counterpart of :mod:`opensandbox.services.command`.
 """
 
+from datetime import timedelta
 from typing import Protocol
 
 from opensandbox.models.execd import (
@@ -115,4 +116,32 @@ class CommandsSync(Protocol):
         Raises:
             SandboxException: If the operation fails.
         """
+        ...
+
+    def create_session(self, *, working_directory: str | None = None) -> str:
+        """Create a bash session. Returns session_id for run_in_session and delete_session."""
+        ...
+
+    def run_in_session(
+        self,
+        session_id: str,
+        command: str,
+        *,
+        working_directory: str | None = None,
+        timeout: timedelta | None = None,
+        handlers: ExecutionHandlersSync | None = None,
+    ) -> Execution:
+        """Run a shell command in an existing bash session (streams output via SSE).
+
+        Args:
+            session_id: Session ID from ``create_session``.
+            command: Shell command to execute.
+            working_directory: Optional working directory override for this run.
+            timeout: Optional max execution time for this session run.
+            handlers: Optional sync handlers for streaming events.
+        """
+        ...
+
+    def delete_session(self, session_id: str) -> None:
+        """Delete a bash session and release resources."""
         ...

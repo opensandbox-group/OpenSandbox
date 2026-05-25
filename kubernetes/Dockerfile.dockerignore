@@ -1,0 +1,15 @@
+**
+!Dockerfile
+!go.mod
+!go.sum
+!cmd/**
+!apis/**
+!pkg/**
+!internal/**
+!kubernetes/Dockerfile
+!kubernetes/go.mod
+!kubernetes/go.sum
+!kubernetes/cmd/**
+!kubernetes/apis/**
+!kubernetes/pkg/**
+!kubernetes/internal/**

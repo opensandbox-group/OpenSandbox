@@ -24,11 +24,13 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
-	"github.com/alibaba/opensandbox/execd/pkg/util/safego"
+	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
+	"github.com/alibaba/opensandbox/internal/safego"
 )
 
 // runCommand executes shell commands and streams their output on Windows.
@@ -42,24 +44,35 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}
 
 	startAt := time.Now()
-	log.Info("received command: %v", request.Code)
+	log.Info("received command: %v", log.SanitizeCommand(request.Code))
 	cmd := exec.CommandContext(ctx, "cmd", "/C", request.Code)
+	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
+	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	if err != nil {
+		return fmt.Errorf("resolve cwd: %w", err)
+	}
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Dir = request.Cwd
-	cmd.Env = mergeEnvs(os.Environ(), loadExtraEnvFromFile())
+	cmd.Dir = cwd
+	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	done := make(chan struct{}, 1)
+	var wg sync.WaitGroup
+	wg.Add(2)
 	safego.Go(func() {
+		defer wg.Done()
 		c.tailStdPipe(c.stdoutFileName(session), request.Hooks.OnExecuteStdout, done)
 	})
 	safego.Go(func() {
+		defer wg.Done()
 		c.tailStdPipe(c.stderrFileName(session), request.Hooks.OnExecuteStderr, done)
 	})
 
 	err = cmd.Start()
 	if err != nil {
+		close(done)
+		wg.Wait()
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
 		log.Error("CommandExecError: error starting commands: %v", err)
 		return nil
@@ -74,6 +87,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 	err = cmd.Wait()
 	close(done)
+	wg.Wait()
 	if err != nil {
 		var eName, eValue string
 		var traceback []string
@@ -115,13 +129,18 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	stderrPath := c.combinedOutputFileName(session)
 
 	startAt := time.Now()
-	log.Info("received command: %v", request.Code)
+	log.Info("received command: %v", log.SanitizeCommand(request.Code))
 	cmd := exec.CommandContext(ctx, "cmd", "/C", request.Code)
+	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
+	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	if err != nil {
+		return fmt.Errorf("resolve cwd: %w", err)
+	}
 
-	cmd.Dir = request.Cwd
+	cmd.Dir = cwd
 	cmd.Stdout = pipe
 	cmd.Stderr = pipe
-	cmd.Env = mergeEnvs(os.Environ(), loadExtraEnvFromFile())
+	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	devNull, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0) // best-effort, ignore error
 	cmd.Stdin = devNull

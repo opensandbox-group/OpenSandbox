@@ -17,8 +17,8 @@
 ```shell
 git clone git@github.com:alibaba/OpenSandbox.git
 cd OpenSandbox/server
-cp example.config.zh.toml ~/.sandbox.toml
-uv sync && uv run python -m src.main
+cp opensandbox_server/examples/example.config.zh.toml ~/.sandbox.toml
+uv sync && uv run python -m opensandbox_server.main
 ```
 
 ### 2. 配置允许的宿主机路径
@@ -233,4 +233,4 @@ Sandbox sandbox = Sandbox.builder()
 
 - [OSEP-0003: Volume 与 VolumeBinding 支持](../../oseps/0003-volume-and-volumebinding-support.md) — 设计提案
 - [Sandbox Lifecycle API 规范](../../specs/sandbox-lifecycle.yml) — Volume 定义的 OpenAPI 规范
-- [服务端配置示例](../../server/example.config.zh.toml) — `[storage]` 段中的 `allowed_host_paths` 配置
+- [服务端配置示例](../../server/opensandbox_server/examples/example.config.zh.toml) — `[storage]` 段中的 `allowed_host_paths` 配置

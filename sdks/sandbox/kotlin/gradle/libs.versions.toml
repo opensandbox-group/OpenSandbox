@@ -17,6 +17,7 @@ kotlin = "2.2.21"
 kotlinx-serialization = "1.9.0"
 okhttp = "4.12.0"
 slf4j = "2.0.9"
+jedis = "5.2.0"
 junit = "5.10.1"
 mockk = "1.13.8"
 spotless = "6.23.3"
@@ -41,6 +42,9 @@ kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 
 # Logging
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+
+# Redis
+jedis = { module = "redis.clients:jedis", version.ref = "jedis" }
 
 # Testing
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }

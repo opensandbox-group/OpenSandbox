@@ -36,7 +36,32 @@ controller:
   
   # -- Log level for zap logger (debug, info, error)
   logLevel: info
-  
+
+  # -- Kubernetes client rate limiter configuration
+  kubeClient:
+    # -- QPS for Kubernetes client rate limiter.
+    qps: 100
+    # -- Burst for Kubernetes client rate limiter.
+    burst: 200
+
+  # -- Pause/Resume snapshot configuration
+  snapshot:
+    # -- Image used for commit operations (must contain nerdctl tool)
+    # DockerHub: opensandbox/image-committer:v0.1.0
+    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.0"
+    # -- Containerd socket path of host
+    containerdSocketPath: "/var/run/containerd/containerd.sock"
+    # -- Timeout duration for commit jobs
+    commitJobTimeout: "10m"
+    # -- OCI registry prefix used for snapshot images.
+    registry: ""
+    # -- Use insecure registry mode when pushing snapshot images.
+    registryInsecure: false
+    # -- Secret name used by commit Jobs to push snapshot images.
+    snapshotPushSecret: ""
+    # -- Secret name injected into resumed sandboxes for pulling snapshot images.
+    resumePullSecret: ""
+
   # -- Enable leader election for controller manager
   leaderElection:
     enabled: true

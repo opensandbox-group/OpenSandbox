@@ -27,11 +27,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
 func DeleteFile(filePath string) error {
-	absPath, err := filepath.Abs(filePath)
+	absPath, err := pathutil.ExpandAbsPath(filePath)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
 	}
@@ -56,7 +57,7 @@ func DeleteFile(filePath string) error {
 }
 
 func ChmodFile(file string, perms model.Permission) error {
-	abs, err := filepath.Abs(file)
+	abs, err := pathutil.ExpandAbsPath(file)
 	if err != nil {
 		return err
 	}
@@ -81,12 +82,12 @@ func SetFileOwnership(_ string, _ string, _ string) error {
 }
 
 func RenameFile(item model.RenameFileItem) error {
-	srcPath, err := filepath.Abs(item.Src)
+	srcPath, err := pathutil.ExpandAbsPath(item.Src)
 	if err != nil {
 		return fmt.Errorf("invalid source path: %w", err)
 	}
 
-	dstPath, err := filepath.Abs(item.Dest)
+	dstPath, err := pathutil.ExpandAbsPath(item.Dest)
 	if err != nil {
 		return fmt.Errorf("invalid destination path: %w", err)
 	}
@@ -113,7 +114,7 @@ func RenameFile(item model.RenameFileItem) error {
 }
 
 func MakeDir(dir string, perm model.Permission) error {
-	abs, err := filepath.Abs(dir)
+	abs, err := pathutil.ExpandAbsPath(dir)
 	if err != nil {
 		return err
 	}
@@ -126,7 +127,7 @@ func MakeDir(dir string, perm model.Permission) error {
 }
 
 func GetFileInfo(filePath string) (model.FileInfo, error) {
-	absPath, err := filepath.Abs(filePath)
+	absPath, err := pathutil.ExpandAbsPath(filePath)
 	if err != nil {
 		return model.FileInfo{}, fmt.Errorf("invalid path %s: %w", filePath, err)
 	}

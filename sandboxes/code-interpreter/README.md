@@ -12,6 +12,7 @@ provide an out-of-the-box multi-language code execution environment.
 - **Version Switching**: Easy runtime version switching without rebuilding
 - **Jupyter Integration**: Built-in Jupyter Notebook with multi-language kernels
 - **Multi-Architecture**: Supports both amd64 and arm64 architectures
+- **clone3-workaround (amd64)**: The image installs [AkihiroSuda/clone3-workaround](https://github.com/AkihiroSuda/clone3-workaround) v1.0.0 as `/usr/local/bin/clone3-workaround` on **linux/amd64** only (upstream ships no arm64 binary), plus **`libseccomp2`** because the upstream binary is dynamically linked to `libseccomp`. Use it to wrap commands on very old Docker/containerd hosts, e.g. `clone3-workaround apt-get update`.
 - **Production Ready**: Optimized for containerized execution environments
 
 ## Supported Languages & Versions
@@ -57,6 +58,10 @@ docker run -it --rm \
   -e GO_VERSION=1.24 \
   opensandbox/code-interpreter:latest
 ```
+
+### `EXECD_CLONE3_COMPAT` (clone3-workaround)
+
+If you set `EXECD_CLONE3_COMPAT` to `1`, `true`, `yes`, `on`, or `reexec` (same semantics as [execd](../../components/execd/README.md#linux-clone3-compatibility-inside-sandboxes)), the entrypoint script **re-executes itself** under `/usr/local/bin/clone3-workaround` before Jupyter and kernel setup. That binary is included on **linux/amd64** only; on **arm64** builds the script prints a warning and continues without wrapping. After a successful wrap, the script **unsets** `EXECD_CLONE3_COMPAT` in the running process tree. Use `0`, `false`, `off`, `no`, or leave unset to disable.
 
 ## Version Switching
 

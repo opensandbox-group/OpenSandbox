@@ -1,0 +1,17 @@
+# E2E-only BatchSandbox template (not used in production defaults).
+# Bundled in the server image for scripts/python-k8s-e2e*.sh; config.toml selects this path.
+#
+# Faster Pod teardown in Kind/CI: skip the default 30s graceful termination window.
+# Do not use for real workloads where graceful shutdown matters.
+
+# Metadata template (will be merged with runtime-generated metadata)
+metadata:
+# Spec template
+spec:
+  replicas: 1
+  template:
+    spec:
+      terminationGracePeriodSeconds: 0
+      restartPolicy: Never
+      tolerations:
+        - operator: "Exists"

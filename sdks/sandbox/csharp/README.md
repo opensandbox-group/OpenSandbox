@@ -55,6 +55,7 @@ try
 catch (SandboxException ex)
 {
     Console.Error.WriteLine($"Sandbox Error: [{ex.Error.Code}] {ex.Error.Message}");
+    Console.Error.WriteLine($"Request ID: {ex.RequestId}");
 }
 ```
 
@@ -68,7 +69,7 @@ Manage the sandbox lifecycle, including renewal, pausing, and resuming.
 var info = await sandbox.GetInfoAsync();
 Console.WriteLine($"State: {info.Status.State}");
 Console.WriteLine($"Created: {info.CreatedAt}");
-Console.WriteLine($"Expires: {info.ExpiresAt}");
+Console.WriteLine($"Expires: {info.ExpiresAt}"); // null when manual cleanup mode is used
 
 await sandbox.PauseAsync();
 
@@ -78,6 +79,23 @@ var resumed = await sandbox.ResumeAsync();
 // Renew: expiresAt = now + timeoutSeconds
 await resumed.RenewAsync(30 * 60);
 ```
+
+Create a non-expiring sandbox by setting `ManualCleanup = true`:
+
+```csharp
+var manual = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "ubuntu",
+    ManualCleanup = true,
+});
+```
+
+Note: unlike the Python, JavaScript, and Kotlin SDKs, the C# SDK uses an explicit
+`ManualCleanup` flag instead of `TimeoutSeconds = null`. This is intentional:
+`int?` in the current options model cannot reliably distinguish "unset, use the
+default TTL" from "explicitly request manual cleanup" without making the default
+creation path ambiguous.
 
 ### Connect to an Existing Sandbox
 
@@ -293,6 +311,9 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 | `ReadyTimeoutSeconds` | Max time to wait for readiness | 30 seconds |
 | `HealthCheckPollingInterval` | Poll interval while waiting (milliseconds) | 200 ms |
 
+Note: metadata keys under `opensandbox.io/` are reserved for system-managed
+labels and will be rejected by the server.
+
 ```csharp
 var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 {
@@ -319,15 +340,37 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 });
 ```
 
-### 4. Timeout and Retry Behavior
+### 4. Runtime Egress Policy Updates
+
+Runtime egress reads and patches go directly to the sandbox egress sidecar.
+The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+
+Patch uses merge semantics:
+- Incoming rules take priority over existing rules with the same `Target`.
+- Existing rules for other targets remain unchanged.
+- Within a single patch payload, the first rule for a `Target` wins.
+- The current `DefaultAction` is preserved.
+
+```csharp
+var policy = await sandbox.GetEgressPolicyAsync();
+
+await sandbox.PatchEgressRulesAsync(new[]
+{
+    new NetworkRule { Action = NetworkRuleAction.Allow, Target = "www.github.com" },
+    new NetworkRule { Action = NetworkRuleAction.Deny, Target = "pypi.org" }
+});
+```
+
+### 5. Timeout and Retry Behavior
 
 - `ConnectionConfig.RequestTimeoutSeconds` controls timeout for SDK HTTP calls.
 - `RunCommandOptions.TimeoutSeconds` controls command execution timeout for command runs.
+- `RunInSessionOptions.TimeoutSeconds` controls command execution timeout for session runs.
 - `SandboxCreateOptions.TimeoutSeconds` controls sandbox server-side TTL.
 - `ReadyTimeoutSeconds` controls how long `CreateAsync` / `ConnectAsync` waits for readiness.
 - The SDK does not automatically retry failed API requests; implement retries in caller code where appropriate.
 
-### 5. Resource Cleanup
+### 6. Resource Cleanup
 
 Both `Sandbox` and `SandboxManager` implement `IAsyncDisposable`. Use `await using` or call `DisposeAsync()` when done.
 

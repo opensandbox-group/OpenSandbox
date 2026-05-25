@@ -43,7 +43,7 @@ classifiers = [
 ]
 dependencies = [
     "mcp[cli]",
-    "opensandbox>=0.1.4,<0.2.0",
+    "opensandbox>=0.1.7,<0.2.0",
 ]
 
 [project.urls]

@@ -43,7 +43,7 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.4.2,<3.0",
-    "opensandbox>=0.1.1,<0.2.0",
+    "opensandbox>=0.1.7,<0.2.0",
 ]
 
 [project.urls]

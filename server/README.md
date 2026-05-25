@@ -1,7 +1,5 @@
 # OpenSandbox Server
 
-English | [中文](README_zh.md)
-
 A production-grade, FastAPI-based service for managing the lifecycle of containerized sandboxes. It acts as the control plane to create, run, monitor, and dispose isolated execution environments across container platforms.
 
 ## Features
@@ -10,8 +8,8 @@ A production-grade, FastAPI-based service for managing the lifecycle of containe
 - **Lifecycle APIs**: Standardized REST interfaces for create, start, pause, resume, delete
 - **Pluggable runtimes**:
   - **Docker**: Production-ready
-  - **Kubernetes**: Production-ready (see `kubernetes/` for deployment)
-- **Automatic expiration**: Configurable TTL with renewal
+  - **Kubernetes**: Production-ready (see [`../kubernetes/README.md`](../kubernetes/README.md) for deployment)
+- **Lifecycle cleanup modes**: Configurable TTL with renewal, or manual cleanup with explicit delete
 - **Access control**: API Key authentication (`OPEN-SANDBOX-API-KEY`); can be disabled for local/dev
 - **Networking modes**:
   - Host: shared host network, performance first
@@ -27,6 +25,9 @@ A production-grade, FastAPI-based service for managing the lifecycle of containe
 - **Port resolution**: Dynamic endpoint generation
 - **Structured errors**: Standard error codes and messages
 
+Metadata keys under the reserved prefix `opensandbox.io/` are system-managed
+and cannot be supplied by users.
+
 ## Requirements
 
 - **Python**: 3.10 or higher
@@ -40,259 +41,48 @@ A production-grade, FastAPI-based service for managing the lifecycle of containe
 
 ### Installation
 
-1. **Install from PyPI**:
-   > For source development or contributions, you can still clone the repo and run `uv sync` inside `server/`.
-   ```bash
-   uv pip install opensandbox-server
-   ```
+Install from PyPI. For local development, clone the repo and run `uv sync` in `server/`.
+
+```bash
+uv pip install opensandbox-server
+```
 
 ### Configuration
 
-The server uses a TOML configuration file to select and configure the underlying runtime.
+The server reads a **TOML** file. Default path: `~/.sandbox.toml`. Override with **`SANDBOX_CONFIG_PATH`** or **`opensandbox-server --config /path/to/sandbox.toml`**.
 
-**Init configuration from simple example**:
+1. Generate a starter file (see `opensandbox-server -h` for all flags):
+
 ```bash
-# run opensandbox-server -h for help
 opensandbox-server init-config ~/.sandbox.toml --example docker
+# Kubernetes: --example k8s  (deploy the operator / CRDs per ../kubernetes/ first)
+# Locales: docker-zh | k8s-zh  |  omit --example for a schema-only skeleton  |  add --force to overwrite
 ```
 
-**Create K8S configuration file**
+2. Edit the file for your environment. **Full reference:** **[configuration.md](configuration.md)** (all keys, defaults, validation, env vars).
 
-The K8S version of the Sandbox Operator needs to be deployed in the cluster, refer to the Kubernetes directory.
-```bash
-# run opensandbox-server -h for help
-opensandbox-server init-config ~/.sandbox.toml --example k8s
-```
+   Topics covered there include: Docker **`network_mode`** / **`host_ip`** (e.g. server in Docker Compose), **`[egress]`** when clients send **`networkPolicy`**, **`[ingress]`**, **`[secure_runtime]`**, Kubernetes **`workload_provider`** / **`batchsandbox_template_file`**, **`[agent_sandbox]`**, TTL caps, **`[renew_intent]`**.
+   The server-wide persistence backend is configured under **`[store]`**; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records.
 
-**[optional] Edit configuration for your environment**
-
-- For quick e2e/demo (specify which one):
-  ```bash
-  opensandbox-server init-config ~/.sandbox.toml --example docker  # or docker-zh|k8s|k8s-zh
-  # add --force to overwrite existing file
-  ```
-- Render the full schema-driven skeleton (no defaults, just placeholders) by omitting --example:
-  ```bash
-  opensandbox-server init-config ~/.sandbox.toml
-  # add --force to overwrite existing file
-  ```
-
-**[optional] Edit `~/.sandbox.toml` for your environment**
-
-Before you start the server, edit the configuration file to suit your environment. You could also generate a new empty configuration file by `opensandbox-server init-config ~/.sandbox.toml`.
-
-**Docker runtime + host networking**
-   ```toml
-   [server]
-   host = "0.0.0.0"
-   port = 8080
-   log_level = "INFO"
-   api_key = "your-secret-api-key-change-this"
-
-   [runtime]
-   type = "docker"
-   execd_image = "opensandbox/execd:v1.0.6"
-
-   [docker]
-   network_mode = "host"  # Containers share host network; only one sandbox instance at a time
-   ```
-
-**Docker runtime + bridge networking**
-   ```toml
-   [server]
-   host = "0.0.0.0"
-   port = 8080
-   log_level = "INFO"
-   api_key = "your-secret-api-key-change-this"
-
-   [runtime]
-   type = "docker"
-   execd_image = "opensandbox/execd:v1.0.6"
-
-   [docker]
-   network_mode = "bridge"  # Isolated container networking
-   ```
-
-**Docker Compose deployment (server runs in a container)**
-
-When `opensandbox-server` itself runs inside Docker Compose and manages sandboxes via
-mounted `/var/run/docker.sock`, configure a reachable host value for bridge-mode endpoint
-resolution:
-
-```toml
-[docker]
-network_mode = "bridge"
-host_ip = "host.docker.internal"  # or host LAN IP (for Linux: explicit host IP is recommended)
-```
-
-Why this matters:
-- In bridge mode, sandbox containers get internal Docker IPs.
-- External callers usually cannot reach those internal IPs directly.
-- `host_ip` lets endpoint resolution return host-reachable addresses.
-
-For SDK/API clients that cannot directly reach sandbox bridge addresses, request proxied
-endpoints through the server:
-
-```bash
-curl -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" \
-  "http://localhost:8080/v1/sandboxes/<sandbox-id>/endpoints/44772?use_server_proxy=true"
-```
-
-The returned endpoint is rewritten to the server proxy route:
-- `<server-host>/sandboxes/<sandbox-id>/proxy/<port>`
-
-Reference runtime compose file:
-- `server/docker-compose.example.yaml`
-
-**Security hardening (applies to all Docker modes)**
-   ```toml
-   [docker]
-   # Drop dangerous capabilities and block privilege escalation by default
-   drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
-   no_new_privileges = true
-   apparmor_profile = ""        # e.g. "docker-default" when AppArmor is available
-   # Limit fork bombs and optionally enforce seccomp / read-only rootfs
-   pids_limit = 512             # set to null to disable
-   seccomp_profile = ""        # path or profile name; empty uses Docker default
-   ```
-   Further reading on Docker container security: https://docs.docker.com/engine/security/
-
-For common issues and solutions, see [Troubleshooting](TROUBLESHOOTING.md).
-
-**Secure container runtime (optional)**
-
-OpenSandbox supports secure container runtimes for enhanced isolation:
-
-```toml
-[secure_runtime]
-type = "gvisor"              # Options: "", "gvisor", "kata", "firecracker"
-docker_runtime = "runsc"      # Docker OCI runtime name (for gVisor, Kata)
-# k8s_runtime_class = "gvisor"  # Kubernetes RuntimeClass name (for K8s)
-```
-
-- `type=""` (default): No secure runtime, uses runc
-- `type="gvisor"`: Uses gVisor (runsc) for user-space kernel isolation
-- `type="kata"`: Uses Kata Containers for VM-level isolation
-- `type="firecracker"`: Uses Firecracker microVM (Kubernetes only)
-
-> **Detailed guide**: See [Secure Container Runtime Guide](../docs/secure-container.md) for complete installation instructions, system requirements, and troubleshooting.
-
-**Docker daemon setup** for gVisor:
-```json
-{
-  "runtimes": {
-    "runsc": {
-      "path": "/usr/bin/runsc"
-    }
-  }
-}
-```
-
-**Kubernetes setup**: Create RuntimeClass before using:
-```bash
-kubectl create -f - <<EOF
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: gvisor
-handler: runsc
-EOF
-```
-
-**Ingress exposure (direct | gateway)**
-   ```toml
-   [ingress]
-   mode = "direct"  # docker runtime only supports direct
-   # gateway.address = "*.example.com"         # host only (domain or IP[:port]); scheme is not allowed
-   # gateway.route.mode = "wildcard"            # wildcard | uri | header
-   ```
-   - `mode=direct`: default; required when `runtime.type=docker` (client ↔ sandbox direct reachability, no L7 gateway).
-   - `mode=gateway`: configure external ingress.
-     - `gateway.address`: wildcard domain required when `gateway.route.mode=wildcard`; otherwise must be domain, IP, or IP:port. Do not include scheme; clients decide http/https.
-     - `gateway.route.mode`: `wildcard` (host-based wildcard), `uri` (path-prefix), `header` (header-based routing).
-     - Response format examples:
-       - `wildcard`: `<sandbox-id>-<port>.example.com/path/to/request`
-       - `uri`: `10.0.0.1:8000/<sandbox-id>/<port>/path/to/request`
-       - `header`: `gateway.example.com` with header `OpenSandbox-Ingress-To: <sandbox-id>-<port>`
-
-**Kubernetes runtime**
-   ```toml
-   [runtime]
-   type = "kubernetes"
-   execd_image = "opensandbox/execd:v1.0.5"
-
-   [kubernetes]
-   kubeconfig_path = "~/.kube/config"
-   namespace = "opensandbox"
-   workload_provider = "batchsandbox"   # or "agent-sandbox"
-   informer_enabled = true              # Beta: enable watch-based cache
-   informer_resync_seconds = 300        # Beta: full list interval
-   informer_watch_timeout_seconds = 60  # Beta: watch restart interval
-   ```
-   - Informer settings are **beta** and enabled by default to reduce API calls; set `informer_enabled = false` to turn off.
-   - Resync and watch timeouts control how often the cache refreshes; tune for your cluster API limits.
-
-### Egress sidecar for `networkPolicy`
-
-- **Required when using `networkPolicy`**: Configure the sidecar image. The `egress.image` setting is mandatory when requests include `networkPolicy`:
-   ```toml
-   [runtime]
-   type = "docker"
-   execd_image = "opensandbox/execd:v1.0.6"
-   
-   [egress]
-   image = "opensandbox/egress:v1.0.1"
-   ```
-- Supported only in Docker bridge mode; requests with `networkPolicy` are rejected when `network_mode=host` or when `egress.image` is not configured.
-- Main container shares the sidecar netns and explicitly drops `NET_ADMIN`; the sidecar keeps `NET_ADMIN` to manage iptables.
-- IPv6 is disabled in the shared namespace when the egress sidecar is injected to keep policy enforcement consistent.
-- Sidecar image is pulled before start; delete/expire/failure paths attempt to clean up the sidecar as well.
-- Request example (`CreateSandboxRequest` with `networkPolicy`):
-   ```json
-   {
-     "image": {"uri": "python:3.11-slim"},
-     "entrypoint": ["python", "-m", "http.server", "8000"],
-     "timeout": 3600,
-     "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
-     "networkPolicy": {
-       "defaultAction": "deny",
-       "egress": [
-         {"action": "allow", "target": "pypi.org"},
-         {"action": "allow", "target": "*.python.org"}
-       ]
-     }
-   }
-   ```
-- When `networkPolicy` is empty or omitted, no sidecar is injected (allow-all at start).
+**Also useful:** [Secure container runtime](../docs/secure-container.md) · [Manual cleanup / optional fields](../docs/manual-cleanup-refactor-guide.md) · [Egress component](../components/egress/README.md) · [`docker-compose.example.yaml`](docker-compose.example.yaml) · [Experimental features](#experimental-features)
 
 ### Run the server
 
-Start the server using the installed CLI (reads `~/.sandbox.toml` by default):
-
 ```bash
 opensandbox-server
+# opensandbox-server --config /path/to/sandbox.toml
 ```
 
-The server will start at `http://0.0.0.0:8080` (or your configured host/port).
+Listens on `server.host` / `server.port` from your TOML (defaults in [configuration.md](configuration.md)).
 
-### Run the server (installed package)
-
-After installing the package (wheel or PyPI), you can use the CLI entrypoint:
+**Health check** (adjust host/port if you changed them):
 
 ```bash
-opensandbox-server --config ~/.sandbox.toml
+curl http://127.0.0.1:8080/health
+# → {"status": "healthy"}
 ```
 
-**Health check**
-
-```bash
-curl http://localhost:8080/health
-```
-
-Expected response:
-```json
-{"status": "healthy"}
-```
+If startup, Docker/Kubernetes, or connectivity fails, see **[Troubleshooting](TROUBLESHOOTING.md)**.
 
 ## API documentation
 
@@ -301,16 +91,16 @@ Once the server is running, interactive API documentation is available:
 - **Swagger UI**: [http://localhost:8080/docs](http://localhost:8080/docs)
 - **ReDoc**: [http://localhost:8080/redoc](http://localhost:8080/redoc)
 
-Further reading on Docker container security: https://docs.docker.com/engine/security/
-
 ### API authentication
 
-Authentication is enforced only when `server.api_key` is set. If the value is empty or missing, the middleware skips API Key checks (intended for local/dev). For production, always set a non-empty `server.api_key` and send it via the `OPEN-SANDBOX-API-KEY` header.
+Authentication is enforced only when `server.api_key` is set. If the value is empty or missing, the middleware skips API Key checks; however startup requires explicit risk acknowledgment. In interactive TTY mode, type `YES` when prompted. In non-interactive environments (Docker/Kubernetes/CI), set `OPENSANDBOX_INSECURE_SERVER=YES` to proceed. For production, always set a non-empty `server.api_key` and send it via the `OPEN-SANDBOX-API-KEY` header.
+
+**Strongly recommend enabling `server.api_key`; see security report [Issue #750](https://github.com/alibaba/OpenSandbox/issues/750)**.
 
 All API endpoints (except `/health`, `/docs`, `/redoc`) require authentication via the `OPEN-SANDBOX-API-KEY` header when authentication is enabled:
 
 ```bash
-curl http://localhost:8080/v1/sandboxes
+curl -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" http://localhost:8080/v1/sandboxes
 ```
 
 ### Example usage
@@ -366,58 +156,20 @@ Response:
 }
 ```
 
-**Get Sandbox Details**
+**Other lifecycle calls** (same `OPEN-SANDBOX-API-KEY` header): `GET /v1/sandboxes/{id}`, `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume`, `GET /v1/sandboxes/{id}/endpoints/{port}` (append `?use_server_proxy=true` when needed), `POST .../renew-expiration`, `DELETE /v1/sandboxes/{id}`. Full request/response shapes: **Swagger UI** above or OpenAPI under [`specs/`](../specs/).
 
-```bash
-curl -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" \
-  http://localhost:8080/v1/sandboxes/a1b2c3d4-5678-90ab-cdef-1234567890ab
-```
+For Kubernetes-backed sandboxes, pause/resume is implemented via `BatchSandbox.spec.pause` and internal `SandboxSnapshot` resources. The externally visible lifecycle transitions are `Running -> Pausing -> Paused -> Resuming -> Running`. Operational details are documented in [docs/pause-resume.md](../docs/pause-resume.md).
 
-**Get Service Endpoint**
-
-```bash
-curl -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" \
-  http://localhost:8080/v1/sandboxes/a1b2c3d4-5678-90ab-cdef-1234567890ab/endpoints/8000
-
-# execd (agent) endpoint
-curl -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" \
-  http://localhost:8080/v1/sandboxes/a1b2c3d4-5678-90ab-cdef-1234567890ab/endpoints/44772
-```
-
-Response:
-```json
-{
-  "endpoint": "sandbox.example.com/a1b2c3d4-5678-90ab-cdef-1234567890ab/8000"
-}
-```
-
-**Renew Expiration**
-
-```bash
-curl -X POST "http://localhost:8080/v1/sandboxes/a1b2c3d4-5678-90ab-cdef-1234567890ab/renew-expiration" \
-  -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "expiresAt": "2024-01-15T12:30:00Z"
-  }'
-```
-
-**Delete a Sandbox**
-
-```bash
-curl -X DELETE \
-  -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" \
-  http://localhost:8080/v1/sandboxes/a1b2c3d4-5678-90ab-cdef-1234567890ab
-```
+`secureAccess` currently applies only to **Kubernetes** sandboxes exposed through **ingress gateway mode**. Direct endpoint exposure, including non-gateway ingress configurations, is not supported for secured access.
 
 ## Architecture
 
 ### Component responsibilities
 
-- **API Layer** (`src/api/`): HTTP request handling, validation, and response formatting
-- **Service Layer** (`src/services/`): Business logic for sandbox lifecycle operations
-- **Middleware** (`src/middleware/`): Cross-cutting concerns (authentication, logging)
-- **Configuration** (`src/config.py`): Centralized configuration management
+- **API Layer** (`opensandbox_server/api/`): HTTP request handling, validation, and response formatting
+- **Service Layer** (`opensandbox_server/services/`): Business logic for sandbox lifecycle operations
+- **Middleware** (`opensandbox_server/middleware/`): Cross-cutting concerns (authentication, logging)
+- **Configuration** (`opensandbox_server/config.py`): Centralized configuration management
 - **Runtime Implementations**: Platform-specific sandbox orchestration
 
 ### Sandbox lifecycle states
@@ -435,13 +187,19 @@ curl -X DELETE \
      ┌─────────┐    pause()         │
      │ Running │───────────────┐    │
      └────┬────┘               │    │
-          │      resume()      │    │
-          │   ┌────────────────┘    │
-          │   │                     │
-          │   ▼                     │
-          │ ┌────────┐              │
-          ├─│ Paused │              │
-          │ └────────┘              │
+          │                    │    │
+          │   resume()         │    │
+          │   ┌──────────────┐ │    │
+          │   │              │ │    │
+          │   ▼              │ │    │
+          │ ┌────────┐       │ │    │
+          ├─│ Paused │───────┘ │    │
+          │ └────┬───┘         │    │
+          │      │             │    │
+          │      ▼             │    │
+          │  ┌──────────┐      │    │
+          │  │ Resuming │──────┘    │
+          │  └──────────┘           │
           │                         │
           │ delete() or expire()    │
           ▼                         │
@@ -459,50 +217,17 @@ curl -X DELETE \
 
 ## Configuration reference
 
-### Server configuration
+Single source of truth for TOML: **[configuration.md](configuration.md)** (includes `SANDBOX_CONFIG_PATH`, `DOCKER_HOST`, `PENDING_FAILURE_TTL`).
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `server.host` | string | `"0.0.0.0"` | Interface to bind |
-| `server.port` | integer | `8080` | Port to listen on |
-| `server.log_level` | string | `"INFO"` | Python logging level |
-| `server.api_key` | string | `null` | API key for authentication |
-| `server.eip` | string | `null` | Bound public IP; when set, used as the host part when returning sandbox endpoints (Docker runtime) |
+## Experimental features
 
-### Runtime configuration
+Optional **🧪 experimental** behavior; **off by default** in [`example.config.toml`](opensandbox_server/examples/example.config.toml). See release notes before production.
 
-| Key                    | Type   | Required | Description                                           |
-|------------------------|--------|----------|-------------------------------------------------------|
-| `runtime.type`         | string | Yes      | Runtime implementation (`"docker"` or `"kubernetes"`) |
-| `runtime.execd_image`  | string | Yes      | Container image with execd binary                     |
+### Auto-renew on access
 
-### Egress configuration
+Extends sandbox TTL when traffic is observed (lifecycle **proxy** and/or **ingress** + optional **Redis** queue). Design and operations: **[OSEP-0009](../oseps/0009-auto-renew-sandbox-on-ingress-access.md)**. TOML keys (`[renew_intent]`, including nested `redis.*`): see **[configuration.md](configuration.md)** and [`example.config.toml`](opensandbox_server/examples/example.config.toml).
 
-| Key           | Type   | Required | Description                    |
-|---------------|--------|----------|--------------------------------|
-| `egress.image` | string | **Required when using `networkPolicy`** | Container image with egress binary. Must be configured when `networkPolicy` is provided in sandbox creation requests. |
-
-### Docker configuration
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `docker.network_mode` | string | `"host"` | Network mode (`"host"` or `"bridge"`) |
-
-### Agent-sandbox configuration
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `agent_sandbox.template_file` | string | `null` | Sandbox CR YAML template for agent-sandbox (used when `kubernetes.workload_provider = "agent-sandbox"`) |
-| `agent_sandbox.shutdown_policy` | string | `"Delete"` | Shutdown policy on expiry (`"Delete"` or `"Retain"`) |
-| `agent_sandbox.ingress_enabled` | boolean | `true` | Whether ingress routing is expected to be enabled |
-
-### Environment variables
-
-| Variable | Description |
-|----------|-------------|
-| `SANDBOX_CONFIG_PATH` | Override config file location |
-| `DOCKER_HOST` | Docker daemon URL (e.g., `unix:///var/run/docker.sock`) |
-| `PENDING_FAILURE_TTL` | TTL for failed pending sandboxes in seconds (default: 3600) |
+Per-sandbox: on **create**, set `extensions["access.renew.extend.seconds"]` (string integer **300**–**86400**). Clients using the server proxy: request endpoints with `use_server_proxy=true` (REST) or SDK `ConnectionConfig(..., use_server_proxy=True)` — details in OSEP-0009.
 
 ## Development
 
@@ -532,7 +257,7 @@ uv run pytest
 
 **Run with coverage**:
 ```bash
-uv run pytest --cov=src --cov-report=html
+uv run pytest --cov=opensandbox_server --cov-report=term --cov-fail-under=80
 ```
 
 **Run specific test**:
@@ -546,7 +271,7 @@ This project is licensed under the terms specified in the LICENSE file in the re
 
 ## Contributing
 
-Contributions are welcome. Suggested flow:
+Contributions are welcome. Follow the repository **[CONTRIBUTING.md](../CONTRIBUTING.md)** (Conventional Commits, PR expectations). Typical flow:
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -559,6 +284,7 @@ Contributions are welcome. Suggested flow:
 
 ## Support
 
-- Documentation: See `DEVELOPMENT.md` for development guidance
-- Issues: Report defects via GitHub Issues
-- Discussions: Use GitHub Discussions for Q&A and ideas
+- **Troubleshooting:** [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — common failures (config, Docker, networking, K8s) and fixes
+- **Development:** [DEVELOPMENT.md](DEVELOPMENT.md)
+- **Issues:** Report defects via GitHub Issues
+- **Discussions:** GitHub Discussions for Q&A and ideas

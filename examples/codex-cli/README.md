@@ -7,10 +7,10 @@ Use the official `@openai/codex` npm package to call OpenAI/Codex-like models in
 Pre-pull the code-interpreter image (includes Node.js):
 
 ```shell
-docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1
+docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2
 
 # use docker hub
-# docker pull opensandbox/code-interpreter:v1.0.1
+# docker pull opensandbox/code-interpreter:v1.0.2
 ```
 
 Start the local OpenSandbox server, logs will be visible in the terminal:
@@ -37,7 +37,7 @@ The script installs the Codex CLI (`npm install -g @openai/codex@latest`) at run
 
 - `SANDBOX_DOMAIN`: Sandbox service address (default: `localhost:8080`)
 - `SANDBOX_API_KEY`: API key if your server requires authentication (optional for local)
-- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1`)
+- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2`)
 - `OPENAI_API_KEY`: Your OpenAI API key (required)
 - `OPENAI_BASE_URL`: OpenAI API endpoint (default: `https://api.openai.com/v1`)
 - `OPENAI_MODEL`: Model to use (default: `gpt-4o-mini`)

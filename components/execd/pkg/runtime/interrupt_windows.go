@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/internal/safego"
 )
 
 // Interrupt stops execution in the specified session.
@@ -34,8 +35,14 @@ func (c *Controller) Interrupt(sessionID string) error {
 		log.Warning("Interrupting Jupyter kernel %s", kernel.kernelID)
 		return kernel.client.InterruptKernel(kernel.kernelID)
 	case c.getCommandKernel(sessionID) != nil:
-		kernel := c.getCommandKernel(sessionID)
-		return c.killPid(kernel.pid)
+		// Guard against a stale PID after the command has finished: the
+		// kernel is retained in commandClientMap, so a late Interrupt could
+		// otherwise terminate an unrelated process that reused the PID.
+		snapshot := c.commandSnapshot(sessionID)
+		if snapshot == nil || !snapshot.running || snapshot.pid <= 0 {
+			return fmt.Errorf("command session %s is not running", sessionID)
+		}
+		return c.killPid(snapshot.pid)
 	default:
 		return errors.New("no such session")
 	}
@@ -55,10 +62,10 @@ func (c *Controller) killPid(pid int) error {
 
 	// Best-effort wait to reduce zombies; os.Process.Wait only works for child processes.
 	done := make(chan error, 1)
-	go func() {
+	safego.Go(func() {
 		_, err := process.Wait()
 		done <- err
-	}()
+	})
 
 	select {
 	case <-done:

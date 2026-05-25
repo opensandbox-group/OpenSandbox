@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
@@ -40,6 +41,8 @@ type ExecuteCodeRequest struct {
 	Timeout  time.Duration     `json:"timeout"`
 	Cwd      string            `json:"cwd"`
 	Envs     map[string]string `json:"envs"`
+	Uid      *uint32           `json:"uid,omitempty"`
+	Gid      *uint32           `json:"gid,omitempty"`
 	Hooks    ExecuteResultHook
 }
 
@@ -79,4 +82,29 @@ type CreateContextRequest struct {
 type CodeContext struct {
 	ID       string   `json:"id,omitempty"`
 	Language Language `json:"language"`
+}
+
+// bashSessionConfig holds bash session configuration.
+type bashSessionConfig struct {
+	// StartupSource is a list of scripts sourced on startup.
+	StartupSource []string
+	// Session is the session identifier.
+	Session string
+	// StartupTimeout is the startup timeout.
+	StartupTimeout time.Duration
+	// Cwd is the working directory.
+	Cwd string
+}
+
+// bashSession represents a bash session.
+type bashSession struct {
+	config  *bashSessionConfig
+	mu      sync.Mutex
+	started bool
+	env     map[string]string
+	cwd     string
+
+	// currentProcessPid is the pid of the active run's process group leader (bash).
+	// Set after cmd.Start(), cleared when run() returns. Used by close() to kill the process group.
+	currentProcessPid int
 }

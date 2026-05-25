@@ -26,6 +26,7 @@ const (
 	ErrorCodeFileNotFound        ErrorCode = "FILE_NOT_FOUND"
 	ErrorCodeUnknown             ErrorCode = "UNKNOWN"
 	ErrorCodeContextNotFound     ErrorCode = "CONTEXT_NOT_FOUND"
+	ErrorCodeNotSupported        ErrorCode = "NOT_SUPPORTED"
 )
 
 type ErrorResponse struct {

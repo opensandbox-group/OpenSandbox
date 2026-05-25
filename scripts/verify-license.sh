@@ -19,6 +19,12 @@
 
 set -euo pipefail
 
+# Print CI diagnostics
+echo "License verification started at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+echo "Runner: $(hostname) ($(uname -srm))"
+echo "User: $(whoami)"
+echo "Working directory: $(pwd)"
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CURRENT_YEAR="$(date +%Y)"
 MIN_YEAR="2025"
@@ -46,9 +52,6 @@ IGNORED_PATHS=(
 is_k8s_mock_go() {
   local file="${1-}"
   [[ -z "$file" ]] && return 1
-  # Skip any Go mocks under kubernetes/internal:
-  # - filenames ending with _mock.go
-  # - any file under a /mock/ directory
   if [[ "$file" != kubernetes/internal/* ]]; then
     return 1
   fi
@@ -63,7 +66,6 @@ is_k8s_mock_go() {
 
 is_generated_to_skip() {
   local file="$1"
-  # Skip common generated files
   if [[ "$file" == *"deepcopy.go" ]]; then
     return 0
   fi
@@ -112,25 +114,20 @@ has_expected_basename() {
 missing=()
 
 while IFS= read -r file; do
-  # Skip ignored paths
   if is_ignored "$file"; then
     continue
   fi
-  # Skip kubernetes internal mock go files
   if is_k8s_mock_go "$file"; then
     continue
   fi
-  # Skip generated files
   if is_generated_to_skip "$file"; then
     continue
   fi
 
-  # Only check files with expected extensions or basenames
   if ! has_expected_extension "$file" && ! has_expected_basename "$file"; then
     continue
   fi
 
-  # Limit scan to the first 25 lines to allow shebangs/DOCTYPE above the header.
   header="$(head -n 25 "$file")"
   if ! echo "$header" | grep -Eq "$LICENSE_REGEX"; then
     missing+=("$file")

@@ -21,54 +21,38 @@ import (
 	"testing"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDeleteFile(t *testing.T) {
 	tmp := t.TempDir()
 	file := filepath.Join(tmp, "sample.txt")
-	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
+	require.NoError(t, os.WriteFile(file, []byte("hello"), 0o644))
 
-	if err := DeleteFile(file); err != nil {
-		t.Fatalf("DeleteFile returned error: %v", err)
-	}
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
-		t.Fatalf("expected file removed, got err=%v", err)
-	}
+	require.NoError(t, DeleteFile(file))
+	_, err := os.Stat(file)
+	require.True(t, os.IsNotExist(err), "expected file removed, got err=%v", err)
 
 	// removing a non-existent file should be a no-op
-	if err := DeleteFile(file); err != nil {
-		t.Fatalf("expected no error deleting missing file, got %v", err)
-	}
+	require.NoError(t, DeleteFile(file), "expected no error deleting missing file")
 }
 
 func TestRenameFile(t *testing.T) {
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.txt")
-	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
+	require.NoError(t, os.WriteFile(src, []byte("data"), 0o644))
 
 	dst := filepath.Join(tmp, "nested", "renamed.txt")
-	if err := RenameFile(model.RenameFileItem{Src: src, Dest: dst}); err != nil {
-		t.Fatalf("RenameFile returned error: %v", err)
-	}
+	require.NoError(t, RenameFile(model.RenameFileItem{Src: src, Dest: dst}))
 
-	if _, err := os.Stat(dst); err != nil {
-		t.Fatalf("expected destination file, got %v", err)
-	}
-	if _, err := os.Stat(src); !os.IsNotExist(err) {
-		t.Fatalf("expected source removed, got err=%v", err)
-	}
+	_, err := os.Stat(dst)
+	require.NoError(t, err)
+	_, err = os.Stat(src)
+	require.True(t, os.IsNotExist(err), "expected source removed, got err=%v", err)
 
 	// destination exists -> expect error
-	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
-		t.Fatalf("rewrite src: %v", err)
-	}
-	if err := RenameFile(model.RenameFileItem{Src: src, Dest: dst}); err == nil {
-		t.Fatalf("expected error when destination already exists")
-	}
+	require.NoError(t, os.WriteFile(src, []byte("data"), 0o644))
+	require.Error(t, RenameFile(model.RenameFileItem{Src: src, Dest: dst}), "expected error when destination already exists")
 }
 
 func TestSearchFileMetadata(t *testing.T) {
@@ -78,16 +62,12 @@ func TestSearchFileMetadata(t *testing.T) {
 	}
 
 	path, info, ok := SearchFileMetadata(metadata, "/any/notes.txt")
-	if !ok {
-		t.Fatalf("expected metadata entry")
-	}
-	if path != "/tmp/a/notes.txt" || info.Path != "/tmp/a/notes.txt" {
-		t.Fatalf("unexpected match path=%s info=%v", path, info)
-	}
+	require.True(t, ok, "expected metadata entry")
+	require.Equal(t, "/tmp/a/notes.txt", path)
+	require.Equal(t, "/tmp/a/notes.txt", info.Path)
 
-	if _, _, ok := SearchFileMetadata(metadata, "/foo/unknown.txt"); ok {
-		t.Fatalf("expected no match")
-	}
+	_, _, ok = SearchFileMetadata(metadata, "/foo/unknown.txt")
+	require.False(t, ok, "expected no match")
 }
 
 func TestParseRange(t *testing.T) {
@@ -122,17 +102,11 @@ func TestParseRange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseRange(tt.header, tt.size)
 			if tt.expectErr {
-				if err == nil {
-					t.Fatalf("expected error")
-				}
+				require.Error(t, err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("got %+v want %+v", got, tt.want)
-			}
+			require.NoError(t, err)
+			require.True(t, reflect.DeepEqual(got, tt.want), "got %+v want %+v", got, tt.want)
 		})
 	}
 }

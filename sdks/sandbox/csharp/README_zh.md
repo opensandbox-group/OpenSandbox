@@ -55,6 +55,7 @@ try
 catch (SandboxException ex)
 {
     Console.Error.WriteLine($"沙箱错误: [{ex.Error.Code}] {ex.Error.Message}");
+    Console.Error.WriteLine($"Request ID: {ex.RequestId}");
 }
 ```
 
@@ -68,7 +69,7 @@ catch (SandboxException ex)
 var info = await sandbox.GetInfoAsync();
 Console.WriteLine($"状态: {info.Status.State}");
 Console.WriteLine($"创建时间: {info.CreatedAt}");
-Console.WriteLine($"过期时间: {info.ExpiresAt}");
+Console.WriteLine($"过期时间: {info.ExpiresAt}"); // 使用手动清理模式时为 null
 
 await sandbox.PauseAsync();
 
@@ -78,6 +79,22 @@ var resumed = await sandbox.ResumeAsync();
 // 续期: expiresAt = now + timeoutSeconds
 await resumed.RenewAsync(30 * 60);
 ```
+
+通过设置 `ManualCleanup = true` 创建一个不会自动过期的沙箱：
+
+```csharp
+var manual = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "ubuntu",
+    ManualCleanup = true,
+});
+```
+
+注意：与 Python、JavaScript、Kotlin SDK 不同，C# SDK 使用显式的
+`ManualCleanup` 开关，而不是 `TimeoutSeconds = null`。这是有意的设计，
+因为在当前的 options 模型里，`int?` 不能稳定地区分“未设置，沿用默认 TTL”
+和“显式请求手动清理”。
 
 ### 2. 自定义健康检查
 
@@ -278,6 +295,8 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 | `ReadyTimeoutSeconds` | 等待就绪的最大时间 | 30 秒 |
 | `HealthCheckPollingInterval` | 等待时的轮询间隔（毫秒） | 200 ms |
 
+注意：`opensandbox.io/` 前缀下的 metadata key 属于系统保留标签，服务端会拒绝用户传入。
+
 ```csharp
 var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 {
@@ -304,7 +323,22 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 });
 ```
 
-### 3. 资源清理
+### 3. 运行时 Egress 策略更新
+
+运行时的 egress 查询和 patch 会直接访问沙箱内的 egress sidecar。
+SDK 会先解析 `18080` 端口对应的 sandbox endpoint，再调用 sidecar 的 `/policy` API。
+
+```csharp
+var policy = await sandbox.GetEgressPolicyAsync();
+
+await sandbox.PatchEgressRulesAsync(new[]
+{
+    new NetworkRule { Action = NetworkRuleAction.Allow, Target = "www.github.com" },
+    new NetworkRule { Action = NetworkRuleAction.Deny, Target = "pypi.org" }
+});
+```
+
+### 4. 资源清理
 
 `Sandbox` 和 `SandboxManager` 都实现了 `IAsyncDisposable`。完成后使用 `await using` 或调用 `DisposeAsync()`。
 

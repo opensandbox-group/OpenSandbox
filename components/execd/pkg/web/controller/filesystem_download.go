@@ -18,15 +18,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 
+	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
 // DownloadFile serves a file for download with support for range requests.
 func (c *FilesystemController) DownloadFile() {
+	rec := beginFilesystemMetric("download")
+	defer rec.Finish(c.basicController)
+
 	filePath := c.ctx.Query("path")
 	if filePath == "" {
 		c.RespondError(
@@ -36,8 +41,17 @@ func (c *FilesystemController) DownloadFile() {
 		)
 		return
 	}
+	resolvedFilePath, err := pathutil.ExpandPath(filePath)
+	if err != nil {
+		c.RespondError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error resolving file path: %s. %v", filePath, err),
+		)
+		return
+	}
 
-	file, err := os.Open(filePath)
+	file, err := os.Open(resolvedFilePath)
 	if err != nil {
 		c.handleFileError(err)
 		return
@@ -49,13 +63,13 @@ func (c *FilesystemController) DownloadFile() {
 		c.RespondError(
 			http.StatusInternalServerError,
 			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error getting file stat info: %s. %v", filePath, err),
+			fmt.Sprintf("error getting file stat info: %s. %v", resolvedFilePath, err),
 		)
 		return
 	}
 
 	c.ctx.Header("Content-Type", "application/octet-stream")
-	c.ctx.Header("Content-Disposition", "attachment; filename="+filepath.Base(filePath))
+	c.ctx.Header("Content-Disposition", formatContentDisposition(filepath.Base(resolvedFilePath)))
 	c.ctx.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 
 	if rangeHeader := c.ctx.GetHeader("Range"); rangeHeader != "" {
@@ -75,9 +89,33 @@ func (c *FilesystemController) DownloadFile() {
 
 			_, _ = file.Seek(r.start, io.SeekStart)
 			_, _ = io.CopyN(c.ctx.Writer, file, r.length)
+			rec.MarkSuccess()
 			return
 		}
 	}
 
-	http.ServeContent(c.ctx.Writer, c.ctx.Request, filepath.Base(filePath), fileInfo.ModTime(), file)
+	rec.MarkSuccess()
+	http.ServeContent(c.ctx.Writer, c.ctx.Request, filepath.Base(resolvedFilePath), fileInfo.ModTime(), file)
+}
+
+// formatContentDisposition formats the Content-Disposition header value with proper
+// encoding for non-ASCII filenames according to RFC 6266 and RFC 5987.
+func formatContentDisposition(filename string) string {
+	// Check if filename contains non-ASCII characters
+	needsEncoding := false
+	for _, r := range filename {
+		if r > 127 {
+			needsEncoding = true
+			break
+		}
+	}
+
+	if !needsEncoding {
+		return "attachment; filename=\"" + filename + "\""
+	}
+
+	// Use RFC 5987 encoding for non-ASCII filenames
+	// Format: attachment; filename="fallback"; filename*=UTF-8''encoded_name
+	encodedFilename := url.PathEscape(filename)
+	return "attachment; filename=\"" + encodedFilename + "\"; filename*=UTF-8''" + encodedFilename
 }

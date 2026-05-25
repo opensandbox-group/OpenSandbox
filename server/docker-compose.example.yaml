@@ -4,16 +4,18 @@ configs:
       [server]
       host = "0.0.0.0"
       port = 8090
-      log_level = "INFO"
+
+      [log]
+      level = "INFO"
 
       [runtime]
       type = "docker"
-      # execd_image = "opensandbox/execd:v1.0.6"
-      execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.6"
+      # execd_image = "opensandbox/execd:v1.0.18"
+      execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18"
 
       [egress]
-      image = "opensandbox/egress:v1.0.1"
-      # image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.0.1"
+      image = "opensandbox/egress:v1.0.12"
+      # image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.0.12"
 
       [docker]
       network_mode = "bridge"
@@ -22,7 +24,10 @@ configs:
       host_ip = "host.docker.internal"
       drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
       no_new_privileges = true
-      pids_limit = 512
+      # TODO: For production environments, it is recommended to set this to '4096' or higher to avoid
+      # "can't start new thread" errors when multiple sandboxes are running concurrently.
+      # See: https://github.com/alibaba/OpenSandbox/issues/447
+      pids_limit = 4096
 
       [ingress]
       mode = "direct"

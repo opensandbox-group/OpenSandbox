@@ -4,6 +4,18 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@9.15.0",
+  "pnpm": {
+    "overrides": {
+      "rollup": "4.60.2",
+      "picomatch@^4.0.0": "4.0.4",
+      "brace-expansion@^1.0.0": "1.1.13",
+      "brace-expansion@^2.0.0": "2.0.3",
+      "flatted@^3.0.0": "3.4.2",
+      "esbuild": "0.25.2",
+      "postcss": "8.5.10",
+      "vite": "6.4.2"
+    }
+  },
   "scripts": {
     "pretest": "pnpm install --prefer-offline",
     "prep:sdk": "pnpm -C ../../sdks install --prefer-offline && pnpm -C ../../sdks run build:js",
@@ -17,11 +29,11 @@
     "@alibaba-group/opensandbox-code-interpreter": "link:../../sdks/code-interpreter/javascript"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
+    "@eslint/js": "^9.39.4",
     "@types/node": "^20.11.30",
-    "eslint": "^9.39.2",
+    "eslint": "^9.39.4",
     "typescript": "^5.7.2",
-    "typescript-eslint": "^8.52.0",
-    "vitest": "^2.1.9"
+    "typescript-eslint": "^8.59.0",
+    "vitest": "^3.2.4"
   }
 }

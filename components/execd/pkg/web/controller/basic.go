@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
@@ -25,7 +26,8 @@ import (
 )
 
 type basicController struct {
-	ctx *gin.Context
+	ctx          *gin.Context
+	sseSetupOnce sync.Once
 }
 
 func newBasicController(ctx *gin.Context) *basicController {

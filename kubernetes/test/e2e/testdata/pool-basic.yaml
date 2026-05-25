@@ -15,3 +15,5 @@ spec:
     bufferMin: {{.BufferMin}}
     poolMax: {{.PoolMax}}
     poolMin: {{.PoolMin}}
+  recycleStrategy:
+    type: Noop

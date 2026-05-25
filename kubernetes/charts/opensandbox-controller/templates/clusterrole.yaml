@@ -74,10 +74,47 @@ rules:
   - patch
   - update
 - apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
   - sandbox.opensandbox.io
   resources:
   - batchsandboxes
   - pools
+  - sandboxsnapshots
   verbs:
   - create
   - delete
@@ -91,6 +128,7 @@ rules:
   resources:
   - batchsandboxes/finalizers
   - pools/finalizers
+  - sandboxsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
@@ -98,6 +136,7 @@ rules:
   resources:
   - batchsandboxes/status
   - pools/status
+  - sandboxsnapshots/status
   verbs:
   - get
   - patch

@@ -1,155 +1,155 @@
-# 镜像构建指南
+# Image Build Guide
 
-本文档介绍如何构建 OpenSandbox Kubernetes Controller 和 Task Executor 镜像。
+This document describes how to build OpenSandbox Kubernetes Controller and Task Executor images.
 
-## 方式一: 使用构建脚本（推荐）
+## Option 1: Using the Build Script (Recommended)
 
-### 本地构建
+### Local Build
 
 ```bash
 cd kubernetes
 
-# 构建 controller 镜像
+# Build controller image
 COMPONENT=controller TAG=v0.1.0 PUSH=false ./build.sh
 
-# 构建 task-executor 镜像
+# Build task-executor image
 COMPONENT=task-executor TAG=v0.1.0 PUSH=false ./build.sh
 ```
 
-### 构建并推送到镜像仓库
+### Build and Push to Registry
 
 ```bash
-# 确保已登录阿里云 ACR
+# Ensure you are logged in to Alibaba Cloud ACR
 docker login sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com
 
-# 构建并推送 controller 镜像
+# Build and push controller image
 COMPONENT=controller TAG=v0.1.0 ./build.sh
 
-# 构建并推送 task-executor 镜像
+# Build and push task-executor image
 COMPONENT=task-executor TAG=v0.1.0 ./build.sh
 ```
 
-### 环境变量说明
+### Environment Variables
 
-- `COMPONENT`: 要构建的组件，可选值: `controller`, `task-executor`
-- `TAG`: 镜像标签，默认为 `latest`
-- `PUSH`: 是否推送到远程仓库，默认为 `true`
+- `COMPONENT`: The component to build. Options: `controller`, `task-executor`
+- `TAG`: Image tag, defaults to `latest`
+- `PUSH`: Whether to push to remote registry, defaults to `true`
 
-## 方式二: 使用 GitHub Actions
+## Option 2: Using GitHub Actions
 
-### 手动触发工作流
+### Manually Trigger the Workflow
 
-1. 打开 [Actions 页面](https://github.com/alibaba/OpenSandbox/actions)
-2. 选择 "Publish Components Image" 工作流
-3. 点击 "Run workflow"
-4. 选择组件和镜像标签:
-   - Component: 在下拉菜单中选择组件名称
+1. Open the [Actions page](https://github.com/alibaba/OpenSandbox/actions)
+2. Select the "Publish Components Image" workflow
+3. Click "Run workflow"
+4. Select the component and image tag:
+   - Component: Select the component name from the dropdown
      - Controller: `controller`
      - Task Executor: `task-executor`
-   - Image tag: 输入镜像标签，例如 `v0.1.0`
-5. 点击 "Run workflow" 开始构建
+   - Image tag: Enter the image tag, e.g. `v0.1.0`
+5. Click "Run workflow" to start the build
 
-### 通过 Git Tag 触发（推荐）
+### Trigger via Git Tag (Recommended)
 
-创建带有特定前缀的 tag 即可自动触发构建:
+Create a tag with a specific prefix to automatically trigger the build:
 
 ```bash
-# 构建 controller v0.1.0
+# Build controller v0.1.0
 git tag k8s/controller/v0.1.0
 git push origin k8s/controller/v0.1.0
 
-# 构建 task-executor v0.1.0
+# Build task-executor v0.1.0
 git tag k8s/task-executor/v0.1.0
 git push origin k8s/task-executor/v0.1.0
 ```
 
-**Tag 命名规则**: `k8s/<component>/<version>`
-- `<component>`: 组件名称 `controller` 或 `task-executor`
-- `<version>`: 镜像版本号，例如 `v0.1.0`
+**Tag naming convention**: `k8s/<component>/<version>`
+- `<component>`: Component name, `controller` or `task-executor`
+- `<version>`: Image version, e.g. `v0.1.0`
 
-## 方式三: 使用 Makefile
+## Option 3: Using Makefile
 
 ```bash
 cd kubernetes
 
-# 构建 controller 镜像（仅本地）
-make docker-build IMG=myregistry/opensandbox-controller:v0.1.0
+# Build controller image (local only)
+make docker-build CONTROLLER_IMG=myregistry/opensandbox-controller:v0.1.0
 
-# 构建 task-executor 镜像（仅本地）
+# Build task-executor image (local only)
 make docker-build-task-executor TASK_EXECUTOR_IMG=myregistry/opensandbox-task-executor:v0.1.0
 
-# 推送镜像
-make docker-push IMG=myregistry/opensandbox-controller:v0.1.0
+# Push images
+make docker-push CONTROLLER_IMG=myregistry/opensandbox-controller:v0.1.0
 make docker-push-task-executor TASK_EXECUTOR_IMG=myregistry/opensandbox-task-executor:v0.1.0
 ```
 
-## 镜像仓库
+## Image Registry
 
-构建的镜像会推送到以下仓库:
+Built images are pushed to the following registry:
 
-### 阿里云容器镜像服务 (ACR)
+### Alibaba Cloud Container Registry (ACR)
 - Controller: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller:<tag>`
 - Task Executor: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/task-executor:<tag>`
 
-## 多架构支持
+## Multi-Architecture Support
 
-构建脚本默认支持以下架构:
+The build script supports the following architectures by default:
 - `linux/amd64`
 - `linux/arm64`
 
-如需构建其他架构，请修改 `build.sh` 中的 `PLATFORMS` 变量。
+To build for other architectures, modify the `PLATFORMS` variable in `build.sh`.
 
-## 本地测试
+## Local Testing
 
-如果只想在本地测试镜像而不推送:
+To build an image for local testing without pushing:
 
 ```bash
-# 构建本地镜像
+# Build local image
 COMPONENT=controller TAG=test PUSH=false ./build.sh
 
-# 加载到 kind 集群测试
+# Load into a Kind cluster for testing
 kind load docker-image opensandbox-controller:test
 
-# 或加载到 minikube 测试
+# Or load into minikube for testing
 minikube image load opensandbox-controller:test
 ```
 
-## 故障排查
+## Troubleshooting
 
-### 权限问题
+### Permission Issues
 
-如果遇到 Docker 权限问题:
+If you encounter Docker permission issues:
 ```bash
 sudo usermod -aG docker $USER
 newgrp docker
 ```
 
-### Buildx 不可用
+### Buildx Unavailable
 
-确保启用 Docker Buildx:
+Ensure Docker Buildx is enabled:
 ```bash
 docker buildx create --use
 docker buildx inspect --bootstrap
 ```
 
-### 磁盘空间不足
+### Insufficient Disk Space
 
-清理 Docker 缓存:
+Clean up Docker cache:
 ```bash
 docker system prune -a
 docker builder prune -a
 ```
 
-## 配置私有镜像仓库
+## Configuring a Private Image Registry
 
-如需使用自己的镜像仓库，修改 `build.sh` 中的仓库地址:
+To use your own image registry, modify the registry address in `build.sh`:
 
 ```bash
-# 编辑 build.sh
+# Edit build.sh
 ACR_REPO="your-acr-registry.cr.aliyuncs.com/your-namespace"
 ```
 
-或者直接在构建时使用环境变量:
+Or specify the registry via environment variable at build time:
 ```bash
 ACR_REPO=myregistry.com/myrepo COMPONENT=controller TAG=v0.1.0 ./build.sh
 ```

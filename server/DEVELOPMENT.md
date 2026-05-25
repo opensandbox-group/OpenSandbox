@@ -46,7 +46,7 @@ This guide provides comprehensive information for developers working on OpenSand
 
 4. **Configure Development Environment**
    ```bash
-   cp example.config.toml ~/.sandbox.toml
+   cp opensandbox_server/examples/example.config.toml ~/.sandbox.toml
    ```
 
    Edit `~/.sandbox.toml` for local development:
@@ -54,12 +54,14 @@ This guide provides comprehensive information for developers working on OpenSand
    [server]
    host = "0.0.0.0"
    port = 8080
-   log_level = "DEBUG"
    api_key = "your-secret-api-key-change-this"
+
+   [log]
+   level = "DEBUG"
 
    [runtime]
    type = "docker"
-   execd_image = "opensandbox/execd:v1.0.6"
+   execd_image = "opensandbox/execd:v1.0.18"
 
    [docker]
    network_mode = "host"
@@ -67,7 +69,7 @@ This guide provides comprehensive information for developers working on OpenSand
 
 5. **Run Development Server**
    ```bash
-   uv run python -m src.main
+   uv run python -m opensandbox_server.main
    ```
 
 ### IDE Configuration
@@ -84,7 +86,7 @@ Create `.vscode/launch.json`:
             "name": "Python: FastAPI",
             "type": "python",
             "request": "launch",
-            "module": "src.main",
+            "module": "opensandbox_server.main",
             "justMyCode": false,
             "env": {
                 "SANDBOX_CONFIG_PATH": "${workspaceFolder}/.sandbox.toml"
@@ -105,7 +107,7 @@ Create `.vscode/launch.json`:
 
 ```
 server/
-├── src/                          # Source code
+├── opensandbox_server/           # Source code
 │   ├── main.py                   # FastAPI application entry point
 │   ├── config.py                 # Configuration management
 │   ├── api/                      # API layer
@@ -204,7 +206,7 @@ uv run pytest
 uv run pytest tests/test_docker_service.py
 
 # With coverage
-uv run pytest --cov=src --cov-report=html
+uv run pytest --cov=opensandbox_server --cov-report=term --cov-fail-under=80
 ```
 
 ### Writing Tests
@@ -212,7 +214,7 @@ uv run pytest --cov=src --cov-report=html
 Example unit test:
 
 ```python
-@patch("src.services.docker.docker")
+@patch("opensandbox_server.services.docker.docker")
 def test_create_sandbox_validates_entrypoint(mock_docker):
     service = DockerSandboxService(config=test_config())
     request = CreateSandboxRequest(
@@ -231,11 +233,11 @@ def test_create_sandbox_validates_entrypoint(mock_docker):
 ```bash
 # Use local Docker
 export DOCKER_HOST="unix:///var/run/docker.sock"
-uv run python -m src.main
+uv run python -m opensandbox_server.main
 
 # Use remote Docker
 export DOCKER_HOST="ssh://user@remote-host"
-uv run python -m src.main
+uv run python -m opensandbox_server.main
 ```
 
 ### Network Modes
@@ -272,7 +274,7 @@ Architecture will include:
 Follow PEP 8 with Ruff enforcement:
 
 ```bash
-uv run ruff check src tests
+uv run ruff check opensandbox_server tests
 ```
 
 ### Naming Conventions
@@ -296,8 +298,8 @@ def get_sandbox(self, sandbox_id: str) -> Sandbox:
 ### Enable Debug Logging
 
 ```toml
-[server]
-log_level = "DEBUG"
+[log]
+level = "DEBUG"
 ```
 
 ### Interactive Debugging
@@ -320,7 +322,7 @@ logging.getLogger("docker").setLevel(logging.DEBUG)
 ### Profiling
 
 ```bash
-python -m cProfile -o profile.stats -m src.main
+python -m cProfile -o profile.stats -m opensandbox_server.main
 ```
 
 ### Optimization Tips

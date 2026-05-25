@@ -20,8 +20,6 @@ package runtime
 import (
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"syscall"
 	"time"
 
@@ -36,61 +34,89 @@ func (c *Controller) Interrupt(sessionID string) error {
 		log.Warning("Interrupting Jupyter kernel %s", kernel.kernelID)
 		return kernel.client.InterruptKernel(kernel.kernelID)
 	case c.getCommandKernel(sessionID) != nil:
-		kernel := c.getCommandKernel(sessionID)
-		return c.killPid(kernel.pid)
+		// Snapshot under c.mu so running/pid are observed consistently with
+		// markCommandFinished. killPid signals the entire process group, so
+		// guarding against a stale PID is critical: a late Interrupt on a
+		// finished session must not blast SIGTERM/SIGKILL at an unrelated
+		// process group that has reused the PID.
+		snapshot := c.commandSnapshot(sessionID)
+		if snapshot == nil || !snapshot.running || snapshot.pid <= 0 {
+			return fmt.Errorf("command session %s is not running", sessionID)
+		}
+		return c.killPid(snapshot.pid)
+	case c.getBashSession(sessionID) != nil:
+		return c.closeBashSession(sessionID)
 	default:
 		return errors.New("no such session")
 	}
 }
 
 // killPid sends SIGTERM followed by SIGKILL if needed.
+//
+// Commands are launched with Setpgid: true, so pid is also the process group
+// id. We signal the entire group via syscall.Kill(-pid, sig) so child and
+// grandchild processes are terminated, not just the group leader.
+//
+// kill(2) on a process group only guarantees delivery to at least one
+// member, and kill(-pid, 0) keeps reporting the group as observable while
+// any unreaped zombie lingers. The probe loops below are therefore
+// best-effort logging — once a kill signal has been delivered, a slow or
+// asynchronous teardown is not treated as a hard failure that would
+// surface as a 500 from Interrupt.
 func (c *Controller) killPid(pid int) error {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
+	if pid <= 0 {
+		return fmt.Errorf("invalid pid %d", pid)
 	}
-	log.Warning("Attempting to terminate process %d", pid)
+	log.Warning("Attempting to terminate process group %d", pid)
 
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		if strings.Contains(err.Error(), "already finished") {
+	sigtermDelivered := false
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
-		log.Warning("SIGTERM failed for pid %d: %v, trying SIGKILL", pid, err)
+		log.Warning("SIGTERM failed for pgroup %d: %v, trying SIGKILL", pid, err)
 	} else {
-		done := make(chan error, 1)
-		go func() {
-			_, err := process.Wait()
-			done <- err
-		}()
-
-		select {
-		case err := <-done:
-			if err == nil {
-				log.Info("Process %d terminated gracefully", pid)
-				return nil
+		sigtermDelivered = true
+		// Probe the group for liveness. os.Process.Wait() doesn't apply
+		// because the leader is not a child of this goroutine.
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if err := syscall.Kill(-pid, 0); err != nil {
+				if errors.Is(err, syscall.ESRCH) {
+					log.Info("Process group %d terminated gracefully", pid)
+					return nil
+				}
 			}
-		case <-time.After(3 * time.Second):
-			log.Warning("Process %d did not terminate after SIGTERM, using SIGKILL", pid)
+			time.Sleep(50 * time.Millisecond)
 		}
+		log.Warning("Process group %d did not exit after SIGTERM, escalating to SIGKILL", pid)
 	}
 
-	if err := process.Signal(syscall.SIGKILL); err != nil {
-		if strings.Contains(err.Error(), "already finished") {
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
-		return fmt.Errorf("failed to kill process %d: %w", pid, err)
+		if sigtermDelivered {
+			// SIGTERM was already delivered to at least one member, so the
+			// kill is in flight. SIGKILL failure here is commonly EPERM on
+			// a group reduced to zombies — the kernel will reap them once
+			// the parent runs Wait(). Surface as a warning rather than a
+			// hard error.
+			log.Warning("SIGKILL on pgroup %d failed: %v; teardown likely already in progress", pid, err)
+			return nil
+		}
+		return fmt.Errorf("failed to kill process group %d: %w", pid, err)
 	}
 
 	for range 3 {
-		if err := process.Signal(syscall.Signal(0)); err != nil {
-			if strings.Contains(err.Error(), "already finished") ||
-				strings.Contains(err.Error(), "no such process") {
-				log.Info("Process %d confirmed terminated", pid)
+		if err := syscall.Kill(-pid, 0); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				log.Info("Process group %d confirmed terminated", pid)
 				return nil
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-
-	return fmt.Errorf("process %d might still be running", pid)
+	log.Warning("Process group %d still observable after SIGKILL; teardown may complete asynchronously", pid)
+	return nil
 }

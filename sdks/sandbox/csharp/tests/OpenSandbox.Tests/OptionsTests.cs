@@ -33,6 +33,7 @@ public class OptionsTests
             Entrypoint = new[] { "bash" },
             Env = new Dictionary<string, string> { ["KEY"] = "VALUE" },
             Metadata = new Dictionary<string, string> { ["tag"] = "test" },
+            Platform = new PlatformSpec { Os = "linux", Arch = "arm64" },
             Resource = new Dictionary<string, string> { ["cpu"] = "2" },
             SkipHealthCheck = true,
             ReadyTimeoutSeconds = 60,
@@ -45,6 +46,8 @@ public class OptionsTests
         options.Entrypoint.Should().Contain("bash");
         options.Env.Should().ContainKey("KEY");
         options.Metadata.Should().ContainKey("tag");
+        options.Platform.Should().NotBeNull();
+        options.Platform!.Arch.Should().Be("arm64");
         options.Resource.Should().ContainKey("cpu");
         options.SkipHealthCheck.Should().BeTrue();
         options.ReadyTimeoutSeconds.Should().Be(60);

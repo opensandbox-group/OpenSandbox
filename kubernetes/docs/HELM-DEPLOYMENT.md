@@ -1,28 +1,28 @@
-# Helm Chart 部署方式
+# Helm Chart Deployment
 
-本文档介绍如何使用 Helm Chart 部署 OpenSandbox Controller。
+This document describes how to deploy the OpenSandbox Controller using Helm Chart.
 
-## 前置要求
+## Prerequisites
 
 - Kubernetes 1.22.4+
 - Helm 3.0+
-- kubectl 已配置并可访问目标集群
+- kubectl configured and able to access the target cluster
 
-## 快速开始
+## Quick Start
 
-### 方式一: 直接从 GitHub Release 安装 (推荐)
+### Option 1: Install from GitHub Release (Recommended)
 
-直接下载并安装发布的 Chart 包:
+Download and install the published chart package directly:
 
 ```bash
-# 安装最新版本 (0.1.0)
+# Install the latest version (0.1.0)
 helm install opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
   --namespace opensandbox-system \
   --create-namespace
 ```
 
-如需使用自定义镜像:
+To use a custom image:
 
 ```bash
 helm install opensandbox-controller \
@@ -33,24 +33,24 @@ helm install opensandbox-controller \
   --create-namespace
 ```
 
-### 方式二: 本地 Chart 安装
+### Option 2: Install from Local Chart
 
-如果您从源码构建,可以使用本地 Chart:
+If building from source, you can use the local chart:
 
-#### 1. 构建镜像
+#### 1. Build Images
 
-首先构建 controller 和 task-executor 镜像:
+First build the controller and task-executor images:
 
 ```bash
-# 构建 controller 镜像
+# Build controller image
 cd kubernetes
 COMPONENT=controller TAG=v0.0.1 ./build.sh
 
-# 构建 task-executor 镜像
+# Build task-executor image
 COMPONENT=task-executor TAG=v0.0.1 ./build.sh
 ```
 
-#### 2. 安装本地 Helm Chart
+#### 2. Install the Local Helm Chart
 
 ```bash
 helm install opensandbox-controller ./charts/opensandbox-controller \
@@ -60,7 +60,7 @@ helm install opensandbox-controller ./charts/opensandbox-controller \
   --create-namespace
 ```
 
-或者使用 Makefile:
+Or using Makefile:
 
 ```bash
 make helm-install \
@@ -68,52 +68,52 @@ make helm-install \
   VERSION=v0.0.1
 ```
 
-### 3. 验证安装
+### 3. Verify Installation
 
 ```bash
-# 检查 Pod 状态
+# Check Pod status
 kubectl get pods -n opensandbox-system
 
-# 检查 CRD
+# Check CRDs
 kubectl get crd | grep opensandbox
 
-# 查看安装状态
+# View installation status
 helm status opensandbox-controller -n opensandbox-system
 
-# 查看已安装的 Chart 版本
+# View installed Chart version
 helm list -n opensandbox-system
 ```
 
-## 版本管理
+## Version Management
 
-### 查看可用版本
+### View Available Versions
 
-访问 GitHub Releases 查看所有可用版本:
+Visit GitHub Releases to see all available versions:
 https://github.com/alibaba/OpenSandbox/releases
 
-查找以 `helm/opensandbox-controller/` 开头的 tag,如 `helm/opensandbox-controller/0.1.0`
+Look for tags starting with `helm/opensandbox-controller/`, such as `helm/opensandbox-controller/0.1.0`
 
-### 升级到指定版本
+### Upgrade to a Specific Version
 
 ```bash
-# 直接从 GitHub Release 升级
+# Upgrade directly from GitHub Release
 helm upgrade opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
   --namespace opensandbox-system
 ```
 
-## 自定义配置
+## Custom Configuration
 
-### 使用自定义 values 文件
+### Using a Custom Values File
 
-创建自定义 values 文件 `custom-values.yaml`:
+Create a custom values file `custom-values.yaml`:
 
 ```yaml
 controller:
   image:
     repository: myregistry.example.com/opensandbox-controller
     tag: v0.1.0
-  
+
   resources:
     limits:
       cpu: 1000m
@@ -121,14 +121,19 @@ controller:
     requests:
       cpu: 100m
       memory: 128Mi
-  
+
   logLevel: debug
+
+  snapshot:
+    registry: myregistry.example.com/opensandbox/snapshots
+    snapshotPushSecret: registry-snapshot-push-secret
+    resumePullSecret: registry-pull-secret
 
 imagePullSecrets:
   - name: myregistrykey
 ```
 
-使用自定义配置安装:
+Install with custom configuration:
 
 ```bash
 helm install opensandbox-controller ./charts/opensandbox-controller \
@@ -137,9 +142,9 @@ helm install opensandbox-controller ./charts/opensandbox-controller \
   --create-namespace
 ```
 
-### 常用配置示例
+### Common Configuration Examples
 
-#### 1. 调整资源配置
+#### 1. Adjust Resource Configuration
 
 ```bash
 helm install opensandbox-controller ./charts/opensandbox-controller \
@@ -148,9 +153,9 @@ helm install opensandbox-controller ./charts/opensandbox-controller \
   --namespace opensandbox-system
 ```
 
-#### 3. 配置节点亲和性
+#### 2. Configure Node Affinity
 
-创建 `affinity-values.yaml`:
+Create `affinity-values.yaml`:
 
 ```yaml
 controller:
@@ -173,20 +178,30 @@ helm install opensandbox-controller ./charts/opensandbox-controller \
   --namespace opensandbox-system
 ```
 
-## 升级
-
-### 升级 Helm Release
-
-从 GitHub Release 升级:
+#### 3. Configure Pause/Resume
 
 ```bash
-# 升级到指定版本
+helm install opensandbox-controller ./charts/opensandbox-controller \
+  --set controller.snapshot.registry=myregistry.example.com/opensandbox/snapshots \
+  --set controller.snapshot.snapshotPushSecret=registry-snapshot-push-secret \
+  --set controller.snapshot.resumePullSecret=registry-pull-secret \
+  --namespace opensandbox-system
+```
+
+## Upgrade
+
+### Upgrade Helm Release
+
+Upgrade from GitHub Release:
+
+```bash
+# Upgrade to a specific version
 helm upgrade opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
   --namespace opensandbox-system
 ```
 
-从本地 Chart 升级:
+Upgrade from local chart:
 
 ```bash
 helm upgrade opensandbox-controller ./charts/opensandbox-controller \
@@ -194,96 +209,97 @@ helm upgrade opensandbox-controller ./charts/opensandbox-controller \
   --namespace opensandbox-system
 ```
 
-或使用 Makefile:
+Or using Makefile:
 
 ```bash
 make helm-upgrade VERSION=v0.0.2
 ```
 
-### 查看升级历史
+### View Upgrade History
 
 ```bash
 helm history opensandbox-controller -n opensandbox-system
 ```
 
-### 回滚
+### Rollback
 
 ```bash
-# 回滚到上一个版本
+# Rollback to the previous version
 helm rollback opensandbox-controller -n opensandbox-system
 
-# 回滚到指定版本
+# Rollback to a specific revision
 helm rollback opensandbox-controller 1 -n opensandbox-system
 ```
 
-## 卸载
+## Uninstall
 
-### 卸载 Helm Release
+### Uninstall Helm Release
 
 ```bash
 helm uninstall opensandbox-controller -n opensandbox-system
 ```
 
-或使用 Makefile:
+Or using Makefile:
 
 ```bash
 make helm-uninstall
 ```
 
-**注意**: 默认情况下,CRD 会被保留。如需删除 CRD:
+**Note**: By default, CRDs are retained. To delete CRDs:
 
 ```bash
 kubectl delete crd batchsandboxes.sandbox.opensandbox.io
 kubectl delete crd pools.sandbox.opensandbox.io
+kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 ```
 
-### 清理 Namespace
+### Clean Up Namespace
 
-如果要完全清理:
+To completely clean up:
 
 ```bash
 kubectl delete namespace opensandbox-system
 ```
 
-## Makefile 命令
+## Makefile Commands
 
-项目提供了一系列 Makefile 命令来简化 Helm 操作:
+The project provides a set of Makefile commands to simplify Helm operations:
 
 ```bash
-# 检查 Helm Chart 语法
+# Lint the Helm Chart
 make helm-lint
 
-# 生成 Kubernetes 清单(不安装)
+# Generate Kubernetes manifests (without installing)
 make helm-template
 
-# 生成清单并显示调试信息
+# Generate manifests with debug output
 make helm-template-debug
 
-# 打包 Helm Chart
+# Package the Helm Chart
 make helm-package
 
-# 安装 Helm Chart
+# Install the Helm Chart
 make helm-install
 
-# 升级 Helm Chart
+# Upgrade the Helm Chart
 make helm-upgrade
 
-# 卸载 Helm Chart
+# Uninstall the Helm Chart
 make helm-uninstall
 
-# 测试已安装的 Chart
+# Test the installed Chart
 make helm-test
 
-# 执行 dry-run 安装
+# Perform a dry-run install
 make helm-dry-run
 
-# 执行所有 Helm 相关任务
+# Run all Helm-related tasks
 make helm-all
 ```
 
-## 验证部署
+## Verify Deployment
 
-### 1. 检查 Controller 状态
+### 1. Check Controller Status
 
 ```bash
 kubectl get deployment -n opensandbox-system
@@ -291,76 +307,76 @@ kubectl get pods -n opensandbox-system
 kubectl logs -n opensandbox-system -l control-plane=controller-manager -f
 ```
 
-### 2. 验证 CRD
+### 2. Verify CRDs
 
 ```bash
 kubectl get crd batchsandboxes.sandbox.opensandbox.io -o yaml
 kubectl get crd pools.sandbox.opensandbox.io -o yaml
 ```
 
-### 3. 创建测试资源
+### 3. Create Test Resources
 
 ```bash
-# 创建 Pool
+# Create a Pool
 kubectl apply -f config/samples/sandbox_v1alpha1_pool.yaml
 
-# 创建 BatchSandbox
+# Create a BatchSandbox
 kubectl apply -f config/samples/sandbox_v1alpha1_batchsandbox.yaml
 
-# 查看状态
+# View status
 kubectl get pools -n opensandbox-system
 kubectl get batchsandboxes -n opensandbox-system
 ```
 
-## 故障排查
+## Troubleshooting
 
-### Chart 验证失败
+### Chart Validation Failure
 
 ```bash
-# 检查 Chart 语法
+# Lint the Chart
 make helm-lint
 
-# 查看详细模板输出
+# View detailed template output
 make helm-template-debug
 ```
 
-### Controller 无法启动
+### Controller Fails to Start
 
 ```bash
-# 查看 Pod 状态
+# View Pod status
 kubectl describe pod -n opensandbox-system -l control-plane=controller-manager
 
-# 查看日志
+# View logs
 kubectl logs -n opensandbox-system -l control-plane=controller-manager
 
-# 检查 RBAC 权限
+# Check RBAC permissions
 kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-opensandbox-controller-controller-manager create pods
 ```
 
-### 镜像拉取失败
+### Image Pull Failure
 
 ```bash
-# 检查镜像配置
+# Check image configuration
 helm get values opensandbox-controller -n opensandbox-system
 
-# 添加镜像拉取密钥
+# Add an image pull secret
 kubectl create secret docker-registry myregistrykey \
   --docker-server=<your-registry> \
   --docker-username=<username> \
   --docker-password=<password> \
   -n opensandbox-system
 
-# 使用密钥重新安装
+# Reinstall with the secret
 helm upgrade opensandbox-controller ./charts/opensandbox-controller \
   --set imagePullSecrets[0].name=myregistrykey \
   --namespace opensandbox-system
 ```
 
-## 高级配置
+## Advanced Configuration
 
-### 多环境部署
+### Multi-Environment Deployment
 
-为不同环境创建专用的 values 文件:
+Create dedicated values files for different environments:
 
 #### values-dev.yaml
 ```yaml
@@ -393,85 +409,98 @@ controller:
         topologyKey: kubernetes.io/hostname
 ```
 
-部署到不同环境:
+Deploy to different environments:
 
 ```bash
-# 开发环境
+# Development environment
 helm install opensandbox-controller ./charts/opensandbox-controller \
   -f values-dev.yaml \
   --namespace opensandbox-dev
 
-# 生产环境
+# Production environment
 helm install opensandbox-controller ./charts/opensandbox-controller \
   -f values-prod.yaml \
   --namespace opensandbox-prod
 ```
 
-## 发布 Helm Chart (维护者使用)
+## Publishing Helm Charts (Maintainers)
 
-### 自动发布
+### Automated Publishing
 
-通过 GitHub Actions 自动发布 Helm Chart:
+Publish Helm Charts automatically via GitHub Actions:
 
-#### 方式一: 通过 Git Tag 触发
+#### Option 1: Trigger via Git Tag
 
 ```bash
-# 发布 opensandbox-controller chart 版本 0.1.0
+# Publish opensandbox-controller chart version 0.1.0
 git tag helm/opensandbox-controller/0.1.0
 git push origin helm/opensandbox-controller/0.1.0
 ```
 
-Tag 命名规则: `helm/{component}/{version}`
-- `helm`: 前缀,表示这是 Helm Chart 发布
-- `{component}`: 组件名称,如 `opensandbox-controller`
-- `{version}`: 版本号,如 `0.1.0`
+Tag naming convention: `helm/{component}/{version}`
+- `helm`: Prefix indicating this is a Helm Chart release
+- `{component}`: Component name, e.g. `opensandbox-controller`
+- `{version}`: Version number, e.g. `0.1.0`
 
-这将自动触发 workflow:
-1. 解析 tag 获取 component 和 version
-2. 更新对应 Chart.yaml 中的版本号
-3. 打包 Helm Chart
-4. 创建 GitHub Release
-5. 发布 .tgz 包到 Release
+This automatically triggers the workflow to:
+1. Parse the tag to extract component and version
+2. Update the version in the corresponding Chart.yaml
+3. Package the Helm Chart
+4. Create a GitHub Release
+5. Publish the .tgz package to the Release
 
-#### 方式二: 手动触发
+Important versioning note:
 
-1. 访问 GitHub Actions 页面
-2. 选择 "Publish Helm Chart" workflow
-3. 点击 "Run workflow"
-4. 选择 component (如: opensandbox-controller)
-5. 输入 chart_version (如: 0.1.0) 和 app_version (如: 0.0.1)
-6. 点击运行
+- The Helm chart `version` is the chart package version and is released through
+  `helm/{component}/{version}` tags.
+- The chart `appVersion` is the default image/application version used by that
+  chart release.
+- The `publish-helm-chart.yml` workflow updates `appVersion` for the published
+  release, but intentionally does not auto-bump the chart `version` inside
+  `Chart.yaml` on server release branches.
+- If you need a specific server image release, set the image tag explicitly
+  (for example `--set server.image.tag=v0.1.13`) or publish a new Helm chart
+  package version for the chart itself.
 
-### 发布后的 URL 格式
+#### Option 2: Manual Trigger
 
-发布后,用户可以通过以下 URL 访问 Helm Chart:
+1. Visit the GitHub Actions page
+2. Select the "Publish Helm Chart" workflow
+3. Click "Run workflow"
+4. Select the component (e.g. opensandbox-controller)
+5. Enter chart_version (e.g. 0.1.0) and app_version (e.g. 0.0.1)
+6. Click Run
+
+### Published URL Format
+
+After publishing, users can access the Helm Chart at:
 
 ```
 https://github.com/alibaba/OpenSandbox/releases/download/helm/{COMPONENT}/{VERSION}/{COMPONENT}-{VERSION}.tgz
 ```
 
-例如:
+Example:
 ```
 https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz
 ```
 
-### 添加新的 Helm Chart 组件
+### Adding a New Helm Chart Component
 
-如果需要为新组件添加 Helm Chart 发布支持:
+To add Helm Chart publishing support for a new component:
 
-1. 在 `charts/` 目录下创建新组件的 chart 目录
-2. 更新 `.github/workflows/publish-helm-chart.yml`:
-   - 在 `workflow_dispatch.inputs.component.options` 中添加新组件
-   - 在 "Set chart path" step 中添加组件路径映射
+1. Create a new chart directory under `charts/`
+2. Update `.github/workflows/publish-helm-chart.yml`:
+   - Add the new component to `workflow_dispatch.inputs.component.options`
+   - Add the component path mapping in the "Set chart path" step
 
-示例:
+Example:
 ```yaml
-# 在 workflow_dispatch inputs 中添加
+# Add to workflow_dispatch inputs
 options:
   - opensandbox-controller
-  - new-component  # 新增
+  - new-component  # new entry
 
-# 在 Set chart path step 中添加
+# Add to Set chart path step
 if [ "$COMPONENT" == "opensandbox-controller" ]; then
   CHART_PATH="kubernetes/charts/opensandbox-controller"
 elif [ "$COMPONENT" == "new-component" ]; then
@@ -479,26 +508,26 @@ elif [ "$COMPONENT" == "new-component" ]; then
 fi
 ```
 
-### 本地测试发布流程
+### Local Test of the Publishing Process
 
-在发布前,建议本地测试:
+Before publishing, test locally:
 
 ```bash
-# 打包 Chart
+# Package the Chart
 make helm-package
 
-# 验证打包的 Chart
+# Validate the packaged Chart
 helm lint opensandbox-controller-*.tgz
 
-# 测试安装
+# Test installation
 helm install test-release opensandbox-controller-*.tgz \
   --namespace test \
   --create-namespace \
   --dry-run
 ```
 
-## 参考资料
+## References
 
-- [Helm Chart README](charts/opensandbox-controller/README.md) - 完整的参数列表
-- [OpenSandbox 文档](README.md) - 项目主文档
-- [配置示例](config/samples/) - 资源配置示例
+- [Helm Chart README](charts/opensandbox-controller/README.md) - Full parameter list
+- [OpenSandbox Documentation](README.md) - Project documentation
+- [Configuration Examples](config/samples/) - Resource configuration examples

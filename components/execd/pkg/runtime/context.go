@@ -28,10 +28,13 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter"
 	jupytersession "github.com/alibaba/opensandbox/execd/pkg/jupyter/session"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
 
 // CreateContext provisions a kernel-backed session and returns its ID.
+// Bash language uses Jupyter kernel like other languages; for pipe-based bash sessions use CreateBashSession (session API).
 func (c *Controller) CreateContext(req *CreateContextRequest) (string, error) {
+	// Create a new Jupyter session.
 	var (
 		client  *jupyter.Client
 		session *jupytersession.Session
@@ -42,7 +45,7 @@ func (c *Controller) CreateContext(req *CreateContextRequest) (string, error) {
 		log.Error("failed to create session, retrying: %v", err)
 		return err != nil
 	}, func() error {
-		client, session, err = c.createContext(*req)
+		client, session, err = c.createJupyterContext(*req)
 		return err
 	})
 	if err != nil {
@@ -68,12 +71,15 @@ func (c *Controller) DeleteContext(session string) error {
 	return c.deleteSessionAndCleanup(session)
 }
 
-func (c *Controller) GetContext(session string) CodeContext {
+func (c *Controller) GetContext(session string) (CodeContext, error) {
 	kernel := c.getJupyterKernel(session)
+	if kernel == nil {
+		return CodeContext{}, ErrContextNotFound
+	}
 	return CodeContext{
 		ID:       session,
 		Language: kernel.language,
-	}
+	}, nil
 }
 
 func (c *Controller) ListContext(language string) ([]CodeContext, error) {
@@ -111,20 +117,11 @@ func (c *Controller) deleteSessionAndCleanup(session string) error {
 	if c.getJupyterKernel(session) == nil {
 		return ErrContextNotFound
 	}
-
 	if err := c.jupyterClient().DeleteSession(session); err != nil {
 		return err
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	delete(c.jupyterClientMap, session)
-	for lang, id := range c.defaultLanguageJupyterSessions {
-		if id == session {
-			delete(c.defaultLanguageJupyterSessions, lang)
-		}
-	}
+	c.jupyterClientMap.Delete(session)
+	c.deleteDefaultSessionByID(session)
 	return nil
 }
 
@@ -133,18 +130,26 @@ func (c *Controller) newContextID() string {
 }
 
 func (c *Controller) newIpynbPath(sessionID, cwd string) (string, error) {
+	resolvedCwd, err := pathutil.ExpandPath(cwd)
+	if err != nil {
+		return "", err
+	}
 	if cwd != "" {
-		err := os.MkdirAll(cwd, os.ModePerm)
+		err := os.MkdirAll(resolvedCwd, os.ModePerm)
 		if err != nil {
 			return "", err
 		}
 	}
 
-	return filepath.Join(cwd, fmt.Sprintf("%s.ipynb", sessionID)), nil
+	return filepath.Join(resolvedCwd, fmt.Sprintf("%s.ipynb", sessionID)), nil
 }
 
-// createDefaultLanguageContext prewarms a session for stateless execution.
-func (c *Controller) createDefaultLanguageContext(language Language) error {
+// createDefaultLanguageJupyterContext prewarms a session for stateless execution.
+func (c *Controller) createDefaultLanguageJupyterContext(language Language) error {
+	if c.getDefaultLanguageSession(language) != "" {
+		return nil
+	}
+
 	var (
 		client  *jupyter.Client
 		session *jupytersession.Session
@@ -154,7 +159,7 @@ func (c *Controller) createDefaultLanguageContext(language Language) error {
 		log.Error("failed to create context, retrying: %v", err)
 		return err != nil
 	}, func() error {
-		client, session, err = c.createContext(CreateContextRequest{
+		client, session, err = c.createJupyterContext(CreateContextRequest{
 			Language: language,
 			Cwd:      "",
 		})
@@ -164,20 +169,17 @@ func (c *Controller) createDefaultLanguageContext(language Language) error {
 		return err
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.defaultLanguageJupyterSessions[language] = session.ID
-	c.jupyterClientMap[session.ID] = &jupyterKernel{
+	c.setDefaultLanguageSession(language, session.ID)
+	c.jupyterClientMap.Store(session.ID, &jupyterKernel{
 		kernelID: session.Kernel.ID,
 		client:   client,
 		language: language,
-	}
+	})
 	return nil
 }
 
-// createContext performs the actual context creation workflow.
-func (c *Controller) createContext(request CreateContextRequest) (*jupyter.Client, *jupytersession.Session, error) {
+// createJupyterContext performs the actual context creation workflow.
+func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyter.Client, *jupytersession.Session, error) {
 	client := c.jupyterClient()
 
 	kernel, err := c.searchKernel(client, request.Language)
@@ -217,10 +219,7 @@ func (c *Controller) createContext(request CreateContextRequest) (*jupyter.Clien
 
 // storeJupyterKernel caches a session -> kernel mapping.
 func (c *Controller) storeJupyterKernel(sessionID string, kernel *jupyterKernel) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.jupyterClientMap[sessionID] = kernel
+	c.jupyterClientMap.Store(sessionID, kernel)
 }
 
 func (c *Controller) jupyterClient() *jupyter.Client {
@@ -236,49 +235,76 @@ func (c *Controller) jupyterClient() *jupyter.Client {
 		jupyter.WithHTTPClient(httpClient))
 }
 
-func (c *Controller) listAllContexts() ([]CodeContext, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	contexts := make([]CodeContext, 0)
-	for session, kernel := range c.jupyterClientMap {
-		if kernel != nil {
-			contexts = append(contexts, CodeContext{
-				ID:       session,
-				Language: kernel.language,
-			})
+func (c *Controller) getDefaultLanguageSession(language Language) string {
+	if v, ok := c.defaultLanguageSessions.Load(language); ok {
+		if session, ok := v.(string); ok {
+			return session
 		}
 	}
+	return ""
+}
 
-	for language, defaultContext := range c.defaultLanguageJupyterSessions {
-		contexts = append(contexts, CodeContext{
-			ID:       defaultContext,
-			Language: language,
-		})
-	}
+func (c *Controller) setDefaultLanguageSession(language Language, sessionID string) {
+	c.defaultLanguageSessions.Store(language, sessionID)
+}
+
+func (c *Controller) deleteDefaultSessionByID(sessionID string) {
+	c.defaultLanguageSessions.Range(func(key, value any) bool {
+		if s, ok := value.(string); ok && s == sessionID {
+			c.defaultLanguageSessions.Delete(key)
+		}
+		return true
+	})
+}
+
+func (c *Controller) listAllContexts() ([]CodeContext, error) {
+	contexts := make([]CodeContext, 0)
+	seen := make(map[string]struct{})
+
+	c.jupyterClientMap.Range(func(key, value any) bool {
+		session, _ := key.(string)
+		if kernel, ok := value.(*jupyterKernel); ok && kernel != nil {
+			contexts = append(contexts, CodeContext{ID: session, Language: kernel.language})
+			seen[session] = struct{}{}
+		}
+		return true
+	})
+
+	c.defaultLanguageSessions.Range(func(key, value any) bool {
+		lang, _ := key.(Language)
+		session, _ := value.(string)
+		if session == "" {
+			return true
+		}
+		// Skip if already collected from jupyterClientMap to avoid duplicates.
+		if _, exists := seen[session]; exists {
+			return true
+		}
+		contexts = append(contexts, CodeContext{ID: session, Language: lang})
+		return true
+	})
 
 	return contexts, nil
 }
 
 func (c *Controller) listLanguageContexts(language Language) ([]CodeContext, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	contexts := make([]CodeContext, 0)
-	for session, kernel := range c.jupyterClientMap {
-		if kernel != nil && kernel.language == language {
-			contexts = append(contexts, CodeContext{
-				ID:       session,
-				Language: language,
-			})
-		}
-	}
+	seen := make(map[string]struct{})
 
-	if defaultContext := c.defaultLanguageJupyterSessions[language]; defaultContext != "" {
-		contexts = append(contexts, CodeContext{
-			ID:       defaultContext,
-			Language: language,
-		})
+	c.jupyterClientMap.Range(func(key, value any) bool {
+		session, _ := key.(string)
+		if kernel, ok := value.(*jupyterKernel); ok && kernel != nil && kernel.language == language {
+			contexts = append(contexts, CodeContext{ID: session, Language: language})
+			seen[session] = struct{}{}
+		}
+		return true
+	})
+
+	if defaultContext := c.getDefaultLanguageSession(language); defaultContext != "" {
+		// Skip if already collected from jupyterClientMap to avoid duplicates.
+		if _, exists := seen[defaultContext]; !exists {
+			contexts = append(contexts, CodeContext{ID: defaultContext, Language: language})
+		}
 	}
 
 	return contexts, nil

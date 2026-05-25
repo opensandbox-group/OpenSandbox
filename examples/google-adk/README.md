@@ -8,10 +8,10 @@ drives tool calls that execute inside a sandbox.
 Pre-pull the code-interpreter image (includes Python):
 
 ```shell
-docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1
+docker pull sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2
 
 # use docker hub
-# docker pull opensandbox/code-interpreter:v1.0.1
+# docker pull opensandbox/code-interpreter:v1.0.2
 ```
 
 Start the local OpenSandbox server, logs will be visible in the terminal:
@@ -40,7 +40,7 @@ cleans up the sandbox.
 
 - `SANDBOX_DOMAIN`: Sandbox service address (default: `localhost:8080`)
 - `SANDBOX_API_KEY`: API key if your server requires authentication (optional for local)
-- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1`)
+- `SANDBOX_IMAGE`: Sandbox image to use (default: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2`)
 - `GOOGLE_API_KEY`: Gemini API key (required)
 - `GOOGLE_ADK_MODEL`: Gemini model name (default: `gemini-2.5-flash`)
 

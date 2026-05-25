@@ -81,6 +81,7 @@ const repoRoot = path.resolve(__dirname, "../../../../");
 
 const specs = {
   execd: path.join(repoRoot, "specs", "execd-api.yaml"),
+  egress: path.join(repoRoot, "specs", "egress-api.yaml"),
   lifecycle: path.join(repoRoot, "specs", "sandbox-lifecycle.yml"),
 };
 
@@ -95,6 +96,7 @@ mkdirSync(outDir, { recursive: true });
 
 const outFiles = {
   execd: path.join(outDir, "execd.ts"),
+  egress: path.join(outDir, "egress.ts"),
   lifecycle: path.join(outDir, "lifecycle.ts"),
 };
 
@@ -104,6 +106,7 @@ console.log(`- outDir:   ${outDir}`);
 
 // Use pnpm as requested by the project rules.
 run("pnpm", ["exec", "openapi-typescript", specs.execd, "-o", outFiles.execd], packageRoot);
+run("pnpm", ["exec", "openapi-typescript", specs.egress, "-o", outFiles.egress], packageRoot);
 run(
   "pnpm",
   ["exec", "openapi-typescript", specs.lifecycle, "-o", outFiles.lifecycle],
@@ -112,10 +115,36 @@ run(
 
 // The generator may overwrite outputs; re-apply unified license headers after generation.
 ensureLicenseHeader(outFiles.execd);
+ensureLicenseHeader(outFiles.egress);
 ensureLicenseHeader(outFiles.lifecycle);
+
+// Clarify that the generated session API in execd.ts is not the recommended entry point.
+const EXECD_SESSION_NOTE = `/**
+ * NOTE: The session-related path types and operations in this file (e.g. /session, runInSession)
+ * are generated from the execd OpenAPI spec. They are not the recommended runtime entry point.
+ * Use \`sandbox.commands.createSession()\`, \`sandbox.commands.runInSession()\`, and
+ * \`sandbox.commands.deleteSession()\` instead.
+ */`;
+
+function ensureExecdSessionNote(filePath) {
+  const body = readFileSync(filePath, "utf8");
+  if (body.includes("not the recommended runtime entry point")) {
+    return;
+  }
+  // Insert after the first "Do not make direct changes" block (after the first empty line that follows it).
+  const marker = "Do not make direct changes to the file.";
+  const idx = body.indexOf(marker);
+  if (idx === -1) return;
+  const afterBlock = body.indexOf("\n\n", idx + marker.length);
+  const insertAt = afterBlock === -1 ? idx + marker.length : afterBlock + 2;
+  const newBody = body.slice(0, insertAt) + "\n" + EXECD_SESSION_NOTE + "\n" + body.slice(insertAt);
+  writeFileSync(filePath, newBody, "utf8");
+}
+
+ensureExecdSessionNote(outFiles.execd);
 
 console.log("\n✅ API type generation completed:");
 console.log(`- ${path.relative(packageRoot, outFiles.execd)}`);
+console.log(`- ${path.relative(packageRoot, outFiles.egress)}`);
 console.log(`- ${path.relative(packageRoot, outFiles.lifecycle)}`);
-
 

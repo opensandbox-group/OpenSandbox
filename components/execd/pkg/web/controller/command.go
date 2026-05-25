@@ -19,10 +19,13 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
+	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
+	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -50,14 +53,39 @@ func (c *CodeInterpretingController) RunCommand() {
 
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
 	defer cancel()
+	execStart := time.Now()
+	var recordOnce sync.Once
+	recordExecution := func(result string) {
+		recordOnce.Do(func() {
+			telemetry.RecordExecutionDuration(
+				ctx,
+				"run_command",
+				result,
+				float64(time.Since(execStart))/float64(time.Millisecond),
+			)
+		})
+	}
 
 	runCodeRequest := c.buildExecuteCommandRequest(request)
 	eventsHandler := c.setServerEventsHandler(ctx)
+	origComplete := eventsHandler.OnExecuteComplete
+	eventsHandler.OnExecuteComplete = func(executionTime time.Duration) {
+		origComplete(executionTime)
+		recordExecution("success")
+	}
+	origError := eventsHandler.OnExecuteError
+	eventsHandler.OnExecuteError = func(err *execute.ErrorOutput) {
+		origError(err)
+		recordExecution("failure")
+	}
 	runCodeRequest.Hooks = eventsHandler
 
-	c.setupSSEResponse()
+	// SSE headers are committed lazily on the first event write
+	// (see writeSingleEvent), so a synchronous error from Execute below can
+	// still be surfaced as a structured JSON error response.
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
+		recordExecution("failure")
 		c.RespondError(
 			http.StatusInternalServerError,
 			model.ErrorCodeRuntimeError,
@@ -133,6 +161,9 @@ func (c *CodeInterpretingController) buildExecuteCommandRequest(request model.Ru
 			Code:     request.Command,
 			Cwd:      request.Cwd,
 			Timeout:  timeout,
+			Gid:      request.Gid,
+			Uid:      request.Uid,
+			Envs:     request.Envs,
 		}
 	} else {
 		return &runtime.ExecuteCodeRequest{
@@ -140,6 +171,9 @@ func (c *CodeInterpretingController) buildExecuteCommandRequest(request model.Ru
 			Code:     request.Command,
 			Cwd:      request.Cwd,
 			Timeout:  timeout,
+			Gid:      request.Gid,
+			Uid:      request.Uid,
+			Envs:     request.Envs,
 		}
 	}
 }

@@ -18,42 +18,76 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
+
+	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 )
 
 type Mode string
 
 const (
-	// ModeHeader is the mode that uses the Host or SandboxIngress header
-	// to determine the sandbox instance.
 	ModeHeader Mode = "header"
-
-	// ModeURI is the mode that uses the URI path to determine the
-	// sandbox instance.
-	//
-	// Pattern is 'hostname/<sandbox-id>/<sandbox-port>/<path-to-request>'.
-	ModeURI Mode = "uri"
+	ModeURI    Mode = "uri"
 )
 
-func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, error) {
+func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
+	var pr parsedRoute
+	var err error
+
 	switch p.mode {
 	case ModeHeader:
 		targetHost := p.parseTargetHostByHeader(r)
 		if targetHost == "" {
-			return nil, fmt.Errorf("missing header '%s' or 'Host'", SandboxIngress)
+			return nil, http.StatusBadRequest, fmt.Errorf("missing header '%s' or 'Host'", SandboxIngress)
 		}
-
-		host, err := p.parseSandboxHost(targetHost)
-		if err != nil || host.ingressKey == "" || host.port == 0 {
-			return nil, fmt.Errorf("invalid host: %s", targetHost)
-		}
-		return host, nil
+		pr, err = parseHostRoute(targetHost)
 	case ModeURI:
-		return p.parseSandboxURI(r)
+		if r.URL == nil || r.URL.Path == "" {
+			return nil, http.StatusBadRequest, errors.New("missing URI path")
+		}
+		pr, err = parseURIRoute(r.URL.Path)
+	default:
+		return nil, http.StatusBadRequest, fmt.Errorf("unknown ingress mode: %s", p.mode)
 	}
 
-	return nil, fmt.Errorf("unknown ingress mode: %s", p.mode)
+	if err != nil || pr.sandboxID == "" || pr.port == 0 {
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid ingress route: %w", err)
+	}
+
+	endpoint, err := p.sandboxProvider.GetEndpoint(pr.sandboxID)
+	if err != nil {
+		return nil, providerErrHTTPStatus(err), err
+	}
+
+	need := endpoint.AccessVerificationRequired()
+
+	if p.mode == ModeURI && !need && pr.uriParsedAsOSEP {
+		pr, err = parseURILegacy(r.URL.Path)
+		if err != nil {
+			return nil, ingressRouteErrHTTPStatus(err), err
+		}
+	}
+
+	present, accessTok := signature.SecureAccessHeaderInfo(r)
+	if err := signature.CheckIngressSecureAccess(signature.IngressAccessInput{
+		Secure:                    need,
+		ExpectedAccessToken:       endpoint.SecureAccessToken,
+		SecureAccessHeaderPresent: present,
+		RequestedAccessToken:      accessTok,
+		ExpiresB36:                pr.expiresB36,
+		Signature:                 pr.signature,
+		SandboxID:                 pr.sandboxID,
+		Port:                      pr.port,
+		Verifier:                  p.secure,
+	}); err != nil {
+		return nil, ingressRouteErrHTTPStatus(err), err
+	}
+
+	return &sandboxHost{
+		ingressKey: pr.sandboxID,
+		port:       pr.port,
+		endpoint:   endpoint.Endpoint,
+		requestURI: pr.requestURI,
+	}, 0, nil
 }
 
 func (p *Proxy) parseTargetHostByHeader(r *http.Request) string {
@@ -72,61 +106,6 @@ func (p *Proxy) parseTargetHostByHeader(r *http.Request) string {
 type sandboxHost struct {
 	ingressKey string
 	port       int
+	endpoint   string
 	requestURI string
-}
-
-func (p *Proxy) parseSandboxHost(s string) (*sandboxHost, error) {
-	domain := strings.Split(strings.TrimPrefix(strings.TrimPrefix(s, "https://"), "http://"), ".")
-	if len(domain) < 1 {
-		return &sandboxHost{}, fmt.Errorf("invalid host: %s", s)
-	}
-
-	ingressAndPort := strings.Split(domain[0], "-")
-	if len(ingressAndPort) <= 1 || ingressAndPort[0] == "" {
-		return &sandboxHost{}, fmt.Errorf("invalid host: %s", s)
-	}
-
-	ingress := strings.Join(ingressAndPort[:len(ingressAndPort)-1], "-")
-	port, err := strconv.Atoi(ingressAndPort[len(ingressAndPort)-1])
-	if err != nil {
-		return &sandboxHost{}, fmt.Errorf("invalid port format: %w", err)
-	}
-	return &sandboxHost{ingress, port, ""}, nil
-}
-
-func (p *Proxy) parseSandboxURI(r *http.Request) (*sandboxHost, error) {
-	path := r.URL.Path
-	if path == "" {
-		return nil, errors.New("missing URI path")
-	}
-
-	// Remove leading slash and split by '/'
-	path = strings.TrimPrefix(path, "/")
-	parts := strings.SplitN(path, "/", 3)
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("invalid URI path format: expected '/<sandbox-id>/<sandbox-port>/<path-to-request>', got: %s", r.URL.Path)
-	}
-
-	sandboxID := parts[0]
-	port, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid port format: %w", err)
-	}
-	if sandboxID == "" || port <= 0 {
-		return nil, errors.New("missing sandbox-id or sandbox-port in URI path")
-	}
-
-	// Extract the remaining path (user's target request URI)
-	var requestURI string
-	if len(parts) >= 3 && parts[2] != "" {
-		requestURI = "/" + parts[2]
-	} else {
-		requestURI = "/"
-	}
-
-	return &sandboxHost{
-		ingressKey: sandboxID,
-		port:       port,
-		requestURI: requestURI,
-	}, nil
 }

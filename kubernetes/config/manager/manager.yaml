@@ -63,6 +63,11 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          - --snapshot-registry=docker-registry.default.svc.cluster.local:5000
+          - --snapshot-registry-insecure=true
+          - --snapshot-push-secret=registry-snapshot-push-secret
+          - --resume-pull-secret=registry-pull-secret
+          - --image-committer-image=image-committer:dev
         image: controller:dev
         name: manager
         ports: []
@@ -96,4 +101,3 @@ spec:
       volumes: []
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
-

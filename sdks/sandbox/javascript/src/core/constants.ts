@@ -13,6 +13,7 @@
 // limitations under the License.
 
 export const DEFAULT_EXECD_PORT = 44772;
+export const DEFAULT_EGRESS_PORT = 18080;
 
 export const DEFAULT_ENTRYPOINT: string[] = ["tail", "-f", "/dev/null"];
 
@@ -26,4 +27,4 @@ export const DEFAULT_READY_TIMEOUT_SECONDS = 30;
 export const DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS = 200;
 
 export const DEFAULT_REQUEST_TIMEOUT_SECONDS = 30;
-export const DEFAULT_USER_AGENT = "OpenSandbox-JS-SDK/0.1.4";
+export const DEFAULT_USER_AGENT = "OpenSandbox-JS-SDK/0.1.7";

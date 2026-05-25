@@ -25,8 +25,8 @@
  *
  * This script:
  * 1. Reads specs/sandbox-lifecycle.yml
- * 2. Escapes backticks
- * 3. Wraps in JavaScript template literal
+ * 2. Encodes the YAML as a JavaScript string literal
+ * 3. Assigns it to the inline spec constant
  * 4. Writes to docs/public/api/spec-inline.js (by default)
  */
 
@@ -81,11 +81,8 @@ function main() {
     const yamlContent = fs.readFileSync(yamlPath, 'utf-8');
     const yamlSize = Math.round(yamlContent.length / 1024);
 
-    // Escape backticks for template literal
-    const escapedYaml = yamlContent.replace(/`/g, '\\`');
-
     // Generate JavaScript
-    const jsContent = `const OPENAPI_SPEC_YAML = \`${escapedYaml}\`;`;
+    const jsContent = `const OPENAPI_SPEC_YAML = ${JSON.stringify(yamlContent)};`;
     const jsSize = Math.round(jsContent.length / 1024);
 
     // Write output
@@ -98,7 +95,7 @@ function main() {
 
     // Verify
     const generated = fs.readFileSync(outputPath, 'utf-8');
-    if (generated.startsWith('const OPENAPI_SPEC_YAML = `')) {
+    if (generated.startsWith('const OPENAPI_SPEC_YAML = ')) {
       console.log('\nFile validated successfully');
       process.exit(0);
     } else {

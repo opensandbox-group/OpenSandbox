@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!scripts/code-interpreter.sh
+!scripts/jupyter_notebook_config.py
+!sandboxes/code-interpreter/Dockerfile
+!sandboxes/code-interpreter/scripts/code-interpreter.sh
+!sandboxes/code-interpreter/scripts/jupyter_notebook_config.py

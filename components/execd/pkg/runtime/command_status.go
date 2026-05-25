@@ -43,8 +43,11 @@ func (c *Controller) commandSnapshot(session string) *commandKernel {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	kernel, ok := c.commandClientMap[session]
-	if !ok || kernel == nil {
+	var kernel *commandKernel
+	if v, ok := c.commandClientMap.Load(session); ok {
+		kernel, _ = v.(*commandKernel)
+	}
+	if kernel == nil {
 		return nil
 	}
 
@@ -116,8 +119,11 @@ func (c *Controller) markCommandFinished(session string, exitCode int, errMsg st
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	kernel, ok := c.commandClientMap[session]
-	if !ok || kernel == nil {
+	var kernel *commandKernel
+	if v, ok := c.commandClientMap.Load(session); ok {
+		kernel, _ = v.(*commandKernel)
+	}
+	if kernel == nil {
 		return
 	}
 
@@ -125,4 +131,8 @@ func (c *Controller) markCommandFinished(session string, exitCode int, errMsg st
 	kernel.errMsg = errMsg
 	kernel.running = false
 	kernel.finishedAt = &now
+	// Clear the PID so a late or retried Interrupt cannot signal a recycled
+	// process. Group-wide kill would otherwise amplify the impact of a
+	// stale-PID hit to every process in the unrelated process group.
+	kernel.pid = 0
 }

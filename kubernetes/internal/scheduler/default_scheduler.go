@@ -215,6 +215,23 @@ func (sch *defaultTaskScheduler) UpdatePods(pods []*corev1.Pod) {
 	sch.allPods = pods
 }
 
+// AddTasks registers task specs that are not yet tracked by the scheduler.
+// Tasks whose names are already tracked are silently skipped, making this
+// safe to call with the full task list during a scale-out reconciliation.
+func (sch *defaultTaskScheduler) AddTasks(tasks []*api.Task) error {
+	newNodes, err := initTaskNodes(tasks)
+	if err != nil {
+		return err
+	}
+	for _, node := range newNodes {
+		if _, exists := sch.taskNodeByNameIndex[node.Name]; !exists {
+			sch.taskNodes = append(sch.taskNodes, node)
+			sch.taskNodeByNameIndex[node.Name] = node
+		}
+	}
+	return nil
+}
+
 func (sch *defaultTaskScheduler) ListTask() []Task {
 	ret := make([]Task, len(sch.taskNodes), len(sch.taskNodes))
 	for i := range sch.taskNodes {

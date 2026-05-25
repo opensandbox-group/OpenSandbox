@@ -21,18 +21,14 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// DefaultProviderFactory is the default implementation of ProviderFactory
 type DefaultProviderFactory struct {
 	config       *rest.Config
-	namespace    string
 	resyncPeriod time.Duration
 }
 
-// NewProviderFactory creates a new DefaultProviderFactory
-func NewProviderFactory(config *rest.Config, namespace string, resyncPeriod time.Duration) *DefaultProviderFactory {
+func NewProviderFactory(config *rest.Config, resyncPeriod time.Duration) *DefaultProviderFactory {
 	return &DefaultProviderFactory{
 		config:       config,
-		namespace:    namespace,
 		resyncPeriod: resyncPeriod,
 	}
 }
@@ -41,9 +37,9 @@ func NewProviderFactory(config *rest.Config, namespace string, resyncPeriod time
 func (f *DefaultProviderFactory) CreateProvider(providerType ProviderType) (Provider, error) {
 	switch providerType {
 	case ProviderTypeBatchSandbox:
-		return NewBatchSandboxProvider(f.config, f.namespace, f.resyncPeriod), nil
+		return NewBatchSandboxProvider(f.config, f.resyncPeriod), nil
 	case ProviderTypeAgentSandbox:
-		return NewAgentSandboxProvider(f.config, f.namespace, f.resyncPeriod), nil
+		return NewAgentSandboxProvider(f.config, f.resyncPeriod), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", providerType)
 	}

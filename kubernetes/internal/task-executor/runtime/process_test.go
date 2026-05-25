@@ -73,6 +73,9 @@ func TestProcessExecutor_Lifecycle(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
+	// Wait for process to fully start and PID file to be written
+	time.Sleep(100 * time.Millisecond)
+
 	// 3. Inspect (Running)
 	status, err := executor.Inspect(ctx, task)
 	if err != nil {
@@ -88,8 +91,8 @@ func TestProcessExecutor_Lifecycle(t *testing.T) {
 	}
 
 	// 5. Inspect (Terminated)
-	// Wait a bit for file to be written
-	time.Sleep(100 * time.Millisecond)
+	// Wait for exit file to be written
+	time.Sleep(200 * time.Millisecond)
 	status, err = executor.Inspect(ctx, task)
 	if err != nil {
 		t.Fatalf("Inspect failed: %v", err)

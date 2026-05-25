@@ -15,7 +15,7 @@
 from fastapi.exceptions import HTTPException
 from fastapi.testclient import TestClient
 
-from src.api import lifecycle
+from opensandbox_server.api import lifecycle
 
 
 def test_pause_route_calls_service_and_returns_202(

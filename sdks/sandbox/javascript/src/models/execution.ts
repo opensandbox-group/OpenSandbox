@@ -54,6 +54,7 @@ export interface Execution {
   result: ExecutionResult[];
   error?: ExecutionError;
   complete?: ExecutionComplete;
+  exitCode?: number | null;
 }
 
 export interface ExecutionHandlers {
