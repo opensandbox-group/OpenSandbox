@@ -99,7 +99,15 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 		ConfDir:    strings.TrimSpace(os.Getenv(constants.EnvMitmproxyConfDir)),
 		ScriptPath: strings.TrimSpace(os.Getenv(constants.EnvMitmproxyScript)),
 	}
-	restartCh := make(chan exitEvent, 1)
+	// Buffered enough to absorb stale exit events from a retry storm without
+	// dropping the death event of the currently-live mitmdump. With buffer 1,
+	// a single half-launched attempt's OnExit can occupy the slot, causing the
+	// fresh process's real death event to be dropped via the default branch in
+	// launchTagged -- watcher would then read the stale event, ignore it on
+	// gen mismatch, and block forever (the same silent-dead-state this watchdog
+	// is meant to prevent). Stale events are still cheap to discard via the
+	// gen check; we just need room to store them.
+	restartCh := make(chan exitEvent, 64)
 	const initialGen uint64 = 1
 	running, err := launchTagged(cfg, restartCh, initialGen)
 	if err != nil {
@@ -195,9 +203,11 @@ func (m *mitmTransparent) restartWithBackoff(ctx context.Context, gate *mitmprox
 				return
 			} else {
 				log.Errorf("[mitmproxy] restart attempt %d (gen %d): wait listen %s: %v", attempt, gen, waitAddr, waitErr)
-				if newRunning.Cmd != nil && newRunning.Cmd.Process != nil {
-					_ = newRunning.Cmd.Process.Kill()
-				}
+				// GracefulShutdown SIGTERMs then SIGKILLs and waits for reap, so
+				// the listen port is released before the next attempt's Launch
+				// races to bind it. Direct Process.Kill returns immediately and
+				// can cause spurious WaitListenPort failures on port contention.
+				mitmproxy.GracefulShutdown(newRunning, time.Second)
 			}
 		} else {
 			log.Errorf("[mitmproxy] restart attempt %d (gen %d): launch failed: %v", attempt, gen, launchErr)
