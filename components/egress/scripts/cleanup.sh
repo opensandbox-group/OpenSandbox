@@ -13,14 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Best-effort cleanup of egress sidecar state. Designed to be used as the
-# opensandbox-supervisor --post-exit (after worker death) and/or --pre-start
-# (before next launch) hook. Safe to run repeatedly; safe to run when egress
-# was never up.
+# Pre-start hook for opensandbox-supervisor wrapping the egress worker.
+# Reaps any mitmdump left over from a previous crashed egress so the next
+# launch can bind the transparent-MITM listen port (default 18081).
 #
-# Hard contract: this script MUST NOT exit non-zero. Each step swallows its
-# own errors. A poststop that crashes is worse than dirty state that the
-# next startup will tolerate.
+# Scope is deliberately narrow:
+#   * iptables NAT rules are NOT torn down here. The egress sidecar shares
+#     a network namespace with the workload it protects; tearing rules
+#     down between crashes would leave the workload with unfiltered egress
+#     for the full backoff window. Egress's own SetupRedirect is additive
+#     and tolerates pre-existing rules (first match wins).
+#   * The `inet opensandbox` nft table is NOT touched here either. The
+#     egress nftables manager already prepends `delete table inet
+#     opensandbox` to its ruleset script, so ApplyStatic is idempotent.
+#
+# Hard contract: this script MUST NOT exit non-zero. A misbehaving cleanup
+# hook is worse than a stray mitmdump; supervisor would treat the hook
+# failure as a launch attempt and trip its crashloop budget faster.
 
 # Intentionally no `set -e`. `set -u` for typo safety on env names only.
 set -u
@@ -31,93 +40,16 @@ log() { printf '[egress-cleanup] %s\n' "$*" >&2; }
 # stderr so it shows up in container logs without polluting the event log.
 try() { "$@" 2>&1 | sed 's/^/  /' >&2; return 0; }
 
-# Repeatedly attempts `iptables -D ...` (or equivalent) until it returns
-# non-zero, with a hard iteration cap so a broken iptables cannot spin
-# forever. Used to drain duplicate rules accumulated across crash restarts.
-delete_until_gone() {
-  i=0
-  while [ $i -lt 32 ]; do
-    "$@" 2>/dev/null || break
-    i=$((i + 1))
-  done
-}
-
-# ─── iptables DNS redirect (pkg/iptables/redirect.go) ────────────────
-remove_dns_redirect() {
-  command -v iptables >/dev/null 2>&1 || { log "iptables not present; skipping DNS redirect cleanup"; return 0; }
-
-  DNS_PORT=15353
-  MARK_HEX=0x1
-
-  for fam in iptables ip6tables; do
-    command -v "$fam" >/dev/null 2>&1 || continue
-    delete_until_gone "$fam" -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-port "$DNS_PORT"
-    delete_until_gone "$fam" -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-port "$DNS_PORT"
-    delete_until_gone "$fam" -t nat -D OUTPUT -p tcp --dport 53 -m mark --mark "$MARK_HEX" -j RETURN
-    delete_until_gone "$fam" -t nat -D OUTPUT -p udp --dport 53 -m mark --mark "$MARK_HEX" -j RETURN
-  done
-
-  # Per-exempt-dst RETURN rules (OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT is a
-  # comma-separated IP list; matches dnsproxy.ParseNameserverExemptList).
-  exempt="${OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT:-}"
-  if [ -n "$exempt" ]; then
-    OLD_IFS="$IFS"
-    IFS=','
-    for d in $exempt; do
-      d=$(printf '%s' "$d" | tr -d ' ')
-      [ -z "$d" ] && continue
-      case "$d" in
-        *:*) fam=ip6tables ;;
-        *)   fam=iptables ;;
-      esac
-      command -v "$fam" >/dev/null 2>&1 || continue
-      delete_until_gone "$fam" -t nat -D OUTPUT -p tcp --dport 53 -d "$d" -j RETURN
-      delete_until_gone "$fam" -t nat -D OUTPUT -p udp --dport 53 -d "$d" -j RETURN
-    done
-    IFS="$OLD_IFS"
-  fi
-
-  log "iptables DNS redirect rules removed (best-effort)"
-}
-
-# ─── iptables transparent HTTP (pkg/iptables/transparent.go) ─────────
-remove_transparent_http() {
-  enabled="${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"
-  case "$enabled" in
-    1|true|TRUE|True|yes|YES|Yes|y|Y|on|ON|On) ;;
-    *) return 0 ;;
-  esac
-  command -v iptables >/dev/null 2>&1 || return 0
-
-  MITM_PORT="${OPENSANDBOX_EGRESS_MITMPROXY_PORT:-18081}"
-  MITM_UID="${OPENSANDBOX_EGRESS_MITMPROXY_UID:-10042}"
-
-  delete_until_gone iptables -t nat -D OUTPUT -p tcp \
-    -m owner ! --uid-owner "$MITM_UID" \
-    -m multiport --dports 80,443 \
-    -j REDIRECT --to-ports "$MITM_PORT"
-  delete_until_gone iptables -t nat -D OUTPUT -p tcp -d 127.0.0.0/8 -j RETURN
-
-  log "iptables transparent HTTP rules removed (best-effort)"
-}
-
-# ─── nftables table `opensandbox` (pkg/nftables/manager.go:31) ───────
-remove_nft_table() {
-  command -v nft >/dev/null 2>&1 || { log "nft not present; skipping nftables cleanup"; return 0; }
-  # `delete table` is atomic: either it exists and is removed, or returns
-  # non-zero (which we swallow). Family is `inet` (matches manager.go).
-  try nft delete table inet opensandbox
-  log "nftables 'opensandbox' table removed (best-effort)"
-}
-
 # ─── stray mitmdump (orphaned after hard crash) ──────────────────────
 kill_stray_mitmdump() {
   command -v pkill >/dev/null 2>&1 || { log "pkill not present; skipping mitmdump reap"; return 0; }
   # mitmdump runs as the `mitmproxy` user (uid 10042 per egress Dockerfile).
+  # `-u mitmproxy` scopes pkill to that uid so we never touch anything else;
+  # `-f mitmdump` is the cmdline match safety net inside that uid.
   # SIGTERM first; give it a moment; SIGKILL anything that ignored TERM.
   try pkill -TERM -u mitmproxy -f mitmdump
   # Short sleep, but bounded so this hook still finishes inside the
-  # supervisor's PostExitTimeout (default 30s) with headroom.
+  # supervisor's PreStartTimeout (default 30s) with plenty of headroom.
   sleep 1
   try pkill -KILL -u mitmproxy -f mitmdump
   log "stray mitmdump processes reaped (best-effort)"
@@ -125,9 +57,6 @@ kill_stray_mitmdump() {
 
 main() {
   log "starting (worker_exit_code=${WORKER_EXIT_CODE:-?} signal=${WORKER_SIGNAL:-?} attempt=${WORKER_ATTEMPT:-?})"
-  remove_dns_redirect
-  remove_transparent_http
-  remove_nft_table
   kill_stray_mitmdump
   log "done"
   exit 0

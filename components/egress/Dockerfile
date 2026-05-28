@@ -114,9 +114,11 @@ RUN useradd -r -u 10042 -d /var/lib/mitmproxy -s /usr/sbin/nologin mitmproxy \
 # All egress runtime artifacts live under one directory to keep paths grouped.
 COPY --from=builder /out/egress /opt/opensandbox-egress/egress
 COPY --from=builder /out/opensandbox-supervisor /opt/opensandbox-egress/supervisor
-# Best-effort cleanup for iptables/nft/mitmdump remnants after a hard crash.
-# Used as both the supervisor pre-start and post-exit hook so dirty state
-# from a previous crash is cleared before relaunch and after this exit.
+# Pre-start hook: reap any mitmdump left over from a previous crashed
+# egress so the new launch can bind the transparent-MITM listen port.
+# Intentionally does NOT touch iptables/nft rules — the sidecar shares
+# a network namespace with the workload, so leaving rules in place keeps
+# egress filtering active across the supervisor's backoff window.
 COPY components/egress/scripts/cleanup.sh /opt/opensandbox-egress/cleanup.sh
 RUN chmod 0755 /opt/opensandbox-egress/cleanup.sh \
             /opt/opensandbox-egress/egress \
@@ -124,12 +126,13 @@ RUN chmod 0755 /opt/opensandbox-egress/cleanup.sh \
 
 COPY components/egress/mitmscripts /var/egress/mitmscripts
 
-# Supervisor wraps the egress binary: restarts on crash with backoff, runs
-# the cleanup hook around each launch, and forwards SIGTERM gracefully.
+# Supervisor wraps the egress binary: restarts on crash with backoff and
+# forwards SIGTERM gracefully. The cleanup hook runs only as pre-start;
+# running it on post-exit would tear down enforcement during the backoff
+# window and leave the workload unprotected.
 # Expects OPENSANDBOX_NETWORK_POLICY env at runtime.
 ENTRYPOINT ["/opt/opensandbox-egress/supervisor", \
             "--pre-start=/opt/opensandbox-egress/cleanup.sh", \
-            "--post-exit=/opt/opensandbox-egress/cleanup.sh", \
             "--name=egress", \
             "--grace-period=20s", \
             "--", \
