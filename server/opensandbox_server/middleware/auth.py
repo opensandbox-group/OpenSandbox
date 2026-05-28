@@ -2,21 +2,9 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """
-Authentication middleware for OpenSandbox Lifecycle API.
-
-This module implements API Key authentication as specified in the OpenAPI spec.
-API keys are configured via config.toml and validated against the OPEN-SANDBOX-API-KEY header.
+Authentication middleware: API key path (legacy) and optional user identity (OSEP-0006).
 """
 
 import re
@@ -26,109 +14,151 @@ from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from opensandbox_server.config import AppConfig, get_config
-
-SANDBOX_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"
-
+from opensandbox_server.config import (
+    AUTH_MODE_API_KEY_AND_USER,
+    AUTH_MODE_API_KEY_ONLY,
+    USER_MODE_TRUSTED_HEADER,
+    AppConfig,
+    get_config,
+)
+from opensandbox_server.middleware.principal import build_user_principal, principal_for_api_key
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """
-    Middleware for API Key authentication.
-
-    Validates the OPEN-SANDBOX-API-KEY header for all requests except health check.
-    Returns 401 Unauthorized if authentication fails.
+    Validates ``OPEN-SANDBOX-API-KEY`` when configured, with optional dual auth for the console.
     """
 
-    # Paths that don't require authentication
-    EXEMPT_PATHS = ["/health", "/docs", "/redoc", "/openapi.json"]
+    API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"
 
-    # Strict pattern for proxy-to-sandbox: /sandboxes/{id}/proxy/{port}/... with numeric port only.
-    # Matches the actual route in proxy.py; rejects path traversal (..) and malformed port.
+    EXEMPT_PATHS = ["/health", "/docs", "/redoc", "/openapi.json"]
     _PROXY_PATH_RE = re.compile(r"^(/v1)?/sandboxes/[^/]+/proxy/\d+(/|$)")
 
     @staticmethod
     def _is_proxy_path(path: str) -> bool:
-        """True only for the exact proxy-route shape; rejects path traversal (..)."""
         if ".." in path:
             return False
         return bool(AuthMiddleware._PROXY_PATH_RE.match(path))
 
-    def __init__(self, app, config: Optional[AppConfig] = None):
-        """
-        Initialize authentication middleware.
+    # API route prefixes that must never be bypassed by the console auth skip.
+    _PROTECTED_API_PREFIXES = (
+        "/v1",
+        "/auth",
+        "/sandboxes",
+        "/snapshots",
+        "/pools",
+        "/devops",
+    )
 
-        Args:
-            app: FastAPI application instance
-            config: Optional application configuration (for dependency injection)
-        """
+    @staticmethod
+    def _is_console_path(path: str, mount: str) -> bool:
+        if ".." in path:
+            return False
+        base = mount.rstrip("/") or "/console"
+        # Reject any mount that collides with known API route prefixes so a
+        # misconfigured mount_path (e.g. "/auth") cannot bypass authentication.
+        if any(
+            base == p or base.startswith(p + "/")
+            for p in AuthMiddleware._PROTECTED_API_PREFIXES
+        ):
+            return False
+        return path == base or path.startswith(base + "/")
+
+    def __init__(self, app, config: Optional[AppConfig] = None):
         super().__init__(app)
         self.config = config or get_config()
-        # Read the API key directly from config; suitable for dev/test usage
         self.valid_api_keys = self._load_api_keys()
 
     def _load_api_keys(self) -> set:
-        """
-        Load valid API keys from configuration.
-
-        Returns:
-            set: Set of valid API keys
-        """
-        # Supports a single API key from config; extend later for secret managers
         api_key = self.config.server.api_key
-        # Treat empty string as no key configured
         if api_key and api_key.strip():
             return {api_key}
         return set()
 
+    def _try_trusted_user_principal(self, request: Request):
+        if self.config.auth.user_mode != USER_MODE_TRUSTED_HEADER:
+            return None
+        th = self.config.auth.trusted_header
+        raw_user = request.headers.get(th.user_header)
+        if raw_user is None or not str(raw_user).strip():
+            return None
+        raw_team = request.headers.get(th.team_header)
+        roles = request.headers.get(th.roles_header)
+        try:
+            return build_user_principal(
+                str(raw_user).strip(),
+                str(raw_team).strip() if raw_team is not None else None,
+                roles,
+                self.config.authz,
+            )
+        except ValueError:
+            return None
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """
-        Process each request and validate authentication.
-
-        Args:
-            request: Incoming HTTP request
-            call_next: Next middleware or route handler
-
-        Returns:
-            Response: HTTP response
-        """
-        # Skip authentication for exempt paths
         if any(request.url.path.startswith(path) for path in self.EXEMPT_PATHS):
             return await call_next(request)
 
-        # Skip authentication only for the exact proxy-to-sandbox route shape
-        # (no path traversal, no loose substring match)
         if self._is_proxy_path(request.url.path):
             return await call_next(request)
 
-        # If no API keys are configured, skip authentication
-        if not self.valid_api_keys:
+        if self.config.console.enabled and self._is_console_path(request.url.path, self.config.console.mount_path):
             return await call_next(request)
 
-        # Extract API key from header
-        api_key = request.headers.get(SANDBOX_API_KEY_HEADER)
+        mode = self.config.auth.mode
+        has_keys = bool(self.valid_api_keys)
 
-        # Validate API key
-        if not api_key:
-            return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={
-                    "code": "MISSING_API_KEY",
-                    "message": "Authentication credentials are missing. "
-                              f"Provide API key via {SANDBOX_API_KEY_HEADER} header.",
-                },
-            )
+        # No API keys: open access (legacy) OR require user headers for api_key_and_user
+        if not has_keys:
+            if mode == AUTH_MODE_API_KEY_AND_USER:
+                principal = self._try_trusted_user_principal(request)
+                if principal is None:
+                    return JSONResponse(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        content={
+                            "code": "MISSING_TRUSTED_IDENTITY",
+                            "message": "User authentication requires trusted identity headers (e.g. "
+                            f"{self.config.auth.trusted_header.user_header}).",
+                        },
+                    )
+                request.state.principal = principal
+                return await call_next(request)
+            return await call_next(request)
 
-        # Enforce strict comparison whenever API keys are configured
-        if self.valid_api_keys and api_key not in self.valid_api_keys:
+        api_key = request.headers.get(self.API_KEY_HEADER)
+        if api_key:
+            if api_key in self.valid_api_keys:
+                request.state.principal = principal_for_api_key()
+                return await call_next(request)
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={
                     "code": "INVALID_API_KEY",
                     "message": "Authentication credentials are invalid. "
-                              "Check your API key and try again.",
+                    "Check your API key and try again.",
                 },
             )
 
-        # Authentication successful, proceed to next middleware/handler
-        response = await call_next(request)
-        return response
+        if mode == AUTH_MODE_API_KEY_ONLY:
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={
+                    "code": "MISSING_API_KEY",
+                    "message": "Authentication credentials are missing. "
+                    "Provide API key via OPEN-SANDBOX-API-KEY header.",
+                },
+            )
+
+        principal = self._try_trusted_user_principal(request)
+        if principal is None:
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={
+                    "code": "MISSING_TRUSTED_IDENTITY",
+                    "message": "User authentication requires trusted identity headers (e.g. "
+                    f"{self.config.auth.trusted_header.user_header}).",
+                },
+            )
+        request.state.principal = principal
+        return await call_next(request)
+
+
+SANDBOX_API_KEY_HEADER = AuthMiddleware.API_KEY_HEADER

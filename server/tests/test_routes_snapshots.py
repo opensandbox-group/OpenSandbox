@@ -29,6 +29,17 @@ from opensandbox_server.services.snapshot_runtime import NoopSnapshotRuntime
 from opensandbox_server.services.snapshot_service import PersistedSnapshotService
 
 
+def _stub_sandbox_service():
+    """Returns a minimal sandbox_service stub that satisfies scope-checking in create_snapshot."""
+
+    class _Stub:
+        @staticmethod
+        def get_sandbox(_sandbox_id: str):
+            return {"id": _sandbox_id, "metadata": {}}
+
+    return _Stub()
+
+
 def _sample_snapshot(now: datetime, snapshot_id: str = "snap-001") -> Snapshot:
     return Snapshot(
         id=snapshot_id,
@@ -49,11 +60,12 @@ def test_create_snapshot_returns_202_and_location_header(
 
     class StubService:
         @staticmethod
-        def create_snapshot(sandbox_id: str, request) -> Snapshot:
+        def create_snapshot(sandbox_id: str, request, *, access_owner=None, access_team=None) -> Snapshot:
             calls.append((sandbox_id, request))
             return _sample_snapshot(now)
 
     monkeypatch.setattr(lifecycle, "snapshot_service", StubService())
+    monkeypatch.setattr(lifecycle, "sandbox_service", _stub_sandbox_service())
 
     response = client.post(
         "/v1/sandboxes/sbx-001/snapshots",
@@ -77,12 +89,13 @@ def test_create_snapshot_accepts_empty_body(
 
     class StubService:
         @staticmethod
-        def create_snapshot(sandbox_id: str, request) -> Snapshot:
+        def create_snapshot(sandbox_id: str, request, *, access_owner=None, access_team=None) -> Snapshot:
             assert sandbox_id == "sbx-001"
             assert request.name is None
             return _sample_snapshot(now)
 
     monkeypatch.setattr(lifecycle, "snapshot_service", StubService())
+    monkeypatch.setattr(lifecycle, "sandbox_service", _stub_sandbox_service())
 
     response = client.post("/v1/sandboxes/sbx-001/snapshots", headers=auth_headers)
 
@@ -99,7 +112,7 @@ def test_list_snapshots_parses_filters_and_pagination(
 
     class StubService:
         @staticmethod
-        def list_snapshots(request) -> ListSnapshotsResponse:
+        def list_snapshots(request, *, access_owner=None, access_team=None) -> ListSnapshotsResponse:
             captured_requests.append(request)
             return ListSnapshotsResponse(
                 items=[_sample_snapshot(now)],
@@ -236,6 +249,7 @@ def test_snapshot_routes_can_use_persisted_service(
         snapshot_runtime=StubSnapshotRuntime(),
     )
     monkeypatch.setattr(lifecycle, "snapshot_service", service)
+    monkeypatch.setattr(lifecycle, "sandbox_service", _stub_sandbox_service())
 
     created = client.post("/v1/sandboxes/sbx-001/snapshots", headers=auth_headers)
     assert created.status_code == 202
@@ -262,6 +276,7 @@ def test_create_snapshot_returns_501_when_runtime_is_not_supported(
         snapshot_runtime=NoopSnapshotRuntime(),
     )
     monkeypatch.setattr(lifecycle, "snapshot_service", service)
+    monkeypatch.setattr(lifecycle, "sandbox_service", _stub_sandbox_service())
 
     response = client.post("/v1/sandboxes/sbx-001/snapshots", headers=auth_headers)
 

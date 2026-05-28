@@ -274,5 +274,10 @@ kubernetes/test/kind/gvisor/runsc
 kubernetes/test/kind/gvisor/containerd-shim-runsc-v1
 bin/
 obj/
+console/dist/
+console/output/
+console/playwright-report/
+console/tests/playwright-report/
+console/playwright.config.ts
 
 .qoder/

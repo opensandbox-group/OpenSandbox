@@ -55,6 +55,9 @@ GATEWAY_ROUTE_MODE_URI = "uri"
 
 EGRESS_MODE_DNS = "dns"
 EGRESS_MODE_DNS_NFT = "dns+nft"
+AUTH_MODE_API_KEY_ONLY = "api_key_only"
+AUTH_MODE_API_KEY_AND_USER = "api_key_and_user"
+USER_MODE_TRUSTED_HEADER = "trusted_header"
 
 
 def _is_valid_ip(host: str) -> bool:
@@ -369,6 +372,96 @@ class IngressConfig(BaseModel):
                         raise ValueError(
                             "ingress.gateway.address must not be empty when gateway.route.mode is uri."
                         )
+        return self
+
+
+class TrustedHeaderConfig(BaseModel):
+    """Identity headers set by a reverse proxy in trusted-header user mode (OSEP-0006)."""
+
+    user_header: str = Field(
+        default="X-OpenSandbox-User",
+        min_length=1,
+        description="Header carrying the end-user subject id (required for user auth).",
+    )
+    team_header: str = Field(
+        default="X-OpenSandbox-Team",
+        min_length=1,
+        description="Optional team id for owner/team scope.",
+    )
+    roles_header: str = Field(
+        default="X-OpenSandbox-Roles",
+        min_length=1,
+        description="Comma-separated roles (read_only, operator) for the end user.",
+    )
+
+
+class AuthConfig(BaseModel):
+    """High-level authentication behavior (API key, optional user path for the console)."""
+
+    mode: Literal[AUTH_MODE_API_KEY_ONLY, AUTH_MODE_API_KEY_AND_USER] = Field(
+        default=AUTH_MODE_API_KEY_ONLY,
+        description='Use "api_key_only" (default) or "api_key_and_user" for console + proxy identity headers.',
+    )
+    user_mode: Literal[USER_MODE_TRUSTED_HEADER] = Field(
+        default=USER_MODE_TRUSTED_HEADER,
+        description="How user identity is obtained when mode is api_key_and_user. Phase 1: trusted_header only.",
+    )
+    trusted_header: TrustedHeaderConfig = Field(
+        default_factory=TrustedHeaderConfig,
+        description="Header names for trusted user/team/roles (when user_mode = trusted_header).",
+    )
+
+
+class AuthzConfig(BaseModel):
+    """Role defaults and owner/team metadata keys for resource scoping (OSEP-0006)."""
+
+    default_role: Literal["read_only", "operator"] = Field(
+        default="read_only",
+        description="When not overridden by subject lists or roles header.",
+    )
+    owner_metadata_key: str = Field(
+        default="access.owner",
+        min_length=1,
+        description="Reserved label key for scope owner (injected on create, enforced on read/mutate).",
+    )
+    team_metadata_key: str = Field(
+        default="access.team",
+        min_length=1,
+        description="Reserved label key for team; optional when the team header is absent.",
+    )
+    operator_subjects: list[str] = Field(
+        default_factory=list,
+        description="Raw user subject values that always receive the operator role.",
+    )
+    read_only_subjects: list[str] = Field(
+        default_factory=list,
+        description="Raw user subject values that always receive the read_only role.",
+    )
+
+
+class ConsoleConfig(BaseModel):
+    """Static hosting of the developer console SPA (optional)."""
+
+    enabled: bool = Field(
+        default=False,
+        description="If true and the dist directory exists, mount the console under mount_path.",
+    )
+    mount_path: str = Field(
+        default="/console",
+        min_length=1,
+        description="URL prefix for the single-page app (Vite base should match).",
+    )
+
+    @model_validator(mode="after")
+    def validate_mount_path(self) -> "ConsoleConfig":
+        mount = self.mount_path.rstrip("/") or "/"
+        reserved_exact = {"/", "/v1", "/health", "/docs", "/redoc", "/openapi.json"}
+        reserved_prefixes = ("/v1/", "/sandboxes")
+        if mount in reserved_exact or any(mount.startswith(p) for p in reserved_prefixes):
+            raise ValueError(
+                "console.mount_path must not overlap API or system routes "
+                "(/, /v1, /v1/*, /sandboxes*, /health, /docs, /redoc, /openapi.json)."
+            )
         return self
 
 
@@ -859,6 +952,9 @@ class AppConfig(BaseModel):
     """Root application configuration model."""
 
     server: ServerConfig = Field(default_factory=ServerConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
+    authz: AuthzConfig = Field(default_factory=AuthzConfig)
+    console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     log: LogConfig = Field(
         default_factory=LogConfig,
         description="Logging configuration (level, file output, rotation).",
@@ -999,6 +1095,13 @@ def get_config_path() -> Path:
 
 __all__ = [
     "AppConfig",
+    "AuthConfig",
+    "AuthzConfig",
+    "AUTH_MODE_API_KEY_ONLY",
+    "AUTH_MODE_API_KEY_AND_USER",
+    "ConsoleConfig",
+    "TrustedHeaderConfig",
+    "USER_MODE_TRUSTED_HEADER",
     "RenewIntentConfig",
     "RenewIntentRedisConfig",
     "ServerConfig",

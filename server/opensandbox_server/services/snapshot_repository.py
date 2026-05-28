@@ -32,6 +32,9 @@ class SnapshotListQuery:
     page_size: int = 20
     source_sandbox_id: str | None = None
     states: list[str] = field(default_factory=list)
+    access_owner: str | None = None
+    access_team: str | None = None
+    include_unscoped_owner: bool = False
 
 
 @dataclass(slots=True)

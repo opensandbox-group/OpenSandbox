@@ -35,12 +35,21 @@ def _make_sandbox(metadata: Optional[Dict[str, str]] = None) -> Sandbox:
     )
 
 
+def _stub_get_sandbox(sandbox_id: str):
+    from opensandbox_server.api.schema import ImageSpec, SandboxStatus
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    return {"id": sandbox_id, "metadata": {}}
+
+
 class TestPatchMetadataRoute:
 
     def test_add_keys(self, client: TestClient, auth_headers: dict, monkeypatch) -> None:
         sandbox = _make_sandbox({"team": "old"})
 
         class StubService:
+            get_sandbox = staticmethod(_stub_get_sandbox)
+
             @staticmethod
             def patch_sandbox_metadata(sandbox_id: str, patch: dict) -> Sandbox:
                 assert sandbox_id == "sbx-001"
@@ -60,6 +69,8 @@ class TestPatchMetadataRoute:
         sandbox = _make_sandbox({"team": "platform"})
 
         class StubService:
+            get_sandbox = staticmethod(_stub_get_sandbox)
+
             @staticmethod
             def patch_sandbox_metadata(sandbox_id: str, patch: dict) -> Sandbox:
                 assert patch == {"deprecated-key": None}
@@ -78,6 +89,8 @@ class TestPatchMetadataRoute:
         sandbox = _make_sandbox()
 
         class StubService:
+            get_sandbox = staticmethod(_stub_get_sandbox)
+
             @staticmethod
             def patch_sandbox_metadata(sandbox_id: str, patch: dict) -> Sandbox:
                 assert patch == {"project": "new", "team": None, "env": "production"}
@@ -96,6 +109,8 @@ class TestPatchMetadataRoute:
         sandbox = _make_sandbox({"team": "platform"})
 
         class StubService:
+            get_sandbox = staticmethod(_stub_get_sandbox)
+
             @staticmethod
             def patch_sandbox_metadata(sandbox_id: str, patch: dict) -> Sandbox:
                 assert patch == {}
@@ -112,6 +127,13 @@ class TestPatchMetadataRoute:
 
     def test_not_found(self, client: TestClient, auth_headers: dict, monkeypatch) -> None:
         class StubService:
+            @staticmethod
+            def get_sandbox(sandbox_id: str):
+                raise HTTPException(
+                    status_code=404,
+                    detail={"code": "SANDBOX_NOT_FOUND", "message": f"Sandbox {sandbox_id} not found"},
+                )
+
             @staticmethod
             def patch_sandbox_metadata(sandbox_id: str, patch: dict) -> Sandbox:
                 raise HTTPException(
@@ -130,6 +152,8 @@ class TestPatchMetadataRoute:
 
     def test_invalid_metadata_rejected(self, client: TestClient, auth_headers: dict, monkeypatch) -> None:
         class StubService:
+            get_sandbox = staticmethod(_stub_get_sandbox)
+
             @staticmethod
             def patch_sandbox_metadata(sandbox_id: str, patch: dict) -> Sandbox:
                 raise HTTPException(

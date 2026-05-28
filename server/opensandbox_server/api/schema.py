@@ -623,6 +623,10 @@ class Snapshot(BaseModel):
         alias="createdAt",
         description="Snapshot creation timestamp",
     )
+    # Internal scope metadata — excluded from API serialization; used by
+    # authorize_snapshot_scope so deleted source sandboxes don't block access.
+    access_owner: Optional[str] = Field(default=None, exclude=True)
+    access_team: Optional[str] = Field(default=None, exclude=True)
 
     class Config:
         populate_by_name = True

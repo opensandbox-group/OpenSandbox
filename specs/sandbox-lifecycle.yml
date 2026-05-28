@@ -23,19 +23,37 @@ info:
 
     ## Authentication
 
-    API Key authentication is required for all operations:
+    The server supports two complementary authentication modes (config-gated; see OSEP-0006):
 
-    1. **HTTP Header**
-       ```
-       OPEN-SANDBOX-API-KEY: your-api-key
-       ```
+    1. **API key (SDK / automation)** — unchanged for backward compatibility:
+       - **HTTP header**
+         ```
+         OPEN-SANDBOX-API-KEY: your-api-key
+         ```
+       - **Environment variable** (for SDK clients)
+         ```
+         OPEN_SANDBOX_API_KEY=your-api-key
+         ```
+         SDK clients will automatically pick up this environment variable.
+       - API key clients are treated as a **service admin** (full access; no owner/team scope filter).
 
-    2. **Environment Variable** (for SDK clients)
-       ```
-       OPEN_SANDBOX_API_KEY=your-api-key
-       ```
+    2. **User / console path** (only when `auth.mode = "api_key_and_user"` in server config) — for browser
+       clients that must not hold the global API key. Identity is supplied by a reverse proxy using
+       **trusted headers** (Phase 1), for example:
+       - `X-OpenSandbox-User` (required for authenticated user requests in this mode)
+       - `X-OpenSandbox-Team` (optional; used with owner for metadata scope)
+       - `X-OpenSandbox-Roles` (comma-separated: `read_only` or `operator`)
+       Requests in this mode without the required user header return **401** with
+       `code: MISSING_TRUSTED_IDENTITY` (not anonymous access).
 
-       SDK clients will automatically pick up this environment variable.
+    **Authorization:** lifecycle operations enforce **read_only** vs **operator** (and service-wide admin for
+    API key) on the server. **403** responses use `code: INSUFFICIENT_ROLE` or `code: OUT_OF_SCOPE` when the
+    caller is not allowed to perform the action or the sandbox is outside the caller’s `access.owner` /
+    `access.team` metadata scope. Those reserved keys are **server-controlled** on create for user principals.
+
+    When `auth.mode` is the default `api_key_only` and an API key is configured, only the API key path applies.
+    When no API key is configured, the server may allow unauthenticated access (development mode); production
+    deployments should always configure authentication.
 servers:
   - url: http://localhost:8080/v1
     description: Local development
@@ -122,8 +140,10 @@ paths:
 
         ## Authentication
 
-        API Key authentication is required via:
-        - `OPEN-SANDBOX-API-KEY: <api-key>` header
+        Authentication follows the server mode:
+        - API key path: `OPEN-SANDBOX-API-KEY: <api-key>`
+        - User path (when `auth.mode = "api_key_and_user"`): trusted identity headers, including
+          `X-OpenSandbox-User` (roles optional; default role from config applies).
       requestBody:
         required: true
         content:
@@ -230,6 +250,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
         '500':
@@ -1171,7 +1193,9 @@ components:
         `resourceLimits` are all optional (defined by the Pool CRD template).
         `snapshotId` must not be provided together with `poolRef`.
 
-        **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
+        **Note**: Authentication can be API key (`OPEN-SANDBOX-API-KEY`) or trusted user headers
+        when `auth.mode = "api_key_and_user"` (Phase 1, OSEP-0006). API key-only mode requires
+        the `OPEN-SANDBOX-API-KEY` header.
       properties:
         image:
           $ref: '#/components/schemas/ImageSpec'

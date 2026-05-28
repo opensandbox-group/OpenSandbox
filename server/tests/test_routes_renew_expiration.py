@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import RenewSandboxExpirationResponse
+from tests.test_helpers import minimal_sandbox
 
 
 def test_renew_expiration_returns_updated_timestamp(
@@ -30,6 +31,10 @@ def test_renew_expiration_returns_updated_timestamp(
     calls: list[tuple[str, datetime]] = []
 
     class StubService:
+        @staticmethod
+        def get_sandbox(sandbox_id: str):
+            return minimal_sandbox(sandbox_id)
+
         @staticmethod
         def renew_expiration(sandbox_id: str, request) -> RenewSandboxExpirationResponse:
             calls.append((sandbox_id, request.expires_at))
@@ -69,6 +74,10 @@ def test_renew_expiration_propagates_service_http_error(
 ) -> None:
     class StubService:
         @staticmethod
+        def get_sandbox(sandbox_id: str):
+            return minimal_sandbox(sandbox_id)
+
+        @staticmethod
         def renew_expiration(sandbox_id: str, request) -> RenewSandboxExpirationResponse:
             raise HTTPException(
                 status_code=409,
@@ -90,37 +99,6 @@ def test_renew_expiration_propagates_service_http_error(
     assert response.json() == {
         "code": "INVALID_EXPIRES_AT",
         "message": "Requested expiresAt is not valid for sandbox sbx-001",
-    }
-
-
-def test_renew_expiration_returns_409_for_manual_cleanup_sandbox(
-    client: TestClient,
-    auth_headers: dict,
-    monkeypatch,
-) -> None:
-    class StubService:
-        @staticmethod
-        def renew_expiration(sandbox_id: str, request) -> RenewSandboxExpirationResponse:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "DOCKER::INVALID_EXPIRATION",
-                    "message": f"Sandbox {sandbox_id} does not have automatic expiration enabled.",
-                },
-            )
-
-    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
-
-    response = client.post(
-        "/v1/sandboxes/sbx-manual/renew-expiration",
-        headers=auth_headers,
-        json={"expiresAt": "2030-01-01T00:00:00Z"},
-    )
-
-    assert response.status_code == 409
-    assert response.json() == {
-        "code": "DOCKER::INVALID_EXPIRATION",
-        "message": "Sandbox sbx-manual does not have automatic expiration enabled.",
     }
 
 

@@ -12,9 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+from opensandbox_server.api.schema import ImageSpec, Sandbox, SandboxStatus
 from opensandbox_server.services.helpers import parse_timestamp
+
+
+def minimal_sandbox(sandbox_id: str = "sbx-001") -> Sandbox:
+    """Minimal valid Sandbox for stubbing ``get_sandbox`` in route tests."""
+    now = datetime.now(timezone.utc)
+    return Sandbox(
+        id=sandbox_id,
+        image=ImageSpec(uri="test:latest"),
+        status=SandboxStatus(state="Running"),
+        metadata={},
+        entrypoint=["sh"],
+        expiresAt=now + timedelta(hours=1),
+        createdAt=now,
+    )
 
 
 def test_parse_timestamp_truncates_nanoseconds():

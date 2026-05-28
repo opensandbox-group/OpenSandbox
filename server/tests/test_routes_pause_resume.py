@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from datetime import datetime, timedelta, timezone
+
+from fastapi import status
 from fastapi.exceptions import HTTPException
 from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
+from opensandbox_server.api.schema import ImageSpec, Sandbox, SandboxStatus
+from tests.test_helpers import minimal_sandbox
 
 
 def test_pause_route_calls_service_and_returns_202(
@@ -26,6 +31,10 @@ def test_pause_route_calls_service_and_returns_202(
     calls: list[str] = []
 
     class StubService:
+        @staticmethod
+        def get_sandbox(sandbox_id: str) -> Sandbox:
+            return minimal_sandbox(sandbox_id)
+
         @staticmethod
         def pause_sandbox(sandbox_id: str) -> None:
             calls.append(sandbox_id)
@@ -47,6 +56,10 @@ def test_resume_route_calls_service_and_returns_202(
 
     class StubService:
         @staticmethod
+        def get_sandbox(sandbox_id: str) -> Sandbox:
+            return minimal_sandbox(sandbox_id)
+
+        @staticmethod
         def resume_sandbox(sandbox_id: str) -> None:
             calls.append(sandbox_id)
 
@@ -65,11 +78,29 @@ def test_pause_route_propagates_service_http_error(
 ) -> None:
     class StubService:
         @staticmethod
-        def pause_sandbox(sandbox_id: str) -> None:
-            raise HTTPException(
-                status_code=404,
-                detail={"code": "SANDBOX_NOT_FOUND", "message": f"Sandbox {sandbox_id} not found"},
+        def get_sandbox(sandbox_id: str) -> Sandbox:
+            if sandbox_id == "missing":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "code": "SANDBOX_NOT_FOUND",
+                        "message": f"Sandbox {sandbox_id} not found",
+                    },
+                )
+            now = datetime.now(timezone.utc)
+            return Sandbox(
+                id=sandbox_id,
+                image=ImageSpec(uri="t"),
+                status=SandboxStatus(state="Running"),
+                metadata={},
+                entrypoint=["sh"],
+                expiresAt=now + timedelta(hours=1),
+                createdAt=now,
             )
+
+        @staticmethod
+        def pause_sandbox(sandbox_id: str) -> None:
+            raise AssertionError("pause_sandbox should not be called when get_sandbox fails")
 
     monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
 

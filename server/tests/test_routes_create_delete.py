@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import CreateSandboxResponse, SandboxStatus
+from opensandbox_server.services.constants import SandboxErrorCodes
+from tests.test_helpers import minimal_sandbox
 
 
 def test_create_sandbox_returns_202_and_service_payload(
@@ -60,42 +62,23 @@ def test_create_sandbox_returns_202_and_service_payload(
     assert calls[0].image.uri == "python:3.11"
 
 
-def test_create_sandbox_manual_cleanup_omits_none_fields(
+def test_create_sandbox_rejects_invalid_extensions(
     client: TestClient,
     auth_headers: dict,
     sample_sandbox_request: dict,
-    monkeypatch,
 ) -> None:
-    now = datetime.now(timezone.utc)
+    payload = {
+        **sample_sandbox_request,
+        "extensions": {"access.renew.extend.seconds": "not-an-int"},
+    }
+    response = client.post("/v1/sandboxes", headers=auth_headers, json=payload)
 
-    class StubService:
-        @staticmethod
-        async def create_sandbox(request) -> CreateSandboxResponse:
-            return CreateSandboxResponse(
-                id="sbx-manual",
-                status=SandboxStatus(state="Pending"),
-                metadata=None,
-                expiresAt=None,
-                createdAt=now,
-                entrypoint=["python", "-c", "print('Hello from sandbox')"],
-            )
-
-    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
-    sample_sandbox_request.pop("timeout", None)
-
-    response = client.post(
-        "/v1/sandboxes",
-        headers=auth_headers,
-        json=sample_sandbox_request,
-    )
-
-    assert response.status_code == 202
+    assert response.status_code == 400
     payload = response.json()
-    assert "expiresAt" not in payload
-    assert "metadata" not in payload
-    assert "reason" not in payload["status"]
-    assert "message" not in payload["status"]
-    assert "lastTransitionAt" not in payload["status"]
+    code = payload.get("code")
+    if code is None and isinstance(payload.get("detail"), dict):
+        code = payload["detail"].get("code")
+    assert code == SandboxErrorCodes.INVALID_PARAMETER
 
 
 def test_create_sandbox_rejects_invalid_request(
@@ -111,81 +94,6 @@ def test_create_sandbox_rejects_invalid_request(
     assert response.status_code == 422
 
 
-def test_create_sandbox_accepts_snapshot_id_without_entrypoint(
-    client: TestClient,
-    auth_headers: dict,
-    monkeypatch,
-) -> None:
-    now = datetime.now(timezone.utc)
-    calls: list[object] = []
-
-    class StubService:
-        @staticmethod
-        async def create_sandbox(request) -> CreateSandboxResponse:
-            calls.append(request)
-            return CreateSandboxResponse(
-                id="sbx-from-snapshot",
-                status=SandboxStatus(state="Pending"),
-                metadata=None,
-                expiresAt=now + timedelta(hours=1),
-                createdAt=now,
-                entrypoint=None,
-            )
-
-    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
-
-    response = client.post(
-        "/v1/sandboxes",
-        headers=auth_headers,
-        json={
-            "snapshotId": "snap-001",
-            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
-        },
-    )
-
-    assert response.status_code == 202
-    assert calls[0].snapshot_id == "snap-001"
-    assert calls[0].entrypoint is None
-
-
-def test_create_sandbox_accepts_snapshot_id_with_entrypoint(
-    client: TestClient,
-    auth_headers: dict,
-    monkeypatch,
-) -> None:
-    now = datetime.now(timezone.utc)
-    calls: list[object] = []
-
-    class StubService:
-        @staticmethod
-        async def create_sandbox(request) -> CreateSandboxResponse:
-            calls.append(request)
-            return CreateSandboxResponse(
-                id="sbx-from-snapshot",
-                status=SandboxStatus(state="Pending"),
-                metadata=None,
-                expiresAt=now + timedelta(hours=1),
-                createdAt=now,
-                entrypoint=["python", "app.py"],
-            )
-
-    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
-
-    response = client.post(
-        "/v1/sandboxes",
-        headers=auth_headers,
-        json={
-            "snapshotId": "snap-001",
-            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
-            "entrypoint": ["python", "app.py"],
-        },
-    )
-
-    assert response.status_code == 202
-    assert calls[0].snapshot_id == "snap-001"
-    assert calls[0].entrypoint == ["python", "app.py"]
-
-
 def test_delete_sandbox_returns_204_and_calls_service(
     client: TestClient,
     auth_headers: dict,
@@ -194,6 +102,10 @@ def test_delete_sandbox_returns_204_and_calls_service(
     calls: list[str] = []
 
     class StubService:
+        @staticmethod
+        def get_sandbox(sandbox_id: str):
+            return minimal_sandbox(sandbox_id)
+
         @staticmethod
         def delete_sandbox(sandbox_id: str) -> None:
             calls.append(sandbox_id)

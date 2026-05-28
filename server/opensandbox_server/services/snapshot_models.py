@@ -77,6 +77,8 @@ class SnapshotRecord:
     )
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
+    access_owner: str | None = None
+    access_team: str | None = None
 
 
 __all__ = [

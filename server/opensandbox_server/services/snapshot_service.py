@@ -69,11 +69,11 @@ class SnapshotService(ABC):
     """
 
     @abstractmethod
-    def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest) -> Snapshot:
+    def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest, *, access_owner: str | None = None, access_team: str | None = None) -> Snapshot:
         pass
 
     @abstractmethod
-    def list_snapshots(self, request: ListSnapshotsRequest) -> ListSnapshotsResponse:
+    def list_snapshots(self, request: ListSnapshotsRequest, *, access_owner: str | None = None, access_team: str | None = None) -> ListSnapshotsResponse:
         pass
 
     @abstractmethod
@@ -114,7 +114,7 @@ class PersistedSnapshotService(SnapshotService):
         if recover_unfinished_snapshots:
             self.recover_unfinished_snapshots()
 
-    def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest) -> Snapshot:
+    def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest, *, access_owner: str | None = None, access_team: str | None = None) -> Snapshot:
         sandbox = self._sandbox_service.get_sandbox(sandbox_id)
         self._ensure_source_sandbox_running(sandbox)
 
@@ -141,6 +141,8 @@ class PersistedSnapshotService(SnapshotService):
             ),
             created_at=now,
             updated_at=now,
+            access_owner=access_owner,
+            access_team=access_team,
         )
         self._snapshot_repository.create(record)
         future = self._snapshot_executor.submit(
@@ -150,7 +152,7 @@ class PersistedSnapshotService(SnapshotService):
         future.add_done_callback(self._log_worker_failure)
         return self._to_snapshot_response(record)
 
-    def list_snapshots(self, request: ListSnapshotsRequest) -> ListSnapshotsResponse:
+    def list_snapshots(self, request: ListSnapshotsRequest, *, access_owner: str | None = None, access_team: str | None = None) -> ListSnapshotsResponse:
         pagination = request.pagination or self._default_pagination()
         result = self._snapshot_repository.list(
             SnapshotListQuery(
@@ -158,6 +160,8 @@ class PersistedSnapshotService(SnapshotService):
                 page_size=pagination.page_size,
                 source_sandbox_id=request.filter.sandbox_id,
                 states=request.filter.state or [],
+                access_owner=access_owner,
+                access_team=access_team,
             )
         )
 
@@ -248,6 +252,8 @@ class PersistedSnapshotService(SnapshotService):
             ),
             created_at=record.created_at,
             updated_at=now,
+            access_owner=record.access_owner,
+            access_team=record.access_team,
         )
         if self._snapshot_repository.update_if_state(
             deleting_record,
@@ -425,6 +431,8 @@ class PersistedSnapshotService(SnapshotService):
                     ),
                     created_at=record.created_at,
                     updated_at=now,
+                    access_owner=record.access_owner,
+                    access_team=record.access_team,
                 )
 
             return SnapshotRecord(
@@ -441,6 +449,8 @@ class PersistedSnapshotService(SnapshotService):
                 ),
                 created_at=record.created_at,
                 updated_at=now,
+                access_owner=record.access_owner,
+                access_team=record.access_team,
             )
 
         if runtime_status.state == SnapshotState.FAILED:
@@ -458,6 +468,8 @@ class PersistedSnapshotService(SnapshotService):
                 ),
                 created_at=record.created_at,
                 updated_at=now,
+                access_owner=record.access_owner,
+                access_team=record.access_team,
             )
 
         return None
@@ -516,6 +528,8 @@ class PersistedSnapshotService(SnapshotService):
                 lastTransitionAt=record.status.last_transition_at,
             ),
             createdAt=record.created_at,
+            access_owner=record.access_owner,
+            access_team=record.access_team,
         )
 
 

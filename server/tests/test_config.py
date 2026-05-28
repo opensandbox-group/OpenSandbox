@@ -1418,3 +1418,19 @@ class TestSecureAccessTomlLoading:
         with pytest.raises(ValidationError, match="not found in secure_access.keys"):
             config_module.load_config(config_path)
 
+def test_console_mount_path_rejects_reserved_prefixes():
+    server_cfg = ServerConfig()
+    runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")
+    for bad in ("/v1", "/v1/", "/v1/admin", "/sandboxes", "/"):
+        with pytest.raises(ValueError):
+            AppConfig(server=server_cfg, runtime=runtime_cfg, console={"mount_path": bad})
+    # /v1ui has no path conflict — should be accepted
+    cfg = AppConfig(server=server_cfg, runtime=runtime_cfg, console={"mount_path": "/v1ui"})
+    assert cfg.console.mount_path == "/v1ui"
+
+
+def test_console_mount_path_allows_custom_non_api_path():
+    server_cfg = ServerConfig()
+    runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")
+    app_cfg = AppConfig(server=server_cfg, runtime=runtime_cfg, console={"mount_path": "/console-ui"})
+    assert app_cfg.console.mount_path == "/console-ui"

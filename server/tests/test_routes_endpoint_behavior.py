@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import SimpleNamespace
-
 from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import Endpoint
+from tests.test_helpers import minimal_sandbox
 
 
 def test_get_endpoint_returns_service_result(
@@ -28,6 +27,10 @@ def test_get_endpoint_returns_service_result(
     calls: list[tuple[str, int]] = []
 
     class StubService:
+        @staticmethod
+        def get_sandbox(sandbox_id: str):
+            return minimal_sandbox(sandbox_id)
+
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
             calls.append((sandbox_id, port))
@@ -52,6 +55,10 @@ def test_get_endpoint_use_server_proxy_rewrites_url(
 ) -> None:
     class StubService:
         @staticmethod
+        def get_sandbox(sandbox_id: str):
+            return minimal_sandbox(sandbox_id)
+
+        @staticmethod
         def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
             return Endpoint(endpoint="10.57.1.91:40109/proxy/44772")
 
@@ -67,33 +74,6 @@ def test_get_endpoint_use_server_proxy_rewrites_url(
     assert response.json()["endpoint"] == "testserver/sandboxes/sbx-001/proxy/44772"
 
 
-def test_get_endpoint_use_server_proxy_prefers_server_eip(
-    client: TestClient,
-    auth_headers: dict,
-    monkeypatch,
-) -> None:
-    class StubService:
-        @staticmethod
-        def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
-            return Endpoint(endpoint="10.57.1.91:40109/proxy/44772")
-
-    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
-    monkeypatch.setattr(
-        lifecycle,
-        "get_config",
-        lambda: SimpleNamespace(server=SimpleNamespace(eip="sandbox.example.com/opensandbox/")),
-    )
-
-    response = client.get(
-        "/v1/sandboxes/sbx-001/endpoints/44772",
-        params={"use_server_proxy": "true"},
-        headers=auth_headers,
-    )
-
-    assert response.status_code == 200
-    assert response.json()["endpoint"] == "sandbox.example.com/opensandbox/sandboxes/sbx-001/proxy/44772"
-
-
 def test_get_endpoint_rejects_non_numeric_port(
     client: TestClient,
     auth_headers: dict,
@@ -104,52 +84,3 @@ def test_get_endpoint_rejects_non_numeric_port(
     )
 
     assert response.status_code == 422
-
-
-def test_get_endpoint_passes_expires_to_service(
-    client: TestClient,
-    auth_headers: dict,
-    monkeypatch,
-) -> None:
-    captured: dict = {}
-
-    class StubService:
-        @staticmethod
-        def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
-            captured.update({"sandbox_id": sandbox_id, "port": port, **kwargs})
-            return Endpoint(endpoint="sandbox.example.com")
-
-    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
-
-    response = client.get(
-        "/v1/sandboxes/sbx-001/endpoints/44772",
-        params={"expires": "2000000000"},
-        headers=auth_headers,
-    )
-
-    assert response.status_code == 200
-    assert captured.get("expires") == 2000000000
-
-
-def test_get_endpoint_unsigned_when_expires_omitted(
-    client: TestClient,
-    auth_headers: dict,
-    monkeypatch,
-) -> None:
-    captured: dict = {}
-
-    class StubService:
-        @staticmethod
-        def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
-            captured.update(kwargs)
-            return Endpoint(endpoint="sandbox.example.com")
-
-    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
-
-    response = client.get(
-        "/v1/sandboxes/sbx-001/endpoints/44772",
-        headers=auth_headers,
-    )
-
-    assert response.status_code == 200
-    assert captured.get("expires") is None

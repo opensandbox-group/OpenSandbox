@@ -42,13 +42,14 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9.15.0
-          run_install: false
+          version: latest
+
+      - name: Enable corepack
+        run: corepack enable
 
       - name: Get pnpm store path
         id: pnpm-store
-        working-directory: sdks
-        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+        run: echo "STORE_PATH=$(corepack pnpm store path)" >> "$GITHUB_OUTPUT"
 
       - name: Cache pnpm store
         uses: actions/cache@v5
@@ -59,11 +60,11 @@ jobs:
 
       - name: Install workspace dependencies
         working-directory: sdks
-        run: pnpm install --frozen-lockfile
+        run: corepack pnpm install --frozen-lockfile
 
       - name: Build SDK
         working-directory: sdks
-        run: pnpm --filter ${{ matrix.sdk.packageName }}... --sort run build
+        run: corepack pnpm --filter ${{ matrix.sdk.packageName }}... --sort run build
 
       - name: Pack SDK
         if: startsWith(github.ref, format('refs/tags/js/{0}/v', matrix.sdk.tagPrefix))
@@ -73,7 +74,7 @@ jobs:
           set -euo pipefail
           PACK_DIR="${GITHUB_WORKSPACE}/dist/npm/${{ matrix.sdk.name }}"
           mkdir -p "$PACK_DIR"
-          pnpm pack --pack-destination "$PACK_DIR"
+          corepack pnpm pack --pack-destination "$PACK_DIR"
           PACKAGE_TARBALL="$(find "$PACK_DIR" -maxdepth 1 -name '*.tgz' -print -quit)"
           if [[ -z "$PACKAGE_TARBALL" ]]; then
             echo "No package tarball was produced in $PACK_DIR" >&2
@@ -92,4 +93,4 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          pnpm publish "${{ steps.pack.outputs.tarball }}" --access public --no-git-checks
+          corepack pnpm publish "${{ steps.pack.outputs.tarball }}" --access public --no-git-checks

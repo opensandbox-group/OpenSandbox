@@ -70,3 +70,25 @@ mode = "dns"
 [renew_intent]
 enabled = false
 min_interval_seconds = 60
+
+# --- Developer console & dual auth (OSEP-0006) ---
+# [auth]
+# mode = "api_key_only"              # default: API key only (backward compatible)
+# mode = "api_key_and_user"          # optional: trusted identity headers for the console
+# user_mode = "trusted_header"
+#
+# [auth.trusted_header]
+# user_header = "X-OpenSandbox-User"
+# team_header = "X-OpenSandbox-Team"
+# roles_header = "X-OpenSandbox-Roles"
+#
+# [authz]
+# default_role = "read_only"
+# owner_metadata_key = "access.owner"
+# team_metadata_key = "access.team"
+# operator_subjects = []
+# read_only_subjects = []
+#
+# [console]
+# enabled = false
+# mount_path = "/console"

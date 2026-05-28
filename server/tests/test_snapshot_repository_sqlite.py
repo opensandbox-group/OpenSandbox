@@ -34,6 +34,9 @@ def _record(
     sandbox_id: str,
     created_at: datetime,
     state: SnapshotState = SnapshotState.CREATING,
+    *,
+    access_owner: str | None = None,
+    access_team: str | None = None,
 ) -> SnapshotRecord:
     return SnapshotRecord(
         id=snapshot_id,
@@ -51,12 +54,20 @@ def _record(
         ),
         created_at=created_at,
         updated_at=created_at,
+        access_owner=access_owner,
+        access_team=access_team,
     )
 
 
 def test_sqlite_snapshot_repository_persists_and_fetches_records(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
-    record = _record("snap-001", "sbx-001", datetime.utcnow())
+    record = _record(
+        "snap-001",
+        "sbx-001",
+        datetime.utcnow(),
+        access_owner="user-001",
+        access_team="team-001",
+    )
 
     repo.create(record)
     loaded = repo.get("snap-001")
@@ -66,6 +77,8 @@ def test_sqlite_snapshot_repository_persists_and_fetches_records(tmp_path) -> No
     assert loaded.source_sandbox_id == "sbx-001"
     assert loaded.restore_config.image == record.restore_config.image
     assert loaded.status.state == SnapshotState.CREATING
+    assert loaded.access_owner == "user-001"
+    assert loaded.access_team == "team-001"
 
 
 def test_sqlite_snapshot_repository_enables_wal_and_busy_timeout(tmp_path) -> None:
@@ -83,7 +96,14 @@ def test_sqlite_snapshot_repository_lists_and_updates_records(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     now = datetime.utcnow()
     first = _record("snap-001", "sbx-001", now)
-    second = _record("snap-002", "sbx-001", now + timedelta(seconds=1), state=SnapshotState.READY)
+    second = _record(
+        "snap-002",
+        "sbx-001",
+        now + timedelta(seconds=1),
+        state=SnapshotState.READY,
+        access_owner="user-001",
+        access_team="team-001",
+    )
     third = _record("snap-003", "sbx-002", now + timedelta(seconds=2), state=SnapshotState.FAILED)
 
     repo.create(first)
@@ -96,6 +116,8 @@ def test_sqlite_snapshot_repository_lists_and_updates_records(tmp_path) -> None:
 
     assert page.total_items == 1
     assert [item.id for item in page.items] == ["snap-002"]
+    assert page.items[0].access_owner == "user-001"
+    assert page.items[0].access_team == "team-001"
 
     updated = SnapshotRecord(
         id=first.id,
