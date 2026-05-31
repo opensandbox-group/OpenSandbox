@@ -165,3 +165,31 @@ func TestMaybeNotifyResolved_NoCallWhenNoAOrAAAA(t *testing.T) {
 		// Expected: no callback
 	}
 }
+
+func TestProxyShouldSkipOutboundLog_Default(t *testing.T) {
+	p := &Proxy{}
+	require.False(t, p.shouldSkipOutboundLog("metadata.internal"),
+		"default (no SetLogSkip call) must preserve current behavior: log every outbound")
+}
+
+func TestProxyShouldSkipOutboundLog_MatchesAndMisses(t *testing.T) {
+	p := &Proxy{}
+	p.SetLogSkip([]string{"metadata.internal", "*.cluster.local"})
+
+	require.True(t, p.shouldSkipOutboundLog("metadata.internal"), "exact pattern hit")
+	require.True(t, p.shouldSkipOutboundLog("svc.cluster.local"), "wildcard subdomain hit")
+	require.True(t, p.shouldSkipOutboundLog("METADATA.INTERNAL."), "case + trailing dot normalised")
+	require.False(t, p.shouldSkipOutboundLog("cluster.local"),
+		"wildcard *.cluster.local must not match bare cluster.local")
+	require.False(t, p.shouldSkipOutboundLog("evil.com"), "non-listed host must not be skipped")
+}
+
+func TestProxyShouldSkipOutboundLog_ClearedByEmptyList(t *testing.T) {
+	p := &Proxy{}
+	p.SetLogSkip([]string{"metadata.internal"})
+	require.True(t, p.shouldSkipOutboundLog("metadata.internal"))
+
+	p.SetLogSkip(nil)
+	require.False(t, p.shouldSkipOutboundLog("metadata.internal"),
+		"clearing the list must re-enable logging for all hosts")
+}

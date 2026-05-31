@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -60,6 +61,10 @@ type Proxy struct {
 	onResolved func(domain string, ips []nftables.ResolvedIP)
 	// Optional: async fan-out for denied lookups (e.g. webhook).
 	blockedBroadcaster *events.Broadcaster
+
+	// Hosts whose successful outbound DNS log line should be suppressed (audit
+	// errors are still logged). Loaded once at startup; nil means "log all".
+	logSkip atomic.Pointer[policy.DomainSet]
 }
 
 // New constructs the DNS proxy: discovers upstreams, default listen 127.0.0.1:15353 if listenAddr is "".
@@ -188,9 +193,26 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	telemetry.RecordDNSForward(elapsed)
-	logOutboundDNS(host, resolvedIPStrings(resp), "", "")
+	if !p.shouldSkipOutboundLog(host) {
+		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
+	}
 	p.maybeNotifyResolved(domain, resp)
 	_ = w.WriteMsg(resp)
+}
+
+// SetLogSkip replaces the set of hosts whose successful DNS outbound log line
+// is suppressed. Passing nil or an empty slice restores the default of logging
+// every outbound. Safe to call concurrently; reads use an atomic pointer.
+func (p *Proxy) SetLogSkip(patterns []string) {
+	p.logSkip.Store(policy.NewDomainSet(patterns))
+}
+
+func (p *Proxy) shouldSkipOutboundLog(host string) bool {
+	ds := p.logSkip.Load()
+	if ds == nil || ds.Empty() {
+		return false
+	}
+	return ds.Match(host)
 }
 
 // maybeNotifyResolved calls onResolved before w.WriteMsg so dynamic nft allows are installed
