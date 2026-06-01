@@ -90,7 +90,8 @@ RUN rm /usr/lib/libcap.so /usr/lib/libcap.so.2 && \
     ninja -C builddir && \
     cp builddir/bwrap /build/bwrap/bwrap
 
-FROM alpine:latest
+# Pinned by tag@digest for reproducibility; Dependabot keeps it current.
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
 COPY --from=bwrap-builder /build/bwrap/bwrap /usr/local/bin/bwrap
 COPY --from=builder /build/execd .

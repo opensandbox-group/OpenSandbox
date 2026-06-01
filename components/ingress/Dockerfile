@@ -59,7 +59,8 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /build/ingress ./main.go
 
-FROM alpine:latest
+# Pinned by tag@digest for reproducibility; Dependabot keeps both current.
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
 COPY --from=builder /build/ingress .
 

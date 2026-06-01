@@ -1,0 +1,99 @@
+# Dependabot configuration for OpenSandbox.
+#
+# This file makes the previously UI-only Dependabot setup reviewable in-tree and,
+# critically, adds the "docker" ecosystem so container base images (golang, debian,
+# alpine, python, ubuntu) are kept patched. Stale base images were the root cause of
+# the bulk of the Critical/High OS-package CVEs found by Trivy: Go modules were being
+# bumped but the images they ship in were never refreshed.
+#
+# Updates are grouped per ecosystem to keep PR volume manageable.
+version: 2
+updates:
+  # ---- Go modules ----------------------------------------------------------
+  - package-ecosystem: gomod
+    directories:
+      - /kubernetes
+      - /components/egress
+      - /components/execd
+      - /components/ingress
+      - /components/internal
+      - /sdks/sandbox/go
+      - /tests/go
+      - /examples/chrome
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ---- Container base images ----------------------------------------------
+  # The gap that let OS-package CVEs accumulate. Covers every Dockerfile dir;
+  # bases are pinned by tag@digest so Dependabot bumps both the tag and digest.
+  - package-ecosystem: docker
+    directories:
+      - /kubernetes
+      - /components/egress
+      - /components/execd
+      - /components/ingress
+      - /server
+      - /sandboxes/code-interpreter
+      - /examples/chrome
+      - /examples/desktop
+      - /examples/playwright
+      - /examples/vscode
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      docker-images:
+        patterns:
+          - "*"
+
+  # ---- Python (uv / pip) ---------------------------------------------------
+  - package-ecosystem: pip
+    directories:
+      - /server
+      - /cli
+      - /sdks/code-interpreter/python
+      - /sdks/mcp/sandbox/python
+      - /sdks/sandbox/python
+      - /tests/python
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      python-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ---- JavaScript / npm ----------------------------------------------------
+  - package-ecosystem: npm
+    directories:
+      - /docs
+      - /sdks
+      - /sdks/code-interpreter/javascript
+      - /sdks/sandbox/javascript
+      - /tests/javascript
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ---- GitHub Actions ------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
