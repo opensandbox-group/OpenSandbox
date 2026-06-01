@@ -13,7 +13,9 @@
 # limitations under the License.
 
 # Build stage
-FROM golang:1.24-alpine AS builder
+# Go 1.25 to match the go.mod directive (the kubernetes module requires go 1.25).
+# Pinned by tag@digest; Dependabot keeps both current.
+FROM golang:1.25-alpine@sha256:8d22e29d960bc50cd025d93d5b7c7d220b1ee9aa7a239b3c8f55a57e987e8d45 AS builder
 
 # Use Aliyun mirror for faster downloads in China
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
@@ -31,7 +33,8 @@ COPY cmd/image-committer/ cmd/image-committer/
 RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/image-committer ./cmd/image-committer/
 
 # Runtime stage
-FROM alpine:3.19
+# Pinned by tag@digest for reproducibility; Dependabot keeps both current.
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
 # Use Aliyun mirror for faster downloads in China
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
