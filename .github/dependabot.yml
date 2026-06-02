@@ -52,8 +52,10 @@ updates:
         patterns:
           - "*"
 
-  # ---- Python (uv / pip) ---------------------------------------------------
-  - package-ecosystem: pip
+  # ---- Python (uv) ---------------------------------------------------------
+  # These dirs pin deps with uv.lock (+ pyproject.toml), so use the uv ecosystem;
+  # the pip ecosystem would not maintain the uv.lock files.
+  - package-ecosystem: uv
     directories:
       - /server
       - /cli
@@ -70,13 +72,14 @@ updates:
           - minor
           - patch
 
-  # ---- JavaScript / npm ----------------------------------------------------
+  # ---- JavaScript / npm (handles pnpm) -------------------------------------
+  # /sdks is a pnpm workspace root whose pnpm-lock.yaml already covers
+  # sdks/{code-interpreter,sandbox}/javascript, so those children are NOT listed
+  # separately (Dependabot requires non-overlapping directories per ecosystem).
   - package-ecosystem: npm
     directories:
       - /docs
       - /sdks
-      - /sdks/code-interpreter/javascript
-      - /sdks/sandbox/javascript
       - /tests/javascript
     schedule:
       interval: weekly
