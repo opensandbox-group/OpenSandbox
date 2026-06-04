@@ -136,13 +136,14 @@ def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None
 
 async def _stream_backend_response(resp: httpx.Response) -> AsyncIterator[bytes]:
     """
-    Yield backend body chunks and always close the httpx streaming response.
+    Yield backend body chunks without httpx content decoding and always close the response.
 
     httpx requires ``await resp.aclose()`` for ``stream=True`` responses so connections
     return to the pool; Starlette's StreamingResponse does not do this automatically.
+    Use ``aiter_raw`` so forwarded ``content-encoding`` headers still match the body bytes.
     """
     try:
-        async for chunk in resp.aiter_bytes():
+        async for chunk in resp.aiter_raw():
             yield chunk
     finally:
         await resp.aclose()

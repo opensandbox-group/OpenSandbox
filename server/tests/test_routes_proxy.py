@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import gzip
 from typing import Any, cast
 
 import httpx
@@ -29,15 +30,28 @@ from opensandbox_server.services.constants import OPEN_SANDBOX_SECURE_ACCESS_HEA
 
 class _FakeStreamingResponse:
     def __init__(
-        self, status_code: int = 200, headers: dict | None = None, chunks: list[bytes] | None = None
+        self,
+        status_code: int = 200,
+        headers: dict | None = None,
+        chunks: list[bytes] | None = None,
+        raw_chunks: list[bytes] | None = None,
     ):
         self.status_code = status_code
         self.headers = httpx.Headers(headers or {})
         self._chunks = chunks or []
+        self._raw_chunks = raw_chunks if raw_chunks is not None else self._chunks
         self.aclose_called = False
+        self.aiter_bytes_called = False
+        self.aiter_raw_called = False
 
     async def aiter_bytes(self):
+        self.aiter_bytes_called = True
         for chunk in self._chunks:
+            yield chunk
+
+    async def aiter_raw(self):
+        self.aiter_raw_called = True
+        for chunk in self._raw_chunks:
             yield chunk
 
     async def aclose(self):
@@ -423,6 +437,46 @@ def test_proxy_filters_response_hop_by_hop_headers(
     assert response.headers.get("keep-alive") is None
     assert response.headers.get("trailer") is None
     assert response.headers.get("x-hop-temp") is None
+
+
+def test_proxy_streams_raw_body_for_content_encoded_response(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+            assert resolve_internal is True
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService)
+
+    decoded_body = b"<html>vnc</html>"
+    encoded_body = gzip.compress(decoded_body)
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=200,
+        headers={
+            "content-type": "text/html",
+            "content-encoding": "gzip",
+        },
+        chunks=[decoded_body],
+        raw_chunks=[encoded_body],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/8080/vnc/index.html",
+        headers={**auth_headers, "Accept-Encoding": "gzip"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("content-encoding") == "gzip"
+    assert response.content == decoded_body
+    assert fake_client.response.aiter_raw_called is True
+    assert fake_client.response.aiter_bytes_called is False
+    assert fake_client.response.aclose_called is True
 
 
 def test_proxy_rejects_websocket_upgrade(
