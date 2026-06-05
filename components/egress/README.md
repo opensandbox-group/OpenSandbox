@@ -55,18 +55,46 @@ Optional advanced features:
 - Nameserver bypass: `OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT`
 - Denied hostname webhook: `OPENSANDBOX_EGRESS_DENY_WEBHOOK`, `OPENSANDBOX_EGRESS_SANDBOX_ID`
 - DoH/DoT controls: `OPENSANDBOX_EGRESS_BLOCK_DOH_443`, `OPENSANDBOX_EGRESS_DOH_BLOCKLIST`
+- Custom DNS upstream: `OPENSANDBOX_EGRESS_DNS_UPSTREAM` (comma-separated IPs, optional `:port`), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT` (default `5` seconds)
+- DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (enable), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC`
+
+### Always-Rules Files
+
+Static rule files under `/var/egress/rules/` are loaded at startup and take priority over dynamic API rules:
+
+| File | Purpose |
+|------|---------|
+| `/var/egress/rules/deny.always` | Domains always denied, overrides user and allow rules |
+| `/var/egress/rules/allow.always` | Domains always allowed, overrides user rules |
+| `/var/egress/rules/log_skip.always` | Domain patterns whose DNS blocks are not logged (noise reduction) |
+
+Format: one domain per line (supports wildcards like `*.example.com`). Lines starting with `#` are comments. Missing files are silently ignored.
+
+Rule precedence: `deny.always` > `allow.always` > user policy (API/env).
+
+Always-rules are hot-reloaded: the sidecar polls the files once per minute and applies changes without restart.
 
 ### Runtime HTTP API
 
-- `GET /policy`: get current policy
-- `POST /policy`: replace policy (`{}`, `null`, empty body => reset to deny-all)
-- `PATCH /policy`: merge/append rules (body is JSON array of egress rules)
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/policy` | Get current policy and enforcement mode |
+| `POST` | `/policy` | Replace policy (`{}`, `null`, empty body => reset to deny-all) |
+| `PUT` | `/policy` | Alias for `POST` |
+| `PATCH` | `/policy` | Merge/append rules (body is JSON array of egress rules) |
+| `DELETE` | `/policy` | Remove specific targets (body is JSON string array, e.g. `["*.example.com"]`) |
+| `GET` | `/healthz` | Health check; returns `200 ok` or `503 mitmproxy not ready` (when transparent MITM is enabled but not yet initialized) |
 
 Quick example:
 
 ```bash
+# Replace policy
 curl -XPOST http://127.0.0.1:18080/policy \
   -d '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.example.com"}]}'
+
+# Remove specific targets
+curl -XDELETE http://127.0.0.1:18080/policy \
+  -d '["*.example.com"]'
 ```
 
 ### Experimental: Transparent MITM (mitmproxy)
@@ -128,7 +156,7 @@ curl -I https://github.com
 
 ## Development
 
-- **Language**: Go 1.24+
+- **Language**: Go 1.25+
 - **Key Packages**:
     - `pkg/dnsproxy`: DNS server and policy matching logic.
     - `pkg/iptables`: `iptables` rule management.
@@ -151,6 +179,21 @@ An end-to-end benchmark compares **dns** (pass-through, no nft write) and **dns+
 ```
 
 More details in [docs/benchmark.md](docs/benchmark.md).
+
+## Process Supervisor
+
+The egress container runs under [`opensandbox-supervisor`](../../components/internal/supervisor/README.md), a lightweight process wrapper that restarts the egress worker on crash with exponential backoff, a crashloop circuit breaker, and structured JSONL event logging.
+
+```
+ENTRYPOINT: supervisor --pre-start=cleanup.sh --name=egress --grace-period=20s -- /opt/opensandbox-egress/egress
+```
+
+Egress-specific configuration:
+
+- **`--grace-period=20s`**: Egress needs extra time to drain DNS connections and tear down iptables/nft rules on shutdown (default is 10 s).
+- **Pre-start hook** (`cleanup.sh`): Reaps orphaned `mitmdump` processes from a previous crash so the new egress can bind the MITM listen port. Intentionally does NOT tear down iptables/nft rules — keeping enforcement active during the backoff window protects the workload.
+
+For full supervisor documentation (all flags, backoff behavior, crashloop breaker, event log schema, library API), see the [supervisor README](../../components/internal/supervisor/README.md).
 
 ## Troubleshooting
 
