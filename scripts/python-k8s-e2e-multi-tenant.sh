@@ -107,9 +107,25 @@ EOF
 }
 
 _write_multi_tenant_http_values() {
-  # Get the Docker bridge IP (gateway from Kind container's perspective)
+  # Get the host IP reachable from Kind containers.
+  # On Linux CI, the Kind Docker bridge gateway is the host.
+  # On Mac, host.docker.internal works but not on Linux without extra setup.
   local host_ip
-  host_ip=$(docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.18.0.1")
+  host_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "${KIND_CLUSTER}-control-plane" 2>/dev/null | tr -d '[:space:]')
+  if [ -z "${host_ip}" ]; then
+    # Fallback: inspect the "kind" network
+    host_ip=$(docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null | tr -d '[:space:]')
+  fi
+  if [ -z "${host_ip}" ]; then
+    host_ip="172.18.0.1"
+  fi
+  echo "HTTP tenant mock endpoint: http://${host_ip}:${HTTP_MOCK_PORT}/verify"
+  # Verify the mock is reachable from host before deploying
+  curl -fsS "http://${host_ip}:${HTTP_MOCK_PORT}/verify" -H "OPEN-SANDBOX-API-KEY: ${TENANT_API_KEY}" || {
+    echo "WARN: mock not reachable at ${host_ip}:${HTTP_MOCK_PORT}, trying 127.0.0.1"
+    # On CI, host-to-host should work via 0.0.0.0 binding
+    curl -fsS "http://127.0.0.1:${HTTP_MOCK_PORT}/verify" -H "OPEN-SANDBOX-API-KEY: ${TENANT_API_KEY}"
+  }
 
   cat > "${SERVER_VALUES_FILE}" <<EOF
 server:
