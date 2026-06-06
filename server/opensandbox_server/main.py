@@ -40,7 +40,8 @@ from opensandbox_server.tenants import (
     HTTPTenantProvider,
     HTTPTenantProviderConfig,
     TenantProvider,
-    _resolve_tenants_path,
+    resolve_tenants_path,
+    validate_tenant_config,
 )
 
 # Load configuration before initializing routers/middleware
@@ -51,20 +52,14 @@ _log_config = configure_logging(app_config.log)
 _tenant_provider: TenantProvider | None = None
 
 if app_config.tenants is not None:
-    if app_config.runtime.type == "docker":
-        sys.exit(
-            "FATAL: [tenants] configured but runtime.type='docker'. "
-            "Multi-tenancy requires Kubernetes namespaces."
-        )
-    if app_config.server.api_key and app_config.server.api_key.strip():
-        sys.exit(
-            "FATAL: server.api_key must be removed from server.toml when using [tenants]. "
-            "Tenant API keys are managed by the tenant provider."
-        )
+    try:
+        validate_tenant_config(app_config.runtime.type, app_config.server.api_key)
+    except ValueError as e:
+        sys.exit(f"FATAL: {e}")
 
     _tenants_cfg = app_config.tenants
     if _tenants_cfg.provider == "file":
-        _tenants_path = _resolve_tenants_path()
+        _tenants_path = resolve_tenants_path()
         _tenant_provider = FileTenantProvider(_tenants_path)
         _tenant_provider.start()
     elif _tenants_cfg.provider == "http":

@@ -40,6 +40,7 @@ from opensandbox_server.tenants import (
     TenantProviderUnavailable,
     get_current_tenant,
     set_current_tenant,
+    validate_tenant_config,
 )
 
 
@@ -374,7 +375,7 @@ class TestHTTPTenantProvider:
             # Now mock server doesn't know this key (simulate revocation by using unknown key)
             # We'll test with a key that's cached but server returns 401
             provider._cache["sk-revoked"] = type(cached)(
-                tenant=TenantEntry(name="old", namespace="old-ns", api_keys=["sk-revoked"]),
+                tenant=TenantEntry(name="old", namespace="old-ns", api_keys=("sk-revoked",)),
                 fetched_at=0,
                 ttl=0,
             )
@@ -498,7 +499,7 @@ class TestNamespaceResolution:
     def test_resolve_namespace_with_tenant(self):
         from opensandbox_server.tenants.context import set_current_tenant, get_current_tenant
 
-        tenant = TenantEntry(name="team-x", namespace="ns-x", api_keys=["k"])
+        tenant = TenantEntry(name="team-x", namespace="ns-x", api_keys=("k",))
         set_current_tenant(tenant)
         try:
             assert get_current_tenant().namespace == "ns-x"
@@ -517,30 +518,15 @@ class TestNamespaceResolution:
 class TestStartupGuards:
 
     def test_tenants_config_with_docker_runtime_rejected(self):
-        with pytest.raises(Exception):
-            # Simulating what main.py does — docker + tenants should be caught
-            # Either by AppConfig validator or main.py sys.exit
-            config = AppConfig(
-                server=ServerConfig(api_key=""),
-                runtime=RuntimeConfig(type="docker", execd_image="opensandbox/execd:latest"),
-                tenants=TenantsConfig(provider="file"),
-                ingress=IngressConfig(mode="direct"),
-            )
-            # The actual guard is in main.py (sys.exit), not in config validation.
-            # So we test the logic directly:
-            if config.runtime.type == "docker" and config.tenants is not None:
-                raise RuntimeError("Docker + tenants not allowed")
+        with pytest.raises(ValueError, match="runtime.type='docker'"):
+            validate_tenant_config(runtime_type="docker", api_key="")
 
     def test_tenants_config_with_api_key_rejected(self):
-        config = AppConfig(
-            server=ServerConfig(api_key="some-key"),
-            runtime=RuntimeConfig(type="docker", execd_image="opensandbox/execd:latest"),
-            tenants=TenantsConfig(provider="file"),
-            ingress=IngressConfig(mode="direct"),
-        )
-        if config.tenants is not None and config.server.api_key:
-            with pytest.raises(RuntimeError):
-                raise RuntimeError("api_key + tenants not allowed")
+        with pytest.raises(ValueError, match="server.api_key must be removed"):
+            validate_tenant_config(runtime_type="kubernetes", api_key="some-key")
+
+    def test_tenants_config_valid_kubernetes_no_api_key(self):
+        validate_tenant_config(runtime_type="kubernetes", api_key="")
 
     def test_http_provider_requires_endpoint(self):
         with pytest.raises(Exception, match="endpoint must be set"):

@@ -31,9 +31,10 @@ Example files in this repository:
 10. [`[storage]`](#storage)
 11. [`[store]`](#store)
 12. [`[secure_runtime]`](#secure_runtime)
-13. [`[renew_intent]`](#renew_intent--experimental)
-14. [Environment variables (outside TOML)](#environment-variables-outside-toml)
-15. [Cross-field validation rules](#cross-field-validation-rules)
+13. [`[tenants]`](#tenants--multi-tenant-mode)
+14. [`[renew_intent]`](#renew_intent--experimental)
+15. [Environment variables (outside TOML)](#environment-variables-outside-toml)
+16. [Cross-field validation rules](#cross-field-validation-rules)
 
 ---
 
@@ -52,6 +53,7 @@ Example files in this repository:
 | `[storage]` | No | Host bind mounts / OSSFS mount root |
 | `[store]` | No | Server-managed persistent metadata backend |
 | `[secure_runtime]` | No | gVisor / Kata / Firecracker |
+| `[tenants]` | No | Multi-tenant mode (Kubernetes only) |
 | `[renew_intent]` | No | Experimental auto-renew on access |
 
 ---
@@ -275,6 +277,39 @@ See [`docs/secure-container.md`](../docs/secure-container.md) for installation a
 
 ---
 
+## `[tenants]` — multi-tenant mode
+
+Enables multi-tenant isolation with per-tenant Kubernetes namespaces. When present, `server.api_key` must be removed — API keys are managed by the tenant provider. Only supported with `runtime.type = "kubernetes"`.
+
+Design: [OSEP-0012](../oseps/0012-multi-tenancy.md).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `provider` | `"file"` \| `"http"` | `"file"` | Tenant provider type. `file` reads a local TOML file; `http` queries a remote endpoint per key. |
+| `endpoint` | string \| omitted | `null` | Remote tenant lookup URL. **Required** when `provider = "http"`. Should use HTTPS in production. |
+| `max_stale_seconds` | float | `300.0` | Maximum seconds to serve stale cache when HTTP endpoint is unreachable. |
+| `timeout_seconds` | float | `5.0` | HTTP request timeout in seconds. |
+| `auth_header` | string \| omitted | `null` | Optional header name for provider-level authentication to HTTP endpoint. |
+| `auth_token` | string \| omitted | `null` | Optional token value for provider-level authentication to HTTP endpoint. |
+
+**File provider** (`provider = "file"`): reads a separate `tenants.toml` file. Path resolved via `SANDBOX_TENANTS_CONFIG_PATH` env or default `~/.opensandbox/tenants.toml`. Hot-reloaded on file change (2s mtime poll). Format:
+
+```toml
+[[tenants]]
+name = "team-a"
+namespace = "sandbox-team-a"
+api_keys = ["sk-a-1", "sk-a-2"]
+
+[[tenants]]
+name = "team-b"
+namespace = "sandbox-team-b"
+api_keys = ["sk-b-1"]
+```
+
+**HTTP provider** (`provider = "http"`): per-key lookup with in-memory TTL cache. Endpoint contract: send `OPEN-SANDBOX-API-KEY` header, expect 200 `{"namespace": "...", "ttl": 60}` or 401.
+
+---
+
 ## `[renew_intent]` — **experimental**
 
 **🧪 Experimental:** auto-renew sandbox expiration when access is observed (lifecycle proxy and/or Redis queue). Off by default. Full design: [OSEP-0009](../oseps/0009-auto-renew-sandbox-on-ingress-access.md).
@@ -301,6 +336,7 @@ These are read by the server or runtime code in addition to the TOML file:
 | Variable | Where used | Description |
 |----------|------------|-------------|
 | `SANDBOX_CONFIG_PATH` | `config.py`, CLI | Path to the TOML file. Overrides the default `~/.sandbox.toml` when set. |
+| `SANDBOX_TENANTS_CONFIG_PATH` | `tenants/` | Path to the tenants TOML file (file provider). Overrides default `~/.opensandbox/tenants.toml`. |
 | `OPENSANDBOX_SERVER_API_KEY` | `config.py` | Overrides the API key from the TOML file. |
 | `DOCKER_HOST` | Docker service | Standard Docker daemon address (e.g. `unix:///var/run/docker.sock`). |
 | `PENDING_FAILURE_TTL` | Docker service | Seconds to retain **failed Pending** sandboxes before cleanup; default **`3600`**. |
@@ -323,7 +359,12 @@ Rules enforced when the full `AppConfig` is parsed (see `AppConfig.validate_runt
 3. **`ingress.mode = "gateway"`**  
    - `[ingress.gateway]` is **required**; address and `route.mode` must satisfy the validators (wildcard domain for `wildcard` route mode, no URL scheme in `address`, etc.).
 
-4. **`secure_runtime`**  
+4. **`[tenants]` present**  
+   - `runtime.type` must be **`"kubernetes"`** (Docker + tenants is fatal).  
+   - `server.api_key` must be empty or omitted (tenant provider manages keys).  
+   - `provider = "http"` requires `endpoint` to be set.
+
+5. **`secure_runtime`**  
    - See [Secure runtime](#secure_runtime) above.
 
 ---

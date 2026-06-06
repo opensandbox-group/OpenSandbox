@@ -11,6 +11,7 @@ A production-grade, FastAPI-based service for managing the lifecycle of containe
   - **Kubernetes**: Production-ready (see [`../kubernetes/README.md`](../kubernetes/README.md) for deployment)
 - **Lifecycle cleanup modes**: Configurable TTL with renewal, or manual cleanup with explicit delete
 - **Access control**: API Key authentication (`OPEN-SANDBOX-API-KEY`); can be disabled for local/dev
+- **Multi-tenancy**: Per-tenant Kubernetes namespace isolation with file or HTTP-based tenant providers ([OSEP-0012](../oseps/0012-multi-tenancy.md))
 - **Networking modes**:
   - Host: shared host network, performance first
   - Bridge: isolated network with built-in HTTP routing
@@ -102,6 +103,21 @@ All API endpoints (except `/health`, `/docs`, `/redoc`) require authentication v
 ```bash
 curl -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" http://localhost:8080/v1/sandboxes
 ```
+
+### Multi-tenant mode
+
+When `[tenants]` is configured in the server TOML, the server switches to multi-tenant mode:
+
+- Each API key maps to a specific tenant and Kubernetes namespace
+- Sandbox operations are scoped to the tenant's namespace
+- `server.api_key` must be removed (keys are managed by the tenant provider)
+- Requires `runtime.type = "kubernetes"`
+
+Two provider backends are available:
+- **File provider** (`provider = "file"`): reads `tenants.toml` with hot-reload support
+- **HTTP provider** (`provider = "http"`): per-key lookup against a remote endpoint with TTL cache
+
+See **[configuration.md](configuration.md)** for full `[tenants]` options and [OSEP-0012](../oseps/0012-multi-tenancy.md) for design.
 
 ### Example usage
 

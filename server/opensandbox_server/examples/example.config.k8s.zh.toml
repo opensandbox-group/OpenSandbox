@@ -81,6 +81,19 @@ mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false
 
+# 多租户模式 — 将租户隔离到不同 Kubernetes 命名空间。
+# 启用时需移除上方 server.api_key（租户 API Key 由 provider 管理）。
+# 需要单独的 tenants.toml 文件（见 configuration.md）。
+# [tenants]
+# provider = "file"
+#
+# HTTP 方式查询租户:
+# [tenants]
+# provider = "http"
+# endpoint = "https://your-iam-service.internal/tenant/verify"
+# timeout_seconds = 5
+# max_stale_seconds = 300
+
 # 🧪 [EXPERIMENTAL] 按访问续期。默认关闭 — 见 server/README_zh.md。
 [renew_intent]
 enabled = false

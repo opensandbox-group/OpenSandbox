@@ -17,7 +17,7 @@ from opensandbox_server.tenants.file_provider import (
     DEFAULT_TENANTS_CONFIG_PATH,
     TENANTS_CONFIG_ENV_VAR,
     FileTenantProvider,
-    _resolve_tenants_path,
+    resolve_tenants_path,
 )
 from opensandbox_server.tenants.http_provider import (
     HTTPTenantProvider,
@@ -25,6 +25,26 @@ from opensandbox_server.tenants.http_provider import (
 )
 from opensandbox_server.tenants.models import TenantEntry
 from opensandbox_server.tenants.provider import TenantProvider, TenantProviderUnavailable
+
+
+def validate_tenant_config(runtime_type: str, api_key: str | None) -> None:
+    """Validate tenant configuration against runtime and auth settings.
+
+    Raises ValueError if:
+    - runtime is docker (multi-tenancy requires Kubernetes namespaces)
+    - server.api_key is set (conflicts with tenant-managed keys)
+    """
+    if runtime_type == "docker":
+        raise ValueError(
+            "[tenants] configured but runtime.type='docker'. "
+            "Multi-tenancy requires Kubernetes namespaces."
+        )
+    if api_key and api_key.strip():
+        raise ValueError(
+            "server.api_key must be removed from server.toml when using [tenants]. "
+            "Tenant API keys are managed by the tenant provider."
+        )
+
 
 __all__ = [
     "TenantEntry",
@@ -37,5 +57,6 @@ __all__ = [
     "TENANTS_CONFIG_ENV_VAR",
     "get_current_tenant",
     "set_current_tenant",
-    "_resolve_tenants_path",
+    "resolve_tenants_path",
+    "validate_tenant_config",
 ]

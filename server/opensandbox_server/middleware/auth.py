@@ -111,8 +111,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def _authenticate_multi_tenant(
         self, api_key: str, request: Request, call_next: Callable
     ) -> Response:
+        import asyncio
+
         try:
-            tenant = self.tenant_provider.lookup(api_key)
+            tenant = await asyncio.to_thread(self.tenant_provider.lookup, api_key)
         except TenantProviderUnavailable as e:
             logger.error("Tenant provider unavailable: %s", e)
             return JSONResponse(

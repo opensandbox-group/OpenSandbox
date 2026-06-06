@@ -33,7 +33,7 @@ TENANTS_CONFIG_ENV_VAR = "SANDBOX_TENANTS_CONFIG_PATH"
 DEFAULT_TENANTS_CONFIG_PATH = Path.home() / ".opensandbox" / "tenants.toml"
 
 
-def _resolve_tenants_path(path: Optional[str | Path] = None) -> Path:
+def resolve_tenants_path(path: Optional[str | Path] = None) -> Path:
     if path:
         return Path(path)
     env = os.environ.get(TENANTS_CONFIG_ENV_VAR)
@@ -64,7 +64,7 @@ def _parse_tenants_file(path: Path) -> List[TenantEntry]:
                 )
             seen_keys[key] = name
 
-        entries.append(TenantEntry(name=name, namespace=namespace, api_keys=list(api_keys)))
+        entries.append(TenantEntry(name=name, namespace=namespace, api_keys=tuple(api_keys)))
 
     return entries
 
@@ -81,7 +81,7 @@ class FileTenantProvider:
     """TenantProvider backed by a local tenants.toml file with hot-reload via filesystem polling."""
 
     def __init__(self, path: Optional[str | Path] = None) -> None:
-        self._path = _resolve_tenants_path(path)
+        self._path = resolve_tenants_path(path)
         self._lock = threading.Lock()
         self._lookup: Dict[str, TenantEntry] = {}
         self._entries: List[TenantEntry] = []

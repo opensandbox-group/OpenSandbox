@@ -80,6 +80,19 @@ mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false
 
+# Multi-tenant mode — isolate tenants into separate Kubernetes namespaces.
+# When enabled, remove server.api_key above (tenant provider manages keys).
+# Requires a separate tenants.toml file (see configuration.md).
+# [tenants]
+# provider = "file"
+#
+# For HTTP-based tenant lookup:
+# [tenants]
+# provider = "http"
+# endpoint = "https://your-iam-service.internal/tenant/verify"
+# timeout_seconds = 5
+# max_stale_seconds = 300
+
 # 🧪 [EXPERIMENTAL] Renew-on-access. Off by default — see server/README.md.
 [renew_intent]
 enabled = false

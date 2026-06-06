@@ -77,12 +77,14 @@ class HTTPTenantProvider:
 
     Each lookup that misses or expires in cache triggers a sync GET to the
     remote endpoint. The server response includes a suggested TTL for caching.
+    Uses per-key locks to prevent thundering herd on TTL expiry.
     """
 
     def __init__(self, config: HTTPTenantProviderConfig) -> None:
         self._config = config
         self._lock = threading.Lock()
         self._cache: Dict[str, _CacheEntry] = {}
+        self._inflight: Dict[str, threading.Event] = {}
         self._ready = False
         self._callbacks: List[Callable[[List[TenantEntry]], None]] = []
         self._client: Optional[httpx.Client] = None
@@ -137,6 +139,12 @@ class HTTPTenantProvider:
         return self._ready
 
     def start(self) -> None:
+        if self._config.endpoint and not self._config.endpoint.startswith("https://"):
+            logger.warning(
+                "HTTP tenant endpoint is not HTTPS (%s). "
+                "API keys will be transmitted in cleartext.",
+                self._config.endpoint,
+            )
         self._client = httpx.Client(timeout=self._config.timeout_seconds)
         self._ready = True
         logger.info("HTTP tenant provider started, endpoint=%s", self._config.endpoint)
@@ -153,6 +161,32 @@ class HTTPTenantProvider:
         self._callbacks.append(callback)
 
     def _fetch_and_cache(self, api_key: str, now: float) -> Optional[TenantEntry]:
+        """Singleflight GET: only one fetch per key at a time, others wait."""
+        with self._lock:
+            event = self._inflight.get(api_key)
+            if event is not None:
+                is_leader = False
+            else:
+                event = threading.Event()
+                self._inflight[api_key] = event
+                is_leader = True
+
+        if not is_leader:
+            event.wait(timeout=self._config.timeout_seconds)
+            with self._lock:
+                cached = self._cache.get(api_key)
+            if cached:
+                return cached.tenant
+            return None
+
+        try:
+            return self._do_fetch(api_key, now)
+        finally:
+            with self._lock:
+                self._inflight.pop(api_key, None)
+            event.set()
+
+    def _do_fetch(self, api_key: str, now: float) -> Optional[TenantEntry]:
         """GET the endpoint for a single api_key. Returns TenantEntry or raises."""
         assert self._client is not None
 
@@ -174,7 +208,7 @@ class HTTPTenantProvider:
         entry = TenantEntry(
             name=namespace,
             namespace=namespace,
-            api_keys=[api_key],
+            api_keys=(api_key,),
         )
 
         with self._lock:
