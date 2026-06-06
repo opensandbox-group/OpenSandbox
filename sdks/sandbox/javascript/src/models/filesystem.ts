@@ -95,6 +95,11 @@ export interface ContentReplaceEntry {
   newContent: string;
 }
 
+export interface ContentReplaceResult {
+  path: string;
+  replacedCount: number;
+}
+
 export interface SetPermissionEntry {
   path: string;
   mode: number;

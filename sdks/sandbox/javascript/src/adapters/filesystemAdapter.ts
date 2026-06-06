@@ -18,6 +18,7 @@ import type { SandboxFiles } from "../services/filesystem.js";
 import type { paths as ExecdPaths } from "../api/execd.js";
 import type {
   ContentReplaceEntry,
+  ContentReplaceResult,
   FileInfo,
   FileMetadata,
   FilesInfoResponse,
@@ -218,6 +219,8 @@ export class FilesystemAdapter implements SandboxFiles {
       null as unknown as ExecdPaths["/files/mv"]["post"]["requestBody"]["content"]["application/json"],
     ReplaceContentsRequest:
       null as unknown as ExecdPaths["/files/replace"]["post"]["requestBody"]["content"]["application/json"],
+    ReplaceContentsOk:
+      null as unknown as ExecdPaths["/files/replace"]["post"]["responses"][200]["content"]["application/json"],
   };
 
   constructor(
@@ -339,17 +342,24 @@ export class FilesystemAdapter implements SandboxFiles {
     throwOnOpenApiFetchError({ error, response }, "Move files failed");
   }
 
-  async replaceContents(entries: ContentReplaceEntry[]): Promise<void> {
+  async replaceContents(entries: ContentReplaceEntry[]): Promise<ContentReplaceResult[]> {
     const req: Record<string, ReplaceFileContentItem> = {};
     for (const e of entries) {
       req[e.path] = { old: e.oldContent, new: e.newContent };
     }
     const body =
       req as unknown as typeof FilesystemAdapter.Api.ReplaceContentsRequest;
-    const { error, response } = await this.client.POST("/files/replace", {
+    const { data, error, response } = await this.client.POST("/files/replace", {
       body,
     });
     throwOnOpenApiFetchError({ error, response }, "Replace contents failed");
+
+    const ok = data as typeof FilesystemAdapter.Api.ReplaceContentsOk | undefined;
+    if (!ok) return [];
+    return Object.entries(ok).map(([path, result]) => ({
+      path,
+      replacedCount: result.replacedCount,
+    }));
   }
 
   async search(entry: SearchEntry): Promise<SearchFilesResponse> {

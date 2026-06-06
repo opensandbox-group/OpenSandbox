@@ -40,6 +40,7 @@ from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
+    ContentReplaceResult,
     EntryInfo,
     MoveEntry,
     SearchEntry,
@@ -286,7 +287,7 @@ class FilesystemAdapterSync(FilesystemSync):
             logger.error("Failed to set permissions", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
-    def replace_contents(self, entries: list[ContentReplaceEntry]) -> None:
+    def replace_contents(self, entries: list[ContentReplaceEntry]) -> list[ContentReplaceResult]:
         try:
             from opensandbox.api.execd.api.filesystem import replace_content
 
@@ -295,6 +296,8 @@ class FilesystemAdapterSync(FilesystemSync):
                 body=FilesystemModelConverter.to_api_replace_content_body(entries),
             )
             handle_api_error(response_obj, "Replace contents")
+
+            return FilesystemModelConverter.to_replace_results(response_obj.parsed)
         except Exception as e:
             logger.error("Failed to replace contents", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e

@@ -386,6 +386,14 @@ type ReplaceItem struct {
 // ReplaceRequest maps file paths to their replacement operations.
 type ReplaceRequest map[string]ReplaceItem
 
+// ReplaceResult holds the result of a content replacement for a single file.
+type ReplaceResult struct {
+	ReplacedCount int `json:"replacedCount"`
+}
+
+// ReplaceResponse maps file paths to their replacement results.
+type ReplaceResponse map[string]ReplaceResult
+
 // FileMetadata is the metadata sent alongside file uploads.
 type FileMetadata struct {
 	Path  string `json:"path"`

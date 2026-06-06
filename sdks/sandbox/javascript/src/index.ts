@@ -117,6 +117,7 @@ export { Sandbox } from "./sandbox.js";
 
 export type {
   ContentReplaceEntry,
+  ContentReplaceResult,
   MoveEntry,
   SearchEntry,
   SetPermissionEntry,

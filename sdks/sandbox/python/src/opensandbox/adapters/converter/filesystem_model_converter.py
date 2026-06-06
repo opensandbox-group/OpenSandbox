@@ -27,6 +27,7 @@ from typing import Any
 from opensandbox.api.execd.models import FileInfo
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
+    ContentReplaceResult,
     EntryInfo,
     MoveEntry,
     SetPermissionEntry,
@@ -126,6 +127,30 @@ class FilesystemModelConverter:
             for entry in entries
         }
         return ReplaceContentBody.from_dict(replace_data)
+
+    @staticmethod
+    def to_replace_results(api_response: Any) -> list[ContentReplaceResult]:
+        """Convert API replace response to list of ContentReplaceResult."""
+        if not api_response:
+            return []
+
+        results: list[ContentReplaceResult] = []
+        items: dict = {}
+        if hasattr(api_response, "additional_properties"):
+            items = api_response.additional_properties
+        elif isinstance(api_response, dict):
+            items = api_response
+
+        for path, result_data in items.items():
+            if hasattr(result_data, "replaced_count"):
+                count = result_data.replaced_count
+            elif isinstance(result_data, dict):
+                count = result_data.get("replacedCount", 0)
+            else:
+                count = 0
+            results.append(ContentReplaceResult(path=path, replaced_count=count))
+
+        return results
 
     @staticmethod
     def to_api_rename_file_items(entries: list[MoveEntry]):

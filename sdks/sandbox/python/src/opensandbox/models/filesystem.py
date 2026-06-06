@@ -177,6 +177,15 @@ class ContentReplaceEntry(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ContentReplaceResult(BaseModel):
+    """
+    Result of a content replacement operation on a single file.
+    """
+
+    path: str = Field(description="File path where replacement was performed")
+    replaced_count: int = Field(description="Number of occurrences replaced. 0 means old content was not found.")
+
+
 class SearchEntry(BaseModel):
     """
     Request to search for files matching a pattern.

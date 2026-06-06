@@ -1169,7 +1169,7 @@ class TestSandboxE2ESync:
         # Replace file contents via API (replace_contents)
         before_replace_info = after_update_info
         time.sleep(0.05)
-        sandbox.files.replace_contents(
+        replace_results = sandbox.files.replace_contents(
             [
                 ContentReplaceEntry(
                     path=test_file1,
@@ -1178,11 +1178,55 @@ class TestSandboxE2ESync:
                 )
             ]
         )
+        assert len(replace_results) == 1
+        assert replace_results[0].path == test_file1
+        assert replace_results[0].replaced_count == 1
         replaced_content1 = sandbox.files.read_file(test_file1, encoding="utf-8")
         assert "Replaced line in file1" in replaced_content1
         assert "Appended line to file1" not in replaced_content1
         after_replace_info = sandbox.files.get_file_info([test_file1])[test_file1]
         _assert_modified_updated(before_replace_info.modified_at, after_replace_info.modified_at, min_delta_ms=1)
+
+        # Replace with no match (replacedCount=0)
+        no_match_results = sandbox.files.replace_contents([
+            ContentReplaceEntry(
+                path=test_file1,
+                old_content="this string does not exist in file",
+                new_content="irrelevant",
+            )
+        ])
+        assert len(no_match_results) == 1
+        assert no_match_results[0].path == test_file1
+        assert no_match_results[0].replaced_count == 0
+        assert sandbox.files.read_file(test_file1, encoding="utf-8") == replaced_content1
+
+        # Replace with multiple matches (replacedCount>1)
+        multi_match_file = f"{test_dir1}/multi_match.txt"
+        sandbox.files.write_files([WriteEntry(path=multi_match_file, data="foo bar foo baz foo")])
+        multi_results = sandbox.files.replace_contents([
+            ContentReplaceEntry(path=multi_match_file, old_content="foo", new_content="qux")
+        ])
+        assert len(multi_results) == 1
+        assert multi_results[0].replaced_count == 3
+        assert sandbox.files.read_file(multi_match_file, encoding="utf-8") == "qux bar qux baz qux"
+
+        # Batch replace across multiple files
+        batch_file_a = f"{test_dir1}/batch_a.txt"
+        batch_file_b = f"{test_dir1}/batch_b.txt"
+        sandbox.files.write_files([
+            WriteEntry(path=batch_file_a, data="hello world"),
+            WriteEntry(path=batch_file_b, data="hello hello"),
+        ])
+        batch_results = sandbox.files.replace_contents([
+            ContentReplaceEntry(path=batch_file_a, old_content="hello", new_content="hi"),
+            ContentReplaceEntry(path=batch_file_b, old_content="hello", new_content="hi"),
+        ])
+        assert len(batch_results) == 2
+        results_by_path = {r.path: r.replaced_count for r in batch_results}
+        assert results_by_path[batch_file_a] == 1
+        assert results_by_path[batch_file_b] == 2
+        assert sandbox.files.read_file(batch_file_a, encoding="utf-8") == "hi world"
+        assert sandbox.files.read_file(batch_file_b, encoding="utf-8") == "hi hi"
 
         # Move/rename a file via API (move_files)
         moved_path = f"{test_dir2}/moved_file3.txt"

@@ -870,6 +870,14 @@ export interface components {
              */
             new: string;
         };
+        /** @description Result of a content replacement operation on a single file */
+        ReplaceFileContentResult: {
+            /**
+             * @description Number of occurrences replaced. 0 means oldContent was not found in the file.
+             * @example 1
+             */
+            replacedCount: number;
+        };
         /** @description System resource usage metrics */
         Metrics: {
             /**
@@ -1578,7 +1586,21 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    /**
+                     * @example {
+                     *       "/workspace/config.yaml": {
+                     *         "replacedCount": 1
+                     *       },
+                     *       "/workspace/app.py": {
+                     *         "replacedCount": 0
+                     *       }
+                     *     }
+                     */
+                    "application/json": {
+                        [key: string]: components["schemas"]["ReplaceFileContentResult"];
+                    };
+                };
             };
             400: components["responses"]["BadRequest"];
             500: components["responses"]["InternalServerError"];

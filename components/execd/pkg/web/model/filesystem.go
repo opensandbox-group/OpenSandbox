@@ -48,3 +48,8 @@ type ReplaceFileContentItem struct {
 	Old string `json:"old,omitempty"`
 	New string `json:"new,omitempty"`
 }
+
+// ReplaceFileContentResult represents the result of a content replacement on a single file
+type ReplaceFileContentResult struct {
+	ReplacedCount int `json:"replacedCount"`
+}

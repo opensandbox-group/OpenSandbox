@@ -43,6 +43,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
+    ContentReplaceResult,
     EntryInfo,
     MoveEntry,
     SearchEntry,
@@ -410,7 +411,7 @@ class FilesystemAdapter(Filesystem):
             logger.error("Failed to set permissions", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
-    async def replace_contents(self, entries: list[ContentReplaceEntry]) -> None:
+    async def replace_contents(self, entries: list[ContentReplaceEntry]) -> list[ContentReplaceResult]:
         """Replace file contents using auto-generated API."""
         try:
             from opensandbox.api.execd.api.filesystem import replace_content
@@ -422,6 +423,8 @@ class FilesystemAdapter(Filesystem):
             )
 
             handle_api_error(response_obj, "Replace contents")
+
+            return FilesystemModelConverter.to_replace_results(response_obj.parsed)
 
         except Exception as e:
             logger.error("Failed to replace contents", exc_info=e)

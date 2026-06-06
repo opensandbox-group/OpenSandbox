@@ -317,3 +317,31 @@ public class ReplaceFileContentItem
     [JsonPropertyName("new")]
     public required string New { get; set; }
 }
+
+/// <summary>
+/// Result of a content replacement operation on a single file.
+/// </summary>
+public class ContentReplaceResult
+{
+    /// <summary>
+    /// Gets or sets the file path.
+    /// </summary>
+    public required string Path { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of occurrences replaced. 0 means old content was not found.
+    /// </summary>
+    public int ReplacedCount { get; set; }
+}
+
+/// <summary>
+/// API response model for replace file content result.
+/// </summary>
+public class ReplaceFileContentResult
+{
+    /// <summary>
+    /// Gets or sets the number of occurrences replaced.
+    /// </summary>
+    [JsonPropertyName("replacedCount")]
+    public int ReplacedCount { get; set; }
+}

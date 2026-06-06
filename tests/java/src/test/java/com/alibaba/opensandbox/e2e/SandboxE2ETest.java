@@ -1341,7 +1341,7 @@ public class SandboxE2ETest extends BaseE2ETest {
             Thread.sleep(50);
         } catch (InterruptedException ignored) {
         }
-        sandbox.files()
+        var replaceResults = sandbox.files()
                 .replaceContents(
                         List.of(
                                 ContentReplaceEntry.builder()
@@ -1349,11 +1349,36 @@ public class SandboxE2ETest extends BaseE2ETest {
                                         .oldContent("Appended line to file1")
                                         .newContent("Replaced line in file1")
                                         .build()));
+        assertEquals(1, replaceResults.size());
+        assertEquals(testFile1, replaceResults.get(0).getPath());
+        assertEquals(1, replaceResults.get(0).getReplacedCount());
         String replaced = sandbox.files().readFile(testFile1, "UTF-8", null);
         assertTrue(replaced.contains("Replaced line in file1"));
         assertFalse(replaced.contains("Appended line to file1"));
         EntryInfo afterReplace = sandbox.files().readFileInfo(List.of(testFile1)).get(testFile1);
         assertModifiedUpdated(beforeReplace.getModifiedAt(), afterReplace.getModifiedAt(), 1, 1000);
+
+        // No match → replacedCount=0
+        var noMatchResults = sandbox.files().replaceContents(List.of(
+                ContentReplaceEntry.builder()
+                        .path(testFile1)
+                        .oldContent("nonexistent string")
+                        .newContent("irrelevant")
+                        .build()));
+        assertEquals(1, noMatchResults.size());
+        assertEquals(0, noMatchResults.get(0).getReplacedCount());
+
+        // Multiple matches
+        sandbox.files().writeFiles(List.of(
+                WriteEntry.builder().path(testDir1 + "/multi.txt").data("foo bar foo baz foo").build()));
+        var multiResults = sandbox.files().replaceContents(List.of(
+                ContentReplaceEntry.builder()
+                        .path(testDir1 + "/multi.txt")
+                        .oldContent("foo")
+                        .newContent("qux")
+                        .build()));
+        assertEquals(1, multiResults.size());
+        assertEquals(3, multiResults.get(0).getReplacedCount());
 
         // Move file3
         String movedPath = testDir2 + "/moved_file3.txt";

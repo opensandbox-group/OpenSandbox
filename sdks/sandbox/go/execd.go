@@ -256,8 +256,13 @@ func (e *ExecdClient) SearchFiles(ctx context.Context, dir string, pattern strin
 }
 
 // ReplaceInFiles performs text replacement in the specified files.
-func (e *ExecdClient) ReplaceInFiles(ctx context.Context, req ReplaceRequest) error {
-	return e.client.doRequest(ctx, http.MethodPost, "/files/replace", req, nil)
+func (e *ExecdClient) ReplaceInFiles(ctx context.Context, req ReplaceRequest) (ReplaceResponse, error) {
+	var resp ReplaceResponse
+	err := e.client.doRequest(ctx, http.MethodPost, "/files/replace", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // UploadFileOptions configures the destination path and multipart filename for an upload.

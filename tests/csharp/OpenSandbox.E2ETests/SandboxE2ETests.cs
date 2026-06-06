@@ -866,7 +866,7 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         AssertModifiedUpdated(beforeUpdate.ModifiedAt, afterUpdate.ModifiedAt, 1, 1000);
 
         await Task.Delay(50);
-        await sandbox.Files.ReplaceContentsAsync(new[]
+        var replaceResults = await sandbox.Files.ReplaceContentsAsync(new[]
         {
             new ContentReplaceEntry
             {
@@ -875,10 +875,33 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
                 NewContent = "Replaced line."
             }
         });
+        Assert.Single(replaceResults);
+        Assert.Equal(testFile1, replaceResults[0].Path);
+        Assert.Equal(1, replaceResults[0].ReplacedCount);
 
         var replaced = await sandbox.Files.ReadFileAsync(testFile1, new ReadFileOptions { Encoding = "utf-8" });
         Assert.Contains("Replaced line.", replaced, StringComparison.Ordinal);
         Assert.DoesNotContain("Appended line.", replaced, StringComparison.Ordinal);
+
+        // No match → ReplacedCount=0
+        var noMatchResults = await sandbox.Files.ReplaceContentsAsync(new[]
+        {
+            new ContentReplaceEntry { Path = testFile1, OldContent = "nonexistent string", NewContent = "irrelevant" }
+        });
+        Assert.Single(noMatchResults);
+        Assert.Equal(0, noMatchResults[0].ReplacedCount);
+
+        // Multiple matches
+        await sandbox.Files.WriteFilesAsync(new[]
+        {
+            new WriteEntry { Path = $"{testDir1}/multi.txt", Data = "foo bar foo baz foo" }
+        });
+        var multiResults = await sandbox.Files.ReplaceContentsAsync(new[]
+        {
+            new ContentReplaceEntry { Path = $"{testDir1}/multi.txt", OldContent = "foo", NewContent = "qux" }
+        });
+        Assert.Single(multiResults);
+        Assert.Equal(3, multiResults[0].ReplacedCount);
 
         var movedPath = $"{testDir2}/moved_file3.txt";
         await sandbox.Files.MoveFilesAsync(new[] { new MoveEntry { Src = testFile3, Dest = movedPath } });

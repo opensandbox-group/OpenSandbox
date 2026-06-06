@@ -1581,13 +1581,23 @@ func TestReplaceInFiles(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("replace item = %+v", item))
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(ReplaceResponse{
+			"/tmp/config.txt": {ReplacedCount: 1},
+		})
 	})
 
-	err := client.ReplaceInFiles(context.Background(), ReplaceRequest{
+	resp, err := client.ReplaceInFiles(context.Background(), ReplaceRequest{
 		"/tmp/config.txt": {Old: "localhost", New: "production.example.com"},
 	})
 	require.NoErrorf(t, err, "ReplaceInFiles")
+	if resp == nil {
+		assert.Fail(t, "expected non-nil response")
+	}
+	if resp["/tmp/config.txt"].ReplacedCount != 1 {
+		assert.Fail(t, fmt.Sprintf("expected replacedCount=1, got %d", resp["/tmp/config.txt"].ReplacedCount))
+	}
 }
 
 func TestDownloadFile(t *testing.T) {

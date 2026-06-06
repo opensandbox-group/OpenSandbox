@@ -766,6 +766,17 @@ paths:
       responses:
         "200":
           description: Content replaced successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/ReplaceFileContentResult"
+              example:
+                "/workspace/config.yaml":
+                  replacedCount: 1
+                "/workspace/app.py":
+                  replacedCount: 0
         "400":
           $ref: "#/components/responses/BadRequest"
         "500":
@@ -1328,6 +1339,16 @@ components:
           description: Replacement string
           example: "0.0.0.0"
       required: [old, new]
+
+    ReplaceFileContentResult:
+      type: object
+      description: Result of a content replacement operation on a single file
+      properties:
+        replacedCount:
+          type: integer
+          description: Number of occurrences replaced. 0 means oldContent was not found in the file.
+          example: 1
+      required: [replacedCount]
 
     Metrics:
       type: object

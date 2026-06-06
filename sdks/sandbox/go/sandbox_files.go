@@ -102,9 +102,9 @@ func (s *Sandbox) DeleteDirectory(ctx context.Context, path string) error {
 }
 
 // ReplaceInFiles performs text replacement in files.
-func (s *Sandbox) ReplaceInFiles(ctx context.Context, req ReplaceRequest) error {
+func (s *Sandbox) ReplaceInFiles(ctx context.Context, req ReplaceRequest) (ReplaceResponse, error) {
 	if s.execd == nil {
-		return fmt.Errorf("opensandbox: execd client not initialized")
+		return nil, fmt.Errorf("opensandbox: execd client not initialized")
 	}
 	return s.execd.ReplaceInFiles(ctx, req)
 }
