@@ -629,3 +629,38 @@ def test_snapshot_service_recovers_deleting_snapshot(tmp_path) -> None:
 
     assert runtime.delete_calls == [("snap-delete", "opensandbox-snapshots:snap-delete")]
     assert repo.get("snap-delete") is None
+
+
+def test_get_snapshot_exposes_image_uri_when_ready(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    repo.create(
+        _snapshot_record(
+            "snap-ready",
+            SnapshotState.READY,
+            image="opensandbox-snapshots:snap-ready",
+        )
+    )
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=StubSnapshotRuntime(),
+    )
+
+    fetched = service.get_snapshot("snap-ready")
+
+    assert fetched.image_uri == "opensandbox-snapshots:snap-ready"
+
+
+def test_snapshot_response_has_no_image_uri_while_creating(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=StubSnapshotRuntime(),
+        snapshot_executor=CapturingExecutor(),
+    )
+
+    created = service.create_snapshot("sbx-001", CreateSnapshotRequest(name="checkpoint"))
+
+    assert created.status.state == "Creating"
+    assert created.image_uri is None

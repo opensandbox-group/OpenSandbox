@@ -267,3 +267,55 @@ def test_create_snapshot_returns_501_when_runtime_is_not_supported(
 
     assert response.status_code == 501
     assert response.json()["code"] == "SNAPSHOT::NOT_IMPLEMENTED"
+
+
+def test_get_snapshot_exposes_image_uri_alias(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+
+    class StubService:
+        @staticmethod
+        def get_snapshot(snapshot_id: str) -> Snapshot:
+            return Snapshot(
+                id=snapshot_id,
+                sandboxId="sbx-001",
+                name="ready-snap",
+                status=SnapshotStatus(state="Ready"),
+                imageUri="opensandbox-snapshots:snap-001",
+                createdAt=now,
+            )
+
+    monkeypatch.setattr(lifecycle, "snapshot_service", StubService())
+
+    response = client.get("/v1/snapshots/snap-001", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert response.json()["imageUri"] == "opensandbox-snapshots:snap-001"
+
+
+def test_get_snapshot_omits_image_uri_when_absent(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+
+    class StubService:
+        @staticmethod
+        def get_snapshot(snapshot_id: str) -> Snapshot:
+            return Snapshot(
+                id=snapshot_id,
+                sandboxId="sbx-001",
+                status=SnapshotStatus(state="Creating"),
+                createdAt=now,
+            )
+
+    monkeypatch.setattr(lifecycle, "snapshot_service", StubService())
+
+    response = client.get("/v1/snapshots/snap-001", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert "imageUri" not in response.json()
