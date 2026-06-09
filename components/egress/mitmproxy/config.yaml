@@ -3,18 +3,24 @@
 # /var/lib/mitmproxy/.mitmproxy/config.yaml.
 #
 # Only deviations from mitm defaults are listed here. Options that
-# happen to match the mitm default (connection_strategy=lazy, http2=true,
-# etc.) are intentionally omitted — the file is meant to be the diff
-# against upstream defaults, not a full enumeration. The one exception
-# is ignore_hosts: even though [] matches the mitm default, it is kept
-# as a discoverable extension point for operators who want to bypass
-# decryption for specific hosts without hunting through the docs.
+# happen to match the mitm default (http2=true, etc.) are intentionally
+# omitted — the file is meant to be the diff against upstream defaults,
+# not a full enumeration. Two intentional exceptions to this rule:
+# ignore_hosts (kept as a discoverable extension point) and
+# connection_strategy (mitmproxy 10+ changed the default from lazy to
+# eager; we pin lazy explicitly to preserve the historical behavior).
 #
 # Per-deployment overrides remain env-driven and applied as --set by
 # launch.go. Precedence: command-line --set > this file > mitm defaults.
 
 mode:
   - transparent
+
+# mitm default changed from lazy to eager in mitmproxy 10+. We pin
+# lazy explicitly: upstream connections are deferred until the full
+# request arrives, avoiding unnecessary upstream opens for blocked
+# or filtered requests.
+connection_strategy: lazy
 
 # mitm default 0.0.0.0; transparent mode must only accept loopback inside
 # the netns (iptables REDIRECT pushes outbound traffic here, and exposing

@@ -66,9 +66,10 @@ This is the single source of truth for:
 - `listen_host` (`127.0.0.1`) — mitm default is `0.0.0.0`
 - `stream_large_bodies` (`10m`) — mitm default is unset (entire body buffered)
 - `ssl_verify_upstream_trusted_confdir` (`/etc/ssl/certs`) — mitm default is unset; overridable per-deployment via env
+- `connection_strategy` (`lazy`) — mitmproxy 10+ changed the default from `lazy` to `eager`; pinned explicitly to preserve the historical behavior of deferring upstream connections until the full request arrives
 - `ignore_hosts` (`[]`) — matches the mitm default; kept in the file as a discoverable extension point for operators adding TLS pass-through entries
 
-Only deviations from the mitm built-in defaults are declared in `config.yaml` (the `ignore_hosts` line is the one intentional exception, kept for discoverability). Other options that happen to match the default (`connection_strategy=lazy`, `http2=true`, etc.) are omitted — the file is the diff against upstream defaults, not a full enumeration.
+Only deviations from the mitm built-in defaults are declared in `config.yaml` (the `ignore_hosts` entry is a discoverability exception; `connection_strategy` is a compatibility pin against the upstream default change). Other options that happen to match the default (`http2=true`, etc.) are omitted — the file is the diff against upstream defaults, not a full enumeration.
 
 Precedence: command-line `--set` (from env overrides) > `config.yaml` > mitmproxy built-in defaults.
 
