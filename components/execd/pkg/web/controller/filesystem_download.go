@@ -57,6 +57,16 @@ func (c *FilesystemController) DownloadFile() {
 	offsetStr := c.ctx.Query("offset")
 	limitStr := c.ctx.Query("limit")
 
+	// Check if only one of offset/limit is provided
+	if (offsetStr != "" && limitStr == "") || (offsetStr == "" && limitStr != "") {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidParameter,
+			"both offset and limit must be provided together for line-based reading",
+		)
+		return
+	}
+
 	if offsetStr != "" && limitStr != "" {
 		offset, err := strconv.Atoi(offsetStr)
 		if err != nil || offset < 1 {
@@ -78,7 +88,7 @@ func (c *FilesystemController) DownloadFile() {
 			return
 		}
 
-		c.serveLineRange(resolvedFilePath, offset, limit)
+		c.serveLineRange(resolvedFilePath, offset, limit, rec)
 		return
 	}
 
@@ -130,7 +140,7 @@ func (c *FilesystemController) DownloadFile() {
 }
 
 // serveLineRange serves a specific range of lines from a file
-func (c *FilesystemController) serveLineRange(filePath string, offset, limit int) {
+func (c *FilesystemController) serveLineRange(filePath string, offset, limit int, rec *filesystemMetricRecorder) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		c.handleFileError(err)
@@ -139,6 +149,9 @@ func (c *FilesystemController) serveLineRange(filePath string, offset, limit int
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	// Increase buffer for long lines (default 64KB -> 1MB)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	
 	currentLine := 1
 	linesWritten := 0
 
@@ -159,7 +172,10 @@ func (c *FilesystemController) serveLineRange(filePath string, offset, limit int
 			model.ErrorCodeRuntimeError,
 			fmt.Sprintf("error reading file: %v", err),
 		)
+		return
 	}
+
+	rec.MarkSuccess()
 }
 
 // formatContentDisposition formats the Content-Disposition header value with proper
