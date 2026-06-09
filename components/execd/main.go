@@ -28,6 +28,7 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/clone3compat"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web"
@@ -40,6 +41,14 @@ func main() {
 	version.EchoVersion("OpenSandbox Execd")
 
 	flag.InitFlags()
+
+	// Probe isolation runtime capabilities.
+	isolationProbe := isolation.Probe(isolation.ProbeConfig{
+		UpperRoot:     flag.IsolationUpperRoot,
+		UpperMaxBytes: flag.IsolationUpperMaxBytes,
+	})
+	log.Info("isolation: available=%v isolator=%s version=%s",
+		isolationProbe.Available, isolationProbe.Isolator, isolationProbe.Version)
 
 	log.Init(flag.ServerLogLevel)
 	if clone3Compat {

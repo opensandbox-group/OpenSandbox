@@ -18,6 +18,7 @@ import (
 	"flag"
 	stdlog "log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,11 +26,15 @@ import (
 )
 
 const (
-	jupyterHostEnv             = "JUPYTER_HOST"
-	jupyterTokenEnv            = "JUPYTER_TOKEN"
-	accessTokenEnv             = "EXECD_ACCESS_TOKEN"
-	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
-	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
+	jupyterHostEnv              = "JUPYTER_HOST"
+	jupyterTokenEnv             = "JUPYTER_TOKEN"
+	accessTokenEnv              = "EXECD_ACCESS_TOKEN"
+	gracefulShutdownTimeoutEnv  = "EXECD_API_GRACE_SHUTDOWN"
+	jupyterIdlePollIntervalEnv  = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
+	isolationUpperRootEnv       = "EXECD_ISOLATION_UPPER_ROOT"
+	isolationUpperMaxBytesEnv   = "EXECD_ISOLATION_UPPER_MAX_BYTES"
+	isolationDiffMaxBytesEnv    = "EXECD_ISOLATION_DIFF_MAX_BYTES"
+	isolationAllowedWritableEnv = "EXECD_ISOLATION_ALLOWED_WRITABLE"
 )
 
 // InitFlags registers CLI flags and env overrides.
@@ -40,6 +45,10 @@ func InitFlags() {
 	ServerAccessToken = ""
 	ApiGracefulShutdownTimeout = time.Second * 1
 	JupyterIdlePollInterval = 100 * time.Millisecond
+	IsolationUpperRoot = "/var/lib/execd/isolation"
+	IsolationUpperMaxBytes = 8 * 1024 * 1024 * 1024 // 8 GiB
+	IsolationDiffMaxBytes = 4 * 1024 * 1024 * 1024  // 4 GiB
+	IsolationAllowedWritable = ""                   // reject all
 
 	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
@@ -87,6 +96,28 @@ func InitFlags() {
 	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 1s)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
 
+	// Isolation flags
+	if v := os.Getenv(isolationUpperRootEnv); v != "" {
+		IsolationUpperRoot = v
+	}
+	if v := os.Getenv(isolationUpperMaxBytesEnv); v != "" {
+		if n, err := parseInt64(v); err == nil {
+			IsolationUpperMaxBytes = n
+		}
+	}
+	if v := os.Getenv(isolationDiffMaxBytesEnv); v != "" {
+		if n, err := parseInt64(v); err == nil {
+			IsolationDiffMaxBytes = n
+		}
+	}
+	if v := os.Getenv(isolationAllowedWritableEnv); v != "" {
+		IsolationAllowedWritable = v
+	}
+	flag.StringVar(&IsolationUpperRoot, "isolation-upper-root", IsolationUpperRoot, "Parent directory for per-session overlay upper directories")
+	flag.Int64Var(&IsolationUpperMaxBytes, "isolation-upper-max-bytes", IsolationUpperMaxBytes, "Hard limit on total upper directory size (default: 8 GiB)")
+	flag.Int64Var(&IsolationDiffMaxBytes, "isolation-diff-max-bytes", IsolationDiffMaxBytes, "Max tar.gz diff output size (default: 4 GiB)")
+	flag.StringVar(&IsolationAllowedWritable, "isolation-allowed-writable", IsolationAllowedWritable, "Comma-separated allowlist of extra_writable paths")
+
 	// Parse flags - these will override environment variables if provided
 	flag.Parse()
 	if JupyterIdlePollInterval <= 0 {
@@ -97,4 +128,9 @@ func InitFlags() {
 	// Log final values
 	log.Info("Jupyter server host is: %s", JupyterServerHost)
 	log.Info("Jupyter server token is: %s", log.MaskToken(JupyterServerToken))
+}
+
+// parseInt64 parses a decimal int64 from s.
+func parseInt64(s string) (int64, error) {
+	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 }

@@ -116,6 +116,13 @@ jobs:
           chmod +x tests/sigterm_forward.sh
           ./tests/sigterm_forward.sh
 
+      - name: Smoke test bwrap (Docker image build + extraction)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          chmod +x components/execd/tests/smoke_bwrap.sh
+          bash components/execd/tests/smoke_bwrap.sh
+
       - name: Show logs
         if: always()
         run: |

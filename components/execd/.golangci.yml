@@ -317,3 +317,5 @@ issues:
       text: 'exported (.+) should have comment( \(or a comment on this block\))? or be unexported'
     - path: \.go$
       text: "fmt.Sprintf can be replaced with string concatenation"
+    - path: \.go$
+      text: "fmt.Errorf can be replaced with errors.New"
