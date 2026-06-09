@@ -119,6 +119,56 @@ jobs:
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
           pkill -f "python -m opensandbox_server.main" || true
 
+  python-credential-vault-e2e:
+    name: Python Credential Vault E2E (docker bridge)
+    runs-on: self-hosted
+    env:
+      UV_BIN: /home/admin/.local/bin
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up uv PATH and verify
+        run: |
+          echo "${UV_BIN}" >> "$GITHUB_PATH"
+          export PATH="${UV_BIN}:${PATH}"
+          uv --version
+          uv run python --version
+
+      - name: Clean up previous Credential Vault E2E resources
+        run: |
+          docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-credential-vault-target || true
+          docker run --rm -v /tmp:/host_tmp alpine rm -rf \
+            /host_tmp/opensandbox-e2e \
+            /host_tmp/opensandbox-credential-vault-e2e || true
+          docker image prune -f || true
+
+      - name: Run Credential Vault E2E
+        run: ./scripts/python-credential-vault-e2e.sh
+
+      - name: Eval server logs
+        if: ${{ always() }}
+        run: cat /tmp/opensandbox-credential-vault-e2e/server.log || true
+
+      - name: Upload Credential Vault E2E logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: credential-vault-e2e-logs
+          path: /tmp/opensandbox-credential-vault-e2e/
+          retention-days: 5
+
+      - name: Clean up after Credential Vault E2E
+        if: always()
+        run: |
+          docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-credential-vault-target || true
+          docker run --rm -v /tmp:/host_tmp alpine rm -rf \
+            /host_tmp/opensandbox-e2e \
+            /host_tmp/opensandbox-credential-vault-e2e || true
+          pkill -f "python -m opensandbox_server.main" || true
+
   java-e2e:
     name: Java E2E (docker bridge)
     runs-on: self-hosted

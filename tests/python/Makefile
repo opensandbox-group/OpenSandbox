@@ -1,4 +1,4 @@
-.PHONY: sync sync-dev test test-k8s test-sandbox test-manager test-code test-pool lint fmt
+.PHONY: sync sync-dev test test-k8s test-sandbox test-manager test-code test-pool test-credential-vault lint fmt
 
 sync:
 	uv sync
@@ -25,6 +25,9 @@ test-code:
 
 test-pool:
 	uv run pytest tests/test_sandbox_pool_e2e_sync.py tests/test_sandbox_pool_e2e_async.py
+
+test-credential-vault:
+	uv run pytest tests/test_credential_vault_e2e.py
 
 lint:
 	uv run ruff check tests

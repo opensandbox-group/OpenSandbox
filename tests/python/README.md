@@ -20,10 +20,19 @@ Run a specific suite:
 ```bash
 uv run pytest tests/test_sandbox_e2e.py
 uv run pytest tests/test_sandbox_pool_e2e_sync.py tests/test_sandbox_pool_e2e_async.py
+uv run pytest tests/test_credential_vault_e2e.py
 ```
 
 Redis-backed pool E2E tests are skipped unless `OPENSANDBOX_TEST_REDIS_URL` is set,
 for example `redis://127.0.0.1:6379/0`.
+
+Credential Vault E2E tests require Docker and a local target service. The
+repository script starts the local OpenSandbox server, the target service, and
+the focused pytest suite:
+
+```bash
+../../scripts/python-credential-vault-e2e.sh
+```
 
 ### Notes about asyncio + shared Sandbox
 
