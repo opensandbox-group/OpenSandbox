@@ -91,6 +91,27 @@ func NewRouter(accessToken string) *gin.Engine {
 		pty.GET("/:sessionId/ws", controller.PTYSessionWebSocket)
 	}
 
+	isolated := r.Group("/v1/isolated")
+	{
+		isolated.POST("/session", withIsolated(func(c *controller.IsolatedSessionController) { c.Create() }))
+		isolated.GET("/session/:sessionId", withIsolated(func(c *controller.IsolatedSessionController) { c.Get() }))
+		isolated.POST("/session/:sessionId/run", withIsolated(func(c *controller.IsolatedSessionController) { c.Run() }))
+		isolated.DELETE("/session/:sessionId", withIsolated(func(c *controller.IsolatedSessionController) { c.Delete() }))
+		isolated.GET("/session/:sessionId/diff", withIsolated(func(c *controller.IsolatedSessionController) { c.Diff() }))
+		isolated.POST("/session/:sessionId/commit", withIsolated(func(c *controller.IsolatedSessionController) { c.Commit() }))
+		isolated.GET("/session/:sessionId/files/info", withIsolated(func(c *controller.IsolatedSessionController) { c.GetFilesInfo() }))
+		isolated.GET("/session/:sessionId/files/download", withIsolated(func(c *controller.IsolatedSessionController) { c.DownloadFile() }))
+		isolated.POST("/session/:sessionId/files/upload", withIsolated(func(c *controller.IsolatedSessionController) { c.UploadFile() }))
+		isolated.DELETE("/session/:sessionId/files", withIsolated(func(c *controller.IsolatedSessionController) { c.RemoveFiles() }))
+		isolated.POST("/session/:sessionId/files/mv", withIsolated(func(c *controller.IsolatedSessionController) { c.RenameFiles() }))
+		isolated.POST("/session/:sessionId/files/permissions", withIsolated(func(c *controller.IsolatedSessionController) { c.ChmodFiles() }))
+		isolated.POST("/session/:sessionId/files/replace", withIsolated(func(c *controller.IsolatedSessionController) { c.ReplaceContent() }))
+		isolated.GET("/session/:sessionId/files/search", withIsolated(func(c *controller.IsolatedSessionController) { c.SearchFiles() }))
+		isolated.POST("/session/:sessionId/directories", withIsolated(func(c *controller.IsolatedSessionController) { c.MakeDirs() }))
+		isolated.DELETE("/session/:sessionId/directories", withIsolated(func(c *controller.IsolatedSessionController) { c.RemoveDirs() }))
+		isolated.GET("/capabilities", withIsolated(func(c *controller.IsolatedSessionController) { c.Capabilities() }))
+	}
+
 	return r
 }
 
@@ -115,6 +136,12 @@ func withMetric(fn func(*controller.MetricController)) gin.HandlerFunc {
 func withPTY(fn func(*controller.PTYController)) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		fn(controller.NewPTYController(ctx))
+	}
+}
+
+func withIsolated(fn func(*controller.IsolatedSessionController)) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		fn(controller.NewIsolatedSessionController(ctx))
 	}
 }
 

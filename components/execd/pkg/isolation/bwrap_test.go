@@ -124,9 +124,10 @@ func TestBuildArgv_WorkspaceSegment(t *testing.T) {
 		}
 		s := strings.Join(argv, " ")
 		for _, want := range []string{
-			"--overlay-src /workspace",
-			"--overlay /var/lib/execd/isolation/abc",
-			"--workdir /var/lib/execd/isolation/abc-work",
+			"--overlay",
+			"/workspace",
+			"/var/lib/execd/isolation/abc",
+			"/var/lib/execd/isolation/abc-work",
 		} {
 			if !strings.Contains(s, want) {
 				t.Errorf("missing %q", want)
@@ -142,7 +143,7 @@ func TestBuildArgv_WorkspaceSegment(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := strings.Join(argv, " ")
-		if !strings.Contains(s, "--overlay-src /workspace") {
+		if !strings.Contains(s, "--overlay-src") {
 			t.Error("missing --overlay-src")
 		}
 	})

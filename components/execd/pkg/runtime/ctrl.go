@@ -43,6 +43,7 @@ type Controller struct {
 	commandClientMap        sync.Map // map[sessionID]*commandKernel
 	bashSessionClientMap    sync.Map // map[sessionID]*bashSession
 	ptySessionMap           sync.Map // map[sessionID]*ptySession
+	isolatedSessionMap      sync.Map // map[sessionID]*isolatedSession
 	db                      *sql.DB
 	dbOnce                  sync.Once
 }

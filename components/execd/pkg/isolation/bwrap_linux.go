@@ -70,9 +70,19 @@ func (b *bwrapImpl) Available() bool {
 }
 
 func (b *bwrapImpl) Capabilities() Capabilities {
+	if bwrapPath == "" {
+		bwrapPath = findBwrap()
+	}
+
+	version, err := probeBwrapVersion()
+	if err != nil {
+		version = ""
+	}
+
 	return Capabilities{
-		Available:              true,
+		Available:              bwrapPath != "",
 		Isolator:               "bwrap",
+		Version:                version,
 		Profiles:               []Profile{ProfileStrict, ProfileBalanced},
 		ShareNetOverridable:    true,
 		CommitSupported:        false, // Phase 2

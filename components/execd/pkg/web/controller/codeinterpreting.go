@@ -34,16 +34,15 @@ import (
 
 var codeRunner codeExecutionRunner
 
-func InitCodeRunner() {
-	codeRunner = runtime.NewController(flag.JupyterServerHost, flag.JupyterServerToken)
+func InitCodeRunner() *runtime.Controller {
+	ctrl := runtime.NewController(flag.JupyterServerHost, flag.JupyterServerToken)
+	codeRunner = ctrl
+	return ctrl
 }
 
 // CodeInterpretingController handles code execution entrypoints.
 type CodeInterpretingController struct {
 	*basicController
-
-	// chunkWriter serializes SSE event writes to prevent interleaved output.
-	chunkWriter sync.Mutex
 }
 
 type codeExecutionRunner interface {

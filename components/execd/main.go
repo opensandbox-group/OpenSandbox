@@ -30,6 +30,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web"
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
@@ -51,6 +52,20 @@ func main() {
 		isolationProbe.Available, isolationProbe.Isolator, isolationProbe.Version)
 
 	log.Init(flag.ServerLogLevel)
+
+	ctrl := controller.InitCodeRunner()
+
+	// Init isolation runner if probe succeeded.
+	if isolationProbe.Available {
+		iso := isolation.NewBwrap()
+		runner, err := runtime.NewIsolatedRunner(ctrl, iso, flag.IsolationUpperRoot, flag.IsolationUpperMaxBytes)
+		if err != nil {
+			log.Warn("isolation: runner init failed (continuing without isolation): %v", err)
+		} else {
+			controller.InitIsolatedRunner(runner)
+			log.Info("isolation: runner ready, upper_root=%s", flag.IsolationUpperRoot)
+		}
+	}
 	if clone3Compat {
 		log.Warn("execd running with clone3 compatibility (seccomp returns ENOSYS for clone3)")
 	}

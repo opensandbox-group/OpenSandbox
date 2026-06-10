@@ -101,13 +101,15 @@ func buildArgv(opts WrapOptions, seccompPath string) ([]string, error) {
 		gid = *opts.Gid
 	}
 
-	setprivArgv := []string{
-		"setpriv",
-		fmt.Sprintf("--reuid=%d", uid),
-		fmt.Sprintf("--regid=%d", gid),
-		"--init-groups",
+	if uid != 0 || gid != 0 {
+		setprivArgv := []string{
+			"setpriv",
+			fmt.Sprintf("--reuid=%d", uid),
+			fmt.Sprintf("--regid=%d", gid),
+			"--init-groups",
+		}
+		argv = append(argv, setprivArgv...)
 	}
-	argv = append(argv, setprivArgv...)
 
 	return argv, nil
 }
@@ -153,22 +155,15 @@ func bwrapWorkspaceSegment(opts WrapOptions) ([]string, error) {
 
 	case WorkspaceOverlay:
 		if opts.UpperDir == "" {
-			// tmpfs upper — ephemeral, no persist.
-			return []string{
-				"--overlay-src", ws.Path,
-				"--overlay", ws.Path,
-			}, nil
+			// tmpfs upper — ephemeral. --tmp-overlay DEST (bwrap v0.11.x).
+			return []string{"--overlay-src", ws.Path, "--tmp-overlay", ws.Path}, nil
 		}
 		workDir := opts.WorkDir
 		if workDir == "" {
 			workDir = opts.UpperDir + "-work"
 		}
-		return []string{
-			"--overlay-src", ws.Path,
-			"--overlay", opts.UpperDir,
-			"--workdir", workDir,
-			ws.Path, // mount target
-		}, nil
+		// --overlay-src LOWER --overlay RWSRC WORKDIR DEST
+		return []string{"--overlay-src", ws.Path, "--overlay", opts.UpperDir, workDir, ws.Path}, nil
 
 	default:
 		return nil, fmt.Errorf("isolation: unknown workspace mode %q", ws.Mode)

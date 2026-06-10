@@ -43,7 +43,7 @@ build: vet ## Build the binary.
 
 .PHONY: test-integration
 test-integration: ## Run integration tests (Linux + bwrap required).
-	go test -v -tags=linux -run Integration ./pkg/...
+	go test -v -tags="linux,bwrap" -run Integration ./pkg/runtime/bwrap_test/
 
 .PHONY: multi-build
 multi-build: vet ## Cross-compile for linux/windows/darwin amd64/arm64.
