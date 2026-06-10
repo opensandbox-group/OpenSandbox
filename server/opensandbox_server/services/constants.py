@@ -42,7 +42,7 @@ EGRESS_MODE_ENV = "OPENSANDBOX_EGRESS_MODE"
 # Must match components/egress/pkg/constants/configuration.go EnvEgressToken
 OPENSANDBOX_EGRESS_TOKEN = "OPENSANDBOX_EGRESS_TOKEN"
 OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT = "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT"
-OPENSANDBOX_MITM_CA_CERT_PATH = "/opt/opensandbox/mitmproxy-ca-cert.pem"
+OPENSANDBOX_MITM_CA_CERT_PATH = "/var/egress/mitmproxy-ca-cert.pem"
 
 
 class SandboxErrorCodes:

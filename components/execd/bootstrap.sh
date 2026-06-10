@@ -126,7 +126,7 @@ trust_mitm_ca_nss() {
 	return 0
 }
 
-MITM_CA="/opt/opensandbox/mitmproxy-ca-cert.pem"
+MITM_CA="/var/egress/mitmproxy-ca-cert.pem"
 if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	i=0
 	while [ "$i" -lt 300 ]; do

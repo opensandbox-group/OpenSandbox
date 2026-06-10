@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
@@ -82,7 +84,7 @@ func startPolicyServer(
 		stopAlwaysReload: make(chan struct{}),
 		mitmGate:         mitmGate,
 	}
-	handler.credentialVault = newCredentialVaultStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" })
+	handler.credentialVault = credentialvault.NewStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" })
 	handler.setAlwaysRules(alwaysDeny, alwaysAllow)
 
 	mux.HandleFunc("/policy", handler.handlePolicy)
@@ -106,7 +108,7 @@ func startPolicyServer(
 		if err != nil {
 			return nil, fmt.Errorf("lookup credential proxy user %q: %w", mitmproxy.RunAsUser, err)
 		}
-		activeSrv, cleanupActiveSocket, err = startCredentialVaultActiveSocketServer(handler, socketPath, int(mitmGID))
+		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServer(handler.handleCredentialVaultActive, socketPath, int(mitmGID))
 		if err != nil {
 			return nil, fmt.Errorf("credential vault active socket: %w", err)
 		}
@@ -174,7 +176,7 @@ type policyServer struct {
 
 	lastAlwaysFP    uint64
 	lastAlwaysFPSet bool
-	credentialVault *credentialVaultStore
+	credentialVault *credentialvault.Store
 	mitmGate        *mitmproxy.HealthGate
 }
 
@@ -279,16 +281,16 @@ func (s *policyServer) handleCredentialVaultSubresource(w http.ResponseWriter, r
 }
 
 func (s *policyServer) handleCredentialVaultGet(w http.ResponseWriter) {
-	state, err := s.credentialVault.sanitized()
+	state, err := s.credentialVault.Sanitized()
 	if err != nil {
-		writeCredentialVaultError(w, err)
+		credentialvault.WriteError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, state)
 }
 
 func (s *policyServer) handleCredentialVaultPost(w http.ResponseWriter, r *http.Request) {
-	if err := s.credentialVault.ready(); err != nil {
+	if err := s.credentialVault.Ready(); err != nil {
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
 	}
@@ -296,21 +298,21 @@ func (s *policyServer) handleCredentialVaultPost(w http.ResponseWriter, r *http.
 		http.Error(w, "credential vault writes require TLS or loopback transport", http.StatusUpgradeRequired)
 		return
 	}
-	var req credentialVaultCreateRequest
-	if err := readCredentialVaultJSON(r, &req); err != nil {
+	var req credentialvault.CreateRequest
+	if err := credentialvault.ReadJSON(r, &req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid credential vault request: %v", err), http.StatusBadRequest)
 		return
 	}
-	state, err := s.credentialVault.create(req, s.effectivePolicy())
+	state, err := s.credentialVault.Create(req, s.effectivePolicy())
 	if err != nil {
-		writeCredentialVaultError(w, err)
+		credentialvault.WriteError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, state)
 }
 
 func (s *policyServer) handleCredentialVaultPatch(w http.ResponseWriter, r *http.Request) {
-	if err := s.credentialVault.ready(); err != nil {
+	if err := s.credentialVault.Ready(); err != nil {
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
 	}
@@ -318,21 +320,21 @@ func (s *policyServer) handleCredentialVaultPatch(w http.ResponseWriter, r *http
 		http.Error(w, "credential vault writes require TLS or loopback transport", http.StatusUpgradeRequired)
 		return
 	}
-	var req credentialVaultMutationRequest
-	if err := readCredentialVaultJSON(r, &req); err != nil {
+	var req credentialvault.MutationRequest
+	if err := credentialvault.ReadJSON(r, &req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid credential vault mutation request: %v", err), http.StatusBadRequest)
 		return
 	}
-	state, err := s.credentialVault.patch(req, s.effectivePolicy())
+	state, err := s.credentialVault.Patch(req, s.effectivePolicy())
 	if err != nil {
-		writeCredentialVaultError(w, err)
+		credentialvault.WriteError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, state)
 }
 
 func (s *policyServer) handleCredentialVaultDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.credentialVault.ready(); err != nil {
+	if err := s.credentialVault.Ready(); err != nil {
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
 	}
@@ -340,26 +342,26 @@ func (s *policyServer) handleCredentialVaultDelete(w http.ResponseWriter, r *htt
 		http.Error(w, "credential vault writes require TLS or loopback transport", http.StatusUpgradeRequired)
 		return
 	}
-	if err := s.credentialVault.delete(); err != nil {
-		writeCredentialVaultError(w, err)
+	if err := s.credentialVault.Delete(); err != nil {
+		credentialvault.WriteError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *policyServer) handleCredentialVaultCredentials(w http.ResponseWriter) {
-	state, err := s.credentialVault.sanitized()
+	state, err := s.credentialVault.Sanitized()
 	if err != nil {
-		writeCredentialVaultError(w, err)
+		credentialvault.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, credentialListResponse{Revision: state.Revision, Credentials: state.Credentials})
+	writeJSON(w, http.StatusOK, credentialvault.ListResponse{Revision: state.Revision, Credentials: state.Credentials})
 }
 
 func (s *policyServer) handleCredentialVaultCredential(w http.ResponseWriter, name string) {
-	state, err := s.credentialVault.sanitized()
+	state, err := s.credentialVault.Sanitized()
 	if err != nil {
-		writeCredentialVaultError(w, err)
+		credentialvault.WriteError(w, err)
 		return
 	}
 	name = strings.TrimSpace(name)
@@ -373,18 +375,18 @@ func (s *policyServer) handleCredentialVaultCredential(w http.ResponseWriter, na
 }
 
 func (s *policyServer) handleCredentialVaultBindings(w http.ResponseWriter) {
-	state, err := s.credentialVault.sanitized()
+	state, err := s.credentialVault.Sanitized()
 	if err != nil {
-		writeCredentialVaultError(w, err)
+		credentialvault.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, credentialBindingListResponse{Revision: state.Revision, Bindings: state.Bindings})
+	writeJSON(w, http.StatusOK, credentialvault.BindingListResponse{Revision: state.Revision, Bindings: state.Bindings})
 }
 
 func (s *policyServer) handleCredentialVaultBinding(w http.ResponseWriter, name string) {
-	state, err := s.credentialVault.sanitized()
+	state, err := s.credentialVault.Sanitized()
 	if err != nil {
-		writeCredentialVaultError(w, err)
+		credentialvault.WriteError(w, err)
 		return
 	}
 	name = strings.TrimSpace(name)
@@ -398,9 +400,9 @@ func (s *policyServer) handleCredentialVaultBinding(w http.ResponseWriter, name 
 }
 
 func (s *policyServer) handleCredentialVaultActive(w http.ResponseWriter) {
-	snapshot, err := s.credentialVault.activeSnapshot()
+	snapshot, err := s.credentialVault.ActiveSnapshot()
 	if err != nil {
-		writeCredentialVaultError(w, err)
+		credentialvault.WriteError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, snapshot)
@@ -740,7 +742,7 @@ func (s *policyServer) validateCredentialVaultPolicyUpdate(pol *policy.NetworkPo
 		return nil
 	}
 	alwaysDeny, alwaysAllow := s.currentAlwaysRules()
-	return s.credentialVault.validateActiveAgainstPolicy(policy.MergeAlwaysOverlay(pol, alwaysDeny, alwaysAllow))
+	return s.credentialVault.ValidateActiveAgainstPolicy(policy.MergeAlwaysOverlay(pol, alwaysDeny, alwaysAllow))
 }
 
 func (s *policyServer) authorize(r *http.Request) bool {
@@ -759,6 +761,15 @@ func (s *policyServer) authorize(r *http.Request) bool {
 
 func credentialVaultWriteTransportAllowed(r *http.Request) bool {
 	return r.TLS != nil || isLoopbackRequest(r)
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *policyServer) enforceEgressRuleLimit(w http.ResponseWriter, egressCount int) bool {

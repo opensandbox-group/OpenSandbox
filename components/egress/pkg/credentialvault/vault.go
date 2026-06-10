@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package credentialvault
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -39,8 +38,8 @@ const (
 )
 
 var (
-	errCredentialVaultNotFound = errors.New("credential vault not found")
-	errCredentialVaultExists   = errors.New("credential vault already exists")
+	ErrNotFound = errors.New("credential vault not found")
+	ErrExists   = errors.New("credential vault already exists")
 
 	headerFieldNamePattern = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_` + "`" + `|~]+$`)
 	reservedHeaderNames    = map[string]struct{}{
@@ -61,64 +60,64 @@ var (
 	}
 )
 
-type credentialVaultStore struct {
+type Store struct {
 	mu             sync.RWMutex
 	exists         bool
 	revision       int64
-	credentials    map[string]credentialRecord
-	bindings       map[string]credentialBinding
+	credentials    map[string]record
+	bindings       map[string]Binding
 	interceptPorts map[int]struct{}
 	mitmGate       *mitmproxy.HealthGate
 	requireToken   func() bool
 }
 
-type credentialRecord struct {
+type record struct {
 	Name       string
 	SourceType string
 	Value      string
 	Revision   int64
 }
 
-type credentialVaultCreateRequest struct {
-	Credentials []credential        `json:"credentials"`
-	Bindings    []credentialBinding `json:"bindings"`
+type CreateRequest struct {
+	Credentials []Credential `json:"credentials"`
+	Bindings    []Binding    `json:"bindings"`
 }
 
-type credentialVaultMutationRequest struct {
-	ExpectedRevision *int64                        `json:"expectedRevision,omitempty"`
-	Credentials      *credentialMutationSet        `json:"credentials,omitempty"`
-	Bindings         *credentialBindingMutationSet `json:"bindings,omitempty"`
+type MutationRequest struct {
+	ExpectedRevision *int64                 `json:"expectedRevision,omitempty"`
+	Credentials      *CredentialMutationSet `json:"credentials,omitempty"`
+	Bindings         *BindingMutationSet    `json:"bindings,omitempty"`
 }
 
-type credentialMutationSet struct {
-	Add     []credential `json:"add,omitempty"`
-	Replace []credential `json:"replace,omitempty"`
+type CredentialMutationSet struct {
+	Add     []Credential `json:"add,omitempty"`
+	Replace []Credential `json:"replace,omitempty"`
 	Delete  []string     `json:"delete,omitempty"`
 }
 
-type credentialBindingMutationSet struct {
-	Add     []credentialBinding `json:"add,omitempty"`
-	Replace []credentialBinding `json:"replace,omitempty"`
-	Delete  []string            `json:"delete,omitempty"`
+type BindingMutationSet struct {
+	Add     []Binding `json:"add,omitempty"`
+	Replace []Binding `json:"replace,omitempty"`
+	Delete  []string  `json:"delete,omitempty"`
 }
 
-type credential struct {
+type Credential struct {
 	Name   string                 `json:"name"`
-	Source inlineCredentialSource `json:"source"`
+	Source InlineCredentialSource `json:"source"`
 }
 
-type inlineCredentialSource struct {
+type InlineCredentialSource struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
 }
 
-type credentialBinding struct {
-	Name  string          `json:"name"`
-	Match credentialMatch `json:"match"`
-	Auth  credentialAuth  `json:"auth"`
+type Binding struct {
+	Name  string `json:"name"`
+	Match Match  `json:"match"`
+	Auth  Auth   `json:"auth"`
 }
 
-type credentialMatch struct {
+type Match struct {
 	Schemes []string `json:"schemes,omitempty"`
 	Ports   []int    `json:"ports,omitempty"`
 	Hosts   []string `json:"hosts"`
@@ -126,110 +125,110 @@ type credentialMatch struct {
 	Paths   []string `json:"paths,omitempty"`
 }
 
-type credentialAuth struct {
+type Auth struct {
 	Type       string              `json:"type"`
 	Credential string              `json:"credential,omitempty"`
 	Name       string              `json:"name,omitempty"`
-	Headers    []customHeaderEntry `json:"headers,omitempty"`
+	Headers    []CustomHeaderEntry `json:"headers,omitempty"`
 }
 
-type customHeaderEntry struct {
+type CustomHeaderEntry struct {
 	Name       string `json:"name"`
 	Credential string `json:"credential"`
 }
 
-type credentialVaultState struct {
-	Revision    int64                       `json:"revision"`
-	Credentials []credentialMetadata        `json:"credentials"`
-	Bindings    []credentialBindingMetadata `json:"bindings"`
+type State struct {
+	Revision    int64             `json:"revision"`
+	Credentials []Metadata        `json:"credentials"`
+	Bindings    []BindingMetadata `json:"bindings"`
 }
 
-type credentialListResponse struct {
-	Revision    int64                `json:"revision"`
-	Credentials []credentialMetadata `json:"credentials"`
+type ListResponse struct {
+	Revision    int64      `json:"revision"`
+	Credentials []Metadata `json:"credentials"`
 }
 
-type credentialBindingListResponse struct {
-	Revision int64                       `json:"revision"`
-	Bindings []credentialBindingMetadata `json:"bindings"`
+type BindingListResponse struct {
+	Revision int64             `json:"revision"`
+	Bindings []BindingMetadata `json:"bindings"`
 }
 
-type credentialMetadata struct {
+type Metadata struct {
 	Name       string `json:"name"`
 	SourceType string `json:"sourceType"`
 	Revision   int64  `json:"revision"`
 }
 
-type credentialBindingMetadata struct {
-	Name     string                 `json:"name"`
-	Revision int64                  `json:"revision"`
-	Match    credentialMatch        `json:"match"`
-	Auth     credentialAuthMetadata `json:"auth"`
+type BindingMetadata struct {
+	Name     string       `json:"name"`
+	Revision int64        `json:"revision"`
+	Match    Match        `json:"match"`
+	Auth     AuthMetadata `json:"auth"`
 }
 
-type credentialAuthMetadata struct {
+type AuthMetadata struct {
 	Type string `json:"type"`
 	Name string `json:"name,omitempty"`
 }
 
-type activeCredentialVaultSnapshot struct {
-	Revision   int64                     `json:"revision"`
-	Bindings   []activeCredentialBinding `json:"bindings"`
-	Redactions []string                  `json:"redactions,omitempty"`
+type ActiveSnapshot struct {
+	Revision   int64           `json:"revision"`
+	Bindings   []ActiveBinding `json:"bindings"`
+	Redactions []string        `json:"redactions,omitempty"`
 }
 
-type activeCredentialBinding struct {
+type ActiveBinding struct {
 	Name    string            `json:"name"`
-	Match   credentialMatch   `json:"match"`
-	Headers []injectionHeader `json:"headers"`
+	Match   Match             `json:"match"`
+	Headers []InjectionHeader `json:"headers"`
 }
 
-type injectionHeader struct {
+type InjectionHeader struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
 }
 
-func newCredentialVaultStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *credentialVaultStore {
-	return &credentialVaultStore{
-		credentials:    make(map[string]credentialRecord),
-		bindings:       make(map[string]credentialBinding),
+func NewStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *Store {
+	return &Store{
+		credentials:    make(map[string]record),
+		bindings:       make(map[string]Binding),
 		interceptPorts: map[int]struct{}{80: {}, 443: {}},
 		mitmGate:       mitmGate,
 		requireToken:   requireToken,
 	}
 }
 
-func (v *credentialVaultStore) create(req credentialVaultCreateRequest, pol *policy.NetworkPolicy) (credentialVaultState, error) {
+func (v *Store) Create(req CreateRequest, pol *policy.NetworkPolicy) (State, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.exists {
-		return credentialVaultState{}, errCredentialVaultExists
+		return State{}, ErrExists
 	}
 
-	credentials := make(map[string]credentialRecord, len(req.Credentials))
-	bindings := make(map[string]credentialBinding, len(req.Bindings))
+	credentials := make(map[string]record, len(req.Credentials))
+	bindings := make(map[string]Binding, len(req.Bindings))
 	for _, c := range req.Credentials {
 		rec, err := normalizeCredential(c, 1)
 		if err != nil {
-			return credentialVaultState{}, err
+			return State{}, err
 		}
 		if _, ok := credentials[rec.Name]; ok {
-			return credentialVaultState{}, fmt.Errorf("duplicate credential name %q", rec.Name)
+			return State{}, fmt.Errorf("duplicate credential name %q", rec.Name)
 		}
 		credentials[rec.Name] = rec
 	}
 	for _, b := range req.Bindings {
 		nb, err := normalizeBinding(b)
 		if err != nil {
-			return credentialVaultState{}, err
+			return State{}, err
 		}
 		if _, ok := bindings[nb.Name]; ok {
-			return credentialVaultState{}, fmt.Errorf("duplicate binding name %q", nb.Name)
+			return State{}, fmt.Errorf("duplicate binding name %q", nb.Name)
 		}
 		bindings[nb.Name] = nb
 	}
 	if err := v.validateCandidate(credentials, bindings, pol); err != nil {
-		return credentialVaultState{}, err
+		return State{}, err
 	}
 
 	v.exists = true
@@ -239,14 +238,14 @@ func (v *credentialVaultStore) create(req credentialVaultCreateRequest, pol *pol
 	return v.sanitizedLocked(), nil
 }
 
-func (v *credentialVaultStore) patch(req credentialVaultMutationRequest, pol *policy.NetworkPolicy) (credentialVaultState, error) {
+func (v *Store) Patch(req MutationRequest, pol *policy.NetworkPolicy) (State, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if !v.exists {
-		return credentialVaultState{}, errCredentialVaultNotFound
+		return State{}, ErrNotFound
 	}
 	if req.ExpectedRevision != nil && *req.ExpectedRevision != v.revision {
-		return credentialVaultState{}, fmt.Errorf("expectedRevision %d does not match current revision %d", *req.ExpectedRevision, v.revision)
+		return State{}, fmt.Errorf("expectedRevision %d does not match current revision %d", *req.ExpectedRevision, v.revision)
 	}
 
 	nextRevision := v.revision + 1
@@ -254,13 +253,13 @@ func (v *credentialVaultStore) patch(req credentialVaultMutationRequest, pol *po
 	bindings := cloneCredentialBindings(v.bindings)
 
 	if err := applyCredentialMutations(credentials, req.Credentials, nextRevision); err != nil {
-		return credentialVaultState{}, err
+		return State{}, err
 	}
 	if err := applyBindingMutations(bindings, req.Bindings); err != nil {
-		return credentialVaultState{}, err
+		return State{}, err
 	}
 	if err := v.validateCandidate(credentials, bindings, pol); err != nil {
-		return credentialVaultState{}, err
+		return State{}, err
 	}
 
 	v.revision = nextRevision
@@ -269,43 +268,43 @@ func (v *credentialVaultStore) patch(req credentialVaultMutationRequest, pol *po
 	return v.sanitizedLocked(), nil
 }
 
-func (v *credentialVaultStore) delete() error {
+func (v *Store) Delete() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if !v.exists {
-		return errCredentialVaultNotFound
+		return ErrNotFound
 	}
 	v.exists = false
 	v.revision = 0
-	v.credentials = make(map[string]credentialRecord)
-	v.bindings = make(map[string]credentialBinding)
+	v.credentials = make(map[string]record)
+	v.bindings = make(map[string]Binding)
 	return nil
 }
 
-func (v *credentialVaultStore) sanitized() (credentialVaultState, error) {
+func (v *Store) Sanitized() (State, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if !v.exists {
-		return credentialVaultState{}, errCredentialVaultNotFound
+		return State{}, ErrNotFound
 	}
 	return v.sanitizedLocked(), nil
 }
 
-func (v *credentialVaultStore) sanitizedLocked() credentialVaultState {
-	state := credentialVaultState{
+func (v *Store) sanitizedLocked() State {
+	state := State{
 		Revision:    v.revision,
-		Credentials: make([]credentialMetadata, 0, len(v.credentials)),
-		Bindings:    make([]credentialBindingMetadata, 0, len(v.bindings)),
+		Credentials: make([]Metadata, 0, len(v.credentials)),
+		Bindings:    make([]BindingMetadata, 0, len(v.bindings)),
 	}
 	for _, c := range v.credentials {
-		state.Credentials = append(state.Credentials, credentialMetadata{
+		state.Credentials = append(state.Credentials, Metadata{
 			Name:       c.Name,
 			SourceType: c.SourceType,
 			Revision:   c.Revision,
 		})
 	}
 	for _, b := range v.bindings {
-		state.Bindings = append(state.Bindings, credentialBindingMetadata{
+		state.Bindings = append(state.Bindings, BindingMetadata{
 			Name:     b.Name,
 			Revision: v.revision,
 			Match:    b.Match,
@@ -317,15 +316,15 @@ func (v *credentialVaultStore) sanitizedLocked() credentialVaultState {
 	return state
 }
 
-func (v *credentialVaultStore) activeSnapshot() (activeCredentialVaultSnapshot, error) {
+func (v *Store) ActiveSnapshot() (ActiveSnapshot, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if !v.exists {
-		return activeCredentialVaultSnapshot{}, errCredentialVaultNotFound
+		return ActiveSnapshot{}, ErrNotFound
 	}
-	snapshot := activeCredentialVaultSnapshot{
+	snapshot := ActiveSnapshot{
 		Revision: v.revision,
-		Bindings: make([]activeCredentialBinding, 0, len(v.bindings)),
+		Bindings: make([]ActiveBinding, 0, len(v.bindings)),
 	}
 	redactions := make(map[string]struct{})
 	names := make([]string, 0, len(v.bindings))
@@ -337,9 +336,9 @@ func (v *credentialVaultStore) activeSnapshot() (activeCredentialVaultSnapshot, 
 		b := v.bindings[name]
 		headers, values, err := renderInjectionHeaders(b.Auth, v.credentials)
 		if err != nil {
-			return activeCredentialVaultSnapshot{}, err
+			return ActiveSnapshot{}, err
 		}
-		snapshot.Bindings = append(snapshot.Bindings, activeCredentialBinding{
+		snapshot.Bindings = append(snapshot.Bindings, ActiveBinding{
 			Name:    b.Name,
 			Match:   b.Match,
 			Headers: headers,
@@ -357,7 +356,7 @@ func (v *credentialVaultStore) activeSnapshot() (activeCredentialVaultSnapshot, 
 	return snapshot, nil
 }
 
-func (v *credentialVaultStore) validateActiveAgainstPolicy(pol *policy.NetworkPolicy) error {
+func (v *Store) ValidateActiveAgainstPolicy(pol *policy.NetworkPolicy) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if !v.exists || len(v.bindings) == 0 {
@@ -366,7 +365,7 @@ func (v *credentialVaultStore) validateActiveAgainstPolicy(pol *policy.NetworkPo
 	return v.validateCandidate(v.credentials, v.bindings, pol)
 }
 
-func (v *credentialVaultStore) ready() error {
+func (v *Store) Ready() error {
 	if v.requireToken != nil && !v.requireToken() {
 		return fmt.Errorf("credential vault requires egress API auth token")
 	}
@@ -382,7 +381,7 @@ func (v *credentialVaultStore) ready() error {
 	return nil
 }
 
-func (v *credentialVaultStore) validateCandidate(credentials map[string]credentialRecord, bindings map[string]credentialBinding, pol *policy.NetworkPolicy) error {
+func (v *Store) validateCandidate(credentials map[string]record, bindings map[string]Binding, pol *policy.NetworkPolicy) error {
 	if len(bindings) > 0 && (pol == nil || len(pol.Egress) == 0) {
 		return fmt.Errorf("credential bindings require explicit networkPolicy.egress allow rules")
 	}
@@ -405,7 +404,7 @@ func (v *credentialVaultStore) validateCandidate(credentials map[string]credenti
 	return nil
 }
 
-func (v *credentialVaultStore) validateBindingPolicy(b credentialBinding, pol *policy.NetworkPolicy) error {
+func (v *Store) validateBindingPolicy(b Binding, pol *policy.NetworkPolicy) error {
 	for _, port := range b.Match.Ports {
 		if _, ok := v.interceptPorts[port]; !ok {
 			return fmt.Errorf("binding %q port %d is not a configured transparent intercept port", b.Name, port)
@@ -422,39 +421,39 @@ func (v *credentialVaultStore) validateBindingPolicy(b credentialBinding, pol *p
 	return nil
 }
 
-func normalizeCredential(c credential, revision int64) (credentialRecord, error) {
+func normalizeCredential(c Credential, revision int64) (record, error) {
 	name := strings.TrimSpace(c.Name)
 	if name == "" {
-		return credentialRecord{}, fmt.Errorf("credential name cannot be blank")
+		return record{}, fmt.Errorf("credential name cannot be blank")
 	}
 	sourceType := strings.TrimSpace(c.Source.Type)
 	if sourceType == "" {
 		sourceType = "inline"
 	}
 	if sourceType != "inline" {
-		return credentialRecord{}, fmt.Errorf("unsupported credential source type %q", sourceType)
+		return record{}, fmt.Errorf("unsupported credential source type %q", sourceType)
 	}
 	if c.Source.Value == "" {
-		return credentialRecord{}, fmt.Errorf("credential %q inline value cannot be empty", name)
+		return record{}, fmt.Errorf("credential %q inline value cannot be empty", name)
 	}
-	return credentialRecord{Name: name, SourceType: sourceType, Value: c.Source.Value, Revision: revision}, nil
+	return record{Name: name, SourceType: sourceType, Value: c.Source.Value, Revision: revision}, nil
 }
 
-func normalizeBinding(b credentialBinding) (credentialBinding, error) {
+func normalizeBinding(b Binding) (Binding, error) {
 	b.Name = strings.TrimSpace(b.Name)
 	if b.Name == "" {
-		return credentialBinding{}, fmt.Errorf("binding name cannot be blank")
+		return Binding{}, fmt.Errorf("binding name cannot be blank")
 	}
 	if err := normalizeMatch(&b.Match); err != nil {
-		return credentialBinding{}, fmt.Errorf("binding %q: %w", b.Name, err)
+		return Binding{}, fmt.Errorf("binding %q: %w", b.Name, err)
 	}
 	if err := normalizeAuth(&b.Auth); err != nil {
-		return credentialBinding{}, fmt.Errorf("binding %q: %w", b.Name, err)
+		return Binding{}, fmt.Errorf("binding %q: %w", b.Name, err)
 	}
 	return b, nil
 }
 
-func normalizeMatch(m *credentialMatch) error {
+func normalizeMatch(m *Match) error {
 	if len(m.Schemes) == 0 {
 		m.Schemes = []string{"https"}
 	}
@@ -512,7 +511,7 @@ func normalizeMatch(m *credentialMatch) error {
 	return nil
 }
 
-func normalizeAuth(a *credentialAuth) error {
+func normalizeAuth(a *Auth) error {
 	a.Type = strings.TrimSpace(a.Type)
 	switch a.Type {
 	case "bearer", "basic":
@@ -566,7 +565,7 @@ func validateCredentialHeaderName(name string) error {
 	return nil
 }
 
-func validateBindingCredentialRefs(b credentialBinding, credentials map[string]credentialRecord) error {
+func validateBindingCredentialRefs(b Binding, credentials map[string]record) error {
 	for _, name := range credentialRefsForAuth(b.Auth) {
 		if _, ok := credentials[name]; !ok {
 			return fmt.Errorf("binding %q references unknown credential %q", b.Name, name)
@@ -575,7 +574,7 @@ func validateBindingCredentialRefs(b credentialBinding, credentials map[string]c
 	return nil
 }
 
-func credentialRefsForAuth(auth credentialAuth) []string {
+func credentialRefsForAuth(auth Auth) []string {
 	if auth.Type == "customHeaders" {
 		out := make([]string, 0, len(auth.Headers))
 		for _, h := range auth.Headers {
@@ -586,7 +585,7 @@ func credentialRefsForAuth(auth credentialAuth) []string {
 	return []string{auth.Credential}
 }
 
-func renderInjectionHeaders(auth credentialAuth, credentials map[string]credentialRecord) ([]injectionHeader, []string, error) {
+func renderInjectionHeaders(auth Auth, credentials map[string]record) ([]InjectionHeader, []string, error) {
 	valueFor := func(name string) (string, error) {
 		c, ok := credentials[name]
 		if !ok {
@@ -594,7 +593,7 @@ func renderInjectionHeaders(auth credentialAuth, credentials map[string]credenti
 		}
 		return c.Value, nil
 	}
-	var headers []injectionHeader
+	var headers []InjectionHeader
 	var redactions []string
 	switch auth.Type {
 	case "bearer":
@@ -603,7 +602,7 @@ func renderInjectionHeaders(auth credentialAuth, credentials map[string]credenti
 			return nil, nil, err
 		}
 		rendered := "Bearer " + value
-		headers = append(headers, injectionHeader{Name: "Authorization", Value: rendered})
+		headers = append(headers, InjectionHeader{Name: "Authorization", Value: rendered})
 		redactions = append(redactions, value, rendered)
 	case "basic":
 		value, err := valueFor(auth.Credential)
@@ -611,14 +610,14 @@ func renderInjectionHeaders(auth credentialAuth, credentials map[string]credenti
 			return nil, nil, err
 		}
 		rendered := "Basic " + value
-		headers = append(headers, injectionHeader{Name: "Authorization", Value: rendered})
+		headers = append(headers, InjectionHeader{Name: "Authorization", Value: rendered})
 		redactions = append(redactions, value, rendered)
 	case "apiKey":
 		value, err := valueFor(auth.Credential)
 		if err != nil {
 			return nil, nil, err
 		}
-		headers = append(headers, injectionHeader{Name: auth.Name, Value: value})
+		headers = append(headers, InjectionHeader{Name: auth.Name, Value: value})
 		redactions = append(redactions, value)
 	case "customHeaders":
 		for _, h := range auth.Headers {
@@ -626,7 +625,7 @@ func renderInjectionHeaders(auth credentialAuth, credentials map[string]credenti
 			if err != nil {
 				return nil, nil, err
 			}
-			headers = append(headers, injectionHeader{Name: h.Name, Value: value})
+			headers = append(headers, InjectionHeader{Name: h.Name, Value: value})
 			redactions = append(redactions, value)
 		}
 	default:
@@ -635,8 +634,8 @@ func renderInjectionHeaders(auth credentialAuth, credentials map[string]credenti
 	return headers, redactions, nil
 }
 
-func sanitizeAuth(auth credentialAuth) credentialAuthMetadata {
-	meta := credentialAuthMetadata{Type: auth.Type}
+func sanitizeAuth(auth Auth) AuthMetadata {
+	meta := AuthMetadata{Type: auth.Type}
 	switch auth.Type {
 	case "apiKey":
 		meta.Name = auth.Name
@@ -644,7 +643,7 @@ func sanitizeAuth(auth credentialAuth) credentialAuthMetadata {
 	return meta
 }
 
-func applyCredentialMutations(credentials map[string]credentialRecord, mutations *credentialMutationSet, revision int64) error {
+func applyCredentialMutations(credentials map[string]record, mutations *CredentialMutationSet, revision int64) error {
 	if mutations == nil {
 		return nil
 	}
@@ -698,7 +697,7 @@ func applyCredentialMutations(credentials map[string]credentialRecord, mutations
 	return nil
 }
 
-func applyBindingMutations(bindings map[string]credentialBinding, mutations *credentialBindingMutationSet) error {
+func applyBindingMutations(bindings map[string]Binding, mutations *BindingMutationSet) error {
 	if mutations == nil {
 		return nil
 	}
@@ -752,16 +751,16 @@ func applyBindingMutations(bindings map[string]credentialBinding, mutations *cre
 	return nil
 }
 
-func cloneCredentialRecords(in map[string]credentialRecord) map[string]credentialRecord {
-	out := make(map[string]credentialRecord, len(in))
+func cloneCredentialRecords(in map[string]record) map[string]record {
+	out := make(map[string]record, len(in))
 	for k, v := range in {
 		out[k] = v
 	}
 	return out
 }
 
-func cloneCredentialBindings(in map[string]credentialBinding) map[string]credentialBinding {
-	out := make(map[string]credentialBinding, len(in))
+func cloneCredentialBindings(in map[string]Binding) map[string]Binding {
+	out := make(map[string]Binding, len(in))
 	for k, v := range in {
 		out[k] = v
 	}
@@ -940,8 +939,8 @@ func trimYAMLScalar(value string) string {
 	return value
 }
 
-func validateBindingAmbiguity(bindings map[string]credentialBinding) error {
-	list := make([]credentialBinding, 0, len(bindings))
+func validateBindingAmbiguity(bindings map[string]Binding) error {
+	list := make([]Binding, 0, len(bindings))
 	for _, b := range bindings {
 		list = append(list, b)
 	}
@@ -955,7 +954,7 @@ func validateBindingAmbiguity(bindings map[string]credentialBinding) error {
 	return nil
 }
 
-func bindingsAmbiguous(a, b credentialBinding) bool {
+func bindingsAmbiguous(a, b Binding) bool {
 	if !stringSlicesOverlap(a.Match.Schemes, b.Match.Schemes) ||
 		!intSlicesOverlap(a.Match.Ports, b.Match.Ports) ||
 		!stringSlicesOverlap(a.Match.Methods, b.Match.Methods) ||
@@ -1079,7 +1078,7 @@ func dedupeIntsInPlace(values *[]int) {
 	*values = out
 }
 
-func readCredentialVaultJSON(r *http.Request, dst any) error {
+func ReadJSON(r *http.Request, dst any) error {
 	defer r.Body.Close()
 	dec := json.NewDecoder(io.LimitReader(r.Body, maxCredentialVaultBodyBytes))
 	dec.DisallowUnknownFields()
@@ -1089,24 +1088,15 @@ func readCredentialVaultJSON(r *http.Request, dst any) error {
 	return nil
 }
 
-func writeCredentialVaultError(w http.ResponseWriter, err error) {
+func WriteError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, errCredentialVaultNotFound):
+	case errors.Is(err, ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, errCredentialVaultExists):
+	case errors.Is(err, ErrExists):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case strings.Contains(err.Error(), "expectedRevision"):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
-}
-
-func isLoopbackRequest(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

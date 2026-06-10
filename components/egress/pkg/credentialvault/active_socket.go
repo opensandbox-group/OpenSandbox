@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package credentialvault
 
 import (
 	"context"
@@ -24,13 +24,13 @@ import (
 	"path/filepath"
 )
 
-func startCredentialVaultActiveSocketServer(
-	handler *policyServer,
+func StartActiveSocketServer(
+	activeHandler func(http.ResponseWriter),
 	socketPath string,
 	socketGID int,
 ) (*http.Server, func(context.Context) error, error) {
-	if handler == nil {
-		return nil, nil, fmt.Errorf("policy server handler is required")
+	if activeHandler == nil {
+		return nil, nil, fmt.Errorf("active credential vault handler is required")
 	}
 	if socketPath == "" {
 		return nil, nil, fmt.Errorf("socket path is required")
@@ -82,7 +82,7 @@ func startCredentialVaultActiveSocketServer(
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		handler.handleCredentialVaultActive(w)
+		activeHandler(w)
 	})
 
 	srv := &http.Server{Handler: mux}
