@@ -34,6 +34,7 @@ from opensandbox.exceptions import (
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
+    CredentialProxyConfig,
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
@@ -477,6 +478,7 @@ class SandboxSync:
         resource: dict[str, str] | None = None,
         platform: PlatformSpec | None = None,
         network_policy: NetworkPolicy | None = None,
+        credential_proxy: CredentialProxyConfig | None = None,
         extensions: dict[str, str] | None = None,
         secure_access: bool = False,
         entrypoint: list[str] | None = None,
@@ -497,6 +499,7 @@ class SandboxSync:
             metadata: Custom metadata for the sandbox
             resource: Resource limits (CPU, memory, etc.)
             network_policy: Optional outbound network policy (egress).
+            credential_proxy: Optional Credential Vault proxy startup settings.
             extensions: Opaque extension parameters passed through to the server as-is.
                 Prefer namespaced keys (e.g. ``storage.id``).
             secure_access: Whether to enable secured access for sandbox endpoints.
@@ -549,6 +552,7 @@ class SandboxSync:
                 timeout=timeout,
                 resource=resource,
                 network_policy=network_policy,
+                credential_proxy=credential_proxy,
                 extensions=extensions,
                 volumes=volumes,
                 platform=platform,

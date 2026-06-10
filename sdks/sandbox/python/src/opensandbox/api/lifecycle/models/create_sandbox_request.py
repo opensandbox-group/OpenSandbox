@@ -26,8 +26,11 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.create_sandbox_request_env import CreateSandboxRequestEnv
-    from ..models.create_sandbox_request_extensions import CreateSandboxRequestExtensions
+    from ..models.create_sandbox_request_extensions import (
+        CreateSandboxRequestExtensions,
+    )
     from ..models.create_sandbox_request_metadata import CreateSandboxRequestMetadata
+    from ..models.credential_proxy_config import CredentialProxyConfig
     from ..models.image_spec import ImageSpec
     from ..models.network_policy import NetworkPolicy
     from ..models.platform_spec import PlatformSpec
@@ -118,6 +121,7 @@ class CreateSandboxRequest:
             network_policy (NetworkPolicy | Unset): Egress network policy matching the sidecar `/policy` request body.
                 If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
                 object or null results in allow-all behavior at startup.
+            credential_proxy (CredentialProxyConfig | Unset): Credential Vault proxy startup settings.
             secure_access (bool | Unset): Opts the sandbox into secured access for endpoint access.
                 This is currently supported only for Kubernetes sandboxes exposed
                 through ingress gateway mode. When enabled, the server provisions
@@ -157,6 +161,7 @@ class CreateSandboxRequest:
     metadata: CreateSandboxRequestMetadata | Unset = UNSET
     entrypoint: list[str] | Unset = UNSET
     network_policy: NetworkPolicy | Unset = UNSET
+    credential_proxy: CredentialProxyConfig | Unset = UNSET
     secure_access: bool | Unset = False
     volumes: list[Volume] | Unset = UNSET
     extensions: CreateSandboxRequestExtensions | Unset = UNSET
@@ -199,6 +204,10 @@ class CreateSandboxRequest:
         if not isinstance(self.network_policy, Unset):
             network_policy = self.network_policy.to_dict()
 
+        credential_proxy: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.credential_proxy, Unset):
+            credential_proxy = self.credential_proxy.to_dict()
+
         secure_access = self.secure_access
 
         volumes: list[dict[str, Any]] | Unset = UNSET
@@ -233,6 +242,8 @@ class CreateSandboxRequest:
             field_dict["entrypoint"] = entrypoint
         if network_policy is not UNSET:
             field_dict["networkPolicy"] = network_policy
+        if credential_proxy is not UNSET:
+            field_dict["credentialProxy"] = credential_proxy
         if secure_access is not UNSET:
             field_dict["secureAccess"] = secure_access
         if volumes is not UNSET:
@@ -245,8 +256,13 @@ class CreateSandboxRequest:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.create_sandbox_request_env import CreateSandboxRequestEnv
-        from ..models.create_sandbox_request_extensions import CreateSandboxRequestExtensions
-        from ..models.create_sandbox_request_metadata import CreateSandboxRequestMetadata
+        from ..models.create_sandbox_request_extensions import (
+            CreateSandboxRequestExtensions,
+        )
+        from ..models.create_sandbox_request_metadata import (
+            CreateSandboxRequestMetadata,
+        )
+        from ..models.credential_proxy_config import CredentialProxyConfig
         from ..models.image_spec import ImageSpec
         from ..models.network_policy import NetworkPolicy
         from ..models.platform_spec import PlatformSpec
@@ -309,6 +325,13 @@ class CreateSandboxRequest:
         else:
             network_policy = NetworkPolicy.from_dict(_network_policy)
 
+        _credential_proxy = d.pop("credentialProxy", UNSET)
+        credential_proxy: CredentialProxyConfig | Unset
+        if isinstance(_credential_proxy, Unset):
+            credential_proxy = UNSET
+        else:
+            credential_proxy = CredentialProxyConfig.from_dict(_credential_proxy)
+
         secure_access = d.pop("secureAccess", UNSET)
 
         _volumes = d.pop("volumes", UNSET)
@@ -337,6 +360,7 @@ class CreateSandboxRequest:
             metadata=metadata,
             entrypoint=entrypoint,
             network_policy=network_policy,
+            credential_proxy=credential_proxy,
             secure_access=secure_access,
             volumes=volumes,
             extensions=extensions,

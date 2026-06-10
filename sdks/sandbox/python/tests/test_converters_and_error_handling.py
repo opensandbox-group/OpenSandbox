@@ -48,6 +48,7 @@ from opensandbox.exceptions import (
 )
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import (
+    CredentialProxyConfig,
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
@@ -250,6 +251,7 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
         ),
         extensions={},
         volumes=None,
+        credential_proxy=CredentialProxyConfig(enabled=True),
     )
     d = req.to_dict()
     assert d["image"]["uri"] == "python:3.11"
@@ -259,6 +261,7 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
     assert d["platform"] == {"os": "linux", "arch": "arm64"}
     assert d["networkPolicy"]["defaultAction"] == "deny"
     assert d["networkPolicy"]["egress"] == [{"action": "allow", "target": "pypi.org"}]
+    assert d["credentialProxy"] == {"enabled": True}
 
     renew = SandboxModelConverter.to_api_renew_request(datetime(2025, 1, 1))
     assert renew.expires_at.tzinfo is timezone.utc

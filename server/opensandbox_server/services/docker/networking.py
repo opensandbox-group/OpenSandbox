@@ -361,6 +361,7 @@ class DockerNetworkingMixin:
         extra_port_bindings: Optional[dict[str, tuple[str, int]]] = None,
         ca_volume_name: Optional[str] = None,
         egress_api_host_port: Optional[int] = None,
+        credential_proxy_enabled: bool = False,
     ):
         sidecar_name = f"sandbox-egress-{sandbox_id}"
         sidecar_labels = {
@@ -380,8 +381,9 @@ class DockerNetworkingMixin:
             f"{EGRESS_RULES_ENV}={policy_payload}",
             f"{EGRESS_MODE_ENV}={egress_mode}",
             f"{OPENSANDBOX_EGRESS_TOKEN}={egress_token}",
-            f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true",
         ]
+        if credential_proxy_enabled:
+            sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
 
         sidecar_port_bindings: dict[str, tuple[str, int]] = {
             "44772": ("0.0.0.0", host_execd_port),

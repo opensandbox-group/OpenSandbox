@@ -140,20 +140,26 @@ type NetworkRule struct {
 	Target string `json:"target"`
 }
 
+// CredentialProxyConfig controls Credential Vault proxy startup behavior.
+type CredentialProxyConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+}
+
 // CreateSandboxRequest is the request body for creating a new sandbox.
 type CreateSandboxRequest struct {
-	Image          *ImageSpec        `json:"image,omitempty"`
-	SnapshotID     string            `json:"snapshotId,omitempty"`
-	Timeout        *int              `json:"timeout,omitempty"`
-	ResourceLimits ResourceLimits    `json:"resourceLimits"`
-	Env            map[string]string `json:"env,omitempty"`
-	SecureAccess   bool              `json:"secureAccess,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	Entrypoint     []string          `json:"entrypoint,omitempty"`
-	NetworkPolicy  *NetworkPolicy    `json:"networkPolicy,omitempty"`
-	Volumes        []Volume          `json:"volumes,omitempty"`
-	Extensions     map[string]string `json:"extensions,omitempty"`
-	Platform       *PlatformSpec     `json:"platform,omitempty"`
+	Image           *ImageSpec             `json:"image,omitempty"`
+	SnapshotID      string                 `json:"snapshotId,omitempty"`
+	Timeout         *int                   `json:"timeout,omitempty"`
+	ResourceLimits  ResourceLimits         `json:"resourceLimits"`
+	Env             map[string]string      `json:"env,omitempty"`
+	SecureAccess    bool                   `json:"secureAccess,omitempty"`
+	Metadata        map[string]string      `json:"metadata,omitempty"`
+	Entrypoint      []string               `json:"entrypoint,omitempty"`
+	NetworkPolicy   *NetworkPolicy         `json:"networkPolicy,omitempty"`
+	CredentialProxy *CredentialProxyConfig `json:"credentialProxy,omitempty"`
+	Volumes         []Volume               `json:"volumes,omitempty"`
+	Extensions      map[string]string      `json:"extensions,omitempty"`
+	Platform        *PlatformSpec          `json:"platform,omitempty"`
 }
 
 // SandboxInfo represents a runtime execution environment provisioned from a

@@ -34,7 +34,9 @@ from opensandbox_server.config import (
 from opensandbox_server.extensions import ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY
 from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
+    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_TOKEN,
+    OPENSANDBOX_MITM_CA_CERT_PATH,
 )
 from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
@@ -57,6 +59,7 @@ from opensandbox_server.services.helpers import (
 from opensandbox_server.api.schema import (
     CreateSandboxRequest,
     CreateSandboxResponse,
+    CredentialProxyConfig,
     Host,
     ImageSpec,
     NetworkPolicy,
@@ -716,6 +719,7 @@ async def test_egress_sidecar_injection_and_capabilities(mock_docker):
         ),
         patch.object(service, "_ensure_image_available"),
         patch.object(service, "_prepare_sandbox_runtime"),
+        patch.object(service, "_wait_for_egress_sidecar_ready"),
     ):
         await service.create_sandbox(req)
 
@@ -744,6 +748,92 @@ async def test_egress_sidecar_injection_and_capabilities(mock_docker):
     sidecar_env = sidecar_kwargs["environment"]
     assert f"{OPENSANDBOX_EGRESS_TOKEN}=egress-token" in sidecar_env
     assert f"{EGRESS_MODE_ENV}={EGRESS_MODE_DNS}" in sidecar_env
+    assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" not in sidecar_env
+    forwarded_env = main_kwargs["environment"]
+    assert all(
+        item
+        not in {
+            f"SSL_CERT_FILE={OPENSANDBOX_MITM_CA_CERT_PATH}",
+            f"REQUESTS_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}",
+            f"CURL_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}",
+            f"GIT_SSL_CAINFO={OPENSANDBOX_MITM_CA_CERT_PATH}",
+            f"NODE_EXTRA_CA_CERTS={OPENSANDBOX_MITM_CA_CERT_PATH}",
+        }
+        for item in forwarded_env
+    )
+    mock_client.volumes.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_network_policy_enables_mitm_only_for_credential_proxy(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+    mock_client.api.create_container.side_effect = [
+        {"Id": "sidecar-id"},
+        {"Id": "main-id"},
+    ]
+    mock_client.containers.get.side_effect = [MagicMock(id="sidecar-id"), MagicMock(id="main-id")]
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest")
+    service = DockerSandboxService(config=cfg)
+
+    req = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={"SSL_CERT_FILE": "/custom.pem"},
+        metadata={},
+        entrypoint=["python"],
+        networkPolicy=NetworkPolicy(default_action="deny", egress=[]),
+        credentialProxy=CredentialProxyConfig(enabled=True),
+    )
+
+    with (
+        patch("opensandbox_server.services.docker.docker_service.generate_egress_token", return_value="egress-token"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 44772),
+                "8080": ("0.0.0.0", 8080),
+                "18080": ("0.0.0.0", 18080),
+            },
+        ),
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch.object(service, "_wait_for_egress_sidecar_ready"),
+    ):
+        await service.create_sandbox(req)
+
+    sidecar_kwargs = mock_client.api.create_container.call_args_list[0].kwargs
+    main_kwargs = mock_client.api.create_container.call_args_list[1].kwargs
+    sidecar_env = sidecar_kwargs["environment"]
+    assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" in sidecar_env
+    assert any(
+        bind.endswith(f":{os.path.dirname(OPENSANDBOX_MITM_CA_CERT_PATH)}:rw")
+        for bind in sidecar_kwargs["host_config"]["binds"]
+    )
+
+    forwarded_env = main_kwargs["environment"]
+    assert "SSL_CERT_FILE=/custom.pem" not in forwarded_env
+    assert f"SSL_CERT_FILE={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
+    assert f"REQUESTS_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
+    assert f"CURL_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
+    assert f"GIT_SSL_CAINFO={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
+    assert f"NODE_EXTRA_CA_CERTS={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
+    assert any(
+        bind.endswith(f":{os.path.dirname(OPENSANDBOX_MITM_CA_CERT_PATH)}:ro")
+        for bind in main_kwargs["host_config"]["binds"]
+    )
+    mock_client.volumes.create.assert_called_once()
 
 
 @pytest.mark.asyncio

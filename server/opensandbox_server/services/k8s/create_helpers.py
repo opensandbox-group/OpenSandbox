@@ -39,6 +39,7 @@ class _CreateWorkloadContext:
     egress_mode: str
     egress_image: Optional[str]
     egress_auth_token: Optional[str]
+    credential_proxy_enabled: bool
     secure_access_token: Optional[str]
 
 
@@ -71,6 +72,9 @@ def _build_create_workload_context(
     egress_mode = app_config.egress.mode if app_config.egress else EGRESS_MODE_DNS
     egress_image = None
     egress_auth_token = None
+    credential_proxy_enabled = bool(
+        request.credential_proxy and request.credential_proxy.enabled
+    )
     if request.network_policy:
         egress_image = app_config.egress.image if app_config.egress else None
         egress_auth_token = egress_token_factory()
@@ -88,5 +92,6 @@ def _build_create_workload_context(
         egress_mode=egress_mode,
         egress_image=egress_image,
         egress_auth_token=egress_auth_token,
+        credential_proxy_enabled=credential_proxy_enabled,
         secure_access_token=secure_access_token,
     )

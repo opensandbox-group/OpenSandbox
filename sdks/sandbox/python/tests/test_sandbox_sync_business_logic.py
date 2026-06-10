@@ -272,6 +272,7 @@ def test_sync_create_passes_new_signature_keywords_even_when_unused(
             platform=None,
             secure_access=False,
             snapshot_id=None,
+            credential_proxy=None,
         ):
             assert spec is not None
             assert entrypoint is not None
@@ -414,6 +415,7 @@ def test_sync_create_restore_from_snapshot_passes_snapshot_id(
             platform=None,
             secure_access=False,
             snapshot_id=None,
+            credential_proxy=None,
         ):
             assert isinstance(env, dict)
             assert isinstance(metadata, dict)
@@ -485,6 +487,7 @@ def test_sync_create_restore_from_snapshot_preserves_custom_entrypoint(
             platform=None,
             secure_access=False,
             snapshot_id=None,
+            credential_proxy=None,
         ):
             assert isinstance(env, dict)
             assert isinstance(metadata, dict)

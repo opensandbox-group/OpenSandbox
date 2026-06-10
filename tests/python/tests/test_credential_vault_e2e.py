@@ -26,6 +26,7 @@ from opensandbox import SandboxSync
 from opensandbox.models.sandboxes import (
     Credential,
     CredentialBinding,
+    CredentialProxyConfig,
     NetworkPolicy,
     NetworkRule,
     SandboxImageSpec,
@@ -75,6 +76,7 @@ def test_credential_vault_injects_all_auth_types(credential_vault_target_ip: str
             defaultAction="allow",
             egress=[NetworkRule(action="allow", target=TARGET_HOST)],
         ),
+        credential_proxy=CredentialProxyConfig(enabled=True),
     )
     try:
         state = sandbox.credential_vault.create(

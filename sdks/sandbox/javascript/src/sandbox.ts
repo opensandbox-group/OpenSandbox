@@ -32,6 +32,7 @@ import type { ExecdCommands } from "./services/execdCommands.js";
 import type { ExecdHealth } from "./services/execdHealth.js";
 import type { ExecdMetrics } from "./services/execdMetrics.js";
 import type {
+  CredentialProxyConfig,
   CreateSandboxRequest,
   Endpoint,
   NetworkPolicy,
@@ -86,6 +87,10 @@ export interface SandboxCreateOptions {
    * If provided without defaultAction, defaults to "deny".
    */
   networkPolicy?: NetworkPolicy;
+  /**
+   * Optional Credential Vault proxy startup settings.
+   */
+  credentialProxy?: CredentialProxyConfig;
   /**
    * Optional list of volume mounts for persistent storage.
    * Each volume specifies a backend (host path, PVC, or OSSFS) and mount configuration.
@@ -311,6 +316,7 @@ export class Sandbox {
             defaultAction: opts.networkPolicy.defaultAction ?? "deny",
           }
         : undefined,
+      credentialProxy: opts.credentialProxy,
       volumes: opts.volumes,
       extensions: opts.extensions ?? {},
       platform: opts.platform,

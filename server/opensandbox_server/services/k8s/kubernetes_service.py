@@ -464,6 +464,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 egress_image=context.egress_image,
                 egress_auth_token=context.egress_auth_token,
                 egress_mode=context.egress_mode,
+                credential_proxy_enabled=context.credential_proxy_enabled,
                 volumes=request.volumes,
                 platform=request.platform,
             )

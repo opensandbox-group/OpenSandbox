@@ -40,6 +40,7 @@ def _egress_container(
     *,
     egress_auth_token: Optional[str] = None,
     egress_mode: str = EGRESS_MODE_DNS,
+    credential_proxy_enabled: bool = False,
 ) -> dict:
     """Sidecar dict produced by ``apply_egress_to_spec``."""
     containers: list = []
@@ -49,6 +50,7 @@ def _egress_container(
         egress_image,
         egress_auth_token=egress_auth_token,
         egress_mode=egress_mode,
+        credential_proxy_enabled=credential_proxy_enabled,
     )
     return containers[0]
 
@@ -86,6 +88,22 @@ class TestEgressSidecarViaApply:
         env_by_name = {env["name"]: env["value"] for env in env_vars}
         assert env_by_name[EGRESS_RULES_ENV] is not None
         assert env_by_name[EGRESS_MODE_ENV] == EGRESS_MODE_DNS
+        assert OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT not in env_by_name
+
+    def test_contains_transparent_mitm_env_when_credential_proxy_enabled(self):
+        egress_image = "opensandbox/egress:v1.0.12"
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        container = _egress_container(
+            egress_image,
+            network_policy,
+            credential_proxy_enabled=True,
+        )
+
+        env_by_name = {env["name"]: env["value"] for env in container["env"]}
         assert env_by_name[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] == "true"
 
     def test_contains_egress_token_when_provided(self):

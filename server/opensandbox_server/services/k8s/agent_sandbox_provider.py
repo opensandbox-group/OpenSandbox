@@ -140,6 +140,7 @@ class AgentSandboxProvider(WorkloadProvider):
         annotations: Optional[Dict[str, str]] = None,
         egress_auth_token: Optional[str] = None,
         egress_mode: str = EGRESS_MODE_DNS,
+        credential_proxy_enabled: bool = False,
     ) -> Dict[str, Any]:
         """Create an agent-sandbox Sandbox CRD workload."""
         if is_windows_profile(platform):
@@ -158,6 +159,7 @@ class AgentSandboxProvider(WorkloadProvider):
             egress_image=egress_image,
             egress_auth_token=egress_auth_token,
             egress_mode=egress_mode,
+            credential_proxy_enabled=credential_proxy_enabled,
         )
 
         if volumes:
@@ -244,6 +246,7 @@ class AgentSandboxProvider(WorkloadProvider):
         egress_image: Optional[str] = None,
         egress_auth_token: Optional[str] = None,
         egress_mode: str = EGRESS_MODE_DNS,
+        credential_proxy_enabled: bool = False,
     ) -> Dict[str, Any]:
         """Build pod spec dict for the Sandbox CRD."""
         disable_ipv6_for_egress = (
@@ -285,8 +288,10 @@ class AgentSandboxProvider(WorkloadProvider):
             egress_image=egress_image,
             egress_auth_token=egress_auth_token,
             egress_mode=egress_mode,
+            credential_proxy_enabled=credential_proxy_enabled,
         )
-        apply_credential_proxy_trust_to_pod_spec(pod_spec)
+        if credential_proxy_enabled:
+            apply_credential_proxy_trust_to_pod_spec(pod_spec)
 
         return pod_spec
 

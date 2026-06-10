@@ -24,6 +24,7 @@ from typing import Protocol
 
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
+    CredentialProxyConfig,
     NetworkPolicy,
     PagedSandboxInfos,
     PagedSnapshotInfos,
@@ -62,6 +63,7 @@ class Sandboxes(Protocol):
         platform: PlatformSpec | None = None,
         secure_access: bool = False,
         snapshot_id: str | None = None,
+        credential_proxy: CredentialProxyConfig | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a new sandbox with the specified configuration.
@@ -74,6 +76,7 @@ class Sandboxes(Protocol):
             timeout: Sandbox lifetime. Pass None to create a sandbox that requires explicit cleanup.
             resource: Runtime resource limits (e.g. cpu/memory). Exact semantics are server-defined.
             network_policy: Optional outbound network policy (egress).
+            credential_proxy: Optional Credential Vault proxy startup settings.
             extensions: Opaque extension parameters passed through to the server as-is.
                 Prefer namespaced keys (e.g. ``storage.id``).
             volumes: Optional list of volume mounts for persistent storage.

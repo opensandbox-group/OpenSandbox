@@ -1272,6 +1272,14 @@ components:
             Shape matches the sidecar `/policy` endpoint. If omitted or empty,
             the sidecar starts in allow-all mode until updated.
 
+        credentialProxy:
+          $ref: '#/components/schemas/CredentialProxyConfig'
+          description: |
+            Optional Credential Vault proxy startup settings. Set `enabled: true`
+            to enable transparent MITM support for credential injection. Plain
+            `networkPolicy` does not enable transparent MITM unless this option
+            is set.
+
         secureAccess:
           type: boolean
           default: false
@@ -1404,6 +1412,22 @@ components:
           description: List of egress rules evaluated in order.
           items:
             $ref: '#/components/schemas/NetworkRule'
+      additionalProperties: false
+
+    CredentialProxyConfig:
+      type: object
+      description: |
+        Credential Vault proxy startup settings. This is an explicit opt-in for
+        transparent MITM support used by credential injection; plain egress
+        network policy remains DNS/FQDN policy enforcement only.
+      properties:
+        enabled:
+          type: boolean
+          default: false
+          description: |
+            When true, the server starts the egress sidecar with transparent
+            MITM enabled and installs the runtime-managed MITM CA bundle into
+            the sandbox container. Requires `networkPolicy`.
       additionalProperties: false
 
     NetworkRule:

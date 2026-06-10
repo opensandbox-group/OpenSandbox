@@ -779,6 +779,7 @@ class TestAgentSandboxProviderEgress:
             execd_image="execd:latest",
             network_policy=network_policy,
             egress_image="opensandbox/egress:v1.0.12",
+            credential_proxy_enabled=True,
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]

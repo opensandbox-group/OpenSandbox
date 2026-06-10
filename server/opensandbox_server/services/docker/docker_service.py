@@ -785,6 +785,9 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
         sidecar_container = None
         credential_ca_volume: Optional[str] = None
+        credential_proxy_enabled = bool(
+            request.credential_proxy and request.credential_proxy.enabled
+        )
         try:
             # For dockur/windows profile, resourceLimits are translated to
             # guest envs (RAM_SIZE/CPU_CORES/DISK_SIZE). Avoid applying
@@ -810,40 +813,41 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             container_exposed_ports: Optional[list[str]] = exposed_ports
 
             if request.network_policy:
-                credential_ca_volume = f"opensandbox-mitm-ca-{sandbox_id}"
-                with self._docker_operation("create credential CA volume", sandbox_id):
-                    self.docker_client.volumes.create(
-                        name=credential_ca_volume,
-                        labels={SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
-                    )
-                auto_created_volumes = list(auto_created_volumes or [])
-                auto_created_volumes.append(credential_ca_volume)
-                labels[SANDBOX_MANAGED_VOLUMES_LABEL] = json.dumps(
-                    auto_created_volumes,
-                    separators=(",", ":"),
-                )
-                environment = [
-                    entry
-                    for entry in environment
-                    if not entry.startswith(
-                        (
-                            "SSL_CERT_FILE=",
-                            "REQUESTS_CA_BUNDLE=",
-                            "CURL_CA_BUNDLE=",
-                            "GIT_SSL_CAINFO=",
-                            "NODE_EXTRA_CA_CERTS=",
+                if credential_proxy_enabled:
+                    credential_ca_volume = f"opensandbox-mitm-ca-{sandbox_id}"
+                    with self._docker_operation("create credential CA volume", sandbox_id):
+                        self.docker_client.volumes.create(
+                            name=credential_ca_volume,
+                            labels={SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
                         )
+                    auto_created_volumes = list(auto_created_volumes or [])
+                    auto_created_volumes.append(credential_ca_volume)
+                    labels[SANDBOX_MANAGED_VOLUMES_LABEL] = json.dumps(
+                        auto_created_volumes,
+                        separators=(",", ":"),
                     )
-                ]
-                environment.extend(
-                    [
-                        f"SSL_CERT_FILE={OPENSANDBOX_MITM_CA_CERT_PATH}",
-                        f"REQUESTS_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}",
-                        f"CURL_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}",
-                        f"GIT_SSL_CAINFO={OPENSANDBOX_MITM_CA_CERT_PATH}",
-                        f"NODE_EXTRA_CA_CERTS={OPENSANDBOX_MITM_CA_CERT_PATH}",
+                    environment = [
+                        entry
+                        for entry in environment
+                        if not entry.startswith(
+                            (
+                                "SSL_CERT_FILE=",
+                                "REQUESTS_CA_BUNDLE=",
+                                "CURL_CA_BUNDLE=",
+                                "GIT_SSL_CAINFO=",
+                                "NODE_EXTRA_CA_CERTS=",
+                            )
+                        )
                     ]
-                )
+                    environment.extend(
+                        [
+                            f"SSL_CERT_FILE={OPENSANDBOX_MITM_CA_CERT_PATH}",
+                            f"REQUESTS_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}",
+                            f"CURL_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}",
+                            f"GIT_SSL_CAINFO={OPENSANDBOX_MITM_CA_CERT_PATH}",
+                            f"NODE_EXTRA_CA_CERTS={OPENSANDBOX_MITM_CA_CERT_PATH}",
+                        ]
+                    )
                 egress_token = generate_egress_token()
                 labels[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] = egress_token
                 sidecar_port_bindings = allocate_port_bindings([*exposed_ports, "18080"])
@@ -866,6 +870,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     egress_api_host_port=(
                         egress_api_binding[1] if egress_api_binding is not None else None
                     ),
+                    credential_proxy_enabled=credential_proxy_enabled,
                 )
                 labels[SANDBOX_EMBEDDING_PROXY_PORT_LABEL] = str(host_execd_port)
                 labels[SANDBOX_HTTP_PORT_LABEL] = str(host_http_port)

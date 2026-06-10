@@ -144,6 +144,17 @@ class NetworkPolicy(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class CredentialProxyConfig(BaseModel):
+    """
+    Credential Vault proxy startup settings.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable transparent MITM support required by Credential Vault injection.",
+    )
+
+
 class InlineCredentialSource(BaseModel):
     """
     Write-only inline credential material for Credential Vault.

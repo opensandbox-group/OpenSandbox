@@ -120,6 +120,24 @@ class NetworkPolicy(BaseModel):
         populate_by_name = True
 
 
+class CredentialProxyConfig(BaseModel):
+    """
+    Credential proxy startup options.
+    """
+
+    enabled: bool = Field(
+        False,
+        description=(
+            "When true, the server enables transparent MITM support required by "
+            "Credential Vault injection. Plain egress network policy does not enable "
+            "transparent MITM unless this option is set."
+        ),
+    )
+
+    class Config:
+        populate_by_name = True
+
+
 # ============================================================================
 # Volume Definitions
 # ============================================================================
@@ -434,6 +452,14 @@ class CreateSandboxRequest(BaseModel):
             "Empty/omitted means allow-all until updated."
         ),
     )
+    credential_proxy: Optional[CredentialProxyConfig] = Field(
+        None,
+        alias="credentialProxy",
+        description=(
+            "Optional Credential Vault proxy startup settings. Set enabled=true to "
+            "enable transparent MITM support for credential injection."
+        ),
+    )
     secure_access: bool = Field(
         False,
         alias="secureAccess",
@@ -464,11 +490,16 @@ class CreateSandboxRequest(BaseModel):
             # Reject conflicting fields that would be ignored in pool mode
             if bool((self.snapshot_id or "").strip()):
                 raise ValueError("snapshotId cannot be used together with poolRef.")
+            if self.credential_proxy and self.credential_proxy.enabled:
+                raise ValueError("credentialProxy.enabled cannot be used together with poolRef.")
             # Normalize blank snapshotId so downstream code won't see
             # a truthy whitespace string (e.g. "   ") as a real value.
             if self.snapshot_id is not None and not self.snapshot_id.strip():
                 self.snapshot_id = None
             return self
+
+        if self.credential_proxy and self.credential_proxy.enabled and self.network_policy is None:
+            raise ValueError("credentialProxy.enabled requires networkPolicy.")
 
         has_image = self.image is not None and bool(self.image.uri.strip())
         has_snapshot = bool((self.snapshot_id or "").strip())

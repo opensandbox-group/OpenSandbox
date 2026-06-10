@@ -48,6 +48,7 @@ from opensandbox.api.lifecycle.models.create_sandbox_request import CreateSandbo
 from opensandbox.api.lifecycle.models.image_spec import ImageSpec
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
+    CredentialProxyConfig,
     NetworkPolicy,
     NetworkRule,
     PagedSandboxInfos,
@@ -166,6 +167,7 @@ class SandboxModelConverter:
         volumes: list[Volume] | None,
         secure_access: bool = False,
         snapshot_id: str | None = None,
+        credential_proxy: CredentialProxyConfig | None = None,
     ) -> CreateSandboxRequest:
         """Convert domain parameters to API CreateSandboxRequest."""
         from opensandbox.api.lifecycle.models.create_sandbox_request import (
@@ -179,6 +181,9 @@ class SandboxModelConverter:
         )
         from opensandbox.api.lifecycle.models.create_sandbox_request_metadata import (
             CreateSandboxRequestMetadata,
+        )
+        from opensandbox.api.lifecycle.models.credential_proxy_config import (
+            CredentialProxyConfig as ApiCredentialProxyConfig,
         )
         from opensandbox.api.lifecycle.models.network_policy import (
             NetworkPolicy as ApiNetworkPolicy,
@@ -239,6 +244,17 @@ class SandboxModelConverter:
                 egress=api_egress,
             )
 
+        api_credential_proxy = UNSET
+        if credential_proxy is not None:
+            if not isinstance(credential_proxy, CredentialProxyConfig):
+                raise TypeError(
+                    "credential_proxy must be a CredentialProxyConfig or None, "
+                    f"got {type(credential_proxy).__name__}"
+                )
+            api_credential_proxy = ApiCredentialProxyConfig(
+                enabled=credential_proxy.enabled,
+            )
+
         api_extensions = (
             CreateSandboxRequestExtensions.from_dict(extensions) if extensions else UNSET
         )
@@ -275,6 +291,7 @@ class SandboxModelConverter:
             resource_limits=api_resource_limits,
             platform=api_platform,
             network_policy=api_network_policy,
+            credential_proxy=api_credential_proxy,
             extensions=api_extensions,
             volumes=api_volumes,
             secure_access=secure_access,

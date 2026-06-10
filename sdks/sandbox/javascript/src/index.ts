@@ -30,6 +30,7 @@ export { ConnectionConfig } from "./config/connection.js";
 export type { ConnectionConfigOptions, ConnectionProtocol } from "./config/connection.js";
 
 export type {
+  CredentialProxyConfig,
   CreateSnapshotRequest,
   CreateSandboxRequest,
   CreateSandboxResponse,
