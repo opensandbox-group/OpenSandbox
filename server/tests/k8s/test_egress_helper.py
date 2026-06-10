@@ -23,12 +23,10 @@ from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_TOKEN,
-    OPENSANDBOX_MITM_CA_CERT_PATH,
+    OPENSANDBOX_RUNTIME_MOUNT_PATH,
+    OPENSANDBOX_RUNTIME_VOLUME_NAME,
 )
 from opensandbox_server.services.k8s.egress_helper import (
-    MITM_CA_MOUNT_PATH,
-    MITM_CA_VOLUME_NAME,
-    apply_credential_proxy_trust_to_pod_spec,
     apply_egress_to_spec,
     build_security_context_for_sandbox_container,
     prep_execd_init_for_egress,
@@ -107,6 +105,12 @@ class TestEgressSidecarViaApply:
 
         env_by_name = {env["name"]: env["value"] for env in container["env"]}
         assert env_by_name[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] == "true"
+        assert container["volumeMounts"] == [
+            {
+                "name": OPENSANDBOX_RUNTIME_VOLUME_NAME,
+                "mountPath": OPENSANDBOX_RUNTIME_MOUNT_PATH,
+            }
+        ]
 
     def test_contains_egress_token_when_provided(self):
         egress_image = "opensandbox/egress:v1.0.12"
@@ -374,46 +378,6 @@ class TestApplyEgressToSpec:
         )
 
         assert len(containers) == 0
-
-    def test_apply_credential_proxy_trust_to_pod_spec(self):
-        pod_spec = {
-            "containers": [
-                {
-                    "name": "sandbox",
-                    "env": [
-                        {"name": "SSL_CERT_FILE", "value": "/old.pem"},
-                        {"name": "FOO", "value": "bar"},
-                    ],
-                    "volumeMounts": [],
-                },
-                {"name": "egress", "volumeMounts": []},
-            ],
-            "volumes": [{"name": "opensandbox-bin", "emptyDir": {}}],
-        }
-
-        apply_credential_proxy_trust_to_pod_spec(pod_spec)
-
-        main = pod_spec["containers"][0]
-        sidecar = pod_spec["containers"][1]
-        env_vars = {env["name"]: env["value"] for env in main["env"]}
-        assert env_vars[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] == "true"
-        assert env_vars["SSL_CERT_FILE"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert env_vars["REQUESTS_CA_BUNDLE"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert env_vars["CURL_CA_BUNDLE"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert env_vars["GIT_SSL_CAINFO"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert env_vars["NODE_EXTRA_CA_CERTS"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert env_vars["FOO"] == "bar"
-        assert {"name": MITM_CA_VOLUME_NAME, "emptyDir": {}} in pod_spec["volumes"]
-        assert {
-            "name": MITM_CA_VOLUME_NAME,
-            "mountPath": MITM_CA_MOUNT_PATH,
-            "readOnly": True,
-        } in main["volumeMounts"]
-        assert {
-            "name": MITM_CA_VOLUME_NAME,
-            "mountPath": MITM_CA_MOUNT_PATH,
-        } in sidecar["volumeMounts"]
-
 
 class TestPrepExecdInitForEgress:
     def test_returns_privileged_security_dict_and_prefixed_script(self):

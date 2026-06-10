@@ -23,14 +23,12 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 from opensandbox_server.config import AppConfig, DEFAULT_EGRESS_DISABLE_IPV6, EGRESS_MODE_DNS
+from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
 from opensandbox_server.services.helpers import format_ingress_endpoint
 from opensandbox_server.api.schema import Endpoint, ImageSpec, NetworkPolicy, PlatformSpec, Volume
 from opensandbox_server.services.k8s.agent_sandbox_template import AgentSandboxTemplateManager
 from opensandbox_server.services.k8s.client import K8sClient
-from opensandbox_server.services.k8s.egress_helper import (
-    apply_credential_proxy_trust_to_pod_spec,
-    apply_egress_to_spec,
-)
+from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
 from opensandbox_server.services.k8s.provider_common import (
     _build_execd_init_container,
     _build_main_container,
@@ -259,10 +257,14 @@ class AgentSandboxProvider(WorkloadProvider):
             self.execd_init_resources,
             disable_ipv6_for_egress=disable_ipv6_for_egress,
         )
+        main_env = dict(env)
+        if credential_proxy_enabled:
+            main_env[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] = "true"
+
         main_container = _build_main_container(
             image_spec=image_spec,
             entrypoint=entrypoint,
-            env=env,
+            env=main_env,
             resource_limits=resource_limits,
             has_network_policy=network_policy is not None,
         )
@@ -290,8 +292,6 @@ class AgentSandboxProvider(WorkloadProvider):
             egress_mode=egress_mode,
             credential_proxy_enabled=credential_proxy_enabled,
         )
-        if credential_proxy_enabled:
-            apply_credential_proxy_trust_to_pod_spec(pod_spec)
 
         return pod_spec
 

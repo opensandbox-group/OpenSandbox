@@ -20,7 +20,6 @@ Public entry points: ``prep_execd_init_for_egress``, ``build_security_context_fo
 """
 
 import json
-import posixpath
 from typing import Any, Dict, List, Optional
 
 from opensandbox_server.api.schema import NetworkPolicy
@@ -31,19 +30,9 @@ from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_TOKEN,
-    OPENSANDBOX_MITM_CA_CERT_PATH,
+    OPENSANDBOX_RUNTIME_MOUNT_PATH,
+    OPENSANDBOX_RUNTIME_VOLUME_NAME,
 )
-
-MITM_CA_VOLUME_NAME = "opensandbox-mitm-ca"
-MITM_CA_MOUNT_PATH = posixpath.dirname(OPENSANDBOX_MITM_CA_CERT_PATH)
-MITM_CA_ENV = {
-    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT: "true",
-    "SSL_CERT_FILE": OPENSANDBOX_MITM_CA_CERT_PATH,
-    "REQUESTS_CA_BUNDLE": OPENSANDBOX_MITM_CA_CERT_PATH,
-    "CURL_CA_BUNDLE": OPENSANDBOX_MITM_CA_CERT_PATH,
-    "GIT_SSL_CAINFO": OPENSANDBOX_MITM_CA_CERT_PATH,
-    "NODE_EXTRA_CA_CERTS": OPENSANDBOX_MITM_CA_CERT_PATH,
-}
 
 
 def prep_execd_init_for_egress(exec_install_script: str) -> tuple[str, Dict[str, Any]]:
@@ -123,70 +112,15 @@ def apply_egress_to_spec(
             "failureThreshold": 30,
         },
     }
+    if credential_proxy_enabled:
+        sidecar["volumeMounts"] = [
+            {
+                "name": OPENSANDBOX_RUNTIME_VOLUME_NAME,
+                "mountPath": OPENSANDBOX_RUNTIME_MOUNT_PATH,
+            }
+        ]
     if egress_auth_token:
         sidecar["readinessProbe"]["httpGet"]["httpHeaders"] = [
             {"name": OPEN_SANDBOX_EGRESS_AUTH_HEADER, "value": egress_auth_token}
         ]
     containers.append(sidecar)
-
-
-def apply_credential_proxy_trust_to_pod_spec(pod_spec: Dict[str, Any]) -> None:
-    """Share the mitmproxy CA from the egress sidecar and trust it in the main container."""
-    containers = pod_spec.get("containers", [])
-    if not isinstance(containers, list):
-        return
-    sidecar = next(
-        (container for container in containers if container.get("name") == "egress"),
-        None,
-    )
-    if sidecar is None:
-        return
-    main = next(
-        (container for container in containers if container.get("name") == "sandbox"),
-        containers[0] if containers else None,
-    )
-    if main is None:
-        return
-
-    _upsert_env(main, MITM_CA_ENV)
-    _ensure_volume(pod_spec, {"name": MITM_CA_VOLUME_NAME, "emptyDir": {}})
-    _ensure_volume_mount(
-        main,
-        {"name": MITM_CA_VOLUME_NAME, "mountPath": MITM_CA_MOUNT_PATH, "readOnly": True},
-    )
-    _ensure_volume_mount(
-        sidecar,
-        {"name": MITM_CA_VOLUME_NAME, "mountPath": MITM_CA_MOUNT_PATH},
-    )
-
-
-def _upsert_env(container: Dict[str, Any], values: Dict[str, str]) -> None:
-    env = container.get("env", [])
-    if not isinstance(env, list):
-        env = []
-    blocked = set(values)
-    env = [entry for entry in env if isinstance(entry, dict) and entry.get("name") not in blocked]
-    env.extend({"name": name, "value": value} for name, value in values.items())
-    container["env"] = env
-
-
-def _ensure_volume(pod_spec: Dict[str, Any], volume: Dict[str, Any]) -> None:
-    volumes = pod_spec.get("volumes", [])
-    if not isinstance(volumes, list):
-        volumes = []
-    if not any(isinstance(item, dict) and item.get("name") == volume["name"] for item in volumes):
-        volumes.append(volume)
-    pod_spec["volumes"] = volumes
-
-
-def _ensure_volume_mount(container: Dict[str, Any], mount: Dict[str, Any]) -> None:
-    mounts = container.get("volumeMounts", [])
-    if not isinstance(mounts, list):
-        mounts = []
-    for index, existing in enumerate(mounts):
-        if isinstance(existing, dict) and existing.get("name") == mount["name"]:
-            mounts[index] = mount
-            break
-    else:
-        mounts.append(mount)
-    container["volumeMounts"] = mounts

@@ -38,12 +38,12 @@ from opensandbox_server.config import (
 from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
-    OPENSANDBOX_MITM_CA_CERT_PATH,
+    OPENSANDBOX_RUNTIME_MOUNT_PATH,
+    OPENSANDBOX_RUNTIME_VOLUME_NAME,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
 )
 from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_TOKEN
-from opensandbox_server.services.k8s.egress_helper import MITM_CA_MOUNT_PATH, MITM_CA_VOLUME_NAME
 from opensandbox_server.services.k8s.image_pull_secret_helper import IMAGE_AUTH_SECRET_PREFIX
 from opensandbox_server.services.k8s.volume_helper import apply_volumes_to_pod_spec
 
@@ -1698,20 +1698,19 @@ class TestBatchSandboxProviderEgress:
         main = next(c for c in containers if c["name"] == "sandbox")
         main_env = {e["name"]: e["value"] for e in main["env"]}
         assert main_env[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] == "true"
-        assert main_env["SSL_CERT_FILE"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert main_env["REQUESTS_CA_BUNDLE"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert main_env["CURL_CA_BUNDLE"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert main_env["GIT_SSL_CAINFO"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert main_env["NODE_EXTRA_CA_CERTS"] == OPENSANDBOX_MITM_CA_CERT_PATH
-        assert {"name": MITM_CA_VOLUME_NAME, "emptyDir": {}} in pod_spec["volumes"]
+        assert "SSL_CERT_FILE" not in main_env
+        assert "REQUESTS_CA_BUNDLE" not in main_env
+        assert "CURL_CA_BUNDLE" not in main_env
+        assert "GIT_SSL_CAINFO" not in main_env
+        assert "NODE_EXTRA_CA_CERTS" not in main_env
+        assert "opensandbox-mitm-ca" not in {v["name"] for v in pod_spec["volumes"]}
         assert {
-            "name": MITM_CA_VOLUME_NAME,
-            "mountPath": MITM_CA_MOUNT_PATH,
-            "readOnly": True,
+            "name": OPENSANDBOX_RUNTIME_VOLUME_NAME,
+            "mountPath": OPENSANDBOX_RUNTIME_MOUNT_PATH,
         } in main["volumeMounts"]
         assert {
-            "name": MITM_CA_VOLUME_NAME,
-            "mountPath": MITM_CA_MOUNT_PATH,
+            "name": OPENSANDBOX_RUNTIME_VOLUME_NAME,
+            "mountPath": OPENSANDBOX_RUNTIME_MOUNT_PATH,
         } in sidecar["volumeMounts"]
 
     def test_create_workload_windows_profile_with_network_policy_keeps_ipv6_disable(

@@ -36,7 +36,6 @@ from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_TOKEN,
-    OPENSANDBOX_MITM_CA_CERT_PATH,
 )
 from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
@@ -750,17 +749,7 @@ async def test_egress_sidecar_injection_and_capabilities(mock_docker):
     assert f"{EGRESS_MODE_ENV}={EGRESS_MODE_DNS}" in sidecar_env
     assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" not in sidecar_env
     forwarded_env = main_kwargs["environment"]
-    assert all(
-        item
-        not in {
-            f"SSL_CERT_FILE={OPENSANDBOX_MITM_CA_CERT_PATH}",
-            f"REQUESTS_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}",
-            f"CURL_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}",
-            f"GIT_SSL_CAINFO={OPENSANDBOX_MITM_CA_CERT_PATH}",
-            f"NODE_EXTRA_CA_CERTS={OPENSANDBOX_MITM_CA_CERT_PATH}",
-        }
-        for item in forwarded_env
-    )
+    assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" not in forwarded_env
     mock_client.volumes.create.assert_not_called()
 
 
@@ -817,23 +806,13 @@ async def test_create_sandbox_network_policy_enables_mitm_only_for_credential_pr
     main_kwargs = mock_client.api.create_container.call_args_list[1].kwargs
     sidecar_env = sidecar_kwargs["environment"]
     assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" in sidecar_env
-    assert any(
-        bind.endswith(f":{os.path.dirname(OPENSANDBOX_MITM_CA_CERT_PATH)}:rw")
-        for bind in sidecar_kwargs["host_config"]["binds"]
-    )
+    assert "binds" not in sidecar_kwargs["host_config"]
 
     forwarded_env = main_kwargs["environment"]
-    assert "SSL_CERT_FILE=/custom.pem" not in forwarded_env
-    assert f"SSL_CERT_FILE={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
-    assert f"REQUESTS_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
-    assert f"CURL_CA_BUNDLE={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
-    assert f"GIT_SSL_CAINFO={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
-    assert f"NODE_EXTRA_CA_CERTS={OPENSANDBOX_MITM_CA_CERT_PATH}" in forwarded_env
-    assert any(
-        bind.endswith(f":{os.path.dirname(OPENSANDBOX_MITM_CA_CERT_PATH)}:ro")
-        for bind in main_kwargs["host_config"]["binds"]
-    )
-    mock_client.volumes.create.assert_called_once()
+    assert "SSL_CERT_FILE=/custom.pem" in forwarded_env
+    assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" not in forwarded_env
+    assert "binds" not in main_kwargs["host_config"]
+    mock_client.volumes.create.assert_not_called()
 
 
 @pytest.mark.asyncio
