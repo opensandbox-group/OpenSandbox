@@ -4,10 +4,14 @@ set -euo pipefail
 echo "Disk usage before Docker cleanup:"
 df -h /
 
-docker ps -aq | xargs -r docker rm -f || true
-docker builder prune -af || true
-docker system prune -af --volumes || true
-rm -rf "${HOME:-/home/admin}/.docker/buildx/activity"/* || true
+containers="$(timeout 30s docker ps -aq || true)"
+if [ -n "${containers}" ]; then
+  echo "${containers}" | xargs -r docker rm -f || true
+fi
+
+timeout 60s docker builder prune -af || true
+timeout 120s docker system prune -af --volumes || true
+timeout 30s rm -rf "${HOME:-/home/admin}/.docker/buildx/activity"/* || true
 
 echo "Disk usage after Docker cleanup:"
 df -h /
