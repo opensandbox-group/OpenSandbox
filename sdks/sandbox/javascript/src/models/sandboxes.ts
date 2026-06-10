@@ -73,13 +73,6 @@ export interface NetworkPolicy extends Record<string, unknown> {
   egress?: NetworkRule[];
 }
 
-export interface CredentialProxyConfig extends Record<string, unknown> {
-  /**
-   * Enable transparent MITM support required by Credential Vault injection.
-   */
-  enabled?: boolean;
-}
-
 // ============================================================================
 // Volume Models
 // ============================================================================
@@ -270,10 +263,6 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    * Optional outbound network policy for the sandbox.
    */
   networkPolicy?: NetworkPolicy;
-  /**
-   * Optional Credential Vault proxy startup settings.
-   */
-  credentialProxy?: CredentialProxyConfig;
   /**
    * Optional list of volume mounts for persistent storage.
    */
