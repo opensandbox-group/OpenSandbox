@@ -159,7 +159,8 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `SetPermissions(ctx, req)` | Change file permissions |
 | `MoveFiles(ctx, req)` | Move/rename files |
 | `SearchFiles(ctx, dir, pattern)` | Search files by glob pattern |
-| `ListDirectory(ctx, path, depth)` | List directory contents with depth control |
+| `ListDirectory(ctx, path)` | List immediate directory contents (server-side default depth) |
+| `ListDirectoryWithDepth(ctx, path, depth)` | List directory contents up to the given depth (`0` returns empty) |
 | `ReplaceInFiles(ctx, req)` | Text replacement in files |
 | `UploadFile(ctx, file, opts)` | Upload a file to the sandbox |
 | `UploadFiles(ctx, entries)` | Upload multiple files to the sandbox |

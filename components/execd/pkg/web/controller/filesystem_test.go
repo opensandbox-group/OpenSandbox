@@ -198,6 +198,44 @@ func TestFilesystemControllerListDirectoryReportsSymlinkWithoutRecursing(t *test
 	require.Contains(t, byPath, targetFile)
 }
 
+func TestFilesystemControllerListDirectoryReturnsLexicalOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Create entries in non-lexical creation order to make sure the response
+	// reflects the contracted lexical-by-name ordering rather than insertion
+	// order or os-specific listing order.
+	for _, name := range []string{"charlie.txt", "alpha", "bravo.txt"} {
+		full := filepath.Join(tmpDir, name)
+		if name == "alpha" {
+			require.NoError(t, os.MkdirAll(full, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(full, "y.txt"), []byte("y"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(full, "x.txt"), []byte("x"), 0o644))
+			continue
+		}
+		require.NoError(t, os.WriteFile(full, []byte(name), 0o644))
+	}
+
+	rawURL := fmt.Sprintf("/directories/list?path=%s&depth=2", url.QueryEscape(tmpDir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.ListDirectory()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+
+	paths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		paths = append(paths, e.Path)
+	}
+	require.Equal(t, []string{
+		filepath.Join(tmpDir, "alpha"),
+		filepath.Join(tmpDir, "alpha", "x.txt"),
+		filepath.Join(tmpDir, "alpha", "y.txt"),
+		filepath.Join(tmpDir, "bravo.txt"),
+		filepath.Join(tmpDir, "charlie.txt"),
+	}, paths)
+}
+
 func TestFilesystemControllerListDirectoryRejectsInvalidRequests(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "file.txt")

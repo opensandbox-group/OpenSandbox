@@ -170,14 +170,23 @@ interface Filesystem {
      * Lists directory contents with optional depth control.
      *
      * @param path Directory path to list
-     * @param depth Optional maximum child depth to include
+     * @param depth Optional maximum child depth to include. `null` lets the
+     *   server apply its default (currently 1 — immediate children only).
+     *   `0` returns an empty list. Larger values include descendants up to
+     *   that many levels below `path`.
      * @return List of EntryInfo objects containing metadata for directory entries
      * @throws SandboxException if the operation fails
      */
     fun listDirectory(
         path: String,
-        depth: Int? = null,
+        depth: Int?,
     ): List<EntryInfo>
+
+    /**
+     * Java-friendly overload of [listDirectory] that uses the server-side
+     * default depth (currently 1). Equivalent to `listDirectory(path, null)`.
+     */
+    fun listDirectory(path: String): List<EntryInfo> = listDirectory(path, null)
 
     /**
      * Moves files from source to destination paths.

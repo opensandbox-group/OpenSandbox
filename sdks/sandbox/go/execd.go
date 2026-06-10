@@ -255,12 +255,29 @@ func (e *ExecdClient) SearchFiles(ctx context.Context, dir string, pattern strin
 	return result, err
 }
 
-// ListDirectory lists directory contents with optional depth control.
-func (e *ExecdClient) ListDirectory(ctx context.Context, path string, depth int) ([]FileInfo, error) {
+// ListDirectory lists the immediate children of the given directory using the
+// server-side default depth (1). Use ListDirectoryWithDepth to override.
+func (e *ExecdClient) ListDirectory(ctx context.Context, path string) ([]FileInfo, error) {
+	return e.listDirectory(ctx, path, nil)
+}
+
+// ListDirectoryWithDepth lists directory contents up to the given depth.
+// depth=0 returns an empty slice (the directory itself is not listed).
+// depth=1 returns the immediate children. Larger values include descendants
+// up to that many levels below path. Negative values are rejected by the
+// server.
+func (e *ExecdClient) ListDirectoryWithDepth(ctx context.Context, path string, depth int) ([]FileInfo, error) {
+	d := depth
+	return e.listDirectory(ctx, path, &d)
+}
+
+func (e *ExecdClient) listDirectory(ctx context.Context, path string, depth *int) ([]FileInfo, error) {
 	var result []FileInfo
 	params := url.Values{}
 	params.Set("path", path)
-	params.Set("depth", strconv.Itoa(depth))
+	if depth != nil {
+		params.Set("depth", strconv.Itoa(*depth))
+	}
 	reqPath := "/directories/list?" + params.Encode()
 	err := e.client.doRequest(ctx, http.MethodGet, reqPath, nil, &result)
 	return result, err

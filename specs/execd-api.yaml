@@ -913,6 +913,15 @@ paths:
         only immediate children are returned (`depth=1`). Set `depth` to a larger
         value to include descendants up to that many levels below `path`. The
         root directory itself is not included in the response.
+
+        Symbolic links are reported with `type=symlink` and are not traversed:
+        the listing never descends into a link target, even when `depth` would
+        otherwise allow it.
+
+        Entries are returned in lexical order by entry name within each
+        directory. Descendants reported via `depth>1` follow their parent in
+        the same lexical order, so a depth-2 listing yields stable, predictable
+        output for file-browser style clients.
       operationId: listDirectory
       tags:
         - Filesystem
