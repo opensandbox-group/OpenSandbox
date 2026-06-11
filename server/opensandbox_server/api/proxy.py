@@ -33,7 +33,7 @@ from websockets.typing import Origin
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
-from opensandbox_server.services.constants import OPEN_SANDBOX_SECURE_ACCESS_HEADER
+from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_SECURE_ACCESS_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +118,15 @@ def _filter_proxy_headers(
             forwarded[key] = value
 
     if endpoint_headers:
+        endpoint_header_excluded = {
+            OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower(),
+            OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(),
+        }
         forwarded.update(
             {
                 key: value
                 for key, value in endpoint_headers.items()
-                if key.lower() != OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower()
+                if key.lower() not in endpoint_header_excluded
             }
         )
     return forwarded

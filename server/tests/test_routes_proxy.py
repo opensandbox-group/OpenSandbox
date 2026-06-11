@@ -634,7 +634,10 @@ def test_proxy_forwards_18080_without_server_side_egress_auth_check(
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
             assert port == 18080
             assert resolve_internal is True
-            return Endpoint(endpoint="10.57.1.91:18080")
+            return Endpoint(
+                endpoint="10.57.1.91:18080",
+                headers={OPEN_SANDBOX_EGRESS_AUTH_HEADER: "endpoint-token"},
+            )
 
     monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
     fake_client = _FakeAsyncClient()
@@ -654,6 +657,8 @@ def test_proxy_forwards_18080_without_server_side_egress_auth_check(
     assert response.json()["code"] == "UNAUTHORIZED"
     assert fake_client.built is not None
     assert fake_client.built["url"] == "http://10.57.1.91:18080/policy"
+    lowered_headers = {k.lower(): v for k, v in fake_client.built["headers"].items()}
+    assert OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower() not in lowered_headers
 
 
 def test_proxy_forwards_egress_auth_header_for_18080(

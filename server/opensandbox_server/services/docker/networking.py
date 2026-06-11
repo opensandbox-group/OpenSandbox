@@ -208,6 +208,7 @@ class DockerNetworkingMixin:
                     self._resolve_proxy_host(),
                     labels,
                     port,
+                    include_egress_auth_headers=False,
                 )
             return self._resolve_internal_endpoint(container, port)
 
@@ -230,6 +231,8 @@ class DockerNetworkingMixin:
         public_host: str,
         labels: dict[str, str],
         port: int,
+        *,
+        include_egress_auth_headers: bool = True,
     ) -> Endpoint:
         execd_host_port = self._parse_host_port_label(
             labels.get(SANDBOX_EMBEDDING_PROXY_PORT_LABEL),
@@ -250,7 +253,8 @@ class DockerNetworkingMixin:
                     },
                 )
             endpoint = Endpoint(endpoint=f"{public_host}:{http_host_port}")
-            self._attach_egress_auth_headers(endpoint, labels, port)
+            if include_egress_auth_headers:
+                self._attach_egress_auth_headers(endpoint, labels, port)
             return endpoint
 
         if execd_host_port is None:
@@ -263,7 +267,8 @@ class DockerNetworkingMixin:
             )
 
         endpoint = Endpoint(endpoint=f"{public_host}:{execd_host_port}/proxy/{port}")
-        self._attach_egress_auth_headers(endpoint, labels, port)
+        if include_egress_auth_headers:
+            self._attach_egress_auth_headers(endpoint, labels, port)
         return endpoint
 
     def _attach_egress_auth_headers(
