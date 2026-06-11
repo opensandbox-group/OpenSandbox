@@ -280,8 +280,8 @@ class FilesystemAdapter(Filesystem):
 
                     # metadata part
                     yield f"--{boundary}\r\n".encode()
-                    yield 'Content-Disposition: form-data; name="metadata"\r\n'.encode()
-                    yield "Content-Type: application/json\r\n\r\n".encode()
+                    yield b'Content-Disposition: form-data; name="metadata"\r\n'
+                    yield b"Content-Type: application/json\r\n\r\n"
                     yield metadata_json.encode()
                     yield b"\r\n"
 
