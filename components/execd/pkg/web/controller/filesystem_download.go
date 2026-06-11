@@ -57,8 +57,10 @@ func (c *FilesystemController) DownloadFile() {
 	offsetStr := c.ctx.Query("offset")
 	limitStr := c.ctx.Query("limit")
 
-	// Check if only one of offset/limit is provided
-	if (offsetStr != "" && limitStr == "") || (offsetStr == "" && limitStr != "") {
+	// Reject empty string values (e.g., ?offset=&limit=)
+	if offsetStr == "" && limitStr == "" {
+		// Both empty, continue to normal download
+	} else if offsetStr == "" || limitStr == "" {
 		c.RespondError(
 			http.StatusBadRequest,
 			model.ErrorCodeInvalidParameter,
@@ -160,7 +162,11 @@ func (c *FilesystemController) serveLineRange(filePath string, offset, limit int
 			if err == io.EOF {
 				// If we have partial line without newline, process it
 				if len(line) > 0 && currentLine >= offset {
-					c.ctx.Writer.Write(line)
+					_, writeErr := c.ctx.Writer.Write(line)
+					if writeErr != nil {
+						// Client disconnected, stop reading
+						return
+					}
 					linesWritten++
 				}
 				break
@@ -174,7 +180,11 @@ func (c *FilesystemController) serveLineRange(filePath string, offset, limit int
 		}
 
 		if currentLine >= offset {
-			c.ctx.Writer.Write(line)
+			_, writeErr := c.ctx.Writer.Write(line)
+			if writeErr != nil {
+				// Client disconnected, stop reading
+				return
+			}
 			linesWritten++
 		}
 		currentLine++
