@@ -39,6 +39,7 @@ from opensandbox_server.services.constants import (
     EGRESS_RULES_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_TOKEN,
+    OPENSANDBOX_RUNTIME_MOUNT_PATH,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_EMBEDDING_PROXY_PORT_LABEL,
     SANDBOX_HTTP_PORT_LABEL,
@@ -362,6 +363,7 @@ class DockerNetworkingMixin:
         host_http_port: int,
         extra_port_bindings: Optional[dict[str, tuple[str, int]]] = None,
         egress_api_host_port: Optional[int] = None,
+        runtime_volume_name: Optional[str] = None,
         credential_proxy_enabled: bool = False,
     ):
         sidecar_name = f"sandbox-egress-{sandbox_id}"
@@ -398,6 +400,10 @@ class DockerNetworkingMixin:
             "cap_add": ["NET_ADMIN"],
             "port_bindings": normalize_port_bindings(sidecar_port_bindings),
         }
+        if runtime_volume_name:
+            sidecar_host_config_kwargs["binds"] = [
+                f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
+            ]
         if self.app_config.egress.disable_ipv6:
             # Optional: disable IPv6 in the shared namespace when egress.disable_ipv6 is set.
             sidecar_host_config_kwargs["sysctls"] = {

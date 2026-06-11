@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -35,12 +36,14 @@ from opensandbox_server.extensions import ACCESS_RENEW_EXTEND_SECONDS_METADATA_K
 from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_EGRESS_TOKEN,
 )
 from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_ID_LABEL,
+    SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_OSSFS_MOUNTS_LABEL,
     SANDBOX_PLATFORM_ARCH_LABEL,
@@ -806,13 +809,21 @@ async def test_create_sandbox_network_policy_enables_mitm_only_for_credential_pr
     main_kwargs = mock_client.api.create_container.call_args_list[1].kwargs
     sidecar_env = sidecar_kwargs["environment"]
     assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" in sidecar_env
-    assert "binds" not in sidecar_kwargs["host_config"]
+    runtime_volume = "opensandbox-runtime-" + main_kwargs["labels"][SANDBOX_ID_LABEL]
+    expected_runtime_bind = f"{runtime_volume}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
+    assert sidecar_kwargs["host_config"]["binds"] == [expected_runtime_bind]
 
     forwarded_env = main_kwargs["environment"]
     assert "SSL_CERT_FILE=/custom.pem" in forwarded_env
-    assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" not in forwarded_env
-    assert "binds" not in main_kwargs["host_config"]
-    mock_client.volumes.create.assert_not_called()
+    assert f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true" in forwarded_env
+    assert expected_runtime_bind in main_kwargs["host_config"]["binds"]
+    assert json.loads(main_kwargs["labels"][SANDBOX_MANAGED_VOLUMES_LABEL]) == [
+        runtime_volume
+    ]
+    mock_client.volumes.create.assert_called_once_with(
+        name=runtime_volume,
+        labels={SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
+    )
 
 
 @pytest.mark.asyncio
