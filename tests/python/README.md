@@ -26,12 +26,13 @@ uv run pytest tests/test_credential_vault_e2e.py
 Redis-backed pool E2E tests are skipped unless `OPENSANDBOX_TEST_REDIS_URL` is set,
 for example `redis://127.0.0.1:6379/0`.
 
-Credential Vault E2E tests require Docker and a local target service. The
-repository script starts the local OpenSandbox server, the target service, and
-the focused pytest suite:
+Credential Vault E2E tests require a reachable target service and
+`OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_IP`. The repository E2E scripts start
+the target service and run the Vault tests as part of each language's normal
+E2E suite:
 
 ```bash
-../../scripts/python-credential-vault-e2e.sh
+../../scripts/python-e2e.sh
 ```
 
 ### Notes about asyncio + shared Sandbox

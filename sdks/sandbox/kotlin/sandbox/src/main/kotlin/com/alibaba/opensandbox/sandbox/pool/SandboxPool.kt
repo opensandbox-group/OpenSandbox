@@ -878,6 +878,7 @@ internal fun PoolCreationSpec.applyToBuilder(builder: Sandbox.Builder): Sandbox.
             .secureAccess(secureAccess)
 
     networkPolicy?.let { configuredBuilder.networkPolicy(it) }
+    credentialProxy?.let { configuredBuilder.credentialProxy(it) }
     platform?.let { configuredBuilder.platform(it) }
     return configuredBuilder
 }

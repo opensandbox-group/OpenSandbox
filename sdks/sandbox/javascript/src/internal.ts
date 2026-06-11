@@ -27,12 +27,17 @@ export { createLifecycleClient } from "./openapi/lifecycleClient.js";
 export type { LifecycleClient } from "./openapi/lifecycleClient.js";
 export { createExecdClient } from "./openapi/execdClient.js";
 export type { ExecdClient } from "./openapi/execdClient.js";
+export { createEgressClient } from "./openapi/egressClient.js";
+export type { EgressClient } from "./openapi/egressClient.js";
 
 // OpenAPI schema types (NOT stable public API; internal-only).
 export type { paths as LifecyclePaths } from "./api/lifecycle.js";
 export type { paths as ExecdPaths } from "./api/execd.js";
+export type { paths as EgressPaths } from "./api/egress.js";
 
 export { SandboxesAdapter } from "./adapters/sandboxesAdapter.js";
+export { EgressAdapter } from "./adapters/egressAdapter.js";
+export type { EgressRawHttpOptions } from "./adapters/egressAdapter.js";
 export { HealthAdapter } from "./adapters/healthAdapter.js";
 export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";

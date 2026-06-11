@@ -16,6 +16,7 @@
 
 package com.alibaba.opensandbox.sandbox.domain.services
 
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
@@ -54,6 +55,7 @@ interface Sandboxes {
      * @param extensions Opaque extension parameters passed through to the server as-is. Prefer namespaced keys
      * @param volumes Optional list of volume mounts for persistent storage
      * @param snapshotId Optional snapshot identifier used to restore a sandbox instead of booting from an image
+     * @param credentialProxy Optional Credential Vault proxy startup settings
      * @return Sandbox creation response containing the sandbox id
      */
     fun createSandbox(
@@ -69,6 +71,7 @@ interface Sandboxes {
         platform: PlatformSpec? = null,
         secureAccess: Boolean = false,
         snapshotId: String? = null,
+        credentialProxy: CredentialProxyConfig? = null,
     ): SandboxCreateResponse
 
     /**

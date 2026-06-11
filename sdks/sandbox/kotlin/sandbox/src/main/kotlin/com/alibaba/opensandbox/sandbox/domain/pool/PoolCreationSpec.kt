@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.domain.pool
 
 import com.alibaba.opensandbox.sandbox.Sandbox
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
@@ -35,6 +36,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
  * @property metadata User-defined metadata.
  * @property extensions Optional extension parameters for server-side customized behaviors.
  * @property networkPolicy Optional outbound network policy.
+ * @property credentialProxy Optional Credential Vault proxy startup settings.
  * @property platform Optional runtime platform constraint.
  * @property secureAccess Whether to enable secured access for sandbox endpoints.
  * @property volumes Optional volume mounts.
@@ -47,6 +49,7 @@ class PoolCreationSpec private constructor(
     val metadata: Map<String, String> = emptyMap(),
     val extensions: Map<String, String> = emptyMap(),
     val networkPolicy: NetworkPolicy? = null,
+    val credentialProxy: CredentialProxyConfig? = null,
     val platform: PlatformSpec? = null,
     val secureAccess: Boolean = false,
     val volumes: List<Volume>? = null,
@@ -74,6 +77,7 @@ class PoolCreationSpec private constructor(
         private var metadata: Map<String, String> = emptyMap()
         private var extensions: Map<String, String> = emptyMap()
         private var networkPolicy: NetworkPolicy? = null
+        private var credentialProxy: CredentialProxyConfig? = null
         private var platform: PlatformSpec? = null
         private var secureAccess: Boolean = false
         private var volumes: List<Volume>? = null
@@ -185,6 +189,24 @@ class PoolCreationSpec private constructor(
             return this
         }
 
+        fun credentialProxy(credentialProxy: CredentialProxyConfig?): Builder {
+            this.credentialProxy = credentialProxy
+            return this
+        }
+
+        @JvmOverloads
+        fun credentialProxyEnabled(enabled: Boolean = true): Builder {
+            this.credentialProxy = CredentialProxyConfig.builder().enabled(enabled).build()
+            return this
+        }
+
+        fun credentialProxy(configure: CredentialProxyConfig.Builder.() -> Unit): Builder {
+            val builder = CredentialProxyConfig.builder()
+            builder.configure()
+            this.credentialProxy = builder.build()
+            return this
+        }
+
         fun platform(platform: PlatformSpec?): Builder {
             this.platform = platform
             return this
@@ -229,6 +251,7 @@ class PoolCreationSpec private constructor(
                 metadata = metadata,
                 extensions = extensions,
                 networkPolicy = networkPolicy,
+                credentialProxy = credentialProxy,
                 platform = platform,
                 secureAccess = secureAccess,
                 volumes = volumes,

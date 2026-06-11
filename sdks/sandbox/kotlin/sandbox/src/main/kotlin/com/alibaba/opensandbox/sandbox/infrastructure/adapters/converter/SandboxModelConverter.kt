@@ -18,6 +18,7 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter
 
 // API Models
 import com.alibaba.opensandbox.sandbox.api.models.CreateSandboxRequest
+import com.alibaba.opensandbox.sandbox.api.models.CredentialProxyConfig as ApiCredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.api.models.CreateSandboxResponse
 import com.alibaba.opensandbox.sandbox.api.models.Endpoint
 import com.alibaba.opensandbox.sandbox.api.models.ImageSpec
@@ -28,6 +29,7 @@ import com.alibaba.opensandbox.sandbox.api.models.RenewSandboxExpirationRequest
 import com.alibaba.opensandbox.sandbox.api.models.RenewSandboxExpirationResponse
 import com.alibaba.opensandbox.sandbox.api.models.Snapshot
 import com.alibaba.opensandbox.sandbox.api.models.execd.Metrics
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Host
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
@@ -187,6 +189,10 @@ internal object SandboxModelConverter {
             .build()
     }
 
+    fun CredentialProxyConfig.toApiCredentialProxyConfig(): ApiCredentialProxyConfig {
+        return ApiCredentialProxyConfig(enabled = this.enabled)
+    }
+
     /**
      * Converts Domain Host -> API Host
      */
@@ -251,6 +257,7 @@ internal object SandboxModelConverter {
         resource: Map<String, String>,
         platform: PlatformSpec?,
         networkPolicy: NetworkPolicy?,
+        credentialProxy: CredentialProxyConfig?,
         secureAccess: Boolean,
         extensions: Map<String, String>,
         volumes: List<Volume>?,
@@ -266,6 +273,7 @@ internal object SandboxModelConverter {
             resourceLimits = resource,
             platform = platform?.toApiPlatformSpec(),
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
+            credentialProxy = credentialProxy?.toApiCredentialProxyConfig(),
             secureAccess = secureAccess,
             extensions = extensions,
             volumes = volumes?.map { it.toApiVolume() },

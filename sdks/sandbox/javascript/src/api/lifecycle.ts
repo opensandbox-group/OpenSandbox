@@ -1115,6 +1115,13 @@ export interface components {
              */
             networkPolicy?: components["schemas"]["NetworkPolicy"];
             /**
+             * @description Optional Credential Vault proxy startup settings. Set `enabled: true`
+             *     to enable transparent MITM support for credential injection. Plain
+             *     `networkPolicy` does not enable transparent MITM unless this option
+             *     is set.
+             */
+            credentialProxy?: components["schemas"]["CredentialProxyConfig"];
+            /**
              * @description Opts the sandbox into secured access for endpoint access.
              *     This is currently supported only for Kubernetes sandboxes exposed
              *     through ingress gateway mode. When enabled, the server provisions
@@ -1226,6 +1233,20 @@ export interface components {
             defaultAction?: "allow" | "deny";
             /** @description List of egress rules evaluated in order. */
             egress?: components["schemas"]["NetworkRule"][];
+        };
+        /**
+         * @description Credential Vault proxy startup settings. This is an explicit opt-in for
+         *     transparent MITM support used by credential injection; plain egress
+         *     network policy remains DNS/FQDN policy enforcement only.
+         */
+        CredentialProxyConfig: {
+            /**
+             * @description When true, the server starts the egress sidecar with transparent
+             *     MITM enabled and installs the runtime-managed MITM CA bundle into
+             *     the sandbox container. Requires `networkPolicy`.
+             * @default false
+             */
+            enabled: boolean;
         };
         NetworkRule: {
             /**

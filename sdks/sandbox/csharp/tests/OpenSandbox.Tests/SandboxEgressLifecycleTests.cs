@@ -56,6 +56,8 @@ public class SandboxEgressLifecycleTests
             Target = "www.github.com"
         }]);
         await sandbox.DeleteEgressRulesAsync(["www.github.com", "*.blocked.org"]);
+        await sandbox.CredentialVault.GetAsync();
+        await sandbox.GetCredentialVaultAsync();
 
         sandboxes.EndpointCalls.Should().Equal(Constants.DefaultExecdPort, Constants.DefaultEgressPort);
         adapterFactory.EgressStackCallCount.Should().Be(1);
@@ -63,6 +65,7 @@ public class SandboxEgressLifecycleTests
         egress.GetPolicyCallCount.Should().Be(1);
         egress.PatchRulesCallCount.Should().Be(1);
         egress.DeleteRulesCallCount.Should().Be(1);
+        egress.GetVaultCallCount.Should().Be(2);
         egress.LastDeleteTargets.Should().Equal("www.github.com", "*.blocked.org");
     }
 
@@ -82,6 +85,10 @@ public class SandboxEgressLifecycleTests
             }),
             AdapterFactory = adapterFactory,
             SkipHealthCheck = true,
+            CredentialProxy = new CredentialProxyConfig
+            {
+                Enabled = true
+            },
             Volumes =
             [
                 new Volume
@@ -98,6 +105,8 @@ public class SandboxEgressLifecycleTests
         });
 
         sandboxes.LastCreateRequest.Should().NotBeNull();
+        sandboxes.LastCreateRequest!.CredentialProxy.Should().NotBeNull();
+        sandboxes.LastCreateRequest!.CredentialProxy!.Enabled.Should().BeTrue();
         sandboxes.LastCreateRequest!.Volumes.Should().NotBeNull();
         sandboxes.LastCreateRequest.Volumes!.Should().ContainSingle();
         sandboxes.LastCreateRequest.Volumes![0].Host!.Path.Should().Be("D:/sandbox-mnt/ReMe");
@@ -305,7 +314,56 @@ public class SandboxEgressLifecycleTests
 
         public int DeleteRulesCallCount { get; private set; }
 
+        public int GetVaultCallCount { get; private set; }
+
         public IReadOnlyList<string> LastDeleteTargets { get; private set; } = [];
+
+        public Task<CredentialVaultState> CreateAsync(
+            IReadOnlyList<Credential> credentials,
+            IReadOnlyList<CredentialBinding> bindings,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateVaultState());
+        }
+
+        public Task<CredentialVaultState> GetAsync(CancellationToken cancellationToken = default)
+        {
+            GetVaultCallCount++;
+            return Task.FromResult(CreateVaultState());
+        }
+
+        public Task<CredentialVaultState> PatchAsync(
+            CredentialVaultPatchRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateVaultState());
+        }
+
+        public Task DeleteAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<IReadOnlyList<CredentialMetadata>> ListCredentialsAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<CredentialMetadata>>(CreateVaultState().Credentials);
+        }
+
+        public Task<CredentialMetadata> GetCredentialAsync(
+            string name,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateVaultState().Credentials[0]);
+        }
+
+        public Task<IReadOnlyList<CredentialBindingMetadata>> ListBindingsAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<CredentialBindingMetadata>>(CreateVaultState().Bindings);
+        }
+
+        public Task<CredentialBindingMetadata> GetBindingAsync(
+            string name,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateVaultState().Bindings[0]);
+        }
 
         public Task<NetworkPolicy> GetPolicyAsync(CancellationToken cancellationToken = default)
         {
@@ -332,6 +390,35 @@ public class SandboxEgressLifecycleTests
             DeleteRulesCallCount++;
             LastDeleteTargets = targets.ToList();
             return Task.CompletedTask;
+        }
+
+        private static CredentialVaultState CreateVaultState()
+        {
+            return new CredentialVaultState
+            {
+                Revision = 1,
+                Credentials =
+                [
+                    new CredentialMetadata
+                    {
+                        Name = "api-token",
+                        SourceType = "inline",
+                        Revision = 1
+                    }
+                ],
+                Bindings =
+                [
+                    new CredentialBindingMetadata
+                    {
+                        Name = "api-binding",
+                        Revision = 1,
+                        Auth = new CredentialAuthMetadata
+                        {
+                            Type = "bearer"
+                        }
+                    }
+                ]
+            };
         }
     }
 

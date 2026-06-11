@@ -17,9 +17,40 @@ using OpenSandbox.Models;
 namespace OpenSandbox.Services;
 
 /// <summary>
+/// Service interface for sandbox-scoped Credential Vault operations.
+/// </summary>
+public interface ICredentialVault
+{
+    Task<CredentialVaultState> CreateAsync(
+        IReadOnlyList<Credential> credentials,
+        IReadOnlyList<CredentialBinding> bindings,
+        CancellationToken cancellationToken = default);
+
+    Task<CredentialVaultState> GetAsync(CancellationToken cancellationToken = default);
+
+    Task<CredentialVaultState> PatchAsync(
+        CredentialVaultPatchRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task DeleteAsync(CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<CredentialMetadata>> ListCredentialsAsync(CancellationToken cancellationToken = default);
+
+    Task<CredentialMetadata> GetCredentialAsync(
+        string name,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<CredentialBindingMetadata>> ListBindingsAsync(CancellationToken cancellationToken = default);
+
+    Task<CredentialBindingMetadata> GetBindingAsync(
+        string name,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Service interface for direct egress sidecar operations.
 /// </summary>
-public interface IEgress
+public interface IEgress : ICredentialVault
 {
     Task<NetworkPolicy> GetPolicyAsync(CancellationToken cancellationToken = default);
 

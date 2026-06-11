@@ -76,6 +76,11 @@ public class SandboxCreateOptions
     public NetworkPolicy? NetworkPolicy { get; set; }
 
     /// <summary>
+    /// Gets or sets optional Credential Vault proxy startup settings.
+    /// </summary>
+    public CredentialProxyConfig? CredentialProxy { get; set; }
+
+    /// <summary>
     /// Gets or sets an optional runtime platform constraint for sandbox provisioning.
     /// </summary>
     public PlatformSpec? Platform { get; set; }

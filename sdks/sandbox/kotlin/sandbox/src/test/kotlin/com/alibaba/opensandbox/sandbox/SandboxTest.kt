@@ -119,6 +119,11 @@ class SandboxTest {
     }
 
     @Test
+    fun `credentialVault should return egress service`() {
+        assertSame(egressService, sandbox.credentialVault())
+    }
+
+    @Test
     fun `diagnostics should return diagnostics service`() {
         assertSame(diagnosticsService, sandbox.diagnostics())
     }

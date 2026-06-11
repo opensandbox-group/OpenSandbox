@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.sandbox.api.infrastructure.Serializer
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
@@ -86,6 +87,7 @@ internal class SandboxesAdapter(
         platform: PlatformSpec?,
         secureAccess: Boolean,
         snapshotId: String?,
+        credentialProxy: CredentialProxyConfig?,
     ): SandboxCreateResponse {
         logger.info("Creating sandbox with startup source: {}", spec?.image ?: snapshotId)
 
@@ -100,6 +102,7 @@ internal class SandboxesAdapter(
                     resource = resource,
                     platform = platform,
                     networkPolicy = networkPolicy,
+                    credentialProxy = credentialProxy,
                     secureAccess = secureAccess,
                     extensions = extensions,
                     volumes = volumes,
