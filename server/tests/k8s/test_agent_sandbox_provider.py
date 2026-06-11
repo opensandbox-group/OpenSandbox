@@ -86,7 +86,7 @@ class TestAgentSandboxProvider:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid"}
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["apiVersion"] == "agents.x-k8s.io/v1alpha1"
@@ -296,7 +296,7 @@ spec:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "sandbox-1234", "uid": "test-uid"}
+        assert result == {"name": "sandbox-1234", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["metadata"]["name"] == "sandbox-1234"
 
@@ -384,7 +384,7 @@ spec:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid"}
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
 
     def test_update_expiration_patches_spec(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)

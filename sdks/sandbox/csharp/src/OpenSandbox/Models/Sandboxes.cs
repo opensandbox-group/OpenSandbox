@@ -163,7 +163,8 @@ public class PVC
     public bool? CreateIfNotExists { get; set; }
 
     /// <summary>
-    /// Gets or sets whether auto-created Docker volumes should be removed on sandbox deletion.
+    /// Gets or sets whether the auto-created volume (Docker named volume or Kubernetes PVC)
+    /// should be removed on sandbox deletion. Pre-existing volumes are never removed.
     /// </summary>
     [JsonPropertyName("deleteOnSandboxTermination")]
     public bool? DeleteOnSandboxTermination { get; set; }

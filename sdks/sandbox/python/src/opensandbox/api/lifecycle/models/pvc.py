@@ -46,9 +46,9 @@ class PVC:
                  Default: True.
             delete_on_sandbox_termination (bool | Unset): When true, the volume is automatically removed when the sandbox
                 is deleted. Only applies to volumes that were auto-created by the
-                server (Docker only). Pre-existing volumes are never removed.
-                Has no effect on Kubernetes PVCs, whose lifecycle is managed by
-                the StorageClass reclaim policy.
+                server on this request; pre-existing volumes are never removed.
+                For Kubernetes, the resulting PVC delete triggers the bound PV's
+                StorageClass reclaim policy (`Retain`/`Delete`).
                  Default: False.
             storage_class (None | str | Unset): Kubernetes StorageClass name for auto-created PVCs. Null means
                 use the cluster default. Ignored for Docker volumes.

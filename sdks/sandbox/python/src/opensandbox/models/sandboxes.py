@@ -200,8 +200,9 @@ class PVC(BaseModel):
         default=False,
         alias="deleteOnSandboxTermination",
         description=(
-            "When true, auto-created Docker volume is removed on sandbox deletion. "
-            "Ignored for Kubernetes PVCs."
+            "When true, the auto-created volume (Docker named volume or "
+            "Kubernetes PVC) is removed on sandbox deletion. Pre-existing "
+            "volumes are never removed."
         ),
     )
     storage_class: str | None = Field(

@@ -390,6 +390,21 @@ class TestK8sClient:
             name="foo-1", body=body
         )
 
+    def test_patch_pvc_uses_strategic_merge_content_type(self, k8s_runtime_config):
+        """patch_pvc must pin strategic-merge content type so a merge-shaped
+        body (e.g. ``{"metadata": {"ownerReferences": [...]}}``) is accepted.
+        The generated kubernetes client defaults to ``application/json-patch+json``
+        which would reject the body as malformed JSON Patch ops."""
+        c = self._make_client(k8s_runtime_config)
+        body = {"metadata": {"ownerReferences": [{"name": "x"}]}}
+        c.patch_pvc("ns", "pvc-a", body)
+        c._core_v1_api.patch_namespaced_persistent_volume_claim.assert_called_once_with(
+            name="pvc-a",
+            namespace="ns",
+            body=body,
+            _content_type="application/strategic-merge-patch+json",
+        )
+
     def test_create_secret_delegates_to_api(self, k8s_runtime_config):
         """create_secret forwards to CoreV1Api.create_namespaced_secret."""
         c = self._make_client(k8s_runtime_config)

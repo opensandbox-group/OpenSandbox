@@ -297,6 +297,8 @@ class BatchSandboxProvider(WorkloadProvider):
         return {
             "name": created["metadata"]["name"],
             "uid": created["metadata"]["uid"],
+            "apiVersion": f"{self.group}/{self.version}",
+            "kind": "BatchSandbox",
         }
 
     def _apply_platform_node_selector(
@@ -365,6 +367,8 @@ class BatchSandboxProvider(WorkloadProvider):
         return {
             "name": created["metadata"]["name"],
             "uid": created["metadata"]["uid"],
+            "apiVersion": f"{self.group}/{self.version}",
+            "kind": "BatchSandbox",
         }
 
     def _extract_template_pod_extras(self) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:

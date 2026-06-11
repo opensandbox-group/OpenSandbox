@@ -180,9 +180,9 @@ class PVC(BaseModel):
         description=(
             "When true, the volume is automatically removed when the sandbox is "
             "deleted. Only applies to volumes that were auto-created by the server "
-            "(Docker only). Pre-existing volumes are never removed. Has no effect "
-            "on Kubernetes PVCs, whose lifecycle is managed by the StorageClass "
-            "reclaim policy."
+            "on this request; pre-existing volumes are never removed. For "
+            "Kubernetes, the resulting PVC delete then triggers the bound PV's "
+            "StorageClass reclaim policy (Retain/Delete)."
         ),
     )
 

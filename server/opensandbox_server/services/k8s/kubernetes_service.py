@@ -47,13 +47,14 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.config import AppConfig, INGRESS_MODE_GATEWAY, SecureAccessConfig, get_config
 from opensandbox_server.services.constants import (
     SANDBOX_ID_LABEL,
+    SANDBOX_MANAGED_VOLUMES_LABEL,
     SandboxErrorCodes,
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
 from opensandbox_server.services.extension_service import ExtensionService
 from opensandbox_server.services.helpers import format_ingress_endpoint
 from opensandbox_server.services.k8s.create_helpers import _build_create_workload_context
-from opensandbox_server.services.k8s.error_helpers import _build_k8s_api_error
+from opensandbox_server.services.k8s.error_helpers import _build_k8s_api_error, _is_not_found_error
 from opensandbox_server.services.k8s.k8s_diagnostics import K8sDiagnosticsMixin
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
 from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
@@ -297,13 +298,25 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             },
         )
 
-    def _ensure_pvc_volumes(self, volumes: list) -> None:
+    def _ensure_pvc_volumes(self, volumes: list, sandbox_id: str) -> list[str]:
         """
         Ensure that PVC volumes exist before creating the workload.
 
         For each volume with a ``pvc`` backend, check whether the
         PersistentVolumeClaim already exists in the target namespace.
         If not, create it using the provisioning hints from the PVC model.
+        Auto-created PVCs are labeled with ``opensandbox.io/volume-managed-by=server``
+        and ``opensandbox.io/id=<sandbox_id>`` only when the caller opts into
+        cleanup via ``deleteOnSandboxTermination=true`` — that label pair drives
+        deletion in ``_cleanup_managed_pvcs``. Pre-existing PVCs and PVCs auto-
+        created without the opt-in are never deleted by the server.
+
+        Returns the list of claim names that were freshly created with the
+        managed-by labels in this call. The caller uses this list to attach
+        ``ownerReferences`` to the workload CR once it is created, so
+        controller-driven CR deletion (TTL expiry, cascade delete) also
+        garbage-collects the PVC. PVCs that were already present, opt-out
+        PVCs, and PVCs we failed to create are excluded from the list.
 
         Degrades gracefully: if the service account lacks RBAC permissions
         for PVC operations (403), the check is skipped and volume resolution
@@ -314,6 +327,58 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
         default_size = self.app_config.storage.volume_default_size
 
+        # Multiple Volume entries may legitimately mount the same PVC at
+        # different paths, but their provisioning flags must agree —
+        # otherwise the first wins and a later opt-in leaks or a later
+        # opt-out is unexpectedly deleted. Reject 400 up front before any
+        # side effects.
+        flags_by_claim: dict[str, tuple[bool, bool]] = {}
+        for vol in volumes:
+            if vol.pvc is None:
+                continue
+            key = (bool(vol.pvc.create_if_not_exists), bool(vol.pvc.delete_on_sandbox_termination))
+            prior = flags_by_claim.setdefault(vol.pvc.claim_name, key)
+            if prior != key:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": (
+                            f"Conflicting provisioning flags for PVC '{vol.pvc.claim_name}': "
+                            f"createIfNotExists/deleteOnSandboxTermination must match across all "
+                            f"mounts of the same claim."
+                        ),
+                    },
+                )
+
+        # Pre-pass: check ownership on *every* PVC mount (not just the
+        # create-if-not-exists subset). A request with
+        # ``createIfNotExists=false`` that points at a PVC already labeled by
+        # another sandbox would otherwise bypass the guard and risk having its
+        # storage yanked when the owner's cleanup or ownerReference GC fires.
+        # We cache the get_pvc result so the create loop below doesn't refetch.
+        existing_cache: dict[str, Any] = {}
+        for vol in volumes:
+            if vol.pvc is None:
+                continue
+            claim_name = vol.pvc.claim_name
+            if claim_name in existing_cache:
+                continue
+            try:
+                existing = self.k8s_client.get_pvc(self.namespace, claim_name)
+            except ApiException as e:
+                if e.status == 403:
+                    logger.warning(
+                        f"No RBAC permission to read PVC '{claim_name}', skipping auto-create. "
+                        "Grant 'get' and 'create' on 'persistentvolumeclaims' to enable."
+                    )
+                    return []  # Skip all remaining PVCs — same SA, same permissions
+                raise
+            existing_cache[claim_name] = existing
+            if existing is not None:
+                self._reject_pvc_owned_by_other_sandbox(existing, claim_name, sandbox_id)
+
+        managed_pvcs: list[str] = []
         seen_claims: set[str] = set()
         for vol in volumes:
             if vol.pvc is None or not vol.pvc.create_if_not_exists:
@@ -323,17 +388,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 continue
             seen_claims.add(claim_name)
 
-            try:
-                existing = self.k8s_client.get_pvc(self.namespace, claim_name)
-            except ApiException as e:
-                if e.status == 403:
-                    logger.warning(
-                        f"No RBAC permission to read PVC '{claim_name}', skipping auto-create. "
-                        "Grant 'get' and 'create' on 'persistentvolumeclaims' to enable."
-                    )
-                    return  # Skip all remaining PVCs — same SA, same permissions
-                raise
+            existing = existing_cache.get(claim_name)
             if existing is not None:
+                # Ownership already validated by the pre-pass above.
                 logger.debug(f"PVC '{claim_name}' already exists in namespace '{self.namespace}'")
                 continue
 
@@ -341,10 +398,17 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             access_modes = vol.pvc.access_modes or ["ReadWriteOnce"]
             storage_class = vol.pvc.storage_class  # None = cluster default
 
+            is_managed = bool(vol.pvc.delete_on_sandbox_termination)
+            pvc_labels: dict[str, str] = {}
+            if is_managed:
+                pvc_labels[SANDBOX_MANAGED_VOLUMES_LABEL] = "server"
+                pvc_labels[SANDBOX_ID_LABEL] = sandbox_id
+
             pvc_body = V1PersistentVolumeClaim(
                 metadata=V1ObjectMeta(
                     name=claim_name,
                     namespace=self.namespace,
+                    labels=pvc_labels or None,
                 ),
                 spec={
                     "accessModes": access_modes,
@@ -360,9 +424,56 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     f"Auto-created PVC '{claim_name}' (size={storage}, class={storage_class or '<default>'}) "
                     f"in namespace '{self.namespace}'"
                 )
+                if is_managed:
+                    managed_pvcs.append(claim_name)
             except ApiException as e:
                 if e.status == 409:
-                    # Race condition: another request created it between our check and create
+                    # Race: another request created the PVC between our
+                    # pre-pass and our create. The winner may have labeled it
+                    # for a *different* sandbox; re-fetch and re-run the
+                    # ownership guard before proceeding, otherwise we'd mount
+                    # storage that another sandbox's cleanup can delete.
+                    # Fail closed when the re-fetch itself fails — we cannot
+                    # confirm ownership and silently proceeding risks the
+                    # exact live-data-loss case the guard exists for.
+                    try:
+                        racer = self.k8s_client.get_pvc(self.namespace, claim_name)
+                    except Exception as fetch_ex:
+                        logger.error(
+                            f"PVC '{claim_name}' lost create race and the "
+                            f"post-race ownership re-check failed: {fetch_ex}"
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={
+                                "code": SandboxErrorCodes.K8S_API_ERROR,
+                                "message": (
+                                    f"Could not verify ownership of concurrently-created PVC "
+                                    f"'{claim_name}'; refusing to proceed. Retry the request."
+                                ),
+                            },
+                        ) from fetch_ex
+                    if racer is None:
+                        # The race winner created the PVC and then deleted it
+                        # again before our re-fetch (e.g. they hit their own
+                        # provisioning failure and rolled back). Proceeding
+                        # would let our workload reference a non-existent
+                        # claim and fail readiness. Fail closed so the caller
+                        # can retry; their retry's pre-pass will see the
+                        # absent PVC and create it cleanly.
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={
+                                "code": SandboxErrorCodes.K8S_API_ERROR,
+                                "message": (
+                                    f"PVC '{claim_name}' was created concurrently and "
+                                    f"then removed before we could verify it; refusing "
+                                    f"to mount a missing claim. Retry the request."
+                                ),
+                            },
+                        )
+                    self._reject_pvc_owned_by_other_sandbox(racer, claim_name, sandbox_id)
+                    # Don't add to managed_pvcs — whoever created it owns it.
                     logger.info(f"PVC '{claim_name}' was created concurrently, proceeding")
                 elif e.status == 403:
                     logger.warning(
@@ -389,6 +500,94 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                             "message": f"Failed to auto-create PVC '{claim_name}': {e.reason}",
                         },
                     ) from e
+        return managed_pvcs
+
+    def _reject_pvc_owned_by_other_sandbox(
+        self,
+        pvc: Any,
+        claim_name: str,
+        sandbox_id: str,
+    ) -> None:
+        """Raise 409 if ``pvc`` is labeled as managed by a *different* sandbox.
+
+        Letting a new sandbox mount a PVC owned by another would expose the
+        new sandbox to the owner's cleanup (label sweep on delete, or
+        ownerReference GC on TTL/cascade) yanking the storage out mid-run.
+        Same-sandbox retries (matching id) and unlabeled user-managed PVCs
+        are intentionally allowed.
+        """
+        meta = getattr(pvc, "metadata", None)
+        existing_labels = getattr(meta, "labels", None) or {}
+        managed_by = existing_labels.get(SANDBOX_MANAGED_VOLUMES_LABEL)
+        owner_id = existing_labels.get(SANDBOX_ID_LABEL)
+        if managed_by == "server" and owner_id and owner_id != sandbox_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"PVC '{claim_name}' is already managed by sandbox "
+                        f"'{owner_id}' and cannot be auto-attached to a new "
+                        f"sandbox; its owner's cleanup would delete the volume. "
+                        f"Pre-create a user-managed PVC if you need to share storage."
+                    ),
+                },
+            )
+
+    def _attach_pvc_owner_references(
+        self,
+        claim_names: list[str],
+        workload_info: dict,
+    ) -> None:
+        """
+        Patch each PVC to set ``ownerReferences`` pointing at the just-created
+        workload CR. K8s garbage collection then deletes the PVC whenever the
+        CR is deleted — by ``delete_sandbox``, by TTL expiry handled in the
+        controller, or by any other cascade.
+
+        Best-effort: failures are logged but never propagate. The label-based
+        ``_cleanup_managed_pvcs`` path remains as a fallback for the
+        ``delete_sandbox`` API.
+        """
+        if not claim_names:
+            return
+        owner_uid = workload_info.get("uid")
+        owner_name = workload_info.get("name")
+        owner_api_version = workload_info.get("apiVersion")
+        owner_kind = workload_info.get("kind")
+        if not (owner_uid and owner_name and owner_api_version and owner_kind):
+            logger.warning(
+                "Workload provider did not return full owner reference info "
+                "(name/uid/apiVersion/kind); skipping PVC ownerReference patch. "
+                "PVC cleanup on controller-driven CR deletion may not run."
+            )
+            return
+
+        owner_ref = {
+            "apiVersion": owner_api_version,
+            "kind": owner_kind,
+            "name": owner_name,
+            "uid": owner_uid,
+            # blockOwnerDeletion=False so PVC delete failures don't stall the
+            # CR delete; controller is the source of truth.
+            "blockOwnerDeletion": False,
+            # controller=False — we don't claim ownership semantics beyond GC.
+            "controller": False,
+        }
+        patch_body = {"metadata": {"ownerReferences": [owner_ref]}}
+
+        for name in claim_names:
+            try:
+                self.k8s_client.patch_pvc(self.namespace, name, patch_body)
+                logger.debug(
+                    f"sandbox={owner_name} | attached ownerReference {owner_kind}/{owner_name} to PVC '{name}'"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"sandbox={owner_name} | failed to attach ownerReference to PVC '{name}': {e}. "
+                    f"Label-based cleanup on delete_sandbox will still run; "
+                    f"controller-driven (TTL) cleanup may not."
+                )
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
@@ -432,6 +631,21 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             secure_access_token_factory=generate_secure_access_token,
         )
         
+        # Tracks whether we have side effects (auto-created PVCs) that must
+        # be swept by the finally clause if the request fails before returning.
+        # Set eagerly *before* the call so a partial failure inside
+        # _ensure_pvc_volumes (some PVCs created, others not) still triggers
+        # cleanup of the ones we managed to label.
+        managed_pvcs_may_exist = False
+        # Set to True the moment ``create_workload`` returns; cleared only when
+        # the workload is confirmed gone (success path, or rollback
+        # ``delete_workload`` returns without raising). The ``finally`` clause
+        # must not sweep PVCs while the CR is still alive — that would leave a
+        # live workload referencing missing storage. Mirrors the semantics of
+        # ``delete_sandbox`` which skips PVC cleanup unless the workload was
+        # deleted (or already gone).
+        workload_left_alive = False
+        created_managed_pvcs: list[str] = []
         try:
             apply_access_renew_extend_seconds_to_mapping(context.annotations, request.extensions)
             apply_extensions_to_annotations(context.annotations, request.extensions)
@@ -440,39 +654,119 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 request.volumes,
                 self.app_config.storage.allowed_host_paths,
             )
-            
+
+            # Reject poolRef + volumes here, before _ensure_pvc_volumes runs.
+            # The provider also rejects this combination but raises
+            # ``ValueError`` from create_workload after PVCs have been
+            # auto-created and labeled — combined with the pessimistic
+            # ``workload_left_alive`` flag the finally would then skip
+            # cleanup, orphaning the labeled PVCs. Validating up-front means
+            # no side effects happen before the 400 is raised.
+            if request.volumes and (request.extensions or {}).get("poolRef"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": (
+                            "Pool mode (extensions.poolRef) does not support volumes. "
+                            "Remove 'volumes' from the request or use template mode."
+                        ),
+                    },
+                )
 
             # Auto-create PVCs that don't exist yet
             if request.volumes:
-                await asyncio.to_thread(self._ensure_pvc_volumes, request.volumes)
+                managed_pvcs_may_exist = True
+                created_managed_pvcs = await asyncio.to_thread(
+                    self._ensure_pvc_volumes, request.volumes, sandbox_id
+                )
 
-            # Create workload
-            workload_info = await asyncio.to_thread(
-                self.workload_provider.create_workload,
-                sandbox_id=sandbox_id,
-                namespace=self.namespace,
-                image_spec=request.image,
-                entrypoint=request.entrypoint,
-                env=request.env or {},
-                resource_limits=context.resource_limits,
-                labels=context.labels,
-                annotations=context.annotations or None,
-                expires_at=context.expires_at,
-                execd_image=self.execd_image,
-                extensions=request.extensions,
-                network_policy=request.network_policy,
-                egress_image=context.egress_image,
-                egress_auth_token=context.egress_auth_token,
-                egress_mode=context.egress_mode,
-                volumes=request.volumes,
-                platform=request.platform,
-            )
-            
+            # Create the workload CR. Three failure modes drive PVC cleanup:
+            #   1. ``ValueError`` — provider preflight rejection (poolRef+volumes,
+            #      windows platform, etc.). By convention no CR has been
+            #      touched, so the PVCs we just labeled are orphans we must
+            #      sweep. Flag stays False; outer handler converts to 400.
+            #   2. Other exception after partial CR creation — try rollback
+            #      ``delete_workload``: on success the CR is gone, sweep PVCs;
+            #      on failure the CR may still be alive with pods needing the
+            #      PVCs, so flip the flag to skip the sweep.
+            #   3. Success — flag becomes True so a subsequent
+            #      ``_wait_for_sandbox_ready`` failure must rollback before
+            #      sweeping (the existing inner try/except handles that).
+            try:
+                workload_info = await asyncio.to_thread(
+                    self.workload_provider.create_workload,
+                    sandbox_id=sandbox_id,
+                    namespace=self.namespace,
+                    image_spec=request.image,
+                    entrypoint=request.entrypoint,
+                    env=request.env or {},
+                    resource_limits=context.resource_limits,
+                    labels=context.labels,
+                    annotations=context.annotations or None,
+                    expires_at=context.expires_at,
+                    execd_image=self.execd_image,
+                    extensions=request.extensions,
+                    network_policy=request.network_policy,
+                    egress_image=context.egress_image,
+                    egress_auth_token=context.egress_auth_token,
+                    egress_mode=context.egress_mode,
+                    volumes=request.volumes,
+                    platform=request.platform,
+                )
+                workload_left_alive = True
+            except ValueError:
+                # Preflight failed; no CR. PVCs are safe to sweep.
+                raise
+            except Exception as create_ex:
+                # CR may exist with partial state. Attempt rollback so the
+                # ``finally`` can sweep PVCs cleanly. A 404 from the rollback
+                # means the CR is already gone (e.g. the provider's own
+                # internal rollback already deleted it before re-raising),
+                # which is the same safe state as a successful delete —
+                # treat it as success so PVCs are still swept.
+                try:
+                    await asyncio.to_thread(
+                        self.workload_provider.delete_workload,
+                        sandbox_id,
+                        self.namespace,
+                    )
+                    logger.info(
+                        f"Rolled back partial workload for sandbox {sandbox_id} "
+                        f"after create_workload failure: {create_ex}"
+                    )
+                except Exception as rb_ex:
+                    if _is_not_found_error(rb_ex):
+                        logger.info(
+                            f"Rollback found no workload for sandbox {sandbox_id} "
+                            f"(already gone); treating as deleted. create_ex={create_ex}"
+                        )
+                    else:
+                        # Rollback failed; CR might still be alive. Be defensive:
+                        # skip PVC sweep so we don't yank storage from a live
+                        # workload. The user's eventual ``delete_sandbox`` will
+                        # 404 or succeed, and *that* path will sweep PVCs.
+                        workload_left_alive = True
+                        logger.error(
+                            f"sandbox={sandbox_id} | create_workload raised and rollback "
+                            f"delete_workload also failed; managed PVCs will be left for "
+                            f"the next delete_sandbox to sweep. create_ex={create_ex}, "
+                            f"rollback_ex={rb_ex}"
+                        )
+                raise
+
+
             logger.info(
                 "Created sandbox: id=%s, workload=%s",
                 sandbox_id,
                 workload_info.get("name"),
             )
+
+            # Attach ownerReferences so K8s GC removes PVCs whenever the CR is
+            # deleted — including TTL expiry handled by the controller, which
+            # never invokes our delete_sandbox API and so bypasses
+            # _cleanup_managed_pvcs.
+            self._attach_pvc_owner_references(created_managed_pvcs, workload_info)
 
             try:
                 workload = await self._wait_for_sandbox_ready(
@@ -486,7 +780,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 )
                 effective_platform = _extract_platform_from_workload(workload)
 
-                return CreateSandboxResponse(
+                response = CreateSandboxResponse(
                     id=sandbox_id,
                     status=SandboxStatus(
                         state=status_info["state"],
@@ -500,7 +794,13 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     entrypoint=request.entrypoint,
                     platform=effective_platform or request.platform,
                 )
-                
+                # Reached success — the caller now owns the sandbox lifecycle
+                # and any PVCs we created. delete_sandbox is responsible for
+                # the eventual cleanup.
+                managed_pvcs_may_exist = False
+                workload_left_alive = False
+                return response
+
             except HTTPException as e:
                 try:
                     logger.error(f"Creation failed, cleaning up sandbox {sandbox_id}: {e}")
@@ -509,10 +809,22 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         sandbox_id,
                         self.namespace,
                     )
+                    workload_left_alive = False
                 except Exception as cleanup_ex:
-                    logger.error(f"Failed to cleanup sandbox {sandbox_id}", exc_info=cleanup_ex)
+                    # 404 means the CR is already gone (e.g. controller deleted
+                    # it on TTL expiry while we were waiting) — that's the same
+                    # safe state as a successful rollback, so allow the PVC
+                    # sweep to proceed.
+                    if _is_not_found_error(cleanup_ex):
+                        workload_left_alive = False
+                        logger.info(
+                            f"Cleanup found no workload for sandbox {sandbox_id} "
+                            f"(already gone); treating as deleted"
+                        )
+                    else:
+                        logger.error(f"Failed to cleanup sandbox {sandbox_id}", exc_info=cleanup_ex)
                 raise
-            
+
         except HTTPException:
             raise
         except ValueError as e:
@@ -533,6 +845,28 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     "message": f"Failed to create sandbox: {str(e)}",
                 },
             ) from e
+        finally:
+            if managed_pvcs_may_exist:
+                if workload_left_alive:
+                    # The CR may still be in the cluster, possibly with pods
+                    # that need the PVCs. Skip the sweep so we don't yank
+                    # storage from a live workload. The user's subsequent
+                    # ``delete_sandbox`` is the recovery path: if it succeeds
+                    # or 404s, the label-sweep there reclaims the PVCs. We
+                    # cannot assume ownerReference GC will help — when this
+                    # path is hit on a ``create_workload`` failure the
+                    # ownerReferences were never attached.
+                    logger.warning(
+                        f"sandbox={sandbox_id} | skipping managed-PVC cleanup: "
+                        f"workload rollback did not confirm deletion; "
+                        f"PVCs will be reclaimed by the next delete_sandbox call"
+                    )
+                else:
+                    # Best-effort: the caller can't sweep these because the create
+                    # API returned no sandbox id. _cleanup_managed_pvcs is scoped
+                    # to PVCs labeled with this sandbox_id, so it can't touch
+                    # anything else.
+                    self._cleanup_managed_pvcs(sandbox_id)
 
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
         """
@@ -611,12 +945,81 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 sandbox_id,
             )
             logger.info(f"Deleted sandbox: {sandbox_id}")
-
-        except HTTPException:
+        except HTTPException as e:
+            # Workload not found (404) still triggers managed-PVC cleanup so a
+            # retry can sweep orphans; other errors leave the workload in place,
+            # so we must not delete its PVCs.
+            if e.status_code == status.HTTP_404_NOT_FOUND:
+                self._cleanup_managed_pvcs(sandbox_id)
             raise
         except Exception as e:
             logger.error(f"Error deleting sandbox {sandbox_id}: {e}")
             raise _build_k8s_api_error("delete sandbox", e) from e
+
+        self._cleanup_managed_pvcs(sandbox_id)
+
+    def _cleanup_managed_pvcs(self, sandbox_id: str) -> None:
+        """
+        Delete PVCs that were auto-created for this sandbox.
+
+        Only PVCs labeled with ``opensandbox.io/volume-managed-by=server`` and
+        ``opensandbox.io/id=<sandbox_id>`` are removed; user-managed PVCs are
+        never touched. Errors are logged but never propagate — workload
+        deletion has already succeeded and PVC cleanup is best-effort.
+
+        Runs after workload deletion so the kubelet has dropped the
+        ``kubernetes.io/pvc-protection`` finalizer; otherwise the PVC would
+        stay in the ``Terminating`` state until pod teardown completes
+        (Kubernetes handles that case correctly, but immediate removal is
+        cleaner when the pod is already gone).
+        """
+        from kubernetes.client import ApiException
+
+        selector = (
+            f"{SANDBOX_MANAGED_VOLUMES_LABEL}=server,"
+            f"{SANDBOX_ID_LABEL}={sandbox_id}"
+        )
+        try:
+            pvcs = self.k8s_client.list_pvcs(self.namespace, label_selector=selector)
+        except ApiException as e:
+            if e.status == 403:
+                logger.debug(
+                    f"No RBAC permission to list PVCs, skipping managed-PVC cleanup for sandbox {sandbox_id}"
+                )
+                return
+            logger.warning(
+                f"Failed to list managed PVCs for sandbox {sandbox_id}: {e}"
+            )
+            return
+        except Exception as e:
+            logger.warning(
+                f"Failed to list managed PVCs for sandbox {sandbox_id}: {e}"
+            )
+            return
+
+        for pvc in pvcs:
+            metadata = getattr(pvc, "metadata", None)
+            name = getattr(metadata, "name", None) if metadata is not None else None
+            if not name:
+                continue
+            try:
+                self.k8s_client.delete_pvc(self.namespace, name)
+                logger.info(
+                    f"sandbox={sandbox_id} | deleted managed PVC '{name}' in namespace '{self.namespace}'"
+                )
+            except ApiException as e:
+                if e.status == 403:
+                    logger.warning(
+                        f"sandbox={sandbox_id} | no RBAC permission to delete PVC '{name}', skipping"
+                    )
+                    return  # Same SA — no point trying the rest
+                logger.warning(
+                    f"sandbox={sandbox_id} | failed to delete managed PVC '{name}': {e}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"sandbox={sandbox_id} | failed to delete managed PVC '{name}': {e}"
+                )
     
     def pause_sandbox(self, sandbox_id: str) -> None:
         """

@@ -28,7 +28,7 @@ rules:
     verbs: ["create", "delete", "get"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["create", "get"]
+    verbs: ["create", "delete", "get", "list", "patch"]
   - apiGroups: ["node.k8s.io"]
     resources: ["runtimeclasses"]
     verbs: ["get", "list"]

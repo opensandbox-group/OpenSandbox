@@ -317,6 +317,60 @@ class K8sClient:
             body=body,
         )
 
+    def list_pvcs(
+        self,
+        namespace: str,
+        label_selector: str = "",
+    ) -> List[Any]:
+        """List PersistentVolumeClaims in a namespace, returning the items list."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        result = self.get_core_v1_api().list_namespaced_persistent_volume_claim(
+            namespace=namespace,
+            label_selector=label_selector,
+        )
+        return list(getattr(result, "items", []) or [])
+
+    def delete_pvc(
+        self,
+        namespace: str,
+        name: str,
+    ) -> None:
+        """Delete a PersistentVolumeClaim by name. 404 is swallowed."""
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        try:
+            self.get_core_v1_api().delete_namespaced_persistent_volume_claim(
+                name=name,
+                namespace=namespace,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                return
+            raise
+
+    def patch_pvc(
+        self,
+        namespace: str,
+        name: str,
+        body: Any,
+    ) -> Any:
+        """Patch a PersistentVolumeClaim using strategic merge semantics.
+
+        The pinned kubernetes-client picks ``application/json-patch+json`` by
+        default (first entry in the generated content-type list) which would
+        reject our merge-shaped body. Force strategic-merge so list fields
+        like ``ownerReferences`` merge by key.
+        """
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        return self.get_core_v1_api().patch_namespaced_persistent_volume_claim(
+            name=name,
+            namespace=namespace,
+            body=body,
+            _content_type="application/strategic-merge-patch+json",
+        )
+
     # ------------------------------------------------------------------
     # Secret operations
     # ------------------------------------------------------------------
