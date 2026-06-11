@@ -63,7 +63,7 @@ func (c *FilesystemController) DownloadFile() {
 	} else if offsetStr == "" || limitStr == "" {
 		c.RespondError(
 			http.StatusBadRequest,
-			model.ErrorCodeInvalidParameter,
+			model.ErrorCodeInvalidRequest,
 			"both offset and limit must be provided together for line-based reading",
 		)
 		return
@@ -74,7 +74,7 @@ func (c *FilesystemController) DownloadFile() {
 		if err != nil || offset < 1 {
 			c.RespondError(
 				http.StatusBadRequest,
-				model.ErrorCodeInvalidParameter,
+				model.ErrorCodeInvalidRequest,
 				"offset must be a positive integer (1-based)",
 			)
 			return
@@ -84,7 +84,7 @@ func (c *FilesystemController) DownloadFile() {
 		if err != nil || limit < 1 {
 			c.RespondError(
 				http.StatusBadRequest,
-				model.ErrorCodeInvalidParameter,
+				model.ErrorCodeInvalidRequest,
 				"limit must be a positive integer",
 			)
 			return
