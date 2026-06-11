@@ -174,89 +174,153 @@ class FilesystemAdapterSync(FilesystemSync):
     def write_files(self, entries: list[WriteEntry]) -> None:
         """Write multiple files in a single operation using multipart upload.
 
-        Uses chunked transfer encoding via sync generator so the proxy layer
-        does not impose Content-Length-based body size limits.
+        Uses chunked transfer encoding for direct execd access to bypass
+        ingress proxy body size limits. Uses Content-Length when going
+        through the server proxy, which does not support chunked multipart.
         """
         if not entries:
             return
         logger.debug("Writing %s files", len(entries))
         try:
-            boundary = f"opensandbox_{os.urandom(8).hex()}_{int(time.time())}"
-
-            def _body() -> Iterator[bytes]:
-                for entry in entries:
-                    if not entry.path:
-                        raise InvalidArgumentException("File path cannot be null")
-                    if entry.data is None:
-                        raise InvalidArgumentException("File data cannot be null")
-
-                    metadata = {
-                        "path": entry.path,
-                        "owner": entry.owner,
-                        "group": entry.group,
-                        "mode": entry.mode,
-                    }
-                    metadata_json = json.dumps(metadata)
-
-                    content: bytes | str | IOBase
-                    content_type: str
-                    if isinstance(entry.data, bytes):
-                        content = entry.data
-                        content_type = "application/octet-stream"
-                    elif isinstance(entry.data, str):
-                        content = entry.data
-                        content_type = "text/plain; charset=utf-8"
-                    elif isinstance(entry.data, IOBase):
-                        if isinstance(entry.data, TextIOBase):
-                            raise InvalidArgumentException(
-                                "File stream must be binary (opened with 'rb'). Text streams are not supported."
-                            )
-                        content = entry.data
-                        content_type = "application/octet-stream"
-                    else:
-                        raise InvalidArgumentException(f"Unsupported file data type: {type(entry.data)}")
-
-                    # metadata part
-                    yield f"--{boundary}\r\n".encode()
-                    yield b'Content-Disposition: form-data; name="metadata"\r\n'
-                    yield b"Content-Type: application/json\r\n\r\n"
-                    yield metadata_json.encode()
-                    yield b"\r\n"
-
-                    # file part header
-                    filename = os.path.basename(entry.path) or "file"
-                    yield f"--{boundary}\r\n".encode()
-                    yield f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode()
-                    yield f"Content-Type: {content_type}\r\n\r\n".encode()
-
-                    # file data
-                    if isinstance(content, bytes):
-                        yield content
-                    elif isinstance(content, str):
-                        yield content.encode("utf-8")
-                    else:  # IOBase
-                        while True:
-                            chunk = content.read(64 * 1024)
-                            if not chunk:
-                                break
-                            if isinstance(chunk, str):
-                                yield chunk.encode()
-                            else:
-                                yield chunk
-                    yield b"\r\n"
-
-                yield f"--{boundary}--\r\n".encode()
-
             url = self._get_execd_url(self.FILESYSTEM_UPLOAD_PATH)
-            response = self._httpx_client.post(
-                url,
-                content=_body(),
-                headers={"content-type": f"multipart/form-data; boundary={boundary}"},
-            )
+
+            if self.connection_config.use_server_proxy:
+                response = self._write_files_with_content_length(url, entries)
+            else:
+                response = self._write_files_chunked(url, entries)
+
             response.raise_for_status()
         except Exception as e:
             logger.error("Failed to write %s files", len(entries), exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def _write_files_with_content_length(
+        self,
+        url: str,
+        entries: list[WriteEntry],
+    ) -> httpx.Response:
+        """Upload via httpx ``files=`` parameter with Content-Length.
+
+        Used when going through the server proxy, which requires Content-Length
+        for multipart requests.
+        """
+        multipart_parts = []
+        for entry in entries:
+            if not entry.path:
+                raise InvalidArgumentException("File path cannot be null")
+            if entry.data is None:
+                raise InvalidArgumentException("File data cannot be null")
+
+            metadata = {
+                "path": entry.path,
+                "owner": entry.owner,
+                "group": entry.group,
+                "mode": entry.mode,
+            }
+            multipart_parts.append(("metadata", ("metadata", json.dumps(metadata), "application/json")))
+
+            content: bytes | str | IOBase
+            content_type: str
+            if isinstance(entry.data, bytes):
+                content = entry.data
+                content_type = "application/octet-stream"
+            elif isinstance(entry.data, str):
+                content = entry.data
+                content_type = "text/plain; charset=utf-8"
+            elif isinstance(entry.data, IOBase):
+                if isinstance(entry.data, TextIOBase):
+                    raise InvalidArgumentException(
+                        "File stream must be binary (opened with 'rb'). Text streams are not supported."
+                    )
+                content = entry.data
+                content_type = "application/octet-stream"
+            else:
+                raise InvalidArgumentException(f"Unsupported file data type: {type(entry.data)}")
+
+            multipart_parts.append(("file", (entry.path, content, content_type)))
+
+        return self._httpx_client.post(url, files=multipart_parts)
+
+    def _write_files_chunked(
+        self,
+        url: str,
+        entries: list[WriteEntry],
+    ) -> httpx.Response:
+        """Upload via chunked transfer encoding.
+
+        Used for direct execd access to bypass ingress proxy body size limits.
+        """
+        boundary = f"opensandbox_{os.urandom(8).hex()}_{int(time.time())}"
+
+        def _body() -> Iterator[bytes]:
+            for entry in entries:
+                if not entry.path:
+                    raise InvalidArgumentException("File path cannot be null")
+                if entry.data is None:
+                    raise InvalidArgumentException("File data cannot be null")
+
+                metadata = {
+                    "path": entry.path,
+                    "owner": entry.owner,
+                    "group": entry.group,
+                    "mode": entry.mode,
+                }
+                metadata_json = json.dumps(metadata)
+
+                content: bytes | str | IOBase
+                content_type: str
+                if isinstance(entry.data, bytes):
+                    content = entry.data
+                    content_type = "application/octet-stream"
+                elif isinstance(entry.data, str):
+                    content = entry.data
+                    content_type = "text/plain; charset=utf-8"
+                elif isinstance(entry.data, IOBase):
+                    if isinstance(entry.data, TextIOBase):
+                        raise InvalidArgumentException(
+                            "File stream must be binary (opened with 'rb'). Text streams are not supported."
+                        )
+                    content = entry.data
+                    content_type = "application/octet-stream"
+                else:
+                    raise InvalidArgumentException(f"Unsupported file data type: {type(entry.data)}")
+
+                # metadata part
+                yield f"--{boundary}\r\n".encode()
+                yield b'Content-Disposition: form-data; name="metadata"\r\n'
+                yield b"Content-Type: application/json\r\n\r\n"
+                yield metadata_json.encode()
+                yield b"\r\n"
+
+                # file part header
+                filename = os.path.basename(entry.path) or "file"
+                yield f"--{boundary}\r\n".encode()
+                yield f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode()
+                yield f"Content-Type: {content_type}\r\n\r\n".encode()
+
+                # file data
+                if isinstance(content, bytes):
+                    yield content
+                elif isinstance(content, str):
+                    yield content.encode("utf-8")
+                else:  # IOBase
+                    while True:
+                        chunk = content.read(64 * 1024)
+                        if not chunk:
+                            break
+                        if isinstance(chunk, str):
+                            yield chunk.encode()
+                        else:
+                            yield chunk
+                yield b"\r\n"
+
+            yield f"--{boundary}--\r\n".encode()
+
+        return self._httpx_client.post(
+            url,
+            content=_body(),
+            headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+        )
 
     def write_file(
         self,
