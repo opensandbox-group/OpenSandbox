@@ -371,8 +371,9 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
         {
             await sandbox.KillAsync();
         }
-        catch
+        catch (Exception ex)
         {
+            Console.Error.WriteLine($"KillSandboxAsync: sandbox.KillAsync() failed during cleanup: {ex}");
         }
 
         await sandbox.DisposeAsync();
