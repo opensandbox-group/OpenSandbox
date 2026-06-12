@@ -27,7 +27,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
@@ -77,17 +76,19 @@ func ChmodFile(file string, perms model.Permission) error {
 }
 
 func SetFileOwnership(absPath string, owner string, group string) error {
+	if owner == "" && group == "" {
+		return nil
+	}
+
 	uid := -1
 	if owner != "" {
 		userInfo, err := user.Lookup(owner)
 		if err != nil {
-			log.Warning("Failed to lookup user %s: %v", owner, err)
-		} else {
-			uid, err = strconv.Atoi(userInfo.Uid)
-			if err != nil {
-				log.Warning("Failed to convert uid for user %s: %v", owner, err)
-				uid = -1
-			}
+			return fmt.Errorf("failed to lookup user %s: %w", owner, err)
+		}
+		uid, err = strconv.Atoi(userInfo.Uid)
+		if err != nil {
+			return fmt.Errorf("failed to convert uid for user %s: %w", owner, err)
 		}
 	}
 
@@ -95,21 +96,12 @@ func SetFileOwnership(absPath string, owner string, group string) error {
 	if group != "" {
 		groupInfo, err := user.LookupGroup(group)
 		if err != nil {
-			log.Warning("Failed to lookup group %s: %v", group, err)
-		} else {
-			gid, err = strconv.Atoi(groupInfo.Gid)
-			if err != nil {
-				log.Warning("Failed to convert gid for group %s: %v", group, err)
-				gid = -1
-			}
+			return fmt.Errorf("failed to lookup group %s: %w", group, err)
 		}
-	}
-
-	if uid == -1 && gid == -1 {
-		if _, err := os.Stat(absPath); err != nil {
-			return fmt.Errorf("failed to set owner/group for %s: %w", absPath, err)
+		gid, err = strconv.Atoi(groupInfo.Gid)
+		if err != nil {
+			return fmt.Errorf("failed to convert gid for group %s: %w", group, err)
 		}
-		return nil
 	}
 
 	if err := os.Chown(absPath, uid, gid); err != nil {

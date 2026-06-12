@@ -98,8 +98,23 @@ func TestSetFileOwnership_EmptyOwnerGroup(t *testing.T) {
 }
 
 func TestSetFileOwnership_MissingFile(t *testing.T) {
-	err := SetFileOwnership("/nonexistent/path/file.txt", "", "")
-	require.Error(t, err, "empty owner/group on missing file should return error")
+	if runtime.GOOS == "windows" {
+		t.Skip("SetFileOwnership is a no-op on Windows")
+	}
+	err := SetFileOwnership("/nonexistent/path/file.txt", "root", "")
+	require.Error(t, err, "chown on missing file should return error")
+}
+
+func TestSetFileOwnership_InvalidOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SetFileOwnership is a no-op on Windows")
+	}
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "test.txt")
+	require.NoError(t, os.WriteFile(file, []byte("data"), 0o644))
+
+	err := SetFileOwnership(file, "nonexistent_user_xyz", "")
+	require.Error(t, err, "invalid owner should return error")
 }
 
 func TestSearchFileMetadata(t *testing.T) {
