@@ -725,3 +725,108 @@ def test_proxy_active_credential_vault_returns_sidecar_forbidden(
     assert response.content == b"forbidden\n"
     assert fake_client.built is not None
     assert fake_client.built["url"] == "http://10.57.1.91:18080/credential-vault/_active"
+
+
+def test_proxy_strips_content_length_for_streaming_post(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """content-length must not be forwarded when the body is streamed (issue #1016).
+
+    The proxy sends the request body as an async generator which httpx encodes
+    with Transfer-Encoding: chunked.  If content-length is also forwarded, Go's
+    net/http server reads exactly that many bytes and silently truncates the rest,
+    causing uploads > ~18 KB to appear successful (HTTP 200) while the file is
+    never fully written.
+    """
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(status_code=200, chunks=[b"ok"])
+    _set_http_client(client, fake_client)
+
+    large_body = b"x" * (20 * 1024)  # 20 KB — above the ~18 KB truncation threshold
+
+    for method in ("POST", "PUT", "PATCH"):
+        response = client.request(
+            method,
+            "/v1/sandboxes/sbx-123/proxy/44772/files/upload",
+            headers={**auth_headers, "Content-Length": str(len(large_body))},
+            content=large_body,
+        )
+
+        assert response.status_code == 200
+        assert fake_client.built is not None
+        lowered = {k.lower(): v for k, v in fake_client.built["headers"].items()}
+        assert "content-length" not in lowered, (
+            f"{method}: content-length must be stripped for streaming requests"
+        )
+
+
+def test_proxy_strips_content_length_for_streaming_delete(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """DELETE with a body is also streamed; content-length must be stripped."""
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(status_code=200, chunks=[b"deleted"])
+    _set_http_client(client, fake_client)
+
+    body = b'{"id": "resource-123"}'
+    response = client.request(
+        "DELETE",
+        "/v1/sandboxes/sbx-123/proxy/44772/resources",
+        headers={**auth_headers, "Content-Length": str(len(body))},
+        content=body,
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    lowered = {k.lower(): v for k, v in fake_client.built["headers"].items()}
+    assert "content-length" not in lowered, (
+        "DELETE: content-length must be stripped for streaming requests"
+    )
+
+
+def test_proxy_preserves_content_length_for_get(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """GET requests are not streamed; content-length (if any) must be forwarded as-is."""
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(status_code=200, chunks=[b"data"])
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/44772/files/list",
+        headers={**auth_headers, "Content-Length": "0"},
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["content"] is None
