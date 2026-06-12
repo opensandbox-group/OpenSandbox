@@ -38,8 +38,11 @@ def apply_volumes_to_pod_spec(
     mounts = main_container.get("volumeMounts", [])
     pod_volumes = pod_spec.get("volumes", [])
 
-    existing_volume_names = {v.get("name") for v in pod_volumes if isinstance(v, dict)}
-    pvc_to_volume_name: Dict[str, str] = {}
+    existing_volume_names = {
+        v.get("name") for v in pod_volumes if isinstance(v, dict)
+    }
+    # Key: (claim_name, read_only) so the same PVC can be mounted both RO and RW.
+    pvc_to_volume_name: Dict[tuple, str] = {}
 
     for vol in volumes:
         vol_name = vol.name
@@ -52,19 +55,23 @@ def apply_volumes_to_pod_spec(
 
         if vol.pvc is not None:
             pvc_claim_name = vol.pvc.claim_name
+            pvc_key = (pvc_claim_name, vol.read_only)
 
-            if pvc_claim_name not in pvc_to_volume_name:
+            if pvc_key not in pvc_to_volume_name:
+                pvc_volume: Dict[str, Any] = {
+                    "claimName": pvc_claim_name,
+                }
+                if vol.read_only:
+                    pvc_volume["readOnly"] = True
                 pod_volumes.append({
                     "name": vol_name,
-                    "persistentVolumeClaim": {
-                        "claimName": pvc_claim_name,
-                    },
+                    "persistentVolumeClaim": pvc_volume,
                 })
-                pvc_to_volume_name[pvc_claim_name] = vol_name
+                pvc_to_volume_name[pvc_key] = vol_name
                 existing_volume_names.add(vol_name)
 
             mount = {
-                "name": pvc_to_volume_name[pvc_claim_name],
+                "name": pvc_to_volume_name[pvc_key],
                 "mountPath": vol.mount_path,
                 "readOnly": vol.read_only,
             }
@@ -73,7 +80,9 @@ def apply_volumes_to_pod_spec(
             mounts.append(mount)
 
             logger.info(
-                f"Added PVC volume '{vol_name}' (claim: {pvc_claim_name}) mounted at '{vol.mount_path}' for sandbox"
+                "Added PVC volume '%s' (claim: %s, readOnly: %s) "
+                "mounted at '%s' for sandbox",
+                vol_name, pvc_claim_name, vol.read_only, vol.mount_path,
             )
         elif vol.host is not None:
             host_path = vol.host.path
@@ -96,7 +105,9 @@ def apply_volumes_to_pod_spec(
             mounts.append(mount)
 
             logger.info(
-                f"Added hostPath volume '{vol_name}' (path: {host_path}) mounted at '{vol.mount_path}' for sandbox"
+                "Added hostPath volume '%s' (path: %s) "
+                "mounted at '%s' for sandbox",
+                vol_name, host_path, vol.mount_path,
             )
         else:
             raise ValueError(

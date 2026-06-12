@@ -2675,6 +2675,16 @@ spec:
         assert models_mount is not None
         assert models_mount["readOnly"] is True
 
+        pvc_vol = next(
+            (
+                v for v in pod_spec["volumes"]
+                if v.get("persistentVolumeClaim", {}).get("claimName") == "models-pvc"
+            ),
+            None,
+        )
+        assert pvc_vol is not None
+        assert pvc_vol["persistentVolumeClaim"].get("readOnly") is True
+
     def test_create_workload_with_pvc_volume_subpath(self, mock_k8s_client):
         """
         Test creating workload with PVC volume mount with subPath.
