@@ -41,6 +41,11 @@ public abstract class BaseE2ETest {
     private static final String PROP_DOMAIN = "opensandbox.test.domain";
     private static final String PROP_PROTOCOL = "opensandbox.test.protocol";
     private static final String PROP_IMG_DEFAULT = "opensandbox.sandbox.default.image";
+    private static final String ENV_API_KEY = "OPENSANDBOX_TEST_API_KEY";
+    private static final String ENV_DOMAIN = "OPENSANDBOX_TEST_DOMAIN";
+    private static final String ENV_PROTOCOL = "OPENSANDBOX_TEST_PROTOCOL";
+    private static final String ENV_IMG_DEFAULT = "OPENSANDBOX_SANDBOX_DEFAULT_IMAGE";
+    private static final String ENV_USE_SERVER_PROXY = "OPENSANDBOX_TEST_USE_SERVER_PROXY";
 
     // ==========================================
     // Shared State (Static)
@@ -54,17 +59,17 @@ public abstract class BaseE2ETest {
     }
 
     protected static String getSandboxImage() {
-        return testProperties.getProperty(PROP_IMG_DEFAULT);
+        return configValue(PROP_IMG_DEFAULT, ENV_IMG_DEFAULT, "opensandbox/code-interpreter:latest");
     }
 
     protected static ConnectionConfig createConnectionConfig(boolean useServerProxy) {
-        String protocol = testProperties.getProperty(PROP_PROTOCOL, "https");
+        String protocol = configValue(PROP_PROTOCOL, ENV_PROTOCOL, "http");
         return ConnectionConfig.builder()
-                .apiKey(testProperties.getProperty(PROP_API_KEY))
-                .domain(testProperties.getProperty(PROP_DOMAIN))
-                .requestTimeout(Duration.ofMinutes(1))
+                .apiKey(configValue(PROP_API_KEY, ENV_API_KEY, "e2e-test"))
+                .domain(configValue(PROP_DOMAIN, ENV_DOMAIN, "localhost:8080"))
+                .requestTimeout(Duration.ofMinutes(3))
                 .protocol(protocol)
-                .useServerProxy(useServerProxy)
+                .useServerProxy(useServerProxy || shouldUseServerProxy())
                 .build();
     }
 
@@ -82,14 +87,28 @@ public abstract class BaseE2ETest {
     }
 
     private static void initializeSharedConfig() {
-        String protocol = testProperties.getProperty(PROP_PROTOCOL, "https");
+        String protocol = configValue(PROP_PROTOCOL, ENV_PROTOCOL, "http");
         sharedConnectionConfig =
                 ConnectionConfig.builder()
-                        .apiKey(testProperties.getProperty(PROP_API_KEY))
-                        .domain(testProperties.getProperty(PROP_DOMAIN))
-                        .requestTimeout(Duration.ofMinutes(1))
+                        .apiKey(configValue(PROP_API_KEY, ENV_API_KEY, "e2e-test"))
+                        .domain(configValue(PROP_DOMAIN, ENV_DOMAIN, "localhost:8080"))
+                        .requestTimeout(Duration.ofMinutes(3))
                         .protocol(protocol)
+                        .useServerProxy(shouldUseServerProxy())
                         .build();
+    }
+
+    private static String configValue(String propertyKey, String envKey, String defaultValue) {
+        String envValue = System.getenv(envKey);
+        if (envValue != null && !envValue.isBlank()) {
+            return envValue;
+        }
+        return testProperties.getProperty(propertyKey, defaultValue);
+    }
+
+    private static boolean shouldUseServerProxy() {
+        String envValue = System.getenv(ENV_USE_SERVER_PROXY);
+        return envValue != null && Boolean.parseBoolean(envValue);
     }
 
     @BeforeEach

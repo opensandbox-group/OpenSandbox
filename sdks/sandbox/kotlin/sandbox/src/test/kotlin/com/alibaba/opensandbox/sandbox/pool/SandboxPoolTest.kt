@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolAcquireFailedException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolEmptyException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolNotRunningException
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Host
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
@@ -403,6 +404,22 @@ class SandboxPoolTest {
         val platformField = builder.javaClass.getDeclaredField("platform")
         platformField.isAccessible = true
         assertSame(platform, platformField.get(builder))
+    }
+
+    @Test
+    fun `applyToBuilder propagates pool creation spec credential proxy to sandbox builder`() {
+        val credentialProxy = CredentialProxyConfig.enabled()
+        val spec =
+            PoolCreationSpec.builder()
+                .image("ubuntu:22.04")
+                .credentialProxy(credentialProxy)
+                .build()
+
+        val builder = spec.applyToBuilder(Sandbox.builder())
+
+        val credentialProxyField = builder.javaClass.getDeclaredField("credentialProxy")
+        credentialProxyField.isAccessible = true
+        assertSame(credentialProxy, credentialProxyField.get(builder))
     }
 
     @Test

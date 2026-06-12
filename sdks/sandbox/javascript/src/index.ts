@@ -30,11 +30,29 @@ export { ConnectionConfig } from "./config/connection.js";
 export type { ConnectionConfigOptions, ConnectionProtocol } from "./config/connection.js";
 
 export type {
+  Credential,
+  CredentialAuth,
+  CredentialAuthMetadata,
+  CredentialBinding,
+  CredentialBindingListResponse,
+  CredentialBindingMetadata,
+  CredentialBindingMutationSet,
+  CredentialListResponse,
+  CredentialMatch,
+  CredentialMatchScheme,
+  CredentialMetadata,
+  CredentialMutationSet,
+  CredentialProxyConfig,
+  CredentialVaultCreateRequest,
+  CredentialVaultPatchRequest,
+  CredentialVaultState,
   CreateSnapshotRequest,
   CreateSandboxRequest,
   CreateSandboxResponse,
+  CustomHeaderEntry,
   Endpoint,
   Host,
+  InlineCredentialSource,
   ListSnapshotsParams,
   ListSnapshotsResponse,
   ListSandboxesParams,
@@ -57,6 +75,7 @@ export type {
 } from "./models/sandboxes.js";
 
 export type { Sandboxes } from "./services/sandboxes.js";
+export type { CredentialVault, Egress } from "./services/egress.js";
 
 export { SandboxManager } from "./manager.js";
 export type { SandboxFilter, SandboxManagerOptions } from "./manager.js";

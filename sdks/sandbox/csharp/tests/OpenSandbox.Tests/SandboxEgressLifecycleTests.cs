@@ -31,7 +31,8 @@ public class SandboxEgressLifecycleTests
     {
         var sandboxes = new StubSandboxes();
         var egress = new StubEgress();
-        var adapterFactory = new StubAdapterFactory(sandboxes, egress);
+        var credentialVault = new StubCredentialVault();
+        var adapterFactory = new StubAdapterFactory(sandboxes, egress, credentialVault);
 
         var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
         {
@@ -56,6 +57,8 @@ public class SandboxEgressLifecycleTests
             Target = "www.github.com"
         }]);
         await sandbox.DeleteEgressRulesAsync(["www.github.com", "*.blocked.org"]);
+        await sandbox.CredentialVault.GetAsync();
+        await sandbox.GetCredentialVaultAsync();
 
         sandboxes.EndpointCalls.Should().Equal(Constants.DefaultExecdPort, Constants.DefaultEgressPort);
         adapterFactory.EgressStackCallCount.Should().Be(1);
@@ -63,7 +66,39 @@ public class SandboxEgressLifecycleTests
         egress.GetPolicyCallCount.Should().Be(1);
         egress.PatchRulesCallCount.Should().Be(1);
         egress.DeleteRulesCallCount.Should().Be(1);
+        credentialVault.GetVaultCallCount.Should().Be(2);
         egress.LastDeleteTargets.Should().Equal("www.github.com", "*.blocked.org");
+    }
+
+    [Fact]
+    public async Task CreateAsync_ShouldAcceptCustomEgressWithoutCredentialVaultMethods()
+    {
+        var sandboxes = new StubSandboxes();
+        var egress = new StubEgress();
+        var adapterFactory = new StubAdapterFactory(sandboxes, egress);
+
+        var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+        {
+            Image = "python:3.12",
+            ConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+            {
+                Domain = "127.0.0.1:8080",
+                Protocol = ConnectionProtocol.Http
+            }),
+            AdapterFactory = adapterFactory,
+            SkipHealthCheck = true,
+            Diagnostics = new SdkDiagnosticsOptions
+            {
+                LoggerFactory = NullLoggerFactory.Instance
+            }
+        });
+
+        await sandbox.GetEgressPolicyAsync();
+        Func<Task> act = () => sandbox.CredentialVault.GetAsync();
+
+        egress.GetPolicyCallCount.Should().Be(1);
+        await act.Should().ThrowAsync<InvalidArgumentException>()
+            .WithMessage("Credential Vault is not available for this adapter factory*");
     }
 
     [Fact]
@@ -82,6 +117,10 @@ public class SandboxEgressLifecycleTests
             }),
             AdapterFactory = adapterFactory,
             SkipHealthCheck = true,
+            CredentialProxy = new CredentialProxyConfig
+            {
+                Enabled = true
+            },
             Volumes =
             [
                 new Volume
@@ -98,6 +137,8 @@ public class SandboxEgressLifecycleTests
         });
 
         sandboxes.LastCreateRequest.Should().NotBeNull();
+        sandboxes.LastCreateRequest!.CredentialProxy.Should().NotBeNull();
+        sandboxes.LastCreateRequest!.CredentialProxy!.Enabled.Should().BeTrue();
         sandboxes.LastCreateRequest!.Volumes.Should().NotBeNull();
         sandboxes.LastCreateRequest.Volumes!.Should().ContainSingle();
         sandboxes.LastCreateRequest.Volumes![0].Host!.Path.Should().Be("D:/sandbox-mnt/ReMe");
@@ -174,11 +215,16 @@ public class SandboxEgressLifecycleTests
     {
         private readonly ISandboxes _sandboxes;
         private readonly IEgress _egress;
+        private readonly ICredentialVault? _credentialVault;
 
-        public StubAdapterFactory(ISandboxes sandboxes, IEgress egress)
+        public StubAdapterFactory(
+            ISandboxes sandboxes,
+            IEgress egress,
+            ICredentialVault? credentialVault = null)
         {
             _sandboxes = sandboxes;
             _egress = egress;
+            _credentialVault = credentialVault;
         }
 
         public int EgressStackCallCount { get; private set; }
@@ -212,7 +258,8 @@ public class SandboxEgressLifecycleTests
             LastEgressBaseUrl = options.EgressBaseUrl;
             return new EgressStack
             {
-                Egress = _egress
+                Egress = _egress,
+                CredentialVault = _credentialVault
             };
         }
     }
@@ -332,6 +379,87 @@ public class SandboxEgressLifecycleTests
             DeleteRulesCallCount++;
             LastDeleteTargets = targets.ToList();
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class StubCredentialVault : ICredentialVault
+    {
+        public int GetVaultCallCount { get; private set; }
+
+        public Task<CredentialVaultState> CreateAsync(
+            IReadOnlyList<Credential> credentials,
+            IReadOnlyList<CredentialBinding> bindings,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateVaultState());
+        }
+
+        public Task<CredentialVaultState> GetAsync(CancellationToken cancellationToken = default)
+        {
+            GetVaultCallCount++;
+            return Task.FromResult(CreateVaultState());
+        }
+
+        public Task<CredentialVaultState> PatchAsync(
+            CredentialVaultPatchRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateVaultState());
+        }
+
+        public Task DeleteAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<IReadOnlyList<CredentialMetadata>> ListCredentialsAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<CredentialMetadata>>(CreateVaultState().Credentials);
+        }
+
+        public Task<CredentialMetadata> GetCredentialAsync(
+            string name,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateVaultState().Credentials[0]);
+        }
+
+        public Task<IReadOnlyList<CredentialBindingMetadata>> ListBindingsAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<CredentialBindingMetadata>>(CreateVaultState().Bindings);
+        }
+
+        public Task<CredentialBindingMetadata> GetBindingAsync(
+            string name,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateVaultState().Bindings[0]);
+        }
+
+        private static CredentialVaultState CreateVaultState()
+        {
+            return new CredentialVaultState
+            {
+                Revision = 1,
+                Credentials =
+                [
+                    new CredentialMetadata
+                    {
+                        Name = "api-token",
+                        SourceType = "inline",
+                        Revision = 1
+                    }
+                ],
+                Bindings =
+                [
+                    new CredentialBindingMetadata
+                    {
+                        Name = "api-binding",
+                        Revision = 1,
+                        Auth = new CredentialAuthMetadata
+                        {
+                            Type = "bearer"
+                        }
+                    }
+                ]
+            };
         }
     }
 

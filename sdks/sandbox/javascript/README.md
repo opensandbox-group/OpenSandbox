@@ -258,6 +258,7 @@ const config2 = new ConnectionConfig({
 | `env`                        | Environment variables                            | `{}`                         |
 | `metadata`                   | Custom metadata tags                             | `{}`                         |
 | `networkPolicy`              | Optional outbound network policy (egress)        | -                            |
+| `credentialProxy`            | Optional Credential Vault proxy startup settings | -                            |
 | `extensions`                 | Extra server-defined fields                      | `{}`                         |
 | `skipHealthCheck`            | Skip readiness checks (`Running` + health check) | `false`                      |
 | `healthCheck`                | Custom readiness check                           | -                            |
@@ -298,7 +299,45 @@ await sandbox.patchEgressRules([
 ]);
 ```
 
-### 4. Resource cleanup
+### 4. Credential Vault
+
+Credential Vault injects outbound credentials from the egress sidecar while
+keeping real secrets out of sandbox environment variables, commands, files, and
+logs. Create the sandbox with `credentialProxy` enabled, then write credentials
+and bindings through `sandbox.credentialVault`.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "python:3.11",
+  networkPolicy: {
+    defaultAction: "deny",
+    egress: [{ action: "allow", target: "api.example.com" }],
+  },
+  credentialProxy: { enabled: true },
+});
+
+await sandbox.credentialVault.create({
+  credentials: [{ name: "api-token", source: { value: "<token>" } }],
+  bindings: [
+    {
+      name: "api-token",
+      match: {
+        schemes: ["https"],
+        ports: [443],
+        hosts: ["api.example.com"],
+        paths: ["/v1/*"],
+      },
+      auth: { type: "apiKey", name: "x-api-key", credential: "api-token" },
+    },
+  ],
+});
+```
+
+See [Credential Vault](../../../docs/credential-vault.md) for auth types,
+binding guidance, and Git/curl examples.
+
+### 5. Resource cleanup
 
 Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js
 so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting

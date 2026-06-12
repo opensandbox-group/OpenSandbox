@@ -36,7 +36,6 @@ from tests.base_e2e_test import (
     create_connection_config_sync,
     get_e2e_sandbox_resource,
     get_sandbox_image,
-    is_kubernetes_runtime,
 )
 
 TARGET_HOST = os.getenv(
@@ -64,8 +63,6 @@ SECRET_VALUES = {
 
 @pytest.fixture(scope="module")
 def credential_vault_target_ip() -> str:
-    if is_kubernetes_runtime():
-        pytest.skip("Credential Vault docker E2E starts a local Docker target service")
     if not TARGET_IP:
         pytest.skip("Set OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_IP to run this E2E")
     return TARGET_IP
@@ -251,7 +248,9 @@ def test_credential_vault_runtime_mutation_adds_replaces_and_deletes_binding(
 def _create_credential_proxy_sandbox() -> tuple[object, SandboxSync]:
     cfg = create_connection_config_sync()
     sandbox = SandboxSync.create(
-        image=SandboxImageSpec(get_sandbox_image()),
+        image=SandboxImageSpec(
+            os.getenv("OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE", get_sandbox_image())
+        ),
         resource=get_e2e_sandbox_resource(),
         connection_config=cfg,
         timeout=timedelta(minutes=5),

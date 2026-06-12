@@ -9,11 +9,11 @@ import {
   Sandbox,
 } from "../dist/index.js";
 
-function createAdapterFactory() {
+function createAdapterFactory({ includeCredentialVault = true } = {}) {
   const recordedRequests = [];
   const endpointCalls = [];
   const egressStackCalls = [];
-  const egressService = {
+  const policyOnlyEgressService = {
     async getPolicy() {
       return {
         defaultAction: "deny",
@@ -21,7 +21,35 @@ function createAdapterFactory() {
       };
     },
     async patchRules() {},
+    async deleteRules() {},
   };
+  const credentialVaultService = {
+    async create() {
+      return { revision: 1, credentials: [], bindings: [] };
+    },
+    async get() {
+      return { revision: 1, credentials: [], bindings: [] };
+    },
+    async patch() {
+      return { revision: 2, credentials: [], bindings: [] };
+    },
+    async delete() {},
+    async listCredentials() {
+      return [];
+    },
+    async getCredential(name) {
+      return { name, sourceType: "inline", revision: 1 };
+    },
+    async listBindings() {
+      return [];
+    },
+    async getBinding(name) {
+      return { name, revision: 1 };
+    },
+  };
+  const egressService = includeCredentialVault
+    ? { ...policyOnlyEgressService, ...credentialVaultService }
+    : policyOnlyEgressService;
   const sandboxes = {
     async createSandbox(req) {
       recordedRequests.push(req);
@@ -94,6 +122,21 @@ test("Sandbox.create forwards secureAccess", async () => {
 
   assert.equal(recordedRequests.length, 1);
   assert.equal(recordedRequests[0].secureAccess, true);
+});
+
+test("Sandbox.create forwards credentialProxy", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    credentialProxy: { enabled: true },
+    skipHealthCheck: true,
+  });
+
+  assert.equal(recordedRequests.length, 1);
+  assert.deepEqual(recordedRequests[0].credentialProxy, { enabled: true });
 });
 
 test("Sandbox.create forwards windows platform values", async () => {
@@ -224,11 +267,33 @@ test("Sandbox creates and reuses egress service during sandbox lifecycle", async
 
   await sandbox.getEgressPolicy();
   await sandbox.patchEgressRules([{ action: "allow", target: "www.github.com" }]);
+  const vaultState = await sandbox.credentialVault.get();
 
   assert.deepEqual(endpointCalls, [DEFAULT_EXECD_PORT, DEFAULT_EGRESS_PORT]);
   assert.equal(egressStackCalls.length, 1);
   assert.equal(egressStackCalls[0].egressBaseUrl, `http://127.0.0.1:${DEFAULT_EGRESS_PORT}`);
   assert.deepEqual(egressStackCalls[0].endpointHeaders, { "x-port": String(DEFAULT_EGRESS_PORT) });
+  assert.deepEqual(vaultState, { revision: 1, credentials: [], bindings: [] });
+});
+
+test("Sandbox.create accepts custom egress adapters without Credential Vault methods", async () => {
+  const { adapterFactory } = createAdapterFactory({ includeCredentialVault: false });
+
+  const sandbox = await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    skipHealthCheck: true,
+  });
+
+  assert.deepEqual(await sandbox.getEgressPolicy(), {
+    defaultAction: "deny",
+    egress: [{ action: "allow", target: "pypi.org" }],
+  });
+  await assert.rejects(
+    () => sandbox.credentialVault.get(),
+    /Credential Vault is not available/
+  );
 });
 
 test("Sandbox.create passes OSSFS volume to request", async () => {

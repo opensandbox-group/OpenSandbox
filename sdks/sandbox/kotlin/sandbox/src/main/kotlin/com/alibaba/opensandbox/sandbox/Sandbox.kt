@@ -24,6 +24,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutExce
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
 import com.alibaba.opensandbox.sandbox.domain.models.execd.DEFAULT_EGRESS_PORT
 import com.alibaba.opensandbox.sandbox.domain.models.execd.DEFAULT_EXECD_PORT
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
@@ -35,6 +36,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewRespo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import com.alibaba.opensandbox.sandbox.domain.services.Commands
+import com.alibaba.opensandbox.sandbox.domain.services.CredentialVault
 import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
 import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
@@ -91,6 +93,7 @@ class Sandbox internal constructor(
     private val healthService: Health,
     private val metricsService: Metrics,
     private val egressService: Egress,
+    private val credentialVaultService: CredentialVault,
     private val customHealthCheck: ((sandbox: Sandbox) -> Boolean)? = null,
     private val httpClientProvider: HttpClientProvider,
     private val diagnosticsService: Diagnostics,
@@ -123,6 +126,14 @@ class Sandbox internal constructor(
      * @return Service for metrics retrieval
      */
     fun metrics() = metricsService
+
+    /**
+     * Provides access to sandbox-scoped Credential Vault operations.
+     *
+     * Credential Vault writes go directly to the sandbox egress sidecar and
+     * preserve endpoint routing/auth headers resolved for this sandbox.
+     */
+    fun credentialVault(): CredentialVault = credentialVaultService
 
     /**
      * Provides access to sandbox diagnostic log and event descriptors.
@@ -222,7 +233,7 @@ class Sandbox internal constructor(
                         DEFAULT_EGRESS_PORT,
                         connectionConfig.useServerProxy,
                     )
-                val egressService = factory.createEgress(egressEndpoint)
+                val egressStack = factory.createEgressStack(egressEndpoint)
                 val diagnosticsService = factory.createDiagnostics()
 
                 val sandbox =
@@ -233,7 +244,8 @@ class Sandbox internal constructor(
                         commandService = commandService,
                         metricsService = metricsService,
                         healthService = healthService,
-                        egressService = egressService,
+                        egressService = egressStack.egress,
+                        credentialVaultService = egressStack.credentialVault,
                         customHealthCheck = healthCheck,
                         httpClientProvider = httpClientProvider,
                         diagnosticsService = diagnosticsService,
@@ -290,6 +302,7 @@ class Sandbox internal constructor(
          * @param readyTimeout Timeout for waiting for sandbox readiness
          * @param resource Resource limits (optional)
          * @param networkPolicy Optional outbound network policy (egress)
+         * @param credentialProxy Optional Credential Vault proxy startup settings
          * @param secureAccess Whether to enable secured access for sandbox endpoints
          * @param connectionConfig Connection configuration
          * @param healthCheck Custom health check function (optional)
@@ -310,6 +323,7 @@ class Sandbox internal constructor(
             resource: Map<String, String>,
             platform: PlatformSpec?,
             networkPolicy: NetworkPolicy?,
+            credentialProxy: CredentialProxyConfig?,
             secureAccess: Boolean,
             connectionConfig: ConnectionConfig,
             healthCheck: ((Sandbox) -> Boolean)? = null,
@@ -329,18 +343,19 @@ class Sandbox internal constructor(
             ) { sandboxService ->
                 val response =
                     sandboxService.createSandbox(
-                        imageSpec,
-                        entrypoint,
-                        env,
-                        metadata,
-                        timeout,
-                        resource,
-                        networkPolicy,
-                        extensions,
-                        volumes,
-                        platform,
-                        secureAccess,
-                        snapshotId,
+                        spec = imageSpec,
+                        entrypoint = entrypoint,
+                        env = env,
+                        metadata = metadata,
+                        timeout = timeout,
+                        resource = resource,
+                        networkPolicy = networkPolicy,
+                        credentialProxy = credentialProxy,
+                        extensions = extensions,
+                        volumes = volumes,
+                        platform = platform,
+                        secureAccess = secureAccess,
+                        snapshotId = snapshotId,
                     )
                 InitializationResult.NewSandbox(response.id)
             }
@@ -900,6 +915,11 @@ class Sandbox internal constructor(
         private var networkPolicy: NetworkPolicy? = null
 
         /**
+         * Optional Credential Vault proxy startup settings.
+         */
+        private var credentialProxy: CredentialProxyConfig? = null
+
+        /**
          * Enables secured access for sandbox endpoints.
          */
         private var secureAccess: Boolean = false
@@ -1124,6 +1144,33 @@ class Sandbox internal constructor(
         }
 
         /**
+         * Sets Credential Vault proxy startup settings for this sandbox.
+         */
+        fun credentialProxy(credentialProxy: CredentialProxyConfig): Builder {
+            this.credentialProxy = credentialProxy
+            return this
+        }
+
+        /**
+         * Enables or disables transparent Credential Vault proxying.
+         */
+        @JvmOverloads
+        fun credentialProxyEnabled(enabled: Boolean = true): Builder {
+            this.credentialProxy = CredentialProxyConfig.builder().enabled(enabled).build()
+            return this
+        }
+
+        /**
+         * Configures Credential Vault proxy startup settings.
+         */
+        fun credentialProxy(configure: CredentialProxyConfig.Builder.() -> Unit): Builder {
+            val builder = CredentialProxyConfig.builder()
+            builder.configure()
+            this.credentialProxy = builder.build()
+            return this
+        }
+
+        /**
          * Enables or disables secured access for sandbox endpoints.
          *
          * Default is false for backward compatibility. When true, the server may
@@ -1344,6 +1391,7 @@ class Sandbox internal constructor(
                 resource = resource,
                 platform = platform,
                 networkPolicy = networkPolicy,
+                credentialProxy = credentialProxy,
                 secureAccess = secureAccess,
                 extensions = extensions,
                 connectionConfig = connectionConfig ?: ConnectionConfig.builder().build(),

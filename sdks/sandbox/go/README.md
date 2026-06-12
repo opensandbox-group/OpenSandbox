@@ -102,6 +102,60 @@ updated, err := egress.PatchPolicy(ctx, []opensandbox.NetworkRule{
 })
 ```
 
+### Use Credential Vault
+
+Credential Vault injects outbound credentials from the egress sidecar while
+keeping real secrets out of sandbox environment variables, commands, files, and
+logs. Create the sandbox with `CredentialProxy` enabled, then write credentials
+and bindings through the sandbox helpers or `EgressClient`.
+
+```go
+sandbox, err := manager.Create(ctx, opensandbox.SandboxCreateOptions{
+    Image: "python:3.11",
+    NetworkPolicy: &opensandbox.NetworkPolicy{
+        DefaultAction: "deny",
+        Egress: []opensandbox.NetworkRule{
+            {Action: "allow", Target: "api.example.com"},
+        },
+    },
+    CredentialProxy: &opensandbox.CredentialProxyConfig{Enabled: true},
+})
+if err != nil {
+    return err
+}
+
+_, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
+    Credentials: []opensandbox.Credential{
+        {
+            Name: "api-token",
+            Source: opensandbox.InlineCredentialSource{
+                Type:  opensandbox.CredentialSourceInline,
+                Value: "<token>",
+            },
+        },
+    },
+    Bindings: []opensandbox.CredentialBinding{
+        {
+            Name: "api-token",
+            Match: opensandbox.CredentialMatch{
+                Schemes: []opensandbox.CredentialScheme{opensandbox.CredentialSchemeHTTPS},
+                Ports:   []int{443},
+                Hosts:   []string{"api.example.com"},
+                Paths:   []string{"/v1/*"},
+            },
+            Auth: opensandbox.CredentialAuth{
+                Type:       opensandbox.CredentialAuthAPIKey,
+                Name:       "x-api-key",
+                Credential: "api-token",
+            },
+        },
+    },
+})
+```
+
+See [Credential Vault](../../../docs/credential-vault.md) for auth types,
+binding guidance, and Git/curl examples.
+
 ## API Reference
 
 ### LifecycleClient
@@ -186,6 +240,14 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 |--------|-------------|
 | `GetPolicy(ctx)` | Get current egress policy |
 | `PatchPolicy(ctx, rules)` | Merge rules into current policy |
+| `CreateCredentialVault(ctx, req)` | Create sandbox-local Credential Vault state |
+| `GetCredentialVault(ctx)` | Get sanitized Credential Vault state |
+| `PatchCredentialVault(ctx, req)` | Atomically mutate credentials and bindings |
+| `DeleteCredentialVault(ctx)` | Delete sandbox-local Credential Vault state |
+| `ListCredentialVaultCredentials(ctx)` | List sanitized credential metadata |
+| `GetCredentialVaultCredential(ctx, name)` | Get sanitized metadata for one credential |
+| `ListCredentialVaultBindings(ctx)` | List sanitized binding metadata |
+| `GetCredentialVaultBinding(ctx, name)` | Get sanitized metadata for one binding |
 
 ## SSE Streaming
 

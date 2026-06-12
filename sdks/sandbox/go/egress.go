@@ -14,7 +14,10 @@
 
 package opensandbox
 
-import "context"
+import (
+	"context"
+	"net/url"
+)
 
 // EgressClient provides methods for the OpenSandbox Egress API.
 // It connects to the egress sidecar endpoint running inside a specific sandbox.
@@ -63,6 +66,77 @@ func (c *EgressClient) PatchPolicy(ctx context.Context, rules []NetworkRule) (*P
 func (c *EgressClient) DeletePolicy(ctx context.Context, targets []string) (*PolicyStatusResponse, error) {
 	var resp PolicyStatusResponse
 	if err := c.doRequest(ctx, "DELETE", "/policy", targets, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// CreateCredentialVault creates the initial sandbox-local Credential Vault
+// revision and activates it in Credential Proxy.
+func (c *EgressClient) CreateCredentialVault(ctx context.Context, req CredentialVaultCreateRequest) (*CredentialVaultState, error) {
+	var resp CredentialVaultState
+	if err := c.doRequest(ctx, "POST", "/credential-vault", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetCredentialVault returns sanitized Credential Vault state. Plaintext
+// credential values are never part of the returned model.
+func (c *EgressClient) GetCredentialVault(ctx context.Context) (*CredentialVaultState, error) {
+	var resp CredentialVaultState
+	if err := c.doRequest(ctx, "GET", "/credential-vault", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// PatchCredentialVault atomically mutates sandbox-local credentials and
+// bindings.
+func (c *EgressClient) PatchCredentialVault(ctx context.Context, req CredentialVaultPatchRequest) (*CredentialVaultState, error) {
+	var resp CredentialVaultState
+	if err := c.doRequest(ctx, "PATCH", "/credential-vault", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// DeleteCredentialVault deletes the sandbox-local Credential Vault.
+func (c *EgressClient) DeleteCredentialVault(ctx context.Context) error {
+	return c.doRequest(ctx, "DELETE", "/credential-vault", nil, nil)
+}
+
+// ListCredentialVaultCredentials returns sanitized credential metadata.
+func (c *EgressClient) ListCredentialVaultCredentials(ctx context.Context) (*CredentialListResponse, error) {
+	var resp CredentialListResponse
+	if err := c.doRequest(ctx, "GET", "/credential-vault/credentials", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetCredentialVaultCredential returns sanitized metadata for one credential.
+func (c *EgressClient) GetCredentialVaultCredential(ctx context.Context, name string) (*CredentialMetadata, error) {
+	var resp CredentialMetadata
+	if err := c.doRequest(ctx, "GET", "/credential-vault/credentials/"+url.PathEscape(name), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ListCredentialVaultBindings returns sanitized binding metadata.
+func (c *EgressClient) ListCredentialVaultBindings(ctx context.Context) (*CredentialBindingListResponse, error) {
+	var resp CredentialBindingListResponse
+	if err := c.doRequest(ctx, "GET", "/credential-vault/bindings", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetCredentialVaultBinding returns sanitized metadata for one binding.
+func (c *EgressClient) GetCredentialVaultBinding(ctx context.Context, name string) (*CredentialBindingMetadata, error) {
+	var resp CredentialBindingMetadata
+	if err := c.doRequest(ctx, "GET", "/credential-vault/bindings/"+url.PathEscape(name), nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

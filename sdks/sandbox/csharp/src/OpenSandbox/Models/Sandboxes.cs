@@ -132,6 +132,384 @@ public class NetworkPolicy
 }
 
 /// <summary>
+/// Credential Vault proxy startup settings.
+/// </summary>
+public class CredentialProxyConfig
+{
+    /// <summary>
+    /// Gets or sets whether transparent MITM support for Credential Vault injection is enabled.
+    /// </summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+}
+
+/// <summary>
+/// Write-only inline credential material for Credential Vault.
+/// </summary>
+public class InlineCredentialSource
+{
+    /// <summary>
+    /// Gets or sets the credential source type.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "inline";
+
+    /// <summary>
+    /// Gets or sets the inline credential value.
+    /// </summary>
+    [JsonPropertyName("value")]
+    public required string Value { get; set; }
+}
+
+/// <summary>
+/// Sandbox-local Credential Vault credential.
+/// </summary>
+public class Credential
+{
+    /// <summary>
+    /// Gets or sets the sandbox-local credential name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the write-only credential source.
+    /// </summary>
+    [JsonPropertyName("source")]
+    public required InlineCredentialSource Source { get; set; }
+}
+
+/// <summary>
+/// Request match for a Credential Vault binding.
+/// </summary>
+public class CredentialMatch
+{
+    /// <summary>
+    /// Gets or sets the request schemes to match.
+    /// </summary>
+    [JsonPropertyName("schemes")]
+    public IReadOnlyList<string>? Schemes { get; set; }
+
+    /// <summary>
+    /// Gets or sets the request ports to match.
+    /// </summary>
+    [JsonPropertyName("ports")]
+    public IReadOnlyList<int>? Ports { get; set; }
+
+    /// <summary>
+    /// Gets or sets exact FQDNs or leftmost-label wildcards.
+    /// </summary>
+    [JsonPropertyName("hosts")]
+    public required IReadOnlyList<string> Hosts { get; set; }
+
+    /// <summary>
+    /// Gets or sets the HTTP methods to match.
+    /// </summary>
+    [JsonPropertyName("methods")]
+    public IReadOnlyList<string>? Methods { get; set; }
+
+    /// <summary>
+    /// Gets or sets the request paths to match.
+    /// </summary>
+    [JsonPropertyName("paths")]
+    public IReadOnlyList<string>? Paths { get; set; }
+}
+
+/// <summary>
+/// Custom header injection entry.
+/// </summary>
+public class CustomHeaderEntry
+{
+    /// <summary>
+    /// Gets or sets the header name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the credential name used as the header value.
+    /// </summary>
+    [JsonPropertyName("credential")]
+    public required string Credential { get; set; }
+}
+
+/// <summary>
+/// Typed Credential Vault auth rule.
+/// </summary>
+public class CredentialAuth
+{
+    /// <summary>
+    /// Gets or sets the auth rule type: bearer, basic, apiKey, or customHeaders.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public required string Type { get; set; }
+
+    /// <summary>
+    /// Gets or sets the referenced credential name for bearer, basic, or apiKey auth.
+    /// </summary>
+    [JsonPropertyName("credential")]
+    public string? Credential { get; set; }
+
+    /// <summary>
+    /// Gets or sets the API key header or query parameter name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets custom header injection entries.
+    /// </summary>
+    [JsonPropertyName("headers")]
+    public IReadOnlyList<CustomHeaderEntry>? Headers { get; set; }
+}
+
+/// <summary>
+/// Sandbox-local Credential Vault binding.
+/// </summary>
+public class CredentialBinding
+{
+    /// <summary>
+    /// Gets or sets the sandbox-local binding name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the request match.
+    /// </summary>
+    [JsonPropertyName("match")]
+    public required CredentialMatch Match { get; set; }
+
+    /// <summary>
+    /// Gets or sets the auth injection rule.
+    /// </summary>
+    [JsonPropertyName("auth")]
+    public required CredentialAuth Auth { get; set; }
+}
+
+/// <summary>
+/// Sanitized credential metadata returned by Credential Vault.
+/// </summary>
+public class CredentialMetadata
+{
+    /// <summary>
+    /// Gets or sets the credential name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the credential source type.
+    /// </summary>
+    [JsonPropertyName("sourceType")]
+    public required string SourceType { get; set; }
+
+    /// <summary>
+    /// Gets or sets the credential revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+}
+
+/// <summary>
+/// Sanitized auth metadata returned for a Credential Vault binding.
+/// </summary>
+public class CredentialAuthMetadata
+{
+    /// <summary>
+    /// Gets or sets the auth rule type.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public required string Type { get; set; }
+
+    /// <summary>
+    /// Gets or sets the API key header or query parameter name when applicable.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+}
+
+/// <summary>
+/// Sanitized binding metadata returned by Credential Vault.
+/// </summary>
+public class CredentialBindingMetadata
+{
+    /// <summary>
+    /// Gets or sets the binding name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the binding revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+
+    /// <summary>
+    /// Gets or sets the sanitized request match.
+    /// </summary>
+    [JsonPropertyName("match")]
+    public CredentialMatch? Match { get; set; }
+
+    /// <summary>
+    /// Gets or sets the sanitized auth metadata.
+    /// </summary>
+    [JsonPropertyName("auth")]
+    public CredentialAuthMetadata? Auth { get; set; }
+}
+
+/// <summary>
+/// Sanitized Credential Vault state.
+/// </summary>
+public class CredentialVaultState
+{
+    /// <summary>
+    /// Gets or sets the vault revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+
+    /// <summary>
+    /// Gets or sets sanitized credential metadata.
+    /// </summary>
+    [JsonPropertyName("credentials")]
+    public required IReadOnlyList<CredentialMetadata> Credentials { get; set; }
+
+    /// <summary>
+    /// Gets or sets sanitized binding metadata.
+    /// </summary>
+    [JsonPropertyName("bindings")]
+    public required IReadOnlyList<CredentialBindingMetadata> Bindings { get; set; }
+}
+
+/// <summary>
+/// Sanitized Credential Vault credential list response.
+/// </summary>
+public class CredentialListResponse
+{
+    /// <summary>
+    /// Gets or sets the vault revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+
+    /// <summary>
+    /// Gets or sets sanitized credential metadata.
+    /// </summary>
+    [JsonPropertyName("credentials")]
+    public required IReadOnlyList<CredentialMetadata> Credentials { get; set; }
+}
+
+/// <summary>
+/// Sanitized Credential Vault binding list response.
+/// </summary>
+public class CredentialBindingListResponse
+{
+    /// <summary>
+    /// Gets or sets the vault revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+
+    /// <summary>
+    /// Gets or sets sanitized binding metadata.
+    /// </summary>
+    [JsonPropertyName("bindings")]
+    public required IReadOnlyList<CredentialBindingMetadata> Bindings { get; set; }
+}
+
+/// <summary>
+/// Initial Credential Vault creation request.
+/// </summary>
+public class CredentialVaultCreateRequest
+{
+    /// <summary>
+    /// Gets or sets credentials to create.
+    /// </summary>
+    [JsonPropertyName("credentials")]
+    public required IReadOnlyList<Credential> Credentials { get; set; }
+
+    /// <summary>
+    /// Gets or sets bindings to create.
+    /// </summary>
+    [JsonPropertyName("bindings")]
+    public required IReadOnlyList<CredentialBinding> Bindings { get; set; }
+}
+
+/// <summary>
+/// Atomic credential mutation set for Credential Vault patch.
+/// </summary>
+public class CredentialMutationSet
+{
+    /// <summary>
+    /// Gets or sets credentials to add.
+    /// </summary>
+    [JsonPropertyName("add")]
+    public IReadOnlyList<Credential>? Add { get; set; }
+
+    /// <summary>
+    /// Gets or sets credentials to replace.
+    /// </summary>
+    [JsonPropertyName("replace")]
+    public IReadOnlyList<Credential>? Replace { get; set; }
+
+    /// <summary>
+    /// Gets or sets credential names to delete.
+    /// </summary>
+    [JsonPropertyName("delete")]
+    public IReadOnlyList<string>? Delete { get; set; }
+}
+
+/// <summary>
+/// Atomic binding mutation set for Credential Vault patch.
+/// </summary>
+public class CredentialBindingMutationSet
+{
+    /// <summary>
+    /// Gets or sets bindings to add.
+    /// </summary>
+    [JsonPropertyName("add")]
+    public IReadOnlyList<CredentialBinding>? Add { get; set; }
+
+    /// <summary>
+    /// Gets or sets bindings to replace.
+    /// </summary>
+    [JsonPropertyName("replace")]
+    public IReadOnlyList<CredentialBinding>? Replace { get; set; }
+
+    /// <summary>
+    /// Gets or sets binding names to delete.
+    /// </summary>
+    [JsonPropertyName("delete")]
+    public IReadOnlyList<string>? Delete { get; set; }
+}
+
+/// <summary>
+/// Credential Vault patch request.
+/// </summary>
+public class CredentialVaultPatchRequest
+{
+    /// <summary>
+    /// Gets or sets the optional optimistic concurrency guard.
+    /// </summary>
+    [JsonPropertyName("expectedRevision")]
+    public int? ExpectedRevision { get; set; }
+
+    /// <summary>
+    /// Gets or sets credential mutations.
+    /// </summary>
+    [JsonPropertyName("credentials")]
+    public CredentialMutationSet? Credentials { get; set; }
+
+    /// <summary>
+    /// Gets or sets binding mutations.
+    /// </summary>
+    [JsonPropertyName("bindings")]
+    public CredentialBindingMutationSet? Bindings { get; set; }
+}
+
+/// <summary>
 /// Host path bind mount backend for a volume.
 /// </summary>
 public class Host
@@ -434,6 +812,12 @@ public class CreateSandboxRequest
     /// </summary>
     [JsonPropertyName("networkPolicy")]
     public NetworkPolicy? NetworkPolicy { get; set; }
+
+    /// <summary>
+    /// Gets or sets optional Credential Vault proxy startup settings.
+    /// </summary>
+    [JsonPropertyName("credentialProxy")]
+    public CredentialProxyConfig? CredentialProxy { get; set; }
 
     /// <summary>
     /// Gets or sets an optional platform constraint for sandbox provisioning.

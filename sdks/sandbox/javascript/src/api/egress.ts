@@ -129,6 +129,282 @@ export interface paths {
         };
         trace?: never;
     };
+    "/credential-vault": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get sanitized Credential Vault state */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Sanitized Credential Vault state. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CredentialVaultState"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a sandbox-local Credential Vault
+         * @description Create the initial sandbox-local Credential Vault revision and activate it
+         *     in Credential Proxy. Inline credential values are write-only and are never
+         *     returned by this API.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CredentialVaultCreateRequest"];
+                };
+            };
+            responses: {
+                /** @description Credential Vault created and acknowledged. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CredentialVaultState"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                409: components["responses"]["Conflict"];
+                412: components["responses"]["PreconditionFailed"];
+            };
+        };
+        /** Delete the sandbox-local Credential Vault */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Credential Vault deleted. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Atomically mutate sandbox-local credentials and bindings */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CredentialVaultMutationRequest"];
+                };
+            };
+            responses: {
+                /** @description Mutation applied and acknowledged. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CredentialVaultState"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                412: components["responses"]["PreconditionFailed"];
+            };
+        };
+        trace?: never;
+    };
+    "/credential-vault/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List sanitized credential metadata */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Sanitized credential metadata. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CredentialListResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/credential-vault/credentials/{credential_name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get sanitized metadata for one credential */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    credential_name: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Sanitized credential metadata. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CredentialMetadata"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/credential-vault/bindings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List sanitized credential binding metadata */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Sanitized binding metadata. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CredentialBindingListResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/credential-vault/bindings/{binding_name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get sanitized metadata for one binding */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    binding_name: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Sanitized binding metadata. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CredentialBindingMetadata"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -179,6 +455,138 @@ export interface components {
              */
             target: string;
         };
+        CredentialVaultCreateRequest: {
+            credentials: components["schemas"]["Credential"][];
+            bindings: components["schemas"]["CredentialBinding"][];
+        };
+        CredentialVaultMutationRequest: {
+            /** @description Optional optimistic concurrency guard. */
+            expectedRevision?: number;
+            credentials?: components["schemas"]["CredentialMutationSet"];
+            bindings?: components["schemas"]["CredentialBindingMutationSet"];
+        };
+        CredentialMutationSet: {
+            add?: components["schemas"]["Credential"][];
+            replace?: components["schemas"]["Credential"][];
+            delete?: string[];
+        };
+        CredentialBindingMutationSet: {
+            add?: components["schemas"]["CredentialBinding"][];
+            replace?: components["schemas"]["CredentialBinding"][];
+            delete?: string[];
+        };
+        CredentialVaultState: {
+            revision: number;
+            credentials: components["schemas"]["CredentialMetadata"][];
+            bindings: components["schemas"]["CredentialBindingMetadata"][];
+        };
+        CredentialListResponse: {
+            revision: number;
+            credentials: components["schemas"]["CredentialMetadata"][];
+        };
+        CredentialBindingListResponse: {
+            revision: number;
+            bindings: components["schemas"]["CredentialBindingMetadata"][];
+        };
+        CredentialMetadata: {
+            name: string;
+            sourceType: string;
+            revision: number;
+        };
+        CredentialBindingMetadata: {
+            name: string;
+            revision: number;
+            match?: components["schemas"]["CredentialMatch"];
+            auth?: components["schemas"]["CredentialAuthMetadata"];
+        };
+        Credential: {
+            name: string;
+            source: components["schemas"]["InlineCredentialSource"];
+        };
+        InlineCredentialSource: {
+            /** @enum {string} */
+            type: "inline";
+            value: string;
+        };
+        CredentialBinding: {
+            name: string;
+            match: components["schemas"]["CredentialMatch"];
+            auth: components["schemas"]["CredentialAuth"];
+        };
+        CredentialMatch: {
+            /**
+             * @default [
+             *       "https"
+             *     ]
+             */
+            schemes: ("https" | "http")[];
+            /**
+             * @default [
+             *       443
+             *     ]
+             */
+            ports: number[];
+            hosts: string[];
+            /**
+             * @default [
+             *       "GET",
+             *       "POST",
+             *       "PUT",
+             *       "PATCH",
+             *       "DELETE"
+             *     ]
+             */
+            methods: string[];
+            /**
+             * @default [
+             *       "/*"
+             *     ]
+             */
+            paths: string[];
+        };
+        CredentialAuth: components["schemas"]["BearerCredentialAuth"] | components["schemas"]["BasicCredentialAuth"] | components["schemas"]["ApiKeyCredentialAuth"] | components["schemas"]["CustomHeadersCredentialAuth"];
+        BearerCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "bearer";
+            credential: string;
+        };
+        BasicCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "basic";
+            /** @description Credential containing pre-encoded base64(username:password). */
+            credential: string;
+        };
+        ApiKeyCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "apiKey";
+            name: string;
+            credential: string;
+        };
+        CustomHeadersCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "customHeaders";
+            headers: components["schemas"]["CustomHeaderEntry"][];
+        };
+        CustomHeaderEntry: {
+            name: string;
+            credential: string;
+        };
+        CredentialAuthMetadata: {
+            type: string;
+            name?: string;
+        };
     };
     responses: {
         /** @description The request was invalid or malformed. */
@@ -192,6 +600,33 @@ export interface components {
         };
         /** @description Authentication failed for the egress sidecar. */
         Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /** @description The requested Credential Vault resource was not found. */
+        NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /** @description The request conflicts with the current Credential Vault revision. */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /** @description Credential Proxy prerequisites are not ready. */
+        PreconditionFailed: {
             headers: {
                 [name: string]: unknown;
             };

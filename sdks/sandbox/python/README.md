@@ -448,6 +448,7 @@ The `Sandbox.create()` allows configuring the sandbox environment.
 | `env`           | Environment variables                    | Empty                           |
 | `metadata`      | Custom metadata tags                     | Empty                           |
 | `network_policy` | Optional outbound network policy (egress) | -                             |
+| `credential_proxy` | Optional Credential Vault proxy startup settings | -                     |
 | `ready_timeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
 
 Note: metadata keys under `opensandbox.io/` are reserved for system-managed
@@ -493,3 +494,49 @@ await sandbox.patch_egress_rules(
     ]
 )
 ```
+
+### 4. Credential Vault
+
+Credential Vault injects outbound credentials from the egress sidecar while
+keeping real secrets out of sandbox environment variables, commands, files, and
+logs. Create the sandbox with `credential_proxy` enabled, then write credentials
+and bindings through `sandbox.credential_vault`.
+
+```python
+from opensandbox.models.sandboxes import (
+    Credential,
+    CredentialBinding,
+    CredentialProxyConfig,
+    NetworkPolicy,
+    NetworkRule,
+)
+
+sandbox = await Sandbox.create(
+    "python:3.11",
+    connection_config=config,
+    network_policy=NetworkPolicy(
+        defaultAction="deny",
+        egress=[NetworkRule(action="allow", target="api.example.com")],
+    ),
+    credential_proxy=CredentialProxyConfig(enabled=True),
+)
+
+await sandbox.credential_vault.create(
+    credentials=[Credential(name="api-token", source={"value": "<token>"})],
+    bindings=[
+        CredentialBinding(
+            name="api-token",
+            match={
+                "schemes": ["https"],
+                "ports": [443],
+                "hosts": ["api.example.com"],
+                "paths": ["/v1/*"],
+            },
+            auth={"type": "apiKey", "name": "x-api-key", "credential": "api-token"},
+        )
+    ],
+)
+```
+
+See [Credential Vault](../../../docs/credential-vault.md) for auth types,
+binding guidance, and Git/curl examples.

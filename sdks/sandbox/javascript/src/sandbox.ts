@@ -23,7 +23,7 @@ import {
 } from "./core/constants.js";
 import { ConnectionConfig, type ConnectionConfigOptions } from "./config/connection.js";
 import type { SandboxFiles } from "./services/filesystem.js";
-import type { Egress } from "./services/egress.js";
+import type { CredentialVault, Egress } from "./services/egress.js";
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 import type { AdapterFactory } from "./factory/adapterFactory.js";
 
@@ -33,6 +33,7 @@ import type { ExecdHealth } from "./services/execdHealth.js";
 import type { ExecdMetrics } from "./services/execdMetrics.js";
 import type {
   CreateSandboxRequest,
+  CredentialProxyConfig,
   Endpoint,
   NetworkPolicy,
   NetworkRule,
@@ -46,6 +47,44 @@ import type {
 import { SandboxReadyTimeoutException } from "./core/exceptions.js";
 
 const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
+const CREDENTIAL_VAULT_METHODS = [
+  "create",
+  "get",
+  "patch",
+  "delete",
+  "listCredentials",
+  "getCredential",
+  "listBindings",
+  "getBinding",
+] as const;
+
+function isCredentialVault(value: unknown): value is CredentialVault {
+  if (typeof value !== "object" || value == null) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return CREDENTIAL_VAULT_METHODS.every(
+    (method) => typeof candidate[method] === "function"
+  );
+}
+
+function unavailableCredentialVault(): CredentialVault {
+  const fail = async (..._args: unknown[]): Promise<never> => {
+    throw new Error(
+      "Credential Vault is not available for this adapter factory. Provide EgressStack.credentialVault to use Credential Vault with a custom adapter."
+    );
+  };
+  return {
+    create: fail,
+    get: fail,
+    patch: fail,
+    delete: fail,
+    listCredentials: fail,
+    getCredential: fail,
+    listBindings: fail,
+    getBinding: fail,
+  };
+}
 
 export interface SandboxCreateOptions {
   /**
@@ -86,6 +125,12 @@ export interface SandboxCreateOptions {
    * If provided without defaultAction, defaults to "deny".
    */
   networkPolicy?: NetworkPolicy;
+  /**
+   * Optional Credential Vault proxy startup settings.
+   *
+   * Set `enabled: true` to opt into transparent MITM support used by credential injection.
+   */
+  credentialProxy?: CredentialProxyConfig;
   /**
    * Optional list of volume mounts for persistent storage.
    * Each volume specifies a backend (host path, PVC, or OSSFS) and mount configuration.
@@ -195,6 +240,10 @@ export class Sandbox {
   readonly files: SandboxFiles;
   readonly health: ExecdHealth;
   readonly metrics: ExecdMetrics;
+  /**
+   * Sandbox-scoped Credential Vault operations.
+   */
+  readonly credentialVault: CredentialVault;
 
   /**
    * Internal state kept out of the public instance shape.
@@ -223,9 +272,16 @@ export class Sandbox {
     health: ExecdHealth;
     metrics: ExecdMetrics;
     egress: Egress;
+    credentialVault?: CredentialVault;
   }) {
     this.id = opts.id;
     this.connectionConfig = opts.connectionConfig;
+    const credentialVault =
+      opts.credentialVault ??
+      (isCredentialVault(opts.egress)
+        ? opts.egress
+        : unavailableCredentialVault());
+
     Sandbox._priv.set(this, {
       adapterFactory: opts.adapterFactory,
       lifecycleBaseUrl: opts.lifecycleBaseUrl,
@@ -238,6 +294,7 @@ export class Sandbox {
     this.files = opts.files;
     this.health = opts.health;
     this.metrics = opts.metrics;
+    this.credentialVault = credentialVault;
   }
 
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
@@ -311,6 +368,7 @@ export class Sandbox {
             defaultAction: opts.networkPolicy.defaultAction ?? "deny",
           }
         : undefined,
+      credentialProxy: opts.credentialProxy,
       volumes: opts.volumes,
       extensions: opts.extensions ?? {},
       platform: opts.platform,
@@ -343,7 +401,7 @@ export class Sandbox {
           execdBaseUrl,
           endpointHeaders: endpoint.headers,
         });
-      const { egress } = adapterFactory.createEgressStack({
+      const { egress, credentialVault } = adapterFactory.createEgressStack({
         connectionConfig,
         egressBaseUrl,
         endpointHeaders: egressEndpoint.headers,
@@ -361,6 +419,7 @@ export class Sandbox {
         health,
         metrics,
         egress,
+        credentialVault,
       });
 
       if (!(opts.skipHealthCheck ?? false)) {
@@ -427,7 +486,7 @@ export class Sandbox {
           execdBaseUrl,
           endpointHeaders: endpoint.headers,
         });
-      const { egress } = adapterFactory.createEgressStack({
+      const { egress, credentialVault } = adapterFactory.createEgressStack({
         connectionConfig,
         egressBaseUrl,
         endpointHeaders: egressEndpoint.headers,
@@ -445,6 +504,7 @@ export class Sandbox {
         health,
         metrics,
         egress,
+        credentialVault,
       });
 
       if (!(opts.skipHealthCheck ?? false)) {

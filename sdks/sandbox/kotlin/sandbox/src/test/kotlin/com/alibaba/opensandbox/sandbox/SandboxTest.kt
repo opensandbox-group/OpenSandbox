@@ -26,6 +26,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.services.Commands
+import com.alibaba.opensandbox.sandbox.domain.services.CredentialVault
 import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
 import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
@@ -70,6 +71,9 @@ class SandboxTest {
     lateinit var egressService: Egress
 
     @MockK
+    lateinit var credentialVaultService: CredentialVault
+
+    @MockK
     lateinit var diagnosticsService: Diagnostics
 
     @MockK
@@ -97,6 +101,7 @@ class SandboxTest {
                 healthService = healthService,
                 metricsService = metricsService,
                 egressService = egressService,
+                credentialVaultService = credentialVaultService,
                 customHealthCheck = null,
                 httpClientProvider = httpClientProvider,
                 diagnosticsService = diagnosticsService,
@@ -116,6 +121,11 @@ class SandboxTest {
     @Test
     fun `metrics should return metrics service`() {
         assertSame(metricsService, sandbox.metrics())
+    }
+
+    @Test
+    fun `credentialVault should return credential vault service`() {
+        assertSame(credentialVaultService, sandbox.credentialVault())
     }
 
     @Test

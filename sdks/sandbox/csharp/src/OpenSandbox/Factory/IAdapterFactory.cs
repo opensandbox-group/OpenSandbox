@@ -130,6 +130,8 @@ public class CreateEgressStackOptions
 public class EgressStack
 {
     public required IEgress Egress { get; init; }
+
+    public ICredentialVault? CredentialVault { get; init; }
 }
 
 /// <summary>

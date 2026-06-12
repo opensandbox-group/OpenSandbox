@@ -17,6 +17,7 @@
 package opensandbox
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -140,20 +141,27 @@ type NetworkRule struct {
 	Target string `json:"target"`
 }
 
+// CredentialProxyConfig enables Credential Vault transparent proxy support at
+// sandbox startup.
+type CredentialProxyConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 // CreateSandboxRequest is the request body for creating a new sandbox.
 type CreateSandboxRequest struct {
-	Image          *ImageSpec        `json:"image,omitempty"`
-	SnapshotID     string            `json:"snapshotId,omitempty"`
-	Timeout        *int              `json:"timeout,omitempty"`
-	ResourceLimits ResourceLimits    `json:"resourceLimits"`
-	Env            map[string]string `json:"env,omitempty"`
-	SecureAccess   bool              `json:"secureAccess,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	Entrypoint     []string          `json:"entrypoint,omitempty"`
-	NetworkPolicy  *NetworkPolicy    `json:"networkPolicy,omitempty"`
-	Volumes        []Volume          `json:"volumes,omitempty"`
-	Extensions     map[string]string `json:"extensions,omitempty"`
-	Platform       *PlatformSpec     `json:"platform,omitempty"`
+	Image           *ImageSpec             `json:"image,omitempty"`
+	SnapshotID      string                 `json:"snapshotId,omitempty"`
+	Timeout         *int                   `json:"timeout,omitempty"`
+	ResourceLimits  ResourceLimits         `json:"resourceLimits"`
+	Env             map[string]string      `json:"env,omitempty"`
+	SecureAccess    bool                   `json:"secureAccess,omitempty"`
+	Metadata        map[string]string      `json:"metadata,omitempty"`
+	Entrypoint      []string               `json:"entrypoint,omitempty"`
+	NetworkPolicy   *NetworkPolicy         `json:"networkPolicy,omitempty"`
+	CredentialProxy *CredentialProxyConfig `json:"credentialProxy,omitempty"`
+	Volumes         []Volume               `json:"volumes,omitempty"`
+	Extensions      map[string]string      `json:"extensions,omitempty"`
+	Platform        *PlatformSpec          `json:"platform,omitempty"`
 }
 
 // SandboxInfo represents a runtime execution environment provisioned from a
@@ -253,6 +261,164 @@ type PolicyStatusResponse struct {
 	EnforcementMode string         `json:"enforcementMode,omitempty"`
 	Reason          string         `json:"reason,omitempty"`
 	Policy          *NetworkPolicy `json:"policy,omitempty"`
+}
+
+// CredentialSourceType is the credential source discriminator.
+type CredentialSourceType string
+
+const (
+	// CredentialSourceInline carries write-only inline credential material.
+	CredentialSourceInline CredentialSourceType = "inline"
+)
+
+// InlineCredentialSource contains write-only credential material. Values sent
+// in this model are never returned by Credential Vault state endpoints.
+type InlineCredentialSource struct {
+	Type  CredentialSourceType `json:"type"`
+	Value string               `json:"value"`
+}
+
+// MarshalJSON defaults the only supported source type so callers can use the
+// natural zero-value form InlineCredentialSource{Value: secret}.
+func (s InlineCredentialSource) MarshalJSON() ([]byte, error) {
+	type inlineCredentialSource InlineCredentialSource
+	source := inlineCredentialSource(s)
+	if source.Type == "" {
+		source.Type = CredentialSourceInline
+	}
+	return json.Marshal(source)
+}
+
+// Credential is a sandbox-local Credential Vault credential create/update
+// model.
+type Credential struct {
+	Name   string                 `json:"name"`
+	Source InlineCredentialSource `json:"source"`
+}
+
+// CredentialScheme is a request scheme matched by a Credential Vault binding.
+type CredentialScheme string
+
+const (
+	CredentialSchemeHTTPS CredentialScheme = "https"
+	CredentialSchemeHTTP  CredentialScheme = "http"
+)
+
+// CredentialMatch selects outbound requests where a Credential Vault binding
+// applies.
+type CredentialMatch struct {
+	Schemes []CredentialScheme `json:"schemes,omitempty"`
+	Ports   []int              `json:"ports,omitempty"`
+	Hosts   []string           `json:"hosts"`
+	Methods []string           `json:"methods,omitempty"`
+	Paths   []string           `json:"paths,omitempty"`
+}
+
+// CustomHeaderEntry describes one custom header injection rule.
+type CustomHeaderEntry struct {
+	Name       string `json:"name"`
+	Credential string `json:"credential"`
+}
+
+// CredentialAuthType is the Credential Vault auth discriminator.
+type CredentialAuthType string
+
+const (
+	CredentialAuthBearer        CredentialAuthType = "bearer"
+	CredentialAuthBasic         CredentialAuthType = "basic"
+	CredentialAuthAPIKey        CredentialAuthType = "apiKey"
+	CredentialAuthCustomHeaders CredentialAuthType = "customHeaders"
+)
+
+// CredentialAuth configures how a binding injects credential material into
+// matching outbound requests.
+type CredentialAuth struct {
+	Type       CredentialAuthType  `json:"type"`
+	Credential string              `json:"credential,omitempty"`
+	Name       string              `json:"name,omitempty"`
+	Headers    []CustomHeaderEntry `json:"headers,omitempty"`
+}
+
+// CredentialBinding is a sandbox-local Credential Vault binding create/update
+// model.
+type CredentialBinding struct {
+	Name  string          `json:"name"`
+	Match CredentialMatch `json:"match"`
+	Auth  CredentialAuth  `json:"auth"`
+}
+
+// CredentialVaultCreateRequest creates the initial sandbox-local Credential
+// Vault revision.
+type CredentialVaultCreateRequest struct {
+	Credentials []Credential        `json:"credentials"`
+	Bindings    []CredentialBinding `json:"bindings"`
+}
+
+// CredentialMutationSet describes atomic credential changes for a vault patch.
+type CredentialMutationSet struct {
+	Add     []Credential `json:"add,omitempty"`
+	Replace []Credential `json:"replace,omitempty"`
+	Delete  []string     `json:"delete,omitempty"`
+}
+
+// CredentialBindingMutationSet describes atomic binding changes for a vault
+// patch.
+type CredentialBindingMutationSet struct {
+	Add     []CredentialBinding `json:"add,omitempty"`
+	Replace []CredentialBinding `json:"replace,omitempty"`
+	Delete  []string            `json:"delete,omitempty"`
+}
+
+// CredentialVaultPatchRequest atomically mutates credentials and bindings. If
+// ExpectedRevision is set, the sidecar applies it as an optimistic concurrency
+// guard.
+type CredentialVaultPatchRequest struct {
+	ExpectedRevision *int                          `json:"expectedRevision,omitempty"`
+	Credentials      *CredentialMutationSet        `json:"credentials,omitempty"`
+	Bindings         *CredentialBindingMutationSet `json:"bindings,omitempty"`
+}
+
+// CredentialMetadata is sanitized credential metadata returned by Credential
+// Vault. It intentionally does not include source values.
+type CredentialMetadata struct {
+	Name       string `json:"name"`
+	SourceType string `json:"sourceType"`
+	Revision   int    `json:"revision"`
+}
+
+// CredentialAuthMetadata is sanitized auth metadata returned by Credential
+// Vault. It intentionally does not include credential references or values.
+type CredentialAuthMetadata struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
+}
+
+// CredentialBindingMetadata is sanitized binding metadata returned by
+// Credential Vault.
+type CredentialBindingMetadata struct {
+	Name     string                  `json:"name"`
+	Revision int                     `json:"revision"`
+	Match    *CredentialMatch        `json:"match,omitempty"`
+	Auth     *CredentialAuthMetadata `json:"auth,omitempty"`
+}
+
+// CredentialVaultState is sanitized Credential Vault state.
+type CredentialVaultState struct {
+	Revision    int                         `json:"revision"`
+	Credentials []CredentialMetadata        `json:"credentials"`
+	Bindings    []CredentialBindingMetadata `json:"bindings"`
+}
+
+// CredentialListResponse is the credential metadata list response.
+type CredentialListResponse struct {
+	Revision    int                  `json:"revision"`
+	Credentials []CredentialMetadata `json:"credentials"`
+}
+
+// CredentialBindingListResponse is the binding metadata list response.
+type CredentialBindingListResponse struct {
+	Revision int                         `json:"revision"`
+	Bindings []CredentialBindingMetadata `json:"bindings"`
 }
 
 // ErrorResponse is the standard error response for non-2xx HTTP responses.

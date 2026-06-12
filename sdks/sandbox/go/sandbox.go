@@ -52,6 +52,9 @@ type SandboxCreateOptions struct {
 	// NetworkPolicy for egress control.
 	NetworkPolicy *NetworkPolicy
 
+	// CredentialProxy enables Credential Vault transparent proxy support.
+	CredentialProxy *CredentialProxyConfig
+
 	// Volumes to mount.
 	Volumes []Volume
 
@@ -125,18 +128,19 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 	lc := config.lifecycleClient()
 
 	req := CreateSandboxRequest{
-		Image:          nil,
-		SnapshotID:     opts.SnapshotID,
-		Entrypoint:     entrypoint,
-		ResourceLimits: limits,
-		Timeout:        timeout,
-		Env:            opts.Env,
-		SecureAccess:   opts.SecureAccess,
-		Metadata:       opts.Metadata,
-		NetworkPolicy:  opts.NetworkPolicy,
-		Volumes:        opts.Volumes,
-		Extensions:     opts.Extensions,
-		Platform:       opts.Platform,
+		Image:           nil,
+		SnapshotID:      opts.SnapshotID,
+		Entrypoint:      entrypoint,
+		ResourceLimits:  limits,
+		Timeout:         timeout,
+		Env:             opts.Env,
+		SecureAccess:    opts.SecureAccess,
+		Metadata:        opts.Metadata,
+		NetworkPolicy:   opts.NetworkPolicy,
+		CredentialProxy: opts.CredentialProxy,
+		Volumes:         opts.Volumes,
+		Extensions:      opts.Extensions,
+		Platform:        opts.Platform,
 	}
 	if opts.Image != "" {
 		req.Image = &ImageSpec{URI: opts.Image, Auth: opts.ImageAuth}

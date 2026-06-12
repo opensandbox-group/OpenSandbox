@@ -258,6 +258,7 @@ const config2 = new ConnectionConfig({
 | `env`                        | 环境变量                             | `{}`                         |
 | `metadata`                   | 自定义元数据标签                     | `{}`                         |
 | `networkPolicy`              | 可选的出站网络策略（egress）         | -                            |
+| `credentialProxy`            | 可选的 Credential Vault proxy 启动配置 | -                          |
 | `extensions`                 | 额外的服务端扩展字段                 | `{}`                         |
 | `skipHealthCheck`            | 跳过就绪检测（`Running` + 健康检查） | `false`                      |
 | `healthCheck`                | 自定义就绪检查                       | -                            |
@@ -291,7 +292,13 @@ await sandbox.patchEgressRules([
 ]);
 ```
 
-### 4. 资源清理
+### 4. Credential Vault
+
+Credential Vault 可以由 egress sidecar 在出站请求中注入凭证，避免真实密钥进入沙箱环境变量、命令参数、文件或日志。创建沙箱时设置 `credentialProxy: { enabled: true }`，然后通过 `sandbox.credentialVault.create(...)` / `patch(...)` 写入 credentials 和 bindings。
+
+更多 auth 类型、binding 规则和 Git/curl 示例请参考 [Credential Vault](../../../docs/credential-vault_zh.md)。
+
+### 5. 资源清理
 
 在 Node.js 环境下，`Sandbox` 和 `SandboxManager` 会拥有各自的 HTTP agent，因此即使多个实例共享同一个 `ConnectionConfig` 也不会互相影响。SDK 会借助 `ConnectionConfig.withTransportIfMissing()` 复刻每个实例的 transport。完成使用后调用 `sandbox.close()` / `manager.close()` 来释放底层连接池；
 

@@ -288,6 +288,7 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 | `Env` | 环境变量 | `{}` |
 | `Metadata` | 自定义元数据标签 | `{}` |
 | `NetworkPolicy` | 可选的出站网络策略（egress） | - |
+| `CredentialProxy` | 可选的 Credential Vault proxy 启动配置 | - |
 | `Volumes` | 可选存储挂载（`Host` / `PVC`，支持 `ReadOnly` 与 `SubPath`） | - |
 | `Extensions` | 额外的服务器定义字段 | `{}` |
 | `SkipHealthCheck` | 跳过就绪检查（`Running` + 健康检查） | `false` |
@@ -338,7 +339,13 @@ await sandbox.PatchEgressRulesAsync(new[]
 });
 ```
 
-### 4. 资源清理
+### 4. Credential Vault
+
+Credential Vault 可以由 egress sidecar 在出站请求中注入凭证，避免真实密钥进入沙箱环境变量、命令参数、文件或日志。创建沙箱时设置 `CredentialProxy = new CredentialProxyConfig { Enabled = true }`，然后通过 `sandbox.CreateCredentialVaultAsync(...)` / `PatchCredentialVaultAsync(...)` 写入 credentials 和 bindings。
+
+更多 auth 类型、binding 规则和 Git/curl 示例请参考 [Credential Vault](../../../docs/credential-vault_zh.md)。
+
+### 5. 资源清理
 
 `Sandbox` 和 `SandboxManager` 都实现了 `IAsyncDisposable`。完成后使用 `await using` 或调用 `DisposeAsync()`。
 

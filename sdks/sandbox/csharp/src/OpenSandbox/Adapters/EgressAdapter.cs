@@ -21,13 +21,95 @@ using OpenSandbox.Services;
 
 namespace OpenSandbox.Adapters;
 
-internal sealed class EgressAdapter : IEgress
+internal sealed class EgressAdapter : IEgress, ICredentialVault
 {
     private readonly HttpClientWrapper _client;
 
     public EgressAdapter(HttpClientWrapper client)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+    }
+
+    public async Task<CredentialVaultState> CreateAsync(
+        IReadOnlyList<Credential> credentials,
+        IReadOnlyList<CredentialBinding> bindings,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new CredentialVaultCreateRequest
+        {
+            Credentials = credentials,
+            Bindings = bindings
+        };
+
+        return await _client.PostAsync<CredentialVaultState>(
+            "/credential-vault",
+            request,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<CredentialVaultState> GetAsync(CancellationToken cancellationToken = default)
+    {
+        return await _client.GetAsync<CredentialVaultState>(
+            "/credential-vault",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<CredentialVaultState> PatchAsync(
+        CredentialVaultPatchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request == null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
+        return await _client.PatchAsync<CredentialVaultState>(
+            "/credential-vault",
+            request,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task DeleteAsync(CancellationToken cancellationToken = default)
+    {
+        await _client.DeleteAsync("/credential-vault", cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<CredentialMetadata>> ListCredentialsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var response = await _client.GetAsync<CredentialListResponse>(
+            "/credential-vault/credentials",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return response.Credentials;
+    }
+
+    public async Task<CredentialMetadata> GetCredentialAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        return await _client.GetAsync<CredentialMetadata>(
+            $"/credential-vault/credentials/{EncodePathSegment(name)}",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<CredentialBindingMetadata>> ListBindingsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var response = await _client.GetAsync<CredentialBindingListResponse>(
+            "/credential-vault/bindings",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return response.Bindings;
+    }
+
+    public async Task<CredentialBindingMetadata> GetBindingAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        return await _client.GetAsync<CredentialBindingMetadata>(
+            $"/credential-vault/bindings/{EncodePathSegment(name)}",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<NetworkPolicy> GetPolicyAsync(CancellationToken cancellationToken = default)
@@ -99,5 +181,15 @@ internal sealed class EgressAdapter : IEgress
             "deny" => NetworkRuleAction.Deny,
             _ => throw new SandboxApiException($"Invalid network rule action: {action ?? "<null>"}")
         };
+    }
+
+    private static string EncodePathSegment(string value)
+    {
+        if (value == null)
+        {
+            throw new ArgumentNullException(nameof(value));
+        }
+
+        return Uri.EscapeDataString(value);
     }
 }

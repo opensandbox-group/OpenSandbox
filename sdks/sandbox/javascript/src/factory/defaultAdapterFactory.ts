@@ -87,8 +87,14 @@ export class DefaultAdapterFactory implements AdapterFactory {
       headers,
       fetch: opts.connectionConfig.fetch,
     });
+    const egress = new EgressAdapter(egressClient, {
+      baseUrl: opts.egressBaseUrl,
+      fetch: opts.connectionConfig.fetch,
+      headers,
+    });
     return {
-      egress: new EgressAdapter(egressClient),
+      egress,
+      credentialVault: egress,
     };
   }
 }

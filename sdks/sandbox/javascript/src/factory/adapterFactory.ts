@@ -14,7 +14,7 @@
 
 import type { ConnectionConfig } from "../config/connection.js";
 import type { SandboxFiles } from "../services/filesystem.js";
-import type { Egress } from "../services/egress.js";
+import type { CredentialVault, Egress } from "../services/egress.js";
 import type { ExecdCommands } from "../services/execdCommands.js";
 import type { ExecdHealth } from "../services/execdHealth.js";
 import type { ExecdMetrics } from "../services/execdMetrics.js";
@@ -50,6 +50,7 @@ export interface CreateEgressStackOptions {
 
 export interface EgressStack {
   egress: Egress;
+  credentialVault?: CredentialVault;
 }
 
 /**

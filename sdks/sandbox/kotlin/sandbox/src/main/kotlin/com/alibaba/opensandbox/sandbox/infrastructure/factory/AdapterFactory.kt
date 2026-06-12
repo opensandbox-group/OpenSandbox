@@ -19,6 +19,7 @@ package com.alibaba.opensandbox.sandbox.infrastructure.factory
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Commands
+import com.alibaba.opensandbox.sandbox.domain.services.CredentialVault
 import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
 import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
@@ -42,6 +43,11 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.Sandboxes
 internal class AdapterFactory(
     private val httpClientProvider: HttpClientProvider,
 ) {
+    data class EgressStack(
+        val egress: Egress,
+        val credentialVault: CredentialVault,
+    )
+
     fun createSandboxes(): Sandboxes {
         return SandboxesAdapter(httpClientProvider)
     }
@@ -58,8 +64,12 @@ internal class AdapterFactory(
         return CommandsAdapter(httpClientProvider, endpoint)
     }
 
-    fun createEgress(endpoint: SandboxEndpoint): Egress {
-        return EgressAdapter(httpClientProvider, endpoint)
+    fun createEgressStack(endpoint: SandboxEndpoint): EgressStack {
+        val adapter = EgressAdapter(httpClientProvider, endpoint)
+        return EgressStack(
+            egress = adapter,
+            credentialVault = adapter,
+        )
     }
 
     fun createMetrics(endpoint: SandboxEndpoint): Metrics {

@@ -19,6 +19,7 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
@@ -119,6 +120,7 @@ class SandboxesAdapterTest {
                 volumes = null,
                 secureAccess = true,
                 snapshotId = null,
+                credentialProxy = CredentialProxyConfig.enabled(),
             )
 
         // Verify request
@@ -147,6 +149,9 @@ class SandboxesAdapterTest {
         assertNotNull(gotPlatform, "platform should be present in createSandbox request")
         assertEquals("linux", gotPlatform!!["os"]!!.jsonPrimitive.content)
         assertEquals("arm64", gotPlatform["arch"]!!.jsonPrimitive.content)
+        val gotCredentialProxy = payload["credentialProxy"]?.jsonObject
+        assertNotNull(gotCredentialProxy, "credentialProxy should be present in createSandbox request")
+        assertEquals("true", gotCredentialProxy!!["enabled"]!!.jsonPrimitive.content)
         assertEquals("true", payload["secureAccess"]!!.jsonPrimitive.content)
 
         // Verify response
@@ -187,6 +192,7 @@ class SandboxesAdapterTest {
                 extensions = emptyMap(),
                 volumes = null,
                 secureAccess = false,
+                credentialProxy = null,
             )
 
         val request = mockWebServer.takeRequest()
@@ -227,6 +233,7 @@ class SandboxesAdapterTest {
                 volumes = null,
                 secureAccess = false,
                 snapshotId = null,
+                credentialProxy = null,
             )
 
         assertEquals("manual-sbx", result.id)
@@ -262,6 +269,7 @@ class SandboxesAdapterTest {
             volumes = null,
             secureAccess = false,
             snapshotId = "snap-123",
+            credentialProxy = null,
         )
 
         val request = mockWebServer.takeRequest()
@@ -301,6 +309,7 @@ class SandboxesAdapterTest {
             volumes = null,
             secureAccess = false,
             snapshotId = "snap-123",
+            credentialProxy = null,
         )
 
         val request = mockWebServer.takeRequest()
@@ -509,6 +518,7 @@ class SandboxesAdapterTest {
             volumes = volumes,
             secureAccess = false,
             snapshotId = null,
+            credentialProxy = null,
         )
 
         val request = mockWebServer.takeRequest()

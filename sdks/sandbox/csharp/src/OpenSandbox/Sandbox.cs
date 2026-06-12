@@ -64,6 +64,11 @@ public sealed class Sandbox : IAsyncDisposable
     /// </summary>
     public IExecdMetrics Metrics { get; }
 
+    /// <summary>
+    /// Gets the sandbox-scoped Credential Vault service.
+    /// </summary>
+    public ICredentialVault CredentialVault { get; }
+
     private readonly IEgress _egress;
 
     private readonly ISandboxes _sandboxes;
@@ -91,7 +96,8 @@ public sealed class Sandbox : IAsyncDisposable
         ISandboxFiles files,
         IExecdHealth health,
         IExecdMetrics metrics,
-        IEgress egress)
+        IEgress egress,
+        ICredentialVault? credentialVault)
     {
         Id = id;
         ConnectionConfig = connectionConfig;
@@ -107,6 +113,9 @@ public sealed class Sandbox : IAsyncDisposable
         Health = health;
         Metrics = metrics;
         _egress = egress;
+        CredentialVault = credentialVault
+            ?? egress as ICredentialVault
+            ?? new UnavailableCredentialVault();
     }
 
     /// <summary>
@@ -188,6 +197,7 @@ public sealed class Sandbox : IAsyncDisposable
                     Egress = options.NetworkPolicy.Egress
                 }
                 : null,
+            CredentialProxy = options.CredentialProxy,
             Volumes = options.Volumes,
             Extensions = options.Extensions?.ToDictionary(kv => kv.Key, kv => (object)kv.Value)
         };
@@ -245,7 +255,8 @@ public sealed class Sandbox : IAsyncDisposable
                 execdStack.Files,
                 execdStack.Health,
                 execdStack.Metrics,
-                egressStack.Egress);
+                egressStack.Egress,
+                egressStack.CredentialVault);
 
             if (!options.SkipHealthCheck)
             {
@@ -369,7 +380,8 @@ public sealed class Sandbox : IAsyncDisposable
                 execdStack.Files,
                 execdStack.Health,
                 execdStack.Metrics,
-                egressStack.Egress);
+                egressStack.Egress,
+                egressStack.CredentialVault);
 
             if (!options.SkipHealthCheck)
             {
@@ -611,6 +623,101 @@ public sealed class Sandbox : IAsyncDisposable
     }
 
     /// <summary>
+    /// Creates a sandbox-local Credential Vault.
+    /// </summary>
+    /// <param name="credentials">Credentials to create.</param>
+    /// <param name="bindings">Bindings to create.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized Credential Vault state.</returns>
+    public async Task<CredentialVaultState> CreateCredentialVaultAsync(
+        IReadOnlyList<Credential> credentials,
+        IReadOnlyList<CredentialBinding> bindings,
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.CreateAsync(credentials, bindings, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Gets sanitized Credential Vault state.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized Credential Vault state.</returns>
+    public async Task<CredentialVaultState> GetCredentialVaultAsync(CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.GetAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Atomically patches sandbox-local credentials and bindings.
+    /// </summary>
+    /// <param name="request">Patch request.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized Credential Vault state.</returns>
+    public async Task<CredentialVaultState> PatchCredentialVaultAsync(
+        CredentialVaultPatchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.PatchAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Deletes the sandbox-local Credential Vault.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public async Task DeleteCredentialVaultAsync(CancellationToken cancellationToken = default)
+    {
+        await CredentialVault.DeleteAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Lists sanitized credential metadata.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized credential metadata.</returns>
+    public async Task<IReadOnlyList<CredentialMetadata>> ListCredentialVaultCredentialsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.ListCredentialsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Gets sanitized metadata for one credential.
+    /// </summary>
+    /// <param name="name">Credential name.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized credential metadata.</returns>
+    public async Task<CredentialMetadata> GetCredentialVaultCredentialAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.GetCredentialAsync(name, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Lists sanitized binding metadata.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized binding metadata.</returns>
+    public async Task<IReadOnlyList<CredentialBindingMetadata>> ListCredentialVaultBindingsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.ListBindingsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Gets sanitized metadata for one binding.
+    /// </summary>
+    /// <param name="name">Binding name.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized binding metadata.</returns>
+    public async Task<CredentialBindingMetadata> GetCredentialVaultBindingAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.GetBindingAsync(name, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Gets the endpoint for a port.
     /// </summary>
     /// <param name="port">The port number.</param>
@@ -760,5 +867,46 @@ public sealed class Sandbox : IAsyncDisposable
         }
 
         return merged;
+    }
+
+    private sealed class UnavailableCredentialVault : ICredentialVault
+    {
+        private const string Message =
+            "Credential Vault is not available for this adapter factory. Provide EgressStack.CredentialVault to use Credential Vault with a custom adapter.";
+
+        public Task<CredentialVaultState> CreateAsync(
+            IReadOnlyList<Credential> credentials,
+            IReadOnlyList<CredentialBinding> bindings,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialVaultState>(CreateException());
+
+        public Task<CredentialVaultState> GetAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialVaultState>(CreateException());
+
+        public Task<CredentialVaultState> PatchAsync(
+            CredentialVaultPatchRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialVaultState>(CreateException());
+
+        public Task DeleteAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException(CreateException());
+
+        public Task<IReadOnlyList<CredentialMetadata>> ListCredentialsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<IReadOnlyList<CredentialMetadata>>(CreateException());
+
+        public Task<CredentialMetadata> GetCredentialAsync(
+            string name,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialMetadata>(CreateException());
+
+        public Task<IReadOnlyList<CredentialBindingMetadata>> ListBindingsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<IReadOnlyList<CredentialBindingMetadata>>(CreateException());
+
+        public Task<CredentialBindingMetadata> GetBindingAsync(
+            string name,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialBindingMetadata>(CreateException());
+
+        private static InvalidArgumentException CreateException() => new(Message);
     }
 }

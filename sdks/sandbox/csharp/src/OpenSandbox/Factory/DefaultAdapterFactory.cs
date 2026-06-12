@@ -91,9 +91,11 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             headers,
             options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"));
 
+        var egress = new EgressAdapter(clientWrapper);
         return new EgressStack
         {
-            Egress = new EgressAdapter(clientWrapper)
+            Egress = egress,
+            CredentialVault = egress
         };
     }
 }

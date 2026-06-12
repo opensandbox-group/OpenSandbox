@@ -439,6 +439,7 @@ config = ConnectionConfig(
 | `env`           | 环境变量             | 空                              |
 | `metadata`      | 自定义元数据标签       | 空                              |
 | `network_policy` | 可选的出站网络策略（egress） | -                         |
+| `credential_proxy` | 可选的 Credential Vault proxy 启动配置 | -                    |
 | `ready_timeout` | 等待沙箱就绪的最大时间 | 30 秒                           |
 
 注意：`opensandbox.io/` 前缀下的 metadata key 属于系统保留标签，服务端会拒绝用户传入。
@@ -476,3 +477,9 @@ await sandbox.patch_egress_rules(
     ]
 )
 ```
+
+### 4. Credential Vault
+
+Credential Vault 可以由 egress sidecar 在出站请求中注入凭证，避免真实密钥进入沙箱环境变量、命令参数、文件或日志。创建沙箱时设置 `credential_proxy=CredentialProxyConfig(enabled=True)`，然后通过 `sandbox.credential_vault.create(...)` / `patch(...)` 写入 credentials 和 bindings。
+
+更多 auth 类型、binding 规则和 Git/curl 示例请参考 [Credential Vault](../../../docs/credential-vault_zh.md)。

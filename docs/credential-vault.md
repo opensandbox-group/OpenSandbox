@@ -5,8 +5,9 @@ Credential Vault is OpenSandbox's outbound credential broker for sandboxed agent
 ## How It Works
 
 Credential Vault is implemented by the egress sidecar. A sandbox must be created
-with both a `network_policy` and `credential_proxy.enabled = true` in the Python
-SDK. The lifecycle API field name is `credentialProxy.enabled`.
+with both an outbound `network_policy` / `networkPolicy` and Credential Proxy
+enabled. The lifecycle API field name is `credentialProxy.enabled`; SDKs expose
+that field using their language-specific naming conventions.
 
 At a high level:
 
@@ -82,10 +83,26 @@ X-Client-Secret: <client-secret>
 ## Requirements
 
 - Server config sets `[egress].image`.
-- Sandbox create request includes `network_policy`.
-- Sandbox create request sets `credential_proxy=CredentialProxyConfig(enabled=True)`.
+- Sandbox create request includes an outbound network policy.
+- Sandbox create request enables Credential Proxy.
 - The sandbox image has the tools you want to run. For Claude Code, use an image
   with Node.js and npm, such as the OpenSandbox code-interpreter image.
+
+## SDK Quick Reference
+
+All sandbox SDKs use the same wire contract. The main differences are naming and
+language style:
+
+| SDK | Enable proxy on sandbox create | Vault entry point | Create / patch methods |
+| --- | --- | --- | --- |
+| Python | `credential_proxy=CredentialProxyConfig(enabled=True)` | `sandbox.credential_vault` | `create(...)`, `patch(...)` |
+| Go | `CredentialProxy: &opensandbox.CredentialProxyConfig{Enabled: true}` | `sandbox.CredentialVault(ctx)` or sandbox helpers | `CreateCredentialVault(ctx, req)`, `PatchCredentialVault(ctx, req)` |
+| JavaScript/TypeScript | `credentialProxy: { enabled: true }` | `sandbox.credentialVault` | `create(request)`, `patch(request)` |
+| Kotlin/JVM | `.credentialProxyEnabled(true)` or `.credentialProxy { enabled(true) }` | `sandbox.credentialVault()` | `create(request)`, `patch(request)` |
+| C#/.NET | `CredentialProxy = new CredentialProxyConfig { Enabled = true }` | `sandbox.CredentialVault` or sandbox helpers | `CreateCredentialVaultAsync(...)`, `PatchCredentialVaultAsync(...)` |
+
+The vault APIs return sanitized metadata. Plaintext credential values are
+write-only and are not returned by `get`, `list`, or patch responses.
 
 ## Claude Code With Anthropic
 
@@ -189,6 +206,61 @@ outbound HTTPS request to `api.anthropic.com/v1/*` receives the real `x-api-key`
 header from Credential Vault. If your environment uses a private npm mirror,
 replace `registry.npmjs.org` in the network policy and the `npm install`
 command with that mirror host.
+
+## Git And Curl With Vault-Injected Credentials
+
+Credential Vault can also protect credentials used by command-line tools such as
+`git` and `curl`. Keep the command free of real secrets and bind the request
+shape to the credential in Vault instead.
+
+For a private Git repository, store a base64-encoded `username:token` value and
+bind it with `basic` auth:
+
+```python
+Credential(name="git-basic", source={"value": "<base64(username:token)>"})
+
+CredentialBinding(
+    name="git-basic",
+    match={
+        "schemes": ["https"],
+        "ports": [443],
+        "hosts": ["git.example.com"],
+        "paths": ["/org/private-repo.git*"],
+    },
+    auth={"type": "basic", "credential": "git-basic"},
+)
+```
+
+Then run the normal URL without embedding credentials:
+
+```bash
+GIT_TERMINAL_PROMPT=0 git clone https://git.example.com/org/private-repo.git
+```
+
+For an API request that expects a token header, bind the path and method to an
+`apiKey` auth rule:
+
+```python
+Credential(name="api-token", source={"value": "<token>"})
+
+CredentialBinding(
+    name="api-token",
+    match={
+        "schemes": ["https"],
+        "ports": [443],
+        "hosts": ["api.example.com"],
+        "methods": ["GET"],
+        "paths": ["/v1/projects/123/variables"],
+    },
+    auth={"type": "apiKey", "name": "PRIVATE-TOKEN", "credential": "api-token"},
+)
+```
+
+The sandbox command stays secret-free:
+
+```bash
+curl -fsS https://api.example.com/v1/projects/123/variables
+```
 
 ## Binding Guidance
 

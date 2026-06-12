@@ -304,6 +304,7 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 | `Env` | Environment variables | `{}` |
 | `Metadata` | Custom metadata tags | `{}` |
 | `NetworkPolicy` | Optional outbound network policy (egress) | - |
+| `CredentialProxy` | Optional Credential Vault proxy startup settings | - |
 | `Volumes` | Optional storage mounts (`Host` / `PVC`, supports `ReadOnly` and `SubPath`) | - |
 | `Extensions` | Extra server-defined fields | `{}` |
 | `SkipHealthCheck` | Skip readiness checks (`Running` + health check) | `false` |
@@ -361,7 +362,64 @@ await sandbox.PatchEgressRulesAsync(new[]
 });
 ```
 
-### 5. Timeout and Retry Behavior
+### 5. Credential Vault
+
+Credential Vault injects outbound credentials from the egress sidecar while
+keeping real secrets out of sandbox environment variables, commands, files, and
+logs. Create the sandbox with `CredentialProxy` enabled, then write credentials
+and bindings through `sandbox.CredentialVault` or the sandbox helper methods.
+
+```csharp
+var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "python:3.11",
+    NetworkPolicy = new NetworkPolicy
+    {
+        DefaultAction = NetworkRuleAction.Deny,
+        Egress = new List<NetworkRule>
+        {
+            new() { Action = NetworkRuleAction.Allow, Target = "api.example.com" }
+        }
+    },
+    CredentialProxy = new CredentialProxyConfig { Enabled = true }
+});
+
+await sandbox.CreateCredentialVaultAsync(
+    new[]
+    {
+        new Credential
+        {
+            Name = "api-token",
+            Source = new InlineCredentialSource { Value = "<token>" }
+        }
+    },
+    new[]
+    {
+        new CredentialBinding
+        {
+            Name = "api-token",
+            Match = new CredentialMatch
+            {
+                Schemes = new[] { "https" },
+                Ports = new[] { 443 },
+                Hosts = new[] { "api.example.com" },
+                Paths = new[] { "/v1/*" }
+            },
+            Auth = new CredentialAuth
+            {
+                Type = "apiKey",
+                Name = "x-api-key",
+                Credential = "api-token"
+            }
+        }
+    });
+```
+
+See [Credential Vault](../../../docs/credential-vault.md) for auth types,
+binding guidance, and Git/curl examples.
+
+### 6. Timeout and Retry Behavior
 
 - `ConnectionConfig.RequestTimeoutSeconds` controls timeout for SDK HTTP calls.
 - `RunCommandOptions.TimeoutSeconds` controls command execution timeout for command runs.
@@ -370,7 +428,7 @@ await sandbox.PatchEgressRulesAsync(new[]
 - `ReadyTimeoutSeconds` controls how long `CreateAsync` / `ConnectAsync` waits for readiness.
 - The SDK does not automatically retry failed API requests; implement retries in caller code where appropriate.
 
-### 6. Resource Cleanup
+### 7. Resource Cleanup
 
 Both `Sandbox` and `SandboxManager` implement `IAsyncDisposable`. Use `await using` or call `DisposeAsync()` when done.
 

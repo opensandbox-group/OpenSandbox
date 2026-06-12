@@ -322,6 +322,7 @@ The `Sandbox.builder()` allows configuring the sandbox environment.
 | `metadata`     | Custom metadata tags                     | Empty                           |
 | `extensions`   | Opaque server-side extension parameters  | Empty                           |
 | `networkPolicy` | Optional outbound network policy (egress) | -                             |
+| `credentialProxy` | Optional Credential Vault proxy startup settings | -                     |
 | `readyTimeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
 
 Note: metadata keys under `opensandbox.io/` are reserved for system-managed
@@ -377,3 +378,70 @@ sandbox.patchEgressRules(
     )
 );
 ```
+
+### 4. Credential Vault
+
+Credential Vault injects outbound credentials from the egress sidecar while
+keeping real secrets out of sandbox environment variables, commands, files, and
+logs. Create the sandbox with `credentialProxyEnabled(true)`, then write
+credentials and bindings through `sandbox.credentialVault()`.
+
+```java
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Credential;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialAuth;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialBinding;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMatch;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultCreateRequest;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule;
+import java.util.List;
+
+Sandbox sandbox = Sandbox.builder()
+    .connectionConfig(config)
+    .image("python:3.11")
+    .networkPolicy(
+        NetworkPolicy.builder()
+            .defaultAction(NetworkPolicy.DefaultAction.DENY)
+            .addEgress(
+                NetworkRule.builder()
+                    .action(NetworkRule.Action.ALLOW)
+                    .target("api.example.com")
+                    .build()
+            )
+            .build()
+    )
+    .credentialProxyEnabled(true)
+    .build();
+
+sandbox.credentialVault().create(
+    CredentialVaultCreateRequest.builder()
+        .credentials(
+            List.of(
+                Credential.builder()
+                    .name("api-token")
+                    .inlineSource("<token>")
+                    .build()
+            )
+        )
+        .bindings(
+            List.of(
+                CredentialBinding.builder()
+                    .name("api-token")
+                    .match(
+                        CredentialMatch.builder()
+                            .schemes(CredentialMatch.Scheme.HTTPS)
+                            .ports(443)
+                            .hosts("api.example.com")
+                            .paths("/v1/*")
+                            .build()
+                    )
+                    .auth(CredentialAuth.apiKey("x-api-key", "api-token"))
+                    .build()
+            )
+        )
+        .build()
+);
+```
+
+See [Credential Vault](../../../docs/credential-vault.md) for auth types,
+binding guidance, and Git/curl examples.

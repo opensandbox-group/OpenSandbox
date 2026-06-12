@@ -74,6 +74,182 @@ export interface NetworkPolicy extends Record<string, unknown> {
 }
 
 // ============================================================================
+// Credential Vault Models
+// ============================================================================
+
+export interface CredentialProxyConfig extends Record<string, unknown> {
+  /**
+   * Enable transparent MITM support required by Credential Vault injection.
+   */
+  enabled?: boolean;
+}
+
+export interface InlineCredentialSource extends Record<string, unknown> {
+  /**
+   * Credential source type. Defaults to "inline" when omitted.
+   */
+  type?: "inline";
+  /**
+   * Write-only inline credential value. This field is accepted in create/patch
+   * requests and is never present in Credential Vault state responses.
+   */
+  value: string;
+}
+
+export interface Credential extends Record<string, unknown> {
+  /**
+   * Sandbox-local credential name.
+   */
+  name: string;
+  /**
+   * Write-only credential source.
+   */
+  source: InlineCredentialSource;
+}
+
+export type CredentialMatchScheme = "https" | "http";
+
+export interface CredentialMatch extends Record<string, unknown> {
+  /**
+   * URL schemes to match. Defaults to HTTPS in the sidecar.
+   */
+  schemes?: CredentialMatchScheme[];
+  /**
+   * Destination ports to match. Defaults to 443 in the sidecar.
+   */
+  ports?: number[];
+  /**
+   * Exact FQDNs or leftmost-label wildcards.
+   */
+  hosts: string[];
+  /**
+   * HTTP methods to match.
+   */
+  methods?: string[];
+  /**
+   * Request paths to match.
+   */
+  paths?: string[];
+}
+
+export interface CustomHeaderEntry extends Record<string, unknown> {
+  /**
+   * Header name to inject.
+   */
+  name: string;
+  /**
+   * Name of the sandbox-local credential to inject as this header value.
+   */
+  credential: string;
+}
+
+export type CredentialAuth =
+  | {
+      type: "bearer";
+      credential: string;
+    }
+  | {
+      type: "basic";
+      /**
+       * Credential containing pre-encoded base64(username:password).
+       */
+      credential: string;
+    }
+  | {
+      type: "apiKey";
+      name: string;
+      credential: string;
+    }
+  | {
+      type: "customHeaders";
+      headers: CustomHeaderEntry[];
+    };
+
+export interface CredentialBinding extends Record<string, unknown> {
+  /**
+   * Sandbox-local binding name.
+   */
+  name: string;
+  /**
+   * Request match for this binding.
+   */
+  match: CredentialMatch;
+  /**
+   * Auth injection rule for this binding.
+   */
+  auth: CredentialAuth;
+}
+
+export interface CredentialMetadata {
+  name: string;
+  /**
+   * Source type only; plaintext source material is not returned.
+   */
+  sourceType: string;
+  revision: number;
+}
+
+export interface CredentialAuthMetadata {
+  type: string;
+  /**
+   * Public auth parameter name, such as an API key header name.
+   */
+  name?: string;
+}
+
+export interface CredentialBindingMetadata {
+  name: string;
+  revision: number;
+  match?: CredentialMatch;
+  /**
+   * Sanitized auth metadata. Plaintext credential references and values are not returned.
+   */
+  auth?: CredentialAuthMetadata;
+}
+
+export interface CredentialVaultState {
+  revision: number;
+  credentials: CredentialMetadata[];
+  bindings: CredentialBindingMetadata[];
+}
+
+export interface CredentialListResponse {
+  revision: number;
+  credentials: CredentialMetadata[];
+}
+
+export interface CredentialBindingListResponse {
+  revision: number;
+  bindings: CredentialBindingMetadata[];
+}
+
+export interface CredentialMutationSet extends Record<string, unknown> {
+  add?: Credential[];
+  replace?: Credential[];
+  delete?: string[];
+}
+
+export interface CredentialBindingMutationSet extends Record<string, unknown> {
+  add?: CredentialBinding[];
+  replace?: CredentialBinding[];
+  delete?: string[];
+}
+
+export interface CredentialVaultCreateRequest extends Record<string, unknown> {
+  credentials: Credential[];
+  bindings: CredentialBinding[];
+}
+
+export interface CredentialVaultPatchRequest extends Record<string, unknown> {
+  /**
+   * Optional optimistic concurrency guard.
+   */
+  expectedRevision?: number;
+  credentials?: CredentialMutationSet;
+  bindings?: CredentialBindingMutationSet;
+}
+
+// ============================================================================
 // Volume Models
 // ============================================================================
 
@@ -263,6 +439,10 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    * Optional outbound network policy for the sandbox.
    */
   networkPolicy?: NetworkPolicy;
+  /**
+   * Optional Credential Vault proxy startup settings.
+   */
+  credentialProxy?: CredentialProxyConfig;
   /**
    * Optional list of volume mounts for persistent storage.
    */
