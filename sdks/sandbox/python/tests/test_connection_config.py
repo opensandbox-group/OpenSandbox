@@ -28,13 +28,40 @@ def test_protocol_validation() -> None:
 
 
 def test_get_base_url_with_domain_and_protocol() -> None:
+    # get_base_url() must NOT append /v1 — doing so would route requests to the
+    # blocking /v1/sandboxes endpoint and cause 504 Gateway Timeouts (issue #591).
     cfg = ConnectionConfig(domain="example.com:1234", protocol="https")
-    assert cfg.get_base_url() == "https://example.com:1234/v1"
+    assert cfg.get_base_url() == "https://example.com:1234"
 
 
 def test_get_base_url_domain_can_include_scheme() -> None:
     cfg = ConnectionConfig(domain="https://example.com:9999", protocol="http")
-    assert cfg.get_base_url() == "https://example.com:9999/v1"
+    assert cfg.get_base_url() == "https://example.com:9999"
+
+
+def test_get_base_url_no_v1_prefix_direct_mode() -> None:
+    """Direct mode: base URL must not contain /v1 so SDK hits POST /sandboxes (async, 202)."""
+    cfg = ConnectionConfig(domain="sandbox-api.example.com", use_server_proxy=False)
+    url = cfg.get_base_url()
+    assert "/v1" not in url
+    assert url == "http://sandbox-api.example.com"
+
+
+def test_get_base_url_no_v1_prefix_proxy_mode() -> None:
+    """Proxy mode: base URL must not contain /v1 to avoid hitting the blocking endpoint."""
+    cfg = ConnectionConfig(
+        domain="http://sandbox-api.example.com",
+        use_server_proxy=True,
+    )
+    url = cfg.get_base_url()
+    assert "/v1" not in url
+    assert url == "http://sandbox-api.example.com"
+
+
+def test_get_base_url_trailing_slash_stripped() -> None:
+    """Trailing slashes on the domain are stripped to prevent double-slash in paths."""
+    cfg = ConnectionConfig(domain="http://sandbox-api.example.com/")
+    assert cfg.get_base_url() == "http://sandbox-api.example.com"
 
 
 @pytest.mark.asyncio
