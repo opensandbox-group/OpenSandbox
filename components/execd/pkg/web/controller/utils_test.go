@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -79,6 +80,13 @@ func TestMakeDirCreatesNewDirectory(t *testing.T) {
 	info, err := os.Stat(newDir)
 	require.NoError(t, err)
 	require.True(t, info.IsDir())
+
+	if runtime.GOOS != "windows" {
+		// Verify the permission bits match what was requested (mode 755 octal).
+		wantPerm := os.FileMode(0o755)
+		gotPerm := info.Mode().Perm()
+		require.Equal(t, wantPerm, gotPerm, "expected directory permissions %o, got %o", wantPerm, gotPerm)
+	}
 }
 
 func TestMakeDirIsIdempotentOnExistingDirectory(t *testing.T) {
@@ -100,7 +108,7 @@ func TestMakeDirIsIdempotentOnExistingDirectory(t *testing.T) {
 	require.Equal(t, before.Mode(), after.Mode(), "MakeDir must not chmod a pre-existing directory")
 }
 
-func TestMakeDirCreatesNestedDirectoriesWithoutChmodingParents(t *testing.T) {
+func TestMakeDirCreatesNestedDirectoriesWithoutChmodNewDirParents(t *testing.T) {
 	// When creating /parent/child and /parent already exists, only /parent/child
 	// should receive chmod — /parent must be left untouched.
 	tmp := t.TempDir()

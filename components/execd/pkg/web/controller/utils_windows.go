@@ -124,6 +124,9 @@ func MakeDir(dir string, perm model.Permission) error {
 	// we can skip chmod/chown on pre-existing directories (including system
 	// dirs like /tmp that the sandbox user does not own).
 	_, statErr := os.Stat(abs)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
 	alreadyExisted := statErr == nil
 
 	if err = os.MkdirAll(abs, os.ModePerm); err != nil {
