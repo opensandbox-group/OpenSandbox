@@ -164,8 +164,8 @@ class ConnectionConfig(BaseModel):
         ``/v1/sandboxes`` endpoint and cause 504 Gateway Timeouts when the
         server-side proxy has a short idle timeout (see issue #591).
         """
-        domain = self.get_domain()
+        domain = self.get_domain().rstrip("/")
         # Allow domain to override protocol if it explicitly starts with a scheme
         if domain.startswith("http://") or domain.startswith("https://"):
-            return domain.rstrip("/")
+            return domain
         return f"{self.protocol}://{domain}"

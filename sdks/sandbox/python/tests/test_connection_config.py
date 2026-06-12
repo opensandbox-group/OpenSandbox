@@ -64,6 +64,12 @@ def test_get_base_url_trailing_slash_stripped() -> None:
     assert cfg.get_base_url() == "http://sandbox-api.example.com"
 
 
+def test_get_base_url_no_scheme_trailing_slash_stripped() -> None:
+    """Trailing slash is stripped even when domain has no explicit scheme."""
+    cfg = ConnectionConfig(domain="sandbox-api.example.com/")
+    assert cfg.get_base_url() == "http://sandbox-api.example.com"
+
+
 @pytest.mark.asyncio
 async def test_close_transport_if_owned_default_transport() -> None:
     cfg = ConnectionConfig().with_transport_if_missing()
