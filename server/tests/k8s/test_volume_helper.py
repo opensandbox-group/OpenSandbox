@@ -120,8 +120,10 @@ class TestApplyVolumesToPodSpec:
         ro_mount = _get_mount(pod_spec, "/mnt/ro")
         rw_mount = _get_mount(pod_spec, "/mnt/rw")
 
+        assert ro_mount is not None
         assert ro_mount["name"] == ro_entry["name"]
         assert ro_mount["readOnly"] is True
+        assert rw_mount is not None
         assert rw_mount["name"] == rw_entry["name"]
         assert rw_mount["readOnly"] is False
 

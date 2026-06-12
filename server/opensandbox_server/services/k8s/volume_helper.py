@@ -17,7 +17,7 @@ Volume helper utilities for Kubernetes pod specs.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from opensandbox_server.api.schema import Volume
 
@@ -42,7 +42,7 @@ def apply_volumes_to_pod_spec(
         v.get("name") for v in pod_volumes if isinstance(v, dict)
     }
     # Key: (claim_name, read_only) so the same PVC can be mounted both RO and RW.
-    pvc_to_volume_name: Dict[tuple, str] = {}
+    pvc_to_volume_name: Dict[Tuple[str, bool], str] = {}
 
     for vol in volumes:
         vol_name = vol.name
@@ -69,6 +69,19 @@ def apply_volumes_to_pod_spec(
                 })
                 pvc_to_volume_name[pvc_key] = vol_name
                 existing_volume_names.add(vol_name)
+                logger.info(
+                    "Added PVC volume '%s' (claim: %s, readOnly: %s) "
+                    "mounted at '%s' for sandbox",
+                    vol_name, pvc_claim_name, vol.read_only, vol.mount_path,
+                )
+            else:
+                mapped_name = pvc_to_volume_name[pvc_key]
+                if vol_name != mapped_name:
+                    logger.warning(
+                        "PVC mount request for vol '%s' (claim: %s, readOnly: %s) "
+                        "reuses existing pod volume '%s'; requested name '%s' is ignored",
+                        vol_name, pvc_claim_name, vol.read_only, mapped_name, vol_name,
+                    )
 
             mount = {
                 "name": pvc_to_volume_name[pvc_key],
@@ -78,12 +91,6 @@ def apply_volumes_to_pod_spec(
             if vol.sub_path:
                 mount["subPath"] = vol.sub_path
             mounts.append(mount)
-
-            logger.info(
-                "Added PVC volume '%s' (claim: %s, readOnly: %s) "
-                "mounted at '%s' for sandbox",
-                vol_name, pvc_claim_name, vol.read_only, vol.mount_path,
-            )
         elif vol.host is not None:
             host_path = vol.host.path
 
