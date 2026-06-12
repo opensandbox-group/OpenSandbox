@@ -93,7 +93,7 @@ func RenameFile(item model.RenameFileItem) error {
 	}
 
 	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		return fmt.Errorf("source path not found: %s", item.Src)
+		return fmt.Errorf("source path not found: %s: %w", item.Src, err)
 	}
 
 	dstDir := filepath.Dir(dstPath)

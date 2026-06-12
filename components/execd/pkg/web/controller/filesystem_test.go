@@ -90,6 +90,22 @@ func TestFilesystemControllerGetFilesInfoReturnsNotFoundForMissingPath(t *testin
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
+func TestFilesystemControllerRenameFilesReturnsNotFoundForMissingSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	missingSrc := filepath.Join(tmpDir, "missing.txt")
+	dst := filepath.Join(tmpDir, "dest.txt")
+	payload, err := json.Marshal([]model.RenameFileItem{{Src: missingSrc, Dest: dst}})
+	require.NoError(t, err)
+	ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", payload)
+
+	ctrl.RenameFiles()
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
+}
+
 func TestFilesystemControllerSearchFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	a := filepath.Join(tmpDir, "alpha.txt")
@@ -363,7 +379,10 @@ func TestReplaceContentFailsUnknownFile(t *testing.T) {
 
 	ctrl.ReplaceContent()
 
-	require.Contains(t, []int{http.StatusNotFound, http.StatusInternalServerError}, rec.Code, "expected failure status")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
 func TestFormatContentDisposition(t *testing.T) {
