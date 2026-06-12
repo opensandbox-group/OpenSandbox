@@ -48,14 +48,24 @@ func (s *DefaultTaskSchedulingStrategy) ValidateShardTaskPatches() error {
 	if len(s.Spec.ShardTaskPatches) == 0 {
 		return nil
 	}
-	zeroBytes, _ := json.Marshal(&sandboxv1alpha1.TaskTemplateSpec{})
+	// Zero-value base: we check structural correctness in isolation, not against any
+	// specific user template, so a bad patch is caught even when TaskTemplate is nil.
+	zeroBytes, err := json.Marshal(&sandboxv1alpha1.TaskTemplateSpec{})
+	if err != nil {
+		return fmt.Errorf("batchsandbox: failed to marshal zero TaskTemplateSpec: %w", err)
+	}
 	for i, patch := range s.Spec.ShardTaskPatches {
-		modified, err := strategicpatch.StrategicMergePatch(zeroBytes, patch.Raw, &sandboxv1alpha1.TaskTemplateSpec{})
-		if err != nil {
-			return fmt.Errorf("batchsandbox: shardTaskPatches[%d] failed schema validation: patch %s, err %w", i, patch.Raw, err)
+		// Truncate patch in error messages to avoid persisting large blobs in status conditions.
+		patchSummary := patch.Raw
+		if len(patchSummary) > 200 {
+			patchSummary = append(patchSummary[:200], []byte("...(truncated)")...)
+		}
+		modified, mergeErr := strategicpatch.StrategicMergePatch(zeroBytes, patch.Raw, &sandboxv1alpha1.TaskTemplateSpec{})
+		if mergeErr != nil {
+			return fmt.Errorf("batchsandbox: shardTaskPatches[%d] failed schema validation: patch %s, err %w", i, patchSummary, mergeErr)
 		}
 		if err = json.Unmarshal(modified, &sandboxv1alpha1.TaskTemplateSpec{}); err != nil {
-			return fmt.Errorf("batchsandbox: shardTaskPatches[%d] produced invalid TaskTemplateSpec: patch %s, err %w", i, patch.Raw, err)
+			return fmt.Errorf("batchsandbox: shardTaskPatches[%d] produced invalid TaskTemplateSpec: patch %s, err %w", i, patchSummary, err)
 		}
 	}
 	return nil

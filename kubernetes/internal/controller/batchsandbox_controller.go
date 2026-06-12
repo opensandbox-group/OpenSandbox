@@ -154,10 +154,24 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				statusCopy := batchSbx.Status.DeepCopy()
 				setConditionInStatus(statusCopy, sandboxv1alpha1.BatchSandboxConditionInvalidShardPatch,
 					sandboxv1alpha1.ConditionTrue, "InvalidShardPatch", patchErr.Error())
-				_ = r.updateStatus(ctx, batchSbx, statusCopy)
+				if statusErr := r.updateStatus(ctx, batchSbx, statusCopy); statusErr != nil {
+					log.Error(statusErr, "failed to update status with InvalidShardPatch condition")
+					return ctrl.Result{}, statusErr
+				}
 				// Return without error so the controller does not keep requeueing;
 				// the resource must be corrected by the user.
 				return ctrl.Result{}, nil
+			}
+			// Patches are valid — clear any stale InvalidShardPatch condition so users
+			// know the fix was accepted.
+			if hasCondition(batchSbx, sandboxv1alpha1.BatchSandboxConditionInvalidShardPatch) {
+				statusCopy := batchSbx.Status.DeepCopy()
+				setConditionInStatus(statusCopy, sandboxv1alpha1.BatchSandboxConditionInvalidShardPatch,
+					sandboxv1alpha1.ConditionFalse, "", "")
+				if statusErr := r.updateStatus(ctx, batchSbx, statusCopy); statusErr != nil {
+					log.Error(statusErr, "failed to clear InvalidShardPatch condition")
+					return ctrl.Result{}, statusErr
+				}
 			}
 			if !controllerutil.ContainsFinalizer(batchSbx, FinalizerTaskCleanup) {
 				err := utils.UpdateFinalizer(r.Client, batchSbx, utils.AddFinalizerOpType, FinalizerTaskCleanup)
@@ -181,7 +195,13 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			statusCopy := batchSbx.Status.DeepCopy()
 			setConditionInStatus(statusCopy, sandboxv1alpha1.BatchSandboxConditionInvalidShardPatch,
 				sandboxv1alpha1.ConditionTrue, "InvalidShardPatch", patchErr.Error())
-			_ = r.updateStatus(ctx, batchSbx, statusCopy)
+			if statusErr := r.updateStatus(ctx, batchSbx, statusCopy); statusErr != nil {
+				log.Error(statusErr, "failed to update status with InvalidShardPatch condition on deletion path")
+				return ctrl.Result{}, statusErr
+			}
+			// Always clean up the in-memory scheduler regardless of whether the finalizer
+			// is still present, so stale schedulers are not left behind.
+			r.deleteTaskScheduler(ctx, batchSbx)
 			if controllerutil.ContainsFinalizer(batchSbx, FinalizerTaskCleanup) {
 				if err := utils.UpdateFinalizer(r.Client, batchSbx, utils.RemoveFinalizerOpType, FinalizerTaskCleanup); err != nil {
 					if !errors.IsNotFound(err) {
@@ -189,7 +209,6 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 						return ctrl.Result{}, err
 					}
 				}
-				r.deleteTaskScheduler(ctx, batchSbx)
 				log.Info("removed finalizer due to invalid shardTaskPatches, resource can now be deleted")
 			}
 			return ctrl.Result{}, nil
