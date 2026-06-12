@@ -595,24 +595,27 @@ func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbo
 	// Pods deleted externally (eviction, OOM kill, manual delete) remain in the alloc-status
 	// annotation but are absent from livePodSet; excluding them makes supplement > 0 so the
 	// pool schedules a replacement (fixes issue #954).
-	effectiveAllocated := int32(0)
+	liveAllocated := make([]string, 0, len(allocated))
 	for _, p := range allocated {
 		if _, alive := livePodSet[p]; alive {
-			effectiveAllocated++
+			liveAllocated = append(liveAllocated, p)
 		} else {
-			log.Info("Detected stale allocation entry: pod no longer exists, excluding from effective count",
+			log.V(1).Info("Detected stale allocation entry: pod no longer exists, excluding from effective count",
 				"sandbox", sandbox.Name, "pod", p)
 		}
 	}
+	if stale := len(allocated) - len(liveAllocated); stale > 0 {
+		log.Info("Filtered stale allocated pods", "sandbox", sandbox.Name, "count", stale)
+	}
 
 	supplement := int32(0)
-	if replica-effectiveAllocated > 0 {
-		supplement = replica - effectiveAllocated
+	if replica-int32(len(liveAllocated)) > 0 {
+		supplement = replica - int32(len(liveAllocated))
 	}
 
 	return &algorithm.SandboxRequest{
 		SandboxName:   sandbox.Name,
-		CurAllocation: allocated,
+		CurAllocation: liveAllocated,
 		CurReleased:   released,
 		PodSupplement: supplement,
 		ToRelease:     toRelease,
