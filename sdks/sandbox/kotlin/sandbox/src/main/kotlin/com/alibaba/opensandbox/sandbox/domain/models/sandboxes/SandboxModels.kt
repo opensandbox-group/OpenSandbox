@@ -766,7 +766,24 @@ class SnapshotInfo(
     val name: String? = null,
     val status: SnapshotStatus,
     val createdAt: OffsetDateTime,
-)
+    /**
+     * Portable OCI image reference for a Ready snapshot, usable to restore a sandbox (e.g. across
+     * clusters). Populated once the snapshot reaches [SnapshotState.READY]; null otherwise.
+     */
+    val imageUri: String? = null,
+) {
+    /**
+     * Binary-compatibility constructor preserving the pre-`imageUri` JVM signature for
+     * already-compiled (e.g. Java) callers; delegates [imageUri] to null.
+     */
+    constructor(
+        id: String,
+        sandboxId: String,
+        name: String?,
+        status: SnapshotStatus,
+        createdAt: OffsetDateTime,
+    ) : this(id, sandboxId, name, status, createdAt, null)
+}
 
 class SnapshotFilter private constructor(
     val sandboxId: String?,

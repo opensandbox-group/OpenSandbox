@@ -923,6 +923,13 @@ public class SnapshotInfo
 
     [JsonPropertyName("createdAt")]
     public required DateTime CreatedAt { get; set; }
+
+    /// <summary>
+    /// Portable OCI image reference for a Ready snapshot, usable to restore a sandbox (e.g. across
+    /// clusters). Populated once the snapshot is Ready; null otherwise.
+    /// </summary>
+    [JsonPropertyName("imageUri")]
+    public string? ImageUri { get; set; }
 }
 
 /// <summary>

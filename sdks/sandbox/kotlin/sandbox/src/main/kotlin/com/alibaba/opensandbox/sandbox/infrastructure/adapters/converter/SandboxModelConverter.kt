@@ -406,6 +406,7 @@ internal object SandboxModelConverter {
                     lastTransitionAt = this.status.lastTransitionAt,
                 ),
             createdAt = this.createdAt,
+            imageUri = this.imageUri,
         )
     }
 

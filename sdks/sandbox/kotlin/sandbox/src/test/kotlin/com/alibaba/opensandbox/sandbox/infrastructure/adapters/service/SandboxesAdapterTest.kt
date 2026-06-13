@@ -369,7 +369,8 @@ class SandboxesAdapterTest {
                     "message": null,
                     "lastTransitionAt": "2023-01-01T10:00:00Z"
                 },
-                "createdAt": "2023-01-01T10:00:00Z"
+                "createdAt": "2023-01-01T10:00:00Z",
+                "imageUri": "registry.example.com/snapshots/snap-123:latest"
             }
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
@@ -378,6 +379,7 @@ class SandboxesAdapterTest {
 
         assertEquals(snapshotId, result.id)
         assertEquals("sandbox-123", result.sandboxId)
+        assertEquals("registry.example.com/snapshots/snap-123:latest", result.imageUri)
 
         val request = mockWebServer.takeRequest()
         assertEquals("GET", request.method)

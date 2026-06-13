@@ -654,6 +654,14 @@ class Snapshot(BaseModel):
         alias="createdAt",
         description="Snapshot creation timestamp",
     )
+    image_uri: Optional[str] = Field(
+        None,
+        alias="imageUri",
+        description=(
+            "Portable OCI image reference produced for a Ready snapshot, usable to restore a "
+            "sandbox (e.g. across clusters). Present once the snapshot is Ready; omitted otherwise."
+        ),
+    )
 
     class Config:
         populate_by_name = True

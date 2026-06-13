@@ -481,6 +481,11 @@ export interface SnapshotInfo extends Record<string, unknown> {
   name?: string;
   status: SnapshotStatus;
   createdAt: Date;
+  /**
+   * Portable OCI image reference for a Ready snapshot, usable to restore a sandbox (e.g. across
+   * clusters). Populated once the snapshot is Ready; absent otherwise.
+   */
+  imageUri?: string;
 }
 
 export interface CreateSnapshotRequest extends Record<string, unknown> {

@@ -386,7 +386,10 @@ internal sealed class SandboxesAdapter : ISandboxes
                     ? ParseIsoDate("lastTransitionAt", lastTransitionAt)
                     : null
             },
-            CreatedAt = ParseIsoDate("createdAt", element.GetProperty("createdAt"))
+            CreatedAt = ParseIsoDate("createdAt", element.GetProperty("createdAt")),
+            ImageUri = element.TryGetProperty("imageUri", out var imageUri) && imageUri.ValueKind != JsonValueKind.Null
+                ? imageUri.GetString()
+                : null
         };
     }
 

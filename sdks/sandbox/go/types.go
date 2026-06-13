@@ -200,6 +200,9 @@ type SnapshotInfo struct {
 	Name      string         `json:"name,omitempty"`
 	Status    SnapshotStatus `json:"status"`
 	CreatedAt time.Time      `json:"createdAt"`
+	// ImageURI is the portable OCI image reference for a Ready snapshot, usable to restore a
+	// sandbox (e.g. across clusters). Populated once the snapshot is Ready; empty otherwise.
+	ImageURI string `json:"imageUri,omitempty"`
 }
 
 type CreateSnapshotRequest struct {

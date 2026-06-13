@@ -606,6 +606,14 @@ class SnapshotInfo(BaseModel):
     name: str | None = Field(default=None, description="Optional snapshot name")
     status: SnapshotStatus = Field(description="Current status of the snapshot")
     created_at: datetime = Field(description="Creation timestamp", alias="created_at")
+    image_uri: str | None = Field(
+        default=None,
+        alias="image_uri",
+        description=(
+            "Portable OCI image reference for a Ready snapshot, usable to restore a sandbox "
+            "(e.g. across clusters). Populated once the snapshot is Ready; None otherwise."
+        ),
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

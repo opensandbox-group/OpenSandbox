@@ -912,6 +912,12 @@ components:
           format: date-time
           description: Snapshot creation timestamp
 
+        imageUri:
+          type: string
+          description: >-
+            Portable OCI image reference produced for a Ready snapshot, usable to restore a sandbox
+            (e.g. across clusters). Present once the snapshot reaches the Ready state; omitted otherwise.
+
       required:
         - id
         - sandboxId

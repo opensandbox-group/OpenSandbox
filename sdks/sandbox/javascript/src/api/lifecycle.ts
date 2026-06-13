@@ -817,6 +817,8 @@ export interface components {
              * @description Snapshot creation timestamp
              */
             createdAt: string;
+            /** @description Portable OCI image reference produced for a Ready snapshot, usable to restore a sandbox (e.g. across clusters). Present once the snapshot reaches the Ready state; omitted otherwise. */
+            imageUri?: string;
         };
         /**
          * @description Snapshot lifecycle state.
