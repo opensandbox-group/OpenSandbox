@@ -21,6 +21,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.pty.PtyMode
 import com.alibaba.opensandbox.sandbox.domain.models.execd.pty.PtySession
 import com.alibaba.opensandbox.sandbox.domain.models.execd.pty.PtySessionStatus
+import com.alibaba.opensandbox.sandbox.domain.models.execd.pty.PtyWebSocket
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Pty
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
@@ -139,12 +140,12 @@ internal class PtyAdapter(
         }
     }
 
-    override fun webSocketUrl(
+    override fun webSocket(
         sessionId: String,
         mode: PtyMode,
         since: Long?,
         takeover: Boolean,
-    ): String {
+    ): PtyWebSocket {
         val scheme = if (httpClientProvider.config.protocol.equals("https", ignoreCase = true)) "wss" else "ws"
         val params =
             buildList {
@@ -153,7 +154,10 @@ internal class PtyAdapter(
                 if (takeover) add("takeover=1")
             }
         val query = if (params.isEmpty()) "" else "?" + params.joinToString("&")
-        return "$scheme://${execdEndpoint.endpoint}$PTY_PATH/$sessionId/ws$query"
+        val url = "$scheme://${execdEndpoint.endpoint}$PTY_PATH/$sessionId/ws$query"
+        // Carry the same routing/auth headers the REST calls send so callers can complete the
+        // WebSocket handshake against header-mode ingress or secure-access endpoints.
+        return PtyWebSocket(url, execdEndpoint.headers)
     }
 
     @Serializable

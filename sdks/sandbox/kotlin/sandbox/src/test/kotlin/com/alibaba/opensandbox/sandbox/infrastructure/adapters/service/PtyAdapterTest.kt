@@ -119,22 +119,22 @@ class PtyAdapterTest {
     }
 
     @Test
-    fun `webSocketUrl should build a ws url with mode since and takeover params`() {
-        val base = ptyAdapter.webSocketUrl("sess-123")
-        assertEquals("ws://${endpoint.endpoint}/pty/sess-123/ws", base)
+    fun `webSocket should build a ws url with mode since and takeover params`() {
+        val base = ptyAdapter.webSocket("sess-123")
+        assertEquals("ws://${endpoint.endpoint}/pty/sess-123/ws", base.url)
 
         val full =
-            ptyAdapter.webSocketUrl(
+            ptyAdapter.webSocket(
                 "sess-123",
                 mode = PtyMode.PIPE,
                 since = 4096,
                 takeover = true,
             )
-        assertEquals("ws://${endpoint.endpoint}/pty/sess-123/ws?pty=0&since=4096&takeover=1", full)
+        assertEquals("ws://${endpoint.endpoint}/pty/sess-123/ws?pty=0&since=4096&takeover=1", full.url)
     }
 
     @Test
-    fun `webSocketUrl should use wss when protocol is https`() {
+    fun `webSocket should use wss when protocol is https`() {
         val config =
             ConnectionConfig.builder()
                 .domain(endpoint.endpoint)
@@ -142,9 +142,19 @@ class PtyAdapterTest {
                 .build()
         val secureAdapter = PtyAdapter(HttpClientProvider(config), endpoint)
 
-        val url = secureAdapter.webSocketUrl("sess-123")
+        val target = secureAdapter.webSocket("sess-123")
 
-        assertTrue(url.startsWith("wss://"), "Expected wss scheme, got: $url")
+        assertTrue(target.url.startsWith("wss://"), "Expected wss scheme, got: ${target.url}")
+    }
+
+    @Test
+    fun `webSocket should carry the endpoint routing and auth headers`() {
+        val headers = mapOf("OpenSandbox-Ingress-To" to "sandbox-1-44772", "X-Auth" to "token")
+        val adapter = PtyAdapter(httpClientProvider, SandboxEndpoint(endpoint.endpoint, headers))
+
+        val target = adapter.webSocket("sess-123")
+
+        assertEquals(headers, target.headers)
     }
 
     @Test

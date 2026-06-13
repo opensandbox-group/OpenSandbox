@@ -52,3 +52,15 @@ class PtySessionStatus(
     val running: Boolean,
     val outputOffset: Long,
 )
+
+/**
+ * WebSocket target for attaching to a PTY session.
+ *
+ * @property url The `ws://` or `wss://` URL to open
+ * @property headers Routing/auth headers that must be sent on the WebSocket handshake
+ * (header-mode ingress and secure-access endpoints require them)
+ */
+class PtyWebSocket(
+    val url: String,
+    val headers: Map<String, String>,
+)
