@@ -43,6 +43,8 @@ tags:
     description: File and directory operations
   - name: Metric
     description: System resource monitoring and metrics
+  - name: PTY
+    description: Interactive pseudo-terminal session lifecycle
 
 paths:
   /ping:
@@ -1080,6 +1082,98 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /pty:
+    post:
+      summary: Create PTY session (create_pty_session)
+      description: |
+        Creates a new interactive pseudo-terminal session and returns a session ID. The shell does
+        not start until the first WebSocket attaches to `/pty/{sessionId}/ws` (the interactive
+        channel is a WebSocket and is intentionally not modelled here). Request body is optional.
+      operationId: createPtySession
+      tags:
+        - PTY
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePtySessionRequest"
+            examples:
+              default:
+                summary: Default (empty body allowed)
+                value: {}
+              with_cwd:
+                summary: With working directory
+                value:
+                  cwd: /workspace
+      responses:
+        "201":
+          description: PTY session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatePtySessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /pty/{sessionId}:
+    get:
+      summary: Get PTY session status (get_pty_session)
+      description: Returns the status of a PTY session, including the output offset usable for replay.
+      operationId: getPtySession
+      tags:
+        - PTY
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Session ID returned by create_pty_session
+          schema:
+            type: string
+          example: pty-abc123
+      responses:
+        "200":
+          description: PTY session status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PtySessionStatusResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      summary: Delete PTY session (delete_pty_session)
+      description: |
+        Tears down a PTY session on the server side, terminating the underlying shell process.
+        Returns 200 on success (the execd controller responds with an empty success body).
+      operationId: deletePtySession
+      tags:
+        - PTY
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Session ID to delete
+          schema:
+            type: string
+          example: pty-abc123
+      responses:
+        "200":
+          description: PTY session deleted successfully
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
 components:
   securitySchemes:
     AccessToken:
@@ -1091,6 +1185,44 @@ components:
         with a valid token. The token is configured during server initialization.
 
   schemas:
+    CreatePtySessionRequest:
+      type: object
+      description: Request to create a PTY session (optional body; empty treated as defaults)
+      properties:
+        cwd:
+          type: string
+          description: Working directory for the shell
+          example: /workspace
+        command:
+          type: string
+          description: Command to run instead of the default login shell
+    CreatePtySessionResponse:
+      type: object
+      required:
+        - session_id
+      properties:
+        session_id:
+          type: string
+          description: Server-assigned identifier of the PTY session
+          example: pty-abc123
+    PtySessionStatusResponse:
+      type: object
+      required:
+        - session_id
+        - running
+        - output_offset
+      properties:
+        session_id:
+          type: string
+          description: Identifier of the PTY session
+          example: pty-abc123
+        running:
+          type: boolean
+          description: Whether the underlying shell process is alive
+        output_offset:
+          type: integer
+          format: int64
+          description: Byte offset of buffered output; pass as `since` on reconnect to replay scrollback
     CreateSessionRequest:
       type: object
       description: Request to create a bash session (optional body; empty treated as defaults)
@@ -1518,3 +1650,13 @@ components:
           example:
             code: RUNTIME_ERROR
             message: "error running code execution"
+
+    NotImplemented:
+      description: Operation not supported on this platform (e.g. PTY on Windows)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: NOT_SUPPORTED
+            message: "PTY is not supported on this platform"

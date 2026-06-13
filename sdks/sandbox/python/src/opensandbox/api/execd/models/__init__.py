@@ -20,6 +20,8 @@ from .chmod_files_body import ChmodFilesBody
 from .code_context import CodeContext
 from .code_context_request import CodeContextRequest
 from .command_status_response import CommandStatusResponse
+from .create_pty_session_request import CreatePtySessionRequest
+from .create_pty_session_response import CreatePtySessionResponse
 from .create_session_request import CreateSessionRequest
 from .create_session_response import CreateSessionResponse
 from .error_response import ErrorResponse
@@ -30,6 +32,7 @@ from .get_files_info_response_200 import GetFilesInfoResponse200
 from .make_dirs_body import MakeDirsBody
 from .metrics import Metrics
 from .permission import Permission
+from .pty_session_status_response import PtySessionStatusResponse
 from .rename_file_item import RenameFileItem
 from .replace_content_body import ReplaceContentBody
 from .replace_content_response_200 import ReplaceContentResponse200
@@ -50,6 +53,8 @@ __all__ = (
     "CodeContext",
     "CodeContextRequest",
     "CommandStatusResponse",
+    "CreatePtySessionRequest",
+    "CreatePtySessionResponse",
     "CreateSessionRequest",
     "CreateSessionResponse",
     "ErrorResponse",
@@ -60,6 +65,7 @@ __all__ = (
     "MakeDirsBody",
     "Metrics",
     "Permission",
+    "PtySessionStatusResponse",
     "RenameFileItem",
     "ReplaceContentBody",
     "ReplaceContentResponse200",
