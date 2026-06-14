@@ -19,6 +19,7 @@ import type { ExecdCommands } from "../services/execdCommands.js";
 import type { ExecdHealth } from "../services/execdHealth.js";
 import type { ExecdMetrics } from "../services/execdMetrics.js";
 import type { Sandboxes } from "../services/sandboxes.js";
+import type { Pools } from "../services/pools.js";
 
 export interface CreateLifecycleStackOptions {
   connectionConfig: ConnectionConfig;
@@ -27,6 +28,7 @@ export interface CreateLifecycleStackOptions {
 
 export interface LifecycleStack {
   sandboxes: Sandboxes;
+  pools: Pools;
 }
 
 export interface CreateExecdStackOptions {

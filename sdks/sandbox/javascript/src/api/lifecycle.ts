@@ -1480,3 +1480,128 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export type operations = Record<string, never>;
+
+// ============================================================================
+// Pool paths and components (manually added – not auto-generated)
+// ============================================================================
+
+export interface PoolComponents {
+    schemas: {
+        PoolCapacitySpec: {
+            bufferMax: number;
+            bufferMin: number;
+            poolMax: number;
+            poolMin: number;
+        };
+        PoolStatus: {
+            total: number;
+            allocated: number;
+            available: number;
+            revision: string;
+        };
+        PoolResponse: {
+            name: string;
+            capacitySpec: PoolComponents["schemas"]["PoolCapacitySpec"];
+            status?: PoolComponents["schemas"]["PoolStatus"];
+            /** @description ISO 8601 timestamp */
+            createdAt?: string;
+        };
+        ListPoolsResponse: {
+            items: PoolComponents["schemas"]["PoolResponse"][];
+        };
+        CreatePoolRequest: {
+            name: string;
+            template: Record<string, unknown>;
+            capacitySpec: PoolComponents["schemas"]["PoolCapacitySpec"];
+        };
+        UpdatePoolRequest: {
+            capacitySpec: PoolComponents["schemas"]["PoolCapacitySpec"];
+        };
+    };
+}
+
+export interface poolPaths {
+    "/pools": {
+        parameters: { query?: never; header?: never; path?: never; cookie?: never };
+        /** List all pre-warmed resource pools */
+        get: {
+            parameters: { query?: never; header?: never; path?: never; cookie?: never };
+            requestBody?: never;
+            responses: {
+                200: { content: { "application/json": PoolComponents["schemas"]["ListPoolsResponse"] } };
+                401: components["responses"]["Unauthorized"];
+                500: components["responses"]["InternalServerError"];
+                501: { content: { "application/json": components["schemas"]["ErrorResponse"] } };
+            };
+        };
+        put?: never;
+        /** Create a pre-warmed resource pool */
+        post: {
+            parameters: { query?: never; header?: never; path?: never; cookie?: never };
+            requestBody: { content: { "application/json": PoolComponents["schemas"]["CreatePoolRequest"] } };
+            responses: {
+                201: { content: { "application/json": PoolComponents["schemas"]["PoolResponse"] } };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalServerError"];
+                501: { content: { "application/json": components["schemas"]["ErrorResponse"] } };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/pools/{poolName}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: { poolName: string };
+            cookie?: never;
+        };
+        /** Retrieve a pool by name */
+        get: {
+            parameters: { query?: never; header?: never; path: { poolName: string }; cookie?: never };
+            requestBody?: never;
+            responses: {
+                200: { content: { "application/json": PoolComponents["schemas"]["PoolResponse"] } };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["InternalServerError"];
+                501: { content: { "application/json": components["schemas"]["ErrorResponse"] } };
+            };
+        };
+        /** Update pool capacity configuration */
+        put: {
+            parameters: { query?: never; header?: never; path: { poolName: string }; cookie?: never };
+            requestBody: { content: { "application/json": PoolComponents["schemas"]["UpdatePoolRequest"] } };
+            responses: {
+                200: { content: { "application/json": PoolComponents["schemas"]["PoolResponse"] } };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["InternalServerError"];
+                501: { content: { "application/json": components["schemas"]["ErrorResponse"] } };
+            };
+        };
+        post?: never;
+        /** Delete a pool */
+        delete: {
+            parameters: { query?: never; header?: never; path: { poolName: string }; cookie?: never };
+            requestBody?: never;
+            responses: {
+                204: { content?: never };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["InternalServerError"];
+                501: { content: { "application/json": components["schemas"]["ErrorResponse"] } };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+}
