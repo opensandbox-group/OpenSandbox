@@ -53,6 +53,12 @@ from .sandbox_status import SandboxStatus
 from .snapshot import Snapshot
 from .snapshot_status import SnapshotStatus
 from .volume import Volume
+from .create_pool_request import ApiCreatePoolRequest
+from .update_pool_request import ApiUpdatePoolRequest
+from .pool_capacity_spec import ApiPoolCapacitySpec
+from .pool_status import ApiPoolStatus
+from .pool_response import ApiPoolResponse
+from .list_pools_response import ApiListPoolsResponse
 
 __all__ = (
     "CreateSandboxRequest",
@@ -92,4 +98,10 @@ __all__ = (
     "Snapshot",
     "SnapshotStatus",
     "Volume",
+    "ApiCreatePoolRequest",
+    "ApiUpdatePoolRequest",
+    "ApiPoolCapacitySpec",
+    "ApiPoolStatus",
+    "ApiPoolResponse",
+    "ApiListPoolsResponse",
 )
