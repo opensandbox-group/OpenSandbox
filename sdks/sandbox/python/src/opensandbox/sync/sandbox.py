@@ -55,6 +55,7 @@ from opensandbox.sync.services import (
     FilesystemSync,
     HealthSync,
     MetricsSync,
+    PtySync,
     SandboxesSync,
 )
 
@@ -130,6 +131,7 @@ class SandboxSync:
         connection_config: ConnectionConfigSync,
         diagnostics_service: DiagnosticsSync | None = None,
         custom_health_check: Callable[["SandboxSync"], bool] | None = None,
+        pty_service: PtySync | None = None,
     ) -> None:
         """
         Internal constructor for SandboxSync. Use :meth:`create` or :meth:`connect` instead.
@@ -138,6 +140,7 @@ class SandboxSync:
         self._sandbox_service = sandbox_service
         self._filesystem_service = filesystem_service
         self._command_service = command_service
+        self._pty_service = pty_service
         self._health_service = health_service
         self._metrics_service = metrics_service
         self._egress_service = egress_service
@@ -164,6 +167,18 @@ class SandboxSync:
         Supports both one-shot command execution and SSE streaming output.
         """
         return self._command_service
+
+    @property
+    def pty(self) -> PtySync:
+        """
+        Provides access to interactive PTY (pseudo-terminal) session operations.
+
+        Manages the lifecycle of long-lived shell sessions (create / status / delete) over
+        execd's REST API. PTY is only supported on Unix-like platforms.
+        """
+        if self._pty_service is None:
+            raise RuntimeError("PTY service is not available on this sandbox instance")
+        return self._pty_service
 
     @property
     def metrics(self) -> MetricsSync:
@@ -572,6 +587,7 @@ class SandboxSync:
                 sandbox_service=sandbox_service,
                 filesystem_service=factory.create_filesystem_service(execd_endpoint),
                 command_service=factory.create_command_service(execd_endpoint),
+                pty_service=factory.create_pty_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
@@ -656,6 +672,7 @@ class SandboxSync:
                 sandbox_service=sandbox_service,
                 filesystem_service=factory.create_filesystem_service(execd_endpoint),
                 command_service=factory.create_command_service(execd_endpoint),
+                pty_service=factory.create_pty_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
@@ -732,6 +749,7 @@ class SandboxSync:
                 sandbox_service=sandbox_service,
                 filesystem_service=factory.create_filesystem_service(execd_endpoint),
                 command_service=factory.create_command_service(execd_endpoint),
+                pty_service=factory.create_pty_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),

@@ -348,3 +348,27 @@ class CommandLogs(BaseModel):
         default=None,
         description="Latest tail cursor for incremental reads",
     )
+
+
+class PtySession(BaseModel):
+    """
+    A created PTY session. The shell starts on the first WebSocket attach.
+    """
+
+    session_id: str = Field(description="Server-assigned identifier of the PTY session")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PtySessionStatus(BaseModel):
+    """
+    Current status of a PTY session.
+    """
+
+    session_id: str = Field(description="Identifier of the PTY session")
+    running: bool = Field(description="Whether the underlying shell process is alive")
+    output_offset: int = Field(
+        description="Byte offset of buffered output; pass as `since` on reconnect to replay"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
