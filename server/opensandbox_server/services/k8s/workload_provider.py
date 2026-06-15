@@ -54,6 +54,7 @@ class WorkloadProvider(ABC):
         egress_mode: str = EGRESS_MODE_DNS,
         credential_proxy_enabled: bool = False,
         resource_requests: Optional[Dict[str, str]] = None,
+        egress_env: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
         """
         Create a new workload resource.

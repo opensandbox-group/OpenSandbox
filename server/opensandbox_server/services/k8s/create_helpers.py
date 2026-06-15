@@ -21,6 +21,8 @@ from typing import Callable, Dict, Optional
 from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.config import AppConfig, EGRESS_MODE_DNS
 from opensandbox_server.services.constants import (
+    EGRESS_ENV_PREFIX,
+    RESERVED_EGRESS_ENV_VARS,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
     SANDBOX_ID_LABEL,
@@ -28,6 +30,32 @@ from opensandbox_server.services.constants import (
     SANDBOX_SNAPSHOT_ID_LABEL,
 )
 from opensandbox_server.services.validators import calculate_expiration_or_raise
+
+Pair = tuple[Dict[str, Optional[str]], Dict[str, Optional[str]]]
+
+
+def _split_egress_env(
+    env: Optional[Dict[str, Optional[str]]],
+) -> Pair:
+    """Split request env into (sandbox_env, egress_env) by OPENSANDBOX_EGRESS_ prefix.
+
+    Raises ValueError if a user-supplied key collides with a reserved internal var.
+    """
+    if not env:
+        return {}, {}
+
+    sandbox_env: Dict[str, Optional[str]] = {}
+    egress_env: Dict[str, Optional[str]] = {}
+    for key, value in env.items():
+        if key.startswith(EGRESS_ENV_PREFIX):
+            if key in RESERVED_EGRESS_ENV_VARS:
+                raise ValueError(
+                    f"Environment variable '{key}' is reserved and cannot be overridden"
+                )
+            egress_env[key] = value
+        else:
+            sandbox_env[key] = value
+    return sandbox_env, egress_env
 
 
 @dataclass
@@ -42,6 +70,8 @@ class _CreateWorkloadContext:
     egress_auth_token: Optional[str]
     credential_proxy_enabled: bool
     secure_access_token: Optional[str]
+    sandbox_env: Dict[str, Optional[str]]
+    egress_env: Dict[str, Optional[str]]
 
 
 def _build_create_workload_context(
@@ -89,6 +119,8 @@ def _build_create_workload_context(
     if request.resource_requests and request.resource_requests.root:
         resource_requests = request.resource_requests.root
 
+    sandbox_env, egress_env = _split_egress_env(request.env)
+
     return _CreateWorkloadContext(
         labels=labels,
         annotations=annotations,
@@ -100,4 +132,6 @@ def _build_create_workload_context(
         egress_auth_token=egress_auth_token,
         credential_proxy_enabled=credential_proxy_enabled,
         secure_access_token=secure_access_token,
+        sandbox_env=sandbox_env,
+        egress_env=egress_env,
     )

@@ -76,6 +76,7 @@ def apply_egress_to_spec(
     egress_auth_token: Optional[str] = None,
     egress_mode: str = EGRESS_MODE_DNS,
     credential_proxy_enabled: bool = False,
+    extra_env: Optional[Dict[str, Optional[str]]] = None,
 ) -> None:
     """
     Append the egress sidecar to ``containers``. When ``egress.disable_ipv6`` is enabled,
@@ -94,6 +95,9 @@ def apply_egress_to_spec(
         env.append({"name": OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT, "value": "true"})
     if egress_auth_token:
         env.append({"name": OPENSANDBOX_EGRESS_TOKEN, "value": egress_auth_token})
+    if extra_env:
+        for name, value in extra_env.items():
+            env.append({"name": name, "value": value or ""})
 
     sidecar: Dict[str, Any] = {
         "name": "egress",

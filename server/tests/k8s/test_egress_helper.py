@@ -15,6 +15,8 @@
 import json
 from typing import Optional
 
+import pytest
+
 from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
 from opensandbox_server.config import EGRESS_MODE_DNS, EGRESS_MODE_DNS_NFT
 from opensandbox_server.services.constants import (
@@ -26,6 +28,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
 )
+from opensandbox_server.services.k8s.create_helpers import _split_egress_env
 from opensandbox_server.services.k8s.egress_helper import (
     apply_egress_to_spec,
     build_security_context_for_sandbox_container,
@@ -391,6 +394,63 @@ class TestApplyEgressToSpec:
 
         assert len(containers) == 0
 
+    def test_extra_env_injected_into_sidecar(self):
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+        extra = {
+            "OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT": "/scripts/auth.py",
+            "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
+        }
+
+        apply_egress_to_spec(
+            containers,
+            network_policy,
+            "opensandbox/egress:v1.1.0",
+            extra_env=extra,
+        )
+
+        env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
+        assert env_by_name["OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT"] == "/scripts/auth.py"
+        assert env_by_name["OPENSANDBOX_EGRESS_LOG_LEVEL"] == "debug"
+
+    def test_extra_env_none_value_becomes_empty_string(self):
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            network_policy,
+            "opensandbox/egress:v1.1.0",
+            extra_env={"OPENSANDBOX_EGRESS_LOG_LEVEL": None},
+        )
+
+        env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
+        assert env_by_name["OPENSANDBOX_EGRESS_LOG_LEVEL"] == ""
+
+    def test_extra_env_empty_dict_is_noop(self):
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            network_policy,
+            "opensandbox/egress:v1.1.0",
+            extra_env={},
+        )
+
+        env_names = {e["name"] for e in containers[0]["env"]}
+        assert env_names == {EGRESS_RULES_ENV, EGRESS_MODE_ENV}
+
+
 class TestPrepExecdInitForEgress:
     def test_returns_privileged_security_dict_and_prefixed_script(self):
         base = "cp ./execd /opt/opensandbox/execd"
@@ -398,3 +458,49 @@ class TestPrepExecdInitForEgress:
         assert sc == {"privileged": True}
         assert "/proc/sys/net/ipv6/conf/all/disable_ipv6" in script
         assert script.endswith(base)
+
+
+class TestSplitEgressEnv:
+    def test_splits_by_prefix(self):
+        env = {
+            "MY_VAR": "hello",
+            "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
+            "OTHER": "world",
+        }
+        sandbox_env, egress_env = _split_egress_env(env)
+        assert sandbox_env == {"MY_VAR": "hello", "OTHER": "world"}
+        assert egress_env == {"OPENSANDBOX_EGRESS_LOG_LEVEL": "debug"}
+
+    def test_none_returns_empty_dicts(self):
+        sandbox_env, egress_env = _split_egress_env(None)
+        assert sandbox_env == {}
+        assert egress_env == {}
+
+    def test_empty_returns_empty_dicts(self):
+        sandbox_env, egress_env = _split_egress_env({})
+        assert sandbox_env == {}
+        assert egress_env == {}
+
+    def test_no_egress_vars(self):
+        env = {"FOO": "bar", "BAZ": "qux"}
+        sandbox_env, egress_env = _split_egress_env(env)
+        assert sandbox_env == env
+        assert egress_env == {}
+
+    def test_rejects_reserved_rules(self):
+        with pytest.raises(ValueError, match="reserved"):
+            _split_egress_env({"OPENSANDBOX_EGRESS_RULES": "evil"})
+
+    def test_rejects_reserved_mode(self):
+        with pytest.raises(ValueError, match="reserved"):
+            _split_egress_env({"OPENSANDBOX_EGRESS_MODE": "evil"})
+
+    def test_rejects_reserved_token(self):
+        with pytest.raises(ValueError, match="reserved"):
+            _split_egress_env({"OPENSANDBOX_EGRESS_TOKEN": "evil"})
+
+    def test_allows_mitmproxy_transparent(self):
+        env = {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
+        sandbox_env, egress_env = _split_egress_env(env)
+        assert sandbox_env == {}
+        assert egress_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
