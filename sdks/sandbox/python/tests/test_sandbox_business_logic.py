@@ -307,6 +307,9 @@ async def test_create_resolves_egress_endpoint_and_builds_service(
         def create_command_service(self, endpoint: SandboxEndpoint):
             return _Noop()
 
+        def create_pty_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
         def create_health_service(self, endpoint: SandboxEndpoint):
             return _Noop()
 
@@ -432,6 +435,9 @@ async def test_create_preserves_manual_cleanup_timeout(
         def create_command_service(self, _endpoint: SandboxEndpoint):
             return _Noop()
 
+        def create_pty_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
         def create_health_service(self, _endpoint: SandboxEndpoint):
             return _Noop()
 
@@ -518,6 +524,9 @@ async def test_create_passes_new_signature_keywords_even_when_unused(
         def create_command_service(self, _endpoint):
             return _Noop()
 
+        def create_pty_service(self, _endpoint):
+            return _Noop()
+
         def create_health_service(self, _endpoint):
             return _Noop()
 
@@ -602,6 +611,9 @@ async def test_create_restore_from_snapshot_passes_snapshot_id(
         def create_command_service(self, _endpoint):
             return _Noop()
 
+        def create_pty_service(self, _endpoint):
+            return _Noop()
+
         def create_health_service(self, _endpoint):
             return _Noop()
 
@@ -673,6 +685,9 @@ async def test_create_restore_from_snapshot_preserves_custom_entrypoint(
             return _Noop()
 
         def create_command_service(self, _endpoint):
+            return _Noop()
+
+        def create_pty_service(self, _endpoint):
             return _Noop()
 
         def create_health_service(self, _endpoint):

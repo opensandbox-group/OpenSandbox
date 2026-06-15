@@ -114,3 +114,23 @@ export interface SandboxMetrics {
 }
 
 export type PingResponse = Record<string, unknown>;
+
+/**
+ * A created PTY session. The shell starts on the first WebSocket attach.
+ */
+export interface PtySession {
+  sessionId: string;
+}
+
+/**
+ * Current status of a PTY session.
+ */
+export interface PtySessionStatus {
+  sessionId: string;
+  running: boolean;
+  /**
+   * Byte offset of buffered output; pass it as `since` on reconnect to replay
+   * scrollback from that point.
+   */
+  outputOffset: number;
+}

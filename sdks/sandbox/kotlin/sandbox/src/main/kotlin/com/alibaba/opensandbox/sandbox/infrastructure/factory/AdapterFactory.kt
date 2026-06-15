@@ -25,6 +25,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.Health
 import com.alibaba.opensandbox.sandbox.domain.services.Metrics
+import com.alibaba.opensandbox.sandbox.domain.services.Pty
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.CommandsAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.DiagnosticsAdapter
@@ -32,6 +33,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.EgressAda
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.FilesystemAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.HealthAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.MetricsAdapter
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.PtyAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.SandboxesAdapter
 
 /**
@@ -62,6 +64,10 @@ internal class AdapterFactory(
 
     fun createCommands(endpoint: SandboxEndpoint): Commands {
         return CommandsAdapter(httpClientProvider, endpoint)
+    }
+
+    fun createPty(endpoint: SandboxEndpoint): Pty {
+        return PtyAdapter(httpClientProvider, endpoint)
     }
 
     fun createEgressStack(endpoint: SandboxEndpoint): EgressStack {

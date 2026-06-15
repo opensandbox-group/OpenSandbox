@@ -32,6 +32,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.Health
 import com.alibaba.opensandbox.sandbox.domain.services.Metrics
+import com.alibaba.opensandbox.sandbox.domain.services.Pty
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import io.mockk.Runs
 import io.mockk.every
@@ -77,6 +78,9 @@ class SandboxTest {
     lateinit var diagnosticsService: Diagnostics
 
     @MockK
+    lateinit var ptyService: Pty
+
+    @MockK
     lateinit var httpClientProvider: HttpClientProvider
 
     private lateinit var sandbox: Sandbox
@@ -106,6 +110,7 @@ class SandboxTest {
                 httpClientProvider = httpClientProvider,
                 diagnosticsService = diagnosticsService,
             )
+        sandbox.bindPtyService(ptyService)
     }
 
     @Test
@@ -116,6 +121,11 @@ class SandboxTest {
     @Test
     fun `commands should return command service`() {
         assertSame(commandService, sandbox.commands())
+    }
+
+    @Test
+    fun `pty should return pty service`() {
+        assertSame(ptyService, sandbox.pty())
     }
 
     @Test

@@ -484,6 +484,17 @@ export interface paths {
          *     only immediate children are returned (`depth=1`). Set `depth` to a larger
          *     value to include descendants up to that many levels below `path`. The
          *     root directory itself is not included in the response.
+         *
+         *     Symbolic links are reported with `type=symlink` and are not traversed:
+         *     the listing never descends into a link target, even when `depth` would
+         *     otherwise allow it. For the same reason, when `path` itself resolves to
+         *     a symbolic link the request is rejected with `400`; callers must pass
+         *     the real directory path they want listed.
+         *
+         *     Entries are returned in lexical order by entry name within each
+         *     directory. Descendants reported via `depth>1` follow their parent in
+         *     the same lexical order, so a depth-2 listing yields stable, predictable
+         *     output for file-browser style clients.
          */
         get: operations["listDirectory"];
         put?: never;
@@ -566,10 +577,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/pty": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create PTY session (create_pty_session)
+         * @description Creates a new interactive pseudo-terminal session and returns a session ID. The shell does
+         *     not start until the first WebSocket attaches to `/pty/{sessionId}/ws` (the interactive
+         *     channel is a WebSocket and is intentionally not modelled here). Request body is optional.
+         */
+        post: operations["createPtySession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/pty/{sessionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get PTY session status (get_pty_session)
+         * @description Returns the status of a PTY session, including the output offset usable for replay.
+         */
+        get: operations["getPtySession"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete PTY session (delete_pty_session)
+         * @description Tears down a PTY session on the server side, terminating the underlying shell process.
+         *     Returns 200 on success (the execd controller responds with an empty success body).
+         */
+        delete: operations["deletePtySession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Request to create a PTY session (optional body; empty treated as defaults) */
+        CreatePtySessionRequest: {
+            /**
+             * @description Working directory for the shell
+             * @example /workspace
+             */
+            cwd?: string;
+            /** @description Command to run instead of the default login shell */
+            command?: string;
+        };
+        CreatePtySessionResponse: {
+            /**
+             * @description Server-assigned identifier of the PTY session
+             * @example pty-abc123
+             */
+            session_id: string;
+        };
+        PtySessionStatusResponse: {
+            /**
+             * @description Identifier of the PTY session
+             * @example pty-abc123
+             */
+            session_id: string;
+            /** @description Whether the underlying shell process is alive */
+            running: boolean;
+            /**
+             * Format: int64
+             * @description Byte offset of buffered output; pass as `since` on reconnect to replay scrollback
+             */
+            output_offset: number;
+        };
         /** @description Request to create a bash session (optional body; empty treated as defaults) */
         CreateSessionRequest: {
             /**
@@ -998,6 +1087,21 @@ export interface components {
                  * @example {
                  *       "code": "RUNTIME_ERROR",
                  *       "message": "error running code execution"
+                 *     }
+                 */
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Operation not supported on this platform (e.g. PTY on Windows) */
+        NotImplemented: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                /**
+                 * @example {
+                 *       "code": "NOT_SUPPORTED",
+                 *       "message": "PTY is not supported on this platform"
                  *     }
                  */
                 "application/json": components["schemas"]["ErrorResponse"];
@@ -1905,6 +2009,89 @@ export interface operations {
                 };
             };
             500: components["responses"]["InternalServerError"];
+        };
+    };
+    createPtySession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CreatePtySessionRequest"];
+            };
+        };
+        responses: {
+            /** @description PTY session created successfully */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatePtySessionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalServerError"];
+            501: components["responses"]["NotImplemented"];
+        };
+    };
+    getPtySession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Session ID returned by create_pty_session
+                 * @example pty-abc123
+                 */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description PTY session status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PtySessionStatusResponse"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            501: components["responses"]["NotImplemented"];
+        };
+    };
+    deletePtySession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Session ID to delete
+                 * @example pty-abc123
+                 */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description PTY session deleted successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            501: components["responses"]["NotImplemented"];
         };
     };
 }

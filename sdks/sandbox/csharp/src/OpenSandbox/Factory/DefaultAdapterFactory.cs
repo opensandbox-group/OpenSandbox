@@ -59,6 +59,7 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
 
         var health = new HealthAdapter(clientWrapper);
         var metrics = new MetricsAdapter(clientWrapper);
+        var pty = new PtyAdapter(clientWrapper);
         var files = new FilesystemAdapter(
             clientWrapper,
             options.HttpClientProvider.HttpClient,
@@ -76,7 +77,8 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             Commands = commands,
             Files = files,
             Health = health,
-            Metrics = metrics
+            Metrics = metrics,
+            Pty = pty
         };
     }
 

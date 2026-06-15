@@ -112,6 +112,15 @@ public class ExecdStack
     /// Gets the metrics service.
     /// </summary>
     public required IExecdMetrics Metrics { get; init; }
+
+    /// <summary>
+    /// Gets the interactive PTY session service.
+    /// </summary>
+    /// <remarks>
+    /// Optional for backward compatibility: factories created before PTY support may leave this
+    /// null, in which case <see cref="Sandbox"/> installs an unavailable-PTY fallback.
+    /// </remarks>
+    public IExecdPty? Pty { get; init; }
 }
 
 public class CreateEgressStackOptions

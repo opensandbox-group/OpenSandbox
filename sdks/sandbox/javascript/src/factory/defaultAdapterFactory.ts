@@ -21,6 +21,7 @@ import { EgressAdapter } from "../adapters/egressAdapter.js";
 import { FilesystemAdapter } from "../adapters/filesystemAdapter.js";
 import { HealthAdapter } from "../adapters/healthAdapter.js";
 import { MetricsAdapter } from "../adapters/metricsAdapter.js";
+import { PtyAdapter } from "../adapters/ptyAdapter.js";
 import { SandboxesAdapter } from "../adapters/sandboxesAdapter.js";
 
 import type {
@@ -58,6 +59,7 @@ export class DefaultAdapterFactory implements AdapterFactory {
 
     const health = new HealthAdapter(execdClient);
     const metrics = new MetricsAdapter(execdClient);
+    const pty = new PtyAdapter(execdClient);
     const files = new FilesystemAdapter(execdClient, {
       baseUrl: opts.execdBaseUrl,
       fetch: opts.connectionConfig.fetch,
@@ -74,6 +76,7 @@ export class DefaultAdapterFactory implements AdapterFactory {
       files,
       health,
       metrics,
+      pty,
     };
   }
 

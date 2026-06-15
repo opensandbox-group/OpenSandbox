@@ -104,8 +104,11 @@ export type {
   Metrics,
   SandboxMetrics,
   PingResponse,
+  PtySession,
+  PtySessionStatus,
 } from "./models/execd.js";
 export type { ExecdCommands } from "./services/execdCommands.js";
+export type { ExecdPty } from "./services/execdPty.js";
 
 export type {
   Execution,

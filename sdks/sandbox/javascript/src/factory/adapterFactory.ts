@@ -18,6 +18,7 @@ import type { CredentialVault, Egress } from "../services/egress.js";
 import type { ExecdCommands } from "../services/execdCommands.js";
 import type { ExecdHealth } from "../services/execdHealth.js";
 import type { ExecdMetrics } from "../services/execdMetrics.js";
+import type { ExecdPty } from "../services/execdPty.js";
 import type { Sandboxes } from "../services/sandboxes.js";
 
 export interface CreateLifecycleStackOptions {
@@ -40,6 +41,11 @@ export interface ExecdStack {
   files: SandboxFiles;
   health: ExecdHealth;
   metrics: ExecdMetrics;
+  /**
+   * Optional for backward compatibility: factories created before PTY support may
+   * omit this. {@link Sandbox} installs an unavailable-PTY fallback when absent.
+   */
+  pty?: ExecdPty;
 }
 
 export interface CreateEgressStackOptions {

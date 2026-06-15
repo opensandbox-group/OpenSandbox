@@ -25,6 +25,7 @@ from opensandbox.adapters.factory import AdapterFactory
 from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.adapters.health_adapter import HealthAdapter
 from opensandbox.adapters.metrics_adapter import MetricsAdapter
+from opensandbox.adapters.pty_adapter import PtyAdapter
 from opensandbox.adapters.sandboxes_adapter import SandboxesAdapter
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "EgressAdapter",
     "HealthAdapter",
     "MetricsAdapter",
+    "PtyAdapter",
 ]
