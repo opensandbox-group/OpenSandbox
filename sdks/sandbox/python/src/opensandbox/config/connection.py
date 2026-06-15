@@ -156,11 +156,16 @@ class ConnectionConfig(BaseModel):
         return self.domain or os.getenv(self._ENV_DOMAIN, self._DEFAULT_DOMAIN)
 
     def get_base_url(self) -> str:
-        """Get the full base URL for API requests."""
-        domain = self.get_domain()
+        """Get the full base URL for API requests.
+
+        Returns the base URL without a version prefix. The generated API client
+        appends versioned paths (e.g. ``/sandboxes``) relative to this URL.
+        Appending ``/v1`` here would route all requests to the blocking
+        ``/v1/sandboxes`` endpoint and cause 504 Gateway Timeouts when the
+        server-side proxy has a short idle timeout (see issue #591).
+        """
+        domain = self.get_domain().rstrip("/")
         # Allow domain to override protocol if it explicitly starts with a scheme
-        if domain.startswith("http://") or domain.startswith(
-            "https://"
-        ):
-            return f"{domain}/{self._API_VERSION}"
-        return f"{self.protocol}://{domain}/{self._API_VERSION}"
+        if domain.startswith("http://") or domain.startswith("https://"):
+            return domain
+        return f"{self.protocol}://{domain}"
