@@ -67,7 +67,7 @@ source = "vcs"
 root = "../../.."
 tag_regex = "^python/sandbox/v(?P<version>\\d+\\.\\d+\\.\\d+(?:[\\.\\w\\+\\-]*)?)$"
 git_describe_command = 'git describe --dirty --tags --long --match "python/sandbox/v*"'
-fallback_version = "0.1.10"
+fallback_version = "0.1.11"
 
 [tool.hatch.build]
 include = [

@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <!-- Shared C# SDK packaging metadata -->
-    <OpenSandboxPackageVersion>0.1.2</OpenSandboxPackageVersion>
+    <OpenSandboxPackageVersion>0.1.3</OpenSandboxPackageVersion>
     <OpenSandboxCodeInterpreterPackageVersion>0.1.1</OpenSandboxCodeInterpreterPackageVersion>
     <OpenSandboxDependencyVersionRange>[$(OpenSandboxPackageVersion),0.2.0)</OpenSandboxDependencyVersionRange>
   </PropertyGroup>

@@ -71,7 +71,7 @@ class ConnectionConfig private constructor(
         private const val ENV_API_KEY = "OPEN_SANDBOX_API_KEY"
         private const val ENV_DOMAIN = "OPEN_SANDBOX_DOMAIN"
 
-        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.12"
+        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.13"
         private const val API_VERSION = "v1"
 
         @JvmStatic
