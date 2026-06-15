@@ -467,13 +467,19 @@ func (allocator *defaultAllocator) Schedule(ctx context.Context, spec *AllocSpec
 		return nil, err
 	}
 
+	// Build a set of live pod names for stale-allocation detection.
+	livePodSet := make(map[string]struct{}, len(spec.Pods))
+	for _, pod := range spec.Pods {
+		livePodSet[pod.Name] = struct{}{}
+	}
+
 	// GC + per-sandbox allocation requests: build SandboxRequests for all existing sandboxes and
 	// append orphan entries for pods whose sandbox no longer exists (e.g. force-deleted).
 	// Orphan entries carry PodSupplement=0 and ToRelease=orphan pods so the normal recycle path
 	// handles them without any special-casing outside this function.
 	// Terminating sandboxes are handled inside getSandboxRequest: they receive no new supplement and
 	// all unreleased pods are queued for release.
-	allRequest, err := allocator.getAllRequest(ctx, spec.Sandboxes, podAllocation)
+	allRequest, err := allocator.getAllRequest(ctx, spec.Sandboxes, podAllocation, livePodSet)
 	if err != nil {
 		return nil, err
 	}
@@ -494,13 +500,15 @@ func (allocator *defaultAllocator) Schedule(ctx context.Context, spec *AllocSpec
 // orphan entries for pods in podAllocation whose sandbox is no longer in the sandboxes list
 // (e.g. force-deleted). Orphan entries carry PodSupplement=0 and ToRelease set to the orphan
 // pods so the normal recycle path handles them without special-casing in the caller.
-func (allocator *defaultAllocator) getAllRequest(ctx context.Context, sandboxes []*sandboxv1alpha1.BatchSandbox, podAllocation map[string]string) ([]*algorithm.SandboxRequest, error) {
+// livePodSet is the set of pod names currently known to the pool; it is used to detect stale
+// annotation entries (pods that were deleted externally) so that supplement is recomputed correctly.
+func (allocator *defaultAllocator) getAllRequest(ctx context.Context, sandboxes []*sandboxv1alpha1.BatchSandbox, podAllocation map[string]string, livePodSet map[string]struct{}) ([]*algorithm.SandboxRequest, error) {
 	log := logf.FromContext(ctx)
 	existingSandboxes := make(map[string]struct{}, len(sandboxes))
 	allRequest := make([]*algorithm.SandboxRequest, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		existingSandboxes[sandbox.Name] = struct{}{}
-		request, err := allocator.getSandboxRequest(ctx, sandbox)
+		request, err := allocator.getSandboxRequest(ctx, sandbox, livePodSet)
 		if err != nil {
 			return nil, err
 		}
@@ -523,7 +531,11 @@ func (allocator *defaultAllocator) getAllRequest(ctx context.Context, sandboxes 
 	return allRequest, nil
 }
 
-func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (*algorithm.SandboxRequest, error) {
+// getSandboxRequest computes the allocation request for a single sandbox.
+// livePodSet is the set of pod names currently known to the pool; any name in the sandbox's
+// alloc-status annotation that is absent from this set is treated as deleted and excluded from
+// the effective-allocation count, causing supplement to increase so a replacement is scheduled.
+func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, livePodSet map[string]struct{}) (*algorithm.SandboxRequest, error) {
 	log := logf.FromContext(ctx)
 	allocated, err := allocator.GetSandboxAllocation(ctx, sandbox)
 	if err != nil {
@@ -577,14 +589,31 @@ func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbo
 		replica = *sandbox.Spec.Replicas
 	}
 
+	// Count only pods that still exist in the live pool pod set.
+	// Pods deleted externally (eviction, OOM kill, manual delete) remain in the alloc-status
+	// annotation but are absent from livePodSet; excluding them makes supplement > 0 so the
+	// pool schedules a replacement (fixes issue #954).
+	liveAllocated := make([]string, 0, len(allocated))
+	for _, p := range allocated {
+		if _, alive := livePodSet[p]; alive {
+			liveAllocated = append(liveAllocated, p)
+		} else {
+			log.V(1).Info("Detected stale allocation entry: pod no longer exists, excluding from effective count",
+				"sandbox", sandbox.Name, "pod", p)
+		}
+	}
+	if stale := len(allocated) - len(liveAllocated); stale > 0 {
+		log.Info("Filtered stale allocated pods", "sandbox", sandbox.Name, "count", stale)
+	}
+
 	supplement := int32(0)
-	if replica-int32(len(allocated)) > 0 {
-		supplement = replica - int32(len(allocated))
+	if replica-int32(len(liveAllocated)) > 0 {
+		supplement = replica - int32(len(liveAllocated))
 	}
 
 	return &algorithm.SandboxRequest{
 		SandboxName:   sandbox.Name,
-		CurAllocation: allocated,
+		CurAllocation: liveAllocated,
 		CurReleased:   released,
 		PodSupplement: supplement,
 		ToRelease:     toRelease,
