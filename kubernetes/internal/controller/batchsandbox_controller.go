@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -619,11 +620,21 @@ func (r *BatchSandboxReconciler) assignPool(ctx context.Context, batchSbx *sandb
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
+	// Use a rate limiter with a low max backoff so that transient API-server errors
+	// (e.g. 429 / conflict during a bulk-create burst) do not push reconciles out by
+	// tens of seconds.  The default controller-runtime limiter caps per-item backoff at
+	// 1000 s; with 128 sandboxes racing to update status, exponential back-off can
+	// easily reach 20-40 s (matching the P50/P99 READY_TO_BSB lag reported in #969).
+	// A 5 s cap ensures the reconcile is retried quickly after a transient failure while
+	// still preventing tight hot-loops on persistent errors.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.BatchSandbox{}).
 		Named("batchsandbox").
 		Owns(&corev1.Pod{}).
 		Owns(&sandboxv1alpha1.SandboxSnapshot{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: maxConcurrentReconciles,
+			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](100*time.Millisecond, 5*time.Second),
+		}).
 		Complete(r)
 }
