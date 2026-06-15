@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	taskscheduler "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/scheduler"
@@ -2724,3 +2726,123 @@ func TestAckPauseWithPhase_DoesNotMutateSpecPause(t *testing.T) {
 
 // Ensure ctrl.Result type is used
 var _ = ctrl.Result{}
+
+// ---------- Issue 1019: shardTaskPatches validation and finalizer unblock ----------
+
+// TestReconcile_InvalidShardTaskPatches_SetsConditionAndDoesNotProceed verifies that when
+// a BatchSandbox has invalid shardTaskPatches (e.g. args as an integer instead of a string
+// array), the reconciler surfaces an InvalidShardPatch condition in status and returns
+// without adding a finalizer or progressing further.
+func TestReconcile_InvalidShardTaskPatches_SetsConditionAndDoesNotProceed(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-bs-invalid-patch",
+			Namespace: "default",
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "img"}},
+				},
+			},
+			TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{
+				Spec: sandboxv1alpha1.TaskSpec{
+					Process: &sandboxv1alpha1.ProcessTask{
+						Command: []string{"sleep"},
+						Args:    []string{"infinite"},
+					},
+				},
+			},
+			// args is an integer, not a string array — invalid against TaskSpec schema.
+			ShardTaskPatches: []runtime.RawExtension{
+				{Raw: []byte(`{"spec":{"process":{"args":3600}}}`)},
+			},
+		},
+	}
+	r := newTestReconciler(bs)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-bs-invalid-patch"},
+	})
+	require.NoError(t, err, "reconcile should not return an error for invalid user input")
+	assert.Equal(t, ctrl.Result{}, result, "reconcile should return an empty result (no requeue)")
+
+	// Verify InvalidShardPatch condition is set in status.
+	updated := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-invalid-patch"}, updated))
+
+	var invalidPatchCond *sandboxv1alpha1.BatchSandboxCondition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == sandboxv1alpha1.BatchSandboxConditionInvalidShardPatch {
+			invalidPatchCond = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	require.NotNil(t, invalidPatchCond, "InvalidShardPatch condition should be set")
+	assert.Equal(t, sandboxv1alpha1.ConditionTrue, invalidPatchCond.Status)
+	assert.Equal(t, "InvalidShardPatch", invalidPatchCond.Reason)
+
+	// Verify that the finalizer was NOT added (reconcile should have bailed before that).
+	assert.False(t, controllerutil.ContainsFinalizer(updated, FinalizerTaskCleanup),
+		"finalizer should not have been added when shardTaskPatches are invalid")
+}
+
+// TestReconcile_InvalidShardTaskPatches_OnDeletion_ClearsFinalizer verifies that when a
+// BatchSandbox with an invalid shardTaskPatch is being deleted, the reconciler clears the
+// finalizer so the resource is not stuck in Terminating forever.
+func TestReconcile_InvalidShardTaskPatches_OnDeletion_ClearsFinalizer(t *testing.T) {
+	now := metav1.Now()
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-bs-delete-invalid",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			// fake client requires non-zero ResourceVersion for objects with DeletionTimestamp.
+			ResourceVersion: "1",
+			Finalizers:      []string{FinalizerTaskCleanup},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "img"}},
+				},
+			},
+			TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{
+				Spec: sandboxv1alpha1.TaskSpec{
+					Process: &sandboxv1alpha1.ProcessTask{
+						Command: []string{"sleep"},
+						Args:    []string{"infinite"},
+					},
+				},
+			},
+			// args is an integer, not a string array — invalid against TaskSpec schema.
+			ShardTaskPatches: []runtime.RawExtension{
+				{Raw: []byte(`{"spec":{"process":{"args":3600}}}`)},
+			},
+		},
+	}
+	r := newTestReconciler(bs)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-bs-delete-invalid"},
+	})
+	require.NoError(t, err, "reconcile should not return an error on deletion with invalid patches")
+	assert.Equal(t, ctrl.Result{}, result)
+
+	// After the finalizer is removed from a terminating object, the fake client
+	// garbage-collects the resource immediately (same behaviour as the real API server).
+	// A "not found" response confirms the finalizer was cleared and deletion unblocked.
+	updated := &sandboxv1alpha1.BatchSandbox{}
+	getErr := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-delete-invalid"}, updated)
+	if getErr == nil {
+		// Resource still visible (e.g. fake client version differences) — confirm finalizer gone.
+		assert.False(t, controllerutil.ContainsFinalizer(updated, FinalizerTaskCleanup),
+			"finalizer should have been removed so the resource is no longer stuck in Terminating")
+	} else {
+		// Resource already garbage-collected — this is the expected happy path.
+		require.True(t, apierrors.IsNotFound(getErr),
+			"expected resource to be deleted after finalizer removal, got unexpected error: %v", getErr)
+	}
+}

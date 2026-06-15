@@ -38,6 +38,16 @@ type runtimeView struct {
 	resumeCompleted bool
 }
 
+// hasCondition returns true when the BatchSandbox has a condition of the given type set to True.
+func hasCondition(sbx *sandboxv1alpha1.BatchSandbox, condType sandboxv1alpha1.BatchSandboxConditionType) bool {
+	for _, c := range sbx.Status.Conditions {
+		if c.Type == condType && c.Status == sandboxv1alpha1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
 func setConditionInStatus(
 	status *sandboxv1alpha1.BatchSandboxStatus,
 	conditionType sandboxv1alpha1.BatchSandboxConditionType,
