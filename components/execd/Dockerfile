@@ -44,6 +44,15 @@ COPY components/execd ./components/execd
 
 WORKDIR /build/components/execd
 
+# Build the opensandbox-supervisor binary from the internal module.
+RUN cd /build/components/internal && \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+    -ldflags "-buildid= -B none \
+              -X 'github.com/alibaba/opensandbox/internal/version.Version=${VERSION}' \
+              -X 'github.com/alibaba/opensandbox/internal/version.BuildTime=${BUILD_TIME}' \
+              -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
+    -o /build/opensandbox-supervisor ./cmd/supervisor
+
 RUN if [ -n "${CC}" ]; then export CC; fi; \
     if [ -n "${CXX}" ]; then export CXX; fi; \
     export CGO_ENABLED="${CGO_ENABLED}" \
@@ -68,6 +77,7 @@ FROM alpine:latest
 
 COPY --from=builder /build/execd .
 COPY --from=builder /build/execd.exe ./execd.exe
+COPY --from=builder /build/opensandbox-supervisor ./opensandbox-supervisor
 COPY components/execd/bootstrap.sh ./bootstrap.sh
 COPY components/execd/install.bat ./install.bat
 
