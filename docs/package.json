@@ -6,7 +6,7 @@
     "overrides": {
       "rollup": "4.60.2",
       "postcss": "8.5.10",
-      "esbuild": "0.25.2",
+      "esbuild": "0.28.1",
       "vite": "6.4.2"
     }
   },
