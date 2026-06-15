@@ -433,6 +433,28 @@ class TestApplyEgressToSpec:
         env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
         assert env_by_name["OPENSANDBOX_EGRESS_LOG_LEVEL"] == ""
 
+    def test_extra_env_mitm_ignored_when_credential_proxy_enabled(self):
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            network_policy,
+            "opensandbox/egress:v1.1.0",
+            credential_proxy_enabled=True,
+            extra_env={"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "false"},
+        )
+
+        mitm_vals = [
+            e["value"]
+            for e in containers[0]["env"]
+            if e["name"] == OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
+        ]
+        assert mitm_vals == ["true"]
+
     def test_extra_env_empty_dict_is_noop(self):
         containers: list = []
         network_policy = NetworkPolicy(
@@ -502,5 +524,9 @@ class TestSplitEgressEnv:
     def test_allows_mitmproxy_transparent(self):
         env = {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
         sandbox_env, egress_env = _split_egress_env(env)
-        assert sandbox_env == {}
+        assert sandbox_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
         assert egress_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
+
+    def test_rejects_reserved_http_addr(self):
+        with pytest.raises(ValueError, match="reserved"):
+            _split_egress_env({"OPENSANDBOX_EGRESS_HTTP_ADDR": "0.0.0.0:9999"})

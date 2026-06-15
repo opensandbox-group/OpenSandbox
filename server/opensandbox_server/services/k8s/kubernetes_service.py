@@ -423,16 +423,16 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         sandbox_id = self.generate_sandbox_id()
 
         created_at = datetime.now(timezone.utc)
-        context = _build_create_workload_context(
-            app_config=self.app_config,
-            request=request,
-            sandbox_id=sandbox_id,
-            created_at=created_at,
-            egress_token_factory=generate_egress_token,
-            secure_access_token_factory=generate_secure_access_token,
-        )
-        
+
         try:
+            context = _build_create_workload_context(
+                app_config=self.app_config,
+                request=request,
+                sandbox_id=sandbox_id,
+                created_at=created_at,
+                egress_token_factory=generate_egress_token,
+                secure_access_token_factory=generate_secure_access_token,
+            )
             apply_access_renew_extend_seconds_to_mapping(context.annotations, request.extensions)
             apply_extensions_to_annotations(context.annotations, request.extensions)
 

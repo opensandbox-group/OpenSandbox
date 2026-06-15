@@ -97,6 +97,8 @@ def apply_egress_to_spec(
         env.append({"name": OPENSANDBOX_EGRESS_TOKEN, "value": egress_auth_token})
     if extra_env:
         for name, value in extra_env.items():
+            if credential_proxy_enabled and name == OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:
+                continue
             env.append({"name": name, "value": value or ""})
 
     sidecar: Dict[str, Any] = {

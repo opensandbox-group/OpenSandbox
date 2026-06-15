@@ -22,6 +22,7 @@ from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.config import AppConfig, EGRESS_MODE_DNS
 from opensandbox_server.services.constants import (
     EGRESS_ENV_PREFIX,
+    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     RESERVED_EGRESS_ENV_VARS,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
@@ -53,6 +54,8 @@ def _split_egress_env(
                     f"Environment variable '{key}' is reserved and cannot be overridden"
                 )
             egress_env[key] = value
+            if key == OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:
+                sandbox_env[key] = value
         else:
             sandbox_env[key] = value
     return sandbox_env, egress_env
