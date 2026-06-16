@@ -85,6 +85,7 @@ func startPolicyServer(
 		mitmGate:         mitmGate,
 	}
 	handler.credentialVault = credentialvault.NewStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" })
+	handler.credentialVaultRequireTLS = constants.IsTruthy(os.Getenv(constants.EnvCredentialVaultRequireTLS))
 	handler.setAlwaysRules(alwaysDeny, alwaysAllow)
 
 	mux.HandleFunc("/policy", handler.handlePolicy)
@@ -174,10 +175,11 @@ type policyServer struct {
 	alwaysLoader     *policy.AlwaysRuleLoader
 	stopAlwaysReload chan struct{}
 
-	lastAlwaysFP    uint64
-	lastAlwaysFPSet bool
-	credentialVault *credentialvault.Store
-	mitmGate        *mitmproxy.HealthGate
+	lastAlwaysFP              uint64
+	lastAlwaysFPSet           bool
+	credentialVault           *credentialvault.Store
+	mitmGate                  *mitmproxy.HealthGate
+	credentialVaultRequireTLS bool
 }
 
 type policyStatusResponse struct {
@@ -294,7 +296,7 @@ func (s *policyServer) handleCredentialVaultPost(w http.ResponseWriter, r *http.
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
 	}
-	if !credentialVaultWriteTransportAllowed(r) {
+	if s.credentialVaultRequireTLS && !credentialVaultWriteTransportAllowed(r) {
 		http.Error(w, "credential vault writes require TLS or loopback transport", http.StatusUpgradeRequired)
 		return
 	}
@@ -316,7 +318,7 @@ func (s *policyServer) handleCredentialVaultPatch(w http.ResponseWriter, r *http
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
 	}
-	if !credentialVaultWriteTransportAllowed(r) {
+	if s.credentialVaultRequireTLS && !credentialVaultWriteTransportAllowed(r) {
 		http.Error(w, "credential vault writes require TLS or loopback transport", http.StatusUpgradeRequired)
 		return
 	}
@@ -338,7 +340,7 @@ func (s *policyServer) handleCredentialVaultDelete(w http.ResponseWriter, r *htt
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
 	}
-	if !credentialVaultWriteTransportAllowed(r) {
+	if s.credentialVaultRequireTLS && !credentialVaultWriteTransportAllowed(r) {
 		http.Error(w, "credential vault writes require TLS or loopback transport", http.StatusUpgradeRequired)
 		return
 	}
@@ -760,7 +762,7 @@ func (s *policyServer) authorize(r *http.Request) bool {
 }
 
 func credentialVaultWriteTransportAllowed(r *http.Request) bool {
-	return r.TLS != nil || isLoopbackRequest(r)
+	return r.TLS != nil || isLoopbackRequest(r) || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func isLoopbackRequest(r *http.Request) bool {

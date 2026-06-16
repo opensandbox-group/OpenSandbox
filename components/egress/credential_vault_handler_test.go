@@ -198,8 +198,9 @@ func TestCredentialVaultWriteRequiresTLSOrLoopback(t *testing.T) {
 	t.Setenv(constants.EnvMitmproxyTransparent, "true")
 	initial := testCredentialVaultPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
 	srv := &policyServer{
-		proxy:           &stubProxy{updated: initial},
-		credentialVault: credentialvault.NewStore(nil, func() bool { return true }),
+		proxy:                     &stubProxy{updated: initial},
+		credentialVault:           credentialvault.NewStore(nil, func() bool { return true }),
+		credentialVaultRequireTLS: true,
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/credential-vault", strings.NewReader(`{"credentials":[],"bindings":[]}`))
@@ -229,4 +230,38 @@ func TestCredentialVaultWriteRequiresTLSOrLoopback(t *testing.T) {
 	srv.handleCredentialVault(w, req)
 
 	require.Equal(t, http.StatusNoContent, w.Result().StatusCode)
+}
+
+func TestCredentialVaultWriteAllowsForwardedProto(t *testing.T) {
+	t.Setenv(constants.EnvMitmproxyTransparent, "true")
+	initial := testCredentialVaultPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	srv := &policyServer{
+		proxy:                     &stubProxy{updated: initial},
+		credentialVault:           credentialvault.NewStore(nil, func() bool { return true }),
+		credentialVaultRequireTLS: true,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/credential-vault", strings.NewReader(`{"credentials":[],"bindings":[]}`))
+	req.RemoteAddr = "198.51.100.10:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	srv.handleCredentialVault(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Result().StatusCode)
+}
+
+func TestCredentialVaultWriteSkipsTLSCheckByDefault(t *testing.T) {
+	t.Setenv(constants.EnvMitmproxyTransparent, "true")
+	initial := testCredentialVaultPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	srv := &policyServer{
+		proxy:           &stubProxy{updated: initial},
+		credentialVault: credentialvault.NewStore(nil, func() bool { return true }),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/credential-vault", strings.NewReader(`{"credentials":[],"bindings":[]}`))
+	req.RemoteAddr = "198.51.100.10:1234"
+	w := httptest.NewRecorder()
+	srv.handleCredentialVault(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Result().StatusCode)
 }

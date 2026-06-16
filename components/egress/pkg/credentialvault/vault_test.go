@@ -75,12 +75,20 @@ func TestCredentialVaultCreateSanitizesAndRendersActiveSnapshot(t *testing.T) {
 	require.Contains(t, payload.Redactions, "secret-token")
 }
 
-func TestCredentialVaultRejectsDefaultAllowWithoutExplicitCoverage(t *testing.T) {
+func TestCredentialVaultAllowsDefaultAllowWithoutExplicitRules(t *testing.T) {
 	store := NewStore(nil, func() bool { return true })
 	pol := testCredentialPolicy(t, `{"defaultAction":"allow","egress":[]}`)
 
 	_, err := store.Create(testCredentialVaultRequest(), pol)
-	require.ErrorContains(t, err, "explicit networkPolicy.egress")
+	require.NoError(t, err, "defaultAction allow should not require explicit egress rules")
+}
+
+func TestCredentialVaultDefaultAllowRespectsExplicitDenyRule(t *testing.T) {
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","target":"code.example.com"}]}`)
+
+	_, err := store.Create(testCredentialVaultRequest(), pol)
+	require.ErrorContains(t, err, "not allowed by egress policy")
 }
 
 func TestCredentialVaultRejectsReservedAndDuplicateHeaderNamesCaseInsensitively(t *testing.T) {

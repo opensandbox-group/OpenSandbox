@@ -383,9 +383,6 @@ func (v *Store) Ready() error {
 }
 
 func (v *Store) validateCandidate(credentials map[string]record, bindings map[string]Binding, pol *policy.NetworkPolicy) error {
-	if len(bindings) > 0 && (pol == nil || len(pol.Egress) == 0) {
-		return fmt.Errorf("credential bindings require explicit networkPolicy.egress allow rules")
-	}
 	for _, b := range bindings {
 		if err := validateBindingCredentialRefs(b, credentials); err != nil {
 			return err
@@ -396,11 +393,6 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 	}
 	if err := validateBindingAmbiguity(bindings); err != nil {
 		return err
-	}
-	for name := range credentials {
-		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("credential name cannot be blank")
-		}
 	}
 	return nil
 }
@@ -413,7 +405,7 @@ func (v *Store) validateBindingPolicy(b Binding, pol *policy.NetworkPolicy) erro
 	}
 	for _, host := range b.Match.Hosts {
 		if !explicitAllowCoversHost(pol, host) {
-			return fmt.Errorf("binding %q host %q is not covered by an explicit allow egress rule", b.Name, host)
+			return fmt.Errorf("binding %q host %q is not allowed by egress policy", b.Name, host)
 		}
 		if bindingHostMatchesIgnoreHosts(host) {
 			return fmt.Errorf("binding %q host %q matches mitmproxy ignore_hosts", b.Name, host)
@@ -822,36 +814,9 @@ func explicitAllowCoversHost(pol *policy.NetworkPolicy, host string) bool {
 		return false
 	}
 	if strings.HasPrefix(host, "*.") {
-		return explicitAllowRuleMatches(pol, host) && pol.Evaluate("probe."+strings.TrimPrefix(host, "*.")) == policy.ActionAllow
+		return pol.Evaluate("probe."+strings.TrimPrefix(host, "*.")) == policy.ActionAllow
 	}
-	return explicitAllowRuleMatches(pol, host) && pol.Evaluate(host) == policy.ActionAllow
-}
-
-func explicitAllowRuleMatches(pol *policy.NetworkPolicy, host string) bool {
-	for _, r := range pol.Egress {
-		if r.Action != policy.ActionAllow {
-			continue
-		}
-		target := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Target), "."))
-		if target == host {
-			return true
-		}
-		if strings.HasPrefix(target, "*.") && hostMatchesPattern(host, target) {
-			return true
-		}
-	}
-	return false
-}
-
-func hostMatchesPattern(host, pattern string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	pattern = strings.ToLower(strings.TrimSuffix(pattern, "."))
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := strings.TrimPrefix(pattern, "*")
-		apex := strings.TrimPrefix(pattern, "*.")
-		return strings.HasSuffix(host, suffix) && host != apex
-	}
-	return host == pattern
+	return pol.Evaluate(host) == policy.ActionAllow
 }
 
 func bindingHostMatchesIgnoreHosts(host string) bool {

@@ -1,4 +1,4 @@
 gymnasium==0.29.1
 stable-baselines3==2.3.2
 tensorboard==2.16.2
-torch==2.9.1
+torch==2.12.0

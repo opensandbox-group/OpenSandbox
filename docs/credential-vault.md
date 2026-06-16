@@ -14,6 +14,8 @@ Credential Vault is OpenSandbox's outbound credential broker for sandboxed agent
 - Server config sets `[egress].image`.
 - Sandbox create request includes an outbound network policy.
 - Sandbox create request enables Credential Proxy.
+- The sandbox image has the tools you want to run. For Claude Code, use an image
+  with Node.js and npm, such as the OpenSandbox code-interpreter image.
 
 ## How It Works
 
@@ -94,6 +96,13 @@ auth={
 X-Client-Id: <client-id>
 X-Client-Secret: <client-secret>
 ```
+
+## Egress Sidecar Configuration
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS` | off | When enabled (`true`/`1`/`on`), credential vault write operations (create, patch, delete) require the request to arrive over TLS, from a loopback address, or with `X-Forwarded-Proto: https`. When disabled (default), any authenticated request is accepted regardless of transport. Enable this in deployments where the egress sidecar is directly reachable from untrusted networks without a TLS-terminating reverse proxy. |
+
 
 ## SDK Quick Reference
 
