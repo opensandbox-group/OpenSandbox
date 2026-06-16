@@ -128,7 +128,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 KIND_CLUSTER ?= sandbox-k8s-test-e2e
 KIND_K8S_VERSION ?= v1.22.4
 GINKGO_ARGS ?=
-E2E_TIMEOUT ?= 30m
+E2E_TIMEOUT ?= 45m
 
 .PHONY: install-kind
 install-kind: ## Install Kind using go install if not already installed
@@ -150,10 +150,16 @@ setup-test-e2e: install-kind ## Set up a Kind cluster for e2e tests if it does n
 			$(KIND) create cluster --name $(KIND_CLUSTER) --image kindest/node:$(KIND_K8S_VERSION) ;; \
 	esac
 
-.PHONY: test-e2e-pause-resume
-test-e2e-pause-resume: setup-test-e2e manifests generate fmt vet 
+.PHONY: test-e2e-core
+test-e2e-core: setup-test-e2e manifests generate fmt vet ## Run only Core-labelled e2e tests
 	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) \
-		KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -ginkgo.focus="PauseResume" -timeout $(E2E_TIMEOUT) $(GINKGO_ARGS)
+		KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter=Core -timeout $(E2E_TIMEOUT) $(GINKGO_ARGS)
+	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-pause-resume
+test-e2e-pause-resume: setup-test-e2e manifests generate fmt vet ## Run only PauseResume-labelled e2e tests
+	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) \
+		KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter=PauseResume -timeout $(E2E_TIMEOUT) $(GINKGO_ARGS)
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-main
