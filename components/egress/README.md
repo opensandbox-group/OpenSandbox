@@ -7,12 +7,14 @@ It runs alongside the sandbox application container (sharing the same network na
 ## Features
 
 - **FQDN-based Allowlist**: Control outbound traffic by domain name (e.g., `api.github.com`).
+- **IP / CIDR Targets**: Egress rules can also target literal IP addresses or CIDR ranges (e.g., `10.0.0.0/8`).
 - **Wildcard Support**: Allow subdomains using wildcards (e.g., `*.pypi.org`).
 - **Transparent Interception**: Uses transparent DNS proxying; no application configuration required.
 - **Experimental: Transparent HTTPS MITM (mitmproxy)**: Optional transparent TLS interception for outbound `80/443` traffic in the sidecar network namespace. See [mitmproxy transparent mode](docs/mitmproxy-transparent.md).
 - **Dynamic DNS (dns+nft mode)**: When a domain is allowed and the proxy resolves it, the resolved A/AAAA IPs are added to nftables with TTL so that default-deny + domain-allow is enforced at the network layer.
+- **Credential Vault**: Automatic credential injection (bearer, basic, API-key, custom headers) for allowed hosts via transparent mitmproxy. See [Credential Vault](#credential-vault).
 - **Privilege Isolation**: Requires `CAP_NET_ADMIN` only for the sidecar; the application container runs unprivileged.
-- **Graceful Degradation**: If `CAP_NET_ADMIN` is missing, it warns and disables enforcement instead of crashing.
+- **Fail-Closed Enforcement**: `iptables` setup is required; the sidecar exits on failure to guarantee no traffic leaks without enforcement. Optional subsystems (OpenTelemetry, startup hooks) degrade gracefully.
 
 ## Architecture
 
@@ -57,6 +59,8 @@ Optional advanced features:
 - DoH/DoT controls: `OPENSANDBOX_EGRESS_BLOCK_DOH_443`, `OPENSANDBOX_EGRESS_DOH_BLOCKLIST`
 - Custom DNS upstream: `OPENSANDBOX_EGRESS_DNS_UPSTREAM` (comma-separated IPs, optional `:port`), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT` (default `5` seconds)
 - DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (enable), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC`
+- Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
+- Metrics: `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (extra key=value attributes for OTLP metrics and structured log fields)
 
 ### Always-Rules Files
 
@@ -83,6 +87,11 @@ Always-rules are hot-reloaded: the sidecar polls the files once per minute and a
 | `PUT` | `/policy` | Alias for `POST` |
 | `PATCH` | `/policy` | Merge/append rules (body is JSON array of egress rules) |
 | `DELETE` | `/policy` | Remove specific targets (body is JSON string array, e.g. `["*.example.com"]`) |
+| `GET/POST/PATCH/DELETE` | `/credential-vault` | Manage the credential vault (create, update, delete) |
+| `GET` | `/credential-vault/credentials` | List credential metadata |
+| `GET` | `/credential-vault/credentials/{name}` | Get single credential metadata |
+| `GET` | `/credential-vault/bindings` | List binding metadata |
+| `GET` | `/credential-vault/bindings/{name}` | Get single binding metadata |
 | `GET` | `/healthz` | Health check; returns `200 ok` or `503 mitmproxy not ready` (when transparent MITM is enabled but not yet initialized) |
 
 Quick example:
@@ -103,6 +112,16 @@ curl -XDELETE http://127.0.0.1:18080/policy \
 
 Optional transparent HTTPS interception for outbound `80/443` traffic in the sidecar network namespace.
 See [docs/mitmproxy-transparent.md](docs/mitmproxy-transparent.md) for configuration and limitations.
+
+### Credential Vault
+
+The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer.
+
+Prerequisites: transparent mitmproxy enabled (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`), egress API auth token set (`OPENSANDBOX_EGRESS_TOKEN`).
+
+Supported auth types: `bearer`, `basic`, `apiKey`, `customHeaders`.
+
+See **[Credential Vault reference](docs/credential-vault.md)** for full API usage, binding rules, and security model.
 
 ### Observability (OpenTelemetry)
 
@@ -162,6 +181,9 @@ curl -I https://github.com
     - `pkg/iptables`: `iptables` rule management.
     - `pkg/nftables`: nftables static/dynamic rules and DNS-resolved IP sets.
     - `pkg/policy`: Policy parsing and definition.
+    - `pkg/credentialvault`: Credential vault store and binding validation.
+    - `pkg/startup`: Post-startup hook registry (`Register`/`RunPost`).
+    - `hooks/`: Side-effect import target; `init()` functions register startup hooks that run after iptables/MITM setup.
 - **Main (egress)**:
     - `nameserver.go`: Builds the list of IPs to whitelist for DNS in nft mode (127.0.0.1 + validated/capped nameservers from resolv.conf).
 
