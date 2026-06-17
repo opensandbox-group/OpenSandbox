@@ -54,6 +54,20 @@ from opensandbox.sync.services.filesystem import FilesystemSync
 
 logger = logging.getLogger(__name__)
 
+
+def _multipart_header_filename(filename: str) -> str:
+    return (
+        filename.replace("\\", "\\\\")
+        .replace('"', r'\"')
+        .replace("\r", "_")
+        .replace("\n", "_")
+    )
+
+
+def _rewind_seekable_stream(stream: IOBase) -> None:
+    if not stream.seekable():
+        return
+    stream.seek(0)
 class _DownloadRequest(TypedDict):
     url: str
     params: dict[str, str]
@@ -304,6 +318,7 @@ class FilesystemAdapterSync(FilesystemSync):
                             "File stream must be binary (opened with 'rb'). Text streams are not supported."
                         )
                     content = entry.data
+                    _rewind_seekable_stream(content)
                     content_type = "application/octet-stream"
                 else:
                     raise InvalidArgumentException(
@@ -316,7 +331,7 @@ class FilesystemAdapterSync(FilesystemSync):
                 yield metadata_json.encode()
                 yield b"\r\n"
 
-                filename = os.path.basename(entry.path) or "file"
+                filename = _multipart_header_filename(os.path.basename(entry.path) or "file")
                 yield f"--{boundary}\r\n".encode()
                 yield (
                     f'Content-Disposition: form-data; name="file"; '

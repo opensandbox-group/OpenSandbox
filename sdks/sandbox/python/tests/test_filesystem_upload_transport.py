@@ -15,6 +15,8 @@
 #
 from __future__ import annotations
 
+from io import BytesIO
+
 import httpx
 import pytest
 
@@ -77,6 +79,42 @@ async def test_async_write_files_direct_execd_uses_chunked_upload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_write_files_direct_execd_rewinds_seekable_streams() -> None:
+    transport = _CaptureAsyncTransport()
+    adapter = FilesystemAdapter(
+        ConnectionConfig(protocol="http", transport=transport, use_server_proxy=False),
+        SandboxEndpoint(endpoint="localhost:44772"),
+    )
+
+    stream = BytesIO(LARGE_PAYLOAD)
+    stream.read(7)
+
+    await adapter.write_files([WriteEntry(path="/tmp/stream.bin", data=stream)])
+
+    assert transport.request is not None
+    assert LARGE_PAYLOAD in transport.body
+
+    await adapter._httpx_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_write_files_direct_execd_escapes_filename_header() -> None:
+    transport = _CaptureAsyncTransport()
+    adapter = FilesystemAdapter(
+        ConnectionConfig(protocol="http", transport=transport, use_server_proxy=False),
+        SandboxEndpoint(endpoint="localhost:44772"),
+    )
+
+    await adapter.write_files([WriteEntry(path='/tmp/weird"name\r\n.txt', data='hello')])
+
+    assert transport.request is not None
+    assert b'filename="weird\\"name__.txt"' in transport.body
+    assert b'filename="weird"name' not in transport.body
+
+    await adapter._httpx_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_async_write_files_server_proxy_uses_content_length_and_preserves_charset() -> None:
     transport = _CaptureAsyncTransport()
     adapter = FilesystemAdapter(
@@ -117,6 +155,40 @@ def test_sync_write_files_direct_execd_uses_chunked_upload() -> None:
     assert b'name="metadata"; filename="metadata"' in transport.body
     assert b'name="file"; filename="large.bin"' in transport.body
     assert LARGE_PAYLOAD in transport.body
+
+    adapter._httpx_client.close()
+
+
+def test_sync_write_files_direct_execd_rewinds_seekable_streams() -> None:
+    transport = _CaptureSyncTransport()
+    adapter = FilesystemAdapterSync(
+        ConnectionConfigSync(protocol="http", transport=transport, use_server_proxy=False),
+        SandboxEndpoint(endpoint="localhost:44772"),
+    )
+
+    stream = BytesIO(LARGE_PAYLOAD)
+    stream.read(7)
+
+    adapter.write_files([WriteEntry(path="/tmp/stream.bin", data=stream)])
+
+    assert transport.request is not None
+    assert LARGE_PAYLOAD in transport.body
+
+    adapter._httpx_client.close()
+
+
+def test_sync_write_files_direct_execd_escapes_filename_header() -> None:
+    transport = _CaptureSyncTransport()
+    adapter = FilesystemAdapterSync(
+        ConnectionConfigSync(protocol="http", transport=transport, use_server_proxy=False),
+        SandboxEndpoint(endpoint="localhost:44772"),
+    )
+
+    adapter.write_files([WriteEntry(path='/tmp/weird"name\r\n.txt', data='hello')])
+
+    assert transport.request is not None
+    assert b'filename="weird\\"name__.txt"' in transport.body
+    assert b'filename="weird"name' not in transport.body
 
     adapter._httpx_client.close()
 
