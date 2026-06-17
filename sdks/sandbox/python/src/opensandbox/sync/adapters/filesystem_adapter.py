@@ -311,7 +311,7 @@ class FilesystemAdapterSync(FilesystemSync):
                     )
 
                 yield f"--{boundary}\r\n".encode()
-                yield b'Content-Disposition: form-data; name="metadata"\r\n'
+                yield b'Content-Disposition: form-data; name="metadata"; filename="metadata"\r\n'
                 yield b"Content-Type: application/json\r\n\r\n"
                 yield metadata_json.encode()
                 yield b"\r\n"

@@ -69,6 +69,7 @@ async def test_async_write_files_direct_execd_uses_chunked_upload() -> None:
     assert headers["transfer-encoding"] == "chunked"
     assert "content-length" not in headers
     assert headers["content-type"].startswith("multipart/form-data; boundary=opensandbox_")
+    assert b'name="metadata"; filename="metadata"' in transport.body
     assert b'name="file"; filename="large.bin"' in transport.body
     assert LARGE_PAYLOAD in transport.body
 
@@ -113,6 +114,7 @@ def test_sync_write_files_direct_execd_uses_chunked_upload() -> None:
     assert headers["transfer-encoding"] == "chunked"
     assert "content-length" not in headers
     assert headers["content-type"].startswith("multipart/form-data; boundary=opensandbox_")
+    assert b'name="metadata"; filename="metadata"' in transport.body
     assert b'name="file"; filename="large.bin"' in transport.body
     assert LARGE_PAYLOAD in transport.body
 
