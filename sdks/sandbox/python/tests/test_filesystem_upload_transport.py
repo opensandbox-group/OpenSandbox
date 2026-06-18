@@ -138,6 +138,26 @@ async def test_async_write_files_server_proxy_uses_content_length_and_preserves_
     await adapter._httpx_client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_async_write_files_direct_execd_encodes_strings_with_entry_encoding() -> None:
+    transport = _CaptureAsyncTransport()
+    adapter = FilesystemAdapter(
+        ConnectionConfig(protocol="http", transport=transport, use_server_proxy=False),
+        SandboxEndpoint(endpoint="localhost:44772"),
+    )
+
+    await adapter.write_files([
+        WriteEntry(path="/tmp/latin1.txt", data="olá", encoding="latin-1"),
+    ])
+
+    assert transport.request is not None
+    assert b"text/plain; charset=latin-1" in transport.body
+    assert "olá".encode("latin-1") in transport.body
+    assert "olá".encode() not in transport.body
+
+    await adapter._httpx_client.aclose()
+
+
 def test_sync_write_files_direct_execd_uses_chunked_upload() -> None:
     transport = _CaptureSyncTransport()
     adapter = FilesystemAdapterSync(

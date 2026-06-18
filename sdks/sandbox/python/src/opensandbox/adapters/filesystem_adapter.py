@@ -308,7 +308,7 @@ class FilesystemAdapter(Filesystem):
                 content_type = "application/octet-stream"
             elif isinstance(entry.data, str):
                 encoding = entry.encoding or "utf-8"
-                content = entry.data
+                content = entry.data.encode(encoding)
                 content_type = f"text/plain; charset={encoding}"
             elif isinstance(entry.data, IOBase):
                 if isinstance(entry.data, TextIOBase):
@@ -361,7 +361,7 @@ class FilesystemAdapter(Filesystem):
                     content_type = "application/octet-stream"
                 elif isinstance(entry.data, str):
                     encoding = entry.encoding or "utf-8"
-                    content = entry.data
+                    content = entry.data.encode(encoding)
                     content_type = f"text/plain; charset={encoding}"
                 elif isinstance(entry.data, IOBase):
                     if isinstance(entry.data, TextIOBase):
@@ -392,8 +392,6 @@ class FilesystemAdapter(Filesystem):
 
                 if isinstance(content, bytes):
                     yield content
-                elif isinstance(content, str):
-                    yield content.encode("utf-8")
                 else:
                     while True:
                         chunk = content.read(64 * 1024)
