@@ -639,11 +639,24 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._ensure_secure_access_support(request)
         self._ensure_network_policy_support(request)
         self._validate_network_exists()
+
+        try:
+            sandbox_env, egress_env = split_egress_env(request.env)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": str(e),
+                },
+            ) from e
+
         pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
         try:
             return self._provision_sandbox(
                 sandbox_id, request, created_at, expires_at, pvc_inspect_cache, auto_created_volumes,
+                sandbox_env=sandbox_env, egress_env=egress_env,
             )
         except ValueError as e:
             raise HTTPException(
@@ -779,8 +792,11 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         expires_at: Optional[datetime],
         pvc_inspect_cache: Optional[dict[str, dict]] = None,
         auto_created_volumes: Optional[list[str]] = None,
+        sandbox_env: Optional[Dict[str, Optional[str]]] = None,
+        egress_env: Optional[Dict[str, Optional[str]]] = None,
     ) -> CreateSandboxResponse:
-        sandbox_env, egress_env = split_egress_env(request.env)
+        if sandbox_env is None and egress_env is None:
+            sandbox_env, egress_env = split_egress_env(request.env)
         patched_request = request.model_copy(update={"env": sandbox_env or None})
         labels, environment = self._build_labels_and_env(sandbox_id, patched_request, expires_at)
         if auto_created_volumes:
