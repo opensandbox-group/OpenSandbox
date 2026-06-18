@@ -641,9 +641,18 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._validate_network_exists()
         pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
-        return self._provision_sandbox(
-            sandbox_id, request, created_at, expires_at, pvc_inspect_cache, auto_created_volumes,
-        )
+        try:
+            return self._provision_sandbox(
+                sandbox_id, request, created_at, expires_at, pvc_inspect_cache, auto_created_volumes,
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": str(e),
+                },
+            ) from e
 
     def _async_provision_worker(
         self,

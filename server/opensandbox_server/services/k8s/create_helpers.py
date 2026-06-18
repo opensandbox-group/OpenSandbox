@@ -19,8 +19,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Optional
 
-logger = logging.getLogger(__name__)
-
 from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.config import AppConfig, EGRESS_MODE_DNS
 from opensandbox_server.services.constants import (
@@ -33,6 +31,8 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.helpers import split_egress_env
 from opensandbox_server.services.validators import calculate_expiration_or_raise
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
