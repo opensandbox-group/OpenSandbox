@@ -28,7 +28,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
 )
-from opensandbox_server.services.k8s.create_helpers import _split_egress_env
+from opensandbox_server.services.helpers import split_egress_env
 from opensandbox_server.services.k8s.egress_helper import (
     apply_egress_to_spec,
     build_security_context_for_sandbox_container,
@@ -489,44 +489,44 @@ class TestSplitEgressEnv:
             "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
             "OTHER": "world",
         }
-        sandbox_env, egress_env = _split_egress_env(env)
+        sandbox_env, egress_env = split_egress_env(env)
         assert sandbox_env == {"MY_VAR": "hello", "OTHER": "world"}
         assert egress_env == {"OPENSANDBOX_EGRESS_LOG_LEVEL": "debug"}
 
     def test_none_returns_empty_dicts(self):
-        sandbox_env, egress_env = _split_egress_env(None)
+        sandbox_env, egress_env = split_egress_env(None)
         assert sandbox_env == {}
         assert egress_env == {}
 
     def test_empty_returns_empty_dicts(self):
-        sandbox_env, egress_env = _split_egress_env({})
+        sandbox_env, egress_env = split_egress_env({})
         assert sandbox_env == {}
         assert egress_env == {}
 
     def test_no_egress_vars(self):
         env = {"FOO": "bar", "BAZ": "qux"}
-        sandbox_env, egress_env = _split_egress_env(env)
+        sandbox_env, egress_env = split_egress_env(env)
         assert sandbox_env == env
         assert egress_env == {}
 
     def test_rejects_reserved_rules(self):
         with pytest.raises(ValueError, match="reserved"):
-            _split_egress_env({"OPENSANDBOX_EGRESS_RULES": "evil"})
+            split_egress_env({"OPENSANDBOX_EGRESS_RULES": "evil"})
 
     def test_rejects_reserved_mode(self):
         with pytest.raises(ValueError, match="reserved"):
-            _split_egress_env({"OPENSANDBOX_EGRESS_MODE": "evil"})
+            split_egress_env({"OPENSANDBOX_EGRESS_MODE": "evil"})
 
     def test_rejects_reserved_token(self):
         with pytest.raises(ValueError, match="reserved"):
-            _split_egress_env({"OPENSANDBOX_EGRESS_TOKEN": "evil"})
+            split_egress_env({"OPENSANDBOX_EGRESS_TOKEN": "evil"})
 
     def test_allows_mitmproxy_transparent(self):
         env = {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
-        sandbox_env, egress_env = _split_egress_env(env)
+        sandbox_env, egress_env = split_egress_env(env)
         assert sandbox_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
         assert egress_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
 
     def test_rejects_reserved_http_addr(self):
         with pytest.raises(ValueError, match="reserved"):
-            _split_egress_env({"OPENSANDBOX_EGRESS_HTTP_ADDR": "0.0.0.0:9999"})
+            split_egress_env({"OPENSANDBOX_EGRESS_HTTP_ADDR": "0.0.0.0:9999"})

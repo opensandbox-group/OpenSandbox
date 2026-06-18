@@ -83,6 +83,7 @@ from opensandbox_server.services.docker.windows_profile import (
 )
 from opensandbox_server.services.extension_service import ExtensionService
 from opensandbox_server.services.constants import (
+    OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
@@ -102,6 +103,7 @@ from opensandbox_server.services.endpoint_auth import (
 from opensandbox_server.services.helpers import (
     matches_filter,
     parse_timestamp,
+    split_egress_env,
 )
 from opensandbox_server.services.docker.ossfs_mixin import OSSFSMixin
 from opensandbox_server.services.sandbox_service import SandboxService
@@ -769,7 +771,9 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         pvc_inspect_cache: Optional[dict[str, dict]] = None,
         auto_created_volumes: Optional[list[str]] = None,
     ) -> CreateSandboxResponse:
-        labels, environment = self._build_labels_and_env(sandbox_id, request, expires_at)
+        sandbox_env, egress_env = split_egress_env(request.env)
+        patched_request = request.model_copy(update={"env": sandbox_env or None})
+        labels, environment = self._build_labels_and_env(sandbox_id, patched_request, expires_at)
         if auto_created_volumes:
             labels[SANDBOX_MANAGED_VOLUMES_LABEL] = json.dumps(
                 auto_created_volumes, separators=(",", ":"),
@@ -778,6 +782,25 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         mem_limit, nano_cpus, gpu_count = self._resolve_resource_limits(request)
         egress_token: Optional[str] = None
         requested_windows_profile = is_windows_platform(request.platform)
+
+        credential_proxy_enabled = bool(
+            request.credential_proxy and request.credential_proxy.enabled
+        )
+
+        if credential_proxy_enabled and egress_env.get(OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE):
+            raise ValueError(
+                f"'{OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE}' cannot be set when credential proxy is enabled"
+            )
+
+        if egress_env and not request.network_policy:
+            dropped_keys = sorted(egress_env.keys())
+            logger.warning(
+                "Sandbox %s has OPENSANDBOX_EGRESS_ env vars %s but no networkPolicy; "
+                "these variables will be ignored because no egress sidecar is created",
+                sandbox_id,
+                dropped_keys,
+            )
+            egress_env = {}
 
         if requested_windows_profile:
             validate_windows_resource_limits((request.resource_limits.root if request.resource_limits else None) or {})
@@ -792,9 +815,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             )
 
         sidecar_container = None
-        credential_proxy_enabled = bool(
-            request.credential_proxy and request.credential_proxy.enabled
-        )
         runtime_volume_name: Optional[str] = None
         try:
             # For dockur/windows profile, resourceLimits are translated to
@@ -866,6 +886,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     ),
                     runtime_volume_name=runtime_volume_name,
                     credential_proxy_enabled=credential_proxy_enabled,
+                    extra_env=egress_env or None,
                 )
                 labels[SANDBOX_EMBEDDING_PROXY_PORT_LABEL] = str(host_execd_port)
                 labels[SANDBOX_HTTP_PORT_LABEL] = str(host_http_port)

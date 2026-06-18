@@ -14,51 +14,25 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Optional
 
+logger = logging.getLogger(__name__)
+
 from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.config import AppConfig, EGRESS_MODE_DNS
 from opensandbox_server.services.constants import (
-    EGRESS_ENV_PREFIX,
-    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
-    RESERVED_EGRESS_ENV_VARS,
+    OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
     SANDBOX_ID_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_SNAPSHOT_ID_LABEL,
 )
+from opensandbox_server.services.helpers import split_egress_env
 from opensandbox_server.services.validators import calculate_expiration_or_raise
-
-Pair = tuple[Dict[str, Optional[str]], Dict[str, Optional[str]]]
-
-
-def _split_egress_env(
-    env: Optional[Dict[str, Optional[str]]],
-) -> Pair:
-    """Split request env into (sandbox_env, egress_env) by OPENSANDBOX_EGRESS_ prefix.
-
-    Raises ValueError if a user-supplied key collides with a reserved internal var.
-    """
-    if not env:
-        return {}, {}
-
-    sandbox_env: Dict[str, Optional[str]] = {}
-    egress_env: Dict[str, Optional[str]] = {}
-    for key, value in env.items():
-        if key.startswith(EGRESS_ENV_PREFIX):
-            if key in RESERVED_EGRESS_ENV_VARS:
-                raise ValueError(
-                    f"Environment variable '{key}' is reserved and cannot be overridden"
-                )
-            egress_env[key] = value
-            if key == OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:
-                sandbox_env[key] = value
-        else:
-            sandbox_env[key] = value
-    return sandbox_env, egress_env
 
 
 @dataclass
@@ -122,7 +96,22 @@ def _build_create_workload_context(
     if request.resource_requests and request.resource_requests.root:
         resource_requests = request.resource_requests.root
 
-    sandbox_env, egress_env = _split_egress_env(request.env)
+    sandbox_env, egress_env = split_egress_env(request.env)
+
+    if credential_proxy_enabled and egress_env.get(OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE):
+        raise ValueError(
+            f"'{OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE}' cannot be set when credential proxy is enabled"
+        )
+
+    if egress_env and not request.network_policy:
+        dropped_keys = sorted(egress_env.keys())
+        logger.warning(
+            "Sandbox %s has OPENSANDBOX_EGRESS_ env vars %s but no networkPolicy; "
+            "these variables will be ignored because no egress sidecar is created",
+            sandbox_id,
+            dropped_keys,
+        )
+        egress_env = {}
 
     return _CreateWorkloadContext(
         labels=labels,

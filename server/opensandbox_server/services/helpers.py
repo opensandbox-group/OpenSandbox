@@ -27,7 +27,12 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from opensandbox_server.api.schema import Endpoint, Sandbox, SandboxFilter
-from opensandbox_server.services.constants import OPEN_SANDBOX_INGRESS_HEADER
+from opensandbox_server.services.constants import (
+    EGRESS_ENV_PREFIX,
+    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPEN_SANDBOX_INGRESS_HEADER,
+    RESERVED_EGRESS_ENV_VARS,
+)
 from opensandbox_server.config import (
     GATEWAY_ROUTE_MODE_HEADER,
     GATEWAY_ROUTE_MODE_URI,
@@ -234,6 +239,32 @@ def format_ingress_endpoint(
     raise RuntimeError(f"Unsupported route mode: {route_mode}")
 
 
+def split_egress_env(
+    env: Optional[Dict[str, Optional[str]]],
+) -> tuple[Dict[str, Optional[str]], Dict[str, Optional[str]]]:
+    """Split request env into (sandbox_env, egress_env) by OPENSANDBOX_EGRESS_ prefix.
+
+    Raises ValueError if a user-supplied key collides with a reserved internal var.
+    """
+    if not env:
+        return {}, {}
+
+    sandbox_env: Dict[str, Optional[str]] = {}
+    egress_env: Dict[str, Optional[str]] = {}
+    for key, value in env.items():
+        if key.startswith(EGRESS_ENV_PREFIX):
+            if key in RESERVED_EGRESS_ENV_VARS:
+                raise ValueError(
+                    f"Environment variable '{key}' is reserved and cannot be overridden"
+                )
+            egress_env[key] = value
+            if key == OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:
+                sandbox_env[key] = value
+        else:
+            sandbox_env[key] = value
+    return sandbox_env, egress_env
+
+
 __all__ = [
     "parse_memory_limit",
     "parse_nano_cpus",
@@ -242,4 +273,5 @@ __all__ = [
     "normalize_external_endpoint_url",
     "format_ingress_endpoint",
     "matches_filter",
+    "split_egress_env",
 ]
