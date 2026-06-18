@@ -507,8 +507,16 @@ class AgentSandboxProvider(WorkloadProvider):
 
         return None
 
-    def get_endpoint_info(self, workload: Dict[str, Any], port: int, sandbox_id: str) -> Optional[Endpoint]:
-        ingress_endpoint = format_ingress_endpoint(self.ingress_config, sandbox_id, port)
+    def get_endpoint_info(
+        self,
+        workload: Dict[str, Any],
+        port: int,
+        sandbox_id: str,
+        resolve_internal: bool = False,
+    ) -> Optional[Endpoint]:
+        ingress_endpoint = None
+        if not resolve_internal:
+            ingress_endpoint = format_ingress_endpoint(self.ingress_config, sandbox_id, port)
         if ingress_endpoint:
             return ingress_endpoint
 

@@ -28,6 +28,9 @@ from opensandbox_server.config import (
     EGRESS_MODE_DNS_NFT,
     EgressConfig,
     ExecdInitResources,
+    GatewayConfig,
+    GatewayRouteModeConfig,
+    IngressConfig,
     KubernetesRuntimeConfig,
     RuntimeConfig,
 )
@@ -669,6 +672,58 @@ spec:
         }
 
         endpoint = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "10.0.0.9:8080"
+        assert endpoint.headers is None
+
+    def test_get_endpoint_info_gateway_mode_returns_gateway_endpoint_by_default(self, mock_k8s_client):
+        app_config = _app_config()
+        app_config.ingress = IngressConfig(
+            mode="gateway",
+            gateway=GatewayConfig(
+                address="127.0.0.1:8081",
+                route=GatewayRouteModeConfig(mode="header"),
+            ),
+        )
+        provider = AgentSandboxProvider(mock_k8s_client, app_config)
+        mock_k8s_client.list_pods.return_value = [
+            SimpleNamespace(status=SimpleNamespace(phase="Running", pod_ip="10.0.0.9"))
+        ]
+        workload = {
+            "status": {"selector": "app=sandbox"},
+            "metadata": {"namespace": "test-ns"},
+        }
+
+        endpoint = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "127.0.0.1:8081"
+        assert endpoint.headers == {"OpenSandbox-Ingress-To": "sandbox-123-8080"}
+        mock_k8s_client.list_pods.assert_not_called()
+
+    def test_get_endpoint_info_resolve_internal_skips_gateway_endpoint(self, mock_k8s_client):
+        app_config = _app_config()
+        app_config.ingress = IngressConfig(
+            mode="gateway",
+            gateway=GatewayConfig(
+                address="127.0.0.1:8081",
+                route=GatewayRouteModeConfig(mode="header"),
+            ),
+        )
+        provider = AgentSandboxProvider(mock_k8s_client, app_config)
+        mock_k8s_client.list_pods.return_value = [
+            SimpleNamespace(status=SimpleNamespace(phase="Running", pod_ip="10.0.0.9"))
+        ]
+        workload = {
+            "status": {"selector": "app=sandbox"},
+            "metadata": {"namespace": "test-ns"},
+        }
+
+        endpoint = provider.get_endpoint_info(
+            workload,
+            8080,
+            "sandbox-123",
+            resolve_internal=True,
+        )
 
         assert endpoint.endpoint == "10.0.0.9:8080"
         assert endpoint.headers is None

@@ -170,7 +170,13 @@ class WorkloadProvider(ABC):
         pass
     
     @abstractmethod
-    def get_endpoint_info(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
+    def get_endpoint_info(
+        self,
+        workload: Any,
+        port: int,
+        sandbox_id: str,
+        resolve_internal: bool = False,
+    ) -> Optional[Endpoint]:
         """
         Get endpoint information from workload.
 
@@ -178,6 +184,7 @@ class WorkloadProvider(ABC):
             workload: Workload object
             port: Port number
             sandbox_id: Sandbox identifier for ingress-based endpoints
+            resolve_internal: If True, bypass client-facing ingress endpoints.
 
         Returns:
             Endpoint object (including optional headers) or None if not available

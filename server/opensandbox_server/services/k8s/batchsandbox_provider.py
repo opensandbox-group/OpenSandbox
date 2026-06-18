@@ -811,9 +811,19 @@ class BatchSandboxProvider(WorkloadProvider):
             "last_transition_at": creation_timestamp,
         }
     
-    def get_endpoint_info(self, workload: Dict[str, Any], port: int, sandbox_id: str) -> Optional[Endpoint]:
+    def get_endpoint_info(
+        self,
+        workload: Dict[str, Any],
+        port: int,
+        sandbox_id: str,
+        resolve_internal: bool = False,
+    ) -> Optional[Endpoint]:
         """Resolve endpoint using gateway ingress or parsed pod IP."""
-        if self.ingress_config and self.ingress_config.mode == INGRESS_MODE_GATEWAY:
+        if (
+            not resolve_internal
+            and self.ingress_config
+            and self.ingress_config.mode == INGRESS_MODE_GATEWAY
+        ):
             return format_ingress_endpoint(self.ingress_config, sandbox_id, port)
 
         pod_ip = self._parse_pod_ip(workload)

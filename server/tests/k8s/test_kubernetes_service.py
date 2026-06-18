@@ -464,6 +464,28 @@ class TestKubernetesSandboxServiceCreate:
             "OpenSandbox-Ingress-To": "sbx-123-44772",
         }
 
+    def test_get_endpoint_passes_resolve_internal_to_provider(self, k8s_service):
+        k8s_service.workload_provider.get_workload.return_value = {
+            "metadata": {"annotations": {}}
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = Endpoint(
+            endpoint="10.244.0.5:44772",
+        )
+
+        endpoint = k8s_service.get_endpoint(
+            "sbx-123",
+            44772,
+            resolve_internal=True,
+        )
+
+        assert endpoint.endpoint == "10.244.0.5:44772"
+        k8s_service.workload_provider.get_endpoint_info.assert_called_once_with(
+            k8s_service.workload_provider.get_workload.return_value,
+            44772,
+            "sbx-123",
+            resolve_internal=True,
+        )
+
     def test_get_endpoint_merges_egress_auth_header_for_egress_api_port(
         self, k8s_service
     ):

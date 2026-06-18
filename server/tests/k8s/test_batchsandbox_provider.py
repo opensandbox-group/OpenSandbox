@@ -32,6 +32,9 @@ from opensandbox_server.config import (
     EGRESS_MODE_DNS_NFT,
     EgressConfig,
     ExecdInitResources,
+    GatewayConfig,
+    GatewayRouteModeConfig,
+    IngressConfig,
     KubernetesRuntimeConfig,
     RuntimeConfig,
 )
@@ -1265,6 +1268,59 @@ spec:
         }
 
         result = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+
+        assert result.endpoint == "10.0.0.1:8080"
+        assert result.headers is None
+
+    def test_get_endpoint_info_gateway_mode_returns_gateway_endpoint_by_default(self):
+        app_config = AppConfig(
+            runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
+            kubernetes=KubernetesRuntimeConfig(namespace="test-ns"),
+            ingress=IngressConfig(
+                mode="gateway",
+                gateway=GatewayConfig(
+                    address="127.0.0.1:8081",
+                    route=GatewayRouteModeConfig(mode="header"),
+                ),
+            ),
+        )
+        provider = BatchSandboxProvider(MagicMock(), app_config)
+        workload = {
+            "metadata": {
+                "annotations": {"sandbox.opensandbox.io/endpoints": '["10.0.0.1"]'}
+            }
+        }
+
+        result = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+
+        assert result.endpoint == "127.0.0.1:8081"
+        assert result.headers == {"OpenSandbox-Ingress-To": "sandbox-123-8080"}
+
+    def test_get_endpoint_info_resolve_internal_skips_gateway_endpoint(self):
+        app_config = AppConfig(
+            runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
+            kubernetes=KubernetesRuntimeConfig(namespace="test-ns"),
+            ingress=IngressConfig(
+                mode="gateway",
+                gateway=GatewayConfig(
+                    address="127.0.0.1:8081",
+                    route=GatewayRouteModeConfig(mode="header"),
+                ),
+            ),
+        )
+        provider = BatchSandboxProvider(MagicMock(), app_config)
+        workload = {
+            "metadata": {
+                "annotations": {"sandbox.opensandbox.io/endpoints": '["10.0.0.1"]'}
+            }
+        }
+
+        result = provider.get_endpoint_info(
+            workload,
+            8080,
+            "sandbox-123",
+            resolve_internal=True,
+        )
 
         assert result.endpoint == "10.0.0.1:8080"
         assert result.headers is None
