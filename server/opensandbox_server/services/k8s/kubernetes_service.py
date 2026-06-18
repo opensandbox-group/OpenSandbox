@@ -20,6 +20,7 @@ using Kubernetes resources for sandbox lifecycle management.
 """
 
 import asyncio
+import inspect
 import logging
 import time
 from datetime import datetime, timezone
@@ -89,6 +90,14 @@ from opensandbox_server.services.k8s.provider_factory import create_workload_pro
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_supports_internal_endpoint_resolution(provider: Any) -> bool:
+    signature = inspect.signature(provider.get_endpoint_info)
+    return "resolve_internal" in signature.parameters or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
 
 
 class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionService):
@@ -882,12 +891,33 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             if expires is not None:
                 endpoint = self._build_signed_endpoint(sandbox_id, port, expires)
             else:
-                endpoint = self.workload_provider.get_endpoint_info(
-                    workload,
-                    port,
-                    sandbox_id,
-                    resolve_internal=resolve_internal,
+                supports_internal_resolution = _provider_supports_internal_endpoint_resolution(
+                    self.workload_provider
                 )
+                if resolve_internal and not supports_internal_resolution:
+                    raise HTTPException(
+                        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail={
+                            "code": SandboxErrorCodes.API_NOT_SUPPORTED,
+                            "message": (
+                                "The configured Kubernetes workload provider does not "
+                                "support internal endpoint resolution required by server proxy."
+                            ),
+                        },
+                    )
+                if supports_internal_resolution:
+                    endpoint = self.workload_provider.get_endpoint_info(
+                        workload,
+                        port,
+                        sandbox_id,
+                        resolve_internal=resolve_internal,
+                    )
+                else:
+                    endpoint = self.workload_provider.get_endpoint_info(
+                        workload,
+                        port,
+                        sandbox_id,
+                    )
 
             if not endpoint:
                 raise HTTPException(

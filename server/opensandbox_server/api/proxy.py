@@ -17,6 +17,7 @@ HTTP and WebSocket proxy routes for reaching services inside sandboxes via the l
 """
 
 import logging
+import secrets
 from collections.abc import AsyncIterator, Mapping
 from typing import Optional
 
@@ -132,6 +133,34 @@ def _filter_proxy_headers(
     return forwarded
 
 
+def _validate_secure_access_header(
+    request_headers: Mapping[str, str],
+    endpoint_headers: Optional[dict[str, str]],
+) -> None:
+    expected = next(
+        (
+            value
+            for key, value in (endpoint_headers or {}).items()
+            if key.lower() == OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower()
+        ),
+        None,
+    )
+    if not expected:
+        return
+
+    actual = request_headers.get(OPEN_SANDBOX_SECURE_ACCESS_HEADER)
+    if actual and secrets.compare_digest(actual, expected):
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={
+            "code": "UNAUTHORIZED",
+            "message": f"Missing or invalid {OPEN_SANDBOX_SECURE_ACCESS_HEADER} header.",
+        },
+    )
+
+
 def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None:
     proxy_renew = getattr(request.app.state, "proxy_renew_coordinator", None)
     if proxy_renew is not None:
@@ -159,8 +188,9 @@ async def _proxy_http_request(
     port: int,
     full_path: str,
 ) -> StreamingResponse:
-    _schedule_proxy_renew(request, sandbox_id)
     endpoint = lifecycle.sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
+    _validate_secure_access_header(request.headers, endpoint.headers)
+    _schedule_proxy_renew(request, sandbox_id)
     query_string = request.url.query
     target_url = _build_proxy_target_url(endpoint, full_path, query_string, websocket=False)
     client: httpx.AsyncClient = request.app.state.http_client
@@ -307,10 +337,10 @@ async def _proxy_websocket_request(
     port: int,
     full_path: str,
 ) -> None:
-    _schedule_proxy_renew(websocket, sandbox_id)
-
     try:
         endpoint = lifecycle.sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
+        _validate_secure_access_header(websocket.headers, endpoint.headers)
+        _schedule_proxy_renew(websocket, sandbox_id)
     except HTTPException as exc:
         logger.warning(
             "Rejecting websocket proxy request for sandbox=%s port=%s: %s",
