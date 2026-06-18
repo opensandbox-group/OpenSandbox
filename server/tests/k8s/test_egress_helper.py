@@ -509,17 +509,29 @@ class TestSplitEgressEnv:
         assert sandbox_env == env
         assert egress_env == {}
 
-    def test_rejects_reserved_rules(self):
-        with pytest.raises(ValueError, match="reserved"):
+    def test_rejects_disallowed_rules(self):
+        with pytest.raises(ValueError, match="not allowed"):
             split_egress_env({"OPENSANDBOX_EGRESS_RULES": "evil"})
 
-    def test_rejects_reserved_mode(self):
-        with pytest.raises(ValueError, match="reserved"):
+    def test_rejects_disallowed_mode(self):
+        with pytest.raises(ValueError, match="not allowed"):
             split_egress_env({"OPENSANDBOX_EGRESS_MODE": "evil"})
 
-    def test_rejects_reserved_token(self):
-        with pytest.raises(ValueError, match="reserved"):
+    def test_rejects_disallowed_token(self):
+        with pytest.raises(ValueError, match="not allowed"):
             split_egress_env({"OPENSANDBOX_EGRESS_TOKEN": "evil"})
+
+    def test_rejects_disallowed_http_addr(self):
+        with pytest.raises(ValueError, match="not allowed"):
+            split_egress_env({"OPENSANDBOX_EGRESS_HTTP_ADDR": "0.0.0.0:9999"})
+
+    def test_rejects_disallowed_dns_upstream(self):
+        with pytest.raises(ValueError, match="not allowed"):
+            split_egress_env({"OPENSANDBOX_EGRESS_DNS_UPSTREAM": "8.8.8.8"})
+
+    def test_rejects_disallowed_nameserver_exempt(self):
+        with pytest.raises(ValueError, match="not allowed"):
+            split_egress_env({"OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT": "1.1.1.1"})
 
     def test_allows_mitmproxy_transparent(self):
         env = {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
@@ -527,6 +539,8 @@ class TestSplitEgressEnv:
         assert sandbox_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
         assert egress_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
 
-    def test_rejects_reserved_http_addr(self):
-        with pytest.raises(ValueError, match="reserved"):
-            split_egress_env({"OPENSANDBOX_EGRESS_HTTP_ADDR": "0.0.0.0:9999"})
+    def test_allows_all_permitted_vars(self):
+        from opensandbox_server.services.constants import ALLOWED_EGRESS_ENV_VARS
+        env = {key: "val" for key in ALLOWED_EGRESS_ENV_VARS}
+        sandbox_env, egress_env = split_egress_env(env)
+        assert set(egress_env.keys()) == ALLOWED_EGRESS_ENV_VARS

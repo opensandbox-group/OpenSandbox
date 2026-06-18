@@ -83,9 +83,9 @@ func TestEgressEnv_ReservedVarReturns400(t *testing.T) {
 	var apiErr *opensandbox.APIError
 	require.True(t, errors.As(err, &apiErr), "expected APIError, got %T: %v", err, err)
 	require.Equal(t, http.StatusBadRequest, apiErr.StatusCode,
-		"reserved OPENSANDBOX_EGRESS_ var should return 400, got %d", apiErr.StatusCode)
+		"disallowed OPENSANDBOX_EGRESS_ var should return 400, got %d", apiErr.StatusCode)
 
-	t.Logf("Reserved env var correctly rejected: %s", apiErr.Error())
+	t.Logf("Disallowed env var correctly rejected: %s", apiErr.Error())
 }
 
 func TestEgressEnv_SSLInsecureWithCredentialProxyReturns400(t *testing.T) {

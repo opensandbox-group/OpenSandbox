@@ -28,10 +28,10 @@ from typing import Dict, Optional
 
 from opensandbox_server.api.schema import Endpoint, Sandbox, SandboxFilter
 from opensandbox_server.services.constants import (
+    ALLOWED_EGRESS_ENV_VARS,
     EGRESS_ENV_PREFIX,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPEN_SANDBOX_INGRESS_HEADER,
-    RESERVED_EGRESS_ENV_VARS,
 )
 from opensandbox_server.config import (
     GATEWAY_ROUTE_MODE_HEADER,
@@ -244,7 +244,8 @@ def split_egress_env(
 ) -> tuple[Dict[str, Optional[str]], Dict[str, Optional[str]]]:
     """Split request env into (sandbox_env, egress_env) by OPENSANDBOX_EGRESS_ prefix.
 
-    Raises ValueError if a user-supplied key collides with a reserved internal var.
+    Only env vars listed in ALLOWED_EGRESS_ENV_VARS are forwarded to the egress
+    sidecar.  Any other OPENSANDBOX_EGRESS_ key raises ValueError.
     """
     if not env:
         return {}, {}
@@ -253,9 +254,10 @@ def split_egress_env(
     egress_env: Dict[str, Optional[str]] = {}
     for key, value in env.items():
         if key.startswith(EGRESS_ENV_PREFIX):
-            if key in RESERVED_EGRESS_ENV_VARS:
+            if key not in ALLOWED_EGRESS_ENV_VARS:
                 raise ValueError(
-                    f"Environment variable '{key}' is reserved and cannot be overridden"
+                    f"Environment variable '{key}' is not allowed; "
+                    f"permitted OPENSANDBOX_EGRESS_ keys: {sorted(ALLOWED_EGRESS_ENV_VARS)}"
                 )
             egress_env[key] = value
             if key == OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:
