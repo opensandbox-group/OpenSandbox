@@ -70,7 +70,12 @@ func TestEgressEnv_ReservedVarReturns400(t *testing.T) {
 	client := opensandbox.NewLifecycleClient(config.Protocol+"://"+config.Domain+"/v1", config.APIKey)
 
 	_, err := client.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-		Image: &opensandbox.ImageSpec{URI: getSandboxImage()},
+		Image:      &opensandbox.ImageSpec{URI: getSandboxImage()},
+		Entrypoint: []string{"tail", "-f", "/dev/null"},
+		ResourceLimits: opensandbox.ResourceLimits{
+			"cpu":    "500m",
+			"memory": "256Mi",
+		},
 		Env: map[string]string{
 			"OPENSANDBOX_EGRESS_RULES": "should-be-rejected",
 		},
@@ -96,7 +101,12 @@ func TestEgressEnv_SSLInsecureWithCredentialProxyReturns400(t *testing.T) {
 	client := opensandbox.NewLifecycleClient(config.Protocol+"://"+config.Domain+"/v1", config.APIKey)
 
 	_, err := client.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-		Image: &opensandbox.ImageSpec{URI: getSandboxImage()},
+		Image:      &opensandbox.ImageSpec{URI: getSandboxImage()},
+		Entrypoint: []string{"tail", "-f", "/dev/null"},
+		ResourceLimits: opensandbox.ResourceLimits{
+			"cpu":    "500m",
+			"memory": "256Mi",
+		},
 		Env: map[string]string{
 			"OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE": "true",
 		},
