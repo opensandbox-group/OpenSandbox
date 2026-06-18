@@ -145,3 +145,19 @@ export type {
   WriteEntry,
 } from "./models/filesystem.js";
 export type { SandboxFiles } from "./services/filesystem.js";
+
+// Pool management
+export type {
+  CreatePoolRequest,
+  PoolCapacitySpec,
+  PoolInfo,
+  PoolListResponse,
+  PoolStatus,
+  UpdatePoolRequest,
+} from "./models/pools.js";
+export type { Pools } from "./services/pools.js";
+export { PoolManager } from "./poolManager.js";
+export type { PoolManagerOptions } from "./poolManager.js";
+
+// Pool management – synchronous (Node.js only)
+export { PoolManagerSync } from "./poolManagerSync.js";
