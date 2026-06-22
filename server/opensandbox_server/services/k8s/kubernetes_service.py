@@ -321,9 +321,13 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         garbage-collects the PVC. PVCs that were already present, opt-out
         PVCs, and PVCs we failed to create are excluded from the list.
 
-        Degrades gracefully: if the service account lacks RBAC permissions
-        for PVC operations (403), the check is skipped and volume resolution
-        is left to the kubelet at pod scheduling time.
+        Fails closed when the service account cannot read PVCs (403 on
+        ``get``): the ownership pre-pass cannot run, and silently mounting a
+        PVC labeled as managed by another sandbox would expose this sandbox
+        to the owner's cleanup. Grant ``get`` on ``persistentvolumeclaims``
+        — the stock Helm chart does so by default. A 403 on ``create`` for
+        an opted-in PVC still degrades to a warning (the kubelet will fail
+        scheduling if the PVC truly doesn't exist).
         """
         from kubernetes.client import V1PersistentVolumeClaim, V1ObjectMeta
         from kubernetes.client import ApiException
@@ -371,11 +375,27 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 existing = self.k8s_client.get_pvc(self.namespace, claim_name)
             except ApiException as e:
                 if e.status == 403:
-                    logger.warning(
-                        f"No RBAC permission to read PVC '{claim_name}', skipping auto-create. "
-                        "Grant 'get' and 'create' on 'persistentvolumeclaims' to enable."
+                    # Fail closed: without read access the ownership pre-pass
+                    # cannot run, and silently mounting a PVC labeled as
+                    # managed by another sandbox would expose this sandbox to
+                    # the owner's cleanup or ownerReference GC. Refuse rather
+                    # than degrade.
+                    logger.error(
+                        f"No RBAC permission to read PVC '{claim_name}'; "
+                        f"cannot verify ownership and refusing to mount. "
+                        f"Grant 'get' on 'persistentvolumeclaims' to enable."
                     )
-                    return []  # Skip all remaining PVCs — same SA, same permissions
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail={
+                            "code": SandboxErrorCodes.K8S_API_ERROR,
+                            "message": (
+                                f"Cannot verify ownership of PVC '{claim_name}': "
+                                f"server lacks 'get' on persistentvolumeclaims. "
+                                f"Operator must grant the missing RBAC."
+                            ),
+                        },
+                    ) from e
                 raise
             existing_cache[claim_name] = existing
             if existing is not None:
@@ -665,7 +685,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             # ``workload_left_alive`` flag the finally would then skip
             # cleanup, orphaning the labeled PVCs. Validating up-front means
             # no side effects happen before the 400 is raised.
-            if request.volumes and (request.extensions or {}).get("poolRef"):
+            if request.volumes and has_pool_ref:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
@@ -874,8 +894,10 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     # Best-effort: the caller can't sweep these because the create
                     # API returned no sandbox id. _cleanup_managed_pvcs is scoped
                     # to PVCs labeled with this sandbox_id, so it can't touch
-                    # anything else.
-                    self._cleanup_managed_pvcs(sandbox_id)
+                    # anything else. Offload — the sync list+delete loop would
+                    # otherwise stall the event loop when the API server is
+                    # slow or several PVCs need sweeping.
+                    await asyncio.to_thread(self._cleanup_managed_pvcs, sandbox_id)
 
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
         """

@@ -286,7 +286,8 @@ export interface PVC extends Record<string, unknown> {
    */
   createIfNotExists?: boolean;
   /**
-   * When true, delete auto-created volume on sandbox deletion (Docker-only).
+   * When true, the auto-created volume (Docker named volume or Kubernetes PVC)
+   * is removed on sandbox deletion. Pre-existing volumes are never removed.
    */
   deleteOnSandboxTermination?: boolean;
   /**

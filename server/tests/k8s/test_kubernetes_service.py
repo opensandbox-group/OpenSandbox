@@ -1123,6 +1123,28 @@ class TestEnsurePvcVolumes:
         assert exc_info.value.status_code == 409
         k8s_service.k8s_client.create_pvc.assert_not_called()
 
+    def test_pre_pass_get_pvc_403_fails_closed(self, k8s_service):
+        # Without 'get' on PVCs the ownership pre-pass cannot verify whether
+        # the claim is already labeled by another sandbox. Silently skipping
+        # would let a request with createIfNotExists=false mount someone
+        # else's managed PVC, exposing it to the owner's cleanup. Refuse
+        # with 500 — RBAC misconfig is a persistent server-side error, not
+        # something retrying will fix.
+        from kubernetes.client import ApiException
+
+        k8s_service.k8s_client.get_pvc.side_effect = ApiException(
+            status=403, reason="Forbidden"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            k8s_service._ensure_pvc_volumes(
+                [self._make_volume("unknown-owner", create_if_not_exists=False)],
+                sandbox_id="sandbox-xyz",
+            )
+
+        assert exc_info.value.status_code == 500
+        k8s_service.k8s_client.create_pvc.assert_not_called()
+
     def test_create_race_409_fails_closed_when_winner_pvc_already_gone(
         self, k8s_service
     ):
