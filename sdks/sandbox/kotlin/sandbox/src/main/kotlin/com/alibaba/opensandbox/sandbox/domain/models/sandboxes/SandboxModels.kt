@@ -418,6 +418,7 @@ class PVC private constructor(
     val storageClass: String?,
     val storage: String?,
     val accessModes: List<String>?,
+    val pv: Map<String, Any>?,
 ) {
     companion object {
         @JvmStatic
@@ -434,6 +435,7 @@ class PVC private constructor(
         private var storageClass: String? = null
         private var storage: String? = null
         private var accessModes: List<String>? = null
+        private var pv: Map<String, Any>? = null
 
         fun claimName(claimName: String): Builder {
             require(claimName.isNotBlank()) { "Claim name cannot be blank" }
@@ -471,6 +473,11 @@ class PVC private constructor(
             return this
         }
 
+        fun pv(pv: Map<String, Any>?): Builder {
+            this.pv = pv
+            return this
+        }
+
         fun build(): PVC {
             val claimNameValue = claimName ?: throw IllegalArgumentException("Claim name must be specified")
             return PVC(
@@ -480,6 +487,7 @@ class PVC private constructor(
                 storageClass = storageClass,
                 storage = storage,
                 accessModes = accessModes,
+                pv = pv,
             )
         }
     }

@@ -211,6 +211,7 @@ internal object SandboxModelConverter {
             storageClass = this.storageClass,
             storage = this.storage,
             accessModes = this.accessModes,
+            pv = this.pv,
         )
     }
 

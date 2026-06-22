@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, Dict
 
 from attrs import define as _attrs_define
 
@@ -66,6 +66,7 @@ class PVC:
     storage_class: None | str | Unset = UNSET
     storage: None | str | Unset = UNSET
     access_modes: list[str] | None | Unset = UNSET
+    pv: Dict[str, Any] | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         claim_name = self.claim_name
@@ -113,6 +114,14 @@ class PVC:
         if access_modes is not UNSET:
             field_dict["accessModes"] = access_modes
 
+        pv: Dict[str, Any] | None | Unset
+        if isinstance(self.pv, Unset):
+            pv = UNSET
+        else:
+            pv = self.pv
+        if pv is not UNSET:
+            field_dict["pv"] = pv
+
         return field_dict
 
     @classmethod
@@ -159,6 +168,15 @@ class PVC:
 
         access_modes = _parse_access_modes(d.pop("accessModes", UNSET))
 
+        def _parse_pv(data: object) -> Dict[str, Any] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(Dict[str, Any], data)
+
+        pv = _parse_pv(d.pop("pv", UNSET))
+
         pvc = cls(
             claim_name=claim_name,
             create_if_not_exists=create_if_not_exists,
@@ -166,6 +184,7 @@ class PVC:
             storage_class=storage_class,
             storage=storage,
             access_modes=access_modes,
+            pv=pv,
         )
 
         return pvc

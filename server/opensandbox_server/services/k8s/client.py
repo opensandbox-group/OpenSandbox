@@ -318,6 +318,33 @@ class K8sClient:
         )
 
     # ------------------------------------------------------------------
+    # PersistentVolume operations
+    # ------------------------------------------------------------------
+
+    def get_pv(
+        self,
+        name: str,
+    ) -> Optional[Any]:
+        """Read a PersistentVolume by name. Returns None on 404."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        try:
+            return self.get_core_v1_api().read_persistent_volume(name)
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    def create_pv(
+        self,
+        body: Any,
+    ) -> Any:
+        """Create a PersistentVolume."""
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        return self.get_core_v1_api().create_persistent_volume(body)
+
+    # ------------------------------------------------------------------
     # Secret operations
     # ------------------------------------------------------------------
 
