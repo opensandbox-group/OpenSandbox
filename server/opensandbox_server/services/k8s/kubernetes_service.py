@@ -771,7 +771,11 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             # deleted — including TTL expiry handled by the controller, which
             # never invokes our delete_sandbox API and so bypasses
             # _cleanup_managed_pvcs.
-            self._attach_pvc_owner_references(created_managed_pvcs, workload_info)
+            await asyncio.to_thread(
+                self._attach_pvc_owner_references,
+                created_managed_pvcs,
+                workload_info,
+            )
 
             try:
                 workload = await self._wait_for_sandbox_ready(
