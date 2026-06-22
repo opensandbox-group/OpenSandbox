@@ -110,10 +110,29 @@ print(output)
 
 ::: warning
 - **Pool mode does not support volumes.** Use template mode instead.
-- PVC must exist before creating the sandbox.
-- PVC is not deleted when the sandbox is killed.
+- Pre-existing PVCs (like the one in this example) are never deleted on sandbox termination.
+- Set `createIfNotExists=true` on the volume to have the server provision the PVC on demand; see [PVC lifecycle](#pvc-lifecycle) below for cleanup semantics.
 - Multiple sandboxes can mount the same PVC if the access mode allows (e.g. `ReadWriteMany`).
 :::
+
+## PVC lifecycle
+
+The lifecycle of a PVC depends on whether the server provisioned it:
+
+| Source | Cleanup |
+|--------|---------|
+| Pre-existing PVC (this example) | Never touched by the server. |
+| Auto-created with `createIfNotExists=true`, `deleteOnSandboxTermination=false` (default) | Persists after sandbox deletion; caller owns cleanup. |
+| Auto-created with `createIfNotExists=true`, `deleteOnSandboxTermination=true` | Server cleans up the PVC when the sandbox terminates. |
+
+For opted-in auto-created PVCs, the server stamps them with `opensandbox.io/volume-managed-by=server` and `opensandbox.io/id=<sandbox-id>` labels, and runs cleanup through two layered paths:
+
+1. **`ownerReferences`** — the PVC is patched to point at the workload custom resource right after creation. Kubernetes garbage collection then cascade-deletes the PVC whenever the CR is removed, including controller-driven TTL expiry that never reaches the `DELETE /sandboxes/{id}` API.
+2. **Label-selector sweep** — on `DELETE /sandboxes/{id}`, the server lists PVCs by the labels above and deletes them best-effort. This handles cases where the `ownerReferences` patch failed (e.g. RBAC) and ensures PVCs are gone as soon as the API returns.
+
+Both paths only match server-labeled PVCs, so pre-existing or opted-out PVCs are never reclaimed. The PV itself follows its `StorageClass.reclaimPolicy` once the PVC is deleted.
+
+Cleanup requires `delete` and `list` verbs on `persistentvolumeclaims` in the server's Role; the stock Helm chart grants these by default.
 
 ## References
 
