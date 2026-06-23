@@ -35,6 +35,17 @@ open class SandboxException(
         cause: Throwable?,
         error: SandboxError,
     ) : this(message = message, cause = cause, error = error, requestId = null)
+
+    override fun toString(): String {
+        val parts = mutableListOf(super.toString())
+        if (!error.message.isNullOrBlank()) {
+            parts += "[${error.code}] ${error.message}"
+        }
+        if (!requestId.isNullOrBlank()) {
+            parts += "request_id=$requestId"
+        }
+        return parts.joinToString(" | ")
+    }
 }
 
 /**

@@ -62,6 +62,14 @@ class SandboxException(Exception):
         self.error = error or SandboxError(SandboxError.INTERNAL_UNKNOWN_ERROR)
         self.request_id = request_id
 
+    def __str__(self) -> str:
+        parts = [super().__str__()]
+        if self.error and self.error.message:
+            parts.append(f"[{self.error.code}] {self.error.message}")
+        if self.request_id:
+            parts.append(f"request_id={self.request_id}")
+        return " | ".join(parts)
+
 
 class SandboxApiException(SandboxException):
     """
