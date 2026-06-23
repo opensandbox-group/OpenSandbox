@@ -42,6 +42,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.Health
 import com.alibaba.opensandbox.sandbox.domain.services.Metrics
+import com.alibaba.opensandbox.sandbox.domain.services.Pty
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import com.alibaba.opensandbox.sandbox.infrastructure.factory.AdapterFactory
 import org.slf4j.LoggerFactory
@@ -100,6 +101,15 @@ class Sandbox internal constructor(
 ) : AutoCloseable {
     private val logger = LoggerFactory.getLogger(Sandbox::class.java)
 
+    // Wired by the factory immediately after construction via [bindPtyService] so the PTY service
+    // shares this sandbox's resolved execd endpoint, without changing this constructor's
+    // JVM-visible signature (which already-compiled consumers may depend on).
+    private lateinit var ptyService: Pty
+
+    internal fun bindPtyService(pty: Pty) {
+        ptyService = pty
+    }
+
     /**
      * Provides access to file system operations within the sandbox.
      *
@@ -117,6 +127,16 @@ class Sandbox internal constructor(
      * @return Service for command execution
      */
     fun commands() = commandService
+
+    /**
+     * Provides access to interactive PTY (pseudo-terminal) session operations.
+     *
+     * Manages the lifecycle of long-lived shell sessions (create / status / delete) over execd's
+     * REST API. PTY is only supported on Unix-like platforms.
+     *
+     * @return Service for PTY session management
+     */
+    fun pty() = ptyService
 
     /**
      * Provides access to sandbox metrics and monitoring.
@@ -225,6 +245,7 @@ class Sandbox internal constructor(
                     )
                 val fileSystemService = factory.createFilesystem(execdEndpoint)
                 val commandService = factory.createCommands(execdEndpoint)
+                val ptyService = factory.createPty(execdEndpoint)
                 val metricsService = factory.createMetrics(execdEndpoint)
                 val healthService = factory.createHealth(execdEndpoint)
                 val egressEndpoint =
@@ -250,6 +271,7 @@ class Sandbox internal constructor(
                         httpClientProvider = httpClientProvider,
                         diagnosticsService = diagnosticsService,
                     )
+                sandbox.bindPtyService(ptyService)
 
                 if (!skipHealthCheck) {
                     sandbox.checkReady(timeout, healthCheckPollingInterval)

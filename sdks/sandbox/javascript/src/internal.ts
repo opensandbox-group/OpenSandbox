@@ -42,3 +42,4 @@ export { HealthAdapter } from "./adapters/healthAdapter.js";
 export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
+export { PtyAdapter, UnavailablePtyAdapter } from "./adapters/ptyAdapter.js";

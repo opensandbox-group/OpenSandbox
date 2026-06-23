@@ -25,6 +25,7 @@ from opensandbox.sync.adapters.egress_adapter import EgressAdapterSync
 from opensandbox.sync.adapters.filesystem_adapter import FilesystemAdapterSync
 from opensandbox.sync.adapters.health_adapter import HealthAdapterSync
 from opensandbox.sync.adapters.metrics_adapter import MetricsAdapterSync
+from opensandbox.sync.adapters.pty_adapter import PtyAdapterSync
 from opensandbox.sync.adapters.sandboxes_adapter import SandboxesAdapterSync
 from opensandbox.sync.services import (
     CommandsSync,
@@ -33,6 +34,7 @@ from opensandbox.sync.services import (
     FilesystemSync,
     HealthSync,
     MetricsSync,
+    PtySync,
     SandboxesSync,
 )
 
@@ -52,6 +54,9 @@ class AdapterFactorySync:
 
     def create_command_service(self, endpoint: SandboxEndpoint) -> CommandsSync:
         return CommandsAdapterSync(self.connection_config, endpoint)
+
+    def create_pty_service(self, endpoint: SandboxEndpoint) -> PtySync:
+        return PtyAdapterSync(self.connection_config, endpoint)
 
     def create_egress_service(self, endpoint: SandboxEndpoint) -> EgressSync:
         return EgressAdapterSync(self.connection_config, endpoint)

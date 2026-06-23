@@ -25,6 +25,7 @@ from opensandbox.services.egress import CredentialVault, Egress
 from opensandbox.services.filesystem import Filesystem
 from opensandbox.services.health import Health
 from opensandbox.services.metrics import Metrics
+from opensandbox.services.pty import Pty
 from opensandbox.services.sandbox import Sandboxes
 
 __all__ = [
@@ -35,5 +36,6 @@ __all__ = [
     "Filesystem",
     "Health",
     "Metrics",
+    "Pty",
     "Sandboxes",
 ]

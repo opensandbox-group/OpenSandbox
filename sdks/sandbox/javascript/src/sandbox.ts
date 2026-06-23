@@ -31,6 +31,8 @@ import type { Sandboxes } from "./services/sandboxes.js";
 import type { ExecdCommands } from "./services/execdCommands.js";
 import type { ExecdHealth } from "./services/execdHealth.js";
 import type { ExecdMetrics } from "./services/execdMetrics.js";
+import type { ExecdPty } from "./services/execdPty.js";
+import { UnavailablePtyAdapter } from "./adapters/ptyAdapter.js";
 import type {
   CreateSandboxRequest,
   CredentialProxyConfig,
@@ -247,6 +249,10 @@ export class Sandbox {
   readonly health: ExecdHealth;
   readonly metrics: ExecdMetrics;
   /**
+   * Interactive PTY (pseudo-terminal) session lifecycle (create / status / delete).
+   */
+  readonly pty: ExecdPty;
+  /**
    * Sandbox-scoped Credential Vault operations.
    */
   readonly credentialVault: CredentialVault;
@@ -277,6 +283,7 @@ export class Sandbox {
     files: SandboxFiles;
     health: ExecdHealth;
     metrics: ExecdMetrics;
+    pty?: ExecdPty;
     egress: Egress;
     credentialVault?: CredentialVault;
   }) {
@@ -300,6 +307,7 @@ export class Sandbox {
     this.files = opts.files;
     this.health = opts.health;
     this.metrics = opts.metrics;
+    this.pty = opts.pty ?? new UnavailablePtyAdapter();
     this.credentialVault = credentialVault;
   }
 
@@ -402,7 +410,7 @@ export class Sandbox {
       const execdBaseUrl = `${connectionConfig.protocol}://${endpoint.endpoint}`;
       const egressBaseUrl = `${connectionConfig.protocol}://${egressEndpoint.endpoint}`;
 
-      const { commands, files, health, metrics } =
+      const { commands, files, health, metrics, pty } =
         adapterFactory.createExecdStack({
           connectionConfig,
           execdBaseUrl,
@@ -425,6 +433,7 @@ export class Sandbox {
         files,
         health,
         metrics,
+        pty,
         egress,
         credentialVault,
       });
@@ -487,7 +496,7 @@ export class Sandbox {
       );
       const execdBaseUrl = `${connectionConfig.protocol}://${endpoint.endpoint}`;
       const egressBaseUrl = `${connectionConfig.protocol}://${egressEndpoint.endpoint}`;
-      const { commands, files, health, metrics } =
+      const { commands, files, health, metrics, pty } =
         adapterFactory.createExecdStack({
           connectionConfig,
           execdBaseUrl,
@@ -510,6 +519,7 @@ export class Sandbox {
         files,
         health,
         metrics,
+        pty,
         egress,
         credentialVault,
       });
