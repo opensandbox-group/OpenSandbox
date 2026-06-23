@@ -92,6 +92,21 @@ func NewRouter(accessToken string) *gin.Engine {
 		pty.GET("/:sessionId/ws", controller.PTYSessionWebSocket)
 	}
 
+	mcpProxy := r.Group("/mcpproxy")
+	{
+		mcpProxy.POST("", withMCP(func(c *controller.MCPController) { c.HandleRequest() }))
+		mcpProxy.GET("", withMCP(func(c *controller.MCPController) { c.SSEStream() }))
+		mcpProxy.DELETE("", withMCP(func(c *controller.MCPController) { c.DeleteSession() }))
+
+		upstreams := mcpProxy.Group("/upstreams")
+		{
+			upstreams.POST("", withMCP(func(c *controller.MCPController) { c.AddUpstream() }))
+			upstreams.GET("", withMCP(func(c *controller.MCPController) { c.ListUpstreams() }))
+			upstreams.GET("/:name", withMCP(func(c *controller.MCPController) { c.GetUpstream() }))
+			upstreams.DELETE("/:name", withMCP(func(c *controller.MCPController) { c.RemoveUpstream() }))
+		}
+	}
+
 	return r
 }
 
@@ -116,6 +131,12 @@ func withMetric(fn func(*controller.MetricController)) gin.HandlerFunc {
 func withPTY(fn func(*controller.PTYController)) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		fn(controller.NewPTYController(ctx))
+	}
+}
+
+func withMCP(fn func(*controller.MCPController)) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		fn(controller.NewMCPController(ctx))
 	}
 }
 

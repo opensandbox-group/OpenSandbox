@@ -59,6 +59,7 @@ func main() {
 	}
 
 	controller.InitCodeRunner()
+	controller.InitMCPProxy()
 	engine := web.NewRouter(flag.ServerAccessToken)
 	addr := fmt.Sprintf(":%d", flag.ServerPort)
 	listener, err := net.Listen("tcp4", addr)
