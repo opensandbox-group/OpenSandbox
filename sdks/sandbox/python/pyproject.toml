@@ -55,9 +55,9 @@ pool-redis = [
 
 [project.urls]
 Homepage = "https://open-sandbox.ai"
-Repository = "https://github.com/alibaba/OpenSandbox"
+Repository = "https://github.com/opensandbox-group/OpenSandbox"
 Documentation = "https://open-sandbox.ai"
-Issues = "https://github.com/alibaba/OpenSandbox/issues"
+Issues = "https://github.com/opensandbox-group/OpenSandbox/issues"
 
 [tool.hatch.version]
 source = "vcs"
