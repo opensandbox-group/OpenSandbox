@@ -17,21 +17,24 @@ status: draft
 - [Requirements](#requirements)
 - [Proposal](#proposal)
   - [Relationship to OSEP-0008](#relationship-to-osep-0008)
+  - [Personas and ownership](#personas-and-ownership)
   - [Public API Overview](#public-api-overview)
   - [Kubernetes Resource Overview](#kubernetes-resource-overview)
-  - [Snapshot Strategies](#snapshot-strategies)
+  - [Example CRs](#example-crs)
+  - [Operating modes](#operating-modes)
+  - [Seamless restore contract](#seamless-restore-contract)
   - [Component Interaction Overview](#component-interaction-overview)
   - [Notes/Constraints/Caveats](#notesconstraintscaveats)
   - [Risks and Mitigations](#risks-and-mitigations)
 - [Design Details](#design-details)
   - [1. BatchSandbox spec field](#1-batchsandbox-spec-field)
-  - [2. SnapshotClass and SnapshotClaim CRDs](#2-snapshotclass-and-snapshotclaim-crds)
-  - [3. Inline snapshot status on BatchSandbox](#3-inline-snapshot-status-on-batchsandbox)
+  - [2. SandboxSnapshotClass, SandboxSnapshotClaim, and SandboxSnapshotClaimTemplate CRDs](#2-sandboxsnapshotclass-sandboxsnapshotclaim-and-sandboxsnapshotclaimtemplate-crds)
+  - [3. Snapshot result recording on `SandboxSnapshot` + inline reference](#3-snapshot-result-recording-on-sandboxsnapshot--inline-reference)
   - [4. Pause state model](#4-pause-state-model)
   - [5. Pause flow](#5-pause-flow)
-  - [6. Commit Job](#6-commit-job)
+  - [6. Snapshot Job](#6-snapshot-job)
   - [7. Resume flow](#7-resume-flow)
-  - [8. Server mapping (public API unchanged)](#8-server-mapping-public-api-unchanged)
+  - [8. Server mapping and public API compatibility](#8-server-mapping-and-public-api-compatibility)
   - [9. Stable sandbox ID, list, get, delete](#9-stable-sandbox-id-list-get-delete)
   - [10. Configuration](#10-configuration)
   - [11. Security considerations](#11-security-considerations)
@@ -46,200 +49,351 @@ status: draft
 ## Summary
 
 This proposal reworks how Kubernetes-backed pause and resume are expressed inside
-the cluster. Instead of orchestrating a separate `SandboxSnapshot` custom
-resource per pause (OSEP-0008), the snapshot *intent*, *policy*, and *status*
-live directly on the existing `BatchSandbox` object. The existing
-`BatchSandbox.spec.pause` boolean remains the trigger, and a new
-`BatchSandbox.spec.pauseStrategy` field selects the snapshot strategy and a
-namespaced `SnapshotClaim`. The claim resolves to a cluster-scoped
-`SnapshotClass`, following the `PersistentVolumeClaim` -> `StorageClass`
-pattern. The controller performs the rootfs commit inline and reports progress
-through `BatchSandbox.status.snapshot`.
+the cluster. **The primary change is to inline the pause/resume _action_ onto the
+`BatchSandbox` reconciler instead of dispatching a separate "action" custom
+resource.** In OSEP-0008 a pause is carried out by creating a dedicated
+`SandboxSnapshot` CR that a separate `SandboxSnapshotReconciler` consumes to drive
+the snapshot Job. Here the action lives directly on the `BatchSandbox` object: the
+existing boolean pause trigger is replaced by `BatchSandbox.spec.operatingMode`,
+an enum that carries the requested persistent mode (`Running`, `Stop`, `Freeze`,
+`Hibernate`), and the `BatchSandbox` reconciler executes the whole pause/resume
+inline. `Hibernate` uses `BatchSandbox.spec.snapshotStrategy`, which references a
+concrete namespaced `SandboxSnapshotClaim`, or a namespaced
+`SandboxSnapshotClaimTemplate` that the server copies into a generated,
+sandbox-specific `SandboxSnapshotClaim`. A concrete claim is shared by every
+sandbox that references it directly; a template is a factory for distinct
+generated claims, one per sandbox. The final claim resolves to a cluster-scoped
+`SandboxSnapshotClass`, following the `PersistentVolumeClaim` -> `StorageClass`
+and DRA `ResourceClaimTemplate` patterns.
+
+The `SandboxSnapshot` CR is **not removed** — it is demoted from an *action*
+object to a *result recording*: the reconciler writes one `SandboxSnapshot` per
+pause to record where the checkpoint artifact landed plus source compatibility,
+and `BatchSandbox.status.snapshot` keeps a lightweight reference to it. Where that
+result is recorded is a secondary detail; the headline is that the action no
+longer requires a separate CR and its own reconciler.
 
 This design follows the upstream
-[kubernetes-sigs/agent-sandbox KEP-0694](https://github.com/kubernetes-sigs/agent-sandbox/pull/762)
-("Suspend and Resume + Snapshot Provider API"), which uses a declarative
-`spec.suspend` boolean plus a `spec.suspensionStrategy`, and a
-`StorageClass`-style `SnapshotClass` for pluggable snapshot backends.
-OpenSandbox adds a namespaced `SnapshotClaim` layer so namespace-local registry
-Secrets are unambiguous.
+[kubernetes-sigs/agent-sandbox KEP-0694 proposal](https://github.com/kubernetes-sigs/agent-sandbox/pull/762)
+("Suspend and Resume + Snapshot Provider API"). At the time of writing, that PR
+is still open and the agent-sandbox default-branch CRDs do not yet include the
+snapshot strategy fields. The current agent-sandbox API uses
+`spec.operatingMode` (`Running`/`Suspended`) instead of a boolean lifecycle
+field; this OSEP follows that enum pattern and folds OpenSandbox's pause operation
+into the same enum so there is only one lifecycle/operation selector. It also adds
+a `StorageClass`-style `SandboxSnapshotClass` for pluggable snapshot backends.
+OpenSandbox adds a namespaced `SandboxSnapshotClaim`/`SandboxSnapshotClaimTemplate` layer so
+tenant-owned storage locations are unambiguous. A template is a real namespaced
+CRD, analogous to DRA `ResourceClaimTemplate`: the server copies it into a
+distinct concrete claim for each sandbox that uses it. Backend credentials are
+never passed through the API or stored in Kubernetes Secrets; they are supplied
+by node/workload identity (e.g., cloud instance roles or workload identity).
 
-The OpenSandbox public server API does **not** change. `POST
-/sandboxes/{sandboxId}/pause`, `POST /sandboxes/{sandboxId}/resume`, and `GET
-/sandboxes/{sandboxId}` keep their current shape. Only the server-to-Kubernetes
-translation changes: pause writes spec fields on `BatchSandbox` rather than
-creating a `SandboxSnapshot` CR.
+This OSEP extends the public `POST /sandboxes/{sandboxId}/pause` request body in
+an additive, backward-compatible way. Existing clients may continue sending no
+body; the server supplies a default operating mode and default snapshot claim
+selection. Callers that need control can optionally select an operating mode (`Stop`,
+`Freeze`, `Hibernate`) and, for `Hibernate`, either an
+existing `SandboxSnapshotClaim`, a `SandboxSnapshotClaimTemplate`, or inline claim parameters
+that the server materializes into a generated `SandboxSnapshotClaim`. `POST
+/sandboxes/{sandboxId}/resume` remains driven by the snapshot result recorded at
+pause time; it does not need new required parameters in this revision.
 
 ```text
 Time ------------------------------------------------------------------------>
 
 Sandbox lifecycle:   [Running]--[Pausing]--[Paused]--[Resuming]--[Running]
                           |                     |
-                spec.pause = true        spec.pause = false
-                + pauseStrategy          (controller recreates Pod
-                (controller commits       from status.snapshot image)
-                 rootfs inline)
+              operatingMode=Hibernate    operatingMode=Running
+                + snapshot               (controller recreates Pod
+                (controller snapshots     from status.snapshot artifact)
+                 full pod state inline)
 ```
 
 ## Motivation
 
-OSEP-0008 delivered pause/resume by committing a sandbox Pod's root filesystem to
-an OCI image. It models the operation as a dedicated `SandboxSnapshot` CR that
+OSEP-0008 delivered pause/resume by committing a sandbox Pod's writable
+filesystem to an OCI image. It models the operation as a dedicated `SandboxSnapshot` CR that
 the server creates, a `SandboxSnapshotReconciler` consumes, and that drives a
-same-node commit Job. The snapshot backend (registry, push secret, committer
-image) is configured globally through controller manager startup flags
-(`--snapshot-registry`, `--snapshot-push-secret`, `--image-committer-image`).
+same-node commit Job. The snapshot backend is configured globally through
+controller manager startup flags such as registry, credential, and committer
+image settings.
 
 That shape works, but it has structural costs:
 
-- **Two sources of truth for one sandbox.** A paused sandbox's lifecycle state is
-  split between `BatchSandbox.spec.pause` and a sibling `SandboxSnapshot` object.
-  The server must read and merge both to answer `GET /sandboxes/{id}`, and must
-  keep them consistent on pause, resume, and delete.
-- **An extra reconcile loop and cross-object ownership.** The snapshot controller
-  is a separate atomic capability that resolves Pod/Node from the referenced
-  `BatchSandbox`, races with scale and eviction, and needs its own finalizer and
-  garbage collection.
+- **The pause action is a separate CR and reconcile loop.** A pause is expressed
+  as a `SandboxSnapshot` *action* object that the server creates and a dedicated
+  `SandboxSnapshotReconciler` consumes. That reconciler is a separate atomic
+  capability that resolves Pod/Node from the referenced `BatchSandbox`, races with
+  scale and eviction, and needs its own finalizer, ownership, and garbage
+  collection; the sandbox's own reconciler cannot see or sequence the action
+  directly. **Inlining this action is the primary change in this OSEP.**
+- **Two objects to keep consistent for one operation.** A paused sandbox's
+  lifecycle state is split between `BatchSandbox.spec.pause` and the sibling action
+  object, so the server must merge both and keep them consistent on pause, resume,
+  and delete.
 - **Global, non-pluggable snapshot configuration.** The registry and push
   credentials are cluster-wide controller flags. Operators cannot offer multiple
   snapshot backends (e.g., a fast local registry vs. a remote durable bucket), and
   the choice cannot vary per sandbox.
-- **Divergence from the upstream agent-sandbox direction.** OpenSandbox tracks the
-  Kubernetes SIG `agent-sandbox` project (OSEP-0002). Upstream is standardizing on
-  a `spec.suspend` + `spec.suspensionStrategy` + `SnapshotClass` model. Aligning
-  now reduces future migration cost and lets OpenSandbox adopt additional
-  strategies (Freeze, VM/memory checkpoint) under one API.
+- **Divergence from the upstream agent-sandbox proposal.** OpenSandbox tracks the
+  Kubernetes SIG `agent-sandbox` project (OSEP-0002). The current agent-sandbox
+  API uses `spec.operatingMode` instead of a boolean lifecycle field, and PR #762
+  layers `spec.suspensionStrategy` + `SandboxSnapshotClass` on top. Aligning now reduces
+  future migration cost and lets OpenSandbox adopt additional strategies (Freeze,
+  VM/memory checkpoint) under one API if that direction lands.
 
-Embedding the snapshot policy and status on the sandbox object itself is the
-idiomatic Kubernetes pattern (it mirrors how the Job API uses `spec.suspend`).
-It collapses the two-object model into one, makes the backend pluggable through a
-`SnapshotClass`, and keeps the public server API stable.
+Making pause/resume part of the `BatchSandbox` reconciler's own desired-state loop
+is the idiomatic Kubernetes pattern. It collapses the separate-action-CR model
+into one reconciler driven by `spec.operatingMode`, retains `SandboxSnapshot` only
+as a per-pause result recording, and makes the backend pluggable through
+DRA/PV-style class and claim resources. The public pause API gains optional
+operating-mode and claim-selection fields, while empty-body pause requests keep
+working through defaults.
 
 ### Goals
 
-- Express pause/resume entirely on the `BatchSandbox` object: `spec.pause` as the
-  trigger, `spec.pauseStrategy` as the strategy/backend selector, and
-  `status.snapshot` as the inline result.
-- Introduce a cluster-scoped `SnapshotClass` CRD and a namespaced
-  `SnapshotClaim` CRD, mirroring Kubernetes `StorageClass`/PVC layering:
-  classes carry backend configuration, claims carry namespace-local Secret
-  references and class selection.
-- Keep the OpenSandbox public server pause/resume API (`/pause`, `/resume`, `GET`)
-  byte-for-byte compatible with today.
+- **Inline the pause/resume action on the `BatchSandbox` reconciler**, driven by
+  `spec.operatingMode` (desired operation enum) with `spec.snapshotStrategy` as
+  the backend selector for `Hibernate` — removing the separate `SandboxSnapshot` *action* CR
+  and its dedicated reconciler. Record the per-pause *result* on a reused
+  `SandboxSnapshot` object referenced from `status.snapshot`.
+- Introduce a cluster-scoped `SandboxSnapshotClass` CRD plus namespaced
+  `SandboxSnapshotClaim` and `SandboxSnapshotClaimTemplate` CRDs, following the Kubernetes DRA
+  `DeviceClass`/`ResourceClaim`/`ResourceClaimTemplate` pattern:
+  classes carry high-level backend direction, claims carry namespace-local target
+  parameters, and templates generate per-sandbox claims.
+- Extend the public `POST /sandboxes/{id}/pause` API with an optional typed
+  operating mode and snapshot claim selector. Existing empty-body calls remain valid by
+  using server/operator defaults. Keep `POST /sandboxes/{id}/resume` simple by
+  using the claim and artifact recorded in `BatchSandbox.status.snapshot`.
 - Keep the public `sandboxId` stable across pause and resume.
-- Preserve the rootfs commit mechanism and the `image-committer` Job from
-  OSEP-0008; only its *driver* changes from a `SandboxSnapshot` CR to the
-  `BatchSandbox` reconciler reading the spec field.
-- Leave the API extensible for future strategies (Freeze, Hibernate with
-  VM/memory checkpoint) without breaking changes.
+- Preserve the same-node snapshot Job pattern from OSEP-0008; only its *driver*
+  changes from a separate `SandboxSnapshot` *action* CR to the `BatchSandbox`
+  reconciler reading `spec.operatingMode`, and its implementation expands from
+  filesystem-only image commit to runtime checkpoint/restore for full pod state.
+- Capture the entire pod state — all container filesystems plus in-memory process
+  state — so a resumed sandbox restores running processes, not just files.
+- Leave the API extensible for future strategies and backends without breaking
+  changes.
 
 ### Non-Goals
 
-- Changing the OpenSandbox public HTTP API shape for pause/resume.
-- Preserving in-memory process state, open sockets, or CPU registers in this
-  revision (rootfs only; memory checkpoint is reserved under the `Hibernate`
-  strategy for a later revision).
-- Supporting multiple retained historical snapshots per sandbox.
+- Recovering or rolling back from any snapshot other than the latest. Per-pause
+  `SandboxSnapshot` objects are retained as history (useful for audit), but resume
+  always restores from the most recent result.
 - Implementing automatic, idle-timeout-driven suspension (policy-based triggers
   are future work, consistent with the upstream Phase 2).
 - Redesigning the explicit "create snapshot" public API (the `osb-snap-*` flow).
   This OSEP only replaces the *pause/resume* usage of `SandboxSnapshot`.
 - Extending the Docker runtime; this proposal targets the Kubernetes runtime.
+- Pause/resume for pool-backed sandboxes (created through `extensions.poolRef`,
+  where the `BatchSandbox` carries `spec.poolRef` and no `spec.template`). Those
+  require solidifying the allocated pod template before the pool pod is released,
+  which is coupled to warm-pool allocation and reclaim. This OSEP assumes a
+  self-contained `BatchSandbox` with its own `spec.template`; pool-backed
+  lifecycle is deferred to a separate warm-pool sandbox lifecycle OSEP.
 
 ## Requirements
 
-- The OpenSandbox public server pause/resume endpoints and their request/response
-  bodies must remain unchanged.
+- `POST /sandboxes/{sandboxId}/pause` must accept enough optional information to
+  choose the operating mode and, for `Hibernate`, the snapshot
+  backend/claim to use. A request with no body must remain valid and resolve
+  through defaults.
+- `POST /sandboxes/{sandboxId}/resume` must resume from the latest successful
+  pause result without requiring the caller to repeat pause-time backend
+  parameters.
 - The public `sandboxId` must remain stable across pause and resume.
-- For `Hibernate`, pause must commit the running sandbox Pod's main container
-  rootfs and push it to a registry resolved from `SnapshotClaim -> SnapshotClass`.
-- Snapshot intent and result must be readable from the `BatchSandbox` object alone;
-  no sibling CR lookup may be required to answer `GET /sandboxes/{id}`.
-- For `Hibernate`, the commit Job must run on the same node as the source Pod.
-- For `Hibernate`, pause must complete `commit -> push` and record the snapshot
-  image before the sandbox is reported `Paused` and the Pod is removed. For
-  `Stop`, no image is recorded and resume uses `spec.template`.
+- For `Hibernate`, the snapshot must capture the full pod state — every
+  container filesystem plus in-memory/process state — and push it to a backend
+  resolved from `SandboxSnapshotClaim -> SandboxSnapshotClass`. `Hibernate` deletes the Pod
+  after the snapshot is durable.
+- Basic lifecycle state must be readable from the `BatchSandbox` object alone: the
+  pause/resume action, aggregate `status.phase`, and the `status.snapshot`
+  reference require no sibling CR lookup to answer `GET /sandboxes/{id}`. Full
+  per-container artifact detail lives on the referenced `SandboxSnapshot` result.
+- For `Hibernate`, pause must complete the snapshot and record the artifact
+  before the sandbox is reported `Paused` and the Pod is removed. For `Stop`, no
+  artifact is recorded and resume uses `spec.template`.
 - At most one pause/resume transition may be in progress for a given sandbox.
 - Resume must reconstruct the Pod from the current pause result: the recorded
-  snapshot image for `Hibernate`, or `spec.template` for `Stop`.
-- Registry credentials must be referenced via namespace-local Kubernetes Secrets,
-  not inline API credentials, and push (pause-time) and pull (resume-time) auth
-  must be modeled independently.
-- The snapshot backend must be selectable per sandbox via a named `SnapshotClaim`.
-  That claim selects a `SnapshotClass`, and a cluster default class must be
-  supported when the claim does not specify one.
+  full-pod-state snapshot for `Hibernate`, or `spec.template` for `Stop`.
+- For checkpoint restores, the controller must verify runtime compatibility
+  (runtime handler, OS/architecture, kernel/runtime support, and artifact format)
+  before starting restore; incompatible restores fail closed with `ResumeFailed`.
+- OpenSandbox must keep `sandboxId` and endpoint identities stable across resume,
+  but Kubernetes Pod UID/IP and external TCP sessions are not guaranteed to
+  survive `Hibernate`.
+- Backend credentials must never be passed through the public API or stored in
+  Kubernetes Secrets; they are provided by node/workload identity in the runtime
+  environment.
+- The snapshot backend must be selectable per pause via a named `SandboxSnapshotClaim`,
+  a named `SandboxSnapshotClaimTemplate`, or inline claim parameters that the server
+  turns into a generated `SandboxSnapshotClaim`. The resolved claim selects a
+  `SandboxSnapshotClass`, and a cluster default class must be supported when the claim
+  does not specify one.
 - The design must remain compatible with the current server path where a
   Kubernetes sandbox maps to a `BatchSandbox` with `replicas = 1`.
 - The change must be additive to CRD schemas and must not break clusters that have
-  not yet installed the `SnapshotClass`/`SnapshotClaim` CRDs.
+  not yet installed the `SandboxSnapshotClass`/`SandboxSnapshotClaim` CRDs. Until those CRDs are
+  present, the server must detect their absence and fall back to the OSEP-0008
+  `SandboxSnapshot` pause/resume path so existing empty-body `/pause` calls keep
+  working unchanged. CRD installation must not be required as a hard preflight
+  before the new server/controller can run.
 
 ## Proposal
 
 Pause and resume are modeled on one runtime object plus PV/PVC-style
 configuration objects:
 
-- `BatchSandbox`: carries the pause trigger (`spec.pause`), the pause strategy
-  (`spec.pauseStrategy`), and the inline snapshot result (`status.snapshot`).
-- `SnapshotClass` (new, cluster-scoped): describes a pluggable snapshot backend
-  (provisioner + parameters).
-- `SnapshotClaim` (new, namespaced): selects a `SnapshotClass` and names the
-  namespace-local push/pull Secrets used by commit Jobs and resumed Pods.
+- `BatchSandbox`: carries the desired persistent mode (`spec.operatingMode`), the
+  snapshot config for `Hibernate` (`spec.snapshotStrategy`), and the
+  inline snapshot result (`status.snapshot`).
+- `SandboxSnapshotClass` (new, cluster-scoped): describes a pluggable snapshot backend
+  (type + parameters).
+- `SandboxSnapshotClaim` (new, namespaced): selects a `SandboxSnapshotClass` and carries the
+  namespace-local storage target for the full-pod-state snapshot Job.
 
 The server remains the orchestrator of the public lifecycle. The `BatchSandbox`
-reconciler owns the in-cluster execution: when it observes `spec.pause = true` and
-a `Hibernate` policy, it resolves the live Pod/Node, dispatches the same-node
-commit Job, records the resulting image in `status.snapshot`, and then removes the
-Pod. Resume is the reverse, driven by `spec.pause = false`.
+reconciler owns the in-cluster execution: when it observes
+`spec.operatingMode = Hibernate`, it resolves the live Pod/Node, dispatches a
+same-node snapshot Job using `spec.snapshotStrategy`, records the resulting
+full-pod-state checkpoint artifact in `status.snapshot`, and deletes the Pod
+after the artifact is durable. Resume is the reverse, driven by
+`spec.operatingMode = Running`.
 
 ### Relationship to OSEP-0008
 
 OSEP-0008 is the predecessor. This OSEP keeps its goals (stable `sandboxId`,
-rootfs persistence, resource release after pause, `image-committer` Job) and
-changes only the in-cluster representation.
+state persistence, resource release after pause, same-node snapshot Job) and
+changes the in-cluster representation and expands snapshot scope from filesystem-only to
+full pod state.
 
 | Concern | OSEP-0008 (current) | OSEP-0015 (this proposal) |
 |---|---|---|
-| Pause trigger | `BatchSandbox.spec.pause` | `BatchSandbox.spec.pause` (unchanged) |
-| Snapshot intent/policy | `SandboxSnapshot` CR (`spec.sandboxName`) | `BatchSandbox.spec.pauseStrategy` |
+| Pause trigger | `BatchSandbox.spec.pause` boolean | `BatchSandbox.spec.operatingMode` enum (`Running`/`Stop`/`Freeze`/`Hibernate`) |
+| Snapshot intent/policy | `SandboxSnapshot` CR (`spec.sandboxName`) | `BatchSandbox.spec.operatingMode` + `BatchSandbox.spec.snapshotStrategy` |
 | Snapshot result | `SandboxSnapshot.status` | `BatchSandbox.status.snapshot` |
-| Backend config | controller startup flags (global) | `SnapshotClaim` (namespaced) -> `SnapshotClass` (cluster-scoped, pluggable) |
+| Backend config | controller startup flags (global) | `SandboxSnapshotClaim` (namespaced) -> `SandboxSnapshotClass` (cluster-scoped, pluggable) |
 | Reconciler | dedicated `SandboxSnapshotReconciler` | `BatchSandboxReconciler` (inline) |
 | Sources of truth for `GET` | `BatchSandbox` + `SandboxSnapshot` | `BatchSandbox` only |
-| Commit Job + image-committer | yes | yes (reused unchanged) |
-| Public server API | `/pause`, `/resume`, `GET` | identical |
+| Snapshot Job | same-node image-committer Job | same-node checkpoint/restore Job (full pod state) |
+| Public server API | `/pause`, `/resume`, `GET` | same endpoints; `/pause` gains an optional backward-compatible body |
 
-This is the OpenSandbox counterpart of agent-sandbox KEP-0694. The pause trigger
-and strategy shape stay aligned, while the backend selector adds a namespaced
-claim layer for OpenSandbox's multi-namespace credential model:
+This is the OpenSandbox counterpart of agent-sandbox KEP-0694. The desired-state
+enum follows the current agent-sandbox `spec.operatingMode` shape, while the
+backend selector adds a namespaced claim layer for OpenSandbox's multi-namespace
+storage ownership model:
 
 | agent-sandbox `Sandbox` | OpenSandbox `BatchSandbox` |
 |---|---|
-| `spec.suspend` (bool) | `spec.pause` (`*bool`, already exists) |
-| `spec.suspensionStrategy.type` | `spec.pauseStrategy.type` |
-| `spec.suspensionStrategy.hibernate.snapshotClass` | `spec.pauseStrategy.hibernate.snapshotClaimName` |
-| `SnapshotClass` (cluster-scoped) | `SnapshotClaim` (namespaced) -> `SnapshotClass` (cluster-scoped) |
+| `spec.operatingMode: Running\|Suspended` | `spec.operatingMode: Running\|Stop\|Freeze\|Hibernate` |
+| `spec.suspensionStrategy.type` | folded into `spec.operatingMode` |
+| `spec.suspensionStrategy.hibernate.snapshotClass` | `spec.snapshotStrategy.snapshotClaimName` |
+| `SandboxSnapshotClass` (cluster-scoped) | `SandboxSnapshotClaim` (namespaced) -> `SandboxSnapshotClass` (cluster-scoped) |
 
 OpenSandbox keeps its existing `pause`/`resume` vocabulary instead of upstream's
-`suspend`/`resume`, because `BatchSandbox.spec.pause` already ships today. Every
-other element of the upstream pattern — the boolean trigger on the CR and the
-nested strategy block on the CR — is adopted directly. The backend selector is
-adapted to OpenSandbox's multi-namespace credential needs by inserting a
-`SnapshotClaim` layer between `BatchSandbox` and `SnapshotClass`, analogous to
-PVCs sitting between Pods and `StorageClass`.
+`suspend`/`resume`, but uses an enum rather than a boolean for the CRD field.
+Because OpenSandbox also needs `Stop` and future `Freeze`, it uses
+`operatingMode` as the single persistent-mode selector instead of adding a second
+operation/strategy enum. A checkpoint-only snapshot is action-shaped rather than
+persistent-mode-shaped and is left to a future OSEP. The backend selector is adapted to OpenSandbox's
+multi-namespace storage targeting needs by inserting a `SandboxSnapshotClaim` layer
+between `BatchSandbox` and `SandboxSnapshotClass`, analogous to PVCs sitting between
+Pods and `StorageClass`.
+
+### Personas and ownership
+
+This mirrors Kubernetes DRA's split between device owners, cluster admins, and
+workload operators:
+
+| Persona | Owns | Responsibilities |
+|---|---|---|
+| System / cluster admin | `SandboxSnapshotClass`, snapshot controller installation, snapshotter image, cluster RBAC | Defines available backend classes such as `local`, `blobstore`, and `s3`; sets cluster defaults; controls privileged infrastructure, backend endpoints, and the node/workload identity used to reach them. |
+| Tenant / namespace operator | `SandboxSnapshotClaim`, `SandboxSnapshotClaimTemplate` | Chooses the storage location for a namespace (bucket/container/region/prefix) and optionally offers templates for per-sandbox generated claims. Backend credentials come from runtime identity, not from objects they create. |
+| Application developer / API caller | `POST /pause` request fields | Usually sends no body and relies on defaults. Advanced callers select `Stop` vs `Hibernate`, choose a claim/template for `Hibernate`, or provide an inline claim spec when policy allows it. |
+| OpenSandbox server | Public API validation and materialization | Validates request shape, applies defaults, creates generated `SandboxSnapshotClaim` objects from templates/inline parameters, and patches `BatchSandbox.spec.operatingMode` plus `BatchSandbox.spec.snapshotStrategy.snapshotClaimName`. |
+| BatchSandbox controller | In-cluster execution | Resolves the referenced claim/class, runs the snapshot Job, records `status.snapshot`, and recreates/restores the Pod on resume. |
+
+`SandboxSnapshotClass` should not be created by tenants or end users. It is the
+admin-owned catalog of supported snapshot backends. `SandboxSnapshotClaim` and
+`SandboxSnapshotClaimTemplate` are the namespace boundary where tenant-specific storage
+locations live.
 
 ### Public API Overview
 
 ```text
-POST /sandboxes/{sandboxId}/pause   -> patch BatchSandbox (spec.pause=true, spec.pauseStrategy), return 202
-POST /sandboxes/{sandboxId}/resume  -> patch BatchSandbox (spec.pause=false), return 202
+POST /sandboxes/{sandboxId}/pause   -> optional body: operating mode + snapshot claim selector; return 202
+POST /sandboxes/{sandboxId}/resume  -> patch BatchSandbox (operatingMode=Running), return 202
 GET  /sandboxes/{sandboxId}         -> Running / Pausing / Paused / Resuming (from BatchSandbox)
 ```
 
-There is no new public endpoint, request field, or response field introduced for
-pause/resume. OSEP-0008 proposed `CreateSandboxRequest.pausePolicy`, but the
-current server API does not expose it; this proposal intentionally does not add it.
-The server chooses or creates the in-cluster `SnapshotClaim` from server-side
-configuration, then patches only `BatchSandbox.spec`.
+There is no new public endpoint. The current OpenAPI definition in
+`specs/sandbox-lifecycle.yml` defines `POST /sandboxes/{sandboxId}/pause` and
+`POST /sandboxes/{sandboxId}/resume` without request bodies, and the FastAPI
+routes in `server/opensandbox_server/api/lifecycle.py` currently accept only the
+path parameter and `X-Request-ID`. This OSEP updates those definitions to accept
+an optional `PauseSandboxRequest` body. Omitting the body, sending `{}`, or using
+old SDKs remains valid:
+
+```json
+{}
+```
+
+The server resolves that to configured defaults, for example
+`operatingMode = "Hibernate"` plus the namespace default `SandboxSnapshotClaim`. New
+clients can opt in to explicit control:
+
+```json
+{
+  "operatingMode": "Hibernate",
+  "snapshotStrategy": {
+    "snapshotClaimName": "default-claim"
+  }
+}
+```
+
+or ask the server to materialize a generated claim from a template:
+
+```json
+{
+  "operatingMode": "Hibernate",
+  "snapshotStrategy": {
+    "snapshotClaimTemplateName": "tenant-s3"
+  }
+}
+```
+
+Claim and template selection are intentionally different contracts:
+
+- Reference `snapshotStrategy.snapshotClaimName` when a concrete
+  `SandboxSnapshotClaim` already exists and can be reused. This is the normal
+  path for namespace defaults and shared tenant storage targets. The claim is
+  stable configuration shared by all sandboxes that reference it directly; the
+  controller reads it directly, and each pause records a unique result on a
+  `SandboxSnapshot` object rather than mutating the claim.
+- Reference `snapshotStrategy.snapshotClaimTemplateName` when the caller or
+  server wants OpenSandbox to materialize a sandbox-specific concrete claim from
+  namespace policy.
+  This is useful for stamping labels/annotations, applying namespace policy, or
+  creating a sandbox-specific storage target without requiring the tenant to
+  pre-create every claim. The template reference is materialization intent on
+  the sandbox, analogous to DRA `ResourceClaimTemplate` use. The server copies
+  the template, creates the
+  concrete `SandboxSnapshotClaim` for that sandbox, then writes that claim name to
+  `BatchSandbox.spec.snapshotStrategy.snapshotClaimName`; the controller consumes
+  only the final claim.
+- A request must set at most one of `snapshotClaimName`,
+  `snapshotClaimTemplateName`, or inline `claim`. If multiple selectors are set,
+  the server rejects the request with `400` instead of guessing. Defaults follow
+  the same order: configured claim first, configured template second, then an
+  inline/generated default only if policy allows it.
+
+The public API never accepts raw credentials and never references Kubernetes
+Secrets; backend access is granted to the snapshot Job and resumed Pods through
+node/workload identity. Claim/template names are the normal user-facing contract.
+`POST /resume` does not require a body because the chosen claim, class, and
+artifact are recorded on the latest successful pause.
 
 ### Kubernetes Resource Overview
 
@@ -247,116 +401,336 @@ configuration, then patches only `BatchSandbox.spec`.
 BatchSandbox (existing, extended)
   |- spec.replicas                 # 1 on the public server path
   |- spec.template                 # Pod template
-  |- spec.pause                    # nil | true (pause) | false (resume)   [existing]
-  |- spec.pauseStrategy            # NEW (mirrors agent-sandbox spec.suspensionStrategy)
-  |    |- type                     # Stop | Freeze | Hibernate (rootfs today)
-  |    `- hibernate                # config block used when type == Hibernate
-  |         `- snapshotClaimName   # name of a SnapshotClaim in the same namespace
+  |- spec.operatingMode            # Running | Stop | Freeze | Hibernate
+  |- spec.snapshotStrategy         # NEW; used by Hibernate
+  |    |- snapshotClaimName        # name of a concrete SandboxSnapshotClaim
+  |    `- snapshotClaimTemplateName # name of a SandboxSnapshotClaimTemplate to materialize
   `- status.snapshot               # NEW, inline snapshot result
        |- phase                    # Pending | Committing | Ready | Failed
-       |- strategyType             # Stop | Hibernate for the current pause result
+       |- operatingMode            # Stop | Hibernate for the current result
        |- snapshotClaimName
        |- snapshotClassName
-       |- containers[]             # {containerName, imageUri, imageDigest}
+       |- artifacts[]              # {containerName, artifactUri, digest, format}
        |- sourcePodName
+       |- sourcePodUID
        |- sourceNodeName
+       |- runtimeHandler
+       |- compatibility            # {os, architecture, kernelVersion, runtimeName, runtimeVersion, checkpointFormatVersion}
        |- readyAt
        `- message
 
-SnapshotClass (NEW, cluster-scoped)
-  |- provisioner                   # e.g. snapshot.opensandbox.io/rootfs
-  `- parameters                    # free-form backend config (registry, insecure, ...)
+SandboxSnapshotClass (NEW, cluster-scoped)
+  |- type                          # Local | BlobStore | S3
+  `- parameters                    # admin defaults (endpoint, local path, ...)
 
-SnapshotClaim (NEW, namespaced; PVC-like)
-  |- spec.snapshotClassName        # name of a SnapshotClass; empty => cluster default
-  |- spec.pushSecretRef.name       # Secret in the claim/sandbox namespace
-  |- spec.pullSecretRef.name       # Secret in the claim/sandbox namespace
+SandboxSnapshotClaim (NEW, namespaced; PVC-like)
+  |- spec.snapshotClassName        # name of a SandboxSnapshotClass; empty => cluster default
+  |- spec.parameters               # bucket/container/region/prefix/compression, backend-specific
   `- status.snapshotClassName      # resolved class
+
+SandboxSnapshotClaimTemplate (NEW, namespaced; DRA ResourceClaimTemplate-like)
+  |- spec.metadata                 # labels/annotations copied to generated claims
+  `- spec.spec                     # SandboxSnapshotClaimSpec copied into generated claims
 ```
 
 The paused runtime state is fully described by `BatchSandbox`
 (`status.phase = Paused` plus `status.snapshot`). No per-pause sibling snapshot
-action object is required to answer `GET /sandboxes/{id}`; `SnapshotClaim` is
+action object is required to answer `GET /sandboxes/{id}`; `SandboxSnapshotClaim` is
 configuration, not the snapshot result.
 
-Side-by-side, the developer-facing shape matches agent-sandbox KEP-0694:
+`SandboxSnapshotClaimTemplate` follows Kubernetes Dynamic Resource Allocation's
+`ResourceClaimTemplate` pattern and is a first-class namespaced CRD. It is not
+used directly by the snapshot Job, but it can be referenced by
+`BatchSandbox.spec.snapshotStrategy`. When the server handles a pause for a
+sandbox that references a template, it copies the template into a concrete
+`SandboxSnapshotClaim`, creates a generated claim for that sandbox, and patches
+`BatchSandbox.spec.snapshotStrategy.snapshotClaimName` to that generated claim.
+The controller consumes only the final claim. Referencing an existing
+`snapshotClaimName` skips this materialization step and shares that claim across
+all sandboxes that reference it.
+
+Side-by-side, the developer-facing shape matches the agent-sandbox KEP-0694
+proposal in PR #762:
 
 ```yaml
-# agent-sandbox (KEP-0694)                # OpenSandbox (OSEP-0015)
-apiVersion: agents.x-k8s.io/v1beta1       apiVersion: sandbox.opensandbox.io/v1alpha1
-kind: Sandbox                             kind: BatchSandbox
-spec:                                     spec:
-  suspend: true                             pause: true
-  suspensionStrategy:                       pauseStrategy:
-    type: "Hibernate"                         type: Hibernate
-    hibernate:                                hibernate:
-      snapshotClass: "fast-memory"              snapshotClaimName: default-rootfs
+# agent-sandbox (KEP-0694)
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+spec:
+  operatingMode: Suspended
+  suspensionStrategy:
+    type: "Hibernate"
+    hibernate:
+      snapshotClass: "fast-memory"
+---
+# OpenSandbox (OSEP-0015)
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+spec:
+  operatingMode: Hibernate
+  snapshotStrategy:
+    snapshotClaimTemplateName: tenant-s3
 ```
 
-### Snapshot Strategies
+### Example CRs
 
-Following agent-sandbox KEP-0694, `spec.pauseStrategy.type` dictates *how* a
-`spec.pause = true` is physically executed:
+These examples are grounded in the current OpenSandbox CRD facts:
 
-| Strategy | What pause does | Filesystem | Memory | Status this revision |
+- `BatchSandbox` is namespaced, uses `apiVersion:
+  sandbox.opensandbox.io/v1alpha1`, has required `spec.replicas`, and embeds a
+  Kubernetes `PodTemplateSpec` under `spec.template`. OSEP-0015 replaces the
+  existing boolean pause intent with `spec.operatingMode`.
+- `SandboxSnapshot` exists today with only `spec.sandboxName` as its desired-state
+  input; OSEP-0015 removes that object from the pause/resume path.
+- Agent-sandbox uses `spec.operatingMode` (`Running`/`Suspended`) instead of a
+  lifecycle boolean. PR #762's KEP examples add a cluster-wide `SandboxSnapshotClass`,
+  `spec.suspensionStrategy.type`, and
+  `spec.suspensionStrategy.hibernate.snapshotClass`.
+
+Current OSEP-0008 pause creates a separate snapshot action object like this:
+
+```yaml
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: SandboxSnapshot
+metadata:
+  name: sandbox-abc123-pause
+  namespace: default
+spec:
+  sandboxName: sandbox-abc123
+```
+
+OSEP-0015 instead preconfigures backend selection with admin-owned classes and
+namespace-local claims/templates:
+
+```yaml
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: SandboxSnapshotClass
+metadata:
+  name: local
+  annotations:
+    snapshot.opensandbox.io/is-default-class: "true"
+type: Local
+parameters:
+  nodePath: /var/lib/opensandbox/snapshots
+---
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: SandboxSnapshotClass
+metadata:
+  name: blobstore
+type: BlobStore
+parameters:
+  endpoint: https://blob.example.com
+  containerBase: opensandbox-snapshots
+---
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: SandboxSnapshotClass
+metadata:
+  name: s3
+type: S3
+parameters:
+  endpoint: https://s3.us-west-2.amazonaws.com
+  forcePathStyle: "false"
+---
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: SandboxSnapshotClaimTemplate
+metadata:
+  name: tenant-s3
+  namespace: default
+spec:
+  metadata:
+    labels:
+      opensandbox.io/snapshot-profile: tenant-s3
+  spec:
+    snapshotClassName: s3
+    parameters:
+      region: us-west-2
+      bucket: sandbox-snapshots
+      prefix: tenants/default
+      compressionMode: Enabled
+      compressionAlgorithm: zstd
+---
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: SandboxSnapshotClaim
+metadata:
+  name: default-claim
+  namespace: default
+spec:
+  snapshotClassName: s3
+  parameters:
+    region: us-west-2
+    bucket: opensandbox-snapshots
+    prefix: tenants/default/shared
+    compressionMode: Enabled
+    compressionAlgorithm: zstd
+```
+
+A sandbox can request a generated claim by referencing the template. The server
+copies the template's metadata and spec into a distinct `SandboxSnapshotClaim`
+for that sandbox:
+
+```yaml
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: sandbox-abc123
+  namespace: default
+spec:
+  replicas: 1
+  operatingMode: Hibernate
+  snapshotStrategy:
+    snapshotClaimTemplateName: tenant-s3
+  template:
+    metadata:
+      labels:
+        app: sandbox-abc123
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sandbox
+          image: python:3.12
+          command: ["sleep", "infinity"]
+```
+
+When the server handles that pause, it materializes a concrete claim by copying
+the template before patching the `BatchSandbox` to reference the generated claim:
+
+```yaml
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: SandboxSnapshotClaim
+metadata:
+  name: sandbox-abc123-pause-20260627
+  namespace: default
+  labels:
+    opensandbox.io/sandbox-id: sandbox-abc123
+    opensandbox.io/generated-from-template: tenant-s3
+spec:
+  snapshotClassName: s3
+  parameters:
+    region: us-west-2
+    bucket: sandbox-snapshots
+    prefix: tenants/default
+    compressionMode: Enabled
+    compressionAlgorithm: zstd
+```
+
+A Hibernate pause request is just a normal `BatchSandbox` with
+`operatingMode: Hibernate` and, after materialization, the snapshot strategy
+field set to the generated claim:
+
+```yaml
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: sandbox-abc123
+  namespace: default
+spec:
+  replicas: 1
+  operatingMode: Hibernate
+  snapshotStrategy:
+    snapshotClaimName: sandbox-abc123-pause-20260627
+  template:
+    metadata:
+      labels:
+        app: sandbox-abc123
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sandbox
+          image: python:3.12
+          command: ["sleep", "infinity"]
+```
+
+A Stop pause uses the same `BatchSandbox.spec.operatingMode` field, but does not
+need a snapshot claim because no checkpoint artifact is produced:
+
+```yaml
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: scratch-sandbox
+  namespace: default
+spec:
+  replicas: 1
+  operatingMode: Stop
+  template:
+    metadata:
+      labels:
+        app: scratch-sandbox
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sandbox
+          image: alpine:3.20
+          command: ["sleep", "infinity"]
+```
+
+### Operating modes
+
+`spec.operatingMode` dictates *how* the sandbox is physically operated. Every
+snapshot-producing mode captures the **full pod state**: all container
+filesystems plus in-memory/process state, so a resumed sandbox restores its
+running processes:
+
+| Operating mode | What pause does | Filesystem | Memory | Status this revision |
 |---|---|---|---|---|
-| `Stop` | Delete the Pod and release compute. | Lost unless on a retained PVC (OSEP-0003). | Lost | Supported (no commit, no `SnapshotClass` required) |
+| `Stop` | Delete the Pod and release compute. | Lost unless on a retained PVC (OSEP-0003). | Lost | Supported (no snapshot, no `SandboxSnapshotClass` required) |
 | `Freeze` | Keep the Pod, freeze container cgroups. | Kept | Kept (in node RAM) | Reserved (Kubernetes freeze is future work) |
-| `Hibernate` | Commit rootfs to an OCI image via the commit Job, then delete the Pod. | Persisted as image | Lost (rootfs only today; memory checkpoint reserved) | **Implemented** (replaces the OSEP-0008 path) |
+| `Hibernate` | Capture full pod state via the snapshot Job, then delete the Pod. | Persisted as checkpoint artifact | Persisted as checkpoint artifact | **Implemented** (replaces the OSEP-0008 path) |
 
-`Hibernate` is the default and the only strategy that requires a
-`hibernate.snapshotClaimName` (or a server-configured default claim). It is the
-direct successor to the OSEP-0008 rootfs snapshot. `Stop` is a lightweight option
-for clean-slate or PVC-backed sandboxes.
-`Freeze` and memory-aware `Hibernate` are reserved so the API does not need to
-break when they land.
+`Hibernate` is the default and requires a resolvable
+`spec.snapshotStrategy.snapshotClaimName` on `BatchSandbox` because it produces a stored
+artifact. The public API can provide that claim directly, ask the server to
+generate one from a template/inline claim, or omit the field and rely on
+defaults. `Stop` is a lightweight option for clean-slate or PVC-backed sandboxes.
+Checkpoint-only snapshotting keeps the Pod running and is action-shaped rather
+than persistent-mode-shaped; it is intentionally left to a future OSEP.
+`Freeze` is reserved so the API does not need to
+break when they land. Until `Freeze` is implemented, the server must reject
+`operatingMode = "Freeze"` with a clear `400`/`501` rather than patching an
+unsupported `BatchSandbox.spec.operatingMode`.
+
+### Seamless restore contract
+
+`Hibernate` is intended to be transparent to the in-sandbox agent process: after
+resume, the agent process continues from the checkpointed memory/process state
+instead of rerunning the image entrypoint. This requires a runtime
+checkpoint/restore implementation (for example CRIU/containerd checkpoint or an
+equivalent runtime primitive). A filesystem image commit alone is not
+sufficient for this OSEP.
+
+The checkpoint artifact must include all containers in the Pod, their writable
+filesystems, process trees, memory, open file descriptors, and enough runtime
+metadata to restore them on a compatible node. `status.snapshot` records the
+artifact references plus runtime compatibility data so resume can fail closed
+before creating a broken Pod.
+
+The pause path must not stop the in-sandbox agent or task processes before
+checkpointing. It may briefly freeze/quiesce containers through the runtime while
+the checkpoint is taken, but the restored process tree must continue from the
+checkpointed instruction/memory state rather than from a clean entrypoint.
+
+Seamless here is scoped to the sandbox process model. Kubernetes object identity
+is not guaranteed to be identical after `Hibernate`: the restored Pod may have a
+new Pod UID and IP, and external TCP connections may need to reconnect.
+OpenSandbox keeps the public `sandboxId` and endpoint identities stable and
+reroutes them after the restored Pod is Ready.
 
 ### Component Interaction Overview
 
-Pause flow (`Hibernate`):
+The lifecycle has three moving parts:
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Server
-    participant Batch as BatchSandbox
-    participant Ctrl as BatchSandboxReconciler
-    participant Claim as SnapshotClaim
-    participant Class as SnapshotClass
-    participant Job as Commit Job Pod
-    participant Registry
+1. **Server:** validates the optional pause body, resolves or generates a
+   namespace-local `SandboxSnapshotClaim`, then patches `BatchSandbox.spec.operatingMode`
+  and `spec.snapshotStrategy`.
+2. **Controller:** resolves the claim/class, runs the same-node snapshot Job, and
+   records a single checkpoint result in `BatchSandbox.status.snapshot`.
+3. **Runtime:** captures/restores full pod state using a checkpoint/restore
+   primitive; backend access comes from node/workload identity.
 
-    Client->>Server: POST /sandboxes/{id}/pause
-    Server->>Batch: Patch spec.pause=true, spec.pauseStrategy{type: Hibernate, hibernate.snapshotClaimName}
-    Server-->>Client: 202 Accepted
-    Ctrl->>Batch: Observe spec.pause=true, resolve Pod + Node
-    Ctrl->>Claim: Read class selection and namespace-local Secret refs
-    Ctrl->>Class: Read provisioner, parameters
-    Ctrl->>Job: Create same-node commit Job Pod
-    Job->>Registry: Commit + push rootfs image
-    Job-->>Ctrl: Succeeded
-    Ctrl->>Batch: status.snapshot.phase=Ready, containers[].imageUri
-    Ctrl->>Batch: Delete Pod, status.phase=Paused
-```
-
-Resume flow:
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Server
-    participant Batch as BatchSandbox
-    participant Ctrl as BatchSandboxReconciler
-    participant Pod as Sandbox Pod
-
-    Client->>Server: POST /sandboxes/{id}/resume
-    Server->>Batch: Patch spec.pause=false
-    Server-->>Client: 202 Accepted
-    Ctrl->>Batch: Observe spec.pause=false, read status.snapshot image
-    Ctrl->>Pod: Create Pod from template with snapshot image + claim pullSecret
-    Pod-->>Ctrl: Running and Ready
-    Ctrl->>Batch: status.phase=Succeed
-```
+`Hibernate` deletes the Pod only after `status.snapshot.phase=Ready`. `Resume`
+sets `operatingMode=Running`; the controller restores from `status.snapshot` when
+the Pod is absent, or treats the request as complete when the sandbox is already
+Running.
 
 ### Notes/Constraints/Caveats
 
@@ -364,188 +738,214 @@ sequenceDiagram
   `BatchSandbox` with `replicas = 1`. The single-replica assumption is unchanged
   from OSEP-0008.
 - `status.snapshot` retains exactly one snapshot result (the latest). Re-pausing
-  replaces it. Multi-snapshot history remains out of scope.
-- For `Hibernate`, the snapshot image reference recorded in `status.snapshot`
-  must be stable and durable enough to survive Pod deletion, because resume relies
-  on it after the Pod is gone.
-- Push authentication (`pushSecretRef`) and pull authentication (`pullSecretRef`)
-  are modeled separately on the namespaced `SnapshotClaim`. They may reference
-  the same Secret but must not be assumed identical.
-- The `image-committer` Job and its trust model (mounts the node container runtime
-  socket) are reused unchanged from OSEP-0008.
+  replaces it. Multi-snapshot history is maintined by the `SandboxSnapshot` CR; However, we only resume from the latest
+  snapshot. The details of managing multiple snapshots remains out of scope.
+- For `Hibernate`, the snapshot reference recorded in `status.snapshot` must be
+  stable and durable enough to survive Pod deletion, because resume relies on it
+  after the Pod is gone.
+- Backend authentication is provided by node/workload identity (no Kubernetes
+  Secrets). The snapshot Job and resumed Pods inherit access from their node or
+  service-account identity binding.
+- The privileged same-node Job pattern from OSEP-0008 is reused, but the Job must
+  run a checkpoint/restore-capable snapshotter rather than an image-only
+  committer.
 - Because the snapshot result lives on `BatchSandbox.status`, deleting the
   `BatchSandbox` removes the paused state automatically; no per-pause result CR
-  cleanup is needed. `SnapshotClaim` is reusable namespace configuration.
-- `spec.pause` semantics are unchanged: `nil` = no-op, `true` = request pause,
-  `false` = request resume. The controller never clears it; the server owns it.
+  cleanup is needed. `SandboxSnapshotClaim` is reusable namespace configuration.
+- `spec.operatingMode` is the desired persistent mode enum. Missing values default
+  to `Running`; the server writes `Hibernate` for default `/pause`, `Stop` when
+  explicitly requested, and `Running` for `/resume`.
 
 ### Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Pod is deleted before the rootfs image is durable | Only delete the Pod after `status.snapshot.phase == Ready`; resume validates the recorded image. |
-| Commit Job lands on the wrong node | Record `status.snapshot.sourceNodeName` and pin the Job Pod to that node, as in OSEP-0008. |
-| Missing/invalid `SnapshotClaim` or `SnapshotClass` on pause | Validate the referenced claim and resolved class before deleting the Pod; on failure set `status.snapshot.phase = Failed` and keep the Pod running. |
-| Concurrent pause/resume requests cause flapping | Gate transitions on `status.snapshot.phase` and the existing pause ACK generation; reject overlapping transitions with `409`. |
-| Status object grows unbounded | `status.snapshot` is a single fixed-shape struct with one container list; no history is appended. |
-| Backend config drift between sandboxes | Centralize backend config in `SnapshotClass`; sandboxes reference a namespace-local `SnapshotClaim` by name only. |
-| Clusters without the new CRDs | The CRDs are additive; absent them, `Hibernate` pauses fail closed and the server reports `501`/error exactly as a misconfigured OSEP-0008 cluster does today. |
+| Pod is deleted before the snapshot is durable | Only delete the Pod after `status.snapshot.phase == Ready`; resume validates the recorded artifact. |
+| Snapshot Job lands on the wrong node | Record `status.snapshot.sourceNodeName` and pin the Job Pod to that node, as in OSEP-0008. |
+| Restore lands where a node-local artifact is unreachable | For node-local backends (`type: Local`), pin the restored Pod to `status.snapshot.sourceNodeName`; fail closed with `ResumeFailed` if that node is gone or unschedulable. Remote backends need no pinning. |
+| Missing/invalid `SandboxSnapshotClaim` or `SandboxSnapshotClass` on pause | Validate the referenced claim and resolved class before deleting the Pod; on failure set `status.snapshot.phase = Failed` and keep the Pod running. |
+| Concurrent pause/resume requests cause flapping | Gate transitions on `status.snapshot.phase`, `status.observedGeneration`, and conditions for the latest `operatingMode`/`snapshotStrategy` generation; reject overlapping transitions with `409`. |
+| Status object grows unbounded | `status.snapshot` is a single fixed-shape struct with one artifact list; no history is appended. |
+| Backend config drift between sandboxes | Centralize backend config in `SandboxSnapshotClass`; sandboxes reference a namespace-local `SandboxSnapshotClaim` by name only. |
+| Clusters without the new CRDs | The CRDs are additive; until they are installed, the server detects their absence and falls back to the OSEP-0008 `SandboxSnapshot` pause/resume path, so existing `/pause`/`/resume`/`GET` calls keep working unchanged. The new inline path activates automatically once the CRDs are present. |
 
 ## Design Details
 
 ### 1. BatchSandbox spec field
 
 Extend `BatchSandboxSpec` (in `apis/sandbox/v1alpha1/batchsandbox_types.go`) with a
-pause strategy. The existing `Pause *bool` field is retained as-is. The shape
-mirrors agent-sandbox KEP-0694's `spec.suspensionStrategy`: a `type` discriminator
-plus a per-strategy config block (`hibernate`).
+single desired operation enum and direct snapshot config. This follows the
+current agent-sandbox `spec.operatingMode` pattern instead of adding or retaining
+a boolean lifecycle field, but folds OpenSandbox's operation enum into
+`operatingMode` so there is one selector instead of both `operatingMode` and
+a separate `strategy.type`.
 
 ```go
-// PauseStrategyType selects how a paused sandbox is physically handled.
-// Mirrors agent-sandbox spec.suspensionStrategy.type.
-// +kubebuilder:validation:Enum=Stop;Freeze;Hibernate
-type PauseStrategyType string
+// BatchSandboxOperatingMode defines the desired operational state.
+// Mirrors agent-sandbox spec.operatingMode while preserving OpenSandbox wording.
+// +kubebuilder:validation:Enum=Running;Stop;Freeze;Hibernate
+type BatchSandboxOperatingMode string
 
 const (
-    // PauseStrategyStop deletes the Pod and releases compute. The filesystem
+    // BatchSandboxOperatingModeRunning indicates the sandbox should be running.
+    BatchSandboxOperatingModeRunning BatchSandboxOperatingMode = "Running"
+    // BatchSandboxOperatingModeStop deletes the Pod and releases compute. The filesystem
     // is not persisted unless backed by a retained PVC.
-    PauseStrategyStop PauseStrategyType = "Stop"
-    // PauseStrategyFreeze keeps the Pod and freezes container cgroups.
+    BatchSandboxOperatingModeStop BatchSandboxOperatingMode = "Stop"
+    // BatchSandboxOperatingModeFreeze keeps the Pod and freezes container cgroups.
     // Reserved; not implemented for Kubernetes in this revision.
-    PauseStrategyFreeze PauseStrategyType = "Freeze"
-    // PauseStrategyHibernate commits the rootfs to an image and deletes the Pod.
-    PauseStrategyHibernate PauseStrategyType = "Hibernate"
+    BatchSandboxOperatingModeFreeze BatchSandboxOperatingMode = "Freeze"
+    // BatchSandboxOperatingModeHibernate snapshots full pod state and deletes the Pod.
+    BatchSandboxOperatingModeHibernate BatchSandboxOperatingMode = "Hibernate"
 )
 
-// HibernateStrategy holds configuration used when Type == Hibernate.
-// Mirrors agent-sandbox spec.suspensionStrategy.hibernate.
-type HibernateStrategy struct {
-    // SnapshotClaimName references a namespaced SnapshotClaim that provides
-    // registry Secret refs and selects a SnapshotClass. Required for Hibernate
-    // unless the server injects a default claim name.
+// SnapshotStrategy holds the snapshot config used when OperatingMode is Hibernate.
+type SnapshotStrategy struct {
+    // SnapshotClaimName references a namespaced SandboxSnapshotClaim that selects a
+    // SandboxSnapshotClass and storage target. Set directly by the server, or
+  // after it materializes SnapshotClaimTemplateName.
     // +optional
     SnapshotClaimName string `json:"snapshotClaimName,omitempty"`
-}
 
-// PauseStrategy describes how pause is executed and which backend to use.
-// Mirrors agent-sandbox spec.suspensionStrategy.
-type PauseStrategy struct {
-    // Type dictates how spec.pause=true is physically executed.
-    // +kubebuilder:default=Hibernate
+    // SnapshotClaimTemplateName references a SandboxSnapshotClaimTemplate in the
+    // BatchSandbox namespace. The server copies the template into a concrete
+    // SandboxSnapshotClaim for this sandbox and writes the generated claim name
+    // back to SnapshotClaimName.
     // +optional
-    Type PauseStrategyType `json:"type,omitempty"`
-
-    // Hibernate carries Hibernate-specific configuration. Consulted only when
-    // Type == Hibernate. Other strategy types reserve their own sibling blocks.
-    // +optional
-    Hibernate *HibernateStrategy `json:"hibernate,omitempty"`
+    SnapshotClaimTemplateName string `json:"snapshotClaimTemplateName,omitempty"`
 }
 
 type BatchSandboxSpec struct {
     // ... existing fields ...
 
-    // Pause is the pause/resume intent written by Server and executed by Controller.
-    // nil = no operation; true = request Pause; false = request Resume.
+    // OperatingMode is the desired operation written by Server and executed by
+    // Controller. Missing values default to Running.
+    // +kubebuilder:default=Running
+    // +kubebuilder:validation:Enum=Running;Stop;Freeze;Hibernate
     // +optional
-    Pause *bool `json:"pause,omitempty"`
+    OperatingMode BatchSandboxOperatingMode `json:"operatingMode,omitempty"`
 
-    // PauseStrategy describes how a paused sandbox is snapshotted and restored.
-    // Only consulted when Pause transitions to true. Additive and backward-compatible:
-    // when nil, the controller falls back to the cluster default strategy (Hibernate)
-    // and the server-configured or cluster default SnapshotClaim.
+    // SnapshotStrategy describes where full pod-state checkpoints are written and read.
+    // Consulted when OperatingMode is Hibernate. When nil, the controller falls
+    // back to the server-configured or cluster default
+    // SandboxSnapshotClaim.
     // +optional
-    PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
+    SnapshotStrategy *SnapshotStrategy `json:"snapshotStrategy,omitempty"`
 }
 ```
 
 Rules:
 
-- `PauseStrategy` is read when the controller acts on `spec.pause = true`.
-- `Hibernate` requires a resolvable `SnapshotClaim` (explicit
-  `hibernate.snapshotClaimName` or server-configured default); the claim must
-  resolve to a `SnapshotClass`. Otherwise the pause fails with a clear condition.
-- `Stop` ignores `hibernate`.
+- `spec.operatingMode` is the single persistent-mode selector. Checkpoint-only
+  snapshotting is an action rather than a persistent mode and is left to a future
+  OSEP.
+- `Hibernate` requires a resolvable `SandboxSnapshotClaim` (explicit
+  `snapshotStrategy.snapshotClaimName`, server-generated from a public
+  `snapshotClaimTemplateName`/inline request, or server-configured default); the
+  claim must resolve to a `SandboxSnapshotClass`. Otherwise the pause fails with a clear
+  condition.
+- `Hibernate` deletes the Pod and reports public `Paused` only after the snapshot
+  artifact is durable.
+- `snapshotClaimTemplateName` is a server materialization input. After generating
+  the claim, the server writes `snapshotClaimName`; the controller consumes only
+  that concrete claim and does not read the template.
+- `Stop` and `Freeze` ignore `spec.snapshotStrategy`. `Hibernate` consults it.
 
-### 2. SnapshotClass and SnapshotClaim CRDs
+### 2. SandboxSnapshotClass, SandboxSnapshotClaim, and SandboxSnapshotClaimTemplate CRDs
 
-Introduce a cluster-scoped `SnapshotClass` and a namespaced `SnapshotClaim` under
-`sandbox.opensandbox.io/v1alpha1`. The split mirrors Kubernetes
-`StorageClass`/PVC:
+Introduce a cluster-scoped `SandboxSnapshotClass` plus namespaced `SandboxSnapshotClaim` and
+`SandboxSnapshotClaimTemplate` resources under `sandbox.opensandbox.io/v1alpha1`. The
+split mirrors Kubernetes DRA:
 
-- `SnapshotClass` is cluster-scoped, admin-owned backend configuration
-  (`provisioner` plus free-form `parameters`).
-- `SnapshotClaim` is namespaced, selected by `BatchSandbox`, and carries
-  namespace-local Secret references. This avoids ambiguous Secret references from
-  cluster-scoped objects.
+- `SandboxSnapshotClass` is the admin-owned class of backend. It answers "what kind of
+  snapshot backend is this?" (`Local`, `BlobStore`, `S3`).
+- `SandboxSnapshotClaim` is the namespace-local request for a concrete storage target.
+  It carries bucket/container/region/prefix-like parameters; backend access is
+  granted by node/workload identity, not by the claim.
+- `SandboxSnapshotClaimTemplate` is a namespaced template that the server copies into a
+  generated `SandboxSnapshotClaim`, analogous to DRA `ResourceClaimTemplate`. It is used
+  when the namespace operator wants a reusable policy for generated claims instead
+  of pre-creating every concrete claim by hand.
+
+`SandboxSnapshotClaim.status` is owned by a lightweight claim-resolution path in the
+same controller manager. It resolves the referenced/default `SandboxSnapshotClass` and
+records `Pending`/`Bound`/`Failed` independently of any individual pause. The
+snapshot execution result still lives only on `BatchSandbox.status.snapshot`.
 
 ```go
+// +kubebuilder:validation:Enum=Local;BlobStore;S3
+type SnapshotBackendType string
+
+const (
+    SnapshotBackendLocal     SnapshotBackendType = "Local"
+    SnapshotBackendBlobStore SnapshotBackendType = "BlobStore"
+    SnapshotBackendS3        SnapshotBackendType = "S3"
+)
+
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=snapclass
-// +kubebuilder:printcolumn:name="PROVISIONER",type="string",JSONPath=".provisioner"
+// +kubebuilder:printcolumn:name="TYPE",type="string",JSONPath=".type"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
-// SnapshotClass describes a pluggable snapshot backend. It is cluster-scoped and
-// selected by namespaced SnapshotClaim objects.
-type SnapshotClass struct {
+// SandboxSnapshotClass describes a pluggable snapshot backend. It is cluster-scoped and
+// selected by namespaced SandboxSnapshotClaim objects.
+type SandboxSnapshotClass struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
 
-    // Provisioner identifies the snapshot driver, e.g. "snapshot.opensandbox.io/rootfs".
+    // Type is the high-level backend kind exposed to operators.
+    // +kubebuilder:validation:Enum=Local;BlobStore;S3
     // +kubebuilder:validation:Required
-    Provisioner string `json:"provisioner"`
+    Type SnapshotBackendType `json:"type"`
 
-    // Parameters holds free-form, provisioner-specific configuration, e.g.
-    // {"registry": "registry.example.com/snapshots", "insecure": "false"}.
+    // Parameters holds admin-owned, backend-specific defaults such as
+    // endpoints, local base paths, or compatibility flags. Tenant-specific
+    // bucket/container/prefix fields belong on SandboxSnapshotClaim.
     // +optional
     Parameters map[string]string `json:"parameters,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type SnapshotClassList struct {
+type SandboxSnapshotClassList struct {
     metav1.TypeMeta `json:",inline"`
     metav1.ListMeta `json:"metadata,omitempty"`
-    Items           []SnapshotClass `json:"items"`
+    Items           []SandboxSnapshotClass `json:"items"`
 }
 
-// SnapshotClaimPhase indicates whether a claim resolved its class.
+// SandboxSnapshotClaimPhase indicates whether a claim resolved its class.
 // +kubebuilder:validation:Enum=Pending;Bound;Failed
-type SnapshotClaimPhase string
+type SandboxSnapshotClaimPhase string
 
 const (
-    SnapshotClaimPhasePending SnapshotClaimPhase = "Pending"
-    SnapshotClaimPhaseBound   SnapshotClaimPhase = "Bound"
-    SnapshotClaimPhaseFailed  SnapshotClaimPhase = "Failed"
+    SandboxSnapshotClaimPhasePending SandboxSnapshotClaimPhase = "Pending"
+    SandboxSnapshotClaimPhaseBound   SandboxSnapshotClaimPhase = "Bound"
+    SandboxSnapshotClaimPhaseFailed  SandboxSnapshotClaimPhase = "Failed"
 )
 
-// SnapshotClaimSpec is namespaced configuration for one or more sandboxes.
-type SnapshotClaimSpec struct {
-    // SnapshotClassName selects the cluster-scoped SnapshotClass. When empty,
-    // the controller uses the annotated cluster default SnapshotClass.
+// SandboxSnapshotClaimSpec is namespaced configuration for one or more sandboxes.
+type SandboxSnapshotClaimSpec struct {
+    // SnapshotClassName selects the cluster-scoped SandboxSnapshotClass. When empty,
+    // the controller uses the annotated cluster default SandboxSnapshotClass.
     // +optional
     SnapshotClassName string `json:"snapshotClassName,omitempty"`
 
-    // PushSecretRef is the Secret (type kubernetes.io/dockerconfigjson) used by
-    // the commit Job to push snapshot images during pause. It is resolved in the
-    // SnapshotClaim namespace.
+    // Parameters holds namespace-owned, backend-specific target information.
+    // Examples: region, bucket, container, prefix, storageAccount, repository,
+    // compressionMode, or compressionAlgorithm.
     // +optional
-    PushSecretRef *corev1.LocalObjectReference `json:"pushSecretRef,omitempty"`
-
-    // PullSecretRef is the Secret used by kubelet to pull the snapshot image
-    // during resume. It is resolved in the SnapshotClaim namespace.
-    // +optional
-    PullSecretRef *corev1.LocalObjectReference `json:"pullSecretRef,omitempty"`
+    Parameters map[string]string `json:"parameters,omitempty"`
 }
 
-// SnapshotClaimStatus records class resolution. Snapshot execution status stays
+// SandboxSnapshotClaimStatus records class resolution. Snapshot execution status stays
 // on BatchSandbox.status.snapshot, not on the claim.
-type SnapshotClaimStatus struct {
-    // Phase indicates whether the claim resolved its SnapshotClass.
+type SandboxSnapshotClaimStatus struct {
+    // Phase indicates whether the claim resolved its SandboxSnapshotClass.
     // +optional
-    Phase SnapshotClaimPhase `json:"phase,omitempty"`
+    Phase SandboxSnapshotClaimPhase `json:"phase,omitempty"`
 
-    // SnapshotClassName is the resolved SnapshotClass, including defaulting.
+    // SnapshotClassName is the resolved SandboxSnapshotClass, including defaulting.
     // +optional
     SnapshotClassName string `json:"snapshotClassName,omitempty"`
 
@@ -562,99 +962,218 @@ type SnapshotClaimStatus struct {
 // +kubebuilder:printcolumn:name="CLASS",type="string",JSONPath=".status.snapshotClassName"
 // +kubebuilder:printcolumn:name="PHASE",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
-// SnapshotClaim is a namespaced PVC-like claim for snapshot backend access.
-type SnapshotClaim struct {
+// SandboxSnapshotClaim is a namespaced PVC-like claim for snapshot backend access.
+type SandboxSnapshotClaim struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
 
-    Spec   SnapshotClaimSpec   `json:"spec,omitempty"`
-    Status SnapshotClaimStatus `json:"status,omitempty"`
+    Spec   SandboxSnapshotClaimSpec   `json:"spec,omitempty"`
+    Status SandboxSnapshotClaimStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type SnapshotClaimList struct {
+type SandboxSnapshotClaimList struct {
     metav1.TypeMeta `json:",inline"`
     metav1.ListMeta `json:"metadata,omitempty"`
-    Items           []SnapshotClaim `json:"items"`
+    Items           []SandboxSnapshotClaim `json:"items"`
+}
+
+// SandboxSnapshotClaimTemplateSpec mirrors DRA ResourceClaimTemplate: metadata is
+// copied to generated claims, and Spec is the SandboxSnapshotClaimSpec to copy.
+type SandboxSnapshotClaimTemplateSpec struct {
+    // +optional
+    Metadata metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec SandboxSnapshotClaimSpec `json:"spec"`
+}
+
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=snapclaimtmpl
+type SandboxSnapshotClaimTemplate struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec SandboxSnapshotClaimTemplateSpec `json:"spec"`
+}
+
+// +kubebuilder:object:root=true
+type SandboxSnapshotClaimTemplateList struct {
+    metav1.TypeMeta `json:",inline"`
+    metav1.ListMeta `json:"metadata,omitempty"`
+    Items           []SandboxSnapshotClaimTemplate `json:"items"`
 }
 ```
 
-A cluster default is selected with an annotation, mirroring `StorageClass`:
+A cluster default is selected with an annotation, mirroring `StorageClass`.
+Claims and templates may omit `snapshotClassName` to use that default:
 
 ```yaml
 apiVersion: sandbox.opensandbox.io/v1alpha1
-kind: SnapshotClass
+kind: SandboxSnapshotClass
 metadata:
-  name: rootfs-default
+  name: default
   annotations:
     snapshot.opensandbox.io/is-default-class: "true"
-provisioner: snapshot.opensandbox.io/rootfs
+type: S3
 parameters:
-  registry: registry.example.com/snapshots
-  insecure: "false"
+  endpoint: https://s3.us-west-2.amazonaws.com
 ---
 apiVersion: sandbox.opensandbox.io/v1alpha1
-kind: SnapshotClaim
+kind: SandboxSnapshotClaimTemplate
 metadata:
-  name: default-rootfs
+  name: default-template
   namespace: sandbox-tenant-a
 spec:
-  snapshotClassName: rootfs-default
-  pushSecretRef:
-    name: registry-snapshot-push-secret
-  pullSecretRef:
-    name: snapshot-registry-pull-secret
+  metadata:
+    labels:
+      opensandbox.io/generated-from-template: default-template
+  spec:
+    snapshotClassName: default
+    parameters:
+      region: us-west-2
+      bucket: tenant-a-snapshots
+      prefix: sandboxes
+      compressionMode: Enabled
+      compressionAlgorithm: zstd
 ```
 
-The provisioner `snapshot.opensandbox.io/rootfs` maps to the existing
-`image-committer` flow. The provisioner string is the extension point for future
-backends (e.g., `snapshot.opensandbox.io/gvisor` for memory checkpoint) without
-changing the `BatchSandbox` API. The claim can be created by the server, a tenant
-operator, or cluster automation; it is not a per-pause action object and does not
-replace `BatchSandbox.status.snapshot`.
+This revision implements one snapshot mechanism: a same-node full-pod-state
+snapshot Job. The `type` enum is the extension point for future backends without
+changing the `BatchSandbox`
+API. The claim can be pre-created by a tenant operator and shared by all
+sandboxes that reference it, or generated by the server from a template/inline
+request. The server must not mutate a shared existing `SandboxSnapshotClaim` to
+satisfy one sandbox's pause request; when sandbox-specific values are needed, or
+when a sandbox references `snapshotClaimTemplateName`, it materializes a concrete
+claim for that sandbox and points
+`BatchSandbox.spec.snapshotStrategy.snapshotClaimName` at that generated claim.
+The claim is still configuration, not the snapshot result, and does not replace
+`BatchSandbox.status.snapshot`. Per-pause history and artifact identity come
+from the `SandboxSnapshot` result objects, so implementations should not create
+a fresh claim for every pause unless backend retention or isolation policy truly
+requires a distinct storage target per pause.
 
-### 3. Inline snapshot status on BatchSandbox
+### 3. Snapshot result recording on `SandboxSnapshot` + inline reference
 
-Extend `BatchSandboxStatus` with a single, fixed-shape snapshot result. The
-existing `ContainerSnapshot` struct is reused.
+The per-pause result is recorded on the existing, namespaced `SandboxSnapshot`
+object, reused here as the bound result (analogous to a `PersistentVolume` /
+`VolumeSnapshotContent`). The `BatchSandbox` reconciler creates **one
+`SandboxSnapshot` per pause**, owns it with an `ownerReference`, and writes the
+full checkpoint detail into its `status`. `BatchSandbox.status.snapshot` keeps
+only a lightweight **reference** to the current result, so basic lifecycle
+`GET /sandboxes/{id}` (Running/Pausing/Paused/Resuming) needs no sibling read;
+fetching per-container artifact detail reads the referenced `SandboxSnapshot`.
+
+Reusing `SandboxSnapshot` gives a natural per-pause **history** (one object per
+pause, garbage-collected with the sandbox) without growing an unbounded array on
+`BatchSandbox`. Resume still consumes only the latest referenced result;
+recovery from an older snapshot remains a Non-Goal.
+
+`SandboxSnapshot` is evolved **additively** from its OSEP-0008 shape: every new
+field is optional and the existing `Succeed` phase value is kept (no `Ready`
+rename, so no breaking enum change). Its role changes from an action trigger to a
+recording — the `BatchSandbox` reconciler drives the whole flow inline and
+*writes* this object, so `spec.sandboxName` is now a back-reference rather than a
+Job trigger.
 
 ```go
-// +kubebuilder:validation:Enum=Pending;Committing;Ready;Failed
-type SnapshotPhase string
+// EXISTING enum, unchanged (note: "Succeed", not "Ready"):
+// +kubebuilder:validation:Enum=Pending;Committing;Succeed;Failed
+// type SandboxSnapshotPhase string
 
-const (
-    SnapshotPhasePending    SnapshotPhase = "Pending"
-    SnapshotPhaseCommitting SnapshotPhase = "Committing"
-    SnapshotPhaseReady      SnapshotPhase = "Ready"
-    SnapshotPhaseFailed     SnapshotPhase = "Failed"
-)
-
-// SnapshotStatus is the inline snapshot result recorded on BatchSandbox.status.
-type SnapshotStatus struct {
-    // Phase is the current snapshot phase for the latest pause.
-    Phase SnapshotPhase `json:"phase,omitempty"`
-    // StrategyType is the pause strategy that produced this result. It prevents
-    // a Stop pause from accidentally resuming an older Hibernate image.
-    // +optional
-    StrategyType PauseStrategyType `json:"strategyType,omitempty"`
-    // SnapshotClaimName is the SnapshotClaim used for this snapshot.
+// SandboxSnapshotSpec is write-once binding identity (no user desired-state).
+type SandboxSnapshotSpec struct {
+    // SandboxName is the source BatchSandbox (same namespace). EXISTING (required).
+    SandboxName string `json:"sandboxName"`
+    // SnapshotClaimName is the SandboxSnapshotClaim used for this snapshot,
+    // resolving the class + storage target. ADD (optional; empty for the
+    // OSEP-0008 filesystem-image path).
     // +optional
     SnapshotClaimName string `json:"snapshotClaimName,omitempty"`
-    // SnapshotClassName is the resolved SnapshotClass used for this snapshot.
+    // OperatingMode is the mode that produced this snapshot (Hibernate | Stop).
+    // ADD (optional).
     // +optional
-    SnapshotClassName string `json:"snapshotClassName,omitempty"`
-    // Containers holds per-container snapshot images, populated when Ready.
+    OperatingMode BatchSandboxOperatingMode `json:"operatingMode,omitempty"`
+}
+
+// ContainerSnapshot keeps the OSEP-0008 image fields and adds checkpoint fields.
+type ContainerSnapshot struct {
+    ContainerName string `json:"containerName"`        // EXISTING
+    // ImageURI/ImageDigest are the OSEP-0008 filesystem-image path (now optional).
     // +optional
-    Containers []ContainerSnapshot `json:"containers,omitempty"`
-    // SourcePodName is the Pod that was snapshotted.
+    ImageURI string `json:"imageUri,omitempty"`        // EXISTING (relaxed to optional)
     // +optional
-    SourcePodName string `json:"sourcePodName,omitempty"`
-    // SourceNodeName is the node the commit Job was pinned to.
+    ImageDigest string `json:"imageDigest,omitempty"`  // EXISTING
+    // ArtifactURI/Format are the OSEP-0015 full-pod-state checkpoint artifact.
     // +optional
-    SourceNodeName string `json:"sourceNodeName,omitempty"`
-    // ReadyAt is when the snapshot became Ready.
+    ArtifactURI string `json:"artifactUri,omitempty"`  // ADD
     // +optional
-    ReadyAt *metav1.Time `json:"readyAt,omitempty"`
+    Format string `json:"format,omitempty"`            // ADD — e.g. "oci-checkpoint-v1"
+}
+
+// SnapshotCompatibility records the source environment a checkpoint was taken in
+// so resume can fail closed before restoring onto an incompatible target. It is
+// captured at pause time, while the source Pod/Node still exist.
+type SnapshotCompatibility struct {
+    // +optional
+    OS string `json:"os,omitempty"`
+    // +optional
+    Architecture string `json:"architecture,omitempty"`
+    // +optional
+    KernelVersion string `json:"kernelVersion,omitempty"`
+    // +optional
+    RuntimeName string `json:"runtimeName,omitempty"`
+    // +optional
+    RuntimeVersion string `json:"runtimeVersion,omitempty"`
+    // +optional
+    CheckpointFormatVersion string `json:"checkpointFormatVersion,omitempty"`
+}
+
+// SandboxSnapshotStatus is the recording (controller-written). It holds all the
+// per-pause detail; nothing heavy lives here — artifact bytes stay in the backend.
+type SandboxSnapshotStatus struct {
+    Phase SandboxSnapshotPhase `json:"phase,omitempty"`          // EXISTING — Pending|Committing|Succeed|Failed
+    // +optional
+    Containers []ContainerSnapshot `json:"containers,omitempty"`  // EXISTING — per-container refs
+    // +optional
+    Conditions []SandboxSnapshotCondition `json:"conditions,omitempty"` // EXISTING
+    // +optional
+    SourcePodName string `json:"sourcePodName,omitempty"`        // EXISTING
+    // +optional
+    SourceNodeName string `json:"sourceNodeName,omitempty"`      // EXISTING
+    // +optional
+    ObservedGeneration int64 `json:"observedGeneration,omitempty"` // EXISTING
+    // +optional
+    SourcePodUID string `json:"sourcePodUID,omitempty"`          // ADD — rechecked before Pod deletion (see §5)
+    // +optional
+    SnapshotClassName string `json:"snapshotClassName,omitempty"` // ADD — resolved class
+    // +optional
+    RuntimeHandler string `json:"runtimeHandler,omitempty"`      // ADD — checkpoint/restore impl needed to restore
+    // +optional
+    Compatibility *SnapshotCompatibility `json:"compatibility,omitempty"` // ADD
+    // +optional
+    ReadyAt *metav1.Time `json:"readyAt,omitempty"`              // ADD — when it reached Succeed
+}
+```
+
+`BatchSandbox.status.snapshot` shrinks to a reference to the current result:
+
+```go
+// SnapshotStatusRef is the inline pointer to the current SandboxSnapshot result.
+type SnapshotStatusRef struct {
+    // Name references the SandboxSnapshot result object bound to the latest pause.
+    // +optional
+    Name string `json:"name,omitempty"`
+    // Phase mirrors the bound SandboxSnapshot phase so basic lifecycle GET needs
+    // no sibling read.
+    // +optional
+    Phase SandboxSnapshotPhase `json:"phase,omitempty"`
+    // OperatingMode is the mode that produced the current result. It prevents a
+    // Stop pause from accidentally resuming an older Hibernate artifact.
+    // +optional
+    OperatingMode BatchSandboxOperatingMode `json:"operatingMode,omitempty"`
     // Message carries human-readable detail, especially on Failed.
     // +optional
     Message string `json:"message,omitempty"`
@@ -663,15 +1182,16 @@ type SnapshotStatus struct {
 type BatchSandboxStatus struct {
     // ... existing fields ...
 
-    // Snapshot is the inline snapshot result for the latest pause. Replaces the
-    // need to read a separate SandboxSnapshot object.
+    // Snapshot references the current SandboxSnapshot result for the latest pause.
+    // The full per-container artifact detail lives on that object.
     // +optional
-    Snapshot *SnapshotStatus `json:"snapshot,omitempty"`
+    Snapshot *SnapshotStatusRef `json:"snapshot,omitempty"`
 }
 ```
 
 The existing `BatchSandboxStatus.Phase` (`Pausing`/`Paused`/`Resuming`) is the
-aggregate the server reads; `status.snapshot` carries the detail.
+aggregate the server reads; `status.snapshot.phase` mirrors the bound
+`SandboxSnapshot` phase, and the referenced `SandboxSnapshot` carries the detail.
 
 ### 4. Pause state model
 
@@ -681,22 +1201,19 @@ that to the user-facing `Running` state.
 
 #### Stable states
 
-- `spec.pause` is `nil`/`false`, the Pod is Running and Ready ->
+- `spec.operatingMode` is `Running` and the Pod is Running and Ready ->
   `status.phase = Succeed` (public API: `Running`).
-- `spec.pause` is `true`, the Pod is gone, `status.snapshot.phase == Ready`
-  (`Hibernate`) or the Pod is simply gone (`Stop`) -> `Paused`.
-- `status.snapshot.phase == Failed` and the Pod still exists ->
-  the sandbox stays `Succeed` (public API: `Running`) with a `PauseFailed`
-  condition.
+- Pod gone due to `Hibernate` with `status.snapshot.phase == Ready`, or gone due
+  to `Stop` -> `status.phase = Paused`.
+- Hibernate snapshot failed while the Pod still exists -> `status.phase = Succeed`
+  (public API: `Running`) plus a `PauseFailed` condition.
 
 #### Intermediate states
 
-- `spec.pause == true`, Pod exists, `status.snapshot.phase` in
-  `Pending`/`Committing` -> `Pausing` (reason mirrors the snapshot phase).
-- `spec.pause == true`, `status.snapshot.phase == Ready`, Pod not yet deleted ->
+- Checkpoint is in `Pending`/`Committing` -> `Pausing`.
+- `Hibernate` checkpoint is Ready but Pod cleanup is still pending ->
   `Pausing` with reason `SNAPSHOT_READY_CLEANUP`.
-- `spec.pause == false`, Pod re-created from snapshot but not yet Ready ->
-  `Resuming`.
+- Pod is being restored from a checkpoint -> `Resuming`.
 
 This reuses the existing `BatchSandboxCondition` types
 (`Paused`, `PauseFailed`, `ResumeFailed`, ...) and the existing
@@ -706,93 +1223,186 @@ This reuses the existing `BatchSandboxCondition` types
 
 ```text
 1. Client  POST /sandboxes/{sandboxId}/pause
-2. Server  Patch BatchSandbox:
-           - spec.pause = true
-           - spec.pauseStrategy = { type, hibernate.snapshotClaimName }   (server-resolved)
-3. Ctrl    Observe spec.pause=true; validate:
+           - no body: use defaults
+           - or optional body: operatingMode + claim/template/inline claim parameters
+2. Server  Resolve/materialize the concrete SandboxSnapshotClaim:
+           - existing snapshotClaimName: read it
+           - snapshotClaimTemplateName: copy template into a generated claim
+           - inline claim: create a generated claim if policy permits it
+3. Server  Patch BatchSandbox:
+           - spec.operatingMode = Hibernate | Stop
+           - spec.snapshotStrategy = { snapshotClaimName }   (server-resolved for Hibernate)
+4. Ctrl    Observe operatingMode/snapshotStrategy generation; validate:
            - workload exists, replicas == 1
-           - for Hibernate: resolve SnapshotClaim (explicit or server default)
-           - resolve SnapshotClass from the claim (explicit or cluster default)
-4. Ctrl    Resolve live Pod and Node; record sourcePodName/sourceNodeName
-5. Ctrl    status.snapshot.strategyType = Hibernate, phase = Pending
-6. Ctrl    (Hibernate) Create same-node commit Job from SnapshotClaim + SnapshotClass config
-7. Job     Commit container rootfs, push image to registry
-8. Ctrl    status.snapshot.phase: Pending -> Committing -> Ready,
-           containers[].imageUri/imageDigest populated
-9. Ctrl    Delete the Pod; status.phase = Paused
-10. GET    /sandboxes/{sandboxId} returns Paused from BatchSandbox
+           - for Hibernate: resolve SandboxSnapshotClaim (existing or server-generated)
+           - resolve SandboxSnapshotClass from the claim (explicit or cluster default)
+5. Ctrl    Resolve live Pod and Node; record sourcePodName/sourceNodeName
+6. Ctrl    status.snapshot.operatingMode = Hibernate, phase = Pending
+7. Ctrl    Create same-node snapshot Job from SandboxSnapshotClaim + SandboxSnapshotClass config
+8. Job     Checkpoint full pod state (filesystems + memory/process), write artifact to backend
+9. Ctrl    status.snapshot.phase: Pending -> Committing -> Ready,
+           artifacts[] populated
+10. Ctrl   Delete the Pod, status.phase = Paused.
+11. GET    /sandboxes/{sandboxId} returns Paused
 ```
 
-For `Stop`, steps 6-8 are skipped: the controller replaces any older Hibernate
-snapshot details with a current `status.snapshot.strategyType = Stop` marker
-(with image fields cleared), deletes the Pod, and reports `Paused` directly
-(filesystem persistence is delegated to a retained PVC). This prevents a later
-resume from accidentally using a stale Hibernate image.
+For `Stop`, claim resolution and checkpoint steps are skipped: the
+controller replaces any older Hibernate snapshot details with a current
+`status.snapshot.operatingMode = Stop` marker (with artifact fields cleared), deletes
+the Pod, and reports `Paused` directly (filesystem persistence is delegated to a
+retained PVC). This prevents a later resume from accidentally using a stale
+Hibernate artifact.
 
 Failure behavior:
 
-- If commit/push fails, `status.snapshot.phase = Failed`, the Pod is **not**
+- If checkpoint or upload fails, `status.snapshot.phase = Failed`, the Pod is **not**
   deleted, and a `PauseFailed` condition is set. The sandbox remains `Succeed`
   internally (public API: `Running`).
+- Reconciliation is level-triggered: as long as `spec.operatingMode` stays
+  `Hibernate`, the controller keeps reconciling toward that desired state and
+  re-attempts a `Failed` snapshot on its own (with backoff). The client does
+  **not** need to re-issue `POST /pause` to trigger a retry; an unchanged
+  `operatingMode`/`snapshot` spec is sufficient because the desired state has not
+  been reached. The `observedGeneration` gating only suppresses overlapping,
+  in-flight transitions; it does not turn a `Failed` phase into a terminal state.
+- In that failure state, `spec.operatingMode` may still be `Hibernate` while
+  public `GET` returns `Running`. This is intentional fail-closed behavior: the
+  requested pause was not achieved, so a client polling for `Paused` observes the
+  `PauseFailed` condition/message and either waits for the controller's retry to
+  succeed or clears the intent via `POST /resume`.
 - Overlapping pause requests for the same sandbox return `409` while a transition
   is in flight.
 
-### 6. Commit Job
+### 6. Snapshot Job
 
-The commit Job is unchanged from OSEP-0008 except for where its inputs come from.
-Backend inputs (registry, insecure flag) are read from the resolved
-`SnapshotClass`, while registry credentials are read from the namespaced
-`SnapshotClaim`. The Job is pinned to `status.snapshot.sourceNodeName`, mounts
-the node container runtime socket, mounts `spec.pushSecretRef.name` from the
-claim namespace as registry auth, and runs the `image-committer`
-(`nerdctl`-based) binary to commit and push the rootfs image. The controller
-resolves the source container ID from the Pod and its main container.
+The snapshot Job keeps OSEP-0008's same-node, controller-owned Job pattern, but
+the implementation changes from image commit to runtime checkpoint. Admin-owned
+backend defaults (endpoint, local path, S3 compatibility flags, and supported
+artifact format) are read from `SandboxSnapshotClass`; namespace-owned target inputs
+(bucket/container/region/prefix and compression parameters) are read from
+`SandboxSnapshotClaim`.
+
+The Job is pinned to `status.snapshot.sourceNodeName`, mounts only the runtime
+interfaces required by the chosen checkpoint implementation, authenticates to the
+backend through node/workload identity, and writes one checkpoint artifact set for
+the whole Pod. The artifact set must cover every container in the Pod and record
+runtime compatibility metadata in `status.snapshot`.
 
 Controller startup flags from OSEP-0008 (`--snapshot-registry`,
-`--snapshot-push-secret`, `--snapshot-registry-insecure`) become *fallback
-defaults* used to synthesize an implicit default `SnapshotClass` and
-namespace-local default `SnapshotClaim` during migration (see
-[Upgrade & Migration Strategy](#upgrade--migration-strategy)). The
-`--image-committer-image` flag remains a controller-level setting, since the
-committer image is trusted infrastructure, not user-selectable.
+`--snapshot-registry-insecure`) are migration-only inputs used to synthesize an
+implicit default `SandboxSnapshotClass` and namespace-local `SandboxSnapshotClaim` (see
+[Upgrade & Migration Strategy](#upgrade--migration-strategy)). The trusted
+snapshotter image remains a controller-level setting, not a user-selectable
+field.
 
 ### 7. Resume flow
 
 ```text
 1. Client  POST /sandboxes/{sandboxId}/resume
-2. Server  Patch BatchSandbox: spec.pause = false
-3. Ctrl    Observe spec.pause=false; if Pod absent and the current pause result is Hibernate:
+2. Server  Patch BatchSandbox: spec.operatingMode = Running
+3. Ctrl    Observe operatingMode=Running; if Pod absent and the current pause result is Hibernate:
            - build Pod from spec.template
-           - override main container image = status.snapshot.containers[].imageUri
-           - attach imagePullSecrets from SnapshotClaim.spec.pullSecretRef
+          - for node-local backends, pin the Pod to status.snapshot.sourceNodeName
+          - restore full pod state from status.snapshot artifacts
+           - authenticate to backend via node/workload identity
           If the current pause result is Stop:
-           - build Pod from spec.template without overriding the image
+           - build Pod from spec.template without checkpoint restore
 4. Ctrl    status.phase = Resuming while the Pod starts
 5. Ctrl    Pod Running and Ready -> status.phase = Succeed (public API: Running)
 ```
 
-For `Stop`-paused sandboxes there is no snapshot image; resume re-creates the Pod
-from `spec.template` (re-attaching any retained PVC). `status.snapshot` stores the
-latest pause result, including its `strategyType`; a Stop pause replaces an older
-Hibernate image result with a Stop marker so stale images are not consumed.
+When the resolved `SandboxSnapshotClass` is a node-local backend (`type: Local` /
+`nodePath`), the checkpoint artifact only exists on the node that produced it.
+Resume must pin the restored Pod to `status.snapshot.sourceNodeName` so the
+scheduler cannot place it on a node where the artifact is unreachable. If that
+node is gone or unschedulable, resume fails closed with `ResumeFailed` rather
+than starting a Pod that cannot find its checkpoint. Remote backends
+(`BlobStore`/`S3`) are reachable from any node and do not require node pinning.
 
-### 8. Server mapping (public API unchanged)
+For `Stop`-paused sandboxes there is no checkpoint artifact; resume re-creates
+the Pod from `spec.template` (re-attaching any retained PVC). `status.snapshot`
+stores the latest pause result, including its `operatingMode`; a Stop pause
+replaces an older Hibernate artifact result with a Stop marker so stale artifacts
+are not consumed.
 
-The server's Kubernetes snapshot runtime
-(`server/opensandbox_server/services/k8s/snapshot_runtime.py`) changes its
-implementation, not its public contract:
+### 8. Server mapping and public API compatibility
+
+The server's Kubernetes lifecycle path changes both its internal implementation
+and the optional request body for pause. The API remains backward-compatible
+because the new body is optional and every new field has a default.
 
 | Public call | OSEP-0008 server action | OSEP-0015 server action |
 |---|---|---|
-| `POST /pause` | Create `SandboxSnapshot` CR + set `spec.pause` | Patch `spec.pause=true` + `spec.pauseStrategy` |
-| `POST /resume` | Validate `SandboxSnapshot` Ready, set `spec.pause` | Patch `spec.pause=false` |
+| `POST /pause` with no body | Create `SandboxSnapshot` CR + set `spec.pause` | Resolve defaults, then patch `spec.operatingMode=Hibernate` + `spec.snapshotStrategy` |
+| `POST /pause` with body | Not available | Validate `operatingMode`; resolve existing claim or generate one from template/inline claim; patch `spec.operatingMode` and `spec.snapshotStrategy.snapshotClaimName` |
+| `POST /resume` | Validate `SandboxSnapshot` Ready, set `spec.pause` | Patch `spec.operatingMode=Running` |
 | `GET /sandboxes/{id}` | Merge `BatchSandbox` + `SandboxSnapshot` | Read `BatchSandbox.status` (incl. `status.snapshot`) |
 | `DELETE` | Delete `BatchSandbox` + `SandboxSnapshot` | Delete `BatchSandbox` |
 
-The server resolves which namespaced `SnapshotClaim` to request from its pause
-configuration (a new `pause.snapshot_claim` setting) or creates/selects a
-namespace-local default claim backed by the configured/default `SnapshotClass`.
-No public request/response field is added or removed.
+**Backward compatibility via CRD detection.** The OSEP-0008 column above is not
+removed at rollout. The server detects whether the new
+`SandboxSnapshotClass`/`SandboxSnapshotClaim` CRDs are installed (for example via API discovery
+or a cached REST mapping). When they are **absent**, the server keeps using the
+OSEP-0008 `SandboxSnapshot` pause/resume path and rejects optional pause-body
+fields that require the new backend objects, so existing empty-body `/pause`
+calls behave exactly as before. When the CRDs are **present**, the server switches
+to the inline `spec.operatingMode`/`spec.snapshotStrategy` path. Both paths stay valid
+during migration, so CRD installation does not need to be a hard, ordered
+preflight; the inline path activates automatically once the CRDs exist.
+
+- `specs/sandbox-lifecycle.yml`: add optional `requestBody` for
+  `/sandboxes/{sandboxId}/pause` that references `PauseSandboxRequest`; keep
+  `/resume` bodyless in this revision.
+- `server/opensandbox_server/api/schema.py`: add Pydantic models for
+  `PauseSandboxRequest`, `SnapshotPauseRequest`, and
+  inline/generated claim options.
+- `server/opensandbox_server/api/lifecycle.py`: accept
+  `body: PauseSandboxRequest | None = Body(None)` on `pause_sandbox`.
+- Kubernetes provider/runtime code: materialize the selected/generated
+  `SandboxSnapshotClaim`, then patch the `BatchSandbox`.
+
+Public request shape (sketch):
+
+```yaml
+PauseSandboxRequest:
+  operatingMode: Hibernate | Stop | Freeze
+  snapshotStrategy:
+    # exactly one of these should be set for Hibernate; all omitted means use defaults
+    snapshotClaimName: default-claim
+    snapshotClaimTemplateName: tenant-s3
+    claim:
+      snapshotClassName: s3
+      parameters:
+        region: us-west-2
+        bucket: opensandbox-snapshots
+        prefix: tenants/default/sandbox-abc123
+        compressionMode: Enabled
+        compressionAlgorithm: zstd
+```
+
+Defaulting rules preserve existing clients:
+
+1. Missing body or missing `operatingMode` defaults to the server's
+   `pause.default_operating_mode` (`Hibernate` unless configured otherwise).
+2. `Hibernate` with no claim selector uses `pause.snapshot_claim`
+   when set.
+3. If `pause.snapshot_claim` is empty and `pause.snapshot_claim_template` is set,
+   the server generates a claim from that template.
+4. If neither claim nor template is configured, the server/controller must
+   create or select a namespace-local default claim from legacy snapshot settings
+   when those settings exist, preserving the OSEP-0008 migration path. If no
+   defaults exist, empty-body `Hibernate` fails as a server
+   misconfiguration.
+
+Class resolution precedence is:
+
+1. An explicit `SandboxSnapshotClaim.spec.snapshotClassName` always wins.
+2. For generated claims, the inline claim or template value is copied first; if
+   still empty, the server may fill `pause.snapshot_class`.
+3. If the claim still has no class, the claim resolver uses the
+   `snapshot.opensandbox.io/is-default-class: "true"` `SandboxSnapshotClass` annotation.
+4. Multiple cluster defaults or no usable default mark the claim `Failed` and
+   cause `Hibernate` pause to fail closed before Pod deletion.
 
 ### 9. Stable sandbox ID, list, get, delete
 
@@ -804,8 +1414,8 @@ No public request/response field is added or removed.
 - `GET /sandboxes` lists `BatchSandbox` objects directly; paused sandboxes appear
   without a separate snapshot listing.
 - `DELETE /sandboxes/{id}` deletes the `BatchSandbox`, which removes the inline
-  snapshot state. Registry image cleanup remains best-effort and must not block
-  deletion success, as in OSEP-0008.
+  snapshot state. Backend artifact cleanup remains best-effort and must not block
+  deletion success.
 
 > Note: keeping the `BatchSandbox` alive across pause (rather than deleting it as
 > OSEP-0008 does) is a deliberate simplification enabled by inline status. It
@@ -814,45 +1424,64 @@ No public request/response field is added or removed.
 
 ### 10. Configuration
 
-Server-side pause configuration gains a claim selector. The class selector and
-registry/secret keys are optional migration/defaulting inputs used when the
-server or controller creates a namespace-local default claim:
+Server-side pause configuration provides the defaults that make the public API
+backward-compatible. The claim selector and claim-template defaults are optional
+migration/defaulting inputs used when the server or controller creates a
+namespace-local default claim:
 
 ```toml
 [pause]
-# Preferred: name of the SnapshotClaim in the sandbox namespace.
-snapshot_claim = "default-rootfs"
+# Used when POST /pause omits operatingMode.
+default_operating_mode = "Hibernate"
 
-# Optional: class used when creating/defaulting SnapshotClaims.
-snapshot_class = "rootfs-default"
+# Preferred: name of the SandboxSnapshotClaim in the sandbox namespace.
+snapshot_claim = "default-claim"
+
+# Optional: template used to generate a distinct per-sandbox claim when
+# snapshot_claim is empty or a caller explicitly requests generated claims.
+snapshot_claim_template = "tenant-s3"
+
+# Whether trusted API callers may submit inline claim specs. Public hosted
+# deployments can keep this false and allow only claim/template names.
+allow_inline_claim = false
+
+# Optional: class used when creating/defaulting SandboxSnapshotClaims.
+snapshot_class = "default"
 
 # Migration hints (optional). When snapshot_claim is empty and these are set,
-# the controller synthesizes an implicit default SnapshotClass plus a
-# namespace-local SnapshotClaim from them.
+# the controller synthesizes an implicit default SandboxSnapshotClass plus a
+# namespace-local SandboxSnapshotClaim from them.
 snapshot_registry = ""
-snapshot_push_secret = ""
-resume_pull_secret = ""
-snapshot_type = "Rootfs"
 ```
 
+Backend credentials are never read from this config; they are provided by
+node/workload identity in the runtime environment.
+
 Controller-side, the snapshot backend flags from OSEP-0008 are retained only to
-seed the implicit default `SnapshotClass` and namespace-local `SnapshotClaim`.
-New deployments should define `SnapshotClass` and `SnapshotClaim` objects instead.
+seed the implicit default `SandboxSnapshotClass` and namespace-local `SandboxSnapshotClaim`.
+New deployments should define `SandboxSnapshotClass`, `SandboxSnapshotClaim`, and, when
+per-sandbox storage isolation is desired, `SandboxSnapshotClaimTemplate` objects instead.
 
 ### 11. Security considerations
 
-The trust model is identical to OSEP-0008: the commit Job mounts the node
-container runtime socket and commits a container root filesystem, a privileged,
+The trust model is identical to OSEP-0008: the snapshot Job mounts the node
+container runtime socket and captures full pod state, a privileged,
 node-level operation. Operational constraints:
 
-- The commit Job image is controller-configured, not user-selectable.
-- The commit Job spec is not user-extensible.
-- `SnapshotClass` objects are cluster-scoped and managed by cluster
-  administrators; they contain no Secret references.
-- `SnapshotClaim` objects are namespaced and can be managed by the server,
-  namespace operator, or tenant automation. They name Secrets in the same
-  namespace as the sandbox/claim, keeping registry credentials out of the public
-  API while avoiding cross-namespace Secret ambiguity.
+- The snapshot Job image is controller-configured, not user-selectable.
+- The snapshot Job spec is not user-extensible.
+- `SandboxSnapshotClass` objects are cluster-scoped and managed by cluster
+  administrators; backend access is granted by node/workload identity.
+- `SandboxSnapshotClaim` objects are namespaced and can be managed by the server,
+  namespace operator, or tenant automation. They name only storage targets;
+  no credentials are stored, keeping secrets out of the public API and cluster.
+- Public hosted deployments should expose only claim/template names by default.
+  Inline claim creation is useful for trusted control planes but should be gated
+  by `pause.allow_inline_claim` because it lets callers choose storage locations.
+- Checkpoint artifacts contain process memory and may include user data,
+  credentials loaded in memory, file descriptors, and application buffers. Backend
+  classes must require encryption at rest, tightly scoped access, retention
+  limits, and auditable deletion.
 
 ### 12. Potential Go type changes
 
@@ -863,33 +1492,32 @@ and omits generated OpenAPI YAML.
 
 #### `batchsandbox_types.go`
 
-`BatchSandboxSpec` keeps the existing `Pause *bool` field and adds the strategy
-selector. `BatchSandboxStatus` gains a fixed-size inline snapshot result.
+`BatchSandboxSpec` replaces the boolean pause field with an `OperatingMode` enum
+and adds direct snapshot strategy config. `BatchSandboxStatus` gains a fixed-size inline
+snapshot result.
 
 ```go
-// +kubebuilder:validation:Enum=Stop;Freeze;Hibernate
-type PauseStrategyType string
+// +kubebuilder:validation:Enum=Running;Stop;Freeze;Hibernate
+type BatchSandboxOperatingMode string
 
 const (
-    PauseStrategyStop      PauseStrategyType = "Stop"
-    PauseStrategyFreeze    PauseStrategyType = "Freeze"
-    PauseStrategyHibernate PauseStrategyType = "Hibernate"
+    BatchSandboxOperatingModeRunning   BatchSandboxOperatingMode = "Running"
+    BatchSandboxOperatingModeStop      BatchSandboxOperatingMode = "Stop"
+    BatchSandboxOperatingModeFreeze    BatchSandboxOperatingMode = "Freeze"
+    BatchSandboxOperatingModeHibernate BatchSandboxOperatingMode = "Hibernate"
 )
 
-type HibernateStrategy struct {
-    // SnapshotClaimName references a SnapshotClaim in the BatchSandbox namespace.
-    // The server may inject a default when this is empty.
+type SnapshotStrategy struct {
+    // SnapshotClaimName references a SandboxSnapshotClaim in the BatchSandbox namespace.
+    // The server may inject a default or the generated claim name when this is empty.
     // +optional
     SnapshotClaimName string `json:"snapshotClaimName,omitempty"`
-}
 
-type PauseStrategy struct {
-    // +kubebuilder:default=Hibernate
+    // SnapshotClaimTemplateName references a SandboxSnapshotClaimTemplate in the
+    // BatchSandbox namespace. The server copies it into a concrete
+    // SandboxSnapshotClaim before setting SnapshotClaimName.
     // +optional
-    Type PauseStrategyType `json:"type,omitempty"`
-
-    // +optional
-    Hibernate *HibernateStrategy `json:"hibernate,omitempty"`
+    SnapshotClaimTemplateName string `json:"snapshotClaimTemplateName,omitempty"`
 }
 
 // +kubebuilder:validation:Enum=Pending;Committing;Ready;Failed
@@ -902,21 +1530,51 @@ const (
     SnapshotPhaseFailed     SnapshotPhase = "Failed"
 )
 
+type SnapshotArtifact struct {
+    ContainerName string `json:"containerName"`
+    ArtifactURI   string `json:"artifactUri"`
+    // +optional
+    Digest string `json:"digest,omitempty"`
+    // +optional
+    Format string `json:"format,omitempty"`
+}
+
+type SnapshotCompatibility struct {
+    // +optional
+    OS string `json:"os,omitempty"`
+    // +optional
+    Architecture string `json:"architecture,omitempty"`
+    // +optional
+    KernelVersion string `json:"kernelVersion,omitempty"`
+    // +optional
+    RuntimeName string `json:"runtimeName,omitempty"`
+    // +optional
+    RuntimeVersion string `json:"runtimeVersion,omitempty"`
+    // +optional
+    CheckpointFormatVersion string `json:"checkpointFormatVersion,omitempty"`
+}
+
 type SnapshotStatus struct {
     // +optional
     Phase SnapshotPhase `json:"phase,omitempty"`
     // +optional
-    StrategyType PauseStrategyType `json:"strategyType,omitempty"`
+    OperatingMode BatchSandboxOperatingMode `json:"operatingMode,omitempty"`
     // +optional
     SnapshotClaimName string `json:"snapshotClaimName,omitempty"`
     // +optional
     SnapshotClassName string `json:"snapshotClassName,omitempty"`
     // +optional
-    Containers []ContainerSnapshot `json:"containers,omitempty"`
+    Artifacts []SnapshotArtifact `json:"artifacts,omitempty"`
     // +optional
     SourcePodName string `json:"sourcePodName,omitempty"`
     // +optional
+    SourcePodUID string `json:"sourcePodUID,omitempty"`
+    // +optional
     SourceNodeName string `json:"sourceNodeName,omitempty"`
+    // +optional
+    RuntimeHandler string `json:"runtimeHandler,omitempty"`
+    // +optional
+    Compatibility *SnapshotCompatibility `json:"compatibility,omitempty"`
     // +optional
     ReadyAt *metav1.Time `json:"readyAt,omitempty"`
     // +optional
@@ -925,9 +1583,11 @@ type SnapshotStatus struct {
 
 type BatchSandboxSpec struct {
     // ... existing fields ...
-    Pause *bool `json:"pause,omitempty"`
+    // +kubebuilder:default=Running
     // +optional
-    PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
+    OperatingMode BatchSandboxOperatingMode `json:"operatingMode,omitempty"`
+    // +optional
+    SnapshotStrategy *SnapshotStrategy `json:"snapshotStrategy,omitempty"`
 }
 
 type BatchSandboxStatus struct {
@@ -939,68 +1599,70 @@ type BatchSandboxStatus struct {
 
 #### `snapshotclass_types.go`
 
-`SnapshotClass` is cluster-scoped and contains only backend configuration. It
+`SandboxSnapshotClass` is cluster-scoped and contains only backend configuration. It
 does not reference Secrets.
 
 ```go
+// +kubebuilder:validation:Enum=Local;BlobStore;S3
+type SnapshotBackendType string
+
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=snapclass
-// +kubebuilder:printcolumn:name="PROVISIONER",type="string",JSONPath=".provisioner"
+// +kubebuilder:printcolumn:name="TYPE",type="string",JSONPath=".type"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
-type SnapshotClass struct {
+type SandboxSnapshotClass struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
 
+    // +kubebuilder:validation:Enum=Local;BlobStore;S3
     // +kubebuilder:validation:Required
-    Provisioner string `json:"provisioner"`
+    Type SnapshotBackendType `json:"type"`
 
     // +optional
     Parameters map[string]string `json:"parameters,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type SnapshotClassList struct {
+type SandboxSnapshotClassList struct {
     metav1.TypeMeta `json:",inline"`
     metav1.ListMeta `json:"metadata,omitempty"`
-    Items           []SnapshotClass `json:"items"`
+    Items           []SandboxSnapshotClass `json:"items"`
 }
 ```
 
 #### `snapshotclaim_types.go`
 
-`SnapshotClaim` is namespaced. It selects a `SnapshotClass` and carries
-namespace-local Secret references for pause-time push and resume-time pull.
+`SandboxSnapshotClaim` is namespaced. It selects a `SandboxSnapshotClass` and carries
+namespace-local target parameters; backend access uses node/workload identity.
 
 ```go
 // +kubebuilder:validation:Enum=Pending;Bound;Failed
-type SnapshotClaimPhase string
+type SandboxSnapshotClaimPhase string
 
 const (
-    SnapshotClaimPhasePending SnapshotClaimPhase = "Pending"
-    SnapshotClaimPhaseBound   SnapshotClaimPhase = "Bound"
-    SnapshotClaimPhaseFailed  SnapshotClaimPhase = "Failed"
+    SandboxSnapshotClaimPhasePending SandboxSnapshotClaimPhase = "Pending"
+    SandboxSnapshotClaimPhaseBound   SandboxSnapshotClaimPhase = "Bound"
+    SandboxSnapshotClaimPhaseFailed  SandboxSnapshotClaimPhase = "Failed"
 )
 
-type SnapshotClaimSpec struct {
-    // Empty means use the annotated cluster default SnapshotClass.
+type SandboxSnapshotClaimSpec struct {
+    // Empty means use the annotated cluster default SandboxSnapshotClass.
     // +optional
     SnapshotClassName string `json:"snapshotClassName,omitempty"`
 
-    // Resolved in the SnapshotClaim namespace.
+    // Backend-specific target settings such as region, bucket/container,
+    // prefix, storage account, repository, local path, compressionMode, or
+    // compressionAlgorithm.
     // +optional
-    PushSecretRef *corev1.LocalObjectReference `json:"pushSecretRef,omitempty"`
-
-    // Resolved in the SnapshotClaim namespace.
-    // +optional
-    PullSecretRef *corev1.LocalObjectReference `json:"pullSecretRef,omitempty"`
+    Parameters map[string]string `json:"parameters,omitempty"`
 }
 
-type SnapshotClaimStatus struct {
+type SandboxSnapshotClaimStatus struct {
     // +optional
-    Phase SnapshotClaimPhase `json:"phase,omitempty"`
+    Phase SandboxSnapshotClaimPhase `json:"phase,omitempty"`
     // +optional
     SnapshotClassName string `json:"snapshotClassName,omitempty"`
     // +optional
@@ -1015,67 +1677,113 @@ type SnapshotClaimStatus struct {
 // +kubebuilder:printcolumn:name="CLASS",type="string",JSONPath=".status.snapshotClassName"
 // +kubebuilder:printcolumn:name="PHASE",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
-type SnapshotClaim struct {
+type SandboxSnapshotClaim struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
 
-    Spec   SnapshotClaimSpec   `json:"spec,omitempty"`
-    Status SnapshotClaimStatus `json:"status,omitempty"`
+    Spec   SandboxSnapshotClaimSpec   `json:"spec,omitempty"`
+    Status SandboxSnapshotClaimStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type SnapshotClaimList struct {
+type SandboxSnapshotClaimList struct {
     metav1.TypeMeta `json:",inline"`
     metav1.ListMeta `json:"metadata,omitempty"`
-    Items           []SnapshotClaim `json:"items"`
+    Items           []SandboxSnapshotClaim `json:"items"`
+}
+```
+
+#### `snapshotclaimtemplate_types.go`
+
+`SandboxSnapshotClaimTemplate` is namespaced and mirrors DRA `ResourceClaimTemplate`.
+The server uses it to create distinct concrete `SandboxSnapshotClaim` objects for
+individual sandboxes.
+
+```go
+type SandboxSnapshotClaimTemplateSpec struct {
+    // +optional
+    Metadata metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec SandboxSnapshotClaimSpec `json:"spec"`
+}
+
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=snapclaimtmpl
+type SandboxSnapshotClaimTemplate struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec SandboxSnapshotClaimTemplateSpec `json:"spec"`
+}
+
+// +kubebuilder:object:root=true
+type SandboxSnapshotClaimTemplateList struct {
+    metav1.TypeMeta `json:",inline"`
+    metav1.ListMeta `json:"metadata,omitempty"`
+    Items           []SandboxSnapshotClaimTemplate `json:"items"`
 }
 ```
 
 The new root objects must be registered with `SchemeBuilder`, and controller RBAC
-markers should be added for reading `SnapshotClass`, reading/updating
-`SnapshotClaim` status, and using the referenced namespace-local Secrets.
+markers should be added for reading `SandboxSnapshotClass`, reading/updating
+`SandboxSnapshotClaim` status, reading `SandboxSnapshotClaimTemplate`, creating generated
+`SandboxSnapshotClaim` objects, using node/workload identity for backend access.
 
 ## Test Plan
 
 ### Unit tests
 
-- Patching `spec.pause=true` with `Hibernate` policy drives
+- Patching `spec.operatingMode=Hibernate` with `spec.snapshotStrategy` drives
   `status.snapshot.phase` `Pending -> Committing -> Ready` and populates
-  `containers[].imageUri`.
+  `artifacts[]`.
+- `POST /pause` with no body remains accepted and resolves to
+  `pause.default_operating_mode` plus default claim/template configuration.
+- `POST /pause` with `snapshotClaimTemplateName` creates or selects the generated
+  `SandboxSnapshotClaim` for that sandbox and patches
+  `BatchSandbox.spec.snapshotStrategy.snapshotClaimName` to the generated
+  claim name.
 - The controller resolves an explicit `snapshotClaimName`, then resolves the
-  claim's explicit or default `SnapshotClass`.
+  claim's explicit or default `SandboxSnapshotClass`.
 - `Hibernate` pause fails closed (`status.snapshot.phase=Failed`, `PauseFailed`
-  condition, Pod retained) when no `SnapshotClaim` or `SnapshotClass` resolves.
-- The commit Job is pinned to `status.snapshot.sourceNodeName`.
-- `Stop` pause deletes the Pod and reports `Paused` without a commit Job.
-- A `Stop` pause after a previous `Hibernate` pause records `strategyType=Stop`
-  and resume uses `spec.template`, not the stale Hibernate image.
+  condition, Pod retained) when no `SandboxSnapshotClaim` or `SandboxSnapshotClass` resolves.
+- Resume fails closed with `ResumeFailed` when the recorded
+  `status.snapshot.compatibility` (OS/architecture, kernel/runtime version, or
+  checkpoint format), runtime handler, or artifact format is incompatible with the
+  target node/runtime.
+- The snapshot Job is pinned to `status.snapshot.sourceNodeName`.
+- `Stop` pause deletes the Pod and reports `Paused` without a snapshot Job.
+- A `Stop` pause after a previous `Hibernate` pause records `operatingMode=Stop`
+  and resume uses `spec.template`, not the stale Hibernate artifact.
 - The aggregate `status.phase` returns `Pausing`/`Paused`/`Resuming` consistent
-  with `spec.pause` and `status.snapshot.phase`.
-- Resume with `spec.pause=false` re-creates the Pod from
-  `status.snapshot.containers[].imageUri` with the claim's `pullSecretRef`.
+  with `spec.operatingMode` and `status.snapshot.phase`.
+- Resume with `spec.operatingMode=Running` re-creates the Pod from the recorded
+  `status.snapshot` reference using node/workload identity.
 - Overlapping pause/resume transitions are rejected with `409`.
 - `GET`/`LIST` answer from `BatchSandbox` alone (no `SandboxSnapshot` read).
 
 ### Integration / e2e tests (Kind)
 
-- End-to-end `Hibernate` pause: Running -> commit -> image in registry -> Pod
+- End-to-end `Hibernate` pause: Running -> checkpoint artifact Ready -> Pod
   deleted -> `GET` returns `Paused`, all from one `BatchSandbox`.
-- End-to-end resume: Pod re-created from the recorded image -> `GET` returns
-  `Running`; working directory contents survive.
+- End-to-end resume: Pod restored from the recorded artifact -> `GET` returns
+  `Running`; working directory contents and an in-memory counter/process survive.
 - Repeat pause/resume: `status.snapshot` is replaced; only the latest is kept.
 - Delete a paused sandbox: the `BatchSandbox` and its inline snapshot state are
   removed.
-- `SnapshotClaim`/`SnapshotClass` selection: two claims pointing at classes with
-  different registries route the commit to the correct backend.
+- `SandboxSnapshotClaim`/`SandboxSnapshotClass` selection: two claims pointing at different
+  classes route the commit to the correct backend/target.
+- `SandboxSnapshotClaimTemplate` selection: two sandboxes using the same template
+  produce distinct generated claims with template values copied independently.
 
 ### Manual / operator validation
 
-- Confirm the committed image lands in the registry named by the resolved
-  `SnapshotClass`.
-- Confirm CPU/memory are released after pause (Pod deleted).
-- Confirm the commit Job runs on the source node and commits the sandbox main
-  container, not a sidecar.
+- Confirm the checkpoint artifact lands in the backend target resolved from
+  `SandboxSnapshotClaim -> SandboxSnapshotClass`.
+- Confirm CPU/memory are released after `Hibernate` pause (Pod deleted).
+- Confirm the snapshot Job runs on the source node and checkpoints every sandbox
+  container, including sidecars.
 
 ## Drawbacks
 
@@ -1085,7 +1793,8 @@ markers should be added for reading `SnapshotClass`, reading/updating
 - Inline status couples snapshot progress to the `BatchSandbox` object; very large
   status objects are avoided by keeping a single fixed-shape struct with no
   history.
-- Introducing `SnapshotClass`/`SnapshotClaim` adds new CRDs and RBAC surfaces.
+- Introducing `SandboxSnapshotClass`/`SandboxSnapshotClaim`/`SandboxSnapshotClaimTemplate` adds new
+  CRDs and RBAC surfaces.
 - Only one snapshot is retained; rollback to older states is still impossible.
 - The single-replica assumption from OSEP-0008 carries over.
 
@@ -1104,67 +1813,87 @@ into the `BatchSandbox` object. `SandboxSnapshot` may still exist for the
 Rejected for the same reasons agent-sandbox KEP-0694 rejected it: native tools
 (HPA/KEDA) expect `replicas: 0` to mean clean deletion, so overloading it to mean
 "hibernate" risks accidental latency, surprise storage cost, and data-loss
-ambiguity. `spec.pause` stays the explicit, semantic trigger.
+ambiguity. `spec.operatingMode` stays the explicit, semantic trigger.
 
-### Strongly-typed `SnapshotProvider` instead of `SnapshotClass`
+### Strongly-typed `SnapshotProvider` instead of `SandboxSnapshotClass`
 
-Rejected in favor of the `StorageClass` paradigm (free-form `parameters` +
-`provisioner`), consistent with agent-sandbox KEP-0694. It is more portable across
-backends and clusters at the cost of weaker compile-time validation, which is an
-acceptable trade for a pluggable provider model.
+Rejected in favor of the class/claim/template paradigm from
+`StorageClass`/PVC and DRA. `SandboxSnapshotClass` keeps a small typed discriminator
+(`Local`, `BlobStore`, `S3`) for operator UX, but backend-specific details
+stay in `parameters` so new backends do not require a new provider CRD.
 
 ### Embed full backend config inline on `BatchSandbox.spec`
 
-Rejected because it would push registry endpoints and credential references into
-every sandbox spec, duplicate configuration, and leak admin-owned settings into
-user-owned objects. `SnapshotClass` plus `SnapshotClaim` keeps a clean
-admin/namespace boundary while preserving namespace-local Secret references.
+Rejected because it would push backend endpoints and storage placement details
+into every sandbox spec, duplicate configuration, and leak admin-owned settings
+into user-owned objects. `SandboxSnapshotClass` plus `SandboxSnapshotClaim`/`SandboxSnapshotClaimTemplate`
+keeps a clean admin/namespace boundary while keeping storage targets
+namespace-local. Public API inline claim parameters are materialized into a
+generated claim rather than embedded on `BatchSandbox.spec`.
 
 ## Infrastructure Needed
 
-- `SnapshotClass` and `SnapshotClaim` CRDs, plus controller RBAC to read classes
-  and read/update claims.
-- An OCI registry reachable from cluster nodes and a
-  `kubernetes.io/dockerconfigjson` Secret for push/pull.
-- The existing `image-committer` image with access to the node container runtime
-  socket (reused from OSEP-0008).
+- `SandboxSnapshotClass`, `SandboxSnapshotClaim`, and `SandboxSnapshotClaimTemplate` CRDs, plus
+  controller/server RBAC to read classes/templates and read/update/create claims.
+- A snapshot backend reachable from cluster nodes, with access granted via
+  node/workload identity (no Kubernetes Secrets).
+- A trusted snapshotter/restore image plus node runtime support for checkpointing
+  and restoring all containers in a Pod. Clusters must advertise compatible
+  runtime handler, OS/architecture, kernel, and checkpoint format support.
 - Controller RBAC to manage Jobs and read Pods (the `SandboxSnapshot` reconciler
-  RBAC for the pause path is no longer required).
+  RBAC for the pause path is only needed on clusters still served by the OSEP-0008
+  fallback path).
 
 ## Upgrade & Migration Strategy
 
 This change is additive for the public API and migrates the in-cluster mechanism.
 
-- **Public API:** unchanged. Existing clients keep calling `/pause`, `/resume`,
-  and `GET` with the same payloads.
-- **CRD rollout:** install the `SnapshotClass` and `SnapshotClaim` CRDs and extend
-  the `BatchSandbox` CRD with `spec.pauseStrategy` and `status.snapshot`
-  (`make manifests generate`). These additions are backward-compatible; older
-  `BatchSandbox` objects validate unchanged.
-- **Backend config migration:** when no `SnapshotClaim` is referenced, the server
+- **Public API:** `POST /pause` gains an optional body. Existing clients keep
+  calling `/pause`, `/resume`, and `GET` with the same payloads because missing
+  pause bodies and missing fields default to configured values.
+- **CRD rollout:** install the `SandboxSnapshotClass`, `SandboxSnapshotClaim`, and
+  `SandboxSnapshotClaimTemplate` CRDs and update the `BatchSandbox` CRD with
+  `spec.operatingMode`, `spec.snapshotStrategy`, and `status.snapshot`
+  (`make manifests generate`). Because `operatingMode` replaces the legacy
+  boolean `spec.pause`, operators need a storage-version/conversion or pre-rollout
+  migration that maps `pause=true` to `operatingMode=Hibernate`,
+  `pause=false`/unset to `operatingMode=Running`, and then drops the boolean field
+  from stored objects. CRD installation is **not** a hard preflight: until the new
+  snapshot CRDs are present the server falls back to the OSEP-0008 `SandboxSnapshot`
+  path via CRD detection (see [§8](#8-server-mapping-and-public-api-compatibility)),
+  and the inline path activates automatically once the CRDs exist.
+- **Backend config migration:** when no `SandboxSnapshotClaim` is referenced, the server
   uses `pause.snapshot_claim` or creates/selects a namespace-local default claim.
-  When no `SnapshotClass` is referenced by that claim and none is annotated
+  When no `SandboxSnapshotClass` is referenced by that claim and none is annotated
   default, the controller synthesizes an implicit default class from the legacy
-  startup flags (`--snapshot-registry`, `--snapshot-push-secret`,
+  startup flags (`--snapshot-registry`,
   `--snapshot-registry-insecure`) so existing clusters keep working with zero
-  config changes. Operators are encouraged to define explicit `SnapshotClass` and
-  `SnapshotClaim` objects and set `pause.snapshot_claim` in the server.
-- **`SandboxSnapshot` deprecation (pause/resume path):** the
-  `SandboxSnapshotReconciler` is no longer required for pause/resume. The CRD and
-  reconciler may be retained for the explicit snapshot API or removed in a later
-  release once that path is migrated; this OSEP does not delete it.
+  config changes. Operators are encouraged to define explicit `SandboxSnapshotClass` and
+  `SandboxSnapshotClaim`/`SandboxSnapshotClaimTemplate` objects and set
+  `pause.snapshot_claim` or `pause.snapshot_claim_template` in the server.
+- **`SandboxSnapshot` coexistence (pause/resume path):** the
+  `SandboxSnapshotReconciler` remains the active pause/resume path on clusters
+  that have not installed the new snapshot CRDs, and the server falls back to it
+  via CRD detection (see [§8](#8-server-mapping-and-public-api-compatibility)).
+  Once the new CRDs are present, the inline path takes over and the
+  `SandboxSnapshot` pause/resume path can be decommissioned. The CRD and
+  reconciler may also be retained for the explicit snapshot API; this OSEP does
+  not delete it.
 - **Rollout sequence:**
   1. Install/extend CRDs.
-  2. Deploy the controller that reconciles `spec.pauseStrategy` inline and reads
-     `SnapshotClaim`/`SnapshotClass`.
-  3. Create one or more `SnapshotClass` objects (mark one default).
-  4. Create namespace-local `SnapshotClaim` objects that reference those classes
-     and local registry Secrets.
-  5. Set `pause.snapshot_claim` in the server (optional; default claim otherwise).
+  2. Deploy the controller/server that reconciles `spec.operatingMode` and
+      `spec.snapshotStrategy` inline,
+     reads `SandboxSnapshotClaim`/`SandboxSnapshotClass`, and materializes generated claims from
+     `SandboxSnapshotClaimTemplate` when requested.
+  3. Create one or more `SandboxSnapshotClass` objects (mark one default).
+  4. Create namespace-local `SandboxSnapshotClaim` or `SandboxSnapshotClaimTemplate` objects
+     that reference those classes; backend access uses node/workload identity.
+  5. Set `pause.snapshot_claim` or `pause.snapshot_claim_template` in the server
+     (optional; default claim otherwise).
   6. Decommission `SandboxSnapshot`-based pause once e2e parity is confirmed.
-- **Rollback:** `spec.pauseStrategy`/`status.snapshot` are additive and the public
-  API is unchanged, but rollback to the OSEP-0008 controller is safe only when no
+- **Rollback:** rollback to the OSEP-0008 controller is safe only when no
   sandboxes are currently paused under OSEP-0015. If paused OSEP-0015 sandboxes
   exist, operators must either resume them before rollback or run a downgrade
   bridge that materializes compatible `SandboxSnapshot` objects from
-  `BatchSandbox.status.snapshot` before deploying the old controller.
+  `BatchSandbox.status.snapshot` before deploying the old controller. Old clients
+  remain compatible throughout because they do not send the optional pause body.
