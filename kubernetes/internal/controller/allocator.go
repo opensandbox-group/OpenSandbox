@@ -582,6 +582,29 @@ func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbo
 		supplement = replica - int32(len(allocated))
 	}
 
+	// Scale-down: when replicas is reduced, release excess allocated pods.
+	// Only trigger when there are no pending release operations to avoid conflicts.
+	if int32(len(allocated)) > replica && len(toRelease) == 0 {
+		excessCnt := int32(len(allocated)) - replica
+		releasedSetForDedupe := make(map[string]struct{}, len(released))
+		for _, r := range released {
+			releasedSetForDedupe[r] = struct{}{}
+		}
+		// Release from the end of the allocated list (highest index first).
+		for i := len(allocated) - 1; i >= 0 && excessCnt > 0; i-- {
+			podName := allocated[i]
+			if _, alreadyReleased := releasedSetForDedupe[podName]; alreadyReleased {
+				continue
+			}
+			toRelease = append(toRelease, podName)
+			excessCnt--
+		}
+		if len(toRelease) > 0 {
+			log.Info("Scale-down: queuing excess pods for release", "sandbox", sandbox.Name,
+				"replica", replica, "allocated", len(allocated), "toRelease", toRelease)
+		}
+	}
+
 	return &algorithm.SandboxRequest{
 		SandboxName:   sandbox.Name,
 		CurAllocation: allocated,
