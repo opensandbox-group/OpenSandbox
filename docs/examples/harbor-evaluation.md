@@ -31,8 +31,18 @@ opensandbox-server
 
 ## Install Harbor
 
+The OpenSandbox backend was merged into Harbor's `main` branch
+([#2054](https://github.com/harbor-framework/harbor/pull/2054)) but is not yet in
+a published release. Until a release ships with it, install Harbor from git:
+
 ```shell
-uv pip install "harbor[opensandbox]"
+uv pip install "harbor[opensandbox] @ git+https://github.com/harbor-framework/harbor"
+```
+
+Once a released Harbor version includes the backend, the plain extra will work:
+
+```shell
+uv pip install "harbor[opensandbox]"   # after the next Harbor release
 ```
 
 ## Configure the connection
