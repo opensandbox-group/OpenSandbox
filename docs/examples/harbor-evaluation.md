@@ -72,26 +72,10 @@ Results are written under the `jobs_dir` from `config.yaml`
 output (`reward.txt`, `ctrf.json`), collected `artifacts/`, and `results.json`.
 A successful run produces `reward = 1.0`.
 
-## Use your own task
-
-The included `hello-opensandbox` task is checked into this repository only to
-make the example self-contained and runnable without publishing or downloading
-anything first. For real evaluations, prefer tasks from an external Harbor task
-registry and override the example task from the command line:
-
-```shell
-harbor run -c config.yaml --task <org>/<task>@latest
-```
-
-During local task development, you can also point Harbor at a task directory:
-
-```shell
-harbor run -c config.yaml --path /path/to/task
-```
-
 ## Evaluate a real agent
 
-Swap the `oracle` agent for a real agent + model:
+Swap the `oracle` agent for a real agent + model, and point `tasks:` in
+`config.yaml` at your own task directories:
 
 ```shell
 harbor run -c config.yaml -a claude-code -m "anthropic/claude-sonnet-4-5"
