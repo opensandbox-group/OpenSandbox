@@ -529,14 +529,56 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 	}
 	// TODO consider supply Pods if Pods is deleted unexpectedly
 	var needCreateIndex []int
-	// TODO var needDeleteIndex []int
 	for i := 0; i < int(*batchSandbox.Spec.Replicas); i++ {
 		_, ok := indexedPodMap[i]
 		if !ok {
 			needCreateIndex = append(needCreateIndex, i)
 		}
 	}
-	// scale
+
+	// Scale-down: find pods with index >= replicas that need to be deleted.
+	var needDeleteIndex []int
+	for idx := range indexedPodMap {
+		if idx >= int(*batchSandbox.Spec.Replicas) {
+			needDeleteIndex = append(needDeleteIndex, idx)
+		}
+	}
+	// Delete from highest index first for safety.
+	slices.SortFunc(needDeleteIndex, func(a, b int) int { return b - a })
+
+	// Execute scale-down: delete excess pods.
+	if len(needDeleteIndex) > 0 {
+		log.Info("try to delete Pods for scale-down", "count", len(needDeleteIndex), "indexes", needDeleteIndex)
+	}
+	for _, idx := range needDeleteIndex {
+		pod, ok := indexedPodMap[idx]
+		if !ok {
+			continue
+		}
+		// Delete the pod directly.  We do not set a ScaleExpectation here because
+		// there is no watch-based mechanism to observe the actual deletion event;
+		// calling ObserveScale immediately after r.Delete would be a no-op.
+		// Duplicate Delete calls on an already-terminating pod are harmless —
+		// the API server returns NotFound which we handle below.
+		if err := r.Delete(ctx, pod); err != nil {
+			if errors.IsNotFound(err) {
+				// Pod already deleted or terminating, skip.
+				continue
+			}
+			r.Recorder.Eventf(batchSandbox, corev1.EventTypeWarning, EventReasonFailedDelete, "failed to delete pod for scale-down: %v, pod: %v", err, pod.Name)
+			return err
+		}
+		r.Recorder.Eventf(batchSandbox, corev1.EventTypeNormal, EventReasonSuccessfulDelete, "deleted pod %s for scale-down (current: %d, desired: %d)", pod.Name, len(indexedPodMap), int(*batchSandbox.Spec.Replicas))
+	}
+
+	// If we just performed scale-down, return early and let the next reconcile
+	// handle scale-up (if needed). This avoids creating pods in the same reconcile
+	// that deletes them, which could confuse expectation tracking.
+	if len(needDeleteIndex) > 0 {
+		return nil
+	}
+
+	// Scale-up: create missing pods.
 	if len(needCreateIndex) > 0 {
 		log.Info("try to create Pods", "count", len(needCreateIndex), "indexes", needCreateIndex)
 	}
