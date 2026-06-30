@@ -84,11 +84,16 @@ def get_sandbox_logs(
         deprecated=True,
         description="Deprecated plain-text logs only. Only return logs newer than this duration (e.g. 10m, 1h).",
     ),
+    container: Optional[str] = Query(
+        None,
+        deprecated=True,
+        description="Deprecated plain-text logs only. Container name to read when the sandbox pod has multiple containers.",
+    ),
 ) -> JSONResponse | PlainTextResponse:
     """Retrieve diagnostic logs for a sandbox."""
     if scope is not None:
         return _diagnostics_not_implemented_response()
-    text = sandbox_service.get_sandbox_logs(sandbox_id, tail=tail, since=since)
+    text = sandbox_service.get_sandbox_logs(sandbox_id, tail=tail, since=since, container=container)
     return _deprecated_plain_text_response(text)
 
 

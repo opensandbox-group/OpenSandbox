@@ -24,7 +24,12 @@ def test_diagnostics_logs_with_scope_returns_not_implemented(
 ) -> None:
     class StubService:
         @staticmethod
-        def get_sandbox_logs(sandbox_id: str, tail: int, since: str | None = None) -> str:
+        def get_sandbox_logs(
+            sandbox_id: str,
+            tail: int,
+            since: str | None = None,
+            container: str | None = None,
+        ) -> str:
             raise AssertionError("stable diagnostics requests must not call legacy logs")
 
     monkeypatch.setattr(devops, "sandbox_service", StubService())
@@ -46,16 +51,22 @@ def test_diagnostics_logs_without_scope_preserves_deprecated_plain_text(
 ) -> None:
     class StubService:
         @staticmethod
-        def get_sandbox_logs(sandbox_id: str, tail: int, since: str | None = None) -> str:
+        def get_sandbox_logs(
+            sandbox_id: str,
+            tail: int,
+            since: str | None = None,
+            container: str | None = None,
+        ) -> str:
             assert sandbox_id == "sbx-001"
             assert tail == 25
             assert since == "5m"
+            assert container == "egress"
             return "legacy logs"
 
     monkeypatch.setattr(devops, "sandbox_service", StubService())
 
     response = client.get(
-        "/v1/sandboxes/sbx-001/diagnostics/logs?tail=25&since=5m",
+        "/v1/sandboxes/sbx-001/diagnostics/logs?tail=25&since=5m&container=egress",
         headers=auth_headers,
     )
 

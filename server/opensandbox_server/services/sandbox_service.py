@@ -256,7 +256,13 @@ class SandboxService(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def get_sandbox_logs(self, sandbox_id: str, tail: int = 100, since: str | None = None) -> str:
+    def get_sandbox_logs(
+        self,
+        sandbox_id: str,
+        tail: int = 100,
+        since: str | None = None,
+        container: str | None = None,
+    ) -> str:
         """
         Retrieve container logs for a sandbox.
 
@@ -264,6 +270,7 @@ class SandboxService(ABC):
             sandbox_id: Unique sandbox identifier
             tail: Number of trailing log lines to return
             since: Only return logs newer than this duration (e.g. "10m", "1h")
+            container: Optional container name for multi-container runtimes
 
         Returns:
             str: Plain-text log output

@@ -21,14 +21,85 @@ by querying K8s Pod state and events. Mixed into KubernetesSandboxService.
 
 from __future__ import annotations
 
+import json
 import re
 
 from fastapi import HTTPException, status
+from kubernetes.client import ApiException
 
 from opensandbox_server.services.constants import (
     SANDBOX_ID_LABEL,
     SandboxErrorCodes,
 )
+
+
+def _extract_k8s_api_message(exc: ApiException) -> str:
+    body = getattr(exc, "body", None)
+    if body:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("message"):
+            return str(payload["message"])
+    return getattr(exc, "reason", None) or str(exc)
+
+
+def _select_log_container(pod) -> str | None:
+    spec = getattr(pod, "spec", None)
+    containers = list(getattr(spec, "containers", None) or [])
+    init_containers = list(getattr(spec, "init_containers", None) or [])
+
+    container_names = [getattr(container, "name", None) for container in containers]
+    container_names = [name for name in container_names if name]
+    if "sandbox" in container_names:
+        return "sandbox"
+    if container_names:
+        return container_names[0]
+
+    init_names = [getattr(container, "name", None) for container in init_containers]
+    init_names = [name for name in init_names if name]
+    if init_names:
+        return init_names[0]
+    return None
+
+
+def _raise_log_api_exception(sandbox_id: str, container_name: str | None, exc: ApiException) -> HTTPException:
+    target = f" container {container_name!r}" if container_name else ""
+    message = _extract_k8s_api_message(exc)
+
+    if exc.status == 404:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
+                "message": f"Failed to read logs for sandbox {sandbox_id!r}{target}: {message}",
+            },
+        ) from exc
+    if exc.status == 400:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": f"Failed to read logs for sandbox {sandbox_id!r}{target}: {message}",
+            },
+        ) from exc
+    if exc.status in {401, 403}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": SandboxErrorCodes.K8S_API_ERROR,
+                "message": f"Failed to read logs for sandbox {sandbox_id!r}{target}: {message}",
+            },
+        ) from exc
+
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail={
+            "code": SandboxErrorCodes.K8S_API_ERROR,
+            "message": f"Failed to read logs for sandbox {sandbox_id!r}{target}: {message}",
+        },
+    ) from exc
 
 
 def _parse_since(since: str) -> int:
@@ -71,10 +142,17 @@ class K8sDiagnosticsMixin:
             )
         return pods[0]
 
-    def get_sandbox_logs(self, sandbox_id: str, tail: int = 100, since: str | None = None) -> str:
+    def get_sandbox_logs(
+        self,
+        sandbox_id: str,
+        tail: int = 100,
+        since: str | None = None,
+        container: str | None = None,
+    ) -> str:
         pod = self._find_pod_for_sandbox(sandbox_id)
         pod_name = pod.metadata.name
         core_v1 = self.k8s_client.get_core_v1_api()
+        container_name = container or _select_log_container(pod)
 
         kwargs: dict = {
             "name": pod_name,
@@ -82,10 +160,15 @@ class K8sDiagnosticsMixin:
             "tail_lines": tail,
             "timestamps": True,
         }
+        if container_name:
+            kwargs["container"] = container_name
         if since:
             kwargs["since_seconds"] = _parse_since(since)
 
-        log_text = core_v1.read_namespaced_pod_log(**kwargs)
+        try:
+            log_text = core_v1.read_namespaced_pod_log(**kwargs)
+        except ApiException as exc:
+            _raise_log_api_exception(sandbox_id, container_name, exc)
         return log_text or "(no logs)"
 
     def get_sandbox_inspect(self, sandbox_id: str) -> str:
