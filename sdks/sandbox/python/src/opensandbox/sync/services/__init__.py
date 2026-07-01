@@ -27,6 +27,7 @@ from opensandbox.sync.services.isolated import (
     IsolationSessionSync,
 )
 from opensandbox.sync.services.metrics import MetricsSync
+from opensandbox.sync.services.pool import PoolsSync
 from opensandbox.sync.services.sandbox import SandboxesSync
 
 __all__ = [
@@ -39,5 +40,6 @@ __all__ = [
     "IsolationServiceSync",
     "IsolationSessionSync",
     "MetricsSync",
+    "PoolsSync",
     "SandboxesSync",
 ]
