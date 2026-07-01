@@ -663,7 +663,7 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 			},
 			wantTaskStatus: &taskScheduleResult{Succeed: 1},
 			batchSandboxChecker: func(bsbx *sandboxv1alpha1.BatchSandbox) error {
-				release, err := parseSandboxReleased(bsbx)
+				release, err := parseSandboxRelease(bsbx)
 				if err != nil {
 					return err
 				}

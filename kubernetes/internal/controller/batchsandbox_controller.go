@@ -326,6 +326,11 @@ func (r *BatchSandboxReconciler) listPods(ctx context.Context, poolStrategy stra
 		}
 		allocSet.Insert(alloc.Pods...)
 
+		release, err := parseSandboxRelease(batchSbx)
+		if err != nil {
+			return nil, err
+		}
+		releasedSet.Insert(release.Pods...)
 		released, err := parseSandboxReleased(batchSbx)
 		if err != nil {
 			return nil, err
@@ -471,11 +476,11 @@ func (r *BatchSandboxReconciler) getTasksCleanupUnfinished(batchSbx *sandboxv1al
 
 func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, toReleasePods []string) error {
 	releasedSet := make(sets.Set[string])
-	released, err := parseSandboxReleased(batchSbx)
+	release, err := parseSandboxRelease(batchSbx)
 	if err != nil {
 		return err
 	}
-	releasedSet.Insert(released.Pods...)
+	releasedSet.Insert(release.Pods...)
 	releasedSet.Insert(toReleasePods...)
 	newRelease := AllocationRelease{
 		Pods: sets.List(releasedSet),
@@ -549,6 +554,7 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 	// Execute scale-down: delete excess pods.
 	if len(needDeleteIndex) > 0 {
 		log.Info("try to delete Pods for scale-down", "count", len(needDeleteIndex), "indexes", needDeleteIndex)
+		r.deleteTaskScheduler(ctx, batchSandbox)
 	}
 	for _, idx := range needDeleteIndex {
 		pod, ok := indexedPodMap[idx]

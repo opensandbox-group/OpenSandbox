@@ -577,25 +577,12 @@ func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbo
 		replica = *sandbox.Spec.Replicas
 	}
 
-	// Compute activeAllocated: pods that are allocated and neither fully released
-	// nor currently in the process of being released.
-	//
-	// alloc-status keeps historical entries (only grows).  Two other annotations
-	// track pods that should no longer count as active:
-	//   - alloc-released: recycle completed, pod is free.
-	//   - alloc-release:  release requested, recycle in progress.
-	// Both must be excluded so that supplement and scale-down calculations
-	// reflect the true current allocation.
-	releaseSet := make(map[string]struct{}, len(release))
-	for _, r := range release {
-		releaseSet[r] = struct{}{}
-	}
+	// Compute activeAllocated: pods that are allocated but not yet released.
+	// Pods in alloc-release are still being recycled and remain active until
+	// recycle completion moves them to alloc-released.
 	activeAllocated := make([]string, 0, len(allocated))
 	for _, pod := range allocated {
 		if _, isReleased := releasedSet[pod]; isReleased {
-			continue
-		}
-		if _, isReleasing := releaseSet[pod]; isReleasing {
 			continue
 		}
 		activeAllocated = append(activeAllocated, pod)
@@ -606,13 +593,13 @@ func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbo
 	// requesting new pods — this preserves the state machine semantics
 	// that release and allocate do not happen in the same reconcile cycle.
 	supplement := int32(0)
-	if replica-int32(len(activeAllocated)) > 0 {
+	if len(toRelease) == 0 && replica-int32(len(activeAllocated)) > 0 {
 		supplement = replica - int32(len(activeAllocated))
 	}
 
 	// Scale-down: when replicas is reduced, release excess active pods.
 	// Only trigger when there are no pending release operations to avoid conflicts.
-	if int32(len(activeAllocated)) > replica {
+	if int32(len(activeAllocated)) > replica && len(toRelease) == 0 {
 		excessCnt := int32(len(activeAllocated)) - replica
 		// Release from the end of the active list (highest index first).
 		for i := len(activeAllocated) - 1; i >= 0 && excessCnt > 0; i-- {
