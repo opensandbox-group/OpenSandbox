@@ -75,20 +75,22 @@ func (s *InMemoryPoolStateStore) TryTakeIdle(_ context.Context, poolName string)
 	defer s.mu.Unlock()
 
 	entries := s.idle[poolName]
-	if len(entries) == 0 {
-		return "", false, nil
+	now := time.Now()
+
+	// Scan past expired entries to find a valid one
+	for len(entries) > 0 {
+		entry := entries[0]
+		entries = entries[1:]
+
+		if now.Before(entry.ExpiresAt) {
+			s.idle[poolName] = entries
+			return entry.SandboxID, true, nil
+		}
+		// Entry expired, skip and continue
 	}
 
-	// Take from the front (FIFO)
-	entry := entries[0]
-	s.idle[poolName] = entries[1:]
-
-	// Skip expired entries
-	if time.Now().After(entry.ExpiresAt) {
-		return "", false, nil
-	}
-
-	return entry.SandboxID, true, nil
+	s.idle[poolName] = entries
+	return "", false, nil
 }
 
 func (s *InMemoryPoolStateStore) PutIdle(_ context.Context, poolName string, sandboxID string, expiresAt time.Time) error {

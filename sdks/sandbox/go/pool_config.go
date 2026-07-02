@@ -116,8 +116,8 @@ func (c *PoolConfig) validate() error {
 	if c.PoolName == "" {
 		return &InvalidArgumentError{Field: "PoolName", Message: "pool name is required"}
 	}
-	if c.MaxIdle <= 0 {
-		return &InvalidArgumentError{Field: "MaxIdle", Message: "must be positive"}
+	if c.MaxIdle < 0 {
+		return &InvalidArgumentError{Field: "MaxIdle", Message: "must be non-negative"}
 	}
 	if c.CreationSpec.Image == "" {
 		return &InvalidArgumentError{Field: "CreationSpec.Image", Message: "image is required"}

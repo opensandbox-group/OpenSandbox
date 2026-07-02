@@ -27,11 +27,13 @@ import (
 type SandboxPool struct {
 	config PoolConfig
 
-	mu       sync.Mutex
-	state    PoolState
-	inFlight int32 // atomic
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	mu         sync.Mutex
+	state      PoolState
+	inFlight   int32 // atomic
+	stopCh     chan struct{}
+	doneCh     chan struct{}
+	started    int32 // atomic: 1 if reconciler goroutine launched
+	shutdownMu sync.Once
 
 	recon *reconcileState
 }
@@ -63,6 +65,7 @@ func (p *SandboxPool) Start(ctx context.Context) error {
 	p.state = PoolStateRunning
 	p.mu.Unlock()
 
+	atomic.StoreInt32(&p.started, 1)
 	go p.runReconcileLoop(ctx)
 	return nil
 }
@@ -70,15 +73,18 @@ func (p *SandboxPool) Start(ctx context.Context) error {
 // Acquire obtains a sandbox from the pool. If no idle sandbox is available,
 // behavior depends on AcquirePolicy (default: DirectCreate).
 func (p *SandboxPool) Acquire(ctx context.Context, opts ...AcquireOption) (*Sandbox, error) {
+	// Increment inFlight first, then check state to prevent race with Shutdown.
+	atomic.AddInt32(&p.inFlight, 1)
+
 	p.mu.Lock()
-	if p.state != PoolStateRunning {
-		state := p.state
-		p.mu.Unlock()
-		return nil, &PoolNotRunningError{PoolName: p.config.PoolName, State: state}
-	}
+	state := p.state
 	p.mu.Unlock()
 
-	atomic.AddInt32(&p.inFlight, 1)
+	if state != PoolStateRunning {
+		atomic.AddInt32(&p.inFlight, -1)
+		return nil, &PoolNotRunningError{PoolName: p.config.PoolName, State: state}
+	}
+
 	defer atomic.AddInt32(&p.inFlight, -1)
 
 	o := &acquireOpts{policy: DirectCreate}
@@ -93,13 +99,22 @@ func (p *SandboxPool) Acquire(ctx context.Context, opts ...AcquireOption) (*Sand
 	}
 
 	if ok {
-		sb, err := p.connectAndValidate(ctx, sandboxID, o.sandboxTimeout)
-		if err == nil {
+		sb, connectErr := p.connectAndValidate(ctx, sandboxID, o.sandboxTimeout)
+		if connectErr == nil {
 			return sb, nil
 		}
-		// Stale sandbox; clean up and fall through
+		// Stale sandbox; clean up
 		_ = p.config.StateStore.RemoveIdle(ctx, p.config.PoolName, sandboxID)
 		go p.killSandbox(sandboxID)
+
+		// Under FailFast, report the actual connect failure
+		if o.policy == FailFast {
+			return nil, &PoolAcquireFailedError{
+				PoolName:  p.config.PoolName,
+				SandboxID: sandboxID,
+				Err:       connectErr,
+			}
+		}
 	}
 
 	// No idle sandbox available
@@ -111,10 +126,11 @@ func (p *SandboxPool) Acquire(ctx context.Context, opts ...AcquireOption) (*Sand
 	}
 }
 
-// Resize dynamically changes the target idle count.
+// Resize dynamically changes the target idle count. Zero is allowed to
+// temporarily disable replenishment without shutting down.
 func (p *SandboxPool) Resize(_ context.Context, maxIdle int) error {
-	if maxIdle <= 0 {
-		return &InvalidArgumentError{Field: "maxIdle", Message: "must be positive"}
+	if maxIdle < 0 {
+		return &InvalidArgumentError{Field: "maxIdle", Message: "must be non-negative"}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -160,22 +176,35 @@ func (p *SandboxPool) Snapshot() PoolSnapshot {
 
 // Shutdown gracefully stops the pool. It waits for in-flight operations
 // to complete (up to DrainTimeout), then kills remaining idle sandboxes.
+// Shutdown is idempotent and safe to call concurrently.
 func (p *SandboxPool) Shutdown(ctx context.Context) error {
-	p.mu.Lock()
-	if p.state == PoolStateStopped {
+	var alreadyStopped bool
+
+	p.shutdownMu.Do(func() {
+		p.mu.Lock()
+		if p.state == PoolStateStopped {
+			alreadyStopped = true
+			p.mu.Unlock()
+			return
+		}
+		p.state = PoolStateDraining
 		p.mu.Unlock()
+
+		// Signal reconciler to stop
+		close(p.stopCh)
+	})
+
+	if alreadyStopped {
 		return nil
 	}
-	p.state = PoolStateDraining
-	p.mu.Unlock()
 
-	// Signal reconciler to stop
-	close(p.stopCh)
-
-	// Wait for reconciler goroutine to finish
-	select {
-	case <-p.doneCh:
-	case <-ctx.Done():
+	// Wait for reconciler goroutine to finish (only if it was started)
+	if atomic.LoadInt32(&p.started) == 1 {
+		select {
+		case <-p.doneCh:
+		case <-ctx.Done():
+			// Context expired; proceed with cleanup anyway
+		}
 	}
 
 	// Wait for in-flight operations
@@ -206,8 +235,12 @@ done:
 func (p *SandboxPool) runReconcileLoop(ctx context.Context) {
 	defer close(p.doneCh)
 
+	// Create a cancellable context for reconcile work
+	reconCtx, reconCancel := context.WithCancel(ctx)
+	defer reconCancel()
+
 	// Immediate first tick
-	p.runReconcileTick(ctx)
+	p.runReconcileTick(reconCtx)
 
 	ticker := time.NewTicker(p.config.ReconcileInterval)
 	defer ticker.Stop()
@@ -215,16 +248,25 @@ func (p *SandboxPool) runReconcileLoop(ctx context.Context) {
 	for {
 		select {
 		case <-p.stopCh:
+			reconCancel()
 			return
 		case <-ctx.Done():
+			reconCancel()
 			return
 		case <-ticker.C:
-			p.runReconcileTick(ctx)
+			p.runReconcileTick(reconCtx)
 		}
 	}
 }
 
 func (p *SandboxPool) runReconcileTick(ctx context.Context) {
+	// Check if shutting down
+	select {
+	case <-p.stopCh:
+		return
+	default:
+	}
+
 	// Acquire leader lock
 	acquired, err := p.config.StateStore.TryAcquireLock(ctx, p.config.PoolName, p.config.OwnerID, p.config.PrimaryLockTTL)
 	if err != nil || !acquired {
@@ -290,7 +332,13 @@ func (p *SandboxPool) runReconcileTick(ctx context.Context) {
 
 func (p *SandboxPool) warmupOne(ctx context.Context) error {
 	spec := p.config.CreationSpec
-	timeout := spec.Timeout
+
+	// Use idle timeout as sandbox TTL to align server-side expiration with pool membership.
+	idleSecs := int(p.config.IdleTimeout.Seconds())
+	timeout := idleSecs
+	if spec.Timeout > 0 && spec.Timeout < idleSecs {
+		timeout = spec.Timeout
+	}
 	if timeout == 0 {
 		timeout = DefaultTimeoutSeconds
 	}
@@ -318,8 +366,15 @@ func (p *SandboxPool) warmupOne(ctx context.Context) error {
 		}
 	}
 
-	// Put into idle set
-	expiresAt := time.Now().Add(p.config.IdleTimeout)
+	// Verify we still hold the lock before publishing to shared store
+	renewed, _ := p.config.StateStore.RenewLock(ctx, p.config.PoolName, p.config.OwnerID, p.config.PrimaryLockTTL)
+	if !renewed {
+		_ = sb.Kill(context.Background())
+		return fmt.Errorf("warmup: lost primary lock, discarding sandbox")
+	}
+
+	// Put into idle set with TTL aligned to sandbox server-side expiration
+	expiresAt := time.Now().Add(time.Duration(timeout) * time.Second)
 	if err := p.config.StateStore.PutIdle(ctx, p.config.PoolName, sb.ID(), expiresAt); err != nil {
 		_ = sb.Kill(context.Background())
 		return fmt.Errorf("warmup put idle: %w", err)

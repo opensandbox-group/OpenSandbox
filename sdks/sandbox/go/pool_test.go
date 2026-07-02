@@ -32,9 +32,14 @@ func TestNewSandboxPoolValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "missing max idle",
-			config:  PoolConfig{PoolName: "test", MaxIdle: 0, CreationSpec: PoolCreationSpec{Image: "test"}, StateStore: NewInMemoryPoolStateStore()},
+			name:    "negative max idle",
+			config:  PoolConfig{PoolName: "test", MaxIdle: -1, CreationSpec: PoolCreationSpec{Image: "test"}, StateStore: NewInMemoryPoolStateStore()},
 			wantErr: true,
+		},
+		{
+			name:    "zero max idle is valid (disable replenishment)",
+			config:  PoolConfig{PoolName: "test", MaxIdle: 0, CreationSpec: PoolCreationSpec{Image: "test"}, StateStore: NewInMemoryPoolStateStore()},
+			wantErr: false,
 		},
 		{
 			name:    "missing image",
@@ -141,6 +146,27 @@ func TestInMemoryPoolStateStore(t *testing.T) {
 	count, _ = store.CountIdle(ctx, pool)
 	if count != 0 {
 		t.Errorf("CountIdle after remove = %d, want 0", count)
+	}
+}
+
+func TestInMemoryPoolStateStoreTryTakeSkipsExpired(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryPoolStateStore()
+	pool := "test-pool"
+
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+	store.PutIdle(ctx, pool, "expired-1", past)
+	store.PutIdle(ctx, pool, "expired-2", past)
+	store.PutIdle(ctx, pool, "valid-1", future)
+
+	// Should skip expired entries and return the valid one
+	id, ok, err := store.TryTakeIdle(ctx, pool)
+	if err != nil {
+		t.Fatalf("TryTakeIdle error: %v", err)
+	}
+	if !ok || id != "valid-1" {
+		t.Errorf("TryTakeIdle = (%q, %v), want (valid-1, true)", id, ok)
 	}
 }
 
