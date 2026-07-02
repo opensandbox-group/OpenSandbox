@@ -26,6 +26,7 @@ type PoolState int
 const (
 	PoolStateCreated  PoolState = iota
 	PoolStateRunning
+	PoolStateDegraded
 	PoolStateDraining
 	PoolStateStopped
 )
@@ -36,6 +37,8 @@ func (s PoolState) String() string {
 		return "CREATED"
 	case PoolStateRunning:
 		return "RUNNING"
+	case PoolStateDegraded:
+		return "DEGRADED"
 	case PoolStateDraining:
 		return "DRAINING"
 	case PoolStateStopped:
@@ -181,6 +184,7 @@ type PoolCreationSpec struct {
 	NetworkPolicy  *NetworkPolicy
 	Volumes        []Volume
 	Extensions     map[string]string
+	ImageAuth      *ImageAuth
 }
 
 // PoolSnapshot contains a point-in-time view of pool state.

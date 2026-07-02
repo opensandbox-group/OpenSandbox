@@ -92,9 +92,9 @@ func (p *SandboxPool) Acquire(ctx context.Context, opts ...AcquireOption) (*Sand
 		fn(o)
 	}
 
-	// Try to get an idle sandbox
+	// Try to get an idle sandbox; on transient store error, fall through to direct create
 	sandboxID, ok, err := p.config.StateStore.TryTakeIdle(ctx, p.config.PoolName)
-	if err != nil {
+	if err != nil && o.policy == FailFast {
 		return nil, fmt.Errorf("pool %q: state store error: %w", p.config.PoolName, err)
 	}
 
@@ -117,7 +117,7 @@ func (p *SandboxPool) Acquire(ctx context.Context, opts ...AcquireOption) (*Sand
 		}
 	}
 
-	// No idle sandbox available
+	// No idle sandbox available (or store error under DirectCreate)
 	switch o.policy {
 	case FailFast:
 		return nil, &PoolEmptyError{PoolName: p.config.PoolName}
@@ -164,8 +164,14 @@ func (p *SandboxPool) Snapshot() PoolSnapshot {
 	idleCount, _ := p.config.StateStore.CountIdle(context.Background(), p.config.PoolName)
 	failureCount, lastError, backoffActive := p.recon.snapshot()
 
+	// Reflect degraded state when in backoff
+	reportedState := state
+	if state == PoolStateRunning && backoffActive {
+		reportedState = PoolStateDegraded
+	}
+
 	return PoolSnapshot{
-		State:         state,
+		State:         reportedState,
 		IdleCount:     idleCount,
 		InFlight:      atomic.LoadInt32(&p.inFlight),
 		FailureCount:  failureCount,
@@ -177,6 +183,7 @@ func (p *SandboxPool) Snapshot() PoolSnapshot {
 // Shutdown gracefully stops the pool. It waits for in-flight operations
 // to complete (up to DrainTimeout), then kills remaining idle sandboxes.
 // Shutdown is idempotent and safe to call concurrently.
+// Returns an error if idle sandbox cleanup fails.
 func (p *SandboxPool) Shutdown(ctx context.Context) error {
 	var alreadyStopped bool
 
@@ -203,7 +210,6 @@ func (p *SandboxPool) Shutdown(ctx context.Context) error {
 		select {
 		case <-p.doneCh:
 		case <-ctx.Done():
-			// Context expired; proceed with cleanup anyway
 		}
 	}
 
@@ -219,21 +225,31 @@ func (p *SandboxPool) Shutdown(ctx context.Context) error {
 
 done:
 	// Kill all remaining idle sandboxes
-	p.ReleaseAllIdle(context.Background())
+	_, releaseErr := p.ReleaseAllIdle(context.Background())
 
 	// Release the leader lock
-	_ = p.config.StateStore.ReleaseLock(context.Background(), p.config.PoolName, p.config.OwnerID)
+	if p.config.StateStore != nil {
+		_ = p.config.StateStore.ReleaseLock(context.Background(), p.config.PoolName, p.config.OwnerID)
+	}
 
 	p.mu.Lock()
 	p.state = PoolStateStopped
 	p.mu.Unlock()
 
-	return nil
+	return releaseErr
 }
 
 // runReconcileLoop is the background goroutine that maintains idle sandbox count.
 func (p *SandboxPool) runReconcileLoop(ctx context.Context) {
-	defer close(p.doneCh)
+	defer func() {
+		close(p.doneCh)
+		// If context was cancelled, transition to STOPPED
+		p.mu.Lock()
+		if p.state == PoolStateRunning {
+			p.state = PoolStateStopped
+		}
+		p.mu.Unlock()
+	}()
 
 	// Create a cancellable context for reconcile work
 	reconCtx, reconCancel := context.WithCancel(ctx)
@@ -353,6 +369,10 @@ func (p *SandboxPool) warmupOne(ctx context.Context) error {
 		NetworkPolicy:  spec.NetworkPolicy,
 		Volumes:        spec.Volumes,
 		Extensions:     spec.Extensions,
+		ImageAuth:      spec.ImageAuth,
+		HealthCheck:    p.config.HealthCheck,
+		ReadyTimeout:   p.config.AcquireReadyTimeout,
+		HealthCheckInterval: p.config.AcquireHealthCheckInterval,
 	})
 	if err != nil {
 		return fmt.Errorf("warmup create: %w", err)
@@ -408,10 +428,14 @@ func (p *SandboxPool) connectAndValidate(ctx context.Context, sandboxID string, 
 
 func (p *SandboxPool) directCreate(ctx context.Context, timeout time.Duration) (*Sandbox, error) {
 	spec := p.config.CreationSpec
-	t := spec.Timeout
+
+	// Use idle timeout as default TTL for consistency with warmed sandboxes
+	t := int(p.config.IdleTimeout.Seconds())
+	if spec.Timeout > 0 && spec.Timeout < t {
+		t = spec.Timeout
+	}
 	if timeout > 0 {
-		secs := int(timeout.Seconds())
-		t = secs
+		t = int(timeout.Seconds())
 	}
 	if t == 0 {
 		t = DefaultTimeoutSeconds
@@ -427,7 +451,10 @@ func (p *SandboxPool) directCreate(ctx context.Context, timeout time.Duration) (
 		NetworkPolicy:  spec.NetworkPolicy,
 		Volumes:        spec.Volumes,
 		Extensions:     spec.Extensions,
+		ImageAuth:      spec.ImageAuth,
 		HealthCheck:    p.config.HealthCheck,
+		ReadyTimeout:   p.config.AcquireReadyTimeout,
+		HealthCheckInterval: p.config.AcquireHealthCheckInterval,
 	})
 }
 
