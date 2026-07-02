@@ -52,15 +52,23 @@ func NewSandboxPool(config PoolConfig) *SandboxPool {
 
 // Start begins the background reconciliation loop. Returns an error if
 // the pool configuration is invalid or the pool is already started.
+// A stopped pool can be restarted by calling Start again.
 func (p *SandboxPool) Start(ctx context.Context) error {
 	if err := p.config.validate(); err != nil {
 		return err
 	}
 
 	p.mu.Lock()
-	if p.state != PoolStateCreated {
+	if p.state == PoolStateRunning {
 		p.mu.Unlock()
 		return &PoolNotRunningError{PoolName: p.config.PoolName, State: p.state}
+	}
+	// Allow restart from STOPPED state
+	if p.state == PoolStateStopped {
+		p.stopCh = make(chan struct{})
+		p.doneCh = make(chan struct{})
+		p.shutdownMu = sync.Once{}
+		p.recon = newReconcileState(p.config.DegradedThreshold)
 	}
 	p.state = PoolStateRunning
 	p.mu.Unlock()
@@ -242,13 +250,22 @@ done:
 // runReconcileLoop is the background goroutine that maintains idle sandbox count.
 func (p *SandboxPool) runReconcileLoop(ctx context.Context) {
 	defer func() {
-		close(p.doneCh)
-		// If context was cancelled, transition to STOPPED
+		// If context was cancelled (not graceful shutdown), clean up idle sandboxes
 		p.mu.Lock()
-		if p.state == PoolStateRunning {
+		wasRunning := p.state == PoolStateRunning
+		if wasRunning {
 			p.state = PoolStateStopped
 		}
 		p.mu.Unlock()
+
+		if wasRunning {
+			p.ReleaseAllIdle(context.Background())
+			if p.config.StateStore != nil {
+				_ = p.config.StateStore.ReleaseLock(context.Background(), p.config.PoolName, p.config.OwnerID)
+			}
+		}
+
+		close(p.doneCh)
 	}()
 
 	// Create a cancellable context for reconcile work
@@ -360,18 +377,19 @@ func (p *SandboxPool) warmupOne(ctx context.Context) error {
 	}
 
 	sb, err := CreateSandbox(ctx, p.config.ConnectionConfig, SandboxCreateOptions{
-		Image:          spec.Image,
-		Entrypoint:     spec.Entrypoint,
-		ResourceLimits: spec.ResourceLimits,
-		TimeoutSeconds: &timeout,
-		Env:            spec.Env,
-		Metadata:       spec.Metadata,
-		NetworkPolicy:  spec.NetworkPolicy,
-		Volumes:        spec.Volumes,
-		Extensions:     spec.Extensions,
-		ImageAuth:      spec.ImageAuth,
-		HealthCheck:    p.config.HealthCheck,
-		ReadyTimeout:   p.config.AcquireReadyTimeout,
+		Image:            spec.Image,
+		Entrypoint:       spec.Entrypoint,
+		ResourceLimits:   spec.ResourceLimits,
+		ResourceRequests: spec.ResourceRequests,
+		TimeoutSeconds:   &timeout,
+		Env:              spec.Env,
+		Metadata:         spec.Metadata,
+		NetworkPolicy:    spec.NetworkPolicy,
+		Volumes:          spec.Volumes,
+		Extensions:       spec.Extensions,
+		ImageAuth:        spec.ImageAuth,
+		HealthCheck:      p.config.HealthCheck,
+		ReadyTimeout:     p.config.AcquireReadyTimeout,
 		HealthCheckInterval: p.config.AcquireHealthCheckInterval,
 	})
 	if err != nil {
@@ -386,6 +404,13 @@ func (p *SandboxPool) warmupOne(ctx context.Context) error {
 		}
 	}
 
+	// Renew server-side TTL after preparer to align with idle expiry stamp
+	idleDur := time.Duration(timeout) * time.Second
+	if _, err := sb.Renew(ctx, idleDur); err != nil {
+		_ = sb.Kill(context.Background())
+		return fmt.Errorf("warmup renew: %w", err)
+	}
+
 	// Verify we still hold the lock before publishing to shared store
 	renewed, _ := p.config.StateStore.RenewLock(ctx, p.config.PoolName, p.config.OwnerID, p.config.PrimaryLockTTL)
 	if !renewed {
@@ -394,7 +419,7 @@ func (p *SandboxPool) warmupOne(ctx context.Context) error {
 	}
 
 	// Put into idle set with TTL aligned to sandbox server-side expiration
-	expiresAt := time.Now().Add(time.Duration(timeout) * time.Second)
+	expiresAt := time.Now().Add(idleDur)
 	if err := p.config.StateStore.PutIdle(ctx, p.config.PoolName, sb.ID(), expiresAt); err != nil {
 		_ = sb.Kill(context.Background())
 		return fmt.Errorf("warmup put idle: %w", err)
@@ -442,18 +467,19 @@ func (p *SandboxPool) directCreate(ctx context.Context, timeout time.Duration) (
 	}
 
 	return CreateSandbox(ctx, p.config.ConnectionConfig, SandboxCreateOptions{
-		Image:          spec.Image,
-		Entrypoint:     spec.Entrypoint,
-		ResourceLimits: spec.ResourceLimits,
-		TimeoutSeconds: &t,
-		Env:            spec.Env,
-		Metadata:       spec.Metadata,
-		NetworkPolicy:  spec.NetworkPolicy,
-		Volumes:        spec.Volumes,
-		Extensions:     spec.Extensions,
-		ImageAuth:      spec.ImageAuth,
-		HealthCheck:    p.config.HealthCheck,
-		ReadyTimeout:   p.config.AcquireReadyTimeout,
+		Image:            spec.Image,
+		Entrypoint:       spec.Entrypoint,
+		ResourceLimits:   spec.ResourceLimits,
+		ResourceRequests: spec.ResourceRequests,
+		TimeoutSeconds:   &t,
+		Env:              spec.Env,
+		Metadata:         spec.Metadata,
+		NetworkPolicy:    spec.NetworkPolicy,
+		Volumes:          spec.Volumes,
+		Extensions:       spec.Extensions,
+		ImageAuth:        spec.ImageAuth,
+		HealthCheck:      p.config.HealthCheck,
+		ReadyTimeout:     p.config.AcquireReadyTimeout,
 		HealthCheckInterval: p.config.AcquireHealthCheckInterval,
 	})
 }

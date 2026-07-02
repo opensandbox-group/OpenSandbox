@@ -136,7 +136,14 @@ func (s *InMemoryPoolStateStore) ReapExpired(_ context.Context, poolName string,
 func (s *InMemoryPoolStateStore) CountIdle(_ context.Context, poolName string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.idle[poolName]), nil
+	now := time.Now()
+	count := 0
+	for _, e := range s.idle[poolName] {
+		if now.Before(e.ExpiresAt) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (s *InMemoryPoolStateStore) TryAcquireLock(_ context.Context, poolName, ownerID string, ttl time.Duration) (bool, error) {

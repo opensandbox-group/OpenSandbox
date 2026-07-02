@@ -49,9 +49,14 @@ func (r *reconcileState) recordFailure(errMsg string) {
 	r.lastError = errMsg
 	if r.failureCount >= r.threshold {
 		r.backoffAttempts++
-		backoff := time.Duration(1<<uint(r.backoffAttempts-1)) * 30 * time.Second
+		// Clamp shift to prevent overflow of time.Duration (max ~292 years)
+		shift := r.backoffAttempts - 1
+		if shift > 20 {
+			shift = 20
+		}
+		backoff := time.Duration(1<<uint(shift)) * 30 * time.Second
 		maxBackoff := 24 * time.Hour
-		if backoff > maxBackoff {
+		if backoff <= 0 || backoff > maxBackoff {
 			backoff = maxBackoff
 		}
 		r.backoffUntil = time.Now().Add(backoff)

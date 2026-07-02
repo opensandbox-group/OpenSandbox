@@ -175,16 +175,17 @@ func (c *PoolConfig) applyDefaults() {
 
 // PoolCreationSpec is the template for creating sandboxes in the pool.
 type PoolCreationSpec struct {
-	Image          string
-	Timeout        int
-	Entrypoint     []string
-	ResourceLimits ResourceLimits
-	Env            map[string]string
-	Metadata       map[string]string
-	NetworkPolicy  *NetworkPolicy
-	Volumes        []Volume
-	Extensions     map[string]string
-	ImageAuth      *ImageAuth
+	Image            string
+	Timeout          int
+	Entrypoint       []string
+	ResourceLimits   ResourceLimits
+	ResourceRequests ResourceLimits
+	Env              map[string]string
+	Metadata         map[string]string
+	NetworkPolicy    *NetworkPolicy
+	Volumes          []Volume
+	Extensions       map[string]string
+	ImageAuth        *ImageAuth
 }
 
 // PoolSnapshot contains a point-in-time view of pool state.
