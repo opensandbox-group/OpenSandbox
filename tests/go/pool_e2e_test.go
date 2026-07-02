@@ -16,7 +16,6 @@ package e2e
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -26,9 +25,6 @@ import (
 )
 
 func TestPool_AcquireFromPreWarmedIdle(t *testing.T) {
-	if os.Getenv("RUN_POOL_E2E") != "true" {
-		t.Skip("Set RUN_POOL_E2E=true to run pool e2e tests")
-	}
 
 	config := getConnectionConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -83,9 +79,6 @@ func TestPool_AcquireFromPreWarmedIdle(t *testing.T) {
 }
 
 func TestPool_AcquireFailFastWhenEmpty(t *testing.T) {
-	if os.Getenv("RUN_POOL_E2E") != "true" {
-		t.Skip("Set RUN_POOL_E2E=true to run pool e2e tests")
-	}
 
 	config := getConnectionConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -117,9 +110,6 @@ func TestPool_AcquireFailFastWhenEmpty(t *testing.T) {
 }
 
 func TestPool_AcquireDirectCreateFallback(t *testing.T) {
-	if os.Getenv("RUN_POOL_E2E") != "true" {
-		t.Skip("Set RUN_POOL_E2E=true to run pool e2e tests")
-	}
 
 	config := getConnectionConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -153,9 +143,6 @@ func TestPool_AcquireDirectCreateFallback(t *testing.T) {
 }
 
 func TestPool_ResizeAndSnapshot(t *testing.T) {
-	if os.Getenv("RUN_POOL_E2E") != "true" {
-		t.Skip("Set RUN_POOL_E2E=true to run pool e2e tests")
-	}
 
 	config := getConnectionConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -207,9 +194,6 @@ func TestPool_ResizeAndSnapshot(t *testing.T) {
 }
 
 func TestPool_GracefulShutdown(t *testing.T) {
-	if os.Getenv("RUN_POOL_E2E") != "true" {
-		t.Skip("Set RUN_POOL_E2E=true to run pool e2e tests")
-	}
 
 	config := getConnectionConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
