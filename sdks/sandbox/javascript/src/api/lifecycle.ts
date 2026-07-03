@@ -1151,6 +1151,25 @@ export interface components {
              */
             secureAccess: boolean;
             /**
+             * @description Kubernetes ServiceAccount bound to the sandbox Pod.
+             *
+             *     Only meaningful for Kubernetes-based runtimes; ignored by the Docker
+             *     runtime. When provided, the sandbox Pod runs under this ServiceAccount,
+             *     enabling per-sandbox cloud identity (e.g. Workload Identity federation)
+             *     and least-privilege access to external resources.
+             *
+             *     When omitted, the server falls back to the globally configured default
+             *     ServiceAccount (`kubernetes.service_account`); if neither is set, the
+             *     namespace `default` ServiceAccount is used.
+             *
+             *     The ServiceAccount must already exist in the sandbox namespace, and the
+             *     name must be a valid RFC 1123 DNS label. Not supported together with
+             *     `extensions.poolRef` (pool ServiceAccount is defined by the pool
+             *     template).
+             * @example agent-finance-sa
+             */
+            serviceAccountName?: string;
+            /**
              * @description Storage mounts for the sandbox. Each volume entry specifies a named backend-specific
              *     storage source and common mount settings. Exactly one backend type must be specified
              *     per volume entry.
@@ -1253,14 +1272,18 @@ export interface components {
         };
         /**
          * @description Credential Vault proxy startup settings. This is an explicit opt-in for
-         *     transparent MITM support used by credential injection; plain egress
-         *     network policy remains DNS/FQDN policy enforcement only.
+         *     transparent MITM support used by credential injection. Credential Vault
+         *     requires `dns+nft` enforcement and a network policy. A deny-default policy
+         *     is strongly recommended; default-allow remains temporarily supported for
+         *     backward compatibility and emits a security warning.
          */
         CredentialProxyConfig: {
             /**
              * @description When true, the server starts the egress sidecar with transparent
              *     MITM enabled and installs the runtime-managed MITM CA bundle into
-             *     the sandbox container. Requires `networkPolicy`.
+             *     the sandbox container. Requires `networkPolicy` and server
+             *     `[egress].mode = "dns+nft"`. `defaultAction: deny` is strongly
+             *     recommended; default-allow support is deprecated.
              * @default false
              */
             enabled: boolean;

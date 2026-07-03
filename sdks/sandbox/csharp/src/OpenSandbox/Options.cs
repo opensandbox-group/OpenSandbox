@@ -101,6 +101,14 @@ public class SandboxCreateOptions
     public bool SecureAccess { get; set; }
 
     /// <summary>
+    /// Gets or sets the Kubernetes ServiceAccount bound to the sandbox Pod,
+    /// enabling per-sandbox cloud identity (e.g. Workload Identity federation).
+    /// Ignored by the Docker runtime; not supported together with pool-based
+    /// creation.
+    /// </summary>
+    public string? ServiceAccountName { get; set; }
+
+    /// <summary>
     /// Gets or sets the resource limits.
     /// </summary>
     public IReadOnlyDictionary<string, string>? Resource { get; set; }

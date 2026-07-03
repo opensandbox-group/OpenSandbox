@@ -108,6 +108,55 @@ class TestAgentSandboxProvider:
         assert "containers" in body["spec"]["podTemplate"]["spec"]
         assert "volumes" in body["spec"]["podTemplate"]["spec"]
 
+    def test_create_workload_per_request_service_account_overrides_config(self, mock_k8s_client):
+        """A per-request serviceAccountName overrides the configured default SA."""
+        provider = AgentSandboxProvider(
+            mock_k8s_client,
+            _app_config(shutdown_policy="Delete", service_account="agent-sa"),
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+            service_account_name="agent-override-sa",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        assert body["spec"]["podTemplate"]["spec"]["serviceAccountName"] == "agent-override-sa"
+
+    def test_create_workload_without_service_account_omits_field(self, mock_k8s_client):
+        """No configured SA and none requested leaves serviceAccountName unset."""
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config())
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        assert "serviceAccountName" not in body["spec"]["podTemplate"]["spec"]
+
+
     def test_create_workload_injects_platform_node_selector(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client, _app_config())
         mock_k8s_client.create_custom_object.return_value = {

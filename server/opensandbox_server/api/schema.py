@@ -478,6 +478,22 @@ class CreateSandboxRequest(BaseModel):
             "When enabled, the server provisions access credentials and returns required endpoint headers."
         ),
     )
+    service_account_name: Optional[str] = Field(
+        None,
+        alias="serviceAccountName",
+        min_length=1,
+        max_length=253,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        description=(
+            "Kubernetes ServiceAccount bound to the sandbox Pod. Only meaningful for "
+            "Kubernetes-based runtimes; ignored by the Docker runtime. When provided, the "
+            "sandbox Pod runs under this ServiceAccount, enabling per-sandbox cloud identity "
+            "(e.g. Workload Identity federation). When omitted, falls back to the globally "
+            "configured default ServiceAccount (kubernetes.service_account), then the namespace "
+            "default. The ServiceAccount must already exist in the sandbox namespace. Not "
+            "supported together with extensions.poolRef."
+        ),
+    )
     volumes: Optional[List[Volume]] = Field(
         None,
         description=(
@@ -501,6 +517,11 @@ class CreateSandboxRequest(BaseModel):
                 raise ValueError("snapshotId cannot be used together with poolRef.")
             if self.credential_proxy and self.credential_proxy.enabled:
                 raise ValueError("credentialProxy.enabled cannot be used together with poolRef.")
+            if self.service_account_name:
+                raise ValueError(
+                    "serviceAccountName cannot be used together with poolRef. "
+                    "The ServiceAccount is defined by the pool template."
+                )
             # Normalize blank snapshotId so downstream code won't see
             # a truthy whitespace string (e.g. "   ") as a real value.
             if self.snapshot_id is not None and not self.snapshot_id.strip():

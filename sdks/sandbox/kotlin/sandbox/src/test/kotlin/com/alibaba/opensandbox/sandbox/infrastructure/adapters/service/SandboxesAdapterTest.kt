@@ -160,6 +160,75 @@ class SandboxesAdapterTest {
     }
 
     @Test
+    fun `createSandbox should forward serviceAccountName in request`() {
+        val responseBody =
+            """
+            {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "status": { "state": "Running" },
+                "createdAt": "2023-01-01T10:00:00Z",
+                "entrypoint": ["bash"]
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        val spec = SandboxImageSpec.builder().image("ubuntu:latest").build()
+        sandboxesAdapter.createSandbox(
+            spec = spec,
+            entrypoint = listOf("bash"),
+            env = emptyMap(),
+            metadata = emptyMap(),
+            timeout = Duration.ofSeconds(600),
+            resource = mapOf("cpu" to "1"),
+            networkPolicy = null,
+            extensions = emptyMap(),
+            volumes = null,
+            secureAccess = false,
+            snapshotId = null,
+            serviceAccountName = "agent-finance-sa",
+        )
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("agent-finance-sa", payload["serviceAccountName"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `createSandbox should not send a serviceAccountName value when not provided`() {
+        val responseBody =
+            """
+            {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "status": { "state": "Running" },
+                "createdAt": "2023-01-01T10:00:00Z",
+                "entrypoint": ["bash"]
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        val spec = SandboxImageSpec.builder().image("ubuntu:latest").build()
+        sandboxesAdapter.createSandbox(
+            spec = spec,
+            entrypoint = listOf("bash"),
+            env = emptyMap(),
+            metadata = emptyMap(),
+            timeout = Duration.ofSeconds(600),
+            resource = mapOf("cpu" to "1"),
+            networkPolicy = null,
+            extensions = emptyMap(),
+            volumes = null,
+            secureAccess = false,
+            snapshotId = null,
+        )
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        // The generated client serializes unset optional fields as explicit JSON null,
+        // which the server treats as "not provided".
+        assertEquals(JsonNull, payload["serviceAccountName"])
+    }
+
+    @Test
     fun `createSandbox should forward windows platform in request`() {
         val responseBody =
             """

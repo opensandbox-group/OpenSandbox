@@ -745,6 +745,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     egress_env=context.egress_env,
                     volumes=request.volumes,
                     platform=request.platform,
+                    service_account_name=request.service_account_name,
                 )
                 workload_left_alive = True
             except ValueError:

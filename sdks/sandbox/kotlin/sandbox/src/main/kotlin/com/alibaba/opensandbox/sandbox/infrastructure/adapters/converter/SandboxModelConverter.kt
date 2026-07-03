@@ -263,6 +263,7 @@ internal object SandboxModelConverter {
         volumes: List<Volume>?,
         snapshotId: String?,
         resourceRequests: Map<String, String>? = null,
+        serviceAccountName: String? = null,
     ): CreateSandboxRequest {
         return CreateSandboxRequest(
             image = spec?.toApiImageSpec(),
@@ -277,6 +278,7 @@ internal object SandboxModelConverter {
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
             credentialProxy = credentialProxy?.toApiCredentialProxyConfig(),
             secureAccess = secureAccess,
+            serviceAccountName = serviceAccountName,
             extensions = extensions,
             volumes = volumes?.map { it.toApiVolume() },
         )

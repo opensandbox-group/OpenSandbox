@@ -55,6 +55,8 @@ interface Sandboxes {
      * @param extensions Opaque extension parameters passed through to the server as-is. Prefer namespaced keys
      * @param volumes Optional list of volume mounts for persistent storage
      * @param snapshotId Optional snapshot identifier used to restore a sandbox instead of booting from an image
+     * @param serviceAccountName Optional Kubernetes ServiceAccount bound to the sandbox Pod. Ignored by the Docker
+     *   runtime; not supported together with pool-based creation.
      * @return Sandbox creation response containing the sandbox id
      */
     fun createSandbox(
@@ -71,6 +73,7 @@ interface Sandboxes {
         secureAccess: Boolean = false,
         snapshotId: String? = null,
         resourceRequests: Map<String, String>? = null,
+        serviceAccountName: String? = null,
     ): SandboxCreateResponse
 
     /**
@@ -91,6 +94,7 @@ interface Sandboxes {
         snapshotId: String? = null,
         credentialProxy: CredentialProxyConfig?,
         resourceRequests: Map<String, String>? = null,
+        serviceAccountName: String? = null,
     ): SandboxCreateResponse {
         if (credentialProxy == null) {
             return createSandbox(
@@ -107,6 +111,7 @@ interface Sandboxes {
                 secureAccess = secureAccess,
                 snapshotId = snapshotId,
                 resourceRequests = resourceRequests,
+                serviceAccountName = serviceAccountName,
             )
         }
         throw UnsupportedOperationException(

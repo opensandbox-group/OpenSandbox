@@ -315,6 +315,8 @@ class Sandbox internal constructor(
          * @param healthCheckPollingInterval Polling interval for readiness/health check
          * @param extensions Optional extension parameters for server-side customized behaviors
          * @param volumes Optional list of volume mounts for persistent storage
+         * @param serviceAccountName Optional Kubernetes ServiceAccount bound to the sandbox Pod. Ignored by the Docker
+         *   runtime; not supported together with pool-based creation.
          * @return Fully configured and ready Sandbox instance
          * @throws SandboxException if sandbox creation or initialization fails
          */
@@ -338,6 +340,7 @@ class Sandbox internal constructor(
             skipHealthCheck: Boolean,
             volumes: List<Volume>?,
             resourceRequests: Map<String, String>? = null,
+            serviceAccountName: String? = null,
         ): Sandbox {
             val timeoutLabel = if (timeout != null) "${timeout.seconds}s" else "manual-cleanup"
             return initializeSandbox(
@@ -364,6 +367,7 @@ class Sandbox internal constructor(
                         secureAccess = secureAccess,
                         snapshotId = snapshotId,
                         resourceRequests = resourceRequests,
+                        serviceAccountName = serviceAccountName,
                     )
                 InitializationResult.NewSandbox(response.id)
             }
@@ -940,6 +944,11 @@ class Sandbox internal constructor(
         private var secureAccess: Boolean = false
 
         /**
+         * Optional Kubernetes ServiceAccount bound to the sandbox Pod.
+         */
+        private var serviceAccountName: String? = null
+
+        /**
          * Optional runtime platform constraint used for sandbox provisioning.
          */
         private var platform: PlatformSpec? = null
@@ -1222,6 +1231,18 @@ class Sandbox internal constructor(
         }
 
         /**
+         * Sets the Kubernetes ServiceAccount bound to the sandbox Pod.
+         *
+         * Enables per-sandbox cloud identity (e.g. Workload Identity federation).
+         * Ignored by the Docker runtime; not supported together with pool-based
+         * creation (`extensions["poolRef"]`).
+         */
+        fun serviceAccountName(serviceAccountName: String): Builder {
+            this.serviceAccountName = serviceAccountName
+            return this
+        }
+
+        /**
          * Sets an explicit runtime platform constraint.
          */
         fun platform(platform: PlatformSpec): Builder {
@@ -1439,6 +1460,7 @@ class Sandbox internal constructor(
                 skipHealthCheck = skipHealthCheck,
                 volumes = if (volumes.isEmpty()) null else volumes.toList(),
                 resourceRequests = resourceRequests,
+                serviceAccountName = serviceAccountName,
             )
         }
     }

@@ -816,6 +816,15 @@ public class CreateSandboxRequest
     public bool? SecureAccess { get; set; }
 
     /// <summary>
+    /// Gets or sets the Kubernetes ServiceAccount bound to the sandbox Pod,
+    /// enabling per-sandbox cloud identity (e.g. Workload Identity federation).
+    /// Ignored by the Docker runtime; not supported together with pool-based
+    /// creation.
+    /// </summary>
+    [JsonPropertyName("serviceAccountName")]
+    public string? ServiceAccountName { get; set; }
+
+    /// <summary>
     /// Gets or sets the custom metadata tags.
     /// </summary>
     [JsonPropertyName("metadata")]

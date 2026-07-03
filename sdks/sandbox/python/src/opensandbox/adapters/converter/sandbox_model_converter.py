@@ -182,6 +182,7 @@ class SandboxModelConverter:
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        service_account_name: str | None = None,
     ) -> CreateSandboxRequest:
         """Convert domain parameters to API CreateSandboxRequest."""
         from opensandbox.api.lifecycle.models.create_sandbox_request import (
@@ -314,6 +315,9 @@ class SandboxModelConverter:
             extensions=api_extensions,
             volumes=api_volumes,
             secure_access=secure_access,
+            service_account_name=(
+                service_account_name if service_account_name is not None else UNSET
+            ),
         )
         if timeout is None:
             # Preserve an explicit manual-cleanup request as JSON null.

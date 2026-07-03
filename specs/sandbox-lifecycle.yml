@@ -1315,6 +1315,29 @@ components:
             accessible without the additional access token for backward
             compatibility.
 
+        serviceAccountName:
+          type: string
+          minLength: 1
+          maxLength: 253
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          description: |
+            Kubernetes ServiceAccount bound to the sandbox Pod.
+
+            Only meaningful for Kubernetes-based runtimes; ignored by the Docker
+            runtime. When provided, the sandbox Pod runs under this ServiceAccount,
+            enabling per-sandbox cloud identity (e.g. Workload Identity federation)
+            and least-privilege access to external resources.
+
+            When omitted, the server falls back to the globally configured default
+            ServiceAccount (`kubernetes.service_account`); if neither is set, the
+            namespace `default` ServiceAccount is used.
+
+            The ServiceAccount must already exist in the sandbox namespace, and the
+            name must be a valid RFC 1123 DNS label. Not supported together with
+            `extensions.poolRef` (pool ServiceAccount is defined by the pool
+            template).
+          example: "agent-finance-sa"
+
         volumes:
           type: array
           description: |

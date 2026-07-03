@@ -55,6 +55,7 @@ class WorkloadProvider(ABC):
         credential_proxy_enabled: bool = False,
         resource_requests: Optional[Dict[str, str]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
+        service_account_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a new workload resource.
@@ -78,6 +79,8 @@ class WorkloadProvider(ABC):
             egress_mode: Sidecar ``OPENSANDBOX_EGRESS_MODE`` (from app ``[egress].mode`` when using network policy).
             credential_proxy_enabled: Enable transparent MITM support required by Credential Vault injection.
             volumes: Optional list of volume mounts for the sandbox.
+            service_account_name: Optional per-sandbox ServiceAccount for the Pod.
+                When omitted, providers fall back to their configured default ServiceAccount.
 
         Returns:
             Dict containing workload metadata (name, uid, etc.)

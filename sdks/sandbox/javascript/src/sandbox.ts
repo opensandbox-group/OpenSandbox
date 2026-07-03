@@ -161,6 +161,13 @@ export interface SandboxCreateOptions {
   secureAccess?: boolean;
 
   /**
+   * Kubernetes ServiceAccount bound to the sandbox Pod. Enables per-sandbox
+   * cloud identity (e.g. Workload Identity federation). Ignored by the Docker
+   * runtime; not supported together with pool-based creation.
+   */
+  serviceAccountName?: string;
+
+  /**
    * Resource limits applied to the sandbox container.
    *
    * This is forwarded to the Lifecycle API as `resourceLimits`.
@@ -381,6 +388,7 @@ export class Sandbox {
       resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
       resourceRequests: opts.resourceRequests,
       secureAccess: opts.secureAccess ?? false,
+      serviceAccountName: opts.serviceAccountName,
       env: opts.env ?? {},
       metadata: opts.metadata ?? {},
       networkPolicy: opts.networkPolicy

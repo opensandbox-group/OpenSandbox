@@ -688,6 +688,17 @@ class TestCreateSandboxRequestPoolMode:
             exc_info.value
         )
 
+    def test_pool_mode_rejects_service_account_name(self):
+        """serviceAccountName and poolRef cannot be used together."""
+        with pytest.raises(ValidationError) as exc_info:
+            CreateSandboxRequest(
+                extensions={"poolRef": "my-pool"},
+                serviceAccountName="agent-finance-sa",
+            )
+        assert "serviceAccountName cannot be used together with poolRef" in str(
+            exc_info.value
+        )
+
     def test_resource_limits_required_without_pool_ref(self):
         """Without poolRef, resourceLimits is still required (image mode)."""
         with pytest.raises(ValidationError):
@@ -710,3 +721,44 @@ class TestCreateSandboxRequestPoolMode:
             CreateSandboxRequest(
                 extensions={"poolRef": "   "},
             )
+
+
+class TestCreateSandboxRequestServiceAccount:
+    """Tests for the serviceAccountName field."""
+
+    def test_accepts_valid_service_account_name(self):
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["python"],
+            resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+            serviceAccountName="agent-finance-sa",
+        )
+        assert request.service_account_name == "agent-finance-sa"
+
+    def test_omitting_service_account_name_defaults_to_none(self):
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["python"],
+            resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+        )
+        assert request.service_account_name is None
+
+    def test_rejects_invalid_service_account_name(self):
+        """Uppercase / invalid characters violate the RFC 1123 DNS label pattern."""
+        with pytest.raises(ValidationError):
+            CreateSandboxRequest(
+                image=ImageSpec(uri="python:3.11"),
+                entrypoint=["python"],
+                resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+                serviceAccountName="Invalid_SA",
+            )
+
+    def test_rejects_empty_service_account_name(self):
+        with pytest.raises(ValidationError):
+            CreateSandboxRequest(
+                image=ImageSpec(uri="python:3.11"),
+                entrypoint=["python"],
+                resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+                serviceAccountName="",
+            )
+

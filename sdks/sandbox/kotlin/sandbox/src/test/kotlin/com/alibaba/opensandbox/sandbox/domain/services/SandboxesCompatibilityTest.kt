@@ -105,6 +105,7 @@ class SandboxesCompatibilityTest {
             secureAccess: Boolean,
             snapshotId: String?,
             resourceRequests: Map<String, String>?,
+            serviceAccountName: String?,
         ): SandboxCreateResponse = SandboxCreateResponse("legacy-sandbox")
 
         override fun getSandboxInfo(sandboxId: String): SandboxInfo = unsupported()

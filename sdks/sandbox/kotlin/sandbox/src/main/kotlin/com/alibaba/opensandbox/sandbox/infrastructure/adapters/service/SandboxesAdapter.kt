@@ -98,6 +98,7 @@ internal class SandboxesAdapter(
         secureAccess: Boolean,
         snapshotId: String?,
         resourceRequests: Map<String, String>?,
+        serviceAccountName: String?,
     ): SandboxCreateResponse =
         createSandbox(
             spec = spec,
@@ -114,6 +115,7 @@ internal class SandboxesAdapter(
             snapshotId = snapshotId,
             credentialProxy = null,
             resourceRequests = resourceRequests,
+            serviceAccountName = serviceAccountName,
         )
 
     override fun createSandbox(
@@ -131,6 +133,7 @@ internal class SandboxesAdapter(
         snapshotId: String?,
         credentialProxy: CredentialProxyConfig?,
         resourceRequests: Map<String, String>?,
+        serviceAccountName: String?,
     ): SandboxCreateResponse {
         logger.info("Creating sandbox with startup source: {}", spec?.image ?: snapshotId)
 
@@ -151,6 +154,7 @@ internal class SandboxesAdapter(
                     volumes = volumes,
                     snapshotId = snapshotId,
                     resourceRequests = resourceRequests,
+                    serviceAccountName = serviceAccountName,
                 )
             val apiResponse = api.sandboxesPost(createRequest)
             val response = apiResponse.toSandboxCreateResponse()

@@ -593,7 +593,10 @@ class KubernetesRuntimeConfig(BaseModel):
     )
     service_account: Optional[str] = Field(
         default=None,
-        description="Service account bound to sandbox workloads.",
+        description=(
+            "Default service account bound to sandbox workloads. Used when a create "
+            "request does not specify serviceAccountName; per-request values take precedence."
+        ),
     )
     workload_provider: Optional[str] = Field(
         default=None,

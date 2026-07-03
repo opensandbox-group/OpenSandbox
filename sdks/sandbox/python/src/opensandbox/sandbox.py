@@ -505,6 +505,7 @@ class Sandbox:
         credential_proxy: CredentialProxyConfig | None = None,
         extensions: dict[str, str] | None = None,
         secure_access: bool = False,
+        service_account_name: str | None = None,
         entrypoint: list[str] | None = None,
         volumes: list[Volume] | None = None,
         connection_config: ConnectionConfig | None = None,
@@ -527,6 +528,9 @@ class Sandbox:
             extensions: Opaque extension parameters passed through to the server as-is.
                 Prefer namespaced keys (e.g. ``storage.id``).
             secure_access: Whether to enable secured access for sandbox endpoints.
+            service_account_name: Optional Kubernetes ServiceAccount bound to the sandbox Pod.
+                Enables per-sandbox cloud identity (e.g. Workload Identity federation).
+                Ignored by the Docker runtime; not supported together with pool-based creation.
             entrypoint: Command to run as entrypoint
             volumes: Optional list of volume mounts for persistent storage.
                 Each volume specifies a backend (host path, PVC, or OSSFS) and mount configuration.
@@ -584,6 +588,7 @@ class Sandbox:
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
+                service_account_name=service_account_name,
             )
             sandbox_id = response.id
 

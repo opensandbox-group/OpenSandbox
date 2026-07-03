@@ -130,8 +130,10 @@ class CreateSandboxRequest:
                 object or null results in allow-all behavior at startup.
             credential_proxy (CredentialProxyConfig | Unset): Credential Vault proxy startup settings. This is an explicit
                 opt-in for
-                transparent MITM support used by credential injection; plain egress
-                network policy remains DNS/FQDN policy enforcement only.
+                transparent MITM support used by credential injection. Credential Vault
+                requires `dns+nft` enforcement and a network policy. A deny-default policy
+                is strongly recommended; default-allow remains temporarily supported for
+                backward compatibility and emits a security warning.
             secure_access (bool | Unset): Opts the sandbox into secured access for endpoint access.
                 This is currently supported only for Kubernetes sandboxes exposed
                 through ingress gateway mode. When enabled, the server provisions
@@ -141,6 +143,22 @@ class CreateSandboxRequest:
                 accessible without the additional access token for backward
                 compatibility.
                  Default: False.
+            service_account_name (str | Unset): Kubernetes ServiceAccount bound to the sandbox Pod.
+
+                Only meaningful for Kubernetes-based runtimes; ignored by the Docker
+                runtime. When provided, the sandbox Pod runs under this ServiceAccount,
+                enabling per-sandbox cloud identity (e.g. Workload Identity federation)
+                and least-privilege access to external resources.
+
+                When omitted, the server falls back to the globally configured default
+                ServiceAccount (`kubernetes.service_account`); if neither is set, the
+                namespace `default` ServiceAccount is used.
+
+                The ServiceAccount must already exist in the sandbox namespace, and the
+                name must be a valid RFC 1123 DNS label. Not supported together with
+                `extensions.poolRef` (pool ServiceAccount is defined by the pool
+                template).
+                 Example: agent-finance-sa.
             volumes (list[Volume] | Unset): Storage mounts for the sandbox. Each volume entry specifies a named backend-
                 specific
                 storage source and common mount settings. Exactly one backend type must be specified
@@ -174,6 +192,7 @@ class CreateSandboxRequest:
     network_policy: NetworkPolicy | Unset = UNSET
     credential_proxy: CredentialProxyConfig | Unset = UNSET
     secure_access: bool | Unset = False
+    service_account_name: str | Unset = UNSET
     volumes: list[Volume] | Unset = UNSET
     extensions: CreateSandboxRequestExtensions | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -225,6 +244,8 @@ class CreateSandboxRequest:
 
         secure_access = self.secure_access
 
+        service_account_name = self.service_account_name
+
         volumes: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.volumes, Unset):
             volumes = []
@@ -263,6 +284,8 @@ class CreateSandboxRequest:
             field_dict["credentialProxy"] = credential_proxy
         if secure_access is not UNSET:
             field_dict["secureAccess"] = secure_access
+        if service_account_name is not UNSET:
+            field_dict["serviceAccountName"] = service_account_name
         if volumes is not UNSET:
             field_dict["volumes"] = volumes
         if extensions is not UNSET:
@@ -354,6 +377,8 @@ class CreateSandboxRequest:
 
         secure_access = d.pop("secureAccess", UNSET)
 
+        service_account_name = d.pop("serviceAccountName", UNSET)
+
         _volumes = d.pop("volumes", UNSET)
         volumes: list[Volume] | Unset = UNSET
         if _volumes is not UNSET:
@@ -383,6 +408,7 @@ class CreateSandboxRequest:
             network_policy=network_policy,
             credential_proxy=credential_proxy,
             secure_access=secure_access,
+            service_account_name=service_account_name,
             volumes=volumes,
             extensions=extensions,
         )

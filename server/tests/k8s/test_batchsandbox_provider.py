@@ -90,6 +90,17 @@ def _app_config_with_egress_disable_ipv6(disable_ipv6: bool = True) -> AppConfig
     )
 
 
+def _app_config_with_service_account(service_account: str) -> AppConfig:
+    """Build an AppConfig with a default ``kubernetes.service_account`` set."""
+    return AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="test-ns",
+            service_account=service_account,
+        ),
+    )
+
+
 class TestBatchSandboxProvider:
     # ===== Initialization Tests =====
 
@@ -2877,6 +2888,126 @@ spec:
                 extensions={"poolRef": "my-pool"},
                 volumes=volumes,
             )
+
+    def test_create_workload_sets_per_request_service_account(self, mock_k8s_client):
+        """A per-request serviceAccountName lands on the pod spec."""
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+            service_account_name="agent-finance-sa",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pod_spec = body["spec"]["template"]["spec"]
+        assert pod_spec["serviceAccountName"] == "agent-finance-sa"
+
+    def test_create_workload_falls_back_to_configured_service_account(self, mock_k8s_client):
+        """When no per-request SA is given, the configured default is used."""
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_service_account("default-sa")
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pod_spec = body["spec"]["template"]["spec"]
+        assert pod_spec["serviceAccountName"] == "default-sa"
+
+    def test_create_workload_per_request_service_account_overrides_default(self, mock_k8s_client):
+        """A per-request SA takes precedence over the configured default."""
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_service_account("default-sa")
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+            service_account_name="agent-override-sa",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pod_spec = body["spec"]["template"]["spec"]
+        assert pod_spec["serviceAccountName"] == "agent-override-sa"
+
+    def test_create_workload_without_service_account_omits_field(self, mock_k8s_client):
+        """No SA configured and none requested leaves serviceAccountName unset."""
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pod_spec = body["spec"]["template"]["spec"]
+        assert "serviceAccountName" not in pod_spec
+
+    def test_create_workload_pool_mode_rejects_service_account(self, mock_k8s_client):
+        """Pool mode rejects a per-request serviceAccountName with a clear error."""
+        provider = BatchSandboxProvider(mock_k8s_client)
+
+        with pytest.raises(
+            ValueError, match="Pool mode does not support serviceAccountName"
+        ):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+                extensions={"poolRef": "my-pool"},
+                service_account_name="agent-finance-sa",
+            )
+
 
     def test_apply_volumes_to_pod_spec_empty_volumes(self, mock_k8s_client):
         """

@@ -29,13 +29,17 @@ T = TypeVar("T", bound="CredentialProxyConfig")
 @_attrs_define
 class CredentialProxyConfig:
     """Credential Vault proxy startup settings. This is an explicit opt-in for
-    transparent MITM support used by credential injection; plain egress
-    network policy remains DNS/FQDN policy enforcement only.
+    transparent MITM support used by credential injection. Credential Vault
+    requires `dns+nft` enforcement and a network policy. A deny-default policy
+    is strongly recommended; default-allow remains temporarily supported for
+    backward compatibility and emits a security warning.
 
         Attributes:
             enabled (bool | Unset): When true, the server starts the egress sidecar with transparent
                 MITM enabled and installs the runtime-managed MITM CA bundle into
-                the sandbox container. Requires `networkPolicy`.
+                the sandbox container. Requires `networkPolicy` and server
+                `[egress].mode = "dns+nft"`. `defaultAction: deny` is strongly
+                recommended; default-allow support is deprecated.
                  Default: False.
     """
 

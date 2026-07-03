@@ -124,6 +124,35 @@ test("Sandbox.create forwards secureAccess", async () => {
   assert.equal(recordedRequests[0].secureAccess, true);
 });
 
+test("Sandbox.create forwards serviceAccountName", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    serviceAccountName: "agent-finance-sa",
+    skipHealthCheck: true,
+  });
+
+  assert.equal(recordedRequests.length, 1);
+  assert.equal(recordedRequests[0].serviceAccountName, "agent-finance-sa");
+});
+
+test("Sandbox.create omits serviceAccountName when not provided", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    skipHealthCheck: true,
+  });
+
+  assert.equal(recordedRequests.length, 1);
+  assert.equal(recordedRequests[0].serviceAccountName, undefined);
+});
+
 test("Sandbox.create forwards credentialProxy", async () => {
   const { adapterFactory, recordedRequests } = createAdapterFactory();
 

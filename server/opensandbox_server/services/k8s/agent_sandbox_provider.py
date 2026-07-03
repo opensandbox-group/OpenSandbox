@@ -143,6 +143,7 @@ class AgentSandboxProvider(WorkloadProvider):
         credential_proxy_enabled: bool = False,
         resource_requests: Optional[Dict[str, str]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
+        service_account_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create an agent-sandbox Sandbox CRD workload."""
         if is_windows_profile(platform):
@@ -170,8 +171,9 @@ class AgentSandboxProvider(WorkloadProvider):
         if volumes:
             apply_volumes_to_pod_spec(pod_spec, volumes)
 
-        if self.service_account:
-            pod_spec["serviceAccountName"] = self.service_account
+        effective_service_account = service_account_name or self.service_account
+        if effective_service_account:
+            pod_spec["serviceAccountName"] = effective_service_account
         self._apply_platform_node_selector(pod_spec, platform)
 
         resource_name = self._resource_name(sandbox_id)

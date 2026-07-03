@@ -78,6 +78,7 @@ class BatchSandboxProvider(WorkloadProvider):
             logger.info(f"Using BatchSandbox template file: {template_file_path}")
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
         self.image_pull_policy = k8s_config.image_pull_policy if k8s_config else "IfNotPresent"
+        self.service_account = k8s_config.service_account if k8s_config else None
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
@@ -122,10 +123,12 @@ class BatchSandboxProvider(WorkloadProvider):
         credential_proxy_enabled: bool = False,
         resource_requests: Optional[Dict[str, str]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
+        service_account_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a BatchSandbox in template mode or pool mode."""
         extensions = extensions or {}
         windows_profile = is_windows_profile(platform)
+        effective_service_account = service_account_name or self.service_account
 
         if self.runtime_class:
             logger.info(f"Using Kubernetes RuntimeClass '{self.runtime_class}' for sandbox {sandbox_id}")
@@ -140,6 +143,11 @@ class BatchSandboxProvider(WorkloadProvider):
                 raise ValueError(
                     "Pool mode does not support volumes. "
                     "Remove 'volumes' from request or use template mode."
+                )
+            if service_account_name:
+                raise ValueError(
+                    "Pool mode does not support serviceAccountName. "
+                    "The ServiceAccount is defined by the pool template."
                 )
             return self._create_workload_from_pool(
                 batchsandbox_name=sandbox_id,
@@ -226,6 +234,9 @@ class BatchSandboxProvider(WorkloadProvider):
         containers = pod_spec.get("containers", [])
         if self.runtime_class:
             pod_spec["runtimeClassName"] = self.runtime_class
+
+        if effective_service_account:
+            pod_spec["serviceAccountName"] = effective_service_account
 
         if image_spec.auth:
             secret_name = build_image_pull_secret_name(sandbox_id)

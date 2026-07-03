@@ -164,7 +164,9 @@ export interface paths {
          * Create a sandbox-local Credential Vault
          * @description Create the initial sandbox-local Credential Vault revision and activate it
          *     in Credential Proxy. Inline credential values are write-only and are never
-         *     returned by this API.
+         *     returned by this API. The sidecar must run in `dns+nft` mode and requires
+         *     an egress policy. `defaultAction: deny` is strongly recommended;
+         *     default-allow remains temporarily supported with a security warning.
          */
         post: {
             parameters: {

@@ -431,6 +431,12 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    */
   secureAccess?: boolean;
   /**
+   * Kubernetes ServiceAccount bound to the sandbox Pod. Only meaningful for
+   * Kubernetes-based runtimes; ignored by the Docker runtime. Not supported
+   * together with pool-based creation (`extensions.poolRef`).
+   */
+  serviceAccountName?: string;
+  /**
    * Timeout in seconds (server semantics).
    */
   timeout?: number | null;

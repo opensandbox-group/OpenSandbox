@@ -136,6 +136,47 @@ public class SandboxesAdapterTests
     }
 
     [Fact]
+    public async Task CreateSandboxAsync_ShouldSerializeServiceAccountName()
+    {
+        var handler = new CaptureCreateRequestHandler();
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        _ = await adapter.CreateSandboxAsync(new CreateSandboxRequest
+        {
+            Image = new ImageSpec { Uri = "python:3.11" },
+            ResourceLimits = new Dictionary<string, string>(),
+            Entrypoint = new List<string> { "python" },
+            ServiceAccountName = "agent-finance-sa"
+        });
+
+        handler.RequestBody.Should().NotBeNullOrEmpty();
+        using var json = JsonDocument.Parse(handler.RequestBody!);
+        json.RootElement.GetProperty("serviceAccountName").GetString().Should().Be("agent-finance-sa");
+    }
+
+    [Fact]
+    public async Task CreateSandboxAsync_ShouldOmitServiceAccountNameWhenNull()
+    {
+        var handler = new CaptureCreateRequestHandler();
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        _ = await adapter.CreateSandboxAsync(new CreateSandboxRequest
+        {
+            Image = new ImageSpec { Uri = "python:3.11" },
+            ResourceLimits = new Dictionary<string, string>(),
+            Entrypoint = new List<string> { "python" }
+        });
+
+        handler.RequestBody.Should().NotBeNullOrEmpty();
+        using var json = JsonDocument.Parse(handler.RequestBody!);
+        json.RootElement.TryGetProperty("serviceAccountName", out _).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task PatchSandboxMetadataAsync_ShouldSendMetadataBodyAndPreserveNull()
     {
         var handler = new CapturePatchMetadataRequestHandler();

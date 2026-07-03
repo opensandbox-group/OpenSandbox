@@ -65,6 +65,7 @@ class Sandboxes(Protocol):
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        service_account_name: str | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a new sandbox with the specified configuration.
@@ -82,6 +83,9 @@ class Sandboxes(Protocol):
                 Prefer namespaced keys (e.g. ``storage.id``).
             volumes: Optional list of volume mounts for persistent storage.
             secure_access: Whether to enable secured access for sandbox endpoints.
+            service_account_name: Optional Kubernetes ServiceAccount bound to the
+                sandbox Pod. Ignored by the Docker runtime. Not supported together
+                with pool-based creation (``extensions.poolRef``).
 
         Returns:
             Sandbox create response

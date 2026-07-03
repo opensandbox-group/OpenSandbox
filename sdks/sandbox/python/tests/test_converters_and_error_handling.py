@@ -312,6 +312,43 @@ def test_sandbox_model_converter_snapshot_restore_request() -> None:
     assert "entrypoint" not in dumped
 
 
+def test_sandbox_model_converter_sets_service_account_name() -> None:
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["/bin/sh"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={"cpu": "100m"},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=None,
+        service_account_name="agent-finance-sa",
+    )
+
+    dumped = req.to_dict()
+    assert dumped["serviceAccountName"] == "agent-finance-sa"
+
+
+def test_sandbox_model_converter_omits_service_account_name_when_absent() -> None:
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["/bin/sh"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={"cpu": "100m"},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=None,
+    )
+
+    dumped = req.to_dict()
+    assert "serviceAccountName" not in dumped
+
+
 def test_sandbox_model_converter_maps_platform_from_create_response() -> None:
     from opensandbox.api.lifecycle.models.create_sandbox_response import (
         CreateSandboxResponse,

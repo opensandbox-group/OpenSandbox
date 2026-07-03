@@ -118,6 +118,7 @@ class SandboxesAdapterSync(SandboxesSync):
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        service_account_name: str | None = None,
     ) -> SandboxCreateResponse:
         logger.info(
             "Creating sandbox with startup source: %s",
@@ -144,6 +145,7 @@ class SandboxesAdapterSync(SandboxesSync):
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
+                service_account_name=service_account_name,
             )
             response_obj = post_sandboxes.sync_detailed(client=self._get_client(), body=create_request)
             handle_api_error(response_obj, "Create sandbox")

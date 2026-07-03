@@ -206,6 +206,51 @@ func TestCreateSandbox_SecureAccess(t *testing.T) {
 	require.NoErrorf(t, err, "CreateSandbox with SecureAccess")
 }
 
+func TestCreateSandbox_ServiceAccountName(t *testing.T) {
+	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req CreateSandboxRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		require.Equal(t, "agent-finance-sa", req.ServiceAccountName)
+
+		jsonResponse(w, http.StatusCreated, SandboxInfo{
+			ID:        "sbx-sa",
+			Status:    SandboxStatus{State: StatePending},
+			CreatedAt: time.Now().UTC().Truncate(time.Second),
+		})
+	})
+
+	_, err := client.CreateSandbox(context.Background(), CreateSandboxRequest{
+		Image:              &ImageSpec{URI: "python:3.12"},
+		Entrypoint:         []string{"/bin/sh"},
+		ResourceLimits:     ResourceLimits{"cpu": "500m"},
+		ServiceAccountName: "agent-finance-sa",
+	})
+	require.NoErrorf(t, err, "CreateSandbox with ServiceAccountName")
+}
+
+func TestCreateSandbox_ServiceAccountNameOmittedWhenEmpty(t *testing.T) {
+	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "serviceAccountName") {
+			t.Errorf("expected serviceAccountName to be omitted, got body %q", string(body))
+		}
+
+		jsonResponse(w, http.StatusCreated, SandboxInfo{
+			ID:        "sbx-no-sa",
+			Status:    SandboxStatus{State: StatePending},
+			CreatedAt: time.Now().UTC().Truncate(time.Second),
+		})
+	})
+
+	_, err := client.CreateSandbox(context.Background(), CreateSandboxRequest{
+		Image:          &ImageSpec{URI: "python:3.12"},
+		Entrypoint:     []string{"/bin/sh"},
+		ResourceLimits: ResourceLimits{"cpu": "500m"},
+	})
+	require.NoErrorf(t, err, "CreateSandbox without ServiceAccountName")
+}
+
 func TestCreateSandbox_ManualCleanup(t *testing.T) {
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
