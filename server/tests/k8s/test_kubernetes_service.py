@@ -668,6 +668,34 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_fails_fast_when_pool_is_missing(
+        self, k8s_service
+    ):
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "does-not-exist-pool"},
+        )
+
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.PoolService.get_pool",
+            side_effect=HTTPException(
+                status_code=404,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
+                    "message": "Pool 'does-not-exist-pool' not found.",
+                },
+            ),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await k8s_service.create_sandbox(pool_request)
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_POOL_NOT_FOUND
+        assert "does-not-exist-pool" in exc_info.value.detail["message"]
+        k8s_service.workload_provider.create_workload.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_create_sandbox_pool_mode_skips_image_and_entrypoint_validation(
         self, k8s_service, mock_workload
     ):
@@ -692,7 +720,11 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.5:8080"
         k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
 
-        response = await k8s_service.create_sandbox(pool_request)
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.PoolService.get_pool",
+            return_value=MagicMock(),
+        ):
+            response = await k8s_service.create_sandbox(pool_request)
 
         assert response.id is not None
         assert response.status.state == "Running"
@@ -724,8 +756,12 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.6:8080"
         k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
 
-        # Should not raise AttributeError on None.auth
-        response = await k8s_service.create_sandbox(pool_request)
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.PoolService.get_pool",
+            return_value=MagicMock(),
+        ):
+            # Should not raise AttributeError on None.auth
+            response = await k8s_service.create_sandbox(pool_request)
         assert response.id is not None
 
 class TestWaitForSandboxReady:

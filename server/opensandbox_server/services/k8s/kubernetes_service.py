@@ -91,6 +91,7 @@ from opensandbox_server.services.validators import (
 )
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.provider_factory import create_workload_provider
+from opensandbox_server.services.k8s.pool_service import PoolService
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 
 logger = logging.getLogger(__name__)
@@ -633,7 +634,11 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         Raises:
             HTTPException: If creation fails, timeout, or invalid parameters
         """
-        has_pool_ref = bool((request.extensions or {}).get("poolRef", "").strip())
+        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
+        has_pool_ref = bool(pool_ref)
+
+        if has_pool_ref:
+            PoolService(self.k8s_client, self.namespace).get_pool(pool_ref)
 
         if not has_pool_ref:
             request = resolve_sandbox_image_from_request(request)
