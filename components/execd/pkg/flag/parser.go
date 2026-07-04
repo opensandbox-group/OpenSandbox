@@ -18,6 +18,7 @@ import (
 	"flag"
 	stdlog "log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ const (
 	jupyterHostEnv             = "JUPYTER_HOST"
 	jupyterTokenEnv            = "JUPYTER_TOKEN"
 	accessTokenEnv             = "EXECD_ACCESS_TOKEN"
+	serverPortEnv              = "OPENSANDBOX_EXECD_PORT"
 	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
@@ -57,6 +59,17 @@ func InitFlags() {
 
 	if accessTokenFromEnv := os.Getenv(accessTokenEnv); accessTokenFromEnv != "" {
 		ServerAccessToken = accessTokenFromEnv
+	}
+
+	if portFromEnv := os.Getenv(serverPortEnv); portFromEnv != "" {
+		port, err := strconv.Atoi(portFromEnv)
+		if err != nil {
+			stdlog.Panicf("Invalid %s=%s: must be an integer", serverPortEnv, portFromEnv)
+		}
+		if port < 1 || port > 65535 {
+			stdlog.Panicf("Invalid %s=%d: must be between 1 and 65535", serverPortEnv, port)
+		}
+		ServerPort = port
 	}
 
 	// Then define flags with current values as defaults

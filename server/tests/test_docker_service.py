@@ -41,7 +41,9 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
+    SANDBOX_EMBEDDING_PROXY_PORT_LABEL,
     SANDBOX_EXPIRES_AT_LABEL,
+    SANDBOX_HTTP_PORT_LABEL,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
@@ -3550,3 +3552,57 @@ def test_docker_get_endpoint_rejects_expires():
 
         assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
         assert "not supported" in exc.value.detail["message"].lower()
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_host_mode_includes_execd_port_env(mock_docker):
+    """Host-mode sandbox should inject OPENSANDBOX_EXECD_PORT env and set port labels."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.create_container.return_value = {"Id": "cid-host"}
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    config = _app_config()
+    config.docker.network_mode = "host"
+    service = DockerSandboxService(config=config)
+
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+    )
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 40001),
+                "8080": ("0.0.0.0", 40002),
+            },
+        ),
+    ):
+        await service.create_sandbox(request)
+
+    create_kwargs = mock_client.api.create_container.call_args.kwargs
+    env_list = create_kwargs.get("environment", [])
+
+    # OPENSANDBOX_EXECD_PORT env var must be present with the allocated port
+    execd_port_envs = [e for e in env_list if e.startswith("OPENSANDBOX_EXECD_PORT=")]
+    assert len(execd_port_envs) == 1
+    assert execd_port_envs[0] == "OPENSANDBOX_EXECD_PORT=40001"
+
+    # Port labels must be set
+    labels = create_kwargs.get("labels", {})
+    assert labels.get(SANDBOX_EMBEDDING_PROXY_PORT_LABEL) == "40001"
+    assert labels.get(SANDBOX_HTTP_PORT_LABEL) == "40002"
+
+    # Host mode should NOT have port_bindings in host_config
+    host_config = mock_client.api.create_container.call_args.kwargs["host_config"]
+    assert "PortBindings" not in host_config

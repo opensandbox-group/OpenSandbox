@@ -211,14 +211,33 @@ class DockerNetworkingMixin:
                     port,
                     include_egress_auth_headers=False,
                 )
+            # In host mode with dynamic port allocation, use allocated ports from
+            # labels so the server proxy reaches the correct sandbox's execd.
+            # Without labels (legacy sandboxes), fall back to the original
+            # 127.0.0.1:{port} format for backward compatibility.
+            if self.network_mode == HOST_NETWORK_MODE:
+                if labels.get(SANDBOX_EMBEDDING_PROXY_PORT_LABEL):
+                    return self._resolve_host_mapped_endpoint(
+                        "127.0.0.1",
+                        labels,
+                        port,
+                        include_egress_auth_headers=False,
+                    )
+                return Endpoint(endpoint=f"127.0.0.1:{port}")
             return self._resolve_internal_endpoint(container, port)
 
         public_host = self._resolve_public_host()
 
         if self.network_mode == HOST_NETWORK_MODE:
-            endpoint = Endpoint(endpoint=f"{public_host}:{port}")
             container = self._get_container_by_sandbox_id(sandbox_id)
             labels = container.attrs.get("Config", {}).get("Labels") or {}
+            # In host mode with dynamic port allocation (labels present), use
+            # the allocated ports from labels to route to the correct sandbox.
+            # Without labels (legacy sandboxes), fall back to the original
+            # host:{container_port} format for backward compatibility.
+            if labels.get(SANDBOX_EMBEDDING_PROXY_PORT_LABEL):
+                return self._resolve_host_mapped_endpoint(public_host, labels, port)
+            endpoint = Endpoint(endpoint=f"{public_host}:{port}")
             self._attach_egress_auth_headers(endpoint, labels, port)
             return endpoint
 

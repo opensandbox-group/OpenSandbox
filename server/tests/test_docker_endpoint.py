@@ -45,13 +45,15 @@ def mock_docker_service():
 
         yield service, mock_client
 
-def test_get_endpoint_host_mode(mock_docker_service):
+def test_get_endpoint_host_mode_legacy_sandbox_no_labels(mock_docker_service):
+    """Legacy host-mode sandbox without dynamic port labels falls back to host:{container_port}."""
     service, mock_client = mock_docker_service
     service.app_config.docker.network_mode = "host"
     service.network_mode = "host"
 
+    # No port labels — simulates a sandbox created before dynamic port allocation.
     mock_container = MagicMock()
-    mock_container.attrs = {"State": {"Running": True}}
+    mock_container.attrs = {"State": {"Running": True}, "Config": {"Labels": {}}}
     mock_client.containers.list.return_value = [mock_container]
 
     with patch("opensandbox_server.services.sandbox_service.SandboxService._resolve_bind_ip", return_value="10.0.0.1"):
@@ -60,6 +62,40 @@ def test_get_endpoint_host_mode(mock_docker_service):
 
     endpoint_internal = service.get_endpoint("sbx-123", 8080, resolve_internal=True)
     assert endpoint_internal.endpoint == "127.0.0.1:8080"
+
+
+def test_get_endpoint_host_mode_with_dynamic_ports(mock_docker_service):
+    """Host mode with dynamic port allocation uses labels instead of fixed 44772."""
+    service, mock_client = mock_docker_service
+    service.app_config.docker.network_mode = "host"
+    service.network_mode = "host"
+
+    labels = {
+        "opensandbox.io/embedding-proxy-port": "40001",
+        "opensandbox.io/http-port": "40002",
+    }
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {"Labels": labels},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+
+    with patch("opensandbox_server.services.sandbox_service.SandboxService._resolve_bind_ip", return_value="10.0.0.1"):
+        # HTTP port (8080) → uses allocated HTTP port from label
+        endpoint = service.get_endpoint("sbx-123", 8080, resolve_internal=False)
+        assert endpoint.endpoint == "10.0.0.1:40002"
+
+        # Other ports → uses allocated execd port + /proxy/
+        endpoint = service.get_endpoint("sbx-123", 44772, resolve_internal=False)
+        assert endpoint.endpoint == "10.0.0.1:40001/proxy/44772"
+
+    # Internal resolution (server proxy)
+    endpoint_http = service.get_endpoint("sbx-123", 8080, resolve_internal=True)
+    assert endpoint_http.endpoint == "127.0.0.1:40002"
+
+    endpoint_execd = service.get_endpoint("sbx-123", 44772, resolve_internal=True)
+    assert endpoint_execd.endpoint == "127.0.0.1:40001/proxy/44772"
 
 
 def test_get_endpoint_bridge_http_port(mock_docker_service):

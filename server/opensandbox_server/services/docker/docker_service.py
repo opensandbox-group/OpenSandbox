@@ -943,6 +943,23 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     labels[SANDBOX_EMBEDDING_PROXY_PORT_LABEL] = str(host_execd_port)
                     labels[SANDBOX_HTTP_PORT_LABEL] = str(host_http_port)
                 else:
+                    # Host mode: allocate unique host ports for execd and HTTP
+                    # to avoid port conflicts between concurrent sandboxes.
+                    # In host mode, containers share the host network namespace,
+                    # so all sandboxes would otherwise bind execd to the same
+                    # port 44772.  Allocate distinct ports and inject the execd
+                    # port via OPENSANDBOX_EXECD_PORT so execd listens on the
+                    # allocated port instead of the default 44772.
+                    host_port_bindings = allocate_port_bindings(
+                        ["44772", "8080"],
+                        min_port=self.app_config.docker.port_range_min,
+                        max_port=self.app_config.docker.port_range_max,
+                    )
+                    host_execd_port = host_port_bindings["44772"][1]
+                    host_http_port = host_port_bindings["8080"][1]
+                    labels[SANDBOX_EMBEDDING_PROXY_PORT_LABEL] = str(host_execd_port)
+                    labels[SANDBOX_HTTP_PORT_LABEL] = str(host_http_port)
+                    environment.append(f"OPENSANDBOX_EXECD_PORT={host_execd_port}")
                     exposed_ports = None
 
             # Inject volume bind mounts into Docker host config
