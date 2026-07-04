@@ -17,7 +17,6 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,7 +24,7 @@ import (
 	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -75,26 +74,27 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 			// Don't upgrade if original host header isn't preserved
 			assert.True(t, strings.HasPrefix(r.Host, "127.0.0.1"))
 
-			conn, err := defaultUpgrader.Upgrade(w, r, nil)
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+				InsecureSkipVerify: true,
+			})
 			if err != nil {
-				log.Println(err)
+				t.Log(err)
+				return
+			}
+			defer conn.CloseNow()
+
+			msgType, p, err := conn.Read(ctx)
+			if err != nil {
 				return
 			}
 
-			messageType, p, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-
-			if err = conn.WriteMessage(messageType, p); err != nil {
+			if err = conn.Write(ctx, msgType, p); err != nil {
 				return
 			}
 		})
 
-		err := http.ListenAndServe(":"+strconv.Itoa(backendPort), mux2)
-		if err != nil {
-			t.Error("ListenAndServe: ", err)
-			return
+		if listenErr := http.ListenAndServe(":"+strconv.Itoa(backendPort), mux2); listenErr != nil {
+			t.Error("ListenAndServe: ", listenErr)
 		}
 	}()
 
@@ -104,24 +104,27 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 	// message to the backend websocket server.
 	h := http.Header{}
 	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
-	conn, _, err := websocket.DefaultDialer.Dial(proxyURL+"/ws", h)
+	conn, _, err := websocket.Dial(ctx, proxyURL+"/ws", &websocket.DialOptions{
+		HTTPHeader: h,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer conn.CloseNow()
 
 	// write a message and send it to the backend server
 	msg := "hello kite"
-	err = conn.WriteMessage(websocket.TextMessage, []byte(msg))
+	err = conn.Write(ctx, websocket.MessageText, []byte(msg))
 	if err != nil {
 		t.Error(err)
 	}
 
-	messageType, p, err := conn.ReadMessage()
+	messageType, p, err := conn.Read(ctx)
 	if err != nil {
 		t.Error(err)
 	}
 
-	if messageType != websocket.TextMessage {
+	if messageType != websocket.MessageText {
 		t.Error("incoming message type is not Text")
 	}
 
@@ -167,26 +170,27 @@ func webSocketProxyWithURIMode(t *testing.T) {
 			// Don't upgrade if original host header isn't preserved
 			assert.True(t, strings.HasPrefix(r.Host, "127.0.0.1"))
 
-			conn, err := defaultUpgrader.Upgrade(w, r, nil)
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+				InsecureSkipVerify: true,
+			})
 			if err != nil {
-				log.Println(err)
+				t.Log(err)
+				return
+			}
+			defer conn.CloseNow()
+
+			msgType, p, err := conn.Read(ctx)
+			if err != nil {
 				return
 			}
 
-			messageType, p, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-
-			if err = conn.WriteMessage(messageType, p); err != nil {
+			if err = conn.Write(ctx, msgType, p); err != nil {
 				return
 			}
 		})
 
-		err := http.ListenAndServe(":"+strconv.Itoa(backendPort), mux2)
-		if err != nil {
-			t.Error("ListenAndServe: ", err)
-			return
+		if listenErr := http.ListenAndServe(":"+strconv.Itoa(backendPort), mux2); listenErr != nil {
+			t.Error("ListenAndServe: ", listenErr)
 		}
 	}()
 
@@ -196,24 +200,27 @@ func webSocketProxyWithURIMode(t *testing.T) {
 	// message to the backend websocket server.
 	h := http.Header{}
 	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
-	conn, _, err := websocket.DefaultDialer.Dial(proxyURL+fmt.Sprintf("/test-sandbox/%v", backendPort)+"/ws", h)
+	conn, _, err := websocket.Dial(ctx, proxyURL+fmt.Sprintf("/test-sandbox/%v", backendPort)+"/ws", &websocket.DialOptions{
+		HTTPHeader: h,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer conn.CloseNow()
 
 	// write a message and send it to the backend server
 	msg := "hello kite"
-	err = conn.WriteMessage(websocket.TextMessage, []byte(msg))
+	err = conn.Write(ctx, websocket.MessageText, []byte(msg))
 	if err != nil {
 		t.Error(err)
 	}
 
-	messageType, p, err := conn.ReadMessage()
+	messageType, p, err := conn.Read(ctx)
 	if err != nil {
 		t.Error(err)
 	}
 
-	if messageType != websocket.TextMessage {
+	if messageType != websocket.MessageText {
 		t.Error("incoming message type is not Text")
 	}
 

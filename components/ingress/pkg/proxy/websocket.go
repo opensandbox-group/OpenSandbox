@@ -15,32 +15,32 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
-var (
-	// defaultWebSocketDialer is a dialer with all fields set to the default zero values.
-	defaultWebSocketDialer = websocket.DefaultDialer
+const backendHandshakeTimeout = 45 * time.Second
 
-	// defaultUpgrader specifies the parameters for upgrading an HTTP
-	// connection to a WebSocket connection.
-	defaultUpgrader = &websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-		// Allow any Origin: ingress sits behind trusted gateways where Host/Origin
-		// often diverge (e.g. browser UI vs internal target). gorilla's default
-		// same-origin check rejects those upgrades.
-		CheckOrigin: func(_ *http.Request) bool { return true },
-	}
-)
+type handshakeError struct {
+	statusCode int
+	statusLine string
+}
+
+func (e *handshakeError) Error() string { return e.statusLine }
 
 // WebSocketProxy is an HTTP Handler that takes an incoming WebSocket
 // connection and proxies it to another server.
@@ -54,14 +54,6 @@ type WebSocketProxy struct {
 	// the incoming WebSocket connection. Request is the initial incoming and
 	// unmodified request.
 	backend func(*http.Request) *url.URL
-
-	//  dialer contains options for connecting to the backend WebSocket server.
-	//  If nil, DefaultDialer is used.
-	dialer *websocket.Dialer
-
-	// upgrader specifies the parameters for upgrading a incoming HTTP
-	// connection to a WebSocket connection. If nil, DefaultUpgrader is used.
-	upgrader *websocket.Upgrader
 }
 
 // ProxyHandler returns a new http.Handler interface that reverse proxies the
@@ -95,11 +87,6 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dialer := w.dialer
-	if w.dialer == nil {
-		dialer = defaultWebSocketDialer
-	}
-
 	// Forward all incoming headers to the backend except hop-by-hop headers
 	// (RFC 7230 §6.1) and WebSocket handshake headers managed by the dialer.
 	// Per RFC 7230, also strip any header named by Connection tokens.
@@ -111,15 +98,31 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Collect client-requested subprotocols before filtering headers.
+	var clientSubprotocols []string
+	for _, v := range r.Header[SecWebSocketProtocol] {
+		for _, sp := range strings.Split(v, ",") {
+			if sp = strings.TrimSpace(sp); sp != "" {
+				clientSubprotocols = append(clientSubprotocols, sp)
+			}
+		}
+	}
+
 	requestHeader := http.Header{}
 	for key, values := range r.Header {
 		switch key {
 		case HopByHopConnection, HopByHopKeepAlive, HopByHopProxyAuth, HopByHopProxyAuthz,
 			HopByHopTE, HopByHopTrailer, HopByHopTransferEncoding, HopByHopUpgrade,
-			HopByHopProxyConnection, SecWebSocketKey, SecWebSocketVersion, SecWebSocketExtensions:
+			HopByHopProxyConnection,
+			SecWebSocketKey, SecWebSocketVersion, SecWebSocketExtensions, SecWebSocketProtocol:
 			continue
 		}
 		if connTokens[key] {
+			continue
+		}
+		// Strip h2 pseudo-headers — invalid in h1 backend requests.
+		if strings.HasPrefix(key, ":") {
 			continue
 		}
 		for _, v := range values {
@@ -157,74 +160,66 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		w.director(r, requestHeader)
 	}
 
-	// Connect to the backend URL, also pass the headers we get from the requst
-	// together with the Forwarded headers we prepared above.
-	connBackend, resp, err := dialer.Dial(backendURL.String(), requestHeader)
+	// HTTP/2 Extended CONNECT (RFC 8441) — raw bidirectional tunnel.
+	if r.ProtoMajor >= 2 && r.Method == http.MethodConnect {
+		w.serveH2Tunnel(rw, r, backendURL, requestHeader, clientSubprotocols)
+		return
+	}
+
+	w.serveH1(rw, r, backendURL, requestHeader, clientSubprotocols)
+}
+
+// serveH1 handles the traditional HTTP/1.1 WebSocket upgrade path.
+func (w *WebSocketProxy) serveH1(rw http.ResponseWriter, r *http.Request, backendURL *url.URL, requestHeader http.Header, clientSubprotocols []string) {
+	ctx := r.Context()
+	dialCtx, dialCancel := context.WithTimeout(ctx, backendHandshakeTimeout)
+	defer dialCancel()
+
+	// Dial the backend first so we can relay errors before upgrading the client.
+	connBackend, resp, err := websocket.Dial(dialCtx, backendURL.String(), &websocket.DialOptions{
+		HTTPHeader:   requestHeader,
+		Subprotocols: clientSubprotocols,
+		Host:         requestHeader.Get("Host"),
+	})
 	if err != nil {
 		Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("WebSocketProxy: couldn't dial to remote backend")
 		if resp != nil {
-			// If the WebSocket handshake fails, ErrBadHandshake is returned
-			// along with a non-nil *http.Response so that callers can handle
-			// redirects, authentication, etcetera.
-			if err := copyResponse(rw, resp); err != nil {
-				Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("WebSocketProxy: couldn't write response after failed remote backend handshake")
+			if copyErr := copyResponse(rw, resp); copyErr != nil {
+				Logger.With(slogger.Field{Key: "error", Value: copyErr}).Errorf("WebSocketProxy: couldn't write response after failed remote backend handshake")
 			}
 		} else {
 			http.Error(rw, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		}
 		return
 	}
-	defer connBackend.Close()
+	defer connBackend.CloseNow() //nolint:errcheck
+	connBackend.SetReadLimit(-1)
 
-	upgrader := w.upgrader
-	if w.upgrader == nil {
-		upgrader = defaultUpgrader
+	// Copy Set-Cookie from the backend handshake response before upgrading.
+	if resp != nil {
+		for _, c := range resp.Header.Values(SetCookie) {
+			rw.Header().Add(SetCookie, c)
+		}
 	}
 
-	// Only pass those headers to the upgrader.
-	upgradeHeader := http.Header{}
-	if hdr := resp.Header.Get(SecWebSocketProtocol); hdr != "" {
-		upgradeHeader.Set(SecWebSocketProtocol, hdr)
-	}
-	if hdr := resp.Header.Get(SetCookie); hdr != "" {
-		upgradeHeader.Set(SetCookie, hdr)
-	}
-
-	// Now upgrade the existing incoming request to a WebSocket connection.
-	// Also pass the header that we gathered from the Dial handshake.
-	connPub, err := upgrader.Upgrade(rw, r, upgradeHeader)
+	// Accept the client-side WebSocket upgrade.
+	connPub, err := websocket.Accept(rw, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
+		Subprotocols:       subprotocolsFromResponse(resp),
+	})
 	if err != nil {
 		Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("WebSocketProxy: couldn't upgrade websocket connection")
 		return
 	}
-	defer connPub.Close()
+	defer connPub.CloseNow() //nolint:errcheck
+	connPub.SetReadLimit(-1)
 
+	// Bidirectional relay.
 	errClient := make(chan error, 1)
 	errBackend := make(chan error, 1)
-	replicateWebsocketConn := func(dst, src *websocket.Conn, errc chan error) {
-		for {
-			msgType, msg, err := src.ReadMessage()
-			if err != nil {
-				m := websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("%v", err))
-				if e, ok := err.(*websocket.CloseError); ok { //nolint:errorlint
-					if e.Code != websocket.CloseNoStatusReceived {
-						m = websocket.FormatCloseMessage(e.Code, e.Text)
-					}
-				}
-				errc <- err
-				_ = dst.WriteMessage(websocket.CloseMessage, m)
-				break
-			}
-			err = dst.WriteMessage(msgType, msg)
-			if err != nil {
-				errc <- err
-				break
-			}
-		}
-	}
 
-	go replicateWebsocketConn(connPub, connBackend, errClient)
-	go replicateWebsocketConn(connBackend, connPub, errBackend)
+	go replicateConn(ctx, connPub, connBackend, errClient)
+	go replicateConn(ctx, connBackend, connPub, errBackend)
 
 	var message string
 	select {
@@ -232,11 +227,216 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		message = "WebSocketProxy: Error when copying from backend to client: %v"
 	case err = <-errBackend:
 		message = "WebSocketProxy: Error when copying from client to backend: %v"
-
 	}
-	if e, ok := err.(*websocket.CloseError); !ok || e.Code == websocket.CloseAbnormalClosure { //nolint:errorlint
+
+	var closeErr websocket.CloseError
+	if !errors.As(err, &closeErr) || closeErr.Code == websocket.StatusAbnormalClosure {
 		Logger.With(slogger.Field{Key: "error", Value: err}).Errorf(message, err)
 	}
+}
+
+// serveH2Tunnel handles HTTP/2 Extended CONNECT (RFC 8441) by dialing
+// the backend over raw HTTP/1.1 and tunneling bytes between the h2 stream
+// and the backend TCP connection. Both sides carry WebSocket frame bytes,
+// so no re-framing is needed.
+func (w *WebSocketProxy) serveH2Tunnel(rw http.ResponseWriter, r *http.Request, backendURL *url.URL, requestHeader http.Header, clientSubprotocols []string) {
+	backendAddr := backendURL.Host
+	if !strings.Contains(backendAddr, ":") {
+		backendAddr += ":80"
+	}
+
+	backendConn, err := net.DialTimeout("tcp", backendAddr, backendHandshakeTimeout)
+	if err != nil {
+		Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("WebSocketProxy: couldn't connect to remote backend (h2 tunnel)")
+		http.Error(rw, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+	defer backendConn.Close()
+
+	// Perform the WebSocket handshake over the raw connection.
+	respHeaders, err := rawWebSocketHandshake(backendConn, backendURL, requestHeader, clientSubprotocols)
+	if err != nil {
+		var hsErr *handshakeError
+		if errors.As(err, &hsErr) {
+			http.Error(rw, hsErr.statusLine, hsErr.statusCode)
+		} else {
+			Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("WebSocketProxy: backend WebSocket handshake failed (h2 tunnel)")
+			http.Error(rw, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		}
+		return
+	}
+
+	rc := http.NewResponseController(rw)
+	if err := rc.EnableFullDuplex(); err != nil {
+		Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("WebSocketProxy: EnableFullDuplex failed")
+		http.Error(rw, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	// Forward Set-Cookie from backend handshake before writing the h2 200.
+	for _, c := range respHeaders.Values("Set-Cookie") {
+		rw.Header().Add("Set-Cookie", c)
+	}
+	rw.WriteHeader(http.StatusOK)
+	if err := rc.Flush(); err != nil {
+		Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("WebSocketProxy: flush failed")
+		return
+	}
+
+	// Both sides now carry raw WebSocket frame bytes — copy bidirectionally.
+	flusher, _ := rw.(http.Flusher)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(backendConn, r.Body)
+		// Half-close the write side so backend can finish sending.
+		if tc, ok := backendConn.(interface{ CloseWrite() error }); ok {
+			_ = tc.CloseWrite()
+		} else {
+			backendConn.Close()
+		}
+	}()
+	copyFlush(rw, backendConn, flusher)
+	r.Body.Close()
+	<-done
+}
+
+// rawWebSocketHandshake sends an HTTP/1.1 WebSocket upgrade request on conn
+// and verifies the 101 response. Returns parsed response headers on success.
+func rawWebSocketHandshake(conn net.Conn, target *url.URL, extraHeaders http.Header, subprotocols []string) (http.Header, error) {
+	key := make([]byte, 16)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generate Sec-WebSocket-Key: %w", err)
+	}
+	secKey := base64.StdEncoding.EncodeToString(key)
+
+	path := target.RequestURI()
+	if path == "" {
+		path = "/"
+	}
+
+	var buf strings.Builder
+	buf.WriteString("GET " + path + " HTTP/1.1\r\n")
+	buf.WriteString("Host: " + target.Host + "\r\n")
+	buf.WriteString("Upgrade: websocket\r\n")
+	buf.WriteString("Connection: Upgrade\r\n")
+	buf.WriteString("Sec-WebSocket-Version: 13\r\n")
+	buf.WriteString("Sec-WebSocket-Key: " + secKey + "\r\n")
+	if len(subprotocols) > 0 {
+		buf.WriteString("Sec-WebSocket-Protocol: " + strings.Join(subprotocols, ", ") + "\r\n")
+	}
+	for k, vs := range extraHeaders {
+		if k == "Host" {
+			continue
+		}
+		for _, v := range vs {
+			buf.WriteString(k + ": " + v + "\r\n")
+		}
+	}
+	buf.WriteString("\r\n")
+
+	if err := conn.SetDeadline(time.Now().Add(backendHandshakeTimeout)); err != nil {
+		return nil, err
+	}
+	if _, err := io.WriteString(conn, buf.String()); err != nil {
+		return nil, fmt.Errorf("write handshake: %w", err)
+	}
+
+	// Read the full HTTP response up to the end-of-headers marker (\r\n\r\n).
+	const maxHandshakeResponseSize = 16384
+	var resp []byte
+	single := make([]byte, 1)
+	for {
+		if _, err := conn.Read(single); err != nil {
+			return nil, fmt.Errorf("read handshake response: %w", err)
+		}
+		resp = append(resp, single[0])
+		if len(resp) >= 4 && string(resp[len(resp)-4:]) == "\r\n\r\n" {
+			break
+		}
+		if len(resp) > maxHandshakeResponseSize {
+			return nil, fmt.Errorf("handshake response too large")
+		}
+	}
+
+	end := bytes.IndexByte(resp, '\r')
+	if end < 0 {
+		end = len(resp)
+	}
+	statusLine := string(resp[:end])
+	if !strings.Contains(statusLine, "101") {
+		code := parseHTTPStatusCode(statusLine)
+		return nil, &handshakeError{statusCode: code, statusLine: statusLine}
+	}
+
+	// Parse response headers.
+	respHeaders := http.Header{}
+	headerLines := strings.Split(string(resp), "\r\n")
+	for i := 1; i < len(headerLines); i++ {
+		line := headerLines[i]
+		if line == "" {
+			break
+		}
+		colonIdx := strings.IndexByte(line, ':')
+		if colonIdx < 0 {
+			continue
+		}
+		respHeaders.Add(
+			strings.TrimSpace(line[:colonIdx]),
+			strings.TrimSpace(line[colonIdx+1:]),
+		)
+	}
+
+	if !strings.EqualFold(respHeaders.Get("Upgrade"), "websocket") ||
+		!headerContainsToken(respHeaders, "Connection", "Upgrade") {
+		return nil, fmt.Errorf("invalid WebSocket handshake: missing Upgrade/Connection headers")
+	}
+
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
+	return respHeaders, nil
+}
+
+func parseHTTPStatusCode(statusLine string) int {
+	parts := strings.SplitN(statusLine, " ", 3)
+	if len(parts) >= 2 {
+		if code, err := strconv.Atoi(parts[1]); err == nil {
+			return code
+		}
+	}
+	return http.StatusBadGateway
+}
+
+func replicateConn(ctx context.Context, dst, src *websocket.Conn, errc chan error) {
+	for {
+		msgType, msg, err := src.Read(ctx)
+		if err != nil {
+			var closeErr websocket.CloseError
+			if errors.As(err, &closeErr) {
+				dst.Close(closeErr.Code, closeErr.Reason)
+			} else {
+				dst.Close(websocket.StatusNormalClosure, "")
+			}
+			errc <- err
+			break
+		}
+		err = dst.Write(ctx, msgType, msg)
+		if err != nil {
+			errc <- err
+			break
+		}
+	}
+}
+
+func subprotocolsFromResponse(resp *http.Response) []string {
+	if resp == nil {
+		return nil
+	}
+	if proto := resp.Header.Get(SecWebSocketProtocol); proto != "" {
+		return []string{proto}
+	}
+	return nil
 }
 
 func copyResponse(rw http.ResponseWriter, resp *http.Response) error {
@@ -252,6 +452,24 @@ func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
 		for _, v := range vv {
 			dst.Add(k, v)
+		}
+	}
+}
+
+// copyFlush copies from src to dst, flushing after each read chunk so that
+// small WebSocket frames reach the h2 client without waiting for more data.
+func copyFlush(dst io.Writer, src io.Reader, flusher http.Flusher) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			_, _ = dst.Write(buf[:n])
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			break
 		}
 	}
 }

@@ -128,16 +128,31 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) isWebSocketRequest(r *http.Request) bool {
+	// HTTP/2 Extended CONNECT (RFC 8441)
+	if r.Method == http.MethodConnect && r.ProtoMajor >= 2 &&
+		strings.EqualFold(r.Header.Get(":protocol"), "websocket") {
+		return true
+	}
+	// HTTP/1.1 Upgrade
 	if r.Method != http.MethodGet {
 		return false
 	}
-	if r.Header.Get("Upgrade") != "websocket" {
-		return false
+	return headerContainsToken(r.Header, "Connection", "Upgrade") &&
+		headerContainsToken(r.Header, "Upgrade", "websocket")
+}
+
+// headerContainsToken checks whether a comma-separated HTTP header contains
+// the given token (case-insensitive). This handles L7 proxies that send
+// multi-value headers like "Connection: keep-alive, Upgrade".
+func headerContainsToken(h http.Header, key, token string) bool {
+	for _, v := range h[http.CanonicalHeaderKey(key)] {
+		for _, s := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(s), token) {
+				return true
+			}
+		}
 	}
-	if r.Header.Get("Connection") != "Upgrade" {
-		return false
-	}
-	return true
+	return false
 }
 
 func (p *Proxy) resolveRealHost(host *sandboxHost) (string, error, int) {

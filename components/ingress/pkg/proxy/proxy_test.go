@@ -54,6 +54,31 @@ func TestIsWebSocketRequest(t *testing.T) {
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
 	assert.False(t, proxy.isWebSocketRequest(req))
+
+	// Connection header with multiple tokens (L7 proxy scenario)
+	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "keep-alive, Upgrade")
+	assert.True(t, proxy.isWebSocketRequest(req))
+
+	// Case-insensitive headers
+	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Upgrade", "WebSocket")
+	req.Header.Set("Connection", "upgrade")
+	assert.True(t, proxy.isWebSocketRequest(req))
+
+	// HTTP/2 Extended CONNECT (RFC 8441)
+	req = httptest.NewRequest(http.MethodConnect, "/ws", nil)
+	req.ProtoMajor = 2
+	req.ProtoMinor = 0
+	req.Header.Set(":protocol", "websocket")
+	assert.True(t, proxy.isWebSocketRequest(req))
+
+	// HTTP/2 CONNECT without :protocol is not WebSocket
+	req = httptest.NewRequest(http.MethodConnect, "/ws", nil)
+	req.ProtoMajor = 2
+	req.ProtoMinor = 0
+	assert.False(t, proxy.isWebSocketRequest(req))
 }
 
 func TestParseHostRoute(t *testing.T) {

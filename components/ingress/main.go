@@ -92,7 +92,15 @@ func main() {
 	http.Handle("/", reverseProxy)
 	http.HandleFunc("/status.ok", proxy.Healthz)
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), nil); err != nil {
+	protos := new(http.Protocols)
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
+	srv := &http.Server{
+		Addr:      fmt.Sprintf(":%v", flag.Port),
+		Protocols: protos,
+	}
+
+	if err := srv.ListenAndServe(); err != nil {
 		log.Panicf("Error starting http server: %v", err)
 	}
 

@@ -70,6 +70,9 @@ spec:
         - name: main
           image: {{ include "opensandbox-server.ingressGatewayImage" . }}
           imagePullPolicy: IfNotPresent
+          env:
+            - name: GODEBUG
+              value: "http2xconnect=1"
           args:
             - "--namespace={{ .Values.server.gateway.dataplaneNamespace }}"
             - "--port={{ .Values.server.gateway.port }}"

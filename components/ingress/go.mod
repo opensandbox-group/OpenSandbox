@@ -6,7 +6,7 @@ require (
 	github.com/alibaba/OpenSandbox/sandbox-k8s v0.0.0
 	github.com/alibaba/opensandbox/internal v0.0.0
 	github.com/alicebob/miniredis/v2 v2.37.0
-	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	github.com/coder/websocket v1.8.15
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 	k8s.io/apimachinery v0.34.3
