@@ -307,7 +307,7 @@ storage ownership model:
 
 OpenSandbox keeps its existing `pause`/`resume` vocabulary instead of upstream's
 `suspend`/`resume`, but uses an enum rather than a boolean for the CRD field.
-Because OpenSandbox also needs future `Freeze`, it uses `operatingMode` as the
+Because OpenSandbox may also adopt future `Freeze`, it uses `operatingMode` as the
 single persistent-mode selector instead of adding a second operation/strategy
 enum. A checkpoint-only snapshot is action-shaped rather than
 persistent-mode-shaped and is left to a future OSEP. The backend selector is adapted to OpenSandbox's
@@ -1554,7 +1554,7 @@ type BatchSandboxOperatingMode string
 const (
     BatchSandboxOperatingModeRunning   BatchSandboxOperatingMode = "Running"
     BatchSandboxOperatingModeFreeze    BatchSandboxOperatingMode = "Freeze"
-  BatchSandboxOperatingModeKeepFS    BatchSandboxOperatingMode = "KeepFS"
+    BatchSandboxOperatingModeKeepFS    BatchSandboxOperatingMode = "KeepFS"
     BatchSandboxOperatingModeHibernate BatchSandboxOperatingMode = "Hibernate"
 )
 
