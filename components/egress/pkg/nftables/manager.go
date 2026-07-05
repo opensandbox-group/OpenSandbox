@@ -222,7 +222,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, allowV6Set)
 	if chainPolicy == "drop" {
-		fmt.Fprintf(&b, "add rule inet %s %s counter drop\n", tableName, chainName)
+		fmt.Fprintf(&b, "add rule inet %s %s drop\n", tableName, chainName)
 	}
 
 	return b.String(), nil

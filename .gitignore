@@ -276,3 +276,4 @@ bin/
 obj/
 
 .qoder/
+/.vs

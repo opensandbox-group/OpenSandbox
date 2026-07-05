@@ -39,7 +39,7 @@ var credentialVaultSecrets = map[string]string{
 
 func TestCredentialVaultInjectsAllAuthTypes(t *testing.T) {
 	targetIP := credentialVaultTargetIP(t)
-	ctx, sb := createCredentialVaultSandbox(t)
+	ctx, sb := createCredentialVaultSandbox(t, targetIP)
 
 	state, err := sb.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
 		Credentials: credentialVaultCredentials(
@@ -105,7 +105,7 @@ func TestCredentialVaultInjectsAllAuthTypes(t *testing.T) {
 
 func TestCredentialVaultRuntimeMutationAddsReplacesAndDeletesBinding(t *testing.T) {
 	targetIP := credentialVaultTargetIP(t)
-	ctx, sb := createCredentialVaultSandbox(t)
+	ctx, sb := createCredentialVaultSandbox(t, targetIP)
 
 	state, err := sb.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{})
 	require.NoError(t, err)
@@ -220,7 +220,7 @@ func credentialVaultTargetIP(t *testing.T) string {
 	return targetIP
 }
 
-func createCredentialVaultSandbox(t *testing.T) (context.Context, *opensandbox.Sandbox) {
+func createCredentialVaultSandbox(t *testing.T, targetIP string) (context.Context, *opensandbox.Sandbox) {
 	t.Helper()
 
 	image := os.Getenv("OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE")
@@ -237,8 +237,11 @@ func createCredentialVaultSandbox(t *testing.T) (context.Context, *opensandbox.S
 		ResourceLimits: credentialVaultSandboxResource(),
 		ReadyTimeout:   90 * time.Second,
 		NetworkPolicy: &opensandbox.NetworkPolicy{
-			DefaultAction: "allow",
-			Egress:        []opensandbox.NetworkRule{{Action: "allow", Target: credentialVaultTargetHost()}},
+			DefaultAction: "deny",
+			Egress: []opensandbox.NetworkRule{
+				{Action: "allow", Target: credentialVaultTargetHost()},
+				{Action: "allow", Target: targetIP},
+			},
 		},
 		CredentialProxy: &opensandbox.CredentialProxyConfig{Enabled: true},
 		Metadata: map[string]string{

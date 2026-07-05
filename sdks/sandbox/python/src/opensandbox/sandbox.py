@@ -353,8 +353,8 @@ class Sandbox:
             SandboxException: if pause operation fails
         """
         logger.info(f"Pausing sandbox: {self.id}")
+        self._sandbox_service.invalidate_endpoint_cache(self.id)
         await self._sandbox_service.pause_sandbox(self.id)
-
 
     async def kill(self) -> None:
         """
@@ -369,6 +369,7 @@ class Sandbox:
             SandboxException: if termination fails
         """
         logger.info(f"Killing sandbox: {self.id}")
+        self._sandbox_service.invalidate_endpoint_cache(self.id)
         await self._sandbox_service.kill_sandbox(self.id)
 
     async def close(self) -> None:

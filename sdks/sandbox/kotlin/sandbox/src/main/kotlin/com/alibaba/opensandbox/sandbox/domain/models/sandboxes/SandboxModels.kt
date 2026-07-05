@@ -714,6 +714,7 @@ class Volume private constructor(
  * @property image Image specification used to create this sandbox
  * @property platform Effective platform used for sandbox provisioning
  * @property metadata Custom metadata attached to the sandbox
+ * @property extensions Opaque extension data returned by the server
  */
 class SandboxInfo(
     val id: String,
@@ -725,6 +726,7 @@ class SandboxInfo(
     val snapshotId: String? = null,
     val platform: PlatformSpec? = null,
     val metadata: Map<String, String>? = null,
+    val extensions: Map<String, String>? = null,
 )
 
 /**
@@ -747,10 +749,12 @@ class SandboxStatus(
  *
  * @property id Unique identifier of the newly created sandbox
  * @property platform Effective platform used for sandbox provisioning
+ * @property extensions Opaque extension data returned by the server
  */
 class SandboxCreateResponse(
     val id: String,
     val platform: PlatformSpec? = null,
+    val extensions: Map<String, String>? = null,
 )
 
 /**

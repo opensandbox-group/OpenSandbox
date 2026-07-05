@@ -409,6 +409,7 @@ export interface SandboxInfo extends Record<string, unknown> {
   platform?: PlatformSpec;
   entrypoint: string[];
   metadata?: Record<string, string>;
+  extensions?: Record<string, string>;
   status: SandboxStatus;
   /**
    * Sandbox creation time.
@@ -457,6 +458,7 @@ export interface CreateSandboxResponse extends Record<string, unknown> {
   status: SandboxStatus;
   platform?: PlatformSpec;
   metadata?: Record<string, string>;
+  extensions?: Record<string, string>;
   /**
    * Sandbox expiration time after creation.
    */

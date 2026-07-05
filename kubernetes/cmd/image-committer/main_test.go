@@ -76,6 +76,96 @@ func TestGetImageDigestReturnsDigest(t *testing.T) {
 	}
 }
 
+func TestGetContainerIDByNerdctlReturnsRunningContainer(t *testing.T) {
+	original := commandCombinedOutput
+	t.Cleanup(func() { commandCombinedOutput = original })
+
+	calls := 0
+	commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		calls++
+		if name != "nerdctl" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		if calls != 1 {
+			t.Fatalf("expected a single nerdctl lookup, got %d", calls)
+		}
+		return []byte("container-running\n"), nil
+	}
+
+	containerID, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	if err != nil {
+		t.Fatalf("expected running container lookup to succeed, got %v", err)
+	}
+	if containerID != "container-running" {
+		t.Fatalf("unexpected container ID %q", containerID)
+	}
+}
+
+func TestGetContainerIDByNerdctlFallsBackToStoppedContainers(t *testing.T) {
+	original := commandCombinedOutput
+	t.Cleanup(func() { commandCombinedOutput = original })
+
+	var calls [][]string
+	commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		if name != "nerdctl" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		calls = append(calls, append([]string(nil), args...))
+		switch len(calls) {
+		case 1:
+			return []byte("\n"), nil
+		case 2:
+			return []byte("container-stopped\n"), nil
+		default:
+			t.Fatalf("unexpected extra nerdctl lookup #%d", len(calls))
+			return nil, nil
+		}
+	}
+
+	containerID, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	if err != nil {
+		t.Fatalf("expected stopped container fallback to succeed, got %v", err)
+	}
+	if containerID != "container-stopped" {
+		t.Fatalf("unexpected container ID %q", containerID)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected two nerdctl lookups, got %d", len(calls))
+	}
+	if contains(calls[0], "-a") {
+		t.Fatalf("first lookup should only inspect running containers: %v", calls[0])
+	}
+	if !contains(calls[1], "-a") {
+		t.Fatalf("second lookup should include stopped containers: %v", calls[1])
+	}
+}
+
+func TestGetContainerIDByNerdctlReturnsHelpfulErrorWhenBothLookupsAreEmpty(t *testing.T) {
+	original := commandCombinedOutput
+	t.Cleanup(func() { commandCombinedOutput = original })
+
+	commandCombinedOutput = func(_ string, _ ...string) ([]byte, error) {
+		return []byte("\n"), nil
+	}
+
+	_, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	if err == nil {
+		t.Fatal("expected lookup failure when both running and stopped container searches are empty")
+	}
+	if got := err.Error(); got != "container 'sandbox' not found in pod default/pod-1 (nerdctl ps and nerdctl ps -a returned empty)" {
+		t.Fatalf("unexpected error %q", got)
+	}
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWriteSnapshotResultWritesTerminationMessage(t *testing.T) {
 	original := terminationMessagePath
 	t.Cleanup(func() { terminationMessagePath = original })

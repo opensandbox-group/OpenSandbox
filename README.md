@@ -252,9 +252,10 @@ OpenSandbox provides examples covering SDK usage, agent integrations, browser au
 - **[desktop](docs/examples/desktop.md)** - Full desktop environment in a sandbox with VNC access.
 - **[vscode](docs/examples/vscode.md)** - code-server (VS Code Web) running inside a sandbox for remote dev.
 
-#### 🧠 ML and Training
+#### 🧠 Training and Evaluation
 
 - **[rl-training](docs/examples/rl-training.md)** - DQN CartPole training in a sandbox with checkpoints and summary output.
+- **[harbor-evaluation](docs/examples/harbor-evaluation.md)** - Run a [Harbor](https://github.com/harbor-framework/harbor) agent evaluation on OpenSandbox, one sandbox per trial.
 
 For more details, please refer to the [examples documentation](docs/examples/index.md).
 

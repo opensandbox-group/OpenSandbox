@@ -512,6 +512,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task PauseAsync(CancellationToken cancellationToken = default)
     {
+        (_sandboxes as Adapters.SandboxesAdapter)?.InvalidateEndpointCache(Id);
         return _sandboxes.PauseSandboxAsync(Id, cancellationToken);
     }
 
@@ -552,6 +553,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task KillAsync(CancellationToken cancellationToken = default)
     {
+        (_sandboxes as Adapters.SandboxesAdapter)?.InvalidateEndpointCache(Id);
         return _sandboxes.DeleteSandboxAsync(Id, cancellationToken);
     }
 

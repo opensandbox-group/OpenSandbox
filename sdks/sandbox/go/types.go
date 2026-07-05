@@ -173,6 +173,7 @@ type SandboxInfo struct {
 	SnapshotID string            `json:"snapshotId,omitempty"`
 	Status     SandboxStatus     `json:"status"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
+	Extensions map[string]string `json:"extensions,omitempty"`
 	Entrypoint []string          `json:"entrypoint"`
 	ExpiresAt  *time.Time        `json:"expiresAt,omitempty"`
 	CreatedAt  time.Time         `json:"createdAt"`

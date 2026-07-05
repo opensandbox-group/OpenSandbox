@@ -7,6 +7,7 @@ permissions:
   id-token: write
   attestations: write
   artifact-metadata: write
+  packages: write
 
 on:
   workflow_dispatch:
@@ -68,6 +69,13 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Parse tag and set variables
         id: parse_tag
         run: |
@@ -127,6 +135,7 @@ jobs:
 
           export TAG=$IMAGE_TAG
           export COMPONENT=$COMPONENT
+          export GHCR_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opensandbox"
           chmod +x build.sh
           ./build.sh
 
@@ -140,6 +149,7 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "dockerhub_image=docker.io/opensandbox/$COMPONENT" >> "$GITHUB_OUTPUT"
           echo "acr_image=sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/$COMPONENT" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=$GHCR_REPO/$COMPONENT" >> "$GITHUB_OUTPUT"
 
       - name: Sign release images
         if: github.ref_type == 'tag' && steps.parse_tag.outputs.image_tag != 'latest' && steps.parse_tag.outputs.image_tag != ''
@@ -147,9 +157,10 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
           DOCKERHUB_IMAGE: ${{ steps.build.outputs.dockerhub_image }}
           ACR_IMAGE: ${{ steps.build.outputs.acr_image }}
+          GHCR_IMAGE: ${{ steps.build.outputs.ghcr_image }}
         run: |
           set -euo pipefail
-          cosign sign --yes "${DOCKERHUB_IMAGE}@${DIGEST}" "${ACR_IMAGE}@${DIGEST}"
+          cosign sign --yes "${DOCKERHUB_IMAGE}@${DIGEST}" "${ACR_IMAGE}@${DIGEST}" "${GHCR_IMAGE}@${DIGEST}"
 
       - name: Attest Docker Hub image
         if: github.ref_type == 'tag' && steps.parse_tag.outputs.image_tag != 'latest' && steps.parse_tag.outputs.image_tag != ''
@@ -165,6 +176,15 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-name: ${{ steps.build.outputs.acr_image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest GHCR image
+        if: github.ref_type == 'tag' && steps.parse_tag.outputs.image_tag != 'latest' && steps.parse_tag.outputs.image_tag != ''
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.build.outputs.ghcr_image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
           create-storage-record: false

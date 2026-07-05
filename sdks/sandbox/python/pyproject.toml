@@ -51,13 +51,14 @@ dependencies = [
 [project.optional-dependencies]
 pool-redis = [
     "redis>=5.0,<6.0",
+    "pyjwt>=2.13.0",
 ]
 
 [project.urls]
 Homepage = "https://open-sandbox.ai"
-Repository = "https://github.com/alibaba/OpenSandbox"
+Repository = "https://github.com/opensandbox-group/OpenSandbox"
 Documentation = "https://open-sandbox.ai"
-Issues = "https://github.com/alibaba/OpenSandbox/issues"
+Issues = "https://github.com/opensandbox-group/OpenSandbox/issues"
 
 [tool.hatch.version]
 source = "vcs"
@@ -135,6 +136,11 @@ python_files = [
     "*_test.py",
 ]
 asyncio_mode = "auto"
+
+[tool.uv]
+constraint-dependencies = [
+    "pyjwt>=2.13.0",
+]
 
 [tool.coverage.run]
 source = ["src"]

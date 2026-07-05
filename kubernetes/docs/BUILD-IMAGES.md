@@ -22,6 +22,9 @@ COMPONENT=task-executor TAG=v0.1.0 PUSH=false ./build.sh
 # Ensure you are logged in to Alibaba Cloud ACR
 docker login sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com
 
+# Optional: also push to GitHub Container Registry
+docker login ghcr.io
+
 # Build and push controller image
 COMPONENT=controller TAG=v0.1.0 ./build.sh
 
@@ -34,6 +37,7 @@ COMPONENT=task-executor TAG=v0.1.0 ./build.sh
 - `COMPONENT`: The component to build. Options: `controller`, `task-executor`
 - `TAG`: Image tag, defaults to `latest`
 - `PUSH`: Whether to push to remote registry, defaults to `true`
+- `GHCR_REPO`: Optional GHCR repository prefix, for example `ghcr.io/opensandbox-group/opensandbox`
 
 ## Option 2: Using GitHub Actions
 
@@ -85,11 +89,22 @@ make docker-push-task-executor TASK_EXECUTOR_IMG=myregistry/opensandbox-task-exe
 
 ## Image Registry
 
-Built images are pushed to the following registry:
+Built images are pushed to Docker Hub and Alibaba Cloud Container Registry (ACR). When `GHCR_REPO` is set, the same images are also pushed to GitHub Container Registry (GHCR).
+
+### Docker Hub
+- Controller: `opensandbox/controller:<tag>`
+- Task Executor: `opensandbox/task-executor:<tag>`
+- Image Committer: `opensandbox/image-committer:<tag>`
 
 ### Alibaba Cloud Container Registry (ACR)
 - Controller: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller:<tag>`
 - Task Executor: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/task-executor:<tag>`
+- Image Committer: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:<tag>`
+
+### GitHub Container Registry (GHCR)
+- Controller: `ghcr.io/<owner>/opensandbox/controller:<tag>`
+- Task Executor: `ghcr.io/<owner>/opensandbox/task-executor:<tag>`
+- Image Committer: `ghcr.io/<owner>/opensandbox/image-committer:<tag>`
 
 ## Multi-Architecture Support
 

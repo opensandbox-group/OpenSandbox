@@ -79,6 +79,17 @@ class SandboxesAdapter(Sandboxes):
             connection_config: Connection configuration (shared transport, headers, timeouts)
         """
         self.connection_config = connection_config
+
+        from opensandbox.adapters.endpoint_cache import AsyncEndpointCache
+
+        if not connection_config.endpoint_cache_disabled:
+            self._endpoint_cache: AsyncEndpointCache | None = AsyncEndpointCache(
+                maxsize=connection_config.endpoint_cache_size or 1024,
+                ttl=connection_config.endpoint_cache_ttl.total_seconds(),
+            )
+        else:
+            self._endpoint_cache = None
+
         from opensandbox.api.lifecycle import AuthenticatedClient
 
         api_key = self.connection_config.get_api_key()
@@ -350,6 +361,18 @@ class SandboxesAdapter(Sandboxes):
         self, sandbox_id: str, port: int, use_server_proxy: bool = False
     ) -> SandboxEndpoint:
         """Get network endpoint information for a sandbox service."""
+        if self._endpoint_cache is not None:
+            key = (sandbox_id, port, use_server_proxy)
+            return await self._endpoint_cache.get_or_fetch(
+                key,
+                lambda: self._fetch_sandbox_endpoint(sandbox_id, port, use_server_proxy),
+            )
+        return await self._fetch_sandbox_endpoint(sandbox_id, port, use_server_proxy)
+
+    async def _fetch_sandbox_endpoint(
+        self, sandbox_id: str, port: int, use_server_proxy: bool = False
+    ) -> SandboxEndpoint:
+        """Fetch endpoint from server (no cache)."""
         logger.debug(f"Retrieving sandbox endpoint: {sandbox_id}, port {port}")
 
         try:
@@ -381,6 +404,11 @@ class SandboxesAdapter(Sandboxes):
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def invalidate_endpoint_cache(self, sandbox_id: str) -> None:
+        """Remove all cached endpoints for a sandbox."""
+        if self._endpoint_cache is not None:
+            self._endpoint_cache.invalidate(sandbox_id)
 
     async def get_signed_sandbox_endpoint(
         self, sandbox_id: str, port: int, expires: int,

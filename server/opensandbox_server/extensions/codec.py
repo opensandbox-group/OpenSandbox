@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, MutableMapping, Optional
+from typing import Dict, Mapping, MutableMapping, Optional
 
 from opensandbox_server.extensions.keys import (
     ACCESS_RENEW_EXTEND_SECONDS_KEY,
@@ -46,7 +46,7 @@ def apply_access_renew_extend_seconds_to_mapping(
     mapping[metadata_key] = s
 
 
-def apply_extensions_to_annotations(
+def apply_extensions_to_mapping(
     annotations: MutableMapping[str, str],
     extensions: Optional[Dict[str, str]],
 ) -> None:
@@ -68,3 +68,23 @@ def apply_extensions_to_annotations(
             suffix = key[len(EXTENSIONS_ANNOTATION_PREFIX):]
             annotation_key = ANNOTATION_METADATA_PREFIX + suffix
             annotations[annotation_key] = value
+
+
+def extract_extensions_from_mapping(
+    annotations: Optional[Mapping[str, str]],
+) -> Optional[Dict[str, str]]:
+    """
+    Restore extension keys previously propagated to Pod annotations.
+
+    For each annotation key starting with ANNOTATION_METADATA_PREFIX, the value is
+    copied to extensions with EXTENSIONS_ANNOTATION_PREFIX prefix.
+    """
+    if not annotations:
+        return None
+
+    extensions = {
+        EXTENSIONS_ANNOTATION_PREFIX + key[len(ANNOTATION_METADATA_PREFIX):]: value
+        for key, value in annotations.items()
+        if key.startswith(ANNOTATION_METADATA_PREFIX)
+    }
+    return extensions or None

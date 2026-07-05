@@ -4580,6 +4580,135 @@ spec:
 			cmd = exec.Command("kubectl", "delete", "pool", poolSmallName, "-n", testNamespace)
 			_, _ = utils.Run(cmd)
 		})
+
+		It("should auto-assign to the non-full Pool when one Pool is fully allocated", func() {
+			const poolFullName = "test-pool-cap-full"
+			const poolAvailName = "test-pool-cap-avail"
+			const testNamespace = "default"
+
+			By("creating pool-avail with capacity")
+			poolAvailYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolAvailName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    3,
+				"BufferMin":    2,
+				"PoolMax":      5,
+				"PoolMin":      2,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolAvailFile := filepath.Join("/tmp", poolAvailName+".yaml")
+			err = os.WriteFile(poolAvailFile, []byte(poolAvailYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolAvailFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolAvailFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating pool-full with minimal capacity")
+			poolFullYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolFullName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    1,
+				"BufferMin":    1,
+				"PoolMax":      1,
+				"PoolMin":      1,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFullFile := filepath.Join("/tmp", poolFullName+".yaml")
+			err = os.WriteFile(poolFullFile, []byte(poolFullYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFullFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", poolFullFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for both pools to be stable")
+			waitPoolStable(poolAvailName, testNamespace, 3*time.Minute)
+			waitPoolStable(poolFullName, testNamespace, 3*time.Minute)
+
+			By("allocating pool-full completely with a BatchSandbox targeting pool-full")
+			const bsFillName = "test-bs-cap-fill"
+			bsFillYAML := fmt.Sprintf(`apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  poolRef: %s
+`, bsFillName, testNamespace, poolFullName)
+
+			bsFillFile := filepath.Join("/tmp", bsFillName+".yaml")
+			err = os.WriteFile(bsFillFile, []byte(bsFillYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bsFillFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsFillFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the first BatchSandbox to be allocated")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", bsFillName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("verifying pool-full is now at capacity")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolFullName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}, 1*time.Minute).Should(Succeed())
+
+			By("creating a second BatchSandbox that should go to pool-avail")
+			const bsCapName = "test-bs-cap-assign"
+			bsCapYAML, err := renderTemplate("testdata/batchsandbox-auto-assign-with-template.yaml", map[string]interface{}{
+				"BatchSandboxName": bsCapName,
+				"Namespace":        testNamespace,
+				"Replicas":         1,
+				"SandboxImage":     utils.SandboxImage,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bsCapFile := filepath.Join("/tmp", bsCapName+".yaml")
+			err = os.WriteFile(bsCapFile, []byte(bsCapYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bsCapFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsCapFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the second BatchSandbox is assigned to pool-avail (not the full pool)")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", bsCapName, "-n", testNamespace,
+					"-o", "jsonpath={.spec.poolRef}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(poolAvailName))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", bsCapName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", bsFillName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pool", poolFullName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pool", poolAvailName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
 	})
 
 })

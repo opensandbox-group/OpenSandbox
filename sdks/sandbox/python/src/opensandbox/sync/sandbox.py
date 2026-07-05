@@ -361,8 +361,8 @@ class SandboxSync:
             SandboxException: if pause operation fails
         """
         logger.info("Pausing sandbox: %s", self.id)
+        self._sandbox_service.invalidate_endpoint_cache(self.id)
         self._sandbox_service.pause_sandbox(self.id)
-
 
     def kill(self) -> None:
         """
@@ -377,6 +377,7 @@ class SandboxSync:
             SandboxException: if termination fails
         """
         logger.info("Killing sandbox: %s", self.id)
+        self._sandbox_service.invalidate_endpoint_cache(self.id)
         self._sandbox_service.kill_sandbox(self.id)
 
     def close(self) -> None:

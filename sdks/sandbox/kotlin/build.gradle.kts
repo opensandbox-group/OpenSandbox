@@ -125,7 +125,7 @@ subprojects {
             name.set(project.name)
             description.set("Alibaba Open Sandbox SDK")
             inceptionYear.set("2025")
-            url.set("https://github.com/alibaba/OpenSandbox")
+            url.set("https://github.com/opensandbox-group/OpenSandbox")
             licenses {
                 license {
                     name.set("The Apache License, Version 2.0")
@@ -142,9 +142,9 @@ subprojects {
                 }
             }
             scm {
-                url.set("https://github.com/alibaba/OpenSandbox")
-                connection.set("scm:git:https://github.com/alibaba/OpenSandbox.git")
-                developerConnection.set("scm:git:ssh://git@github.com/alibaba/OpenSandbox.git")
+                url.set("https://github.com/opensandbox-group/OpenSandbox")
+                connection.set("scm:git:https://github.com/opensandbox-group/OpenSandbox.git")
+                developerConnection.set("scm:git:ssh://git@github.com/opensandbox-group/OpenSandbox.git")
             }
         }
     }

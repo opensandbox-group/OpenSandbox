@@ -611,7 +611,7 @@ api_key = "your-secret-key"
 
 [runtime]
 type = "kubernetes"
-execd_image = "opensandbox/execd:v1.0.19"
+execd_image = "opensandbox/execd:v1.0.20"
 
 [kubernetes]
 namespace = "default"

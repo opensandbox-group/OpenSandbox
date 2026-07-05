@@ -31,7 +31,7 @@ spec:
             - name: opensandbox-bin
               mountPath: /opt/opensandbox
         - name: execd-installer
-          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.19
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20
           command: [ "/bin/sh", "-c" ]
           args:
             - |

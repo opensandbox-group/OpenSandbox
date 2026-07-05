@@ -67,4 +67,6 @@ export interface Sandboxes {
     port: number,
     expires: number
   ): Promise<Endpoint>;
+
+  invalidateEndpointCache?(sandboxId: SandboxId): void;
 }

@@ -17,11 +17,24 @@ Credential Vault is OpenSandbox's outbound credential broker for sandboxed agent
 - Go SDK >= 1.0.3
 - C# SDK >= 0.1.3
 - Server config sets `[egress].image`.
+- Server config sets `[egress].mode = "dns+nft"`. Credential Vault refuses to
+  activate in DNS-only mode because direct-IP connections can bypass DNS policy.
 - Sandbox create request includes an outbound network policy.
+- The outbound network policy should use `defaultAction="deny"` and explicitly
+  allow every host referenced by a credential binding. Default-allow remains
+  temporarily supported for backward compatibility but emits a security warning.
 - Sandbox create request enables Credential Proxy.
 - Sandbox pods are not running with an additional transparent service-mesh sidecar (for example Istio/Envoy injection) in the same network namespace. Credential Vault currently assumes the OpenSandbox egress sidecar is the only transparent outbound interception layer in the pod.
 - The sandbox image has the tools you want to run. For Claude Code, use an image
   with Node.js and npm, such as the OpenSandbox code-interpreter image.
+
+::: warning Migration notice
+Credential Proxy still requires server `[egress].mode = "dns+nft"`; deployments
+that cannot provide nft enforcement cannot safely enable credential injection.
+Default-allow policies remain accepted during the compatibility period, but emit
+a security warning and should migrate to `defaultAction="deny"` before enforcement
+is tightened in a future release.
+:::
 
 ## How It Works
 
@@ -59,8 +72,8 @@ Use one of these operator patterns instead:
 
 For the underlying egress-sidecar limitation, see [Egress](/components/egress#service-mesh-compatibility).
 
-Credential bindings are intentionally precise. Prefer a default-deny egress
-policy and a narrow path match, for example `/v1/*` for Anthropic API calls.
+Credential bindings are intentionally precise. A default-deny egress policy is
+required. Use a narrow path match, for example `/v1/*` for Anthropic API calls.
 
 ## Auth Types
 
@@ -119,7 +132,8 @@ X-Client-Secret: <client-secret>
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
-| `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS` | off | When enabled (`true`/`1`/`on`), credential vault write operations (create, patch, delete) require the request to arrive over TLS, from a loopback address, or with `X-Forwarded-Proto: https`. When disabled (default), any authenticated request is accepted regardless of transport. Enable this in deployments where the egress sidecar is directly reachable from untrusted networks without a TLS-terminating reverse proxy. |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS` | off | When enabled (`true`/`1`/`on`), credential vault write operations (create, patch, delete) require TLS, loopback transport, or `X-Forwarded-Proto: https` from a configured trusted proxy. When disabled (default), any authenticated request is accepted regardless of transport. Enable this in deployments where the egress sidecar is directly reachable from untrusted networks without a TLS-terminating reverse proxy. |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS` | empty | Comma-separated IP addresses or CIDRs allowed to assert `X-Forwarded-Proto: https`. Forwarded transport headers from all other peers are ignored. Configure this when TLS terminates at a reverse proxy before the egress sidecar. |
 
 
 ## SDK Quick Reference
@@ -299,7 +313,8 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 ## Binding Guidance
 
 - Use `defaultAction="deny"` and only allow the service hosts required by the
-  tool.
+  tool. Default-allow policies are deprecated because they may allow credential
+  destination bypass and will emit a security warning.
 - Scope bindings by path whenever possible, for example `/v1/*`.
 - Avoid overlapping bindings at the same precedence; ambiguous matches are
   rejected.

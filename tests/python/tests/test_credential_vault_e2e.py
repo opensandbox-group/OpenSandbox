@@ -71,7 +71,7 @@ def credential_vault_target_ip() -> str:
 def test_credential_vault_injects_all_auth_types(
     credential_vault_target_ip: str,
 ) -> None:
-    cfg, sandbox = _create_credential_proxy_sandbox()
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
     try:
         state = sandbox.credential_vault.create(
             credentials=[
@@ -134,7 +134,7 @@ def test_credential_vault_injects_all_auth_types(
 def test_credential_vault_runtime_mutation_adds_replaces_and_deletes_binding(
     credential_vault_target_ip: str,
 ) -> None:
-    cfg, sandbox = _create_credential_proxy_sandbox()
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
     try:
         state = sandbox.credential_vault.create(credentials=[], bindings=[])
         assert state.revision == 1
@@ -245,7 +245,7 @@ def test_credential_vault_runtime_mutation_adds_replaces_and_deletes_binding(
         _close_sandbox(cfg, sandbox)
 
 
-def _create_credential_proxy_sandbox() -> tuple[object, SandboxSync]:
+def _create_credential_proxy_sandbox(target_ip: str) -> tuple[object, SandboxSync]:
     cfg = create_connection_config_sync()
     sandbox = SandboxSync.create(
         image=SandboxImageSpec(
@@ -256,8 +256,11 @@ def _create_credential_proxy_sandbox() -> tuple[object, SandboxSync]:
         timeout=timedelta(minutes=5),
         ready_timeout=timedelta(seconds=60),
         network_policy=NetworkPolicy(
-            defaultAction="allow",
-            egress=[NetworkRule(action="allow", target=TARGET_HOST)],
+            defaultAction="deny",
+            egress=[
+                NetworkRule(action="allow", target=TARGET_HOST),
+                NetworkRule(action="allow", target=target_ip),
+            ],
         ),
         credential_proxy=CredentialProxyConfig(enabled=True),
         metadata={E2E_LABEL_KEY: E2E_LABEL_VALUE},

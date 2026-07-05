@@ -210,4 +210,5 @@ if __name__ == "__main__":
         timeout_keep_alive=app_config.server.timeout_keep_alive,
         loop=app_config.server.loop,
         http=app_config.server.http,
+        timeout_graceful_shutdown=app_config.server.timeout_graceful_shutdown,
     )

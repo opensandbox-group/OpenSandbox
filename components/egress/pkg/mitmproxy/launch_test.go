@@ -20,6 +20,73 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestBuildMitmdumpArgsNoUserScripts(t *testing.T) {
+	args := buildMitmdumpArgs(Config{ListenPort: 18081})
+	require.Contains(t, args, "--listen-port")
+	require.Contains(t, args, "18081")
+	require.Contains(t, args, "-s")
+	require.Contains(t, args, systemScriptPath)
+	// Only one -s (system addon)
+	count := 0
+	for _, a := range args {
+		if a == "-s" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count)
+}
+
+func TestBuildMitmdumpArgsSingleUserScript(t *testing.T) {
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"/scripts/auth.py"},
+	})
+	count := 0
+	for _, a := range args {
+		if a == "-s" {
+			count++
+		}
+	}
+	require.Equal(t, 2, count)
+	require.Equal(t, "/scripts/auth.py", args[len(args)-1])
+}
+
+func TestBuildMitmdumpArgsMultipleUserScripts(t *testing.T) {
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"/scripts/auth.py", "/scripts/logging.py"},
+	})
+	count := 0
+	for _, a := range args {
+		if a == "-s" {
+			count++
+		}
+	}
+	require.Equal(t, 3, count)
+	// Order: system, auth, logging
+	scripts := []string{}
+	for i, a := range args {
+		if a == "-s" {
+			scripts = append(scripts, args[i+1])
+		}
+	}
+	require.Equal(t, []string{systemScriptPath, "/scripts/auth.py", "/scripts/logging.py"}, scripts)
+}
+
+func TestBuildMitmdumpArgsSkipsEmptyScriptPaths(t *testing.T) {
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"  ", "/scripts/auth.py", "", "  /scripts/logging.py  "},
+	})
+	scripts := []string{}
+	for i, a := range args {
+		if a == "-s" {
+			scripts = append(scripts, args[i+1])
+		}
+	}
+	require.Equal(t, []string{systemScriptPath, "/scripts/auth.py", "/scripts/logging.py"}, scripts)
+}
+
 func TestBuildMitmdumpEnvSetsMitmproxyHome(t *testing.T) {
 	env := buildMitmdumpEnv(
 		[]string{

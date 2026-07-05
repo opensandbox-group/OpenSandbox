@@ -59,6 +59,17 @@ logger = logging.getLogger(__name__)
 class SandboxesAdapterSync(SandboxesSync):
     def __init__(self, connection_config: ConnectionConfigSync) -> None:
         self.connection_config = connection_config
+
+        from opensandbox.adapters.endpoint_cache import EndpointCache
+
+        if not connection_config.endpoint_cache_disabled:
+            self._endpoint_cache: EndpointCache | None = EndpointCache(
+                maxsize=connection_config.endpoint_cache_size or 1024,
+                ttl=connection_config.endpoint_cache_ttl.total_seconds(),
+            )
+        else:
+            self._endpoint_cache = None
+
         from opensandbox.api.lifecycle import AuthenticatedClient
 
         api_key = self.connection_config.get_api_key()
@@ -228,6 +239,17 @@ class SandboxesAdapterSync(SandboxesSync):
     def get_sandbox_endpoint(
         self, sandbox_id: str, port: int, use_server_proxy: bool = False
     ) -> SandboxEndpoint:
+        if self._endpoint_cache is not None:
+            key = (sandbox_id, port, use_server_proxy)
+            return self._endpoint_cache.get_or_fetch(
+                key,
+                lambda: self._fetch_sandbox_endpoint(sandbox_id, port, use_server_proxy),
+            )
+        return self._fetch_sandbox_endpoint(sandbox_id, port, use_server_proxy)
+
+    def _fetch_sandbox_endpoint(
+        self, sandbox_id: str, port: int, use_server_proxy: bool = False
+    ) -> SandboxEndpoint:
         try:
             from opensandbox.api.lifecycle.api.sandboxes import (
                 get_sandboxes_sandbox_id_endpoints_port,
@@ -246,6 +268,11 @@ class SandboxesAdapterSync(SandboxesSync):
         except Exception as e:
             logger.error("Failed to retrieve sandbox endpoint for sandbox %s", sandbox_id, exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def invalidate_endpoint_cache(self, sandbox_id: str) -> None:
+        """Remove all cached endpoints for a sandbox."""
+        if self._endpoint_cache is not None:
+            self._endpoint_cache.invalidate(sandbox_id)
 
     def get_signed_sandbox_endpoint(
         self, sandbox_id: str, port: int, expires: int,

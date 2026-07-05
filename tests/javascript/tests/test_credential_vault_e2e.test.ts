@@ -34,7 +34,7 @@ const credentialVaultTest = process.env.OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_
 
 credentialVaultTest("credential vault injects all auth types", async () => {
   const targetIp = credentialVaultTargetIp();
-  const sandbox = await createCredentialVaultSandbox();
+  const sandbox = await createCredentialVaultSandbox(targetIp);
 
   try {
     const state = await sandbox.credentialVault.create({
@@ -86,7 +86,7 @@ credentialVaultTest("credential vault injects all auth types", async () => {
 
 credentialVaultTest("credential vault runtime mutation adds replaces and deletes binding", async () => {
   const targetIp = credentialVaultTargetIp();
-  const sandbox = await createCredentialVaultSandbox();
+  const sandbox = await createCredentialVaultSandbox(targetIp);
 
   try {
     let state = await sandbox.credentialVault.create({ credentials: [], bindings: [] });
@@ -189,7 +189,7 @@ function credentialVaultTargetIp(): string {
   return targetIp;
 }
 
-async function createCredentialVaultSandbox(): Promise<Sandbox> {
+async function createCredentialVaultSandbox(targetIp: string): Promise<Sandbox> {
   const image = process.env.OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE ?? getSandboxImage();
   return Sandbox.create({
     connectionConfig: createConnectionConfig(),
@@ -201,8 +201,11 @@ async function createCredentialVaultSandbox(): Promise<Sandbox> {
     readyTimeoutSeconds: 90,
     timeoutSeconds: 5 * 60,
     networkPolicy: {
-      defaultAction: "allow",
-      egress: [{ action: "allow", target: credentialVaultTargetHost() }],
+      defaultAction: "deny",
+      egress: [
+        { action: "allow", target: credentialVaultTargetHost() },
+        { action: "allow", target: targetIp },
+      ],
     },
     credentialProxy: { enabled: true },
     metadata: {

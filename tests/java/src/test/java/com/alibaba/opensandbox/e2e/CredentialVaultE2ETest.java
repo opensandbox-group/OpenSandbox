@@ -69,7 +69,7 @@ class CredentialVaultE2ETest extends BaseE2ETest {
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
     void credentialVaultInjectsAllAuthTypes() {
         String targetIp = credentialVaultTargetIp();
-        Sandbox sandbox = createCredentialVaultSandbox();
+        Sandbox sandbox = createCredentialVaultSandbox(targetIp);
 
         try {
             CredentialVaultState state =
@@ -145,7 +145,7 @@ class CredentialVaultE2ETest extends BaseE2ETest {
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
     void credentialVaultRuntimeMutationAddsReplacesAndDeletesBinding() {
         String targetIp = credentialVaultTargetIp();
-        Sandbox sandbox = createCredentialVaultSandbox();
+        Sandbox sandbox = createCredentialVaultSandbox(targetIp);
 
         try {
             CredentialVaultState state =
@@ -271,7 +271,7 @@ class CredentialVaultE2ETest extends BaseE2ETest {
         }
     }
 
-    private static Sandbox createCredentialVaultSandbox() {
+    private static Sandbox createCredentialVaultSandbox(String targetIp) {
         String image =
                 envOrDefault(
                         "OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE", getSandboxImage());
@@ -287,11 +287,16 @@ class CredentialVaultE2ETest extends BaseE2ETest {
                 .readyTimeout(Duration.ofSeconds(90))
                 .networkPolicy(
                         NetworkPolicy.builder()
-                                .defaultAction(NetworkPolicy.DefaultAction.ALLOW)
+                                .defaultAction(NetworkPolicy.DefaultAction.DENY)
                                 .addEgress(
                                         NetworkRule.builder()
                                                 .action(NetworkRule.Action.ALLOW)
                                                 .target(credentialVaultTargetHost())
+                                                .build())
+                                .addEgress(
+                                        NetworkRule.builder()
+                                                .action(NetworkRule.Action.ALLOW)
+                                                .target(targetIp)
                                                 .build())
                                 .build())
                 .credentialProxy(CredentialProxyConfig.enabled())

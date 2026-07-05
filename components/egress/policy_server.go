@@ -762,16 +762,48 @@ func (s *policyServer) authorize(r *http.Request) bool {
 }
 
 func credentialVaultWriteTransportAllowed(r *http.Request) bool {
-	return r.TLS != nil || isLoopbackRequest(r) || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	if r.TLS != nil || isLoopbackRequest(r) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		return false
+	}
+	remoteIP := requestRemoteIP(r)
+	if !remoteIP.IsValid() {
+		return false
+	}
+	for _, raw := range strings.Split(os.Getenv(constants.EnvCredentialVaultTrustedProxyCIDRs), ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(raw)
+		if err == nil && prefix.Contains(remoteIP) {
+			return true
+		}
+		addr, err := netip.ParseAddr(raw)
+		if err == nil && addr == remoteIP {
+			return true
+		}
+	}
+	return false
 }
 
 func isLoopbackRequest(r *http.Request) bool {
+	ip := requestRemoteIP(r)
+	return ip.IsValid() && ip.IsLoopback()
+}
+
+func requestRemoteIP(r *http.Request) netip.Addr {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	ip, err := netip.ParseAddr(strings.TrimSpace(host))
+	if err != nil {
+		return netip.Addr{}
+	}
+	return ip.Unmap()
 }
 
 func (s *policyServer) enforceEgressRuleLimit(w http.ResponseWriter, egressCount int) bool {

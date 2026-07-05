@@ -92,7 +92,7 @@ jobs:
           execd_image = "opensandbox/execd:local"
           [egress]
           image = "opensandbox/egress:local"
-          mode = "dns"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -308,6 +308,7 @@ jobs:
           execd_image = "opensandbox/execd:local"
           [egress]
           image = "opensandbox/egress:local"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -398,6 +399,7 @@ jobs:
           execd_image = "opensandbox/execd:local"
           [egress]
           image = "opensandbox/egress:local"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -490,6 +492,7 @@ jobs:
           execd_image = "opensandbox/execd:local"
           [egress]
           image = "opensandbox/egress:local"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]

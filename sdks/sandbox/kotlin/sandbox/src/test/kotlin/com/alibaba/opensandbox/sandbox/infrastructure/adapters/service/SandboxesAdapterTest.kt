@@ -553,7 +553,10 @@ class SandboxesAdapterTest {
                 "image": {
                     "uri": "ubuntu:latest"
                 },
-                "metadata": {}
+                "metadata": {},
+                "extensions": {
+                    "opensandbox.extensions.custom-label": "中文数据"
+                }
             }
             """.trimIndent()
 
@@ -564,6 +567,7 @@ class SandboxesAdapterTest {
         assertEquals(sandboxId, result.id)
         assertEquals(SandboxState.RUNNING, result.status.state)
         assertEquals("ubuntu:latest", result.image!!.image)
+        assertEquals("中文数据", result.extensions!!["opensandbox.extensions.custom-label"])
 
         val request = mockWebServer.takeRequest()
         assertEquals("/v1/sandboxes/$sandboxId", request.path)

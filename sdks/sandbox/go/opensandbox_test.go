@@ -1296,9 +1296,10 @@ func TestSandboxManager_ListMultipleStates(t *testing.T) {
 
 func TestSandboxManager_GetSandboxInfo(t *testing.T) {
 	want := SandboxInfo{
-		ID:        "sbx-get",
-		Status:    SandboxStatus{State: StateRunning},
-		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		ID:         "sbx-get",
+		Status:     SandboxStatus{State: StateRunning},
+		Extensions: map[string]string{"opensandbox.extensions.custom-label": "中文数据"},
+		CreatedAt:  time.Now().UTC().Truncate(time.Second),
 	}
 
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1317,6 +1318,7 @@ func TestSandboxManager_GetSandboxInfo(t *testing.T) {
 	if got.ID != "sbx-get" {
 		assert.Fail(t, fmt.Sprintf("ID = %q, want %q", got.ID, "sbx-get"))
 	}
+	require.Equal(t, "中文数据", got.Extensions["opensandbox.extensions.custom-label"])
 }
 
 func TestSandboxManager_KillSandbox(t *testing.T) {

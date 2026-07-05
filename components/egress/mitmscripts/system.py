@@ -35,7 +35,7 @@
 #      found, ensuring domain-based TLS pass-through works reliably.
 #
 # User-defined addons can be loaded alongside this script via
-# OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT.
+# OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT (comma-separated for multiple scripts).
 from __future__ import annotations
 
 import http.client as http_client

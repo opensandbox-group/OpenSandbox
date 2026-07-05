@@ -74,6 +74,16 @@ internal class SandboxesAdapter(
     private val api = SandboxesApi(provider.config.getBaseUrl(), provider.authenticatedClient)
     private val snapshotApi = SnapshotsApi(provider.config.getBaseUrl(), provider.authenticatedClient)
 
+    private val endpointCache: com.alibaba.opensandbox.sandbox.infrastructure.cache.EndpointCache? =
+        if (!provider.config.endpointCacheDisabled) {
+            com.alibaba.opensandbox.sandbox.infrastructure.cache.EndpointCache(
+                maxSize = provider.config.endpointCacheSize,
+                ttl = provider.config.endpointCacheTtl,
+            )
+        } else {
+            null
+        }
+
     override fun createSandbox(
         spec: SandboxImageSpec?,
         entrypoint: List<String>?,
@@ -273,6 +283,16 @@ internal class SandboxesAdapter(
         port: Int,
         useServerProxy: Boolean,
     ): SandboxEndpoint {
+        val cache = endpointCache ?: return fetchSandboxEndpoint(sandboxId, port, useServerProxy)
+        val key = com.alibaba.opensandbox.sandbox.infrastructure.cache.EndpointCacheKey(sandboxId, port, useServerProxy)
+        return cache.getOrFetch(key) { fetchSandboxEndpoint(sandboxId, port, useServerProxy) }
+    }
+
+    private fun fetchSandboxEndpoint(
+        sandboxId: String,
+        port: Int,
+        useServerProxy: Boolean,
+    ): SandboxEndpoint {
         logger.debug("Retrieving sandbox endpoint: {}, port {}", sandboxId, port)
         return try {
             api.sandboxesSandboxIdEndpointsPortGet(sandboxId, port, useServerProxy).toSandboxEndpoint()
@@ -280,6 +300,10 @@ internal class SandboxesAdapter(
             logger.error("Failed to retrieve sandbox endpoint for sandbox {}", sandboxId, e)
             throw e.toSandboxException()
         }
+    }
+
+    override fun invalidateEndpointCache(sandboxId: String) {
+        endpointCache?.invalidate(sandboxId)
     }
 
     override fun getSignedSandboxEndpoint(

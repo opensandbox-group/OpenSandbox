@@ -639,6 +639,9 @@ class SandboxInfo(BaseModel):
         default=None, description="Effective platform used for sandbox provisioning."
     )
     metadata: dict[str, str] | None = Field(default=None, description="Custom metadata")
+    extensions: dict[str, str] | None = Field(
+        default=None, description="Opaque extension data returned by the server"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -651,6 +654,9 @@ class SandboxCreateResponse(BaseModel):
     id: str = Field(description="Unique identifier of the newly created sandbox")
     platform: PlatformSpec | None = Field(
         default=None, description="Effective platform used for sandbox provisioning."
+    )
+    extensions: dict[str, str] | None = Field(
+        default=None, description="Opaque extension data returned by the server"
     )
 
 

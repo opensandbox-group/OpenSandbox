@@ -717,6 +717,12 @@ public class SandboxInfo
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
 
     /// <summary>
+    /// Gets or sets opaque extension data returned by the server.
+    /// </summary>
+    [JsonPropertyName("extensions")]
+    public IReadOnlyDictionary<string, string>? Extensions { get; set; }
+
+    /// <summary>
     /// Gets or sets the sandbox status.
     /// </summary>
     [JsonPropertyName("status")]
@@ -874,6 +880,12 @@ public class CreateSandboxResponse
     /// </summary>
     [JsonPropertyName("metadata")]
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
+
+    /// <summary>
+    /// Gets or sets opaque extension data returned by the server.
+    /// </summary>
+    [JsonPropertyName("extensions")]
+    public IReadOnlyDictionary<string, string>? Extensions { get; set; }
 
     /// <summary>
     /// Gets or sets the sandbox expiration time.

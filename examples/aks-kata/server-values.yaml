@@ -41,7 +41,7 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.19"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20"
 
   [storage]
   allowed_host_paths = []
@@ -59,7 +59,7 @@ configToml: |
   batchsandbox_template_file = "/etc/opensandbox/aks-kata.batchsandbox-template.yaml"
 
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.1"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3"
   mode = "dns+nft"
   disable_ipv6 = true
 

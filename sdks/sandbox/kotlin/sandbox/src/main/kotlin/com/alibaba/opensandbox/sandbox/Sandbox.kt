@@ -574,6 +574,7 @@ class Sandbox internal constructor(
      */
     fun pause() {
         logger.info("Pausing sandbox: {}", id)
+        sandboxService.invalidateEndpointCache(id)
         sandboxService.pauseSandbox(id)
     }
 
@@ -587,6 +588,7 @@ class Sandbox internal constructor(
      * @throws SandboxException if termination fails
      */
     fun kill() {
+        sandboxService.invalidateEndpointCache(id)
         sandboxService.killSandbox(id)
     }
 

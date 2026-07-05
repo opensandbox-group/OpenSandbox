@@ -75,12 +75,13 @@ func TestCredentialVaultCreateSanitizesAndRendersActiveSnapshot(t *testing.T) {
 	require.Contains(t, payload.Redactions, "secret-token")
 }
 
-func TestCredentialVaultAllowsDefaultAllowWithoutExplicitRules(t *testing.T) {
+func TestCredentialVaultAllowsDefaultAllowPolicyForCompatibility(t *testing.T) {
 	store := NewStore(nil, func() bool { return true })
 	pol := testCredentialPolicy(t, `{"defaultAction":"allow","egress":[]}`)
 
-	_, err := store.Create(testCredentialVaultRequest(), pol)
-	require.NoError(t, err, "defaultAction allow should not require explicit egress rules")
+	state, err := store.Create(testCredentialVaultRequest(), pol)
+	require.NoError(t, err)
+	require.Len(t, state.Bindings, 1)
 }
 
 func TestCredentialVaultDefaultAllowRespectsExplicitDenyRule(t *testing.T) {

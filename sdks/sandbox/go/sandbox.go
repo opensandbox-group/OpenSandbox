@@ -238,6 +238,9 @@ func (s *Sandbox) Resume(ctx context.Context, opts ...ReadyOptions) (*Sandbox, e
 
 // Kill terminates the sandbox. This is irreversible.
 func (s *Sandbox) Kill(ctx context.Context) error {
+	if s.lifecycle.cache != nil {
+		s.lifecycle.cache.Invalidate(s.id)
+	}
 	return s.lifecycle.DeleteSandbox(ctx, s.id)
 }
 
@@ -249,7 +252,11 @@ func (s *Sandbox) Close() error {
 }
 
 // Pause pauses the sandbox while preserving its state.
+// Endpoint cache is invalidated because endpoints may change across pause/resume.
 func (s *Sandbox) Pause(ctx context.Context) error {
+	if s.lifecycle.cache != nil {
+		s.lifecycle.cache.Invalidate(s.id)
+	}
 	return s.lifecycle.PauseSandbox(ctx, s.id)
 }
 

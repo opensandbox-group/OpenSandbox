@@ -49,8 +49,9 @@ const systemScriptPath = "/var/egress/mitmscripts/system.py"
 type Config struct {
 	ListenPort int
 	UserName   string
-	// ScriptPath is an optional user-supplied addon, loaded after the system addon.
-	ScriptPath string
+	// ScriptPaths are optional user-supplied addons, loaded after the system addon
+	// in the order given. Parsed from the comma-separated OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT env var.
+	ScriptPaths []string
 	// OnExit is called (if non-nil) when mitmdump exits. Called from a background goroutine.
 	OnExit func(error)
 }
@@ -98,35 +99,7 @@ func Launch(cfg Config) (*Running, error) {
 		return nil, fmt.Errorf("mitmproxy: lookup user %q: %w", uname, err)
 	}
 
-	// Only per-launch dynamic values are passed on the command line. Static
-	// options (mode, listen_host, connection_strategy, stream_large_bodies,
-	// http2, ignore_hosts, ssl_verify_upstream_trusted_confdir) come from
-	// /var/lib/mitmproxy/.mitmproxy/config.yaml shipped in the egress image.
-	// `--set` overrides config.yaml, so the env-driven overrides below take
-	// precedence at runtime without rebuilding the image.
-	args := []string{
-		"--listen-port", strconv.Itoa(cfg.ListenPort),
-	}
-
-	// Upstream cert trust path override. Default in config.yaml is /etc/ssl/certs;
-	// override per-deployment when the upstream uses a private CA bundle.
-	if trustDir := strings.TrimSpace(os.Getenv(constants.EnvMitmproxyUpstreamTrustDir)); trustDir != "" {
-		args = append(args, "--set", "ssl_verify_upstream_trusted_confdir="+trustDir)
-	}
-
-	// Transparent mode redirects TCP to IP addresses. Clients connecting to IPs
-	// do not send SNI, so upstream TLS cert hostname verification fails with
-	// "IP address mismatch". Set OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE=true
-	// to skip upstream verification when clients connect by IP.
-	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxySslInsecure)) {
-		args = append(args, "--set", "ssl_insecure=true")
-	}
-
-	// Load the system addon first so user addons can observe / override its hooks.
-	args = append(args, "-s", systemScriptPath)
-	if user := strings.TrimSpace(cfg.ScriptPath); user != "" {
-		args = append(args, "-s", user)
-	}
+	args := buildMitmdumpArgs(cfg)
 
 	cmd := exec.Command("mitmdump", args...)
 	cmd.Stdout = os.Stdout
@@ -153,6 +126,28 @@ func Launch(cfg Config) (*Running, error) {
 
 	log.Infof("[mitmproxy] mitmdump started (pid %d, transparent on %s:%d)", cmd.Process.Pid, listenHostLoopback, cfg.ListenPort)
 	return &Running{Cmd: cmd, done: done}, nil
+}
+
+func buildMitmdumpArgs(cfg Config) []string {
+	args := []string{
+		"--listen-port", strconv.Itoa(cfg.ListenPort),
+	}
+
+	if trustDir := strings.TrimSpace(os.Getenv(constants.EnvMitmproxyUpstreamTrustDir)); trustDir != "" {
+		args = append(args, "--set", "ssl_verify_upstream_trusted_confdir="+trustDir)
+	}
+
+	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxySslInsecure)) {
+		args = append(args, "--set", "ssl_insecure=true")
+	}
+
+	args = append(args, "-s", systemScriptPath)
+	for _, p := range cfg.ScriptPaths {
+		if s := strings.TrimSpace(p); s != "" {
+			args = append(args, "-s", s)
+		}
+	}
+	return args
 }
 
 func buildMitmdumpEnv(base []string, home string) []string {

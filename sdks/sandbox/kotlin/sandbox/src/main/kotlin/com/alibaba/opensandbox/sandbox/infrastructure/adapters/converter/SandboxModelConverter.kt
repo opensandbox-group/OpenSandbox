@@ -323,6 +323,7 @@ internal object SandboxModelConverter {
             platform = this.platform?.toDomainPlatformSpec(),
             status = this.status.toSandboxStatus(),
             metadata = metadata,
+            extensions = extensions,
         )
     }
 
@@ -372,6 +373,7 @@ internal object SandboxModelConverter {
         return SandboxCreateResponse(
             id = this.id,
             platform = this.platform?.toDomainPlatformSpec(),
+            extensions = this.extensions,
         )
     }
 

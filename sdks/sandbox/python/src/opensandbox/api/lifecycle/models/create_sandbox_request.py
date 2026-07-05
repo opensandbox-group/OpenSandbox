@@ -130,8 +130,10 @@ class CreateSandboxRequest:
                 object or null results in allow-all behavior at startup.
             credential_proxy (CredentialProxyConfig | Unset): Credential Vault proxy startup settings. This is an explicit
                 opt-in for
-                transparent MITM support used by credential injection; plain egress
-                network policy remains DNS/FQDN policy enforcement only.
+                transparent MITM support used by credential injection. Credential Vault
+                requires `dns+nft` enforcement and a network policy. A deny-default policy
+                is strongly recommended; default-allow remains temporarily supported for
+                backward compatibility and emits a security warning.
             secure_access (bool | Unset): Opts the sandbox into secured access for endpoint access.
                 This is currently supported only for Kubernetes sandboxes exposed
                 through ingress gateway mode. When enabled, the server provisions

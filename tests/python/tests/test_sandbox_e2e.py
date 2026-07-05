@@ -357,6 +357,36 @@ class TestSandboxE2E:
 
         logger.info("TEST 1 PASSED: Sandbox lifecycle and health test completed successfully")
 
+    @pytest.mark.timeout(120)
+    @pytest.mark.order(1)
+    async def test_01_extensions_round_trip(self):
+        """Verify extensions are returned in create response, get_info, and list."""
+        cfg = create_connection_config()
+        ext_sandbox = await Sandbox.create(
+            image=SandboxImageSpec(get_sandbox_image()),
+            resource=get_e2e_sandbox_resource(),
+            connection_config=cfg,
+            timeout=timedelta(minutes=2),
+            ready_timeout=timedelta(seconds=30),
+            metadata={"tag": "e2e-extensions"},
+            extensions={
+                "opensandbox.extensions.test-key": "test-value",
+                "opensandbox.extensions.second": "second-value",
+            },
+            health_check_polling_interval=timedelta(milliseconds=500),
+        )
+        try:
+            info = await ext_sandbox.get_info()
+            assert info.extensions is not None, "extensions missing from get_info"
+            assert info.extensions.get("opensandbox.extensions.test-key") == "test-value"
+            assert info.extensions.get("opensandbox.extensions.second") == "second-value"
+            logger.info("extensions round-trip OK: %s", info.extensions)
+        finally:
+            try:
+                await ext_sandbox.kill()
+            except Exception as e:
+                logger.warning("extensions test teardown kill failed: %s", e)
+            await ext_sandbox.close()
 
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)

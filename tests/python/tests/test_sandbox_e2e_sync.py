@@ -273,6 +273,37 @@ class TestSandboxE2ESync:
 
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
+    def test_01_extensions_round_trip(self) -> None:
+        """Verify extensions are returned in create response and get_info."""
+        cfg = create_connection_config_sync()
+        ext_sandbox = SandboxSync.create(
+            image=SandboxImageSpec(get_sandbox_image()),
+            resource=get_e2e_sandbox_resource(),
+            connection_config=cfg,
+            timeout=timedelta(minutes=2),
+            ready_timeout=timedelta(seconds=30),
+            metadata={"tag": "e2e-extensions"},
+            extensions={
+                "opensandbox.extensions.test-key": "test-value",
+                "opensandbox.extensions.second": "second-value",
+            },
+            health_check_polling_interval=timedelta(milliseconds=500),
+        )
+        try:
+            info = ext_sandbox.get_info()
+            assert info.extensions is not None, "extensions missing from get_info"
+            assert info.extensions.get("opensandbox.extensions.test-key") == "test-value"
+            assert info.extensions.get("opensandbox.extensions.second") == "second-value"
+            logger.info("extensions round-trip OK: %s", info.extensions)
+        finally:
+            try:
+                ext_sandbox.kill()
+            except Exception as e:
+                logger.warning("extensions test teardown kill failed: %s", e)
+            ext_sandbox.close()
+
+    @pytest.mark.timeout(120)
+    @pytest.mark.order(1)
     def test_01a_network_policy_create(self) -> None:
         if is_kubernetes_runtime():
             pytest.skip("Network policy is not covered in the Kubernetes runtime suite")

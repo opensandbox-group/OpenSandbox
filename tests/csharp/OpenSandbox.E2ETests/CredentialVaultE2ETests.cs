@@ -50,7 +50,7 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
             return;
         }
 
-        var sandbox = await CreateCredentialVaultSandboxAsync();
+        var sandbox = await CreateCredentialVaultSandboxAsync(targetIp);
 
         try
         {
@@ -112,7 +112,7 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
             return;
         }
 
-        var sandbox = await CreateCredentialVaultSandboxAsync();
+        var sandbox = await CreateCredentialVaultSandboxAsync(targetIp);
 
         try
         {
@@ -221,7 +221,7 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
         }
     }
 
-    private async Task<Sandbox> CreateCredentialVaultSandboxAsync()
+    private async Task<Sandbox> CreateCredentialVaultSandboxAsync(string targetIp)
     {
         return await Sandbox.CreateAsync(new SandboxCreateOptions
         {
@@ -237,10 +237,11 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
             TimeoutSeconds = 5 * 60,
             NetworkPolicy = new NetworkPolicy
             {
-                DefaultAction = NetworkRuleAction.Allow,
+                DefaultAction = NetworkRuleAction.Deny,
                 Egress = new List<NetworkRule>
                 {
-                    new() { Action = NetworkRuleAction.Allow, Target = CredentialVaultTargetHost() }
+                    new() { Action = NetworkRuleAction.Allow, Target = CredentialVaultTargetHost() },
+                    new() { Action = NetworkRuleAction.Allow, Target = targetIp }
                 }
             },
             CredentialProxy = new CredentialProxyConfig { Enabled = true },

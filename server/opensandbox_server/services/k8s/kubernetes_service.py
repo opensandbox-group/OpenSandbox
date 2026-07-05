@@ -30,7 +30,8 @@ from fastapi import HTTPException, status
 
 from opensandbox_server.extensions import (
     apply_access_renew_extend_seconds_to_mapping,
-    apply_extensions_to_annotations,
+    apply_extensions_to_mapping,
+    extract_extensions_from_mapping,
 )
 from opensandbox_server.extensions.keys import ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY
 from opensandbox_server.api.schema import (
@@ -78,6 +79,7 @@ from opensandbox_server.services.k8s.workload_access import (
 )
 from opensandbox_server.services.sandbox_service import SandboxService
 from opensandbox_server.services.validators import (
+    ensure_credential_proxy_configured,
     ensure_entrypoint,
     ensure_egress_configured,
     ensure_egress_runtime_compatible,
@@ -87,7 +89,13 @@ from opensandbox_server.services.validators import (
     ensure_timeout_within_limit,
     ensure_volumes_valid,
 )
-from opensandbox_server.services.k8s.client import K8sClient
+from opensandbox_server.services.k8s.client import (
+    K8sClient,
+    OPENSANDBOX_API_GROUP,
+    OPENSANDBOX_API_VERSION,
+    POOL_AUTO_ASSIGN_REF,
+    POOL_PLURAL,
+)
 from opensandbox_server.services.k8s.provider_factory import create_workload_provider
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 
@@ -262,6 +270,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         and that the secure runtime supports the iptables nat table needed by the sidecar.
         """
         ensure_egress_configured(request.network_policy, self.app_config.egress)
+        ensure_credential_proxy_configured(
+            request.credential_proxy, request.network_policy, self.app_config.egress
+        )
         ensure_egress_runtime_compatible(request.network_policy, self.app_config.secure_runtime)
 
     def _ensure_image_auth_support(self, request: CreateSandboxRequest) -> None:
@@ -301,6 +312,35 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 ),
             },
         )
+
+    def _ensure_pool_ref_exists(self, pool_ref: str) -> None:
+        """Validate that the referenced Pool exists before creating a BatchSandbox."""
+        try:
+            pool = self.k8s_client.get_custom_object(
+                group=OPENSANDBOX_API_GROUP,
+                version=OPENSANDBOX_API_VERSION,
+                namespace=self.namespace,
+                plural=POOL_PLURAL,
+                name=pool_ref,
+            )
+        except Exception as e:
+            logger.exception("Failed to validate poolRef %s", pool_ref)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_API_ERROR,
+                    "message": f"Failed to validate pool '{pool_ref}': {str(e)}",
+                },
+            ) from e
+
+        if pool is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
+                    "message": f"Pool '{pool_ref}' not found.",
+                },
+            )
 
     def _ensure_pvc_volumes(self, volumes: list, sandbox_id: str) -> list[str]:
         """
@@ -628,7 +668,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         Raises:
             HTTPException: If creation fails, timeout, or invalid parameters
         """
-        has_pool_ref = bool((request.extensions or {}).get("poolRef", "").strip())
+        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
+        has_pool_ref = bool(pool_ref)
 
         if not has_pool_ref:
             request = resolve_sandbox_image_from_request(request)
@@ -672,7 +713,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 secure_access_token_factory=generate_secure_access_token,
             )
             apply_access_renew_extend_seconds_to_mapping(context.annotations, request.extensions)
-            apply_extensions_to_annotations(context.annotations, request.extensions)
+            apply_extensions_to_mapping(context.annotations, request.extensions)
 
             ensure_volumes_valid(
                 request.volumes,
@@ -697,6 +738,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         ),
                     },
                 )
+
+            if has_pool_ref and pool_ref != POOL_AUTO_ASSIGN_REF:
+                await asyncio.to_thread(self._ensure_pool_ref_exists, pool_ref)
 
             # Auto-create PVCs that don't exist yet
             if request.volumes:
@@ -809,6 +853,12 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     self.workload_provider.get_status(workload)
                 )
                 effective_platform = _extract_platform_from_workload(workload)
+                if isinstance(workload, dict):
+                    annotations = workload.get("metadata", {}).get("annotations") or {}
+                else:
+                    md = getattr(workload, "metadata", None)
+                    raw_ann = getattr(md, "annotations", None) if md else None
+                    annotations = raw_ann if isinstance(raw_ann, dict) else {}
 
                 response = CreateSandboxResponse(
                     id=sandbox_id,
@@ -821,6 +871,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     created_at=created_at,
                     expires_at=context.expires_at,
                     metadata=request.metadata,
+                    extensions=extract_extensions_from_mapping(annotations),
                     entrypoint=request.entrypoint,
                     platform=effective_platform or request.platform,
                 )

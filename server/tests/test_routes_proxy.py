@@ -167,6 +167,11 @@ def test_proxy_forwards_filtered_headers_and_query(
         "Trailer": "X-Checksum",
         "X-Hop-Temp": "drop-me",
         "X-Trace": "trace-1",
+        "Forwarded": "for=attacker;proto=https",
+        "X-Forwarded-For": "203.0.113.99",
+        "X-Forwarded-Host": "attacker.example",
+        "X-Forwarded-Proto": "https",
+        "X-Real-Ip": "203.0.113.99",
     }
 
     response = client.post(
@@ -195,6 +200,11 @@ def test_proxy_forwards_filtered_headers_and_query(
     assert SANDBOX_API_KEY_HEADER.lower() not in lowered_headers
     assert "x-hop-temp" not in lowered_headers
     assert lowered_headers.get("x-trace") == "trace-1"
+    assert "forwarded" not in lowered_headers
+    assert "x-real-ip" not in lowered_headers
+    assert lowered_headers.get("x-forwarded-proto") == "http"
+    assert lowered_headers.get("x-forwarded-host") != "attacker.example"
+    assert lowered_headers.get("x-forwarded-for") != "203.0.113.99"
     assert fake_client.response.aclose_called is True
 
 
@@ -537,7 +547,11 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
             assert resolve_internal is True
             return Endpoint(
                 endpoint="10.57.1.91:40109/proxy/44772",
-                headers={OPEN_SANDBOX_INGRESS_HEADER: "sbx-123-44772"},
+                headers={
+                    OPEN_SANDBOX_INGRESS_HEADER: "sbx-123-44772",
+                    "X-Forwarded-Proto": "https",
+                    "X-Forwarded-For": "198.51.100.20",
+                },
             )
 
     monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
@@ -553,6 +567,11 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
             "Cookie": "sid=secret",
             "Origin": "https://ui.example.com",
             "X-Trace": "trace-ws",
+            "Forwarded": "for=attacker;proto=https",
+            "X-Forwarded-For": "203.0.113.99",
+            "X-Forwarded-Host": "attacker.example",
+            "X-Forwarded-Proto": "https",
+            "X-Real-Ip": "203.0.113.99",
         },
         subprotocols=["claw.v1"],
     ) as websocket:
@@ -572,6 +591,11 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
     assert "authorization" not in lowered_headers
     assert "cookie" not in lowered_headers
     assert "origin" not in lowered_headers
+    assert "forwarded" not in lowered_headers
+    assert "x-real-ip" not in lowered_headers
+    assert lowered_headers["x-forwarded-proto"] == "http"
+    assert lowered_headers["x-forwarded-host"] == "testserver"
+    assert lowered_headers["x-forwarded-for"] == "testclient"
     assert lowered_headers["opensandbox-ingress-to"] == "sbx-123-44772"
     assert lowered_headers["x-trace"] == "trace-ws"
 

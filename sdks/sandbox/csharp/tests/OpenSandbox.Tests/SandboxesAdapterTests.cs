@@ -69,6 +69,7 @@ public class SandboxesAdapterTests
           "image": { "uri": "python:3.11" },
           "platform": { "os": "linux", "arch": "amd64" },
           "entrypoint": ["python"],
+          "extensions": { "opensandbox.extensions.custom-label": "中文数据" },
           "status": { "state": "Running" },
           "createdAt": "2026-03-14T12:00:00Z"
         }
@@ -80,6 +81,8 @@ public class SandboxesAdapterTests
         sandbox.ExpiresAt.Should().BeNull();
         sandbox.Platform.Should().NotBeNull();
         sandbox.Platform!.Arch.Should().Be("amd64");
+        sandbox.Extensions.Should().ContainKey("opensandbox.extensions.custom-label")
+            .WhoseValue.Should().Be("中文数据");
     }
 
     [Fact]
@@ -90,6 +93,7 @@ public class SandboxesAdapterTests
           "id": "sbx-2",
           "status": { "state": "Pending" },
           "platform": { "os": "linux", "arch": "arm64" },
+          "extensions": { "opensandbox.extensions.custom-label": "中文数据" },
           "createdAt": "2026-03-14T12:00:00Z",
           "entrypoint": ["python"]
         }
@@ -106,6 +110,8 @@ public class SandboxesAdapterTests
         response.ExpiresAt.Should().BeNull();
         response.Platform.Should().NotBeNull();
         response.Platform!.Arch.Should().Be("arm64");
+        response.Extensions.Should().ContainKey("opensandbox.extensions.custom-label")
+            .WhoseValue.Should().Be("中文数据");
     }
 
     [Fact]

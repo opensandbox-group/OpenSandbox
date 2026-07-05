@@ -85,6 +85,18 @@ class ConnectionConfig(BaseModel):
             "It's useful when client sdk can't access the created sandbox directly"
         ),
     )
+    endpoint_cache_ttl: timedelta = Field(
+        default=timedelta(seconds=600),
+        description="TTL for cached endpoint entries.",
+    )
+    endpoint_cache_size: int = Field(
+        default=1024,
+        description="Maximum number of cached endpoint entries. 0 means default (1024).",
+    )
+    endpoint_cache_disabled: bool = Field(
+        default=False,
+        description="Disable endpoint caching entirely.",
+    )
 
     # Environment variable names
     _ENV_API_KEY = "OPEN_SANDBOX_API_KEY"

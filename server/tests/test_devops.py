@@ -24,7 +24,12 @@ def test_diagnostics_logs_with_scope_returns_not_implemented(
 ) -> None:
     class StubService:
         @staticmethod
-        def get_sandbox_logs(sandbox_id: str, tail: int, since: str | None = None) -> str:
+        def get_sandbox_logs(
+            sandbox_id: str,
+            tail: int,
+            since: str | None = None,
+            container: str | None = None,
+        ) -> str:
             raise AssertionError("stable diagnostics requests must not call legacy logs")
 
     monkeypatch.setattr(devops, "sandbox_service", StubService())
@@ -46,10 +51,16 @@ def test_diagnostics_logs_without_scope_preserves_deprecated_plain_text(
 ) -> None:
     class StubService:
         @staticmethod
-        def get_sandbox_logs(sandbox_id: str, tail: int, since: str | None = None) -> str:
+        def get_sandbox_logs(
+            sandbox_id: str,
+            tail: int,
+            since: str | None = None,
+            container: str | None = None,
+        ) -> str:
             assert sandbox_id == "sbx-001"
             assert tail == 25
             assert since == "5m"
+            assert container is None
             return "legacy logs"
 
     monkeypatch.setattr(devops, "sandbox_service", StubService())
@@ -63,6 +74,36 @@ def test_diagnostics_logs_without_scope_preserves_deprecated_plain_text(
     assert response.headers["content-type"].startswith("text/plain")
     assert response.headers["deprecation"] == "true"
     assert response.text == "legacy logs"
+
+
+def test_diagnostics_logs_forwards_container_query_to_service(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    captured: dict = {}
+
+    class StubService:
+        @staticmethod
+        def get_sandbox_logs(
+            sandbox_id: str,
+            tail: int,
+            since: str | None = None,
+            container: str | None = None,
+        ) -> str:
+            captured["container"] = container
+            return "sidecar logs"
+
+    monkeypatch.setattr(devops, "sandbox_service", StubService())
+
+    response = client.get(
+        "/v1/sandboxes/sbx-001/diagnostics/logs?container=egress",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.text == "sidecar logs"
+    assert captured == {"container": "egress"}
 
 
 def test_diagnostics_events_with_scope_returns_not_implemented(
@@ -102,7 +143,12 @@ def test_diagnostics_summary_redacts_unexpected_exception_details(
             return "events ok"
 
         @staticmethod
-        def get_sandbox_logs(sandbox_id: str, tail: int) -> str:
+        def get_sandbox_logs(
+            sandbox_id: str,
+            tail: int,
+            since: str | None = None,
+            container: str | None = None,
+        ) -> str:
             return "logs ok"
 
     monkeypatch.setattr(devops, "sandbox_service", StubService())

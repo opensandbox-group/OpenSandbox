@@ -569,6 +569,7 @@ export class Sandbox {
   }
 
   async pause(): Promise<void> {
+    this.sandboxes.invalidateEndpointCache?.(this.id);
     await this.sandboxes.pauseSandbox(this.id);
   }
 
@@ -625,6 +626,7 @@ export class Sandbox {
   }
 
   async kill(): Promise<void> {
+    this.sandboxes.invalidateEndpointCache?.(this.id);
     await this.sandboxes.deleteSandbox(this.id);
   }
 

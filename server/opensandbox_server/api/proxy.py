@@ -56,6 +56,15 @@ SENSITIVE_HEADERS = {
     SANDBOX_API_KEY_HEADER.lower(),
 }
 
+FORWARDED_HEADERS = {
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-forwarded-proto",
+    "x-real-ip",
+}
+
 # Handled by websockets on the outbound handshake; do not duplicate on additional_headers
 WEBSOCKET_HANDSHAKE_HEADERS = {
     "origin",
@@ -103,7 +112,7 @@ def _filter_proxy_headers(
     Endpoint-resolved headers are merged for routing, except secure-access
     credentials which callers must explicitly provide on server-proxy requests.
     """
-    excluded = set(HOP_BY_HOP_HEADERS) | set(SENSITIVE_HEADERS)
+    excluded = set(HOP_BY_HOP_HEADERS) | set(SENSITIVE_HEADERS) | set(FORWARDED_HEADERS)
     if extra_excluded:
         excluded.update(extra_excluded)
     if connection_header:
@@ -121,7 +130,7 @@ def _filter_proxy_headers(
         endpoint_header_excluded = {
             OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower(),
             OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(),
-        }
+        } | FORWARDED_HEADERS
         forwarded.update(
             {
                 key: value
@@ -130,6 +139,24 @@ def _filter_proxy_headers(
             }
         )
     return forwarded
+
+
+def _set_forwarded_headers(
+    headers: dict[str, str], request: Request | WebSocket
+) -> None:
+    """Rebuild proxy headers from the connection observed by this server."""
+    scheme = request.url.scheme.lower()
+    if scheme == "ws":
+        scheme = "http"
+    elif scheme == "wss":
+        scheme = "https"
+    headers["X-Forwarded-Proto"] = scheme
+
+    inbound_host = request.headers.get("host", "")
+    if inbound_host:
+        headers["X-Forwarded-Host"] = inbound_host
+    if request.client:
+        headers["X-Forwarded-For"] = request.client.host
 
 
 def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None:
@@ -178,19 +205,9 @@ async def _proxy_http_request(
             endpoint.headers,
             connection_header=request.headers.get("connection"),
         )
-        # Inject standard reverse-proxy headers. Check for existing values
-        # case-insensitively so an already-present header with any casing
-        # (e.g. lowercase "x-forwarded-proto" from an upstream edge) is
-        # preserved and we don't emit a duplicate with different casing,
-        # which would break chain-safe semantics for downstream backends.
-        existing_lower = {key.lower() for key in headers}
-        if "x-forwarded-proto" not in existing_lower:
-            headers["X-Forwarded-Proto"] = request.url.scheme
-        inbound_host = request.headers.get("host", "")
-        if inbound_host and "x-forwarded-host" not in existing_lower:
-            headers["X-Forwarded-Host"] = inbound_host
-        if request.client and "x-forwarded-for" not in existing_lower:
-            headers["X-Forwarded-For"] = request.client.host
+        # Forwarded headers are stripped above and rebuilt from the connection
+        # observed by this trusted proxy, so clients cannot spoof transport state.
+        _set_forwarded_headers(headers, request)
 
         stream_body = request.method in ("POST", "PUT", "PATCH", "DELETE")
         req = client.build_request(
@@ -338,6 +355,7 @@ async def _proxy_websocket_request(
         extra_excluded=WEBSOCKET_HANDSHAKE_HEADERS,
         connection_header=websocket.headers.get("connection"),
     )
+    _set_forwarded_headers(headers, websocket)
     subprotocols = list(websocket.scope.get("subprotocols", []))
     raw_origin = websocket.headers.get("origin")
     origin: Origin | None = Origin(raw_origin) if raw_origin else None

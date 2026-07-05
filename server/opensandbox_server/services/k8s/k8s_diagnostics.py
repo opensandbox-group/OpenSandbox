@@ -24,11 +24,19 @@ from __future__ import annotations
 import re
 
 from fastapi import HTTPException, status
+from kubernetes.client.exceptions import ApiException
 
 from opensandbox_server.services.constants import (
     SANDBOX_ID_LABEL,
     SandboxErrorCodes,
 )
+
+#: Default container to pull logs from when the caller does not specify one.
+#: OSB-managed sandbox pods canonically run the user workload in a container
+#: named "sandbox" alongside sidecars (e.g. "egress") and init containers
+#: (e.g. "execd-installer"). Without this default, Kubernetes returns HTTP 400
+#: on any pod with more than one container.
+DEFAULT_LOG_CONTAINER = "sandbox"
 
 
 def _parse_since(since: str) -> int:
@@ -71,22 +79,74 @@ class K8sDiagnosticsMixin:
             )
         return pods[0]
 
-    def get_sandbox_logs(self, sandbox_id: str, tail: int = 100, since: str | None = None) -> str:
+    def get_sandbox_logs(
+        self,
+        sandbox_id: str,
+        tail: int = 100,
+        since: str | None = None,
+        container: str | None = None,
+    ) -> str:
         pod = self._find_pod_for_sandbox(sandbox_id)
         pod_name = pod.metadata.name
         core_v1 = self.k8s_client.get_core_v1_api()
 
+        target_container = self._resolve_log_container(pod, container)
+
         kwargs: dict = {
             "name": pod_name,
             "namespace": self.namespace,
+            "container": target_container,
             "tail_lines": tail,
             "timestamps": True,
         }
         if since:
             kwargs["since_seconds"] = _parse_since(since)
 
-        log_text = core_v1.read_namespaced_pod_log(**kwargs)
+        try:
+            log_text = core_v1.read_namespaced_pod_log(**kwargs)
+        except ApiException as exc:
+            raise _map_pod_log_error(pod_name, target_container, exc) from exc
+
         return log_text or "(no logs)"
+
+    @staticmethod
+    def _resolve_log_container(pod, requested: str | None) -> str:
+        """Pick the container to read logs from.
+
+        Order of preference:
+        1. The caller-supplied name, if it matches a container or init container
+           on the pod.
+        2. ``DEFAULT_LOG_CONTAINER`` ("sandbox") when present.
+        3. The first regular container declared in the pod spec.
+        """
+        spec = getattr(pod, "spec", None)
+        regular = list(getattr(spec, "containers", None) or []) if spec else []
+        init = list(getattr(spec, "init_containers", None) or []) if spec else []
+        all_names = [c.name for c in regular] + [c.name for c in init]
+
+        if requested:
+            if requested in all_names:
+                return requested
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
+                    "message": (
+                        f"Container '{requested}' not found on pod "
+                        f"'{pod.metadata.name}'. Available: {all_names or '(none)'}"
+                    ),
+                },
+            )
+
+        if DEFAULT_LOG_CONTAINER in all_names:
+            return DEFAULT_LOG_CONTAINER
+        if regular:
+            return regular[0].name
+        if init:
+            return init[0].name
+        # Fall back to the canonical name so the upstream Kubernetes error is
+        # explicit instead of silently None-ing the container kwarg.
+        return DEFAULT_LOG_CONTAINER
 
     def get_sandbox_inspect(self, sandbox_id: str) -> str:
         pod = self._find_pod_for_sandbox(sandbox_id)
@@ -196,3 +256,59 @@ class K8sDiagnosticsMixin:
                 f"[{ts}] {ev.type:8s} {ev.reason or 'N/A':20s} {ev.message or ''}"
             )
         return "\n".join(lines)
+
+
+def _map_pod_log_error(pod_name: str, container: str, exc: ApiException) -> HTTPException:
+    """Translate a Kubernetes pod-log ApiException into a sensible HTTPException.
+
+    Bare ``ApiException`` instances are not JSON-serialisable, so when they
+    escape the request handler FastAPI/uvicorn surfaces them as opaque 500
+    responses. Wrap them with structured detail and a status code that
+    reflects whether the problem is the request, the credentials, or the
+    cluster itself.
+    """
+    raw_status = getattr(exc, "status", None) or 0
+    body = getattr(exc, "body", None) or str(exc)
+
+    if raw_status == 400:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.K8S_API_ERROR,
+                "message": (
+                    f"Kubernetes rejected log request for pod '{pod_name}' "
+                    f"container '{container}': {body}"
+                ),
+            },
+        )
+    if raw_status in (401, 403):
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": SandboxErrorCodes.K8S_API_ERROR,
+                "message": (
+                    f"Kubernetes denied log access for pod '{pod_name}' "
+                    f"container '{container}': {body}"
+                ),
+            },
+        )
+    if raw_status == 404:
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
+                "message": (
+                    f"Pod '{pod_name}' or container '{container}' not found: {body}"
+                ),
+            },
+        )
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail={
+            "code": SandboxErrorCodes.K8S_API_ERROR,
+            "message": (
+                f"Kubernetes returned {raw_status} when reading logs for pod "
+                f"'{pod_name}' container '{container}': {body}"
+            ),
+        },
+    )

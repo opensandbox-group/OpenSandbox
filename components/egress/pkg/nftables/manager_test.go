@@ -56,7 +56,23 @@ func TestApplyStatic_BuildsRuleset_DefaultDeny(t *testing.T) {
 	expectContains(t, rendered, "add element inet opensandbox deny_v6 { 2001:db8::/32 }")
 	expectContains(t, rendered, "add rule inet opensandbox egress ip daddr @dyn_allow_v4 accept")
 	expectContains(t, rendered, "add rule inet opensandbox egress ip6 daddr @dyn_allow_v6 accept")
-	expectContains(t, rendered, "add rule inet opensandbox egress counter drop")
+	expectContains(t, rendered, "add rule inet opensandbox egress drop")
+}
+
+func TestApplyStatic_DefaultDenyFallbackRuleUsesPlainDrop(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+
+	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[]}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+
+	expectContains(t, rendered, "add chain inet opensandbox egress { type filter hook output priority 0; policy drop; }")
+	expectContains(t, rendered, "add rule inet opensandbox egress drop")
+	require.NotContains(t, rendered, "counter drop", "counter expression is not supported in the QA pod netns")
 }
 
 func TestApplyStatic_DefaultAllowUsesAcceptPolicy(t *testing.T) {
@@ -76,7 +92,7 @@ func TestApplyStatic_DefaultAllowUsesAcceptPolicy(t *testing.T) {
 
 	expectContains(t, rendered, "policy accept;")
 	expectContains(t, rendered, "add rule inet opensandbox egress tcp dport 853 drop")
-	require.NotContains(t, rendered, "counter drop", "did not expect drop counter when defaultAction is allow:\n%s", rendered)
+	require.NotContains(t, rendered, " egress drop", "did not expect final drop rule when defaultAction is allow:\n%s", rendered)
 	expectContains(t, rendered, "add element inet opensandbox deny_v4 { 10.0.0.0/8 }")
 }
 

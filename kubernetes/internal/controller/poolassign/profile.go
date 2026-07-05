@@ -41,7 +41,7 @@ func DefaultProfile() *Profile {
 	return &Profile{
 		Name: DefaultProfileName,
 		Plugins: PluginsSpec{
-			Predicate: []string{"image", "resource", "nodeselector"},
+			Predicate: []string{"capacity", "image", "resource", "nodeselector"},
 			Score:     []ScoreSpec{{Name: "resbalance", Weight: 100}},
 		},
 		PluginConf: []PluginConf{

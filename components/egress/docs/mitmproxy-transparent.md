@@ -30,8 +30,8 @@ By default, mitmproxy listens on `18081` and transparent redirect rules are set 
 # Optional: change listening port (default: 18081)
 export OPENSANDBOX_EGRESS_MITMPROXY_PORT=18081
 
-# Optional: load an additional user-defined mitm addon (loaded after the system addon)
-export OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT=/path/to/your/addon.py
+# Optional: load user-defined mitm addons (loaded after the system addon, comma-separated)
+export OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT=/path/to/your/addon.py,/path/to/another.py
 ```
 
 To bypass decryption for selected domains, edit the baked-in
@@ -46,7 +46,7 @@ To bypass decryption for selected domains, edit the baked-in
 |------|----------|------|--------|
 | `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` | Yes | Enable transparent mitmproxy (`1/true/on`, etc.) | Disabled |
 | `OPENSANDBOX_EGRESS_MITMPROXY_PORT` | No | mitmdump listen port; `iptables` redirects `80/443` here | `18081` |
-| `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT` | No | Additional user mitm addon script path (`-s`); loaded after the system addon | Empty |
+| `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT` | No | User mitm addon script paths (comma-separated); each is passed as `-s` and loaded after the system addon in order | Empty |
 | `OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR` | No | Trust directory for upstream TLS verification (OpenSSL style); overrides the config.yaml default | `/etc/ssl/certs` |
 | `OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE` | No | Skip upstream TLS verification (`1/true/on`); use when clients connect by IP and SNI is unavailable | Disabled |
 
@@ -124,16 +124,21 @@ The bundled system addon at `/var/egress/mitmscripts/system.py` is shipped in th
 - Forces streaming (`flow.response.stream = True`) for SSE (`text/event-stream`) and chunked responses, so each chunk is forwarded immediately instead of being buffered up to the `stream_large_bodies=1m` threshold (critical for LLM streaming UX).
 - Redacts credential values from response headers. Response bodies are not rewritten by default.
 
-The system addon is always loaded and cannot be disabled via configuration. To override its behavior, supply a user addon via `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT`; user addons are loaded after the system addon and may observe or override its hooks.
+The system addon is always loaded and cannot be disabled via configuration. To override its behavior, supply user addons via `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT` (comma-separated for multiple scripts); user addons are loaded after the system addon in the order given and may observe or override its hooks.
 
-### 3) Add a User Addon Alongside the System Addon
+### 3) Add User Addons Alongside the System Addon
 
 ```bash
 export OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true
+
+# Single addon
 export OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT=/path/to/your/addon.py
+
+# Multiple addons (comma-separated)
+export OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT=/path/to/auth.py,/path/to/logging.py
 ```
 
-The user addon is loaded after the system addon (`-s system.py -s user.py`), so user hooks observe and may override system behavior.
+User addons are loaded after the system addon (`-s system.py -s auth.py -s logging.py`), in the order given. Later addons observe and may override hooks from earlier ones.
 
 ### 4) Bypass Decryption for Specific Domains (e.g. log upload)
 

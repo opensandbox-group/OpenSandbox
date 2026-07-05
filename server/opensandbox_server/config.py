@@ -470,6 +470,15 @@ class ServerConfig(BaseModel):
         # no concurrency cap. TOML has no null literal, so 0 is the only way
         # to disable the limit from the config file.
         return None if value == 0 else value
+    timeout_graceful_shutdown: Optional[int] = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Seconds uvicorn waits for in-flight requests to finish before "
+            "forcing shutdown. Ensures Ctrl+C terminates promptly even when "
+            "a long-running operation (e.g. image pull) is in progress."
+        ),
+    )
     backlog: int = Field(
         default=2048,
         ge=1,
