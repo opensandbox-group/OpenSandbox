@@ -97,7 +97,7 @@ This OSEP extends the public `POST /sandboxes/{sandboxId}/pause` request body in
 an additive, backward-compatible way. Existing clients may continue sending no
 body; the server supplies a default operating mode and default snapshot claim
 selection. Callers that need control can optionally select a pause-capable
-operating mode (`KeepFS`, `Freeze`, `Hibernate`) and, for snapshot-producing
+operating mode (`KeepFS`, `Freeze`, `Hibernate`) and, for snapshot-producing  
 modes, either an
 existing `SandboxSnapshotClaim`, a `SandboxSnapshotClaimTemplate` plus optional
 per-use parameters, or inline claim parameters that the server materializes into
@@ -779,9 +779,14 @@ but restores memory/process state too.
 - For `KeepFS` and future `Hibernate`, the snapshot reference recorded in `status.snapshot` must be
   stable and durable enough to survive Pod deletion, because resume relies on it
   after the Pod is gone.
-- Backend authentication is provided by node/workload identity (no Kubernetes
-  Secrets). The snapshot Job and resumed Pods inherit access from their node or
-  service-account identity binding.
+- Backend authentication is expected to be provided by node/workload identity
+  rather than Kubernetes Secrets: the snapshot Job and resumed Pods inherit access
+  from their node or service-account identity binding. This is guidance for the
+  provider that implements a `SandboxSnapshotClass`/`SandboxSnapshotClaim` backend,
+  not a mechanism enforced by this proposal. It is the implementor's
+  responsibility to wire up identity-based access and to ensure no static or
+  long-lived secret is embedded in the class/claim parameters or otherwise
+  required by the backend.
 - The privileged same-node Job pattern from OSEP-0008 is reused. `KeepFS` uses
   the image-only committer path; future `Hibernate` requires a
   checkpoint/restore-capable snapshotter.
