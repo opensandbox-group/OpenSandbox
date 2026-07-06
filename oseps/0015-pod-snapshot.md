@@ -786,7 +786,13 @@ but restores memory/process state too.
   not a mechanism enforced by this proposal. It is the implementor's
   responsibility to wire up identity-based access and to ensure no static or
   long-lived secret is embedded in the class/claim parameters or otherwise
-  required by the backend.
+  required by the backend. For example, on Azure the cluster admin binds the
+  snapshot committer's Kubernetes ServiceAccount to an Azure Entra ID (workload
+  identity) and assigns it the appropriate role (such as `Storage Blob Data
+  Contributor`) on the target storage account. The committer can then upload the
+  files produced by `nerdctl save` directly to Azure Blob Storage using that
+  federated identity, without any token, connection string, or password in the
+  `SandboxSnapshotClass`/`SandboxSnapshotClaim` parameters.
 - The privileged same-node Job pattern from OSEP-0008 is reused. `KeepFS` uses
   the image-only committer path; future `Hibernate` requires a
   checkpoint/restore-capable snapshotter.
