@@ -135,7 +135,6 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request) {
 				r.URL.Scheme = "http"
 			}
 		}
-		telemetry.RecordProxyHTTP()
 		NewHTTPProxy().ServeHTTP(w, r)
 	}
 }
