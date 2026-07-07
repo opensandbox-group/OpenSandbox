@@ -128,5 +128,3 @@ func RecordRouting(result string, durationMs float64) {
 	routingResolutions.Add(context.Background(), 1, attrs)
 	routingResolutionDuration.Record(context.Background(), durationMs, attrs)
 }
-
-
