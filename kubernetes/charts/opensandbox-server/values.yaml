@@ -72,6 +72,10 @@ server:
       # List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }.
       # key_id must be exactly one character in [0-9a-z].
       keys: []
+    # -- Tolerations for the ingress gateway pod.
+    tolerations: []
+    # -- Affinity for the ingress gateway pod.
+    affinity: {}
 
 # -- Server config (TOML). Mounted at /etc/opensandbox/config.toml.
 configToml: |
