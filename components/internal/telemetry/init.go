@@ -177,8 +177,7 @@ func firstEndpoint(primary, fallback string) string {
 func deltaTemporalitySelector(kind sdkmetric.InstrumentKind) metricdata.Temporality {
 	switch kind {
 	case sdkmetric.InstrumentKindCounter,
-		sdkmetric.InstrumentKindHistogram,
-		sdkmetric.InstrumentKindObservableCounter:
+		sdkmetric.InstrumentKindHistogram:
 		return metricdata.DeltaTemporality
 	default:
 		return metricdata.CumulativeTemporality
