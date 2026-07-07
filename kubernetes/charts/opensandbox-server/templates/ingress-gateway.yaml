@@ -69,7 +69,11 @@ spec:
       containers:
         - name: main
           image: {{ include "opensandbox-server.ingressGatewayImage" . }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ .Values.server.gateway.pullPolicy | default "IfNotPresent" }}
+          {{- with .Values.server.gateway.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             - "--namespace={{ .Values.server.gateway.dataplaneNamespace }}"
             - "--port={{ .Values.server.gateway.port }}"
@@ -99,6 +103,14 @@ spec:
             timeoutSeconds: 3
           resources:
             {{- toYaml .Values.server.gateway.resources | nindent 12 }}
+          {{- with .Values.server.gateway.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.server.gateway.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

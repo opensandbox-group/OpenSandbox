@@ -72,6 +72,14 @@ server:
       # List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }.
       # key_id must be exactly one character in [0-9a-z].
       keys: []
+    # -- Image pull policy for the ingress gateway container.
+    pullPolicy: IfNotPresent
+    # -- Extra environment variables for the ingress gateway container.
+    env: []
+    # -- Extra volume mounts for the ingress gateway container.
+    volumeMounts: []
+    # -- Extra volumes for the ingress gateway pod.
+    volumes: []
 
 # -- Server config (TOML). Mounted at /etc/opensandbox/config.toml.
 configToml: |
