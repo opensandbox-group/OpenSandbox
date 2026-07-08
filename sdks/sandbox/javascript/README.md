@@ -333,7 +333,7 @@ await sandbox.credentialVault.create({
 ```
 
 See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
-scoped placeholder substitutions, binding guidance, and Git/curl examples.
+binding guidance, and Git/curl examples.
 
 ### 5. Resource cleanup
 
