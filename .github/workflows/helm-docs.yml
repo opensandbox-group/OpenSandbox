@@ -1,0 +1,31 @@
+name: Helm Docs
+
+on:
+  pull_request:
+    paths:
+      - 'kubernetes/charts/**/values.yaml'
+      - 'kubernetes/charts/**/Chart.yaml'
+
+jobs:
+  helm-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install helm-docs
+        run: |
+          wget -qO /tmp/helm-docs.tar.gz \
+            https://github.com/norwoodj/helm-docs/releases/latest/download/helm-docs_Linux_x86_64.tar.gz
+          tar -xzf /tmp/helm-docs.tar.gz -C /usr/local/bin helm-docs
+
+      - name: Generate chart READMEs
+        run: helm-docs --chart-search-root kubernetes/charts/
+
+      - name: Commit updated READMEs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs(charts): regenerate READMEs via helm-docs"
+          file_pattern: "kubernetes/charts/**/README.md"
