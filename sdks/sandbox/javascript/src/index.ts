@@ -43,6 +43,8 @@ export type {
   CredentialMetadata,
   CredentialMutationSet,
   CredentialProxyConfig,
+  CredentialSubstitution,
+  CredentialSubstitutionSurface,
   CredentialVaultCreateRequest,
   CredentialVaultPatchRequest,
   CredentialVaultState,

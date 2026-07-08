@@ -664,7 +664,7 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 
 func renderSubstitutions(ctx context.Context, auth Auth, credentials map[string]record) ([]InjectionSubstitution, []string, error) {
 	substitutions := make([]InjectionSubstitution, 0, len(auth.Substitutions))
-	redactions := make([]string, 0, len(auth.Substitutions)*5)
+	redactions := make([]string, 0, len(auth.Substitutions)*6)
 	for _, substitution := range auth.Substitutions {
 		value, err := resolveCredentialValue(ctx, substitution.Credential, credentials)
 		if err != nil {
@@ -688,7 +688,44 @@ func substitutionRedactionVariants(value string) []string {
 	if data, err := json.Marshal(value); err == nil && len(data) >= 2 {
 		jsonEncoded = string(data[1 : len(data)-1])
 	}
-	return []string{value, urlEncoded, formEncoded, jsonEncoded}
+	return []string{value, urlEncoded, formEncoded, jsonEncoded, jsonASCIIEncodedStringContent(value)}
+}
+
+func jsonASCIIEncodedStringContent(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			switch {
+			case r < 0x20:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			case r < 0x80:
+				b.WriteRune(r)
+			case r <= 0xffff:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			default:
+				v := r - 0x10000
+				high := 0xd800 + (v >> 10)
+				low := 0xdc00 + (v & 0x3ff)
+				fmt.Fprintf(&b, `\u%04x\u%04x`, high, low)
+			}
+		}
+	}
+	return b.String()
 }
 
 func sanitizeAuth(auth Auth) AuthMetadata {

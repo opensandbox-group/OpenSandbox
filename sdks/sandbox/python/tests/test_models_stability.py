@@ -25,6 +25,7 @@ from opensandbox.api.lifecycle.models.create_sandbox_response import (
 from opensandbox.api.lifecycle.models.image_spec import ImageSpec as ApiImageSpec
 from opensandbox.api.lifecycle.models.sandbox import Sandbox as ApiSandbox
 from opensandbox.api.lifecycle.types import UNSET
+from opensandbox.models import CredentialSubstitution
 from opensandbox.models.execd import (
     Execution,
     ExecutionError,
@@ -54,6 +55,16 @@ from opensandbox.models.sandboxes import (
 def test_sandbox_image_spec_supports_positional_image() -> None:
     spec = SandboxImageSpec("python:3.11")
     assert spec.image == "python:3.11"
+
+
+def test_models_package_exports_credential_substitution() -> None:
+    substitution = CredentialSubstitution(
+        credential="client-secret",
+        placeholder="__client_secret__",
+        in_=["body", "query"],
+    )
+
+    assert substitution.model_dump(by_alias=True)["in"] == ["body", "query"]
 
 
 def test_sandbox_image_spec_rejects_blank_image() -> None:
