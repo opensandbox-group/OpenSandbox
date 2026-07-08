@@ -107,11 +107,18 @@ from opensandbox.pool import (
     InMemoryAsyncPoolStateStore,
     InMemoryPoolStateStore,
     PoolCreationSpec,
+    PoolDestroyOptions,
+    PoolDestroyResult,
+    PoolDestroyState,
+    PoolDestroyStrategy,
     PooledSandboxCreateContext,
     PooledSandboxCreateReason,
     PooledSandboxCreator,
     SandboxPool,
     SandboxPoolAsync,
+    SandboxPoolManager,
+    SandboxPoolManagerAsync,
+    SandboxPoolManagerSync,
 )
 from opensandbox.sandbox import Sandbox
 from opensandbox.sync import SandboxManagerSync, SandboxPoolSync, SandboxSync
@@ -137,6 +144,13 @@ __all__ = [
     "PooledSandboxCreateReason",
     "PooledSandboxCreator",
     "PoolCreationSpec",
+    "PoolDestroyOptions",
+    "PoolDestroyResult",
+    "PoolDestroyState",
+    "PoolDestroyStrategy",
     "InMemoryAsyncPoolStateStore",
     "InMemoryPoolStateStore",
+    "SandboxPoolManager",
+    "SandboxPoolManagerAsync",
+    "SandboxPoolManagerSync",
 ]

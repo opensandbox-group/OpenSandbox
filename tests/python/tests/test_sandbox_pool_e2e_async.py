@@ -29,6 +29,7 @@ from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import (
     PoolAcquireFailedException,
+    PoolDestroyedException,
     PoolEmptyException,
     PoolNotRunningException,
 )
@@ -38,8 +39,11 @@ from opensandbox.pool import (
     AsyncPoolStateStore,
     InMemoryAsyncPoolStateStore,
     PoolCreationSpec,
+    PoolDestroyOptions,
+    PoolDestroyState,
     PoolSnapshot,
     PoolState,
+    SandboxPoolManagerAsync,
     SandboxPoolAsync,
 )
 from opensandbox.pool_redis import AsyncRedisPoolStateStore
@@ -117,6 +121,30 @@ class TestSandboxPoolSingleNodeE2EAsync:
 
         await self.pool.shutdown(graceful=True)
         with pytest.raises(PoolNotRunningException):
+            await self.pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+
+    @pytest.mark.timeout(240)
+    async def test_async_destroy_drains_idle_writes_tombstone_and_blocks_acquire(self) -> None:
+        await _eventually(
+            "async pool has warm idle before destroy",
+            lambda: _snapshot_matches(self.pool, lambda snap: snap.idle_count >= 1),
+        )
+
+        manager = SandboxPoolManagerAsync(
+            state_store=self.store,
+            connection_config=create_connection_config(),
+            owner_id=f"destroyer-{self.tag}",
+        )
+        result = await manager.destroy(
+            self.pool_name,
+            PoolDestroyOptions(drain_timeout=timedelta(seconds=30)),
+        )
+
+        assert result.state == PoolDestroyState.DESTROYED
+        assert result.drained_idle_count >= 1
+        assert result.persistent_state_cleared
+        assert await self.store.get_destroy_state(self.pool_name) == PoolDestroyState.DESTROYED
+        with pytest.raises(PoolDestroyedException):
             await self.pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
 
     @pytest.mark.timeout(300)
@@ -648,6 +676,67 @@ class TestSandboxPoolRedisDistributedE2EAsync:
             lambda: _remote_count_matches(self.manager, self.tag, lambda count: count == 1),
             timeout=timedelta(seconds=60),
         )
+
+    @pytest.mark.timeout(420)
+    async def test_async_redis_destroy_tombstone_blocks_all_nodes_and_direct_create(self) -> None:
+        pool_name = f"async-redis-destroy-{self.tag}"
+        store_a = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 1)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 1)
+        self.pools.extend([pool_a, pool_b])
+
+        await pool_a.start()
+        await pool_b.start()
+        await _eventually(
+            "async Redis destroy pool warms",
+            lambda: _snapshot_matches(pool_a, lambda snap: snap.idle_count >= 1),
+        )
+
+        pool_manager = SandboxPoolManagerAsync(
+            state_store=store_b,
+            connection_config=create_connection_config(),
+            owner_id=f"destroyer-{self.tag}",
+        )
+        result = await pool_manager.destroy(
+            pool_name,
+            PoolDestroyOptions(drain_timeout=timedelta(seconds=60)),
+        )
+
+        assert result.state == PoolDestroyState.DESTROYED
+        assert await store_a.get_destroy_state(pool_name) == PoolDestroyState.DESTROYED
+        with pytest.raises(PoolDestroyedException):
+            await pool_a.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+        with pytest.raises(PoolDestroyedException):
+            await pool_b.resize(1)
+
+    @pytest.mark.timeout(60)
+    async def test_async_redis_begin_destroy_fence_blocks_start_and_direct_create(self) -> None:
+        pool_name = f"async-redis-destroying-fence-{self.tag}"
+        store = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        await store.begin_destroy(pool_name, f"destroyer-{self.tag}")
+        assert await store.get_destroy_state(pool_name) == PoolDestroyState.DESTROYING
+
+        pool = _create_pool(pool_name, f"owner-{self.tag}", store, self.tag, 0)
+        self.pools.append(pool)
+
+        with pytest.raises(PoolDestroyedException):
+            await pool.start()
+
+        running_pool_name = f"async-redis-destroying-running-{self.tag}"
+        running_store = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        running_pool = _create_pool(
+            running_pool_name,
+            f"owner-running-{self.tag}",
+            running_store,
+            self.tag,
+            0,
+        )
+        self.pools.append(running_pool)
+        await running_pool.start()
+        await running_store.begin_destroy(running_pool_name, f"destroyer-{self.tag}")
+        with pytest.raises(PoolDestroyedException):
+            await running_pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
 
 
 def _create_pool(

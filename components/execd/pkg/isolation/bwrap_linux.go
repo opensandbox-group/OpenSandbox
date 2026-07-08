@@ -59,12 +59,30 @@ func findBwrap() string {
 	return ""
 }
 
+// bwrapIsSetuid reports whether the resolved bwrap binary has the setuid bit
+// set. The setuid build of bubblewrap does not support --disable-userns, so
+// buildArgv must skip that flag in userns mode. Detected once at startup.
+var bwrapIsSetuid bool
+
+// isSetuidBinary reports whether the file at path has the setuid bit set.
+func isSetuidBinary(path string) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeSetuid != 0
+}
+
 // bwrapImpl is the Linux bwrap Isolator.
 type bwrapImpl struct{}
 
 // NewBwrap returns a bwrap Isolator for Linux, configured by cfg.
 func NewBwrap(cfg Config) Isolator {
 	bwrapPath = findBwrap()
+	bwrapIsSetuid = isSetuidBinary(bwrapPath)
 
 	// Pre-generate seccomp BPF once at startup.
 	if bpf, err := generateSeccompDenyBPF(cfg.Seccomp); err != nil {

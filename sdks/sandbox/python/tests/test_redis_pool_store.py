@@ -8,8 +8,12 @@ import pytest
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 
-from opensandbox.exceptions import PoolStateStoreUnavailableException
+from opensandbox.exceptions import (
+    PoolDestroyedException,
+    PoolStateStoreUnavailableException,
+)
 from opensandbox.pool_redis import RedisPoolStateStore
+from opensandbox.pool_types import PoolDestroyState
 
 
 @pytest.fixture()
@@ -151,6 +155,34 @@ def test_redis_store_max_idle_is_shared(
     assert store.get_max_idle("pool") == 0
 
 
+def test_redis_store_destroy_fences_writes_and_preserves_tombstone(
+    redis_store: tuple[RedisPoolStateStore, Any, str],
+) -> None:
+    store, _, _ = redis_store
+    store.put_idle("pool", "id-1")
+    assert store.try_acquire_primary_lock("pool", "owner-1", timedelta(seconds=60))
+
+    store.begin_destroy("pool", "destroyer")
+
+    assert store.get_destroy_state("pool") == PoolDestroyState.DESTROYING
+    assert not store.try_acquire_primary_lock("pool", "owner-1", timedelta(seconds=60))
+    assert not store.renew_primary_lock("pool", "owner-1", timedelta(seconds=60))
+    with pytest.raises(PoolDestroyedException):
+        store.put_idle("pool", "id-2")
+    with pytest.raises(PoolDestroyedException):
+        store.set_max_idle("pool", 2)
+
+    store.clear_pool_state("pool")
+    assert store.snapshot_counters("pool").idle_count == 0
+    assert store.get_destroy_state("pool") == PoolDestroyState.DESTROYING
+
+    store.mark_destroyed("pool", "destroyer", timedelta(seconds=60))
+    assert store.get_destroy_state("pool") == PoolDestroyState.DESTROYED
+    with pytest.raises(PoolDestroyedException):
+        store.begin_destroy("pool", "destroyer-2")
+    assert store.get_destroy_state("pool") == PoolDestroyState.DESTROYED
+
+
 def test_redis_store_wraps_client_failures() -> None:
     store = RedisPoolStateStore(_BrokenRedis())
 
@@ -198,6 +230,9 @@ class _BrokenRedis(Redis):
     def hgetall(self, key: str) -> dict[str, str]:
         raise RuntimeError("redis unavailable")
 
+    def delete(self, *keys: str) -> int:
+        raise RuntimeError("redis unavailable")
+
 
 class _FakeAsyncRedis(AsyncRedis):
     def __init__(self) -> None:
@@ -234,6 +269,9 @@ class _FakeAsyncRedis(AsyncRedis):
     async def hgetall(self, key: str) -> dict[str, str]:
         return {}
 
+    async def delete(self, *keys: str) -> int:
+        return 0
+
 
 class _FakeRedis(Redis):
     """Small Redis double for RedisPoolStateStore unit tests."""
@@ -249,14 +287,20 @@ class _FakeRedis(Redis):
             min_remaining_ttl_ms = int(args[2]) if len(args) >= 3 else 0
             return self._take_idle(args[0], args[1], min_remaining_ttl_ms)
         if "RPUSH" in script:
-            return self._put_idle(args[0], args[1], args[2], int(args[3]))
+            return self._put_idle(args[0], args[1], args[2], args[3], int(args[4]))
+        if "SET" in script and "NX" in script:
+            return int(self._acquire_lock(args[0], args[1], args[2], int(args[3])))
         if "PEXPIRE" in script:
-            return int(self._renew_lock(args[0], args[1], int(args[2])))
+            return int(self._renew_lock(args[0], args[1], args[2], int(args[3])))
         if "HGETALL" in script:
             min_remaining_ttl_ms = int(args[2]) if len(args) >= 3 else 0
             return self._reap_expired(args[0], args[1], min_remaining_ttl_ms)
         if "DEL" in script and "GET" in script:
             return self._release_lock(args[0], args[1])
+        if "destroy_state == ARGV[2]" in script:
+            return self._begin_destroy(args[0], args[1], args[2], args[3], args[4])
+        if "SET" in script:
+            return self._set_value(args[0], args[1], args[2])
         raise NotImplementedError("unsupported Redis script")
 
     def get(self, key: str) -> str | None:
@@ -303,6 +347,20 @@ class _FakeRedis(Redis):
     def hgetall(self, key: str) -> dict[str, str]:
         return dict(self._hashes.get(key, {}))
 
+    def delete(self, *keys: str) -> int:
+        removed = 0
+        for key in keys:
+            if key in self._strings:
+                self._strings.pop(key, None)
+                removed += 1
+            if key in self._lists:
+                self._lists.pop(key, None)
+                removed += 1
+            if key in self._hashes:
+                self._hashes.pop(key, None)
+                removed += 1
+        return removed
+
     def _take_idle(
         self, list_key: str, expires_key: str, min_remaining_ttl_ms: int = 0
     ) -> Any:
@@ -329,9 +387,12 @@ class _FakeRedis(Redis):
         self,
         list_key: str,
         expires_key: str,
+        destroy_state_key: str,
         sandbox_id: str,
         ttl_ms: int,
     ) -> int:
+        if self.get(destroy_state_key) is not None:
+            return -1
         now = _now_ms()
         expires = self._hashes.setdefault(expires_key, {})
         current = expires.get(sandbox_id)
@@ -342,11 +403,44 @@ class _FakeRedis(Redis):
         expires[sandbox_id] = str(now + ttl_ms)
         return 1
 
-    def _renew_lock(self, key: str, owner_id: str, ttl_ms: int) -> bool:
+    def _acquire_lock(
+        self, key: str, destroy_state_key: str, owner_id: str, ttl_ms: int
+    ) -> bool:
+        if self.get(destroy_state_key) is not None:
+            return False
+        if self.set(key, owner_id, nx=True, px=ttl_ms):
+            return True
+        return self._renew_lock(key, destroy_state_key, owner_id, ttl_ms)
+
+    def _renew_lock(
+        self, key: str, destroy_state_key: str, owner_id: str, ttl_ms: int
+    ) -> bool:
+        if self.get(destroy_state_key) is not None:
+            return False
         if self.get(key) != owner_id:
             return False
         self._strings[key] = (owner_id, _now_ms() + ttl_ms)
         return True
+
+    def _set_value(self, key: str, destroy_state_key: str, value: str) -> int:
+        if self.get(destroy_state_key) is not None:
+            return -1
+        self.set(key, value)
+        return 1
+
+    def _begin_destroy(
+        self,
+        state_key: str,
+        owner_key: str,
+        destroying: str,
+        destroyed: str,
+        owner_id: str,
+    ) -> int:
+        if self.get(state_key) == destroyed:
+            return -1
+        self.set(state_key, destroying)
+        self.set(owner_key, owner_id)
+        return 1
 
     def _release_lock(self, key: str, owner_id: str) -> int:
         if self.get(key) != owner_id:

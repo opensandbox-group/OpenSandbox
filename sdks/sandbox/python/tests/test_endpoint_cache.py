@@ -184,3 +184,4 @@ class TestAsyncEndpointCache:
 
         # Cache should not be populated on error
         assert c.get(key) is None
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]

@@ -38,6 +38,7 @@ type IsolatedSessionOptions struct {
 	EnvPassthroughKeys []string
 	Uid                *uint32
 	Gid                *uint32
+	UidMode            string // "setpriv" (default) or "userns"
 	IdleTimeoutSeconds int
 }
 
@@ -110,6 +111,9 @@ func (s *isolatedSession) start() error {
 	}
 	wrapOpts.Uid = s.opts.Uid
 	wrapOpts.Gid = s.opts.Gid
+	if s.opts.UidMode != "" {
+		wrapOpts.UidMode = isolation.UidMode(s.opts.UidMode)
+	}
 	wrapOpts.UpperDir = s.upperDir
 	wrapOpts.WorkDir = s.workDir
 

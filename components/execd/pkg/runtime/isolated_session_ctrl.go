@@ -412,13 +412,22 @@ func (r *IsolatedRunner) GetMergedView(id string) (vfs.FS, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// MergedView chowns files on the host side (execd's namespace).
+	// In setpriv mode the requested uid/gid are real host IDs, so use them.
+	// In userns mode the requested uid/gid are in-namespace IDs mapped to
+	// execd's real host uid/gid, so host-side files must use execd's own
+	// host uid/gid — chowning to the in-namespace ID would fail with EPERM
+	// (unprivileged execd) or create files that appear as nobody/overflow
+	// inside the sandbox.
 	uid := uint32(os.Getuid())
 	gid := uint32(os.Getgid())
-	if s.opts.Uid != nil {
-		uid = *s.opts.Uid
-	}
-	if s.opts.Gid != nil {
-		gid = *s.opts.Gid
+	if isolation.UidMode(s.opts.UidMode) != isolation.UidModeUserns {
+		if s.opts.Uid != nil {
+			uid = *s.opts.Uid
+		}
+		if s.opts.Gid != nil {
+			gid = *s.opts.Gid
+		}
 	}
 
 	mode := isolation.WorkspaceOverlay

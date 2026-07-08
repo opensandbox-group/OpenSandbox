@@ -2084,6 +2084,13 @@ components:
         gid:
           type: integer
           format: uint32
+        uid_mode:
+          type: string
+          enum: ["setpriv", "userns"]
+          description: >-
+            Controls how user identity is established inside the namespace.
+            "setpriv" (default) uses real setuid via setpriv(1).
+            "userns" creates a user namespace via --unshare-user --disable-userns.
         idle_timeout_seconds:
           type: integer
 

@@ -59,6 +59,27 @@ func (m EnvMode) Valid() bool {
 	return m == EnvModeDeny || m == EnvModeAllow
 }
 
+// UidMode controls how user identity is established inside the namespace.
+type UidMode string
+
+const (
+	// UidModeSetpriv uses setpriv(1) after bwrap to drop privileges via
+	// real setuid/setgid. Requires CAP_SETUID/CAP_SETGID or root.
+	// This is the default when UidMode is empty.
+	UidModeSetpriv UidMode = "setpriv"
+
+	// UidModeUserns creates a user namespace (--unshare-user) and maps the
+	// desired uid/gid inside it via --uid/--gid. Also passes
+	// --disable-userns to prevent nested user namespace creation.
+	// Does not require elevated privileges.
+	UidModeUserns UidMode = "userns"
+)
+
+// Valid reports whether m is a known uid mode.
+func (m UidMode) Valid() bool {
+	return m == UidModeSetpriv || m == UidModeUserns
+}
+
 // Structs
 
 // WorkspaceSpec describes a workspace directory and how it is mounted.
@@ -99,7 +120,8 @@ type WrapOptions struct {
 	ShareNet       bool
 	EnvPassthrough EnvSpec
 	Uid, Gid       *uint32
-	UpperDir       string // empty when upper is on tmpfs (persist disabled)
+	UidMode        UidMode // "" or "setpriv" → setpriv; "userns" → user namespace
+	UpperDir       string  // empty when upper is on tmpfs (persist disabled)
 	WorkDir        string
 }
 

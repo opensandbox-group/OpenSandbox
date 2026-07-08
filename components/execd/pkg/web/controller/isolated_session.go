@@ -89,6 +89,7 @@ func (c *IsolatedSessionController) Create() {
 		EnvPassthroughKeys: req.EnvPassthrough.Keys,
 		Uid:                req.Uid,
 		Gid:                req.Gid,
+		UidMode:            req.UidMode,
 		IdleTimeoutSeconds: req.IdleTimeoutSeconds,
 	}
 

@@ -36,6 +36,7 @@ type IsolatedSessionOptions struct {
 	EnvPassthroughKeys []string
 	Uid                *uint32
 	Gid                *uint32
+	UidMode            string
 	IdleTimeoutSeconds int
 }
 

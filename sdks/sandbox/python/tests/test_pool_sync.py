@@ -13,6 +13,7 @@ from opensandbox._pool_reconciler import ReconcileState, run_reconcile_tick
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import (
     PoolAcquireFailedException,
+    PoolDestroyedException,
     PoolEmptyException,
     PoolNotRunningException,
 )
@@ -121,6 +122,100 @@ def test_acquire_direct_create_when_empty() -> None:
         fake_sandbox = cast(FakeSandbox, sandbox)
         assert sandbox.id == "created-1"
         assert fake_sandbox.renewed == [timedelta(minutes=5)]
+    finally:
+        pool.shutdown(False)
+
+
+def test_acquire_does_not_direct_create_when_pool_namespace_is_destroying() -> None:
+    FakeSandbox.reset()
+    store = InMemoryPoolStateStore()
+    pool = _create_pool(max_idle=0, store=store)
+    pool.start()
+
+    try:
+        store.begin_destroy("pool", "destroyer")
+
+        with pytest.raises(PoolDestroyedException):
+            pool.acquire()
+        assert FakeSandbox.created_count == 0
+    finally:
+        pool.shutdown(False)
+
+
+def test_acquire_idle_destroy_race_raises_pool_destroyed() -> None:
+    store = InMemoryPoolStateStore()
+    store.put_idle("pool", "id-1")
+    connected: list[FakeSandbox] = []
+
+    class FencingSandbox(FakeSandbox):
+        @classmethod
+        def connect(cls, sandbox_id: str, *args: Any, **kwargs: Any) -> FakeSandbox:
+            sandbox = cls(sandbox_id)
+            connected.append(sandbox)
+            store.begin_destroy("pool", "destroyer")
+            return sandbox
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=FencingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        with pytest.raises(PoolDestroyedException):
+            pool.acquire(policy=AcquirePolicy.DIRECT_CREATE)
+        assert connected[0].killed
+        assert connected[0].closed
+    finally:
+        pool.shutdown(False)
+
+
+def test_acquire_stopped_destroyed_pool_raises_pool_destroyed() -> None:
+    store = InMemoryPoolStateStore()
+    pool = _create_pool(max_idle=0, store=store)
+    pool.start()
+    store.begin_destroy("pool", "destroyer")
+    pool.shutdown(False)
+
+    with pytest.raises(PoolDestroyedException):
+        pool.acquire()
+
+
+def test_acquire_destroy_race_preserves_pool_destroyed_when_cleanup_fails() -> None:
+    store = InMemoryPoolStateStore()
+    store.put_idle("pool", "id-1")
+
+    class CleanupFailingSandbox(FakeSandbox):
+        @classmethod
+        def connect(cls, sandbox_id: str, *args: Any, **kwargs: Any) -> FakeSandbox:
+            store.begin_destroy("pool", "destroyer")
+            return cls(sandbox_id)
+
+        def kill(self) -> None:
+            raise RuntimeError("kill failed")
+
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=CleanupFailingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        with pytest.raises(PoolDestroyedException):
+            pool.acquire(policy=AcquirePolicy.DIRECT_CREATE)
     finally:
         pool.shutdown(False)
 

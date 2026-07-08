@@ -39,6 +39,7 @@ type CreateIsolatedSessionRequest struct {
 	EnvPassthrough     EnvPassthroughSpec `json:"env_passthrough,omitempty"`
 	Uid                *uint32            `json:"uid,omitempty"`
 	Gid                *uint32            `json:"gid,omitempty"`
+	UidMode            string             `json:"uid_mode,omitempty"` // "setpriv" (default) | "userns"
 	IdleTimeoutSeconds int                `json:"idle_timeout_seconds,omitempty"`
 }
 
@@ -80,6 +81,14 @@ func (r *CreateIsolatedSessionRequest) Validate() error {
 		default:
 			return fmt.Errorf("invalid env_passthrough mode %q: must be \"deny\" or \"allow\"",
 				r.EnvPassthrough.Mode)
+		}
+	}
+	if r.UidMode != "" {
+		switch r.UidMode {
+		case "setpriv", "userns":
+		default:
+			return fmt.Errorf("invalid uid_mode %q: must be \"setpriv\" or \"userns\"",
+				r.UidMode)
 		}
 	}
 	return nil

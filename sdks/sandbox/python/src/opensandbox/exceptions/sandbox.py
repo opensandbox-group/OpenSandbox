@@ -32,6 +32,8 @@ class SandboxError:
     POOL_ACQUIRE_FAILED = "POOL_ACQUIRE_FAILED"
     POOL_STATE_STORE_UNAVAILABLE = "POOL_STATE_STORE_UNAVAILABLE"
     POOL_NOT_RUNNING = "POOL_NOT_RUNNING"
+    POOL_DESTROYED = "POOL_DESTROYED"
+    POOL_DESTROY_INCOMPLETE = "POOL_DESTROY_INCOMPLETE"
 
     def __init__(self, code: str, message: str | None = None) -> None:
         self.code = code
@@ -201,4 +203,32 @@ class PoolNotRunningException(SandboxException):
     ) -> None:
         super().__init__(
             message, cause, SandboxError(SandboxError.POOL_NOT_RUNNING, message)
+        )
+
+
+class PoolDestroyedException(SandboxException):
+    """Thrown when a pool namespace is being destroyed or has been destroyed."""
+
+    def __init__(
+        self,
+        message: str | None = "Pool namespace is destroyed",
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message, cause, SandboxError(SandboxError.POOL_DESTROYED, message)
+        )
+
+
+class PoolDestroyIncompleteException(SandboxException):
+    """Thrown when pool destroy starts but does not complete."""
+
+    def __init__(
+        self,
+        message: str | None = "Pool destroy did not complete",
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            cause,
+            SandboxError(SandboxError.POOL_DESTROY_INCOMPLETE, message),
         )
