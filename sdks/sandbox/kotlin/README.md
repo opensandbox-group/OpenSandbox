@@ -463,4 +463,4 @@ sandbox.credentialVault().create(
 ```
 
 See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
-binding guidance, and Git/curl examples.
+scoped placeholder substitutions, binding guidance, and Git/curl examples.

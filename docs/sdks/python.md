@@ -543,5 +543,5 @@ await sandbox.credential_vault.create(
 )
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, scoped
+placeholder substitutions, binding guidance, and Git/curl examples.
