@@ -92,10 +92,16 @@ class _Response:
         self.body = value
 
 
+class _ClientConn:
+    def __init__(self, sni: str = "") -> None:
+        self.sni = sni
+
+
 class _Flow:
     def __init__(self) -> None:
         self.request = _Request()
         self.response = _Response()
+        self.client_conn = _ClientConn()
         self.metadata: dict[str, Any] = {}
 
 
@@ -242,6 +248,176 @@ class SystemAddonRedactionTest(unittest.TestCase):
         system.responseheaders(flow)
 
         self.assertEqual("[REDACTED]", flow.response.headers.get("x-token-echo"))
+
+    # -- credential destination confusion tests --------------------------------
+
+    def _make_vault(self, system: Any) -> None:
+        """Install a vault with a binding for code.example.com."""
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "gitlab-api",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "secret-token"}],
+                }
+            ],
+            ["secret-token"],
+        )
+
+    def test_host_header_spoof_fqdn_mismatch_blocks_injection(self) -> None:
+        """Credential must NOT be injected when Host header (pretty_host)
+        differs from the actual upstream FQDN (flow.request.host)."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "attacker.example.net"
+        flow.request.pretty_host = "code.example.com"
+        self._make_vault(system)
+
+        system.request(flow)
+
+        self.assertEqual("", flow.request.headers.get("Private-Token"))
+        self.assertTrue(
+            any("does not match" in m for m in system.ctx.log.messages),
+            "expected a mismatch warning in the log",
+        )
+
+    def test_transparent_https_sni_mismatch_blocks_injection(self) -> None:
+        """In transparent HTTPS mode where host is an IP, credential must NOT
+        be injected when the TLS SNI differs from the Host header."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "93.184.216.34"
+        flow.request.pretty_host = "code.example.com"
+        flow.client_conn = _ClientConn(sni="attacker.example.net")
+        self._make_vault(system)
+
+        system.request(flow)
+
+        self.assertEqual("", flow.request.headers.get("Private-Token"))
+
+    def test_transparent_https_sni_match_allows_injection(self) -> None:
+        """In transparent HTTPS mode where host is an IP, credential should be
+        injected when the TLS SNI matches the Host header (legitimate flow)."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "93.184.216.34"
+        flow.request.pretty_host = "code.example.com"
+        flow.client_conn = _ClientConn(sni="code.example.com")
+        self._make_vault(system)
+
+        system.request(flow)
+
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_matching_host_and_pretty_host_allows_injection(self) -> None:
+        """The existing happy path: host == pretty_host allows injection."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "code.example.com"
+        flow.request.pretty_host = "code.example.com"
+        self._make_vault(system)
+
+        system.request(flow)
+
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_request_host_prefers_fqdn_over_pretty_host(self) -> None:
+        """_request_host should return the actual FQDN, not pretty_host."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "real.example.com"
+        flow.request.pretty_host = "spoofed.example.com"
+
+        self.assertEqual("real.example.com", system._request_host(flow))
+
+    def test_request_host_uses_sni_when_host_is_ip(self) -> None:
+        """_request_host should prefer SNI over pretty_host when host is an IP."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "10.0.0.1"
+        flow.request.pretty_host = "spoofed.example.com"
+        flow.client_conn = _ClientConn(sni="real.example.com")
+
+        self.assertEqual("real.example.com", system._request_host(flow))
+
+    def test_request_host_falls_back_to_pretty_host_for_http(self) -> None:
+        """_request_host falls back to pretty_host for transparent HTTP
+        where host is an IP and no SNI is available."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "10.0.0.1"
+        flow.request.pretty_host = "code.example.com"
+        flow.request.scheme = "http"
+        flow.client_conn = _ClientConn(sni="")
+
+        self.assertEqual("code.example.com", system._request_host(flow))
+
+    def test_https_ip_no_sni_blocks_injection(self) -> None:
+        """HTTPS with IP destination and no SNI is unverifiable – must block."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "93.184.216.34"
+        flow.request.pretty_host = "code.example.com"
+        flow.request.scheme = "https"
+        flow.client_conn = _ClientConn(sni="")
+        self._make_vault(system)
+
+        system.request(flow)
+
+        self.assertEqual("", flow.request.headers.get("Private-Token"))
+        self.assertTrue(
+            any("does not match" in m for m in system.ctx.log.messages),
+            "expected a mismatch warning in the log",
+        )
+
+    def test_http_ip_transparent_allows_injection(self) -> None:
+        """Transparent HTTP with IP destination is accepted risk – allow."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "gitlab-api",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "schemes": ["http"],
+                        "ports": [80],
+                        "paths": ["/api/v8/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "secret-token"}],
+                }
+            ],
+            ["secret-token"],
+        )
+        flow = _Flow()
+        flow.request.host = "93.184.216.34"
+        flow.request.pretty_host = "code.example.com"
+        flow.request.scheme = "http"
+        flow.request.port = 80
+        flow.client_conn = _ClientConn(sni="")
+
+        system.request(flow)
+
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_ip_host_with_mismatched_sni_blocks_injection(self) -> None:
+        """Host=IP matches actual IP, but SNI diverges – must block."""
+        system = _load_system_module()
+        flow = _Flow()
+        flow.request.host = "93.184.216.34"
+        flow.request.pretty_host = "93.184.216.34"
+        flow.request.scheme = "https"
+        flow.client_conn = _ClientConn(sni="code.example.com")
+        self._make_vault(system)
+
+        system.request(flow)
+
+        self.assertEqual("", flow.request.headers.get("Private-Token"))
 
 
 class SystemAddonPathTraversalTest(unittest.TestCase):
