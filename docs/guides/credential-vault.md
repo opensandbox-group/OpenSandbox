@@ -196,7 +196,7 @@ await sandbox.credential_vault.create(
                 "schemes": ["https"],
                 "hosts": ["api.example.com"],
                 "methods": ["POST"],
-                "paths": ["/tenants/*/token"],
+                "paths": ["/tenants/__tenant_id__/token"],
             },
             auth={
                 "type": "passthrough",

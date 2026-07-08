@@ -192,12 +192,12 @@ _DOT_SEGMENT_RE = re.compile(r"/\.\.(/|$)")
 
 
 def _path_is_ambiguous(raw_path: str) -> bool:
-    """Return True if the raw request path contains dot-segment traversal sequences.
+    """Return True if the raw request path contains ambiguous segments.
 
     Legitimate HTTP clients resolve dot segments before sending. Raw ``..``
-    or percent-encoded variants on the wire indicate an attempt to confuse
-    path-based authorization checks (the canonical path seen by the upstream
-    server would differ from the raw prefix matched here).
+    or percent-encoded separators on the wire indicate an attempt to confuse
+    path-based authorization checks because the canonical path seen by the
+    upstream server may differ from the raw prefix matched here.
     """
     path = raw_path.split("?", 1)[0]
 
@@ -205,21 +205,19 @@ def _path_is_ambiguous(raw_path: str) -> bool:
     if _DOT_SEGMENT_RE.search(path):
         return True
 
-    # Iteratively decode to catch nested encodings like %252e%252e.
+    # Iteratively decode to catch nested encodings like %252e%252e or %252f.
     decoded = path
     for _ in range(10):
+        lower = decoded.lower()
+        if "%2f" in lower or "%5c" in lower:
+            return True
+        if "\\" in decoded:
+            return True
         next_decoded = unquote(decoded)
         if next_decoded == decoded:
             break
         decoded = next_decoded
     if _DOT_SEGMENT_RE.search(decoded):
-        return True
-
-    # Reject encoded separators (%2f, %5c) and raw backslashes.
-    lower = path.lower()
-    if "%2f" in lower or "%5c" in lower:
-        return True
-    if "\\" in path:
         return True
 
     return False
@@ -322,7 +320,7 @@ def _encoded_substitution_value(value: str, surface: str, content_type: str = ""
         return quote(value, safe="")
     if surface == "body":
         normalized_type = content_type.split(";", 1)[0].strip().lower()
-        if normalized_type == "application/json":
+        if normalized_type == "application/json" or normalized_type.endswith("+json"):
             return json.dumps(value)[1:-1]
         if normalized_type == "application/x-www-form-urlencoded":
             return quote_plus(value, safe="")
@@ -574,7 +572,6 @@ def _redact_response_headers(flow: http.HTTPFlow) -> None:
 
 def _redact_text(text: str, values: list[str]) -> str:
     out = text
-    for value in values:
-        if value:
-            out = out.replace(value, "[REDACTED]")
+    for value in sorted({value for value in values if value}, key=len, reverse=True):
+        out = out.replace(value, "[REDACTED]")
     return out

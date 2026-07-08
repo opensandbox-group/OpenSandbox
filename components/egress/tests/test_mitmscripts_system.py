@@ -245,6 +245,16 @@ class SystemAddonRedactionTest(unittest.TestCase):
 
         self.assertEqual("[REDACTED]", flow.response.headers.get("x-token-echo"))
 
+    def test_responseheaders_redacts_longer_values_first(self) -> None:
+        system = _load_system_module()
+        flow = _Flow()
+        flow.response.headers["x-token-echo"] = "prefix token-abc suffix"
+        flow.metadata[system.FLOW_REDACTIONS_KEY] = ["token", "token-abc"]
+
+        system.responseheaders(flow)
+
+        self.assertEqual("prefix [REDACTED] suffix", flow.response.headers.get("x-token-echo"))
+
 
 class SystemAddonSubstitutionTest(unittest.TestCase):
     def _make_system_with_substitutions(self):
@@ -334,6 +344,20 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         self.assertEqual({"client_secret": 'body "secret" \\ value'}, json.loads(body))
         self.assertEqual(str(len(flow.request.content)), flow.request.headers.get("content-length"))
         self.assertEqual("", flow.request.headers.get("transfer-encoding"))
+
+    def test_structured_json_body_substitution_escapes_string_value(self) -> None:
+        system = self._make_system_with_substitutions()
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/merge-patch+json; charset=utf-8"
+        flow.request.content = b'{"client_secret":"__body_secret__"}'
+
+        system.request(flow)
+
+        body = flow.request.content.decode("utf-8")
+        self.assertEqual({"client_secret": 'body "secret" \\ value'}, json.loads(body))
 
     def test_form_body_substitution_url_encodes_value(self) -> None:
         system = self._make_system_with_substitutions()
@@ -473,6 +497,37 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         self.assertIn("path=[REDACTED]", logs)
         self.assertNotIn("tenant/secret", logs)
         self.assertNotIn("tenant%2Fsecret", logs)
+
+    def test_path_substitution_rejects_nested_encoded_separator(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "path-secret",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/tenants/*"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__tenant_id__",
+                            "value": "tenant%2Fsecret",
+                            "in": ["path"],
+                        },
+                    ],
+                }
+            ],
+            ["__tenant_id__", "tenant%2Fsecret", "tenant%252Fsecret"],
+        )
+        flow = _Flow()
+        flow.request.path = "/tenants/__tenant_id__/items"
+
+        system.request(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
 
 
 class SystemAddonPathTraversalTest(unittest.TestCase):

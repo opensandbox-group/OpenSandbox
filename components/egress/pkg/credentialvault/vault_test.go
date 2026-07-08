@@ -132,7 +132,9 @@ func TestCredentialVaultRendersScopedSubstitutions(t *testing.T) {
 	require.Contains(t, payload.Redactions, "__client_secret__")
 	require.Contains(t, payload.Redactions, `real "clé"&value😀`)
 	require.Contains(t, payload.Redactions, "real%20%22cl%C3%A9%22%26value%F0%9F%98%80")
+	require.Contains(t, payload.Redactions, "real%20%22cl%c3%a9%22%26value%f0%9f%98%80")
 	require.Contains(t, payload.Redactions, "real+%22cl%C3%A9%22%26value%F0%9F%98%80")
+	require.Contains(t, payload.Redactions, "real+%22cl%c3%a9%22%26value%f0%9f%98%80")
 	require.Contains(t, payload.Redactions, `real \"clé\"\u0026value😀`)
 	require.Contains(t, payload.Redactions, `real \"cl\u00e9\"&value\ud83d\ude00`)
 }
@@ -204,6 +206,37 @@ func TestCredentialVaultRejectsInvalidSubstitution(t *testing.T) {
 		},
 	})
 	require.ErrorContains(t, err, "requires placeholder")
+}
+
+func TestCredentialVaultPreservesSubstitutionPlaceholderWhitespace(t *testing.T) {
+	binding, err := normalizeBinding(Binding{
+		Name:  "literal-placeholder",
+		Match: Match{Hosts: []string{"code.example.com"}},
+		Auth: Auth{
+			Type: "passthrough",
+			Substitutions: []Substitution{
+				{Credential: "token", Placeholder: " __token__ ", In: []string{" Body ", "body"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, " __token__ ", binding.Auth.Substitutions[0].Placeholder)
+	require.Equal(t, []string{"body"}, binding.Auth.Substitutions[0].In)
+}
+
+func TestCredentialVaultRejectsDuplicateSubstitutionPlaceholderSurface(t *testing.T) {
+	_, err := normalizeBinding(Binding{
+		Name:  "duplicate-placeholder-surface",
+		Match: Match{Hosts: []string{"code.example.com"}},
+		Auth: Auth{
+			Type: "passthrough",
+			Substitutions: []Substitution{
+				{Credential: "primary", Placeholder: "__token__", In: []string{"body"}},
+				{Credential: "secondary", Placeholder: "__token__", In: []string{"query", "body"}},
+			},
+		},
+	})
+	require.ErrorContains(t, err, `duplicates placeholder "__token__" on body surface`)
 }
 
 func TestCredentialVaultRejectsPassthroughIgnoredFields(t *testing.T) {

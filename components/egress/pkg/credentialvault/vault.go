@@ -384,7 +384,12 @@ func (v *Store) ActiveSnapshotWithContext(ctx context.Context) (ActiveSnapshot, 
 	for value := range redactions {
 		snapshot.Redactions = append(snapshot.Redactions, value)
 	}
-	sort.Strings(snapshot.Redactions)
+	sort.Slice(snapshot.Redactions, func(i, j int) bool {
+		if len(snapshot.Redactions[i]) != len(snapshot.Redactions[j]) {
+			return len(snapshot.Redactions[i]) > len(snapshot.Redactions[j])
+		}
+		return snapshot.Redactions[i] < snapshot.Redactions[j]
+	})
 	return snapshot, nil
 }
 
@@ -697,7 +702,46 @@ func substitutionRedactionVariants(value string) []string {
 	if data, err := json.Marshal(value); err == nil && len(data) >= 2 {
 		jsonEncoded = string(data[1 : len(data)-1])
 	}
-	return []string{value, urlEncoded, formEncoded, jsonEncoded, jsonASCIIEncodedStringContent(value)}
+	return []string{
+		value,
+		urlEncoded,
+		lowercasePercentEscapes(urlEncoded),
+		formEncoded,
+		lowercasePercentEscapes(formEncoded),
+		jsonEncoded,
+		jsonASCIIEncodedStringContent(value),
+	}
+}
+
+func lowercasePercentEscapes(value string) string {
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(value); i++ {
+		if value[i] == '%' && i+2 < len(value) && isHexDigit(value[i+1]) && isHexDigit(value[i+2]) {
+			b.WriteByte('%')
+			b.WriteByte(lowerHexByte(value[i+1]))
+			b.WriteByte(lowerHexByte(value[i+2]))
+			i += 2
+			changed = true
+			continue
+		}
+		b.WriteByte(value[i])
+	}
+	if !changed {
+		return value
+	}
+	return b.String()
+}
+
+func isHexDigit(b byte) bool {
+	return ('0' <= b && b <= '9') || ('a' <= b && b <= 'f') || ('A' <= b && b <= 'F')
+}
+
+func lowerHexByte(b byte) byte {
+	if 'A' <= b && b <= 'F' {
+		return b + ('a' - 'A')
+	}
+	return b
 }
 
 func jsonASCIIEncodedStringContent(value string) string {
@@ -753,14 +797,14 @@ func normalizeSubstitutions(substitutions []Substitution) error {
 		"header": {},
 		"body":   {},
 	}
+	seenPairs := make(map[[2]string]int)
 	for i := range substitutions {
 		substitution := &substitutions[i]
 		substitution.Credential = strings.TrimSpace(substitution.Credential)
 		if substitution.Credential == "" {
 			return fmt.Errorf("substitution %d requires credential", i)
 		}
-		substitution.Placeholder = strings.TrimSpace(substitution.Placeholder)
-		if substitution.Placeholder == "" {
+		if strings.TrimSpace(substitution.Placeholder) == "" {
 			return fmt.Errorf("substitution %d requires placeholder", i)
 		}
 		if len(substitution.In) == 0 {
@@ -777,6 +821,11 @@ func normalizeSubstitutions(substitutions []Substitution) error {
 				continue
 			}
 			seen[surface] = struct{}{}
+			pair := [2]string{substitution.Placeholder, surface}
+			if previous, duplicate := seenPairs[pair]; duplicate {
+				return fmt.Errorf("substitution %d duplicates placeholder %q on %s surface from substitution %d", i, substitution.Placeholder, surface, previous)
+			}
+			seenPairs[pair] = i
 			normalized = append(normalized, surface)
 		}
 		substitution.In = normalized
