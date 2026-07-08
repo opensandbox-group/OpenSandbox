@@ -1,0 +1,25 @@
+name: Chart Testing
+
+on:
+  pull_request:
+    paths:
+      - 'kubernetes/charts/**'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v4
+
+      - uses: helm/chart-testing-action@v2
+
+      - name: Lint charts
+        run: |
+          ct lint \
+            --chart-dirs kubernetes/charts \
+            --validate-maintainers=false \
+            --check-version-increment=false
