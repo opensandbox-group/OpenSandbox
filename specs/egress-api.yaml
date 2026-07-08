@@ -583,6 +583,7 @@ components:
         - $ref: '#/components/schemas/BasicCredentialAuth'
         - $ref: '#/components/schemas/ApiKeyCredentialAuth'
         - $ref: '#/components/schemas/CustomHeadersCredentialAuth'
+        - $ref: '#/components/schemas/PassthroughCredentialAuth'
       discriminator:
         propertyName: type
         mapping:
@@ -590,6 +591,7 @@ components:
           basic: '#/components/schemas/BasicCredentialAuth'
           apiKey: '#/components/schemas/ApiKeyCredentialAuth'
           customHeaders: '#/components/schemas/CustomHeadersCredentialAuth'
+          passthrough: '#/components/schemas/PassthroughCredentialAuth'
     BearerCredentialAuth:
       type: object
       required: [type, credential]
@@ -599,6 +601,10 @@ components:
           enum: [bearer]
         credential:
           type: string
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
       additionalProperties: false
     BasicCredentialAuth:
       type: object
@@ -610,6 +616,10 @@ components:
         credential:
           type: string
           description: Credential containing pre-encoded base64(username:password).
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
       additionalProperties: false
     ApiKeyCredentialAuth:
       type: object
@@ -623,6 +633,10 @@ components:
           pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
         credential:
           type: string
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
       additionalProperties: false
     CustomHeadersCredentialAuth:
       type: object
@@ -636,6 +650,22 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/CustomHeaderEntry'
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      additionalProperties: false
+    PassthroughCredentialAuth:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [passthrough]
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
       additionalProperties: false
     CustomHeaderEntry:
       type: object
@@ -646,6 +676,26 @@ components:
           pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
         credential:
           type: string
+      additionalProperties: false
+    CredentialSubstitution:
+      type: object
+      required: [credential, placeholder, in]
+      description: Literal case-sensitive placeholder replacement for selected request surfaces. Replacement is opt-in and scoped per binding.
+      properties:
+        credential:
+          type: string
+          description: Name of the sandbox-local credential used as the replacement value.
+        placeholder:
+          type: string
+          minLength: 1
+          description: Literal placeholder to replace. The placeholder and resolved credential value are added to the active redaction set.
+        in:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [path, query, header, body]
+          description: Request surfaces where the placeholder may be replaced. Query and path replacements are URL-encoded, JSON string bodies are escaped, x-www-form-urlencoded bodies are form-encoded, compressed bodies are skipped, and multipart bodies are skipped.
       additionalProperties: false
     CredentialAuthMetadata:
       type: object

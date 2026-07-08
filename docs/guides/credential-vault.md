@@ -53,7 +53,8 @@ At a high level:
 4. When the sandbox makes an HTTPS request, transparent MITM in the sidecar
    inspects the request metadata.
 5. If exactly one binding matches the request scheme, host, port, method, and
-   path, the sidecar injects the configured auth header.
+   path, the sidecar injects the configured auth header and scoped placeholder
+   substitutions.
 6. Secret values are redacted from vault responses and response headers.
 
 The active vault used by the MITM process is served over a local Unix domain
@@ -86,6 +87,9 @@ rendered into the outbound request:
 - `apiKey`: injects the credential value into the configured header name.
 - `customHeaders`: injects multiple configured headers, each backed by its own
   credential.
+- `passthrough`: does not inject an auth header. Use it with `substitutions`
+  when the upstream API requires a credential in a path, query string, or body
+  placeholder instead of a header.
 
 Simple examples:
 
@@ -127,6 +131,42 @@ auth={
 X-Client-Id: <client-id>
 X-Client-Secret: <client-secret>
 ```
+
+### Scoped Placeholder Substitutions
+
+All auth types accept an optional `substitutions` list. Each substitution names
+a credential, a literal placeholder, and the request surfaces where replacement
+is allowed:
+
+```python
+auth={
+    "type": "passthrough",
+    "substitutions": [
+        {
+            "credential": "client-secret",
+            "placeholder": "__client_secret__",
+            "in": ["body", "query"],
+        }
+    ],
+}
+```
+
+Substitution is disabled by default and is exact, literal, and case-sensitive.
+Only the configured surfaces are rewritten:
+
+- `path`: replaces placeholders in the request path.
+- `query`: replaces placeholders in the query string and URL-encodes the value.
+- `header`: replaces placeholders in request headers, excluding hop-by-hop and
+  security-sensitive headers such as `Host`, `Content-Length`, and forwarding
+  headers.
+- `body`: replaces placeholders in UTF-8 request bodies. JSON string values are
+  escaped, `application/x-www-form-urlencoded` values are form-encoded,
+  compressed bodies are skipped, and multipart bodies are skipped.
+
+The sidecar updates `Content-Length` when it rewrites a body. The placeholder
+and resolved credential value are both added to the active redaction set. A
+binding with substitutions that matched the request but did not find any
+placeholder emits a substitution-miss log without exposing credential values.
 
 ## Egress Sidecar Configuration
 

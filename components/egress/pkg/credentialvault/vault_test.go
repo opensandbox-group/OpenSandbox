@@ -81,6 +81,58 @@ func TestCredentialVaultCreateSanitizesAndRendersActiveSnapshot(t *testing.T) {
 	require.Contains(t, payload.Redactions, "secret-token")
 }
 
+func TestCredentialVaultRendersScopedSubstitutions(t *testing.T) {
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+
+	state, err := store.Create(CreateRequest{
+		Credentials: []Credential{
+			{
+				Name:   "client-secret",
+				Source: mustMarshal(map[string]string{"type": "inline", "value": "real-secret"}),
+			},
+		},
+		Bindings: []Binding{
+			{
+				Name: "token-request",
+				Match: Match{
+					Hosts:   []string{"code.example.com"},
+					Methods: []string{"POST"},
+					Paths:   []string{"/oauth/token"},
+				},
+				Auth: Auth{
+					Type: "passthrough",
+					Substitutions: []Substitution{
+						{
+							Credential:  "client-secret",
+							Placeholder: "__client_secret__",
+							In:          []string{"body", "query", "path", "body"},
+						},
+					},
+				},
+			},
+		},
+	}, pol)
+	require.NoError(t, err)
+	require.Equal(t, "passthrough", state.Bindings[0].Auth.Type)
+	require.NotContains(t, string(mustMarshal(state)), "__client_secret__")
+	require.NotContains(t, string(mustMarshal(state)), "real-secret")
+
+	payload, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), payload.Revision)
+	require.Empty(t, payload.Bindings[0].Headers)
+	require.Equal(t, []InjectionSubstitution{
+		{
+			Placeholder: "__client_secret__",
+			Value:       "real-secret",
+			In:          []string{"body", "query", "path"},
+		},
+	}, payload.Bindings[0].Substitutions)
+	require.Contains(t, payload.Redactions, "__client_secret__")
+	require.Contains(t, payload.Redactions, "real-secret")
+}
+
 func TestCredentialVaultAllowsDefaultAllowPolicyForCompatibility(t *testing.T) {
 	store := NewStore(nil, func() bool { return true })
 	pol := testCredentialPolicy(t, `{"defaultAction":"allow","egress":[]}`)
@@ -122,6 +174,32 @@ func TestCredentialVaultRejectsReservedAndDuplicateHeaderNamesCaseInsensitively(
 		},
 	})
 	require.ErrorContains(t, err, "duplicate custom header name")
+}
+
+func TestCredentialVaultRejectsInvalidSubstitution(t *testing.T) {
+	_, err := normalizeBinding(Binding{
+		Name:  "bad-substitution-surface",
+		Match: Match{Hosts: []string{"code.example.com"}},
+		Auth: Auth{
+			Type: "passthrough",
+			Substitutions: []Substitution{
+				{Credential: "token", Placeholder: "__token__", In: []string{"cookie"}},
+			},
+		},
+	})
+	require.ErrorContains(t, err, "unsupported target surface")
+
+	_, err = normalizeBinding(Binding{
+		Name:  "bad-substitution-placeholder",
+		Match: Match{Hosts: []string{"code.example.com"}},
+		Auth: Auth{
+			Type: "passthrough",
+			Substitutions: []Substitution{
+				{Credential: "token", Placeholder: " ", In: []string{"body"}},
+			},
+		},
+	})
+	require.ErrorContains(t, err, "requires placeholder")
 }
 
 func TestCredentialVaultRejectsNonFQDNBindingHosts(t *testing.T) {
@@ -187,6 +265,28 @@ func TestCredentialVaultPatchRejectsDeletingReferencedCredential(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, state.Credentials)
 	require.Empty(t, state.Bindings)
+}
+
+func TestCredentialVaultRejectsUnknownSubstitutionCredential(t *testing.T) {
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+
+	_, err := store.Create(CreateRequest{
+		Credentials: nil,
+		Bindings: []Binding{
+			{
+				Name:  "missing-substitution-credential",
+				Match: Match{Hosts: []string{"code.example.com"}},
+				Auth: Auth{
+					Type: "passthrough",
+					Substitutions: []Substitution{
+						{Credential: "missing", Placeholder: "__missing__", In: []string{"body"}},
+					},
+				},
+			},
+		},
+	}, pol)
+	require.ErrorContains(t, err, "references unknown credential")
 }
 
 func TestParseMitmproxyIgnoreHosts(t *testing.T) {

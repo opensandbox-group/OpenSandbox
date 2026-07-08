@@ -235,12 +235,36 @@ public class CustomHeaderEntry
 }
 
 /// <summary>
+/// Scoped placeholder substitution entry.
+/// </summary>
+public class CredentialSubstitution
+{
+    /// <summary>
+    /// Gets or sets the credential name used as the replacement value.
+    /// </summary>
+    [JsonPropertyName("credential")]
+    public required string Credential { get; set; }
+
+    /// <summary>
+    /// Gets or sets the literal placeholder to replace.
+    /// </summary>
+    [JsonPropertyName("placeholder")]
+    public required string Placeholder { get; set; }
+
+    /// <summary>
+    /// Gets or sets the request surfaces where replacement may occur.
+    /// </summary>
+    [JsonPropertyName("in")]
+    public required IReadOnlyList<string> In { get; set; }
+}
+
+/// <summary>
 /// Typed Credential Vault auth rule.
 /// </summary>
 public class CredentialAuth
 {
     /// <summary>
-    /// Gets or sets the auth rule type: bearer, basic, apiKey, or customHeaders.
+    /// Gets or sets the auth rule type: bearer, basic, apiKey, customHeaders, or passthrough.
     /// </summary>
     [JsonPropertyName("type")]
     public required string Type { get; set; }
@@ -262,6 +286,12 @@ public class CredentialAuth
     /// </summary>
     [JsonPropertyName("headers")]
     public IReadOnlyList<CustomHeaderEntry>? Headers { get; set; }
+
+    /// <summary>
+    /// Gets or sets scoped placeholder substitutions for matching requests.
+    /// </summary>
+    [JsonPropertyName("substitutions")]
+    public IReadOnlyList<CredentialSubstitution>? Substitutions { get; set; }
 }
 
 /// <summary>

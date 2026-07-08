@@ -45,7 +45,7 @@ import re
 import socket
 import time
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, quote_plus, unquote
 
 from mitmproxy import ctx, http
 from mitmproxy.tls import ClientHelloData
@@ -56,6 +56,21 @@ DEFAULT_CREDENTIAL_PROXY_SOCKET = "/run/opensandbox/credential-proxy/active.sock
 ACTIVE_VAULT_PATH = "/credential-vault/_active"
 VAULT_CACHE_TTL_SECONDS = 0.5
 FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
+HEADER_SUBSTITUTION_DENYLIST = {
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "te",
+    "trailer",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+}
 
 
 class ActiveVault:
@@ -277,6 +292,171 @@ def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] |
     return selected[0]
 
 
+def _split_path_query(raw_path: str) -> tuple[str, str | None]:
+    if "?" not in raw_path:
+        return raw_path or "/", None
+    path, query = raw_path.split("?", 1)
+    return path or "/", query
+
+
+def _request_body_bytes(flow: http.HTTPFlow) -> bytes | None:
+    body = getattr(flow.request, "raw_content", None)
+    if body is None:
+        body = getattr(flow.request, "content", None)
+    if body is None:
+        return None
+    if isinstance(body, str):
+        return body.encode("utf-8")
+    return body
+
+
+def _set_request_body_bytes(flow: http.HTTPFlow, body: bytes) -> None:
+    flow.request.content = body
+    flow.request.headers["content-length"] = str(len(body))
+
+
+def _encoded_substitution_value(value: str, surface: str, content_type: str = "") -> str:
+    if surface in {"path", "query"}:
+        return quote(value, safe="")
+    if surface == "body":
+        normalized_type = content_type.split(";", 1)[0].strip().lower()
+        if normalized_type == "application/json":
+            return json.dumps(value)[1:-1]
+        if normalized_type == "application/x-www-form-urlencoded":
+            return quote_plus(value, safe="")
+    return value
+
+
+def _replace_literal(text: str, placeholder: str, replacement: str) -> tuple[str, bool]:
+    if placeholder not in text:
+        return text, False
+    return text.replace(placeholder, replacement), True
+
+
+def _apply_path_query_substitutions(
+    flow: http.HTTPFlow,
+    substitutions: list[dict[str, Any]],
+) -> list[str]:
+    raw_path = flow.request.path or "/"
+    path_part, query_part = _split_path_query(raw_path)
+    path_changed = False
+    query_changed = False
+    applied: list[str] = []
+
+    for substitution in substitutions:
+        placeholder = substitution.get("placeholder")
+        value = substitution.get("value")
+        surfaces = substitution.get("in") or []
+        if not placeholder or value is None:
+            continue
+        value_text = str(value)
+        if "path" in surfaces:
+            replacement = _encoded_substitution_value(value_text, "path")
+            path_part, changed = _replace_literal(path_part, str(placeholder), replacement)
+            if changed:
+                path_changed = True
+                applied.append("path")
+        if query_part is not None and "query" in surfaces:
+            replacement = _encoded_substitution_value(value_text, "query")
+            query_part, changed = _replace_literal(query_part, str(placeholder), replacement)
+            if changed:
+                query_changed = True
+                applied.append("query")
+
+    if path_changed:
+        candidate_path = path_part
+        if query_part is not None:
+            candidate_path = f"{candidate_path}?{query_part}"
+        if _path_is_ambiguous(candidate_path):
+            flow.response = http.Response.make(
+                403,
+                b"request path contains ambiguous substituted segments\n",
+                {"content-type": "text/plain"},
+            )
+            ctx.log.warn(
+                "credential proxy: rejected request after path substitution: "
+                f"{flow.request.method} {_request_host(flow)}{path_part}"
+            )
+            return applied
+
+    if path_changed or query_changed:
+        flow.request.path = path_part if query_part is None else f"{path_part}?{query_part}"
+    return applied
+
+
+def _apply_header_substitutions(
+    flow: http.HTTPFlow,
+    substitutions: list[dict[str, Any]],
+) -> list[str]:
+    applied: list[str] = []
+    for substitution in substitutions:
+        placeholder = substitution.get("placeholder")
+        value = substitution.get("value")
+        surfaces = substitution.get("in") or []
+        if not placeholder or value is None or "header" not in surfaces:
+            continue
+        for name, header_value in list(flow.request.headers.items()):
+            if name.lower() in HEADER_SUBSTITUTION_DENYLIST:
+                continue
+            updated, changed = _replace_literal(str(header_value), str(placeholder), str(value))
+            if changed:
+                flow.request.headers[name] = updated
+                applied.append("header")
+    return applied
+
+
+def _apply_body_substitutions(
+    flow: http.HTTPFlow,
+    substitutions: list[dict[str, Any]],
+) -> list[str]:
+    body = _request_body_bytes(flow)
+    if body is None:
+        return []
+
+    content_encoding = flow.request.headers.get("content-encoding", "").strip().lower()
+    if content_encoding and content_encoding != "identity":
+        return []
+
+    content_type = flow.request.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower().startswith("multipart/"):
+        return []
+
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return []
+
+    applied: list[str] = []
+    for substitution in substitutions:
+        placeholder = substitution.get("placeholder")
+        value = substitution.get("value")
+        surfaces = substitution.get("in") or []
+        if not placeholder or value is None or "body" not in surfaces:
+            continue
+        replacement = _encoded_substitution_value(str(value), "body", content_type)
+        text, changed = _replace_literal(text, str(placeholder), replacement)
+        if changed:
+            applied.append("body")
+
+    if applied:
+        _set_request_body_bytes(flow, text.encode("utf-8"))
+    return applied
+
+
+def _apply_substitutions(flow: http.HTTPFlow, binding: dict[str, Any]) -> list[str]:
+    substitutions = binding.get("substitutions") or []
+    if not substitutions:
+        return []
+
+    applied = []
+    applied.extend(_apply_path_query_substitutions(flow, substitutions))
+    if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
+        return applied
+    applied.extend(_apply_header_substitutions(flow, substitutions))
+    applied.extend(_apply_body_substitutions(flow, substitutions))
+    return applied
+
+
 def request(flow: http.HTTPFlow) -> None:
     vault = _load_active_vault()
     if vault is None:
@@ -316,13 +496,24 @@ def request(flow: http.HTTPFlow) -> None:
         flow.request.headers[name] = value
         injected_names.append(name)
 
-    if injected_names:
+    substituted_surfaces = _apply_substitutions(flow, binding)
+    if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
+        return
+
+    if injected_names or substituted_surfaces:
         flow.metadata[FLOW_REDACTIONS_KEY] = list(vault.redactions)
         ctx.log.info(
-            "credential proxy: injected binding="
+            "credential proxy: applied binding="
             f"{binding.get('name')} revision={vault.revision} "
             f"host={_request_host(flow)} method={flow.request.method} "
-            f"headers={','.join(injected_names)}"
+            f"headers={','.join(injected_names)} "
+            f"substitutions={','.join(sorted(set(substituted_surfaces)))}"
+        )
+    elif binding.get("substitutions"):
+        ctx.log.info(
+            "credential proxy: substitution miss binding="
+            f"{binding.get('name')} revision={vault.revision} "
+            f"host={_request_host(flow)} method={flow.request.method}"
         )
 
 

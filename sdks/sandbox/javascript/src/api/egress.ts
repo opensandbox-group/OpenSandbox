@@ -545,7 +545,7 @@ export interface components {
              */
             paths: string[];
         };
-        CredentialAuth: components["schemas"]["BearerCredentialAuth"] | components["schemas"]["BasicCredentialAuth"] | components["schemas"]["ApiKeyCredentialAuth"] | components["schemas"]["CustomHeadersCredentialAuth"];
+        CredentialAuth: components["schemas"]["BearerCredentialAuth"] | components["schemas"]["BasicCredentialAuth"] | components["schemas"]["ApiKeyCredentialAuth"] | components["schemas"]["CustomHeadersCredentialAuth"] | components["schemas"]["PassthroughCredentialAuth"];
         BearerCredentialAuth: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -553,6 +553,7 @@ export interface components {
              */
             type: "bearer";
             credential: string;
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
         };
         BasicCredentialAuth: {
             /**
@@ -562,6 +563,7 @@ export interface components {
             type: "basic";
             /** @description Credential containing pre-encoded base64(username:password). */
             credential: string;
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
         };
         ApiKeyCredentialAuth: {
             /**
@@ -571,6 +573,7 @@ export interface components {
             type: "apiKey";
             name: string;
             credential: string;
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
         };
         CustomHeadersCredentialAuth: {
             /**
@@ -579,10 +582,28 @@ export interface components {
              */
             type: "customHeaders";
             headers: components["schemas"]["CustomHeaderEntry"][];
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
+        };
+        PassthroughCredentialAuth: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "passthrough";
+            substitutions?: components["schemas"]["CredentialSubstitution"][];
         };
         CustomHeaderEntry: {
             name: string;
             credential: string;
+        };
+        /** @description Literal case-sensitive placeholder replacement for selected request surfaces. Replacement is opt-in and scoped per binding. */
+        CredentialSubstitution: {
+            /** @description Name of the sandbox-local credential used as the replacement value. */
+            credential: string;
+            /** @description Literal placeholder to replace. The placeholder and resolved credential value are added to the active redaction set. */
+            placeholder: string;
+            /** @description Request surfaces where the placeholder may be replaced. Query and path replacements are URL-encoded, JSON string bodies are escaped, x-www-form-urlencoded bodies are form-encoded, compressed bodies are skipped, and multipart bodies are skipped. */
+            in: ("path" | "query" | "header" | "body")[];
         };
         CredentialAuthMetadata: {
             type: string;

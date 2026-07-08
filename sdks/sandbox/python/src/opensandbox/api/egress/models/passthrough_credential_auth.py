@@ -21,37 +21,29 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from attrs import define as _attrs_define
 
-from ..models.api_key_credential_auth_type import ApiKeyCredentialAuthType
+from ..models.passthrough_credential_auth_type import PassthroughCredentialAuthType
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.credential_substitution import CredentialSubstitution
 
 
-T = TypeVar("T", bound="ApiKeyCredentialAuth")
+T = TypeVar("T", bound="PassthroughCredentialAuth")
 
 
 @_attrs_define
-class ApiKeyCredentialAuth:
+class PassthroughCredentialAuth:
     """
     Attributes:
-        type_ (ApiKeyCredentialAuthType):
-        name (str):
-        credential (str):
+        type_ (PassthroughCredentialAuthType):
         substitutions (list[CredentialSubstitution] | Unset):
     """
 
-    type_: ApiKeyCredentialAuthType
-    name: str
-    credential: str
+    type_: PassthroughCredentialAuthType
     substitutions: list[CredentialSubstitution] | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         type_ = self.type_.value
-
-        name = self.name
-
-        credential = self.credential
 
         substitutions: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.substitutions, Unset):
@@ -65,8 +57,6 @@ class ApiKeyCredentialAuth:
         field_dict.update(
             {
                 "type": type_,
-                "name": name,
-                "credential": credential,
             }
         )
         if substitutions is not UNSET:
@@ -79,11 +69,7 @@ class ApiKeyCredentialAuth:
         from ..models.credential_substitution import CredentialSubstitution
 
         d = dict(src_dict)
-        type_ = ApiKeyCredentialAuthType(d.pop("type"))
-
-        name = d.pop("name")
-
-        credential = d.pop("credential")
+        type_ = PassthroughCredentialAuthType(d.pop("type"))
 
         _substitutions = d.pop("substitutions", UNSET)
         substitutions: list[CredentialSubstitution] | Unset = UNSET
@@ -94,11 +80,9 @@ class ApiKeyCredentialAuth:
 
                 substitutions.append(substitutions_item)
 
-        api_key_credential_auth = cls(
+        passthrough_credential_auth = cls(
             type_=type_,
-            name=name,
-            credential=credential,
             substitutions=substitutions,
         )
 
-        return api_key_credential_auth
+        return passthrough_credential_auth
