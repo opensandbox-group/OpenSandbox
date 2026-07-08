@@ -89,7 +89,7 @@ func TestCredentialVaultRendersScopedSubstitutions(t *testing.T) {
 		Credentials: []Credential{
 			{
 				Name:   "client-secret",
-				Source: mustMarshal(map[string]string{"type": "inline", "value": "real-secret"}),
+				Source: mustMarshal(map[string]string{"type": "inline", "value": `real "secret"+value`}),
 			},
 		},
 		Bindings: []Binding{
@@ -116,7 +116,7 @@ func TestCredentialVaultRendersScopedSubstitutions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "passthrough", state.Bindings[0].Auth.Type)
 	require.NotContains(t, string(mustMarshal(state)), "__client_secret__")
-	require.NotContains(t, string(mustMarshal(state)), "real-secret")
+	require.NotContains(t, string(mustMarshal(state)), `real "secret"+value`)
 
 	payload, err := store.ActiveSnapshot()
 	require.NoError(t, err)
@@ -125,12 +125,15 @@ func TestCredentialVaultRendersScopedSubstitutions(t *testing.T) {
 	require.Equal(t, []InjectionSubstitution{
 		{
 			Placeholder: "__client_secret__",
-			Value:       "real-secret",
+			Value:       `real "secret"+value`,
 			In:          []string{"body", "query", "path"},
 		},
 	}, payload.Bindings[0].Substitutions)
 	require.Contains(t, payload.Redactions, "__client_secret__")
-	require.Contains(t, payload.Redactions, "real-secret")
+	require.Contains(t, payload.Redactions, `real "secret"+value`)
+	require.Contains(t, payload.Redactions, "real%20%22secret%22%2Bvalue")
+	require.Contains(t, payload.Redactions, "real+%22secret%22%2Bvalue")
+	require.Contains(t, payload.Redactions, `real \"secret\"+value`)
 }
 
 func TestCredentialVaultAllowsDefaultAllowPolicyForCompatibility(t *testing.T) {

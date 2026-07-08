@@ -131,6 +131,7 @@ func Launch(cfg Config) (*Running, error) {
 func buildMitmdumpArgs(cfg Config) []string {
 	args := []string{
 		"--listen-port", strconv.Itoa(cfg.ListenPort),
+		"--set", "flow_detail=0",
 	}
 
 	if trustDir := strings.TrimSpace(os.Getenv(constants.EnvMitmproxyUpstreamTrustDir)); trustDir != "" {

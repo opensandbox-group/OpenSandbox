@@ -325,6 +325,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.request.method = "POST"
         flow.request.path = "/token"
         flow.request.headers["content-type"] = "application/json"
+        flow.request.headers["transfer-encoding"] = "chunked"
         flow.request.content = b'{"client_secret":"__body_secret__"}'
 
         system.request(flow)
@@ -332,6 +333,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         body = flow.request.content.decode("utf-8")
         self.assertEqual({"client_secret": 'body "secret" \\ value'}, json.loads(body))
         self.assertEqual(str(len(flow.request.content)), flow.request.headers.get("content-length"))
+        self.assertEqual("", flow.request.headers.get("transfer-encoding"))
 
     def test_form_body_substitution_url_encodes_value(self) -> None:
         system = self._make_system_with_substitutions()
@@ -361,6 +363,41 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         self.assertEqual(b'{"client_secret":"__body_secret__"}', flow.request.content)
         self.assertNotIn(system.FLOW_REDACTIONS_KEY, flow.metadata)
         self.assertIn("substitution miss", "\n".join(system.ctx.log.messages))
+
+    def test_rejected_path_substitution_log_does_not_include_secret_value(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "path-secret",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/tenants/*"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__tenant_id__",
+                            "value": "tenant/secret",
+                            "in": ["path"],
+                        },
+                    ],
+                }
+            ],
+            ["__tenant_id__", "tenant/secret", "tenant%2Fsecret"],
+        )
+        flow = _Flow()
+        flow.request.path = "/tenants/__tenant_id__/items"
+
+        system.request(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        logs = "\n".join(system.ctx.log.messages)
+        self.assertIn("path=[REDACTED]", logs)
+        self.assertNotIn("tenant/secret", logs)
+        self.assertNotIn("tenant%2Fsecret", logs)
 
 
 class SystemAddonPathTraversalTest(unittest.TestCase):

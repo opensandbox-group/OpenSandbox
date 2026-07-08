@@ -312,6 +312,8 @@ def _request_body_bytes(flow: http.HTTPFlow) -> bytes | None:
 
 def _set_request_body_bytes(flow: http.HTTPFlow, body: bytes) -> None:
     flow.request.content = body
+    if "transfer-encoding" in flow.request.headers:
+        del flow.request.headers["transfer-encoding"]
     flow.request.headers["content-length"] = str(len(body))
 
 
@@ -375,7 +377,7 @@ def _apply_path_query_substitutions(
             )
             ctx.log.warn(
                 "credential proxy: rejected request after path substitution: "
-                f"{flow.request.method} {_request_host(flow)}{path_part}"
+                f"{flow.request.method} {_request_host(flow)} path=[REDACTED]"
             )
             return applied
 

@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -663,7 +664,7 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 
 func renderSubstitutions(ctx context.Context, auth Auth, credentials map[string]record) ([]InjectionSubstitution, []string, error) {
 	substitutions := make([]InjectionSubstitution, 0, len(auth.Substitutions))
-	redactions := make([]string, 0, len(auth.Substitutions)*2)
+	redactions := make([]string, 0, len(auth.Substitutions)*5)
 	for _, substitution := range auth.Substitutions {
 		value, err := resolveCredentialValue(ctx, substitution.Credential, credentials)
 		if err != nil {
@@ -674,9 +675,20 @@ func renderSubstitutions(ctx context.Context, auth Auth, credentials map[string]
 			Value:       value,
 			In:          append([]string(nil), substitution.In...),
 		})
-		redactions = append(redactions, substitution.Placeholder, value)
+		redactions = append(redactions, substitution.Placeholder)
+		redactions = append(redactions, substitutionRedactionVariants(value)...)
 	}
 	return substitutions, redactions, nil
+}
+
+func substitutionRedactionVariants(value string) []string {
+	urlEncoded := strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+	formEncoded := url.QueryEscape(value)
+	jsonEncoded := value
+	if data, err := json.Marshal(value); err == nil && len(data) >= 2 {
+		jsonEncoded = string(data[1 : len(data)-1])
+	}
+	return []string{value, urlEncoded, formEncoded, jsonEncoded}
 }
 
 func sanitizeAuth(auth Auth) AuthMetadata {
