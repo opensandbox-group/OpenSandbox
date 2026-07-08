@@ -571,6 +571,15 @@ func normalizeAuth(a *Auth) error {
 			}
 		}
 	case "passthrough":
+		if strings.TrimSpace(a.Credential) != "" {
+			return fmt.Errorf("passthrough auth does not accept credential")
+		}
+		if strings.TrimSpace(a.Name) != "" {
+			return fmt.Errorf("passthrough auth does not accept name")
+		}
+		if len(a.Headers) != 0 {
+			return fmt.Errorf("passthrough auth does not accept headers")
+		}
 	default:
 		return fmt.Errorf("unsupported auth type %q", a.Type)
 	}

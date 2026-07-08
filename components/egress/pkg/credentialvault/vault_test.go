@@ -206,6 +206,42 @@ func TestCredentialVaultRejectsInvalidSubstitution(t *testing.T) {
 	require.ErrorContains(t, err, "requires placeholder")
 }
 
+func TestCredentialVaultRejectsPassthroughIgnoredFields(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		auth Auth
+		want string
+	}{
+		{
+			name: "credential",
+			auth: Auth{Type: "passthrough", Credential: "api-token"},
+			want: "does not accept credential",
+		},
+		{
+			name: "name",
+			auth: Auth{Type: "passthrough", Name: "X-Token"},
+			want: "does not accept name",
+		},
+		{
+			name: "headers",
+			auth: Auth{
+				Type:    "passthrough",
+				Headers: []CustomHeaderEntry{{Name: "X-Token", Credential: "api-token"}},
+			},
+			want: "does not accept headers",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := normalizeBinding(Binding{
+				Name:  "bad-passthrough",
+				Match: Match{Hosts: []string{"code.example.com"}},
+				Auth:  tc.auth,
+			})
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
 func TestCredentialVaultRejectsNonFQDNBindingHosts(t *testing.T) {
 	for _, host := range []string{
 		"api.example.com:443",

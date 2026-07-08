@@ -329,10 +329,59 @@ def _encoded_substitution_value(value: str, surface: str, content_type: str = ""
     return value
 
 
-def _replace_literal(text: str, placeholder: str, replacement: str) -> tuple[str, bool]:
-    if placeholder not in text:
-        return text, False
-    return text.replace(placeholder, replacement), True
+def _replace_literals_once(text: str, replacements: list[tuple[str, str]]) -> tuple[str, list[int]]:
+    # Apply replacements against the original text so inserted credential values
+    # are never scanned again for later placeholders.
+    if not replacements:
+        return text, []
+
+    parts: list[str] = []
+    applied: list[int] = []
+    applied_set: set[int] = set()
+    i = 0
+    while i < len(text):
+        selected_index = -1
+        selected_placeholder = ""
+        selected_replacement = ""
+        for index, (placeholder, replacement) in enumerate(replacements):
+            if len(placeholder) <= len(selected_placeholder):
+                continue
+            if text.startswith(placeholder, i):
+                selected_index = index
+                selected_placeholder = placeholder
+                selected_replacement = replacement
+        if selected_index >= 0:
+            parts.append(selected_replacement)
+            if selected_index not in applied_set:
+                applied.append(selected_index)
+                applied_set.add(selected_index)
+            i += len(selected_placeholder)
+            continue
+        parts.append(text[i])
+        i += 1
+
+    if not applied:
+        return text, []
+    return "".join(parts), applied
+
+
+def _substitution_replacements(
+    substitutions: list[dict[str, Any]], surface: str, content_type: str = ""
+) -> list[tuple[str, str]]:
+    replacements: list[tuple[str, str]] = []
+    for substitution in substitutions:
+        placeholder = substitution.get("placeholder")
+        value = substitution.get("value")
+        surfaces = substitution.get("in") or []
+        if not placeholder or value is None or surface not in surfaces:
+            continue
+        replacements.append(
+            (
+                str(placeholder),
+                _encoded_substitution_value(str(value), surface, content_type),
+            )
+        )
+    return replacements
 
 
 def _apply_path_query_substitutions(
@@ -345,25 +394,19 @@ def _apply_path_query_substitutions(
     query_changed = False
     applied: list[str] = []
 
-    for substitution in substitutions:
-        placeholder = substitution.get("placeholder")
-        value = substitution.get("value")
-        surfaces = substitution.get("in") or []
-        if not placeholder or value is None:
-            continue
-        value_text = str(value)
-        if "path" in surfaces:
-            replacement = _encoded_substitution_value(value_text, "path")
-            path_part, changed = _replace_literal(path_part, str(placeholder), replacement)
-            if changed:
-                path_changed = True
-                applied.append("path")
-        if query_part is not None and "query" in surfaces:
-            replacement = _encoded_substitution_value(value_text, "query")
-            query_part, changed = _replace_literal(query_part, str(placeholder), replacement)
-            if changed:
-                query_changed = True
-                applied.append("query")
+    path_part, path_applied = _replace_literals_once(
+        path_part, _substitution_replacements(substitutions, "path")
+    )
+    if path_applied:
+        path_changed = True
+        applied.extend("path" for _ in path_applied)
+    if query_part is not None:
+        query_part, query_applied = _replace_literals_once(
+            query_part, _substitution_replacements(substitutions, "query")
+        )
+        if query_applied:
+            query_changed = True
+            applied.extend("query" for _ in query_applied)
 
     if path_changed:
         candidate_path = path_part
@@ -391,19 +434,16 @@ def _apply_header_substitutions(
     substitutions: list[dict[str, Any]],
 ) -> list[str]:
     applied: list[str] = []
-    for substitution in substitutions:
-        placeholder = substitution.get("placeholder")
-        value = substitution.get("value")
-        surfaces = substitution.get("in") or []
-        if not placeholder or value is None or "header" not in surfaces:
+    replacements = _substitution_replacements(substitutions, "header")
+    if not replacements:
+        return applied
+    for name, header_value in list(flow.request.headers.items()):
+        if name.lower() in HEADER_SUBSTITUTION_DENYLIST:
             continue
-        for name, header_value in list(flow.request.headers.items()):
-            if name.lower() in HEADER_SUBSTITUTION_DENYLIST:
-                continue
-            updated, changed = _replace_literal(str(header_value), str(placeholder), str(value))
-            if changed:
-                flow.request.headers[name] = updated
-                applied.append("header")
+        updated, header_applied = _replace_literals_once(str(header_value), replacements)
+        if header_applied:
+            flow.request.headers[name] = updated
+            applied.extend("header" for _ in header_applied)
     return applied
 
 
@@ -429,16 +469,9 @@ def _apply_body_substitutions(
         return []
 
     applied: list[str] = []
-    for substitution in substitutions:
-        placeholder = substitution.get("placeholder")
-        value = substitution.get("value")
-        surfaces = substitution.get("in") or []
-        if not placeholder or value is None or "body" not in surfaces:
-            continue
-        replacement = _encoded_substitution_value(str(value), "body", content_type)
-        text, changed = _replace_literal(text, str(placeholder), replacement)
-        if changed:
-            applied.append("body")
+    replacements = _substitution_replacements(substitutions, "body", content_type)
+    text, body_applied = _replace_literals_once(text, replacements)
+    applied.extend("body" for _ in body_applied)
 
     if applied:
         _set_request_body_bytes(flow, text.encode("utf-8"))
@@ -485,6 +518,10 @@ def request(flow: http.HTTPFlow) -> None:
     if not binding:
         return
 
+    substituted_surfaces = _apply_substitutions(flow, binding)
+    if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
+        return
+
     injected_names: list[str] = []
     for header in binding.get("headers") or []:
         name = header.get("name")
@@ -497,10 +534,6 @@ def request(flow: http.HTTPFlow) -> None:
             del flow.request.headers[name]
         flow.request.headers[name] = value
         injected_names.append(name)
-
-    substituted_surfaces = _apply_substitutions(flow, binding)
-    if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
-        return
 
     if injected_names or substituted_surfaces:
         flow.metadata[FLOW_REDACTIONS_KEY] = list(vault.redactions)

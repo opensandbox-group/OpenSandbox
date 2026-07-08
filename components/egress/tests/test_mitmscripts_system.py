@@ -348,6 +348,81 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
 
         self.assertEqual(b"secret=form+secret%2Bvalue", flow.request.content)
 
+    def test_body_substitution_does_not_rewrite_inserted_values(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "nested-body",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/token"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__a__",
+                            "value": "prefix __b__",
+                            "in": ["body"],
+                        },
+                        {
+                            "placeholder": "__b__",
+                            "value": "secret-b",
+                            "in": ["body"],
+                        },
+                    ],
+                }
+            ],
+            ["__a__", "prefix __b__", "__b__", "secret-b"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "text/plain"
+        flow.request.content = b"first=__a__&second=__b__"
+
+        system.request(flow)
+
+        self.assertEqual(b"first=prefix __b__&second=secret-b", flow.request.content)
+
+    def test_header_substitution_does_not_rewrite_injected_headers(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "header-substitution",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/lookup"],
+                    },
+                    "headers": [
+                        {"name": "Authorization", "value": "Bearer __header_secret__"}
+                    ],
+                    "substitutions": [
+                        {
+                            "placeholder": "__header_secret__",
+                            "value": "substituted-secret",
+                            "in": ["header"],
+                        },
+                    ],
+                }
+            ],
+            ["__header_secret__", "substituted-secret"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.path = "/lookup"
+        flow.request.headers["X-Template"] = "client __header_secret__"
+
+        system.request(flow)
+
+        self.assertEqual("client substituted-secret", flow.request.headers.get("X-Template"))
+        self.assertEqual("Bearer __header_secret__", flow.request.headers.get("Authorization"))
+
     def test_compressed_body_substitution_is_skipped(self) -> None:
         system = self._make_system_with_substitutions()
         flow = _Flow()
