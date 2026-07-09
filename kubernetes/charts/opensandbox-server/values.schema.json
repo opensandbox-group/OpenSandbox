@@ -71,10 +71,10 @@
                                     "type": "object",
                                     "properties": {
                                         "cpu": {
-                                            "type": "string"
+                                            "anyOf": [{"type": "string"}, {"type": "number"}]
                                         },
                                         "memory": {
-                                            "type": "string"
+                                            "anyOf": [{"type": "string"}, {"type": "number"}]
                                         }
                                     }
                                 },
@@ -82,10 +82,10 @@
                                     "type": "object",
                                     "properties": {
                                         "cpu": {
-                                            "type": "string"
+                                            "anyOf": [{"type": "string"}, {"type": "number"}]
                                         },
                                         "memory": {
-                                            "type": "string"
+                                            "anyOf": [{"type": "string"}, {"type": "number"}]
                                         }
                                     }
                                 }
@@ -125,10 +125,10 @@
                             "type": "object",
                             "properties": {
                                 "cpu": {
-                                    "type": "string"
+                                    "anyOf": [{"type": "string"}, {"type": "number"}]
                                 },
                                 "memory": {
-                                    "type": "string"
+                                    "anyOf": [{"type": "string"}, {"type": "number"}]
                                 }
                             }
                         },
@@ -136,10 +136,10 @@
                             "type": "object",
                             "properties": {
                                 "cpu": {
-                                    "type": "string"
+                                    "anyOf": [{"type": "string"}, {"type": "number"}]
                                 },
                                 "memory": {
-                                    "type": "string"
+                                    "anyOf": [{"type": "string"}, {"type": "number"}]
                                 }
                             }
                         }
