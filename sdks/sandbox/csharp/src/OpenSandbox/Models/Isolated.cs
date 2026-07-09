@@ -26,14 +26,22 @@ public record EnvPassthroughSpec(
     [property: JsonPropertyName("keys")] List<string>? Keys = null
 );
 
+public record BindMount(
+    [property: JsonPropertyName("source")] string Source,
+    [property: JsonPropertyName("dest")] string? Dest = null,
+    [property: JsonPropertyName("readonly")] bool? ReadOnly = null
+);
+
 public record CreateIsolatedSessionRequest(
     [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec Workspace,
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
+    [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
     [property: JsonPropertyName("share_net")] bool? ShareNet = null,
     [property: JsonPropertyName("env_passthrough")] EnvPassthroughSpec? EnvPassthrough = null,
     [property: JsonPropertyName("uid")] int? Uid = null,
     [property: JsonPropertyName("gid")] int? Gid = null,
+    [property: JsonPropertyName("uid_mode")] string? UidMode = null,
     [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
 );
 

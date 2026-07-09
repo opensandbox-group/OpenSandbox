@@ -16,12 +16,53 @@ package opensandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
+
+// TestCreateIsolatedSessionRequest_BindsWireFormat verifies that binds and
+// uid_mode serialize to the expected execd wire format.
+func TestCreateIsolatedSessionRequest_BindsWireFormat(t *testing.T) {
+	req := CreateIsolatedSessionRequest{
+		Workspace: IsolatedWorkspaceSpec{Path: "/workspace", Mode: "rw"},
+		Binds: []BindMount{
+			{Source: "/data/in", Dest: "/mnt/in", ReadOnly: true},
+			{Source: "/data/out"},
+		},
+		UidMode: "userns",
+	}
+
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	s := string(b)
+
+	assert.Contains(t, s, `"binds":[`)
+	assert.Contains(t, s, `"source":"/data/in"`)
+	assert.Contains(t, s, `"dest":"/mnt/in"`)
+	assert.Contains(t, s, `"readonly":true`)
+	assert.Contains(t, s, `"uid_mode":"userns"`)
+	// Empty dest/readonly must be omitted for the second bind.
+	require.True(t, strings.Contains(s, `{"source":"/data/out"}`),
+		"bind with only source should omit dest/readonly: %s", s)
+}
+
+// TestCreateIsolatedSessionRequest_BindsOmittedWhenEmpty verifies binds and
+// uid_mode are omitted when unset (backward compatible with existing callers).
+func TestCreateIsolatedSessionRequest_BindsOmittedWhenEmpty(t *testing.T) {
+	req := CreateIsolatedSessionRequest{
+		Workspace: IsolatedWorkspaceSpec{Path: "/workspace"},
+	}
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	s := string(b)
+	require.True(t, !strings.Contains(s, "binds"), "binds should be omitted: %s", s)
+	require.True(t, !strings.Contains(s, "uid_mode"), "uid_mode should be omitted: %s", s)
+}
 
 func TestIsolationRunOnce_CreatesRunsDeletes(t *testing.T) {
 	var (

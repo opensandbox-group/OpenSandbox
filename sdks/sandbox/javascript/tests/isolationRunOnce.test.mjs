@@ -113,3 +113,54 @@ describe("withSession", () => {
     assert.deepStrictEqual(calls, ["create", "delete"]);
   });
 });
+
+describe("create request body", () => {
+  function mockCapturingCreate(captured) {
+    return async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      const method = init?.method ?? "GET";
+      if (method === "POST" && urlStr.includes("/v1/isolated/session") && !urlStr.includes("/run")) {
+        captured.body = JSON.parse(init.body);
+        return new Response(
+          JSON.stringify({ session_id: "sess-body", created_at: "2026-01-01T00:00:00Z" }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (method === "DELETE") return new Response(null, { status: 204 });
+      return new Response("not found", { status: 404 });
+    };
+  }
+
+  it("serializes binds and uid_mode into the create body", async () => {
+    const captured = {};
+    const adapter = createAdapter(mockCapturingCreate(captured));
+
+    await adapter.withSession(
+      {
+        workspace: { path: "/workspace", mode: "rw" },
+        binds: [
+          { source: "/data/in", dest: "/mnt/in", readonly: true },
+          { source: "/data/out" },
+        ],
+        uid_mode: "userns",
+      },
+      async () => "ok",
+    );
+
+    assert.deepStrictEqual(captured.body.binds, [
+      { source: "/data/in", dest: "/mnt/in", readonly: true },
+      { source: "/data/out" },
+    ]);
+    assert.strictEqual(captured.body.uid_mode, "userns");
+  });
+
+  it("omits binds and uid_mode when unset", async () => {
+    const captured = {};
+    const adapter = createAdapter(mockCapturingCreate(captured));
+
+    await adapter.withSession({ workspace: { path: "/workspace" } }, async () => "ok");
+
+    assert.ok(!("binds" in captured.body));
+    assert.ok(!("uid_mode" in captured.body));
+  });
+});

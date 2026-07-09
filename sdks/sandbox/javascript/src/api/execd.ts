@@ -1250,18 +1250,36 @@ export interface components {
             profile?: "strict" | "balanced";
             workspace: components["schemas"]["IsolatedWorkspaceSpec"];
             extra_writable?: string[];
+            /** @description Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist. */
+            binds?: components["schemas"]["BindMount"][];
             share_net?: boolean;
             env_passthrough?: components["schemas"]["EnvPassthroughSpec"];
             /** Format: uint32 */
             uid?: number;
             /** Format: uint32 */
             gid?: number;
+            /**
+             * @description Controls how user identity is established inside the namespace. "setpriv" (default) uses real setuid via setpriv(1). "userns" creates a user namespace via --unshare-user --disable-userns.
+             * @enum {string}
+             */
+            uid_mode?: "setpriv" | "userns";
             idle_timeout_seconds?: number;
         };
         IsolatedWorkspaceSpec: {
             path: string;
             /** @enum {string} */
             mode?: "rw" | "overlay" | "ro";
+        };
+        BindMount: {
+            /** @description Host path to bind-mount into the namespace. */
+            source: string;
+            /** @description Mount destination inside the namespace. Defaults to source when omitted. */
+            dest?: string;
+            /**
+             * @description When true the mount is read-only (--ro-bind); otherwise it is read-write (--bind).
+             * @default false
+             */
+            readonly: boolean;
         };
         EnvPassthroughSpec: {
             /** @enum {string} */

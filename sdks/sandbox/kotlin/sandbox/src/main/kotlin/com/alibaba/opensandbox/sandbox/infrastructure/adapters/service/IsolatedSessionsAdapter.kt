@@ -51,15 +51,24 @@ private data class IsolatedCreateBody(
     val workspace: IsolatedWorkspaceBody,
     val profile: String? = null,
     val extra_writable: List<String>? = null,
+    val binds: List<BindMountBody>? = null,
     val share_net: Boolean? = null,
     val env_passthrough: EnvPassthroughBody? = null,
     val uid: Int? = null,
     val gid: Int? = null,
+    val uid_mode: String? = null,
     val idle_timeout_seconds: Int? = null,
 )
 
 @Serializable
 private data class IsolatedWorkspaceBody(val path: String, val mode: String? = null)
+
+@Serializable
+private data class BindMountBody(
+    val source: String,
+    val dest: String? = null,
+    val readonly: Boolean? = null,
+)
 
 @Serializable
 private data class EnvPassthroughBody(val mode: String? = null, val keys: List<String>? = null)
@@ -130,11 +139,14 @@ internal class IsolatedSessionsAdapter(
                         IsolatedWorkspaceBody(request.workspace.path, request.workspace.mode),
                     profile = request.profile,
                     extra_writable = request.extraWritable,
+                    binds =
+                        request.binds?.map { BindMountBody(it.source, it.dest, it.readonly) },
                     share_net = request.shareNet,
                     env_passthrough =
                         request.envPassthrough?.let { EnvPassthroughBody(it.mode, it.keys) },
                     uid = request.uid,
                     gid = request.gid,
+                    uid_mode = request.uidMode,
                     idle_timeout_seconds = request.idleTimeoutSeconds,
                 )
             val httpRequest =

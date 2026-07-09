@@ -16,6 +16,7 @@
 
 """Contains all the data models used in inputs/outputs"""
 
+from .bind_mount import BindMount
 from .capabilities_response import CapabilitiesResponse
 from .chmod_files_body import ChmodFilesBody
 from .code_context import CodeContext
@@ -23,6 +24,7 @@ from .code_context_request import CodeContextRequest
 from .command_status_response import CommandStatusResponse
 from .create_isolated_session_request import CreateIsolatedSessionRequest
 from .create_isolated_session_request_profile import CreateIsolatedSessionRequestProfile
+from .create_isolated_session_request_uid_mode import CreateIsolatedSessionRequestUidMode
 from .create_session_request import CreateSessionRequest
 from .create_session_response import CreateSessionResponse
 from .env_passthrough_spec import EnvPassthroughSpec
@@ -64,6 +66,7 @@ from .session_state_status import SessionStateStatus
 from .upload_file_body import UploadFileBody
 
 __all__ = (
+    "BindMount",
     "CapabilitiesResponse",
     "ChmodFilesBody",
     "CodeContext",
@@ -71,6 +74,7 @@ __all__ = (
     "CommandStatusResponse",
     "CreateIsolatedSessionRequest",
     "CreateIsolatedSessionRequestProfile",
+    "CreateIsolatedSessionRequestUidMode",
     "CreateSessionRequest",
     "CreateSessionResponse",
     "EnvPassthroughSpec",

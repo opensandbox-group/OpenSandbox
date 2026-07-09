@@ -222,6 +222,7 @@ export class IsolatedSessionsAdapter implements IsolationService {
       workspace: { path: workspace, mode: opts?.workspaceMode },
       profile: opts?.profile,
       share_net: opts?.shareNet,
+      binds: opts?.binds,
     });
     try {
       return await session.run(code, opts?.runOpts, opts?.handlers, opts?.signal);

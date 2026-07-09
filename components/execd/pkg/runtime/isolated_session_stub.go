@@ -31,6 +31,7 @@ type IsolatedSessionOptions struct {
 	WorkspacePath      string
 	WorkspaceMode      string
 	ExtraWritable      []string
+	Binds              []isolation.BindMount
 	ShareNet           *bool
 	EnvPassthroughMode string
 	EnvPassthroughKeys []string

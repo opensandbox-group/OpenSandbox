@@ -151,6 +151,10 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 		return "", err
 	}
 
+	if err := r.validateBinds(opts.Binds); err != nil {
+		return "", err
+	}
+
 	if err := os.MkdirAll(opts.WorkspacePath, 0o755); err != nil {
 		return "", fmt.Errorf("create workspace: %w", err)
 	}
@@ -467,21 +471,102 @@ func (r *IsolatedRunner) validateExtraWritable(paths []string) error {
 	if len(r.allowedWritable) == 0 {
 		return fmt.Errorf("extra_writable not allowed: no paths in allowlist")
 	}
-	for _, p := range paths {
-		cleaned := filepath.Clean(p)
-		found := false
-		for _, allowed := range r.allowedWritable {
-			allowedClean := filepath.Clean(allowed)
-			if cleaned == allowedClean || strings.HasPrefix(cleaned, allowedClean+"/") {
-				found = true
-				break
-			}
+	for i := range paths {
+		resolved, err := r.resolveAllowedSource(paths[i])
+		if err != nil {
+			return fmt.Errorf("extra_writable path %q: %w", paths[i], err)
 		}
-		if !found {
-			return fmt.Errorf("extra_writable path %q not in allowlist", p)
-		}
+		// Mount the fully-resolved path so validation and mount target agree.
+		paths[i] = resolved
 	}
 	return nil
+}
+
+// resolveAllowedSource requires src to exist, fully resolves symlinks, checks
+// the resolved real path against the writable allowlist, and returns it. It is
+// shared by extra_writable and binds so both enforce identical semantics:
+//   - the source must already exist (bwrap --bind requires this anyway), and
+//   - the allowlist is enforced against the fully-resolved real path, leaving
+//     no unresolved suffix that could be swapped to an out-of-allowlist symlink
+//     between validation and bwrap start.
+func (r *IsolatedRunner) resolveAllowedSource(src string) (string, error) {
+	if src == "" {
+		return "", fmt.Errorf("source is required")
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(src))
+	if err != nil {
+		return "", fmt.Errorf("must be an existing path: %w", err)
+	}
+	if !r.pathAllowedResolved(resolved) {
+		return "", fmt.Errorf("not in allowlist")
+	}
+	return resolved, nil
+}
+
+// validateBinds checks that every bind's source path falls within the writable
+// allowlist. Read-only binds are validated too, so read access to arbitrary host
+// paths outside the allowlist is not possible.
+//
+// The source of each bind must already exist and is fully resolved via
+// filepath.EvalSymlinks; the resolved real path is written back in place. This
+// enforces the allowlist against the real target and closes the TOCTOU window:
+// bwrap is handed a fully-resolved path with no unresolved suffix, so a symlink
+// created or swapped between validation and bwrap start cannot redirect the
+// mount outside the allowlist. (bwrap's --bind requires the source to exist, so
+// this adds no functional restriction.)
+func (r *IsolatedRunner) validateBinds(binds []isolation.BindMount) error {
+	if len(binds) == 0 {
+		return nil
+	}
+	if len(r.allowedWritable) == 0 {
+		return fmt.Errorf("binds not allowed: no paths in allowlist")
+	}
+	for i := range binds {
+		resolved, err := r.resolveAllowedSource(binds[i].Source)
+		if err != nil {
+			return fmt.Errorf("binds source %q: %w", binds[i].Source, err)
+		}
+		// Mount the fully-resolved path so validation and mount target agree.
+		binds[i].Source = resolved
+	}
+	return nil
+}
+
+// pathAllowedResolved reports whether an already symlink-resolved path is equal
+// to, or nested under, any allowlist entry. Allowlist entries are themselves
+// symlink-resolved so the comparison is between real paths on both sides.
+func (r *IsolatedRunner) pathAllowedResolved(resolved string) bool {
+	for _, allowed := range r.allowedWritable {
+		allowedClean := resolveSymlinks(filepath.Clean(allowed))
+		if resolved == allowedClean || strings.HasPrefix(resolved, allowedClean+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveSymlinks returns the real path of p with symlinks resolved. Because p
+// (or a leading component) may not exist yet, it resolves the longest existing
+// prefix and re-appends the remaining components, so a symlinked ancestor is
+// still followed while a not-yet-created leaf is preserved.
+func resolveSymlinks(p string) string {
+	if p == "" {
+		return p
+	}
+	remaining := ""
+	cur := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Clean(filepath.Join(resolved, remaining))
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the root without an existing prefix; fall back to lexical.
+			return p
+		}
+		remaining = filepath.Join(filepath.Base(cur), remaining)
+		cur = parent
+	}
 }
 
 // shellescape wraps s in single quotes, escaping embedded single quotes.

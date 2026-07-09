@@ -28,14 +28,22 @@ data class EnvPassthroughSpec(
     val keys: List<String> = emptyList(),
 )
 
+data class BindMount(
+    val source: String,
+    val dest: String? = null,
+    val readonly: Boolean? = null,
+)
+
 data class CreateIsolatedSessionRequest(
     val workspace: IsolatedWorkspaceSpec,
     val profile: String? = null,
     val extraWritable: List<String>? = null,
+    val binds: List<BindMount>? = null,
     val shareNet: Boolean? = null,
     val envPassthrough: EnvPassthroughSpec? = null,
     val uid: Int? = null,
     val gid: Int? = null,
+    val uidMode: String? = null,
     val idleTimeoutSeconds: Int? = null,
 )
 

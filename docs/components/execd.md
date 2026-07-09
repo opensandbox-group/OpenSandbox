@@ -46,8 +46,55 @@ curl -v http://localhost:44772/ping
   - Code execution (`/code`, SSE stream)
   - Session and command execution (`/session`, `/command`)
   - Filesystem operations (`/files`, `/directories`)
+  - Isolated sessions (`/v1/isolated/session`, bubblewrap namespaces)
   - PTY over WebSocket (`/pty`)
   - Local metrics endpoints (`/metrics`, `/metrics/watch`)
+
+## Isolated Sessions
+
+Isolated sessions run a bash process inside a per-execution
+[bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) namespace,
+created via `POST /v1/isolated/session`. Beyond the workspace, callers can
+expose additional host paths into the namespace.
+
+### Bind mounts
+
+Two request fields control extra host paths:
+
+- `extra_writable`: a list of paths bind-mounted read-write at the same path
+  inside the namespace (`source == destination`).
+- `binds`: explicit `source` → `dest` mappings, each optionally read-only.
+  - `source` (required): host path to bind. It must **already exist** and is
+    resolved (symlinks followed) before use.
+  - `dest`: mount destination inside the namespace; defaults to `source` when
+    omitted. It must be an **existing** mount point — `bwrap` cannot create a
+    destination under the read-only root, so create the directory first.
+  - `readonly` (default `false`): mount read-only (`--ro-bind`) when `true`,
+    read-write (`--bind`) otherwise.
+
+Example:
+
+```json
+{
+  "workspace": { "path": "/workspace", "mode": "rw" },
+  "binds": [
+    { "source": "/data/in",  "dest": "/mnt/in", "readonly": true },
+    { "source": "/data/out", "dest": "/mnt/out" }
+  ]
+}
+```
+
+### Writable allowlist
+
+The source path of every `extra_writable` entry and every `binds` entry must
+fall within the `allowed_writable` allowlist (see the isolation config file
+below). The allowlist is enforced against the fully symlink-resolved real
+path, so a symlink cannot redirect a bind outside the allowlist. An empty
+allowlist rejects all `extra_writable`/`binds` requests.
+
+The built-in default allowlist is `/workspace`, `/mnt`, `/media`, `/data`
+(subpaths included). Set `allowed_writable` in the isolation config to
+override it.
 
 ## Configuration
 
@@ -62,6 +109,7 @@ curl -v http://localhost:44772/ping
 | `--access-token` | `""` | Optional shared API access token. |
 | `--graceful-shutdown-timeout` | `1s` | SSE tail-drain wait window before closing. |
 | `--jupyter-idle-poll-interval` | `100ms` | Poll interval after Jupyter reports idle. |
+| `--isolation-config` | `""` | Path to the isolation TOML config (see below). |
 
 ### Environment Variables
 
@@ -72,12 +120,29 @@ curl -v http://localhost:44772/ping
 | `EXECD_ACCESS_TOKEN` | Same as `--access-token` (overridden by explicit flag). |
 | `EXECD_API_GRACE_SHUTDOWN` | Same as `--graceful-shutdown-timeout`. |
 | `EXECD_JUPYTER_IDLE_POLL_INTERVAL` | Same as `--jupyter-idle-poll-interval`. |
+| `EXECD_ISOLATION_CONFIG` | Same as `--isolation-config`. |
 | `EXECD_CLONE3_COMPAT` | Linux clone3 compatibility switch (see below). |
 | `EXECD_LOG_FILE` | Optional log output file path; default is stdout. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Preferred OTLP metrics endpoint. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Fallback OTLP endpoint when metrics-specific endpoint is unset. |
 | `OPENSANDBOX_ID` | Optional `sandbox_id` metric/resource attribute. |
 | `OPENSANDBOX_EXECD_METRICS_EXTRA_ATTRS` | Optional extra metric attrs (`k=v,k2=v2`). |
+
+### Isolation Config File
+
+Isolated sessions read an optional TOML file given by `--isolation-config`
+(or `EXECD_ISOLATION_CONFIG`). All fields are optional; omitted fields use
+built-in defaults.
+
+```toml
+# Parent directory for per-session overlay upper directories.
+upper_root = "/var/lib/execd/isolation"
+
+# Host paths callers may request via extra_writable / binds.
+# Enforced against the fully symlink-resolved real path; subpaths are allowed.
+# Default: ["/workspace", "/mnt", "/media", "/data"]. Empty = reject all.
+allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
+```
 
 ## Observability
 

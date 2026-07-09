@@ -42,6 +42,7 @@ from opensandbox.models.filesystem import (
     WriteEntry,
 )
 from opensandbox.models.isolated import (
+    BindMount,
     CreateIsolatedSessionRequest,
     EnvPassthroughSpec,
     IsolatedCapabilities,
@@ -98,6 +99,7 @@ __all__ = [
     "CommandStatus",
     "CommandLogs",
     # Isolated session models
+    "BindMount",
     "CreateIsolatedSessionRequest",
     "EnvPassthroughSpec",
     "IsolatedCapabilities",

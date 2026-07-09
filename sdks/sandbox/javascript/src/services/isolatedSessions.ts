@@ -16,6 +16,7 @@ import type { CommandExecution } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import type { SandboxFiles } from "./filesystem.js";
 import type {
+  BindMount,
   CreateIsolatedSessionRequest,
   IsolatedCapabilities,
   IsolatedRunOpts,
@@ -43,6 +44,7 @@ export interface RunOnceOpts {
   handlers?: ExecutionHandlers;
   profile?: "strict" | "balanced";
   shareNet?: boolean;
+  binds?: BindMount[];
   signal?: AbortSignal;
 }
 

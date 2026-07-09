@@ -428,3 +428,43 @@ def test_execution_text_strips_trailing_newlines() -> None:
     )
     assert ex.text == "1\n2"
     assert str(ex) == "1\n2"
+
+
+def test_isolated_binds_serialize_to_wire_format() -> None:
+    """binds and uid_mode serialize to the execd wire format."""
+    from opensandbox.models import (
+        BindMount,
+        CreateIsolatedSessionRequest,
+        IsolatedWorkspaceSpec,
+    )
+
+    req = CreateIsolatedSessionRequest(
+        workspace=IsolatedWorkspaceSpec(path="/workspace", mode="rw"),
+        binds=[
+            BindMount(source="/data/in", dest="/mnt/in", readonly=True),
+            BindMount(source="/data/out"),
+        ],
+        uid_mode="userns",
+    )
+    body = req.model_dump(exclude_none=True)
+
+    assert body["uid_mode"] == "userns"
+    assert body["binds"] == [
+        {"source": "/data/in", "dest": "/mnt/in", "readonly": True},
+        {"source": "/data/out"},
+    ]
+
+
+def test_isolated_binds_omitted_when_unset() -> None:
+    """binds and uid_mode are omitted when unset (backward compatible)."""
+    from opensandbox.models import (
+        CreateIsolatedSessionRequest,
+        IsolatedWorkspaceSpec,
+    )
+
+    req = CreateIsolatedSessionRequest(
+        workspace=IsolatedWorkspaceSpec(path="/workspace"),
+    )
+    body = req.model_dump(exclude_none=True)
+    assert "binds" not in body
+    assert "uid_mode" not in body

@@ -51,6 +51,22 @@ class EnvPassthroughSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class BindMount(BaseModel):
+    """An explicit source-to-destination bind mount into the namespace."""
+
+    source: str = Field(description="Host path to bind-mount into the namespace")
+    dest: str | None = Field(
+        default=None,
+        description="Mount destination inside the namespace. Defaults to source when omitted.",
+    )
+    readonly: bool | None = Field(
+        default=None,
+        description="Mount read-only (--ro-bind) when true; read-write (--bind) otherwise.",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class CreateIsolatedSessionRequest(BaseModel):
     """Request to create an isolated bash session."""
 
@@ -64,6 +80,10 @@ class CreateIsolatedSessionRequest(BaseModel):
     extra_writable: list[str] | None = Field(
         default=None,
         description="Additional paths to bind read-write inside the namespace",
+    )
+    binds: list[BindMount] | None = Field(
+        default=None,
+        description="Additional host paths bind-mounted with explicit source-to-destination mapping",
     )
     share_net: bool | None = Field(
         default=None,
@@ -80,6 +100,10 @@ class CreateIsolatedSessionRequest(BaseModel):
     gid: int | None = Field(
         default=None,
         description="Run as this Unix GID inside the namespace",
+    )
+    uid_mode: str | None = Field(
+        default=None,
+        description="How user identity is established inside the namespace: 'setpriv' (default) or 'userns'.",
     )
     idle_timeout_seconds: int | None = Field(
         default=None,

@@ -79,11 +79,21 @@ func (c *IsolatedSessionController) Create() {
 		return
 	}
 
+	binds := make([]isolation.BindMount, 0, len(req.Binds))
+	for _, b := range req.Binds {
+		binds = append(binds, isolation.BindMount{
+			Source:   b.Source,
+			Dest:     b.Dest,
+			ReadOnly: b.ReadOnly,
+		})
+	}
+
 	opts := &runtime.IsolatedSessionOptions{
 		Profile:            req.Profile,
 		WorkspacePath:      req.Workspace.Path,
 		WorkspaceMode:      req.Workspace.Mode,
 		ExtraWritable:      req.ExtraWritable,
+		Binds:              binds,
 		ShareNet:           req.ShareNet,
 		EnvPassthroughMode: req.EnvPassthrough.Mode,
 		EnvPassthroughKeys: req.EnvPassthrough.Keys,
@@ -98,7 +108,10 @@ func (c *IsolatedSessionController) Create() {
 		status := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "not in allowlist") ||
 			strings.Contains(err.Error(), "not allowed") ||
-			strings.Contains(err.Error(), "unknown isolation profile") {
+			strings.Contains(err.Error(), "unknown isolation profile") ||
+			strings.Contains(err.Error(), "must be an existing path") ||
+			strings.Contains(err.Error(), "must be an absolute path") ||
+			strings.Contains(err.Error(), "source is required") {
 			status = http.StatusBadRequest
 		}
 		c.RespondError(status, model.ErrorCodeRuntimeError, err.Error())

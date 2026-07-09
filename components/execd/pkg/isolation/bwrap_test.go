@@ -215,6 +215,59 @@ func TestBuildArgv_ExtraWritable(t *testing.T) {
 	}
 }
 
+func TestBuildArgv_Binds(t *testing.T) {
+	t.Run("rw_src_to_dest", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "/host/data", Dest: "/container/data"}}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.Contains(t, s, "--bind /host/data /container/data")
+	})
+
+	t.Run("readonly_uses_ro_bind", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "/host/ro", Dest: "/mnt/ro", ReadOnly: true}}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.Contains(t, s, "--ro-bind /host/ro /mnt/ro")
+	})
+
+	t.Run("empty_dest_defaults_to_source", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "/host/same"}}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.Contains(t, s, "--bind /host/same /host/same")
+	})
+
+	t.Run("validation_empty_source", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Dest: "/mnt/x"}}
+		_, err := buildArgv(opts, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "bind.source is required")
+	})
+
+	t.Run("validation_relative_source", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "relative/path"}}
+		_, err := buildArgv(opts, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be an absolute path")
+	})
+
+	t.Run("validation_relative_dest", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "/host/a", Dest: "rel/dest"}}
+		_, err := buildArgv(opts, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be an absolute path")
+	})
+}
+
 func TestBuildArgv_Setpriv(t *testing.T) {
 	t.Run("default_uid_gid", func(t *testing.T) {
 		opts := basicWrapOpts()

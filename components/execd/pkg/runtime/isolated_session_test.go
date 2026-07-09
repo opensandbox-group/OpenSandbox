@@ -18,8 +18,10 @@ package runtime
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,5 +412,67 @@ func TestRunInIsolatedSession_ConcurrentSessions(t *testing.T) {
 	}
 	if len(out2) != 1 || out2[0] != "two" {
 		t.Errorf("session 2: expected [two], got %v", out2)
+	}
+}
+
+// TestValidateBinds_SymlinkBypass verifies that a symlink placed inside an
+// allowed directory cannot be used to smuggle a bind source whose real target
+// lies outside the allowlist.
+func TestValidateBinds_SymlinkBypass(t *testing.T) {
+	allowed := t.TempDir()
+	outside := t.TempDir()
+
+	// allowed/link -> outside (a directory outside the allowlist).
+	link := filepath.Join(allowed, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &IsolatedRunner{allowedWritable: []string{allowed}}
+
+	// A direct path under the allowlist is fine.
+	if err := r.validateBinds([]isolation.BindMount{{Source: allowed}}); err != nil {
+		t.Errorf("direct allowlisted source should be accepted: %v", err)
+	}
+
+	// The symlink resolves outside the allowlist and must be rejected.
+	err := r.validateBinds([]isolation.BindMount{{Source: link}})
+	if err == nil {
+		t.Fatal("expected symlinked source resolving outside allowlist to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not in allowlist") {
+		t.Errorf("expected allowlist rejection, got: %v", err)
+	}
+
+	// A symlink whose target stays inside the allowlist is still accepted, and
+	// the source is rewritten to the resolved real path so bwrap mounts the
+	// resolved target (closing the TOCTOU window).
+	innerTarget := filepath.Join(allowed, "real")
+	if err := os.Mkdir(innerTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	innerLink := filepath.Join(allowed, "inner")
+	if err := os.Symlink(innerTarget, innerLink); err != nil {
+		t.Fatal(err)
+	}
+	binds := []isolation.BindMount{{Source: innerLink}}
+	if err := r.validateBinds(binds); err != nil {
+		t.Errorf("symlink resolving inside allowlist should be accepted: %v", err)
+	}
+	wantResolved, _ := filepath.EvalSymlinks(innerLink)
+	if binds[0].Source != wantResolved {
+		t.Errorf("bind source should be rewritten to resolved path %q, got %q", wantResolved, binds[0].Source)
+	}
+
+	// A non-existent source under the allowlist must be rejected: a missing
+	// leaf could otherwise be swapped to an out-of-allowlist symlink between
+	// validation and bwrap start.
+	missing := filepath.Join(allowed, "does-not-exist-yet")
+	err = r.validateBinds([]isolation.BindMount{{Source: missing}})
+	if err == nil {
+		t.Fatal("expected non-existent bind source to be rejected")
+	}
+	if !strings.Contains(err.Error(), "must be an existing path") {
+		t.Errorf("expected existing-path rejection, got: %v", err)
 	}
 }

@@ -50,7 +50,7 @@ func DefaultConfig() Config {
 		UpperRoot:       "/var/lib/execd/isolation",
 		UpperMaxBytes:   8 * 1024 * 1024 * 1024, // 8 GiB
 		DiffMaxBytes:    4 * 1024 * 1024 * 1024, // 4 GiB
-		AllowedWritable: nil,
+		AllowedWritable: []string{"/workspace", "/mnt", "/media", "/data"},
 		Seccomp:         nil, // use built-in denylist
 	}
 }

@@ -33,15 +33,24 @@ type EnvPassthroughSpec struct {
 	Keys []string `json:"keys,omitempty"`
 }
 
+// BindMount describes an explicit source-to-destination bind mount into the namespace.
+type BindMount struct {
+	Source   string `json:"source"`
+	Dest     string `json:"dest,omitempty"`
+	ReadOnly bool   `json:"readonly,omitempty"`
+}
+
 // CreateIsolatedSessionRequest is the request body for creating an isolated session.
 type CreateIsolatedSessionRequest struct {
 	Workspace          IsolatedWorkspaceSpec `json:"workspace"`
 	Profile            string                `json:"profile,omitempty"`
 	ExtraWritable      []string              `json:"extra_writable,omitempty"`
+	Binds              []BindMount           `json:"binds,omitempty"`
 	ShareNet           *bool                 `json:"share_net,omitempty"`
 	EnvPassthrough     *EnvPassthroughSpec   `json:"env_passthrough,omitempty"`
 	Uid                *uint32               `json:"uid,omitempty"`
 	Gid                *uint32               `json:"gid,omitempty"`
+	UidMode            string                `json:"uid_mode,omitempty"` // "setpriv" | "userns"
 	IdleTimeoutSeconds int                   `json:"idle_timeout_seconds,omitempty"`
 }
 

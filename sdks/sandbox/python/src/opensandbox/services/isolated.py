@@ -26,6 +26,7 @@ from typing import Protocol
 
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.isolated import (
+    BindMount,
     CreateIsolatedSessionRequest,
     IsolatedCapabilities,
     IsolatedRunOpts,
@@ -82,6 +83,7 @@ class IsolationService(Protocol):
         handlers: ExecutionHandlers | None = None,
         profile: str | None = None,
         share_net: bool | None = None,
+        binds: list[BindMount] | None = None,
     ) -> Execution:
         """Create a session, run *code*, and delete the session (auto-cleanup)."""
         ...
@@ -116,11 +118,13 @@ class IsolationServiceMixin:
         handlers: ExecutionHandlers | None = None,
         profile: str | None = None,
         share_net: bool | None = None,
+        binds: list[BindMount] | None = None,
     ) -> Execution:
         request = CreateIsolatedSessionRequest(
             workspace=IsolatedWorkspaceSpec(path=workspace, mode=workspace_mode),
             profile=profile,
             share_net=share_net,
+            binds=binds,
         )
         session = await self.create(request)
         try:

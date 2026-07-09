@@ -22,14 +22,22 @@ export interface EnvPassthroughSpec {
   keys?: string[];
 }
 
+export interface BindMount {
+  source: string;
+  dest?: string;
+  readonly?: boolean;
+}
+
 export interface CreateIsolatedSessionRequest {
   workspace: IsolatedWorkspaceSpec;
   profile?: "strict" | "balanced";
   extra_writable?: string[];
+  binds?: BindMount[];
   share_net?: boolean;
   env_passthrough?: EnvPassthroughSpec;
   uid?: number;
   gid?: number;
+  uid_mode?: "setpriv" | "userns";
   idle_timeout_seconds?: number;
 }
 

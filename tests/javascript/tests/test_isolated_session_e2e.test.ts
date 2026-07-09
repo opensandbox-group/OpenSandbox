@@ -715,4 +715,82 @@ describe("IsolatedSession E2E", () => {
     );
     expect(output).toContain("step1");
   });
+
+  // Bind mount tests (explicit source->dest binds)
+
+  it("test_bind_read_write_host_visible", async () => {
+    const ts = Date.now();
+    // Source must be within the execd writable allowlist (e.g. /data).
+    const srcDir = `/data/bind_rw_${ts}`;
+    const dest = "/mnt/bind_rw";
+    const fileName = "from_sandbox.txt";
+    const content = "bind-rw-visible-on-host";
+
+    // Create the source dir and the destination mount point (bwrap binds onto
+    // an existing dir; it cannot create one under the read-only root).
+    await sandbox.commands.run(`mkdir -p ${srcDir} ${dest}`);
+
+    const session = await sandbox.isolation.create({
+      workspace: { path: "/tmp", mode: "rw" },
+      binds: [{ source: srcDir, dest }],
+    });
+    try {
+      const exec = await session.run(
+        `echo -n ${content} > ${dest}/${fileName} && cat ${dest}/${fileName}`
+      );
+      expect(exec.logs.stdout.map(m => m.text).join("")).toContain(content);
+
+      const hostCheck = await sandbox.commands.run(`cat ${srcDir}/${fileName}`);
+      expect(hostCheck.logs.stdout.map(m => m.text).join("")).toContain(content);
+    } finally {
+      await session.delete();
+      await sandbox.commands.run(`rm -rf ${srcDir}`);
+    }
+  });
+
+  it("test_bind_illegal_rejected", async () => {
+    await expect(
+      sandbox.isolation.create({
+        workspace: { path: "/tmp", mode: "rw" },
+        // /etc is not in the writable allowlist.
+        binds: [{ source: "/etc", dest: "/mnt/etc" }],
+      })
+    ).rejects.toThrow();
+  });
+
+  it("test_bind_read_only_readable", async () => {
+    const ts = Date.now();
+    const srcDir = `/data/bind_ro_${ts}`;
+    const dest = "/mnt/bind_ro";
+    const fileName = "host_created.txt";
+    const content = "bind-ro-host-content";
+
+    await sandbox.commands.run(
+      `mkdir -p ${srcDir} ${dest} && echo -n ${content} > ${srcDir}/${fileName}`
+    );
+
+    const session = await sandbox.isolation.create({
+      workspace: { path: "/tmp", mode: "rw" },
+      binds: [{ source: srcDir, dest, readonly: true }],
+    });
+    try {
+      const exec = await session.run(`cat ${dest}/${fileName}`);
+      expect(exec.logs.stdout.map(m => m.text).join("")).toContain(content);
+
+      const write = await session.run(
+        `echo x > ${dest}/newfile.txt 2>&1 || echo WRITE_FAILED`
+      );
+      const output = write.logs.stdout.map(m => m.text).join("")
+        + write.logs.stderr.map(m => m.text).join("");
+      expect(
+        output.includes("WRITE_FAILED") ||
+        output.includes("Read-only") ||
+        output.includes("read-only") ||
+        output.includes("Permission denied")
+      ).toBe(true);
+    } finally {
+      await session.delete();
+      await sandbox.commands.run(`rm -rf ${srcDir}`);
+    }
+  });
 });
