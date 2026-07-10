@@ -124,6 +124,16 @@ def _snapshot_record(
     )
 
 
+def test_snapshot_response_exposes_image_uri_only_when_ready() -> None:
+    image = "opensandbox-snapshots:snap-1"
+    ready = _snapshot_record("snap-ready", SnapshotState.READY, image=image)
+    deleting = _snapshot_record("snap-deleting", SnapshotState.DELETING, image=image)
+
+    assert PersistedSnapshotService._to_snapshot_response(ready).image_uri == image
+    # Once deletion is requested (or any non-Ready state), the restore image must not leak.
+    assert PersistedSnapshotService._to_snapshot_response(deleting).image_uri is None
+
+
 def test_snapshot_service_persists_create_and_get(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = StubSnapshotRuntime()
@@ -220,6 +230,10 @@ def test_snapshot_service_marks_snapshot_ready_from_worker(tmp_path) -> None:
     assert stored is not None
     assert stored.status.state == SnapshotState.READY
     assert stored.restore_config.image == "opensandbox-snapshots:snap-ready"
+
+    # The Ready snapshot response exposes the portable restore image via imageUri.
+    response = service.get_snapshot(created.id)
+    assert response.image_uri == "opensandbox-snapshots:snap-ready"
 
 
 def test_snapshot_service_marks_snapshot_failed_from_worker(tmp_path) -> None:
