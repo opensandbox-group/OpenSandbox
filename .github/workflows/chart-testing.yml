@@ -1,0 +1,106 @@
+name: Chart Testing
+
+on:
+  pull_request:
+    paths:
+      - 'kubernetes/charts/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # helm lint + yamllint on every chart, for the default values AND each
+  # ci/*-values.yaml value set. ct renders one lint pass per value set, so the
+  # conditional branches (gateway, non-empty volumes, disabled components...)
+  # are exercised, not just the defaults.
+  lint:
+    name: ct lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v4
+
+      - uses: helm/chart-testing-action@v2
+
+      - name: Lint charts
+        run: |
+          ct lint \
+            --chart-dirs kubernetes/charts \
+            --all \
+            --validate-maintainers=false \
+            --check-version-increment=false
+
+  # Render every chart (default + each ci/ value set) and validate the produced
+  # manifests against explicit, pinned Kubernetes schema versions with
+  # kubeconform. Pinning the versions avoids the false confidence of validating
+  # against a single bundled/stale schema set, and the ci/ value sets make sure
+  # the conditional template branches are the ones being validated.
+  validate-manifests:
+    name: kubeconform (K8s ${{ matrix.k8s }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor from the charts' kubeVersion (">=1.21.1-0") plus a mid and a
+        # recent release, mirroring kubernetes-test.yml.
+        k8s: ["1.21.1", "1.28.6", "1.34.2"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: azure/setup-helm@v4
+
+      - name: Install kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.7.0
+        run: |
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: helm template + kubeconform
+        run: |
+          set -euo pipefail
+          fail=0
+          for chart in kubernetes/charts/*/; do
+            chart_name="$(basename "$chart")"
+            # Vendor file:// sub-charts for the umbrella chart before templating.
+            if grep -q '^dependencies:' "${chart}Chart.yaml"; then
+              helm dependency build "$chart" >/dev/null
+            fi
+            # Default values, then every ci/ value set.
+            value_files=("")
+            if [ -d "${chart}ci" ]; then
+              for vf in "${chart}"ci/*-values.yaml; do
+                value_files+=("$vf")
+              done
+            fi
+            for vf in "${value_files[@]}"; do
+              label="default"; render=(helm template ci-release "$chart")
+              if [ -n "$vf" ]; then
+                label="$(basename "$vf")"
+                render=(helm template ci-release "$chart" -f "$vf")
+              fi
+              echo "::group::${chart_name} [${label}] — K8s ${{ matrix.k8s }}"
+              # CustomResourceDefinition is skipped: the CRDs shipped by the
+              # controller chart are static definitions and kubeconform's default
+              # schema set does not carry the CRD meta-schema. The validation
+              # target is the rendered workload manifests, which stay strict.
+              if ! "${render[@]}" | kubeconform \
+                    -strict \
+                    -summary \
+                    -skip CustomResourceDefinition \
+                    -kubernetes-version "${{ matrix.k8s }}" \
+                    -schema-location default; then
+                fail=1
+              fi
+              echo "::endgroup::"
+            done
+          done
+          exit "$fail"

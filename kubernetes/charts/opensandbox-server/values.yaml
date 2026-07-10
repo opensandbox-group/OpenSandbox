@@ -96,7 +96,7 @@ configToml: |
   snapshot_create_timeout_seconds = 900
   workload_provider = "batchsandbox"
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
-  
+
   [egress]
   image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3"
   mode = "dns+nft"

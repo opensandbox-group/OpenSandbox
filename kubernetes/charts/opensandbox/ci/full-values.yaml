@@ -1,0 +1,21 @@
+# CI values (chart-testing + kubeconform) for the all-in-one umbrella chart.
+# Exercises both sub-charts together with their optional branches enabled:
+# controller extra volumes/mounts and the server ingress gateway. Values are
+# nested under each dependency name.
+opensandbox-controller:
+  extraVolumes:
+    - name: custom-volume
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: custom-volume
+      mountPath: /custom-path
+
+opensandbox-server:
+  server:
+    gateway:
+      enabled: true
+      secureAccess:
+        activeKey: "a"
+        keys:
+          - key_id: "a"
+            key: "c2VjcmV0LWtleS1tYXRlcmlhbA=="

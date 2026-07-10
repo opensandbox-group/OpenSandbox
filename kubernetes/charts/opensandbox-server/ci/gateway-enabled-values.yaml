@@ -1,0 +1,18 @@
+# CI values (chart-testing + kubeconform).
+# Enables the ingress gateway so the whole ingress-gateway.yaml block
+# (ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment, Service) and
+# the secure-access-keys signing branch are rendered and schema-validated.
+# This is exactly the class of regressions from #1233, #1235 and #1236, which
+# a gateway-disabled default render never exercises.
+imagePullSecrets:
+  - name: my-registry-secret
+
+server:
+  gateway:
+    enabled: true
+    host: sandbox.example.com
+    secureAccess:
+      activeKey: "a"
+      keys:
+        - key_id: "a"
+          key: "c2VjcmV0LWtleS1tYXRlcmlhbA=="

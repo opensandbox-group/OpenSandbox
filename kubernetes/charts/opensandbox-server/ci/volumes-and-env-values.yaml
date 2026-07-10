@@ -1,0 +1,32 @@
+# CI values (chart-testing + kubeconform).
+# Non-empty server volumes/volumeMounts, env, image pull secrets and
+# scheduling — the branches a default (empty) render skips. Guards against the
+# `volumeMounts: null` / `volumes: null` class of bugs (#1240) in the
+# non-empty direction.
+imagePullSecrets:
+  - name: my-registry-secret
+
+server:
+  env:
+    - name: OPENSANDBOX_LOG_FORMAT
+      value: json
+  volumes:
+    - name: cache
+      emptyDir: {}
+  volumeMounts:
+    - name: cache
+      mountPath: /var/cache/opensandbox
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: server
+      effect: NoSchedule
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: opensandbox-server

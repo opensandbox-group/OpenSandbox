@@ -1,0 +1,52 @@
+# CI values (chart-testing + kubeconform).
+# Turns on every optional controller branch that a default render skips:
+# non-empty extraVolumes/extraVolumeMounts, sidecar and init containers,
+# extra env, image pull secrets, scheduling, and the snapshot push/pull
+# secret args. The empty case is already covered by the default values.
+imagePullSecrets:
+  - name: my-registry-secret
+
+controller:
+  priorityClassName: system-cluster-critical
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: controller
+      effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values: ["linux"]
+  snapshot:
+    registry: "registry.example.com/snapshots"
+    registryInsecure: true
+    snapshotPushSecret: "snapshot-push"
+    resumePullSecret: "snapshot-pull"
+
+extraEnv:
+  - name: CUSTOM_VAR
+    value: "custom-value"
+
+extraVolumes:
+  - name: custom-volume
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: custom-volume
+    mountPath: /custom-path
+
+extraInitContainers:
+  - name: init-perms
+    image: busybox:1.36
+    command: ["sh", "-c", "echo init"]
+
+extraContainers:
+  - name: sidecar
+    image: busybox:1.36
+    command: ["sh", "-c", "sleep infinity"]

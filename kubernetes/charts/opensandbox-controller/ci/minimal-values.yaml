@@ -1,0 +1,18 @@
+# CI values (chart-testing + kubeconform).
+# Exercises the "disabled/off" branches that the default values (all enabled)
+# never render: no ServiceAccount creation, no RBAC, no CRD install, no leader
+# election and no probes.
+serviceAccount:
+  create: false
+rbac:
+  create: false
+crds:
+  install: false
+
+controller:
+  leaderElection:
+    enabled: false
+  livenessProbe:
+    enabled: false
+  readinessProbe:
+    enabled: false
