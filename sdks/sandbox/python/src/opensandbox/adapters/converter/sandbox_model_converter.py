@@ -537,6 +537,10 @@ class SandboxModelConverter:
         if isinstance(name, Unset):
             name = None
 
+        image_uri = api_snapshot.image_uri
+        if isinstance(image_uri, Unset):
+            image_uri = None
+
         return SnapshotInfo(
             id=api_snapshot.id,
             sandbox_id=api_snapshot.sandbox_id,
@@ -548,6 +552,7 @@ class SandboxModelConverter:
                 last_transition_at=last_transition_at,
             ),
             created_at=api_snapshot.created_at,
+            image_uri=image_uri,
         )
 
     @staticmethod

@@ -42,6 +42,8 @@ class Snapshot:
         status (SnapshotStatus): Detailed snapshot status information with lifecycle state and transition details.
         created_at (datetime.datetime): Snapshot creation timestamp
         name (str | Unset): Optional human-readable snapshot name
+        image_uri (str | Unset): Portable OCI image reference produced for a Ready snapshot, usable to restore a sandbox
+            (e.g. across clusters). Present once the snapshot reaches the Ready state; omitted otherwise.
     """
 
     id: str
@@ -49,6 +51,7 @@ class Snapshot:
     status: SnapshotStatus
     created_at: datetime.datetime
     name: str | Unset = UNSET
+    image_uri: str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         id = self.id
@@ -60,6 +63,8 @@ class Snapshot:
         created_at = self.created_at.isoformat()
 
         name = self.name
+
+        image_uri = self.image_uri
 
         field_dict: dict[str, Any] = {}
 
@@ -73,6 +78,8 @@ class Snapshot:
         )
         if name is not UNSET:
             field_dict["name"] = name
+        if image_uri is not UNSET:
+            field_dict["imageUri"] = image_uri
 
         return field_dict
 
@@ -91,12 +98,15 @@ class Snapshot:
 
         name = d.pop("name", UNSET)
 
+        image_uri = d.pop("imageUri", UNSET)
+
         snapshot = cls(
             id=id,
             sandbox_id=sandbox_id,
             status=status,
             created_at=created_at,
             name=name,
+            image_uri=image_uri,
         )
 
         return snapshot
