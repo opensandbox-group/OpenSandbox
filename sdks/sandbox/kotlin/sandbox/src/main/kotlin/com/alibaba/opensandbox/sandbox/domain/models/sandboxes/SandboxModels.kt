@@ -794,7 +794,29 @@ class SnapshotInfo(
     val name: String? = null,
     val status: SnapshotStatus,
     val createdAt: OffsetDateTime,
-)
+    /**
+     * Portable OCI image reference for a Ready snapshot, usable to restore a sandbox (e.g. across
+     * clusters). Populated once the snapshot reaches [SnapshotState.READY]; null otherwise.
+     */
+    val imageUri: String? = null,
+) {
+    /**
+     * Binary-compatibility constructor preserving the pre-`imageUri` JVM signatures for
+     * already-compiled callers; delegates [imageUri] to null.
+     *
+     * The default on [name] is deliberate: it makes the compiler emit the old
+     * `(String, String, String?, SnapshotStatus, OffsetDateTime, int, DefaultConstructorMarker)`
+     * synthetic `$default` constructor, so Kotlin call sites compiled against the previous
+     * `SnapshotInfo` that omitted `name` keep resolving instead of hitting `NoSuchMethodError`.
+     */
+    constructor(
+        id: String,
+        sandboxId: String,
+        name: String? = null,
+        status: SnapshotStatus,
+        createdAt: OffsetDateTime,
+    ) : this(id, sandboxId, name, status, createdAt, null)
+}
 
 class SnapshotFilter private constructor(
     val sandboxId: String?,
