@@ -28,6 +28,7 @@ import (
 type basicController struct {
 	ctx          *gin.Context
 	sseSetupOnce sync.Once
+	chunkWriter  sync.Mutex
 }
 
 func newBasicController(ctx *gin.Context) *basicController {

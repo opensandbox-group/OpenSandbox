@@ -218,7 +218,7 @@ change when practical.
 
 Releases are managed through the public workflows and scripts in this
 repository, including the GitHub Actions workflows under `.github/workflows/`
-and the release tooling documented in `docs/release-automation.md`.
+and the release tooling documented in `docs/community/release-automation.md`.
 
 Maintainers responsible for a release target are expected to ensure that:
 

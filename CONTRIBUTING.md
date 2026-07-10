@@ -24,7 +24,7 @@ OpenSandbox adheres to a [Code of Conduct](CODE_OF_CONDUCT.md) that we expect al
 
 There are many ways to contribute to OpenSandbox:
 
-- **Report Bugs**: Submit detailed bug reports through [GitHub Issues](https://github.com/alibaba/OpenSandbox/issues)
+- **Report Bugs**: Submit detailed bug reports through [GitHub Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
 - **Suggest Features**: Propose new features or improvements
 - **Write Code**: Fix bugs, implement features, or improve performance
 - **Improve Documentation**: Enhance README files, write tutorials, or fix typos
@@ -37,7 +37,7 @@ There are many ways to contribute to OpenSandbox:
 1. **Search Existing Issues**: Check if your bug report or feature request already exists
 2. **Check Roadmap**: Review the project roadmap to see if your idea aligns with project goals
 3. **Discuss Major Changes**: For significant changes, open an issue first or submit an [OSEP](oseps/README.md) to discuss your approach
-4. **Review Architecture**: Read [docs/architecture.md](docs/architecture.md) to understand the system design
+4. **Review Architecture**: Read [Architecture Overview](docs/architecture/) to understand the system design
 
 ## Development Environment Setup
 
@@ -638,7 +638,7 @@ Use GitHub Discussions for:
 
 ### Documentation
 
-- [Architecture Overview](docs/architecture.md)
+- [Architecture Overview](docs/architecture/)
 - [Server Development Guide](server/DEVELOPMENT.md)
 - [execd Development Guide](components/execd/DEVELOPMENT.md)
 - [OpenAPI Specifications](specs/README.md)

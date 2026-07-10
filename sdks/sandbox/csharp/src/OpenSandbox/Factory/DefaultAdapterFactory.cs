@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using OpenSandbox.Adapters;
+using OpenSandbox.Core;
 using OpenSandbox.Internal;
 using Microsoft.Extensions.Logging;
 
@@ -38,7 +39,15 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             options.ConnectionConfig.Headers,
             options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"));
 
-        var sandboxes = new SandboxesAdapter(clientWrapper);
+        EndpointCache? endpointCache = null;
+        if (!options.ConnectionConfig.EndpointCacheDisabled)
+        {
+            endpointCache = new EndpointCache(
+                options.ConnectionConfig.EndpointCacheSize,
+                options.ConnectionConfig.EndpointCacheTtlSeconds);
+        }
+
+        var sandboxes = new SandboxesAdapter(clientWrapper, endpointCache);
 
         return new LifecycleStack
         {
@@ -71,12 +80,20 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             headers,
             options.LoggerFactory.CreateLogger("OpenSandbox.CommandsAdapter"));
 
+        var isolated = new IsolatedSessionsAdapter(
+            options.HttpClientProvider.HttpClient,
+            options.HttpClientProvider.SseHttpClient,
+            options.ExecdBaseUrl,
+            headers,
+            options.LoggerFactory.CreateLogger("OpenSandbox.IsolatedSessionsAdapter"));
+
         return new ExecdStack
         {
             Commands = commands,
             Files = files,
             Health = health,
-            Metrics = metrics
+            Metrics = metrics,
+            Isolation = isolated
         };
     }
 

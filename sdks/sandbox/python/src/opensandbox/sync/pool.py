@@ -28,6 +28,7 @@ from opensandbox._pool_reconciler import ReconcileState, run_reconcile_tick
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import (
     PoolAcquireFailedException,
+    PoolDestroyedException,
     PoolEmptyException,
     PoolNotRunningException,
 )
@@ -36,6 +37,10 @@ from opensandbox.pool_types import (
     IdleEntry,
     PoolConfig,
     PoolCreationSpec,
+    PoolDestroyState,
+    PooledSandboxCreateContext,
+    PooledSandboxCreateReason,
+    PooledSandboxCreator,
     PoolLifecycleState,
     PoolSnapshot,
     PoolState,
@@ -83,6 +88,7 @@ class SandboxPoolSync:
             [ConnectionConfigSync], SandboxManagerSync
         ] = SandboxManagerSync.create,
         sandbox_factory: type[SandboxSync] = SandboxSync,
+        sandbox_creator: PooledSandboxCreator | None = None,
     ) -> None:
         self._config = PoolConfig(
             pool_name=pool_name,
@@ -107,6 +113,7 @@ class SandboxPoolSync:
             idle_timeout=idle_timeout,
             drain_timeout=drain_timeout,
             acquire_min_remaining_ttl=acquire_min_remaining_ttl,
+            sandbox_creator=sandbox_creator,
         )
         self._state_store = self._config.state_store
         self._connection_config = connection_config
@@ -134,6 +141,7 @@ class SandboxPoolSync:
                 return
             self._lifecycle_state = PoolLifecycleState.STARTING
             try:
+                self._ensure_pool_namespace_active()
                 self._warn_if_primary_lock_ttl_may_expire_during_warmup()
                 self._sandbox_manager = self._create_sandbox_manager()
                 self._state_store.set_idle_entry_ttl(
@@ -169,14 +177,19 @@ class SandboxPoolSync:
     ) -> SandboxSync:
         if self._lifecycle_state != PoolLifecycleState.RUNNING:
             state = self._lifecycle_state
-            raise PoolNotRunningException(f"Cannot acquire when pool state is {state.value}")
+            self._raise_if_pool_namespace_destroyed()
+            raise PoolNotRunningException(
+                f"Cannot acquire when pool state is {state.value}"
+            )
         self._begin_operation()
         try:
             if self._lifecycle_state != PoolLifecycleState.RUNNING:
                 state = self._lifecycle_state
+                self._raise_if_pool_namespace_destroyed()
                 raise PoolNotRunningException(
                     f"Cannot acquire when pool state is {state.value}"
                 )
+            self._ensure_pool_namespace_active()
             pool_name = self._config.pool_name
             take_result = _try_take_idle_with_min_ttl(
                 self._state_store,
@@ -204,6 +217,7 @@ class SandboxPoolSync:
                     )
                     if sandbox_timeout is not None:
                         sandbox.renew(sandbox_timeout)
+                    self._ensure_pool_namespace_active_after_create(sandbox)
                     # Candidate is connected and (optionally) renewed. Now safe to clean up the
                     # discarded-alive sandboxes; offload to the warmup executor so the caller
                     # does not wait for N kill RPCs.
@@ -211,6 +225,11 @@ class SandboxPoolSync:
                         pool_name, pending_kill, source="acquire"
                     )
                     return sandbox
+                except PoolDestroyedException:
+                    self._schedule_kill_discarded_alive(
+                        pool_name, pending_kill, source="acquire"
+                    )
+                    raise
                 except Exception as exc:
                     idle_connect_failure = exc
                     self._state_store.remove_idle(pool_name, sandbox_id)
@@ -248,6 +267,7 @@ class SandboxPoolSync:
     def resize(self, max_idle: int) -> None:
         if max_idle < 0:
             raise ValueError("max_idle must be >= 0")
+        self._ensure_pool_namespace_active()
         self._state_store.set_max_idle(self._config.pool_name, max_idle)
         self._current_max_idle = max_idle
 
@@ -269,10 +289,7 @@ class SandboxPoolSync:
                     manager.kill_sandbox(sandbox_id)
                 except Exception as exc:
                     logger.warning(
-                        "release_all_idle: failed to kill sandbox: pool_name=%s sandbox_id=%s error=%s",
-                        pool_name,
-                        sandbox_id,
-                        exc,
+                        f"release_all_idle: failed to kill sandbox: pool_name={pool_name} sandbox_id={sandbox_id} error={exc}"
                     )
         finally:
             if temporary_manager is not None:
@@ -319,17 +336,18 @@ class SandboxPoolSync:
         drained = self._await_in_flight_drain(self._config.drain_timeout)
         if not drained:
             logger.warning(
-                "Pool graceful shutdown timed out waiting in-flight operations: pool_name=%s in_flight=%s timeout_ms=%s",
-                self._config.pool_name,
-                self._in_flight,
-                int(self._config.drain_timeout.total_seconds() * 1000),
+                f"Pool graceful shutdown timed out waiting in-flight operations: pool_name={self._config.pool_name} in_flight={self._in_flight} timeout_ms={int(self._config.drain_timeout.total_seconds() * 1000)}"
             )
         with self._lifecycle_lock:
             self._lifecycle_state = PoolLifecycleState.STOPPED
             self._close_provider()
 
     def _run_scheduler(self, stop_event: threading.Event) -> None:
-        initial_delay = 0 if self._config.max_idle > 0 else self._config.reconcile_interval.total_seconds()
+        initial_delay = (
+            0
+            if self._config.max_idle > 0
+            else self._config.reconcile_interval.total_seconds()
+        )
         if initial_delay > 0 and stop_event.wait(initial_delay):
             return
         while not stop_event.is_set():
@@ -353,6 +371,9 @@ class SandboxPoolSync:
         try:
             if self._lifecycle_state != PoolLifecycleState.RUNNING:
                 return
+            if self._state_store.get_destroy_state(self._config.pool_name) != PoolDestroyState.ACTIVE:
+                self._stop_after_pool_namespace_destroyed()
+                return
             run_reconcile_tick(
                 config=self._config.with_max_idle(self._resolve_max_idle()),
                 state_store=self._state_store,
@@ -363,8 +384,7 @@ class SandboxPoolSync:
             )
         except Exception as exc:
             logger.error(
-                "Pool reconcile tick failed unexpectedly: pool_name=%s",
-                self._config.pool_name,
+                f"Pool reconcile tick failed unexpectedly: pool_name={self._config.pool_name}",
                 exc_info=exc,
             )
         finally:
@@ -373,7 +393,8 @@ class SandboxPoolSync:
     def _create_one_sandbox(self) -> str | None:
         self._begin_operation()
         try:
-            sandbox = self._build_sandbox_from_spec()
+            self._ensure_pool_namespace_active()
+            sandbox = self._build_warmup_sandbox()
             try:
                 if self._config.warmup_sandbox_preparer is not None:
                     self._config.warmup_sandbox_preparer(sandbox)
@@ -383,12 +404,13 @@ class SandboxPoolSync:
                     except Exception:
                         pass
                     return None
-                # The server-side TTL has been ticking since `_build_sandbox_from_spec()`;
+                # The server-side TTL has been ticking since sandbox creation;
                 # readiness wait and `warmup_sandbox_preparer` can both consume meaningful time.
                 # Renew right before handing the id back to the reconciler so the store's
                 # stamped expiry actually matches what the server will honor — otherwise
                 # `acquire_min_remaining_ttl` overestimates remaining TTL by the warmup duration.
                 sandbox.renew(self._config.idle_timeout)
+                self._ensure_pool_namespace_active_after_create(sandbox)
                 return sandbox.id
             except Exception:
                 try:
@@ -401,7 +423,17 @@ class SandboxPoolSync:
         finally:
             self._end_operation()
 
-    def _build_sandbox_from_spec(self) -> SandboxSync:
+    def _build_warmup_sandbox(self) -> SandboxSync:
+        if self._config.sandbox_creator is not None:
+            return self._build_sandbox_from_creator(
+                creator=self._config.sandbox_creator,
+                reason=PooledSandboxCreateReason.WARMUP,
+                ready_timeout=self._config.warmup_ready_timeout,
+                health_check_polling_interval=self._config.warmup_health_check_polling_interval,
+                skip_health_check=self._config.warmup_skip_health_check,
+                health_check=self._config.warmup_health_check,
+            )
+
         spec = self._creation_spec
         return self._sandbox_factory.create(
             spec.image,
@@ -423,6 +455,28 @@ class SandboxPoolSync:
         )
 
     def _direct_create(self, sandbox_timeout: timedelta | None) -> SandboxSync:
+        self._ensure_pool_namespace_active()
+        if self._config.sandbox_creator is not None:
+            sandbox = self._build_sandbox_from_creator(
+                creator=self._config.sandbox_creator,
+                reason=PooledSandboxCreateReason.DIRECT_CREATE,
+                ready_timeout=self._config.acquire_ready_timeout,
+                health_check_polling_interval=self._config.acquire_health_check_polling_interval,
+                skip_health_check=self._config.acquire_skip_health_check,
+                health_check=self._config.acquire_health_check,
+            )
+            if sandbox_timeout is not None:
+                try:
+                    sandbox.renew(sandbox_timeout)
+                except BaseException:
+                    try:
+                        sandbox.kill()
+                    finally:
+                        sandbox.close()
+                    raise
+            self._ensure_pool_namespace_active_after_create(sandbox)
+            return sandbox
+
         spec = self._creation_spec
         sandbox = self._sandbox_factory.create(
             spec.image,
@@ -451,7 +505,80 @@ class SandboxPoolSync:
                 finally:
                     sandbox.close()
                 raise
+        self._ensure_pool_namespace_active_after_create(sandbox)
         return sandbox
+
+    def _ensure_pool_namespace_active(self) -> None:
+        state = self._state_store.get_destroy_state(self._config.pool_name)
+        if state != PoolDestroyState.ACTIVE:
+            raise PoolDestroyedException(
+                f"Pool namespace is {state.value}: pool_name={self._config.pool_name}"
+            )
+
+    def _raise_if_pool_namespace_destroyed(self) -> None:
+        try:
+            self._ensure_pool_namespace_active()
+        except PoolDestroyedException:
+            raise
+        except Exception:
+            return
+
+    def _ensure_pool_namespace_active_after_create(self, sandbox: SandboxSync) -> None:
+        try:
+            self._ensure_pool_namespace_active()
+        except BaseException:
+            try:
+                sandbox.kill()
+            except Exception as exc:
+                logger.warning(
+                    "Pool sandbox cleanup after fence failed: pool_name=%s "
+                    "sandbox_id=%s operation=kill error=%s",
+                    self._config.pool_name,
+                    sandbox.id,
+                    exc,
+                )
+            try:
+                sandbox.close()
+            except Exception as exc:
+                logger.warning(
+                    "Pool sandbox cleanup after fence failed: pool_name=%s "
+                    "sandbox_id=%s operation=close error=%s",
+                    self._config.pool_name,
+                    sandbox.id,
+                    exc,
+                )
+            raise
+
+    def _stop_after_pool_namespace_destroyed(self) -> None:
+        with self._lifecycle_lock:
+            if self._lifecycle_state == PoolLifecycleState.STOPPED:
+                return
+            self._stop_reconcile(wait_for_warmup=False, join_scheduler=False)
+            self._lifecycle_state = PoolLifecycleState.STOPPED
+            self._close_provider()
+
+    def _build_sandbox_from_creator(
+        self,
+        *,
+        creator: PooledSandboxCreator,
+        reason: PooledSandboxCreateReason,
+        ready_timeout: timedelta,
+        health_check_polling_interval: timedelta,
+        skip_health_check: bool,
+        health_check: Callable[[SandboxSync], bool] | None,
+    ) -> SandboxSync:
+        context = PooledSandboxCreateContext(
+            pool_name=self._config.pool_name,
+            owner_id=str(self._config.owner_id),
+            idle_timeout=self._config.idle_timeout,
+            reason=reason,
+            ready_timeout=ready_timeout,
+            health_check_polling_interval=health_check_polling_interval,
+            skip_health_check=skip_health_check,
+            health_check=health_check,
+            connection_config=self._connection_for_pool_resource(),
+        )
+        return creator(context)
 
     def _resolve_max_idle(self) -> int:
         shared = self._state_store.get_max_idle(self._config.pool_name)
@@ -461,7 +588,10 @@ class SandboxPoolSync:
         return self._sandbox_manager_factory(self._connection_for_pool_resource())
 
     def _connection_for_pool_resource(self) -> ConnectionConfigSync:
-        if self._connection_config.transport is not None and not self._connection_config._owns_transport:
+        if (
+            self._connection_config.transport is not None
+            and not self._connection_config._owns_transport
+        ):
             return self._connection_config
         config = self._connection_config.model_copy(update={"transport": None})
         config._owns_transport = True
@@ -489,10 +619,7 @@ class SandboxPoolSync:
             return True
         except Exception as exc:
             logger.warning(
-                "Pool sandbox cleanup failed: pool_name=%s sandbox_id=%s error=%s",
-                self._config.pool_name,
-                sandbox_id,
-                exc,
+                f"Pool sandbox cleanup failed: pool_name={self._config.pool_name} sandbox_id={sandbox_id} error={exc}"
             )
             return False
 
@@ -513,15 +640,10 @@ class SandboxPoolSync:
             self._kill_discarded_alive(pool_name, sandbox_ids, source)
             return
         try:
-            executor.submit(
-                self._kill_discarded_alive, pool_name, sandbox_ids, source
-            )
+            executor.submit(self._kill_discarded_alive, pool_name, sandbox_ids, source)
         except Exception as exc:
             logger.debug(
-                "Discarded-alive kill submit rejected, running inline: pool_name=%s count=%d error=%s",
-                pool_name,
-                len(sandbox_ids),
-                exc,
+                f"Discarded-alive kill submit rejected, running inline: pool_name={pool_name} count={len(sandbox_ids)} error={exc}"
             )
             self._kill_discarded_alive(pool_name, sandbox_ids, source)
 
@@ -540,10 +662,7 @@ class SandboxPoolSync:
         for sandbox_id in sandbox_ids:
             if self._kill_sandbox_best_effort(sandbox_id):
                 logger.debug(
-                    "Killed near-expiry idle sandbox: pool_name=%s sandbox_id=%s source=%s",
-                    pool_name,
-                    sandbox_id,
-                    source,
+                    f"Killed near-expiry idle sandbox: pool_name={pool_name} sandbox_id={sandbox_id} source={source}"
                 )
 
     def _begin_operation(self) -> None:
@@ -575,7 +694,11 @@ class SandboxPoolSync:
     ) -> None:
         self._stop_event.set()
         thread = self._scheduler_thread
-        if join_scheduler and thread is not None and thread is not threading.current_thread():
+        if (
+            join_scheduler
+            and thread is not None
+            and thread is not threading.current_thread()
+        ):
             thread.join(timeout=5)
         if join_scheduler:
             self._scheduler_thread = None
@@ -585,7 +708,9 @@ class SandboxPoolSync:
             if wait_for_warmup:
                 executor.shutdown(wait=True)
             else:
-                self._await_executor_threads(executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS)
+                self._await_executor_threads(
+                    executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS
+                )
         self._warmup_executor = None
         self._release_primary_lock_best_effort()
 
@@ -607,10 +732,7 @@ class SandboxPoolSync:
             )
         except Exception as exc:
             logger.warning(
-                "Pool primary lock release failed: pool_name=%s owner_id=%s error=%s",
-                self._config.pool_name,
-                self._config.owner_id,
-                exc,
+                f"Pool primary lock release failed: pool_name={self._config.pool_name} owner_id={self._config.owner_id} error={exc}"
             )
 
     def _close_provider(self) -> None:
@@ -622,8 +744,5 @@ class SandboxPoolSync:
         if self._config.primary_lock_ttl > self._config.warmup_ready_timeout:
             return
         logger.warning(
-            "Pool primary lock TTL may expire during warmup: pool_name=%s primary_lock_ttl_ms=%s warmup_ready_timeout_ms=%s",
-            self._config.pool_name,
-            int(self._config.primary_lock_ttl.total_seconds() * 1000),
-            int(self._config.warmup_ready_timeout.total_seconds() * 1000),
+            f"Pool primary lock TTL may expire during warmup: pool_name={self._config.pool_name} primary_lock_ttl_ms={int(self._config.primary_lock_ttl.total_seconds() * 1000)} warmup_ready_timeout_ms={int(self._config.warmup_ready_timeout.total_seconds() * 1000)}"
         )

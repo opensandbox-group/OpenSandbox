@@ -165,14 +165,16 @@ class CodeInterpreterSync:
         if sandbox is None:
             raise InvalidArgumentException("Sandbox instance must be provided")
 
-        logger.info("Creating code interpreter from sandbox: %s", sandbox.id)
+        logger.info(f"Creating code interpreter from sandbox: {sandbox.id}")
         factory = AdapterFactorySync(sandbox.connection_config)
         try:
             endpoint = sandbox.get_endpoint(DEFAULT_EXECD_PORT)
             code_service = factory.create_code_execution_service(endpoint)
-            logger.info("Code interpreter %s created successfully", sandbox.id)
+            logger.info(f"Code interpreter {sandbox.id} created successfully")
             return cls(sandbox, code_service)
         except Exception as e:
             if isinstance(e, SandboxException):
                 raise
-            raise SandboxInternalException(f"Failed to create code interpreter: {e}", cause=e) from e
+            raise SandboxInternalException(
+                f"Failed to create code interpreter: {e}", cause=e
+            ) from e

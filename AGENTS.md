@@ -62,6 +62,58 @@ Never:
 - Edit generated output as the only fix.
 - Mix unrelated component work into the same change.
 
+## Documentation Rules
+
+### Content ownership — single source of truth
+
+| Content type | Source of truth | Rule |
+|---|---|---|
+| User and operations docs | `docs/` | Keep long-form docs here |
+| Root README | repo root `README.md` | GitHub homepage |
+| SDK, CLI, Helm, and other publishable package READMEs | package directory | Keep install, quick start, and package entry points |
+| Non-publishable component/module READMEs | component/module directory | Keep minimal pointers to `docs/` when a docs page exists |
+| Examples | `docs/examples/` + runnable code under `examples/` | Put docs in `docs/examples/`; keep example READMEs as thin pointers |
+| OSEPs | `oseps/` | `docs/community/oseps.md` only indexes GitHub proposals |
+| CONTRIBUTING, CODE_OF_CONDUCT, DEVELOPMENT | repo root / component directory | `docs/community/` links to them, does not duplicate them |
+
+**When modifying user-visible or operations-visible behavior**: update `docs/` first.
+
+**When editing READMEs**: avoid long-form docs outside root or publishable package READMEs.
+
+**When adding examples**: keep runnable code under `examples/`, and document it under `docs/examples/`.
+
+**When linking from README files to docs**: prefer repository-relative `docs/*.md` links so links match the checked-out branch or tag. Use `https://open-sandbox.ai` as a public site entry point, not as the only source link from versioned code directories.
+
+**When handling localized READMEs**: do not add new localized copies for SDKs, examples, or non-special modules.
+
+### Docs site structure
+
+```
+docs/
+  getting-started/     # Quick start, installation, configuration
+  architecture/        # Architecture overview, network design
+  guides/              # Feature guides (credential vault, secure container, etc.)
+  sdks/                # SDK reference (one page per language per SDK)
+  components/          # Server, execd, ingress, egress
+  kubernetes/          # Kubernetes operator and deployment
+  api/                 # OpenAPI spec reference
+  cli/                 # CLI reference
+  examples/            # One page per example
+  community/           # Contributing, code of conduct, OSEPs, releases
+  reference/           # Migration guides
+```
+
+### Docs conventions
+
+- Engine: VitePress. Config is a static `config.mts` with no build-time code generation.
+- All images go in `docs/public/images/`, referenced as `/images/filename` in markdown.
+- Every page must have YAML frontmatter with `title` and `description`.
+- Internal links use VitePress absolute paths (e.g., `/sdks/python`, `/guides/credential-vault`).
+- Links to source code or specs use full GitHub URLs.
+- Use VitePress custom containers (`::: tip`, `::: warning`, `::: info`) and code groups where appropriate.
+- Build and verify: `cd docs && pnpm docs:build` — must complete with zero errors.
+- The README.md in `docs/` is for docs-site contributors only (how to run dev server), and must stay excluded from the published site.
+
 ## Review Focus
 
 - Prioritize breaking changes in specs, SDK interfaces, config, CLI behavior, and protocols.

@@ -304,15 +304,15 @@ class CodesAdapterSync(CodesSync):
                         event_node = EventNode(**event_dict)
                         dispatcher.dispatch(event_node)
                     except json.JSONDecodeError:
-                        logger.debug("Failed to parse SSE line: %s", line)
+                        logger.debug(f"Failed to parse SSE line: {line}")
                         continue
                     except Exception as e:
-                        logger.error("Error processing event: %s", data, exc_info=e)
+                        logger.error(f"Error processing event: {data}", exc_info=e)
                         continue
 
             return execution
         except Exception as e:
-            logger.error("Failed to run code (length: %s)", len(code), exc_info=e)
+            logger.error(f"Failed to run code (length: {len(code)})", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def interrupt(self, execution_id: str) -> None:

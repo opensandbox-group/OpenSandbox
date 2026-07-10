@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -62,7 +64,11 @@ func (c *FilesystemController) UploadFile() {
 }
 
 func (c *FilesystemController) parseUploadForm() ([]*multipart.FileHeader, []*multipart.FileHeader, *uploadError) {
-	form, err := c.ctx.MultipartForm()
+	return parseUploadForm(c.ctx)
+}
+
+func parseUploadForm(ctx *gin.Context) ([]*multipart.FileHeader, []*multipart.FileHeader, *uploadError) {
+	form, err := ctx.MultipartForm()
 	if err != nil || form == nil {
 		return nil, nil, newUploadError(http.StatusBadRequest, model.ErrorCodeInvalidFile, "multipart form is empty")
 	}
@@ -92,7 +98,7 @@ func (c *FilesystemController) processUploadPair(metadataHeader, fileHeader *mul
 		return uerr
 	}
 
-	resolvedPath, uerr := resolveUploadTarget(meta.Path)
+	resolvedPath, uerr := resolveUploadTarget(meta.Path, meta.Permission)
 	if uerr != nil {
 		return uerr
 	}
@@ -137,7 +143,7 @@ func parseUploadMetadata(header *multipart.FileHeader) (*model.FileMetadata, *up
 	return &meta, nil
 }
 
-func resolveUploadTarget(targetPath string) (string, *uploadError) {
+func resolveUploadTarget(targetPath string, perm model.Permission) (string, *uploadError) {
 	resolvedPath, err := pathutil.ExpandPath(targetPath)
 	if err != nil {
 		return "", newUploadError(
@@ -147,7 +153,7 @@ func resolveUploadTarget(targetPath string) (string, *uploadError) {
 		)
 	}
 	targetDir := filepath.Dir(resolvedPath)
-	if err := os.MkdirAll(targetDir, os.ModePerm); err != nil {
+	if err := MkdirAllWithOwnership(targetDir, os.ModePerm, perm.Owner, perm.Group); err != nil {
 		return "", newUploadError(
 			http.StatusInternalServerError,
 			model.ErrorCodeRuntimeError,
@@ -199,7 +205,7 @@ func writeUploadFile(resolvedPath string, fileHeader *multipart.FileHeader) *upl
 	targetDir := filepath.Dir(resolvedPath)
 	if d, err := os.Open(targetDir); err == nil {
 		if err := d.Sync(); err != nil {
-			log.Warning("failed to sync parent dir %s: %v", targetDir, err)
+			log.Warn("failed to sync parent dir %s: %v", targetDir, err)
 		}
 		_ = d.Close()
 	}

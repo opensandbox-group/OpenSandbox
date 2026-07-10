@@ -384,7 +384,7 @@ func (s *ptySession) writeAndFanout(chunk []byte, isStdout bool) {
 	if w != nil {
 		if _, err := w.Write(chunk); err != nil {
 			// Pipe was closed (client detached) — ignore.
-			log.Warning("pty fanout write: %v", err)
+			log.Warn("pty fanout write: %v", err)
 		}
 	}
 }
@@ -539,7 +539,7 @@ func (s *ptySession) SendSignal(name string) {
 
 	sig := parseSignalName(name)
 	if sig == 0 {
-		log.Warning("ptySession.SendSignal: unknown signal %q", name)
+		log.Warn("ptySession.SendSignal: unknown signal %q", name)
 		return
 	}
 
@@ -547,7 +547,7 @@ func (s *ptySession) SendSignal(name string) {
 	// In pipe mode (Setpgid), pgid is also == pid.
 	// Either way, Kill(-pid, sig) sends to the process group.
 	if err := syscall.Kill(-pid, sig); err != nil {
-		log.Warning("ptySession.SendSignal kill(-%d, %v): %v", pid, sig, err)
+		log.Warn("ptySession.SendSignal kill(-%d, %v): %v", pid, sig, err)
 	}
 }
 

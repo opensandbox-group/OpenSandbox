@@ -39,7 +39,9 @@ interface Filesystem {
      *
      * @param path The absolute or relative path to the file to read
      * @param encoding Character encoding for the file content (default: UTF-8)
-     * @param range HTTP byte range to read (e.g., "bytes=0-1023").
+     * @param range HTTP byte range to read (e.g., "bytes=0-1023"). Mutually exclusive with offset/limit.
+     * @param offset Starting line number (1-based) for line-based reading. Mutually exclusive with range.
+     * @param limit Number of lines to return for line-based reading. Mutually exclusive with range.
      * @return The file content as a string
      * @throws SandboxException if the operation fails
      */
@@ -47,7 +49,20 @@ interface Filesystem {
         path: String,
         encoding: String = "UTF-8",
         range: String? = null,
+        offset: Int? = null,
+        limit: Int? = null,
     ): String
+
+    /**
+     * Backward-compatible overload for Java callers using positional args.
+     */
+    fun readFile(
+        path: String,
+        encoding: String,
+        range: String?,
+    ): String {
+        return readFile(path, encoding, range, null, null)
+    }
 
     /**
      * Convenience overload for reading a file as a string using UTF-8.
@@ -65,14 +80,28 @@ interface Filesystem {
      * Reads the content of a file as a byte array.
      *
      * @param path The absolute or relative path to the file to read
-     * @param range HTTP byte range to read (e.g., "bytes=0-1023").
+     * @param range HTTP byte range to read (e.g., "bytes=0-1023"). Mutually exclusive with offset/limit.
+     * @param offset Starting line number (1-based) for line-based reading. Mutually exclusive with range.
+     * @param limit Number of lines to return for line-based reading. Mutually exclusive with range.
      * @return The file content as a byte array
      * @throws SandboxException if the operation fails
      */
     fun readByteArray(
         path: String,
         range: String? = null,
+        offset: Int? = null,
+        limit: Int? = null,
     ): ByteArray
+
+    /**
+     * Backward-compatible overload for Java callers using positional args.
+     */
+    fun readByteArray(
+        path: String,
+        range: String?,
+    ): ByteArray {
+        return readByteArray(path, range, null, null)
+    }
 
     /**
      * Convenience overload for reading a file as a byte array.
@@ -90,14 +119,28 @@ interface Filesystem {
      * Opens a file for reading as an InputStream.
      *
      * @param path The absolute or relative path to the file to read
-     * @param range HTTP byte range to read (e.g., "bytes=0-1023").
+     * @param range HTTP byte range to read (e.g., "bytes=0-1023"). Mutually exclusive with offset/limit.
+     * @param offset Starting line number (1-based) for line-based reading. Mutually exclusive with range.
+     * @param limit Number of lines to return for line-based reading. Mutually exclusive with range.
      * @return An InputStream for reading the file content
      * @throws SandboxException if the operation fails
      */
     fun readStream(
         path: String,
         range: String? = null,
+        offset: Int? = null,
+        limit: Int? = null,
     ): InputStream
+
+    /**
+     * Backward-compatible overload for Java callers using positional args.
+     */
+    fun readStream(
+        path: String,
+        range: String?,
+    ): InputStream {
+        return readStream(path, range, null, null)
+    }
 
     /**
      * Convenience overload for opening a file stream.

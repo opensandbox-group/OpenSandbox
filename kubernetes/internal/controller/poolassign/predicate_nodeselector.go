@@ -16,7 +16,10 @@ package assign
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -45,6 +48,33 @@ func (p *nodeSelectorPredicate) Predicate(_ context.Context, sbx *sandboxv1alpha
 	}
 
 	return true
+}
+
+func (p *nodeSelectorPredicate) Reason(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) string {
+	if sbx.Spec.Template == nil {
+		return ""
+	}
+	poolLabels := mergePoolLabels(pool)
+
+	var reasons []string
+	for k, v := range sbx.Spec.Template.Spec.NodeSelector {
+		poolV, ok := poolLabels[k]
+		if !ok {
+			reasons = append(reasons, fmt.Sprintf("nodeSelector key %q not found in pool", k))
+		} else if poolV != v {
+			reasons = append(reasons, fmt.Sprintf("nodeSelector %s=%s, pool has %s=%s", k, v, k, poolV))
+		}
+	}
+
+	if sbx.Spec.Template.Spec.Affinity != nil && sbx.Spec.Template.Spec.Affinity.NodeAffinity != nil {
+		req := sbx.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		if req != nil && len(req.NodeSelectorTerms) > 0 && !nodeAffinityMatch(sbx.Spec.Template.Spec.Affinity, poolLabels) {
+			reasons = append(reasons, "node affinity requirements not satisfied")
+		}
+	}
+
+	sort.Strings(reasons)
+	return strings.Join(reasons, "; ")
 }
 
 func mergePoolLabels(pool *sandboxv1alpha1.Pool) map[string]string {

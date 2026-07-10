@@ -15,6 +15,8 @@
 package controller
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,7 +29,8 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// DownloadFile serves a file for download with support for range requests.
+// DownloadFile serves a file for download with support for range requests
+// and line-based reading via offset/limit query parameters.
 func (c *FilesystemController) DownloadFile() {
 	rec := beginFilesystemMetric("download")
 	defer rec.Finish(c.basicController)
@@ -51,12 +54,32 @@ func (c *FilesystemController) DownloadFile() {
 		return
 	}
 
+	rawOffset := c.ctx.Query("offset")
+	rawLimit := c.ctx.Query("limit")
+	hasLineParams := rawOffset != "" || rawLimit != ""
+	rangeHeader := c.ctx.GetHeader("Range")
+
+	if hasLineParams && rangeHeader != "" {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			"line-based reading (offset/limit) and byte range (Range header) are mutually exclusive",
+		)
+		return
+	}
+
 	file, err := os.Open(resolvedFilePath)
 	if err != nil {
 		c.handleFileError(err)
 		return
 	}
 	defer file.Close()
+
+	if hasLineParams {
+		c.serveLineRange(file, rawOffset, rawLimit)
+		rec.MarkSuccess()
+		return
+	}
 
 	fileInfo, err := file.Stat()
 	if err != nil {
@@ -72,7 +95,7 @@ func (c *FilesystemController) DownloadFile() {
 	c.ctx.Header("Content-Disposition", formatContentDisposition(filepath.Base(resolvedFilePath)))
 	c.ctx.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 
-	if rangeHeader := c.ctx.GetHeader("Range"); rangeHeader != "" {
+	if rangeHeader != "" {
 		ranges, err := ParseRange(rangeHeader, fileInfo.Size())
 		if err != nil {
 			c.RespondError(
@@ -96,6 +119,65 @@ func (c *FilesystemController) DownloadFile() {
 
 	rec.MarkSuccess()
 	http.ServeContent(c.ctx.Writer, c.ctx.Request, filepath.Base(resolvedFilePath), fileInfo.ModTime(), file)
+}
+
+// serveLineRange reads lines from file starting at a 1-based offset and
+// returns up to limit lines as text/plain.
+func (c *FilesystemController) serveLineRange(file *os.File, rawOffset, rawLimit string) {
+	offset := int64(1)
+	if rawOffset != "" {
+		parsed, err := strconv.ParseInt(rawOffset, 10, 64)
+		if err != nil || parsed < 1 {
+			c.RespondError(
+				http.StatusBadRequest,
+				model.ErrorCodeInvalidRequest,
+				fmt.Sprintf("invalid query parameter 'offset': %s", rawOffset),
+			)
+			return
+		}
+		offset = parsed
+	}
+
+	limit := int64(-1)
+	if rawLimit != "" {
+		parsed, err := strconv.ParseInt(rawLimit, 10, 64)
+		if err != nil || parsed < 1 {
+			c.RespondError(
+				http.StatusBadRequest,
+				model.ErrorCodeInvalidRequest,
+				fmt.Sprintf("invalid query parameter 'limit': %s", rawLimit),
+			)
+			return
+		}
+		limit = parsed
+	}
+
+	c.ctx.Header("Content-Type", "text/plain; charset=utf-8")
+	c.ctx.Status(http.StatusOK)
+
+	reader := bufio.NewReader(file)
+	var lineNum int64
+	var written int64
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			line = bytes.TrimRight(line, "\r\n")
+			lineNum++
+			if lineNum >= offset {
+				if written > 0 {
+					_, _ = c.ctx.Writer.Write([]byte("\n"))
+				}
+				_, _ = c.ctx.Writer.Write(line)
+				written++
+				if limit >= 0 && written >= limit {
+					break
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
 }
 
 // formatContentDisposition formats the Content-Disposition header value with proper

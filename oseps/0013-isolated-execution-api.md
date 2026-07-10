@@ -3,8 +3,8 @@ title: Isolated Execution API
 authors:
   - "@pjp"
 creation-date: 2026-06-06
-last-updated: 2026-06-06
-status: draft
+last-updated: 2026-06-23
+status: implementing
 ---
 
 # OSEP-0013: Isolated Execution API

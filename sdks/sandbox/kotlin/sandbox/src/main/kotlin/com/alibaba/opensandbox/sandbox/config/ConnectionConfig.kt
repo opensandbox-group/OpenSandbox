@@ -46,6 +46,12 @@ class ConnectionConfig private constructor(
      * Useful when the client SDK cannot access the created sandbox directly.
      */
     val useServerProxy: Boolean = false,
+    /** TTL for cached endpoint entries. Default: 10 minutes. */
+    val endpointCacheTtl: Duration = Duration.ofSeconds(600),
+    /** Maximum number of cached endpoint entries. Default: 1024. */
+    val endpointCacheSize: Int = 1024,
+    /** Disable endpoint caching entirely. */
+    val endpointCacheDisabled: Boolean = false,
 ) {
     /**
      * Creates a copy of this ConnectionConfig without copying the connectionPool.
@@ -63,6 +69,9 @@ class ConnectionConfig private constructor(
             connectionPool = null,
             connectionPoolManagedByUser = false,
             useServerProxy = this.useServerProxy,
+            endpointCacheTtl = this.endpointCacheTtl,
+            endpointCacheSize = this.endpointCacheSize,
+            endpointCacheDisabled = this.endpointCacheDisabled,
         )
 
     companion object {
@@ -71,7 +80,7 @@ class ConnectionConfig private constructor(
         private const val ENV_API_KEY = "OPEN_SANDBOX_API_KEY"
         private const val ENV_DOMAIN = "OPEN_SANDBOX_DOMAIN"
 
-        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.12"
+        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.16"
         private const val API_VERSION = "v1"
 
         @JvmStatic
@@ -146,6 +155,9 @@ class ConnectionConfig private constructor(
         private var connectionPoolManagedByUser: Boolean = false
 
         private var useServerProxy: Boolean = false
+        private var endpointCacheTtl: Duration = Duration.ofSeconds(600)
+        private var endpointCacheSize: Int = 1024
+        private var endpointCacheDisabled: Boolean = false
 
         /**
          * Use sandbox server as proxy for process execd requests.
@@ -153,6 +165,24 @@ class ConnectionConfig private constructor(
          */
         fun useServerProxy(useServerProxy: Boolean): Builder {
             this.useServerProxy = useServerProxy
+            return this
+        }
+
+        /** Set endpoint cache TTL. */
+        fun endpointCacheTtl(ttl: Duration): Builder {
+            this.endpointCacheTtl = ttl
+            return this
+        }
+
+        /** Set endpoint cache max size. */
+        fun endpointCacheSize(size: Int): Builder {
+            this.endpointCacheSize = size
+            return this
+        }
+
+        /** Disable endpoint caching. */
+        fun endpointCacheDisabled(disabled: Boolean): Builder {
+            this.endpointCacheDisabled = disabled
             return this
         }
 
@@ -293,6 +323,9 @@ class ConnectionConfig private constructor(
                 connectionPool = connectionPool,
                 connectionPoolManagedByUser = connectionPoolManagedByUser,
                 useServerProxy = useServerProxy,
+                endpointCacheTtl = endpointCacheTtl,
+                endpointCacheSize = endpointCacheSize,
+                endpointCacheDisabled = endpointCacheDisabled,
             )
         }
     }

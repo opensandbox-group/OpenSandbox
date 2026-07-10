@@ -21,7 +21,8 @@ from opensandbox_server.extensions import (
     ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
     ACCESS_RENEW_EXTEND_SECONDS_MIN,
     apply_access_renew_extend_seconds_to_mapping,
-    apply_extensions_to_annotations,
+    apply_extensions_to_mapping,
+    extract_extensions_from_mapping,
     validate_extensions
 )
 
@@ -104,7 +105,7 @@ class TestExtensionsToAnnotations:
     def test_single_extension_propagated(self):
         annotations: dict[str, str] = {}
         extensions = {"opensandbox.extensions.pool-ref": "my-pool"}
-        apply_extensions_to_annotations(annotations, extensions)
+        apply_extensions_to_mapping(annotations, extensions)
         assert annotations == {"opensandbox.io/extensions.pool-ref": "my-pool"}
 
     def test_multiple_extensions_propagated(self):
@@ -113,7 +114,7 @@ class TestExtensionsToAnnotations:
             "opensandbox.extensions.pool-ref": "my-pool",
             "opensandbox.extensions.custom-key": "custom-value",
         }
-        apply_extensions_to_annotations(annotations, extensions)
+        apply_extensions_to_mapping(annotations, extensions)
         assert annotations == {
             "opensandbox.io/extensions.pool-ref": "my-pool",
             "opensandbox.io/extensions.custom-key": "custom-value",
@@ -125,7 +126,7 @@ class TestExtensionsToAnnotations:
             "poolRef": "my-pool",
             "other.key": "value",
         }
-        apply_extensions_to_annotations(annotations, extensions)
+        apply_extensions_to_mapping(annotations, extensions)
         assert annotations == {}
 
     def test_mixed_extensions_propagated_only_prefix_keys(self):
@@ -135,24 +136,49 @@ class TestExtensionsToAnnotations:
             "poolRef": "ignored",
             "access.renew.extend.seconds": "1800",
         }
-        apply_extensions_to_annotations(annotations, extensions)
+        apply_extensions_to_mapping(annotations, extensions)
         assert annotations == {"opensandbox.io/extensions.pool-ref": "my-pool"}
 
     def test_empty_extensions_noop(self):
         annotations: dict[str, str] = {"existing": "value"}
-        apply_extensions_to_annotations(annotations, None)
+        apply_extensions_to_mapping(annotations, None)
         assert annotations == {"existing": "value"}
 
     def test_empty_extensions_dict_noop(self):
         annotations: dict[str, str] = {"existing": "value"}
-        apply_extensions_to_annotations(annotations, {})
+        apply_extensions_to_mapping(annotations, {})
         assert annotations == {"existing": "value"}
 
     def test_preserves_existing_annotations(self):
         annotations: dict[str, str] = {"existing": "value"}
         extensions = {"opensandbox.extensions.new-key": "new-value"}
-        apply_extensions_to_annotations(annotations, extensions)
+        apply_extensions_to_mapping(annotations, extensions)
         assert annotations == {
             "existing": "value",
             "opensandbox.io/extensions.new-key": "new-value",
         }
+
+
+class TestExtensionsFromAnnotations:
+    def test_restores_prefixed_annotations(self):
+        annotations = {
+            "opensandbox.io/extensions.custom-key": "custom-value",
+            "opensandbox.io/extensions.localized": "中文数据",
+        }
+
+        assert extract_extensions_from_mapping(annotations) == {
+            "opensandbox.extensions.custom-key": "custom-value",
+            "opensandbox.extensions.localized": "中文数据",
+        }
+
+    def test_ignores_non_extension_annotations(self):
+        annotations = {
+            "opensandbox.io/access-renew-extend-seconds": "1800",
+            "other": "value",
+        }
+
+        assert extract_extensions_from_mapping(annotations) is None
+
+    def test_empty_annotations_return_none(self):
+        assert extract_extensions_from_mapping({}) is None
+        assert extract_extensions_from_mapping(None) is None

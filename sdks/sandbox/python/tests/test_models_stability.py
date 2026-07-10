@@ -25,6 +25,7 @@ from opensandbox.api.lifecycle.models.create_sandbox_response import (
 from opensandbox.api.lifecycle.models.image_spec import ImageSpec as ApiImageSpec
 from opensandbox.api.lifecycle.models.sandbox import Sandbox as ApiSandbox
 from opensandbox.api.lifecycle.types import UNSET
+from opensandbox.models import CredentialSubstitution
 from opensandbox.models.execd import (
     Execution,
     ExecutionError,
@@ -54,6 +55,16 @@ from opensandbox.models.sandboxes import (
 def test_sandbox_image_spec_supports_positional_image() -> None:
     spec = SandboxImageSpec("python:3.11")
     assert spec.image == "python:3.11"
+
+
+def test_models_package_exports_credential_substitution() -> None:
+    substitution = CredentialSubstitution(
+        credential="client-secret",
+        placeholder="__client_secret__",
+        in_=["body", "query"],
+    )
+
+    assert substitution.model_dump(by_alias=True)["in"] == ["body", "query"]
 
 
 def test_sandbox_image_spec_rejects_blank_image() -> None:
@@ -428,3 +439,43 @@ def test_execution_text_strips_trailing_newlines() -> None:
     )
     assert ex.text == "1\n2"
     assert str(ex) == "1\n2"
+
+
+def test_isolated_binds_serialize_to_wire_format() -> None:
+    """binds and uid_mode serialize to the execd wire format."""
+    from opensandbox.models import (
+        BindMount,
+        CreateIsolatedSessionRequest,
+        IsolatedWorkspaceSpec,
+    )
+
+    req = CreateIsolatedSessionRequest(
+        workspace=IsolatedWorkspaceSpec(path="/workspace", mode="rw"),
+        binds=[
+            BindMount(source="/data/in", dest="/mnt/in", readonly=True),
+            BindMount(source="/data/out"),
+        ],
+        uid_mode="userns",
+    )
+    body = req.model_dump(exclude_none=True)
+
+    assert body["uid_mode"] == "userns"
+    assert body["binds"] == [
+        {"source": "/data/in", "dest": "/mnt/in", "readonly": True},
+        {"source": "/data/out"},
+    ]
+
+
+def test_isolated_binds_omitted_when_unset() -> None:
+    """binds and uid_mode are omitted when unset (backward compatible)."""
+    from opensandbox.models import (
+        CreateIsolatedSessionRequest,
+        IsolatedWorkspaceSpec,
+    )
+
+    req = CreateIsolatedSessionRequest(
+        workspace=IsolatedWorkspaceSpec(path="/workspace"),
+    )
+    body = req.model_dump(exclude_none=True)
+    assert "binds" not in body
+    assert "uid_mode" not in body

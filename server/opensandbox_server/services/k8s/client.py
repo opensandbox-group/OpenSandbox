@@ -32,6 +32,12 @@ from opensandbox_server.services.k8s.rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
 
+OPENSANDBOX_API_GROUP = "sandbox.opensandbox.io"
+OPENSANDBOX_API_VERSION = "v1alpha1"
+POOL_KIND = "Pool"
+POOL_PLURAL = "pools"
+POOL_AUTO_ASSIGN_REF = "*"
+
 _InformerKey = Tuple[str, str, str, str]  # (group, version, plural, namespace)
 
 
@@ -315,6 +321,60 @@ class K8sClient:
         return self.get_core_v1_api().create_namespaced_persistent_volume_claim(
             namespace=namespace,
             body=body,
+        )
+
+    def list_pvcs(
+        self,
+        namespace: str,
+        label_selector: str = "",
+    ) -> List[Any]:
+        """List PersistentVolumeClaims in a namespace, returning the items list."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        result = self.get_core_v1_api().list_namespaced_persistent_volume_claim(
+            namespace=namespace,
+            label_selector=label_selector,
+        )
+        return list(getattr(result, "items", []) or [])
+
+    def delete_pvc(
+        self,
+        namespace: str,
+        name: str,
+    ) -> None:
+        """Delete a PersistentVolumeClaim by name. 404 is swallowed."""
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        try:
+            self.get_core_v1_api().delete_namespaced_persistent_volume_claim(
+                name=name,
+                namespace=namespace,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                return
+            raise
+
+    def patch_pvc(
+        self,
+        namespace: str,
+        name: str,
+        body: Any,
+    ) -> Any:
+        """Patch a PersistentVolumeClaim using strategic merge semantics.
+
+        The pinned kubernetes-client picks ``application/json-patch+json`` by
+        default (first entry in the generated content-type list) which would
+        reject our merge-shaped body. Force strategic-merge so list fields
+        like ``ownerReferences`` merge by key.
+        """
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        return self.get_core_v1_api().patch_namespaced_persistent_volume_claim(
+            name=name,
+            namespace=namespace,
+            body=body,
+            _content_type="application/strategic-merge-patch+json",
         )
 
     # ------------------------------------------------------------------

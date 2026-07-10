@@ -112,6 +112,8 @@ public class ExecdStack
     /// Gets the metrics service.
     /// </summary>
     public required IExecdMetrics Metrics { get; init; }
+
+    public required IIsolatedSessions Isolation { get; init; }
 }
 
 public class CreateEgressStackOptions

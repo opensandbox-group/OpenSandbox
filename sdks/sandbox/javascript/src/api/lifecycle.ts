@@ -103,19 +103,16 @@ export interface paths {
             };
             responses: {
                 /**
-                 * @description Sandbox created and accepted for provisioning.
+                 * @description Sandbox created and provisioned successfully.
                  *
                  *     The returned sandbox includes:
                  *     - `id`: Unique sandbox identifier
-                 *     - `status.state: "Pending"` (auto-starting provisioning or restore)
-                 *     - `status.reason` and `status.message` indicating initialization stage
+                 *     - `status.state: "Running"` (provisioning completed synchronously)
+                 *     - `status.reason` and `status.message` indicating current state
                  *     - `metadata`, `expiresAt`, `createdAt`: Core sandbox information
                  *
                  *     Note: startup source details and `updatedAt` are not included in the create response.
                  *     Use GET /sandboxes/{sandboxId} to retrieve the complete sandbox information.
-                 *
-                 *     To track provisioning progress, poll GET /sandboxes/{sandboxId}.
-                 *     The sandbox will automatically transition to `Running` state once provisioning or restore completes.
                  */
                 202: {
                     headers: {
@@ -775,6 +772,10 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
+            /** @description Opaque extension data restored from provider-specific storage */
+            extensions?: {
+                [key: string]: string;
+            };
             /**
              * @description Platform constraint echoed from request or workload template.
              *     Null when no scheduling constraint is provided.
@@ -873,6 +874,10 @@ export interface components {
             status: components["schemas"]["SandboxStatus"];
             /** @description Custom metadata from creation request */
             metadata?: {
+                [key: string]: string;
+            };
+            /** @description Opaque extension data restored from provider-specific storage */
+            extensions?: {
                 [key: string]: string;
             };
             /**
@@ -1054,12 +1059,21 @@ export interface components {
              */
             timeout?: number | null;
             /**
-             * @description Runtime resource constraints for the sandbox instance.
+             * @description Runtime resource constraints (hard caps) for the sandbox instance.
              *     Required when `extensions.poolRef` is not set.
              *     Optional when using pool mode (resource limits are defined by the Pool CRD template).
              *     SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
              */
             resourceLimits?: components["schemas"]["ResourceLimits"];
+            /**
+             * @description Resource reservations (guaranteed minimums) for the sandbox instance.
+             *     When provided, these values are used as Kubernetes resource `requests`,
+             *     enabling Burstable QoS class (where `requests < limits`).
+             *     When omitted, `resourceLimits` values are used for both limits and requests,
+             *     resulting in Guaranteed QoS class.
+             *     Only meaningful for Kubernetes-based runtimes; ignored by Docker runtime.
+             */
+            resourceRequests?: components["schemas"]["ResourceLimits"];
             /**
              * @description Environment variables to inject into the sandbox runtime.
              * @example {
@@ -1236,14 +1250,18 @@ export interface components {
         };
         /**
          * @description Credential Vault proxy startup settings. This is an explicit opt-in for
-         *     transparent MITM support used by credential injection; plain egress
-         *     network policy remains DNS/FQDN policy enforcement only.
+         *     transparent MITM support used by credential injection. Credential Vault
+         *     requires `dns+nft` enforcement and a network policy. A deny-default policy
+         *     is strongly recommended; default-allow remains temporarily supported for
+         *     backward compatibility and emits a security warning.
          */
         CredentialProxyConfig: {
             /**
              * @description When true, the server starts the egress sidecar with transparent
              *     MITM enabled and installs the runtime-managed MITM CA bundle into
-             *     the sandbox container. Requires `networkPolicy`.
+             *     the sandbox container. Requires `networkPolicy` and server
+             *     `[egress].mode = "dns+nft"`. `defaultAction: deny` is strongly
+             *     recommended; default-allow support is deprecated.
              * @default false
              */
             enabled: boolean;
@@ -1333,9 +1351,9 @@ export interface components {
             /**
              * @description When true, the volume is automatically removed when the sandbox
              *     is deleted. Only applies to volumes that were auto-created by the
-             *     server (Docker only). Pre-existing volumes are never removed.
-             *     Has no effect on Kubernetes PVCs, whose lifecycle is managed by
-             *     the StorageClass reclaim policy.
+             *     server on this request; pre-existing volumes are never removed.
+             *     For Kubernetes, the resulting PVC delete triggers the bound PV's
+             *     StorageClass reclaim policy (`Retain`/`Delete`).
              * @default false
              */
             deleteOnSandboxTermination: boolean;

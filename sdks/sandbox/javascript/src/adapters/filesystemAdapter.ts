@@ -520,11 +520,13 @@ export class FilesystemAdapter implements SandboxFiles {
 
   async readBytes(
     path: string,
-    opts?: { range?: string }
+    opts?: { range?: string; offset?: number; limit?: number }
   ): Promise<Uint8Array> {
-    const url =
+    let url =
       joinUrl(this.opts.baseUrl, "/files/download") +
       `?path=${encodeURIComponent(path)}`;
+    if (opts?.offset != null) url += `&offset=${opts.offset}`;
+    if (opts?.limit != null) url += `&limit=${opts.limit}`;
     const res = await this.fetch(url, {
       method: "GET",
       headers: {
@@ -552,18 +554,20 @@ export class FilesystemAdapter implements SandboxFiles {
 
   readBytesStream(
     path: string,
-    opts?: { range?: string }
+    opts?: { range?: string; offset?: number; limit?: number }
   ): AsyncIterable<Uint8Array> {
     return this.downloadStream(path, opts);
   }
 
   private async *downloadStream(
     path: string,
-    opts?: { range?: string }
+    opts?: { range?: string; offset?: number; limit?: number }
   ): AsyncIterable<Uint8Array> {
-    const url =
+    let url =
       joinUrl(this.opts.baseUrl, "/files/download") +
       `?path=${encodeURIComponent(path)}`;
+    if (opts?.offset != null) url += `&offset=${opts.offset}`;
+    if (opts?.limit != null) url += `&limit=${opts.limit}`;
     const res = await this.fetch(url, {
       method: "GET",
       headers: {
@@ -598,9 +602,9 @@ export class FilesystemAdapter implements SandboxFiles {
 
   async readFile(
     path: string,
-    opts?: { encoding?: string; range?: string }
+    opts?: { encoding?: string; range?: string; offset?: number; limit?: number }
   ): Promise<string> {
-    const bytes = await this.readBytes(path, { range: opts?.range });
+    const bytes = await this.readBytes(path, { range: opts?.range, offset: opts?.offset, limit: opts?.limit });
     const encoding = opts?.encoding ?? "utf-8";
     return new TextDecoder(encoding).decode(bytes);
   }

@@ -645,7 +645,8 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 		{
 			name: "tasks, succeed=1; releasedPod=1",
 			fields: fields{
-				Client: fake.NewClientBuilder().WithScheme(testscheme).WithObjects(fakeBatchSandbox).WithStatusSubresource(fakeBatchSandbox).Build(),
+				Client:   fake.NewClientBuilder().WithScheme(testscheme).WithObjects(fakeBatchSandbox).WithStatusSubresource(fakeBatchSandbox).Build(),
+				Recorder: record.NewFakeRecorder(10),
 			},
 			args: args{
 				tSch: func() taskscheduler.TaskScheduler {

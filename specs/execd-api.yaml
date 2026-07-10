@@ -18,7 +18,7 @@ info:
 
   contact:
     name: OpenSandbox Team
-    url: https://github.com/alibaba/OpenSandbox
+    url: https://github.com/opensandbox-group/OpenSandbox
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0.html
@@ -43,6 +43,8 @@ tags:
     description: File and directory operations
   - name: Metric
     description: System resource monitoring and metrics
+  - name: IsolatedExecution
+    description: Per-session namespace isolation, code execution, and filesystem proxy
 
 paths:
   /ping:
@@ -841,6 +843,10 @@ paths:
         Downloads a file from the specified path within the sandbox. Supports HTTP
         range requests for resumable downloads and partial content retrieval.
         Returns file as octet-stream with appropriate headers.
+
+        When offset/limit query parameters are provided, the endpoint performs
+        line-based reading and returns text/plain content instead. Line-based
+        parameters are mutually exclusive with the Range header.
       operationId: downloadFile
       tags:
         - Filesystem
@@ -852,30 +858,56 @@ paths:
           schema:
             type: string
           example: /workspace/data.csv
+        - name: offset
+          in: query
+          required: false
+          description: >
+            Starting line number (1-based) for line-based reading.
+            Mutually exclusive with the Range header.
+          schema:
+            type: integer
+            minimum: 1
+          example: 100
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Number of lines to return for line-based reading.
+            Mutually exclusive with the Range header.
+          schema:
+            type: integer
+            minimum: 1
+          example: 20
         - name: Range
           in: header
           required: false
-          description: HTTP Range header for partial content requests
+          description: HTTP Range header for partial content requests. Mutually exclusive with offset/limit.
           schema:
             type: string
           example: "bytes=0-1023"
       responses:
         "200":
-          description: File content
+          description: |
+            File content. Returns application/octet-stream for full or byte-range
+            downloads, or text/plain for line-based reads (when offset/limit are provided).
           content:
             application/octet-stream:
               schema:
                 type: string
                 format: binary
+            text/plain:
+              schema:
+                type: string
+                description: Line-based content returned when offset/limit parameters are used
           headers:
             Content-Disposition:
               schema:
                 type: string
-              description: Attachment header with filename
+              description: Attachment header with filename (byte-range mode only)
             Content-Length:
               schema:
                 type: integer
-              description: File size in bytes
+              description: File size in bytes (byte-range mode only)
         "206":
           description: Partial file content (when Range header is provided)
           content:
@@ -1079,6 +1111,562 @@ paths:
                 $ref: "#/components/schemas/Metrics"
         "500":
           $ref: "#/components/responses/InternalServerError"
+
+  /v1/isolated/session:
+    post:
+      summary: Create an isolated bash session
+      operationId: createIsolatedSession
+      tags:
+        - IsolatedExecution
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIsolatedSessionRequest"
+      responses:
+        "201":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IsolatedCreateSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/sessions:
+    get:
+      summary: List isolated sessions
+      operationId: listIsolatedSessions
+      tags:
+        - IsolatedExecution
+      responses:
+        "200":
+          description: List of active isolated sessions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListIsolatedSessionsResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/capabilities:
+    get:
+      summary: Get isolator capabilities
+      operationId: isolatedCapabilities
+      tags:
+        - IsolatedExecution
+      responses:
+        "200":
+          description: Isolator capabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesResponse"
+
+  /v1/isolated/session/{sessionId}:
+    get:
+      summary: Get isolated session state
+      operationId: getIsolatedSession
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      summary: Delete an isolated session
+      operationId: deleteIsolatedSession
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/run:
+    post:
+      summary: Run code in an isolated session (SSE streaming)
+      operationId: runInIsolatedSession
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IsolatedRunRequest"
+      responses:
+        "200":
+          description: SSE stream of execution output
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ServerStreamEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/diff:
+    get:
+      summary: Download upper directory diff (stub)
+      operationId: isolatedSessionDiff
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/commit:
+    post:
+      summary: Commit upper changes to workspace (stub)
+      operationId: isolatedSessionCommit
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/info:
+    get:
+      summary: Get file information
+      operationId: isolatedGetFilesInfo
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: File path(s) to get info for (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: File metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/FileInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/download:
+    get:
+      summary: Download a file
+      operationId: isolatedDownloadFile
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: offset
+          in: query
+          required: false
+          description: Starting line number (1-based) for line-based reading. Mutually exclusive with Range header.
+          schema:
+            type: integer
+            minimum: 1
+        - name: limit
+          in: query
+          required: false
+          description: Number of lines to return for line-based reading. Mutually exclusive with Range header.
+          schema:
+            type: integer
+            minimum: 1
+        - name: Range
+          in: header
+          required: false
+          description: HTTP Range header for partial content requests. Mutually exclusive with offset/limit.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            text/plain:
+              schema:
+                type: string
+                description: Line-based content returned when offset/limit parameters are used
+        "206":
+          description: Partial file content (when Range header is provided)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/upload:
+    post:
+      summary: Upload a file
+      operationId: isolatedUploadFile
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                metadata:
+                  type: string
+                  description: JSON-encoded file metadata
+                file:
+                  type: string
+                  format: binary
+                  description: File to upload
+      responses:
+        "200":
+          description: File uploaded
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files:
+    delete:
+      summary: Remove files
+      operationId: isolatedRemoveFiles
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: File path(s) to delete (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: Files removed
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/mv:
+    post:
+      summary: Rename or move files
+      operationId: isolatedRenameFiles
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/RenameFileItem"
+      responses:
+        "200":
+          description: Files renamed
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/permissions:
+    post:
+      summary: Change file permissions
+      operationId: isolatedChmodFiles
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/Permission"
+      responses:
+        "200":
+          description: Permissions changed
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/replace:
+    post:
+      summary: Replace file content
+      operationId: isolatedReplaceContent
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: verbose
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When true, return per-file replacement counts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/ReplaceFileContentItem"
+      responses:
+        "200":
+          description: Content replaced
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/ReplaceFileContentResult"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/search:
+    get:
+      summary: Search files
+      operationId: isolatedSearchFiles
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: Root directory path to search in
+          schema:
+            type: string
+        - name: pattern
+          in: query
+          required: false
+          description: Glob pattern to match files (default is **)
+          schema:
+            type: string
+            default: "**"
+      responses:
+        "200":
+          description: Matched files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/directories/list:
+    get:
+      summary: List directory contents
+      operationId: isolatedListDirectory
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: Directory path to list
+          schema:
+            type: string
+        - name: depth
+          in: query
+          required: false
+          description: Maximum depth to traverse (default 1)
+          schema:
+            type: integer
+            minimum: 0
+            default: 1
+      responses:
+        "200":
+          description: Directory entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/directories:
+    post:
+      summary: Create directories
+      operationId: isolatedMakeDirs
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/Permission"
+      responses:
+        "200":
+          description: Directories created
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      summary: Remove directories
+      operationId: isolatedRemoveDirs
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: Directory path(s) to delete (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: Directories removed
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
 components:
   securitySchemes:
@@ -1488,7 +2076,193 @@ components:
           example: "error parsing request, MAYBE invalid body format"
       required: [code, message]
 
+    CreateIsolatedSessionRequest:
+      type: object
+      required:
+        - workspace
+      properties:
+        profile:
+          type: string
+          enum: ["strict", "balanced"]
+        workspace:
+          $ref: "#/components/schemas/IsolatedWorkspaceSpec"
+        extra_writable:
+          type: array
+          items:
+            type: string
+        binds:
+          type: array
+          description: >-
+            Additional host paths bind-mounted into the namespace with an
+            explicit source-to-destination mapping. Unlike extra_writable
+            (which mounts source==destination read-write), each entry may map
+            a distinct destination path and be mounted read-only. The source
+            path of every entry must fall within the configured writable
+            allowlist.
+          items:
+            $ref: "#/components/schemas/BindMount"
+        share_net:
+          type: boolean
+        env_passthrough:
+          $ref: "#/components/schemas/EnvPassthroughSpec"
+        uid:
+          type: integer
+          format: uint32
+        gid:
+          type: integer
+          format: uint32
+        uid_mode:
+          type: string
+          enum: ["setpriv", "userns"]
+          description: >-
+            Controls how user identity is established inside the namespace.
+            "setpriv" (default) uses real setuid via setpriv(1).
+            "userns" creates a user namespace via --unshare-user --disable-userns.
+        idle_timeout_seconds:
+          type: integer
+
+    IsolatedWorkspaceSpec:
+      type: object
+      required:
+        - path
+      properties:
+        path:
+          type: string
+        mode:
+          type: string
+          enum: ["rw", "overlay", "ro"]
+
+    BindMount:
+      type: object
+      required:
+        - source
+      properties:
+        source:
+          type: string
+          description: Host path to bind-mount into the namespace.
+        dest:
+          type: string
+          description: >-
+            Mount destination inside the namespace. Defaults to source when
+            omitted.
+        readonly:
+          type: boolean
+          default: false
+          description: >-
+            When true the mount is read-only (--ro-bind); otherwise it is
+            read-write (--bind).
+
+    EnvPassthroughSpec:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: ["allow", "deny"]
+        keys:
+          type: array
+          items:
+            type: string
+
+    IsolatedCreateSessionResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    IsolatedRunRequest:
+      type: object
+      required:
+        - code
+      properties:
+        code:
+          type: string
+        envs:
+          type: object
+          additionalProperties:
+            type: string
+        timeout_seconds:
+          type: integer
+          minimum: 0
+
+    SessionState:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["active", "dead", "destroyed"]
+        created_at:
+          type: string
+          format: date-time
+        last_run_at:
+          type: string
+          format: date-time
+        idle_remaining_seconds:
+          type: integer
+          nullable: true
+
+    IsolatedSessionSummary:
+      type: object
+      required:
+        - session_id
+        - status
+        - created_at
+        - last_run_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: ["active", "dead", "destroyed"]
+        created_at:
+          type: string
+          format: date-time
+        last_run_at:
+          type: string
+          format: date-time
+        idle_remaining_seconds:
+          type: integer
+          nullable: true
+
+    ListIsolatedSessionsResponse:
+      type: object
+      required:
+        - sessions
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/IsolatedSessionSummary"
+
+    CapabilitiesResponse:
+      type: object
+      properties:
+        available:
+          type: boolean
+        isolator:
+          type: string
+        version:
+          type: string
+        message:
+          type: string
+          description: Diagnostic message when isolation is unavailable
+        commit_supported:
+          type: boolean
+        diff_supported:
+          type: boolean
+
   responses:
+    ServiceUnavailable:
+      description: Isolation subsystem is not available
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
     BadRequest:
       description: Invalid request body format or missing required fields
       content:

@@ -69,6 +69,21 @@ public class ConnectionConfigOptions
     /// Gets or sets whether to use server-proxied endpoint URLs.
     /// </summary>
     public bool? UseServerProxy { get; set; }
+
+    /// <summary>
+    /// Gets or sets the endpoint cache TTL in seconds. Default: 600 (10 minutes).
+    /// </summary>
+    public int? EndpointCacheTtlSeconds { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum number of cached endpoint entries. Default: 1024.
+    /// </summary>
+    public int? EndpointCacheSize { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether to disable endpoint caching entirely.
+    /// </summary>
+    public bool? EndpointCacheDisabled { get; set; }
 }
 
 /// <summary>
@@ -111,6 +126,21 @@ public sealed class ConnectionConfig
     public bool UseServerProxy { get; }
 
     /// <summary>
+    /// Gets the endpoint cache TTL in seconds.
+    /// </summary>
+    public int EndpointCacheTtlSeconds { get; }
+
+    /// <summary>
+    /// Gets the maximum number of cached endpoint entries.
+    /// </summary>
+    public int EndpointCacheSize { get; }
+
+    /// <summary>
+    /// Gets whether endpoint caching is disabled.
+    /// </summary>
+    public bool EndpointCacheDisabled { get; }
+
+    /// <summary>
     /// Gets the user agent string.
     /// </summary>
     public string UserAgent { get; } = Constants.DefaultUserAgent;
@@ -137,6 +167,9 @@ public sealed class ConnectionConfig
         ApiKey = options.ApiKey ?? envApiKey;
         RequestTimeoutSeconds = options.RequestTimeoutSeconds ?? Constants.DefaultRequestTimeoutSeconds;
         UseServerProxy = options.UseServerProxy ?? false;
+        EndpointCacheTtlSeconds = options.EndpointCacheTtlSeconds ?? 600;
+        EndpointCacheSize = options.EndpointCacheSize ?? 1024;
+        EndpointCacheDisabled = options.EndpointCacheDisabled ?? false;
 
         var headers = new Dictionary<string, string>(options.Headers ?? new Dictionary<string, string>());
 

@@ -24,6 +24,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
 import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.Health
+import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.Metrics
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.CommandsAdapter
@@ -31,6 +32,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.Diagnosti
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.EgressAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.FilesystemAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.HealthAdapter
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.IsolatedSessionsAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.MetricsAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.SandboxesAdapter
 
@@ -78,5 +80,9 @@ internal class AdapterFactory(
 
     fun createHealth(endpoint: SandboxEndpoint): Health {
         return HealthAdapter(httpClientProvider, endpoint)
+    }
+
+    fun createIsolatedSessions(endpoint: SandboxEndpoint): IsolationService {
+        return IsolatedSessionsAdapter(httpClientProvider, endpoint)
     }
 }

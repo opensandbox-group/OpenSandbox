@@ -46,7 +46,6 @@ IGNORED_PATHS=(
   "LICENSE"
   "NOTICE"
   "docs/"
-  "scripts/spec-doc/index.html" # Generated doc
 )
 
 is_k8s_mock_go() {

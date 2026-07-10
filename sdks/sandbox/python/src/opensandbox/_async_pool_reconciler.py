@@ -47,7 +47,7 @@ async def run_async_reconcile_tick(
     ttl = config.primary_lock_ttl
 
     if not await state_store.try_acquire_primary_lock(pool_name, owner_id, ttl):
-        logger.debug("Async reconcile skip (not primary): pool_name=%s", pool_name)
+        logger.debug(f"Async reconcile skip (not primary): pool_name={pool_name}")
         return
     await _run_primary_replenish_once(
         config=config,
@@ -116,9 +116,7 @@ async def _run_primary_replenish_once(
             for orphaned_id in created_ids[index:]:
                 await _discard(on_discard_sandbox, orphaned_id)
             logger.warning(
-                "Async reconcile lost primary lock before put_idle; dropped %s newly created sandbox(es): pool_name=%s",
-                len(created_ids) - index,
-                pool_name,
+                f"Async reconcile lost primary lock before put_idle; dropped {len(created_ids) - index} newly created sandbox(es): pool_name={pool_name}"
             )
             return
         try:
@@ -134,14 +132,13 @@ async def _run_primary_replenish_once(
                     pass
                 await _discard(on_discard_sandbox, orphaned_id)
             logger.warning(
-                "Async reconcile put_idle failed; dropped %s newly created sandbox(es): pool_name=%s error=%s",
-                len(created_ids) - index,
-                pool_name,
-                exc,
+                f"Async reconcile put_idle failed; dropped {len(created_ids) - index} newly created sandbox(es): pool_name={pool_name} error={exc}"
             )
             return
     if created > 0:
-        logger.debug("Async reconcile created %s sandboxes: pool_name=%s", created, pool_name)
+        logger.debug(
+            f"Async reconcile created {created} sandboxes: pool_name={pool_name}"
+        )
 
 
 async def _shrink_excess_idle(
@@ -157,9 +154,7 @@ async def _shrink_excess_idle(
     for _ in range(to_remove):
         if not await state_store.renew_primary_lock(pool_name, owner_id, ttl):
             logger.warning(
-                "Async reconcile lost primary lock before shrinking idle: pool_name=%s removed=%s",
-                pool_name,
-                removed,
+                f"Async reconcile lost primary lock before shrinking idle: pool_name={pool_name} removed={removed}"
             )
             return
         sandbox_id = await state_store.try_take_idle(pool_name)
@@ -169,7 +164,9 @@ async def _shrink_excess_idle(
         removed += 1
 
     await state_store.renew_primary_lock(pool_name, owner_id, ttl)
-    logger.debug("Async reconcile shrunk %s idle sandbox(es): pool_name=%s", removed, pool_name)
+    logger.debug(
+        f"Async reconcile shrunk {removed} idle sandbox(es): pool_name={pool_name}"
+    )
 
 
 async def _discard(
@@ -179,7 +176,5 @@ async def _discard(
         await on_discard_sandbox(sandbox_id)
     except Exception as exc:
         logger.warning(
-            "Async reconcile sandbox cleanup failed: sandbox_id=%s error=%s",
-            sandbox_id,
-            exc,
+            f"Async reconcile sandbox cleanup failed: sandbox_id={sandbox_id} error={exc}"
         )

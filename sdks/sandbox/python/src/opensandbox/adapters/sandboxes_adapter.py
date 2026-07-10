@@ -79,6 +79,17 @@ class SandboxesAdapter(Sandboxes):
             connection_config: Connection configuration (shared transport, headers, timeouts)
         """
         self.connection_config = connection_config
+
+        from opensandbox.adapters.endpoint_cache import AsyncEndpointCache
+
+        if not connection_config.endpoint_cache_disabled:
+            self._endpoint_cache: AsyncEndpointCache | None = AsyncEndpointCache(
+                maxsize=connection_config.endpoint_cache_size or 1024,
+                ttl=connection_config.endpoint_cache_ttl.total_seconds(),
+            )
+        else:
+            self._endpoint_cache = None
+
         from opensandbox.api.lifecycle import AuthenticatedClient
 
         api_key = self.connection_config.get_api_key()
@@ -129,11 +140,11 @@ class SandboxesAdapter(Sandboxes):
         secure_access: bool = False,
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
+        resource_requests: dict[str, str] | None = None,
     ) -> SandboxCreateResponse:
         """Create a new sandbox instance with the specified configuration."""
         logger.info(
-            "Creating sandbox with startup source: %s",
-            spec.image if spec is not None else snapshot_id,
+            f"Creating sandbox with startup source: {spec.image if spec is not None else snapshot_id}"
         )
 
         try:
@@ -153,6 +164,7 @@ class SandboxesAdapter(Sandboxes):
                 volumes=volumes,
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
+                resource_requests=resource_requests,
             )
 
             client = await self._get_client()
@@ -164,16 +176,17 @@ class SandboxesAdapter(Sandboxes):
             handle_api_error(response_obj, "Create sandbox")
 
             from opensandbox.api.lifecycle.models import CreateSandboxResponse
-            parsed = require_parsed(response_obj, CreateSandboxResponse, "Create sandbox")
+
+            parsed = require_parsed(
+                response_obj, CreateSandboxResponse, "Create sandbox"
+            )
             response = SandboxModelConverter.to_sandbox_create_response(parsed)
             logger.info(f"Successfully created sandbox: {response.id}")
             return response
 
         except Exception as e:
-            logger.error(
-                "Failed to create sandbox with startup source: %s",
-                spec.image if spec is not None else snapshot_id,
-                exc_info=e,
+            logger.warning(
+                f"Failed to create sandbox with startup source {spec.image if spec is not None else snapshot_id}: {e}"
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -193,11 +206,12 @@ class SandboxesAdapter(Sandboxes):
             handle_api_error(response_obj, f"Get sandbox {sandbox_id}")
 
             from opensandbox.api.lifecycle.models import Sandbox
+
             parsed = require_parsed(response_obj, Sandbox, f"Get sandbox {sandbox_id}")
             return SandboxModelConverter.to_sandbox_info(parsed)
 
         except Exception as e:
-            logger.error(f"Failed to get sandbox info: {sandbox_id}", exc_info=e)
+            logger.warning(f"Failed to get sandbox info {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def list_sandboxes(self, filter: SandboxFilter) -> PagedSandboxInfos:
@@ -207,7 +221,6 @@ class SandboxesAdapter(Sandboxes):
         # Prepare metadata parameter similar to Kotlin SDK
         metadata = UNSET
         if filter.metadata:
-
             metadata_parts: list[str] = []
             for key, value in filter.metadata.items():
                 metadata_parts.append(f"{key}={value}")
@@ -223,17 +236,22 @@ class SandboxesAdapter(Sandboxes):
                 state=filter.states if filter.states else API_UNSET,
                 metadata=metadata,
                 page=filter.page if filter.page is not None else API_UNSET,
-                page_size=filter.page_size if filter.page_size is not None else API_UNSET,
+                page_size=filter.page_size
+                if filter.page_size is not None
+                else API_UNSET,
             )
 
             handle_api_error(response_obj, "List sandboxes")
 
             from opensandbox.api.lifecycle.models import ListSandboxesResponse
-            parsed = require_parsed(response_obj, ListSandboxesResponse, "List sandboxes")
+
+            parsed = require_parsed(
+                response_obj, ListSandboxesResponse, "List sandboxes"
+            )
             return SandboxModelConverter.to_paged_sandbox_infos(parsed)
 
         except Exception as e:
-            logger.error("Failed to list sandboxes", exc_info=e)
+            logger.warning(f"Failed to list sandboxes: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def patch_sandbox_metadata(
@@ -262,7 +280,7 @@ class SandboxesAdapter(Sandboxes):
             )
             return SandboxModelConverter.to_sandbox_info(parsed)
         except Exception as e:
-            logger.error("Failed to patch sandbox %s metadata", sandbox_id, exc_info=e)
+            logger.warning(f"Failed to patch sandbox {sandbox_id} metadata: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def create_snapshot(
@@ -285,7 +303,9 @@ class SandboxesAdapter(Sandboxes):
             parsed = require_parsed(response_obj, Snapshot, "Create snapshot")
             return SandboxModelConverter.to_snapshot_info(parsed)
         except Exception as e:
-            logger.error("Failed to create snapshot for sandbox %s", sandbox_id, exc_info=e)
+            logger.debug(
+                f"Failed to create snapshot for sandbox {sandbox_id}", exc_info=e
+            )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_snapshot(self, snapshot_id: str) -> SnapshotInfo:
@@ -301,10 +321,12 @@ class SandboxesAdapter(Sandboxes):
                 snapshot_id=snapshot_id,
             )
             handle_api_error(response_obj, f"Get snapshot {snapshot_id}")
-            parsed = require_parsed(response_obj, Snapshot, f"Get snapshot {snapshot_id}")
+            parsed = require_parsed(
+                response_obj, Snapshot, f"Get snapshot {snapshot_id}"
+            )
             return SandboxModelConverter.to_snapshot_info(parsed)
         except Exception as e:
-            logger.error("Failed to get snapshot info: %s", snapshot_id, exc_info=e)
+            logger.warning(f"Failed to get snapshot info {snapshot_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def list_snapshots(self, filter: SnapshotFilter) -> PagedSnapshotInfos:
@@ -316,16 +338,22 @@ class SandboxesAdapter(Sandboxes):
             client = await self._get_client()
             response_obj = await get_snapshots.asyncio_detailed(
                 client=client,
-                sandbox_id=filter.sandbox_id if filter.sandbox_id is not None else API_UNSET,
+                sandbox_id=filter.sandbox_id
+                if filter.sandbox_id is not None
+                else API_UNSET,
                 state=filter.states if filter.states else API_UNSET,
                 page=filter.page if filter.page is not None else API_UNSET,
-                page_size=filter.page_size if filter.page_size is not None else API_UNSET,
+                page_size=filter.page_size
+                if filter.page_size is not None
+                else API_UNSET,
             )
             handle_api_error(response_obj, "List snapshots")
-            parsed = require_parsed(response_obj, ListSnapshotsResponse, "List snapshots")
+            parsed = require_parsed(
+                response_obj, ListSnapshotsResponse, "List snapshots"
+            )
             return SandboxModelConverter.to_paged_snapshot_infos(parsed)
         except Exception as e:
-            logger.error("Failed to list snapshots", exc_info=e)
+            logger.warning(f"Failed to list snapshots: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
@@ -341,13 +369,27 @@ class SandboxesAdapter(Sandboxes):
             )
             handle_api_error(response_obj, f"Delete snapshot {snapshot_id}")
         except Exception as e:
-            logger.error("Failed to delete snapshot: %s", snapshot_id, exc_info=e)
+            logger.warning(f"Failed to delete snapshot {snapshot_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_sandbox_endpoint(
         self, sandbox_id: str, port: int, use_server_proxy: bool = False
     ) -> SandboxEndpoint:
         """Get network endpoint information for a sandbox service."""
+        if self._endpoint_cache is not None:
+            key = (sandbox_id, port, use_server_proxy)
+            return await self._endpoint_cache.get_or_fetch(
+                key,
+                lambda: self._fetch_sandbox_endpoint(
+                    sandbox_id, port, use_server_proxy
+                ),
+            )
+        return await self._fetch_sandbox_endpoint(sandbox_id, port, use_server_proxy)
+
+    async def _fetch_sandbox_endpoint(
+        self, sandbox_id: str, port: int, use_server_proxy: bool = False
+    ) -> SandboxEndpoint:
+        """Fetch endpoint from server (no cache)."""
         logger.debug(f"Retrieving sandbox endpoint: {sandbox_id}, port {port}")
 
         try:
@@ -370,18 +412,26 @@ class SandboxesAdapter(Sandboxes):
             )
 
             from opensandbox.api.lifecycle.models import Endpoint
+
             parsed = require_parsed(response_obj, Endpoint, "Get endpoint")
             return SandboxModelConverter.to_sandbox_endpoint(parsed)
 
         except Exception as e:
-            logger.error(
-                f"Failed to retrieve sandbox endpoint for sandbox {sandbox_id}",
-                exc_info=e,
+            logger.warning(
+                f"Failed to retrieve sandbox endpoint for sandbox {sandbox_id}: {e}"
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
+    def invalidate_endpoint_cache(self, sandbox_id: str) -> None:
+        """Remove all cached endpoints for a sandbox."""
+        if self._endpoint_cache is not None:
+            self._endpoint_cache.invalidate(sandbox_id)
+
     async def get_signed_sandbox_endpoint(
-        self, sandbox_id: str, port: int, expires: int,
+        self,
+        sandbox_id: str,
+        port: int,
+        expires: int,
         use_server_proxy: bool = False,
     ) -> SandboxEndpoint:
         """Get signed sandbox endpoint with an OSEP-0011 route token."""
@@ -404,17 +454,18 @@ class SandboxesAdapter(Sandboxes):
             )
 
             handle_api_error(
-                response_obj, f"Get signed endpoint for sandbox {sandbox_id} port {port}"
+                response_obj,
+                f"Get signed endpoint for sandbox {sandbox_id} port {port}",
             )
 
             from opensandbox.api.lifecycle.models import Endpoint
+
             parsed = require_parsed(response_obj, Endpoint, "Get signed endpoint")
             return SandboxModelConverter.to_sandbox_endpoint(parsed)
 
         except Exception as e:
-            logger.error(
-                f"Failed to retrieve signed sandbox endpoint for sandbox {sandbox_id}",
-                exc_info=e,
+            logger.warning(
+                f"Failed to retrieve signed sandbox endpoint for sandbox {sandbox_id}: {e}"
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -438,7 +489,7 @@ class SandboxesAdapter(Sandboxes):
             logger.info(f"Initiated pause for sandbox: {sandbox_id}")
 
         except Exception as e:
-            logger.error(f"Failed to initiate pause sandbox: {sandbox_id}", exc_info=e)
+            logger.warning(f"Failed to initiate pause sandbox {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def resume_sandbox(self, sandbox_id: str) -> None:
@@ -461,7 +512,7 @@ class SandboxesAdapter(Sandboxes):
             logger.info(f"Initiated resume for sandbox: {sandbox_id}")
 
         except Exception as e:
-            logger.error(f"Failed initiate resume sandbox: {sandbox_id}", exc_info=e)
+            logger.warning(f"Failed to resume sandbox {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def renew_sandbox_expiration(
@@ -500,14 +551,12 @@ class SandboxesAdapter(Sandboxes):
             )
             renew_response = SandboxModelConverter.to_sandbox_renew_response(parsed)
             logger.info(
-                "Successfully renewed sandbox %s expiration to %s",
-                sandbox_id,
-                renew_response.expires_at,
+                f"Successfully renewed sandbox {sandbox_id} expiration to {renew_response.expires_at}"
             )
             return renew_response
 
         except Exception as e:
-            logger.error(f"Failed to renew sandbox {sandbox_id} expiration", exc_info=e)
+            logger.warning(f"Failed to renew sandbox {sandbox_id} expiration: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def kill_sandbox(self, sandbox_id: str) -> None:
@@ -530,5 +579,5 @@ class SandboxesAdapter(Sandboxes):
             logger.info(f"Successfully terminated sandbox: {sandbox_id}")
 
         except Exception as e:
-            logger.error(f"Failed to terminate sandbox: {sandbox_id}", exc_info=e)
+            logger.warning(f"Failed to terminate sandbox {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e

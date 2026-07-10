@@ -56,7 +56,6 @@ IGNORES=(
   "NOTICE"
   "README.md"
   "README_zh.md"
-  "scripts/spec-doc/index.html"
 )
 
 has_license() {

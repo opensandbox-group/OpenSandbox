@@ -13,6 +13,7 @@ from opensandbox._pool_reconciler import ReconcileState
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import (
     PoolAcquireFailedException,
+    PoolDestroyedException,
     PoolEmptyException,
     PoolNotRunningException,
 )
@@ -22,6 +23,8 @@ from opensandbox.pool import (
     AsyncPoolConfig,
     InMemoryAsyncPoolStateStore,
     PoolCreationSpec,
+    PooledSandboxCreateContext,
+    PooledSandboxCreateReason,
     SandboxPoolAsync,
 )
 
@@ -65,7 +68,9 @@ async def test_async_reconcile_batch_failures_only_advance_backoff_once() -> Non
 
     assert state.failure_count == 10
     assert state.is_backoff_active(datetime.now(timezone.utc) + timedelta(seconds=29))
-    assert not state.is_backoff_active(datetime.now(timezone.utc) + timedelta(seconds=31))
+    assert not state.is_backoff_active(
+        datetime.now(timezone.utc) + timedelta(seconds=31)
+    )
 
 
 @pytest.mark.asyncio
@@ -97,6 +102,108 @@ async def test_async_acquire_direct_create_when_empty() -> None:
         fake_sandbox = cast(FakeAsyncSandbox, sandbox)
         assert sandbox.id == "created-1"
         assert fake_sandbox.renewed == [timedelta(minutes=5)]
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_acquire_does_not_direct_create_when_pool_namespace_is_destroying() -> None:
+    FakeAsyncSandbox.reset()
+    store = InMemoryAsyncPoolStateStore()
+    pool = _create_pool(max_idle=0, store=store)
+    await pool.start()
+
+    try:
+        await store.begin_destroy("pool", "destroyer")
+
+        with pytest.raises(PoolDestroyedException):
+            await pool.acquire()
+        assert FakeAsyncSandbox.created_count == 0
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_acquire_idle_destroy_race_raises_pool_destroyed() -> None:
+    store = InMemoryAsyncPoolStateStore()
+    await store.put_idle("pool", "id-1")
+    connected: list[FakeAsyncSandbox] = []
+
+    class FencingAsyncSandbox(FakeAsyncSandbox):
+        @classmethod
+        async def connect(
+            cls, sandbox_id: str, *args: Any, **kwargs: Any
+        ) -> FakeAsyncSandbox:
+            sandbox = cls(sandbox_id)
+            connected.append(sandbox)
+            await store.begin_destroy("pool", "destroyer")
+            return sandbox
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),
+        sandbox_factory=FencingAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        with pytest.raises(PoolDestroyedException):
+            await pool.acquire(policy=AcquirePolicy.DIRECT_CREATE)
+        assert connected[0].killed
+        assert connected[0].closed
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_acquire_stopped_destroyed_pool_raises_pool_destroyed() -> None:
+    store = InMemoryAsyncPoolStateStore()
+    pool = _create_pool(max_idle=0, store=store)
+    await pool.start()
+    await store.begin_destroy("pool", "destroyer")
+    await pool.shutdown(False)
+
+    with pytest.raises(PoolDestroyedException):
+        await pool.acquire()
+
+
+@pytest.mark.asyncio
+async def test_async_acquire_destroy_race_preserves_pool_destroyed_when_cleanup_fails() -> None:
+    store = InMemoryAsyncPoolStateStore()
+    await store.put_idle("pool", "id-1")
+
+    class CleanupFailingAsyncSandbox(FakeAsyncSandbox):
+        @classmethod
+        async def connect(
+            cls, sandbox_id: str, *args: Any, **kwargs: Any
+        ) -> FakeAsyncSandbox:
+            await store.begin_destroy("pool", "destroyer")
+            return cls(sandbox_id)
+
+        async def kill(self) -> None:
+            raise RuntimeError("kill failed")
+
+        async def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),
+        sandbox_factory=CleanupFailingAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        with pytest.raises(PoolDestroyedException):
+            await pool.acquire(policy=AcquirePolicy.DIRECT_CREATE)
     finally:
         await pool.shutdown(False)
 
@@ -151,6 +258,50 @@ async def test_async_acquire_direct_create_kills_and_closes_when_renew_fails() -
 
 
 @pytest.mark.asyncio
+async def test_async_acquire_direct_create_uses_sandbox_creator() -> None:
+    contexts: list[PooledSandboxCreateContext] = []
+
+    async def creator(context: PooledSandboxCreateContext) -> FakeAsyncSandbox:
+        contexts.append(context)
+        return FakeAsyncSandbox("created-by-hook")
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        idle_timeout=timedelta(minutes=10),
+        sandbox_creator=creator,
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),
+        sandbox_factory=FakeAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        sandbox = await pool.acquire(sandbox_timeout=timedelta(minutes=5))
+        fake_sandbox = cast(FakeAsyncSandbox, sandbox)
+
+        assert sandbox.id == "created-by-hook"
+        assert fake_sandbox.renewed == [timedelta(minutes=5)]
+        assert len(contexts) == 1
+        assert contexts[0].pool_name == "pool"
+        assert contexts[0].owner_id == "owner-1"
+        assert contexts[0].idle_timeout == timedelta(minutes=10)
+        assert contexts[0].reason is PooledSandboxCreateReason.DIRECT_CREATE
+        assert contexts[0].ready_timeout == pool._config.acquire_ready_timeout
+        assert (
+            contexts[0].health_check_polling_interval
+            == pool._config.acquire_health_check_polling_interval
+        )
+        assert contexts[0].skip_health_check is False
+        assert contexts[0].health_check is None
+        assert isinstance(contexts[0].connection_config, ConnectionConfig)
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
 async def test_async_acquire_when_stopped_raises_pool_not_running() -> None:
     pool = _create_pool(max_idle=0)
 
@@ -192,7 +343,9 @@ async def test_async_start_overwrites_shared_max_idle_with_user_config() -> None
 
 
 @pytest.mark.asyncio
-async def test_async_resize_only_updates_target_without_immediate_reconcile_trigger() -> None:
+async def test_async_resize_only_updates_target_without_immediate_reconcile_trigger() -> (
+    None
+):
     pool = SandboxPoolAsync(
         pool_name="pool",
         owner_id="owner-1",
@@ -407,7 +560,9 @@ class FakeAsyncSandbox:
         return sandbox
 
     @classmethod
-    async def connect(cls, sandbox_id: str, *args: Any, **kwargs: Any) -> FakeAsyncSandbox:
+    async def connect(
+        cls, sandbox_id: str, *args: Any, **kwargs: Any
+    ) -> FakeAsyncSandbox:
         if sandbox_id.startswith("stale"):
             raise RuntimeError("stale sandbox")
         return cls(sandbox_id)

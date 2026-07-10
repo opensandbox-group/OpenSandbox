@@ -106,6 +106,17 @@ def sync_detailed(
     value to include descendants up to that many levels below `path`. The
     root directory itself is not included in the response.
 
+    Symbolic links are reported with `type=symlink` and are not traversed:
+    the listing never descends into a link target, even when `depth` would
+    otherwise allow it. For the same reason, when `path` itself resolves to
+    a symbolic link the request is rejected with `400`; callers must pass
+    the real directory path they want listed.
+
+    Entries are returned in lexical order by entry name within each
+    directory. Descendants reported via `depth>1` follow their parent in
+    the same lexical order, so a depth-2 listing yields stable, predictable
+    output for file-browser style clients.
+
     Args:
         path (str):
         depth (int | Unset):  Default: 1.
@@ -143,6 +154,17 @@ def sync(
     value to include descendants up to that many levels below `path`. The
     root directory itself is not included in the response.
 
+    Symbolic links are reported with `type=symlink` and are not traversed:
+    the listing never descends into a link target, even when `depth` would
+    otherwise allow it. For the same reason, when `path` itself resolves to
+    a symbolic link the request is rejected with `400`; callers must pass
+    the real directory path they want listed.
+
+    Entries are returned in lexical order by entry name within each
+    directory. Descendants reported via `depth>1` follow their parent in
+    the same lexical order, so a depth-2 listing yields stable, predictable
+    output for file-browser style clients.
+
     Args:
         path (str):
         depth (int | Unset):  Default: 1.
@@ -174,6 +196,17 @@ async def asyncio_detailed(
     only immediate children are returned (`depth=1`). Set `depth` to a larger
     value to include descendants up to that many levels below `path`. The
     root directory itself is not included in the response.
+
+    Symbolic links are reported with `type=symlink` and are not traversed:
+    the listing never descends into a link target, even when `depth` would
+    otherwise allow it. For the same reason, when `path` itself resolves to
+    a symbolic link the request is rejected with `400`; callers must pass
+    the real directory path they want listed.
+
+    Entries are returned in lexical order by entry name within each
+    directory. Descendants reported via `depth>1` follow their parent in
+    the same lexical order, so a depth-2 listing yields stable, predictable
+    output for file-browser style clients.
 
     Args:
         path (str):
@@ -209,6 +242,17 @@ async def asyncio(
     only immediate children are returned (`depth=1`). Set `depth` to a larger
     value to include descendants up to that many levels below `path`. The
     root directory itself is not included in the response.
+
+    Symbolic links are reported with `type=symlink` and are not traversed:
+    the listing never descends into a link target, even when `depth` would
+    otherwise allow it. For the same reason, when `path` itself resolves to
+    a symbolic link the request is rejected with `400`; callers must pass
+    the real directory path they want listed.
+
+    Entries are returned in lexical order by entry name within each
+    directory. Descendants reported via `depth>1` follow their parent in
+    the same lexical order, so a depth-2 listing yields stable, predictable
+    output for file-browser style clients.
 
     Args:
         path (str):

@@ -51,9 +51,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://open-sandbox.ai"
-Repository = "https://github.com/alibaba/OpenSandbox"
+Repository = "https://github.com/opensandbox-group/OpenSandbox"
 Documentation = "https://open-sandbox.ai"
-Issues = "https://github.com/alibaba/OpenSandbox/issues"
+Issues = "https://github.com/opensandbox-group/OpenSandbox/issues"
 
 [project.scripts]
 opensandbox = "opensandbox_cli.main:cli"

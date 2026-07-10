@@ -53,6 +53,8 @@ class WorkloadProvider(ABC):
         egress_auth_token: Optional[str] = None,
         egress_mode: str = EGRESS_MODE_DNS,
         credential_proxy_enabled: bool = False,
+        resource_requests: Optional[Dict[str, str]] = None,
+        egress_env: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
         """
         Create a new workload resource.
@@ -64,6 +66,7 @@ class WorkloadProvider(ABC):
             entrypoint: Container entrypoint command
             env: Environment variables
             resource_limits: Resource limits (cpu, memory)
+            resource_requests: Resource requests (guaranteed minimums). When omitted, limits are used.
             labels: Labels to apply to the workload
             expires_at: Expiration time, or None for manual cleanup (no TTL)
             execd_image: execd daemon image

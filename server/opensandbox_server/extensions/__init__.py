@@ -18,13 +18,16 @@ CreateSandbox ``extensions`` shared logic: well-known keys, HTTP validation, wor
 
 from opensandbox_server.extensions.codec import (
     apply_access_renew_extend_seconds_to_mapping,
-    apply_extensions_to_annotations,
+    apply_extensions_to_mapping,
+    extract_extensions_from_mapping,
 )
 from opensandbox_server.extensions.keys import (
     ACCESS_RENEW_EXTEND_SECONDS_KEY,
     ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
+    BOOTSTRAP_EXECD_ISOLATION_KEY,
     EXTENSIONS_ANNOTATION_PREFIX,
     ANNOTATION_METADATA_PREFIX,
+    ISOLATION_UPPER_MOUNT_PATH,
 )
 from opensandbox_server.extensions.validation import (
     ACCESS_RENEW_EXTEND_SECONDS_MAX,
@@ -39,7 +42,10 @@ __all__ = [
     "ACCESS_RENEW_EXTEND_SECONDS_MAX",
     "validate_extensions",
     "apply_access_renew_extend_seconds_to_mapping",
-    "apply_extensions_to_annotations",
+    "apply_extensions_to_mapping",
+    "extract_extensions_from_mapping",
     "EXTENSIONS_ANNOTATION_PREFIX",
     "ANNOTATION_METADATA_PREFIX",
+    "BOOTSTRAP_EXECD_ISOLATION_KEY",
+    "ISOLATION_UPPER_MOUNT_PATH",
 ]

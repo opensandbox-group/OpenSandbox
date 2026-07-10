@@ -55,6 +55,7 @@ from opensandbox.services import (
     Egress,
     Filesystem,
     Health,
+    IsolationService,
     Metrics,
     Sandboxes,
 )
@@ -123,6 +124,7 @@ class Sandbox:
         egress_service: Egress,
         connection_config: ConnectionConfig,
         diagnostics_service: Diagnostics | None = None,
+        isolated_service: IsolationService | None = None,
         custom_health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
     ) -> None:
         """
@@ -136,10 +138,19 @@ class Sandbox:
         self._metrics_service = metrics_service
         self._egress_service = egress_service
         self._connection_config = connection_config
-        self._diagnostics_service = diagnostics_service or AdapterFactory(
-            connection_config
-        ).create_diagnostics_service()
+        self._diagnostics_service = (
+            diagnostics_service
+            or AdapterFactory(connection_config).create_diagnostics_service()
+        )
         self._custom_health_check = custom_health_check
+        self._isolated_service = isolated_service
+
+    @property
+    def isolation(self) -> IsolationService:
+        """Provides access to namespace-isolated session operations (OSEP-0013)."""
+        if self._isolated_service is None:
+            raise SandboxInternalException("isolated service not initialized")
+        return self._isolated_service
 
     @property
     def files(self) -> Filesystem:
@@ -284,7 +295,9 @@ class Sandbox:
         logger.info(
             f"Renewing sandbox {self.id} timeout, estimated expiration: {new_expiration}"
         )
-        return await self._sandbox_service.renew_sandbox_expiration(self.id, new_expiration)
+        return await self._sandbox_service.renew_sandbox_expiration(
+            self.id, new_expiration
+        )
 
     async def patch_metadata(self, patch: dict[str, str | None]) -> SandboxInfo:
         """
@@ -341,8 +354,8 @@ class Sandbox:
             SandboxException: if pause operation fails
         """
         logger.info(f"Pausing sandbox: {self.id}")
+        self._sandbox_service.invalidate_endpoint_cache(self.id)
         await self._sandbox_service.pause_sandbox(self.id)
-
 
     async def kill(self) -> None:
         """
@@ -357,6 +370,7 @@ class Sandbox:
             SandboxException: if termination fails
         """
         logger.info(f"Killing sandbox: {self.id}")
+        self._sandbox_service.invalidate_endpoint_cache(self.id)
         await self._sandbox_service.kill_sandbox(self.id)
 
     async def close(self) -> None:
@@ -376,8 +390,7 @@ class Sandbox:
             logger.debug(f"Closed resources for sandbox {self.id}")
         except Exception as e:
             logger.warning(
-                f"Error closing resources for sandbox {self.id}: {e}",
-                exc_info=True
+                f"Error closing resources for sandbox {self.id}: {e}", exc_info=True
             )
 
     async def is_healthy(self) -> bool:
@@ -486,6 +499,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
         resource: dict[str, str] | None = None,
+        resource_requests: dict[str, str] | None = None,
         platform: PlatformSpec | None = None,
         network_policy: NetworkPolicy | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
@@ -543,11 +557,11 @@ class Sandbox:
             image = SandboxImageSpec(image=image)
 
         startup_source = image.image if image is not None else snapshot_id
-        timeout_log = "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
+        timeout_log = (
+            "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
+        )
         logger.info(
-            "Creating sandbox with startup source: %s (timeout: %s)",
-            startup_source,
-            timeout_log,
+            f"Creating sandbox with startup source: {startup_source} (timeout: {timeout_log})"
         )
         factory = AdapterFactory(config)
         sandbox_id: str | None = None
@@ -569,6 +583,7 @@ class Sandbox:
                 platform=platform,
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
+                resource_requests=resource_requests,
             )
             sandbox_id = response.id
 
@@ -588,17 +603,19 @@ class Sandbox:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
 
             if not skip_health_check:
                 await sandbox.check_ready(ready_timeout, health_check_polling_interval)
-                logger.info("Sandbox %s is ready", sandbox.id)
+                logger.info(f"Sandbox {sandbox.id} is ready")
             else:
                 logger.info(
-                    "Sandbox %s created (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox.id,
+                    f"Sandbox {sandbox.id} created (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
             return sandbox
@@ -606,14 +623,12 @@ class Sandbox:
             if sandbox_id and sandbox_service:
                 try:
                     logger.warning(
-                        "Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: %s",
-                        sandbox_id,
+                        f"Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {sandbox_id}"
                     )
                     await sandbox_service.kill_sandbox(sandbox_id)
                 except Exception as cleanup_ex:
                     logger.error(
-                        "Failed to clean up sandbox %s after creation failure",
-                        sandbox_id,
+                        f"Failed to clean up sandbox {sandbox_id} after creation failure",
                         exc_info=cleanup_ex,
                     )
 
@@ -685,19 +700,23 @@ class Sandbox:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
 
             if not skip_health_check:
-                await sandbox.check_ready(connect_timeout, health_check_polling_interval)
+                await sandbox.check_ready(
+                    connect_timeout, health_check_polling_interval
+                )
             else:
                 logger.info(
-                    "Connected to sandbox %s (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox_id,
+                    f"Connected to sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
-            logger.info("Connected to sandbox %s", sandbox_id)
+            logger.info(f"Connected to sandbox {sandbox_id}")
             return sandbox
         except Exception as e:
             await config.close_transport_if_owned()
@@ -708,13 +727,13 @@ class Sandbox:
 
     @classmethod
     async def resume(
-            cls,
-            sandbox_id: str,
-            connection_config: ConnectionConfig | None = None,
-            health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
-            resume_timeout: timedelta = timedelta(seconds=30),
-            health_check_polling_interval: timedelta = timedelta(milliseconds=200),
-            skip_health_check: bool = False,
+        cls,
+        sandbox_id: str,
+        connection_config: ConnectionConfig | None = None,
+        health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
+        resume_timeout: timedelta = timedelta(seconds=30),
+        health_check_polling_interval: timedelta = timedelta(milliseconds=200),
+        skip_health_check: bool = False,
     ) -> "Sandbox":
         """
         Resume a paused sandbox by ID and return a new, usable Sandbox instance.
@@ -738,7 +757,7 @@ class Sandbox:
 
         config = (connection_config or ConnectionConfig()).with_transport_if_missing()
 
-        logger.info("Resuming sandbox: %s", sandbox_id)
+        logger.info(f"Resuming sandbox: {sandbox_id}")
         factory = AdapterFactory(config)
 
         try:
@@ -761,6 +780,9 @@ class Sandbox:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
@@ -769,8 +791,7 @@ class Sandbox:
                 await sandbox.check_ready(resume_timeout, health_check_polling_interval)
             else:
                 logger.info(
-                    "Resumed sandbox %s (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox_id,
+                    f"Resumed sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
             return sandbox

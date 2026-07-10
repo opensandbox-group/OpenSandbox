@@ -72,6 +72,17 @@ type ConnectionConfig struct {
 	// resolvable from the host machine.
 	// Example: map[string]string{"host.docker.internal": "localhost"}
 	EndpointHostRewrite map[string]string
+
+	// EndpointCacheTTL is how long a cached endpoint stays valid.
+	// Zero means DefaultEndpointCacheTTL (600s).
+	EndpointCacheTTL time.Duration
+
+	// EndpointCacheSize is the maximum number of cached endpoints.
+	// Zero means DefaultEndpointCacheSize (1024).
+	EndpointCacheSize int
+
+	// EndpointCacheDisabled disables endpoint caching entirely.
+	EndpointCacheDisabled bool
 }
 
 // RewriteEndpointURL applies EndpointHostRewrite rules to an endpoint URL
@@ -174,7 +185,11 @@ func (c *ConnectionConfig) clientOpts(includeAuthHeader bool) []Option {
 // Appends the API version prefix (/v1) to the base URL, as required by
 // NewLifecycleClient and the OpenSandbox lifecycle API spec.
 func (c *ConnectionConfig) lifecycleClient() *LifecycleClient {
-	return NewLifecycleClient(c.GetBaseURL()+"/"+APIVersion, c.GetAPIKey(), c.clientOpts(true)...)
+	var cache *EndpointCache
+	if !c.EndpointCacheDisabled {
+		cache = NewEndpointCache(c.EndpointCacheSize, c.EndpointCacheTTL)
+	}
+	return NewLifecycleClientWithCache(c.GetBaseURL()+"/"+APIVersion, c.GetAPIKey(), cache, c.clientOpts(true)...)
 }
 
 // execdClient creates an ExecdClient for a resolved endpoint. All headers

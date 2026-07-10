@@ -34,6 +34,8 @@ import kotlin.math.ceil
  * @property stateStore Injected [PoolStateStore] implementation (required).
  * @property connectionConfig Connection config for lifecycle API (required).
  * @property creationSpec Template for creating sandboxes (replenish and direct-create) (required).
+ * @property sandboxCreator Optional custom creator for pool-created sandboxes. When absent, the pool uses
+ * [creationSpec] and the standard sandbox lifecycle API.
  * @property reconcileInterval Interval between reconcile ticks (default: 30s).
  * @property degradedThreshold Consecutive create failures required to transition to DEGRADED (default: 3).
  * @property acquireReadyTimeout Max time to wait for a sandbox returned by acquire to become ready (default: 30s).
@@ -68,6 +70,7 @@ class PoolConfig private constructor(
     val stateStore: PoolStateStore,
     val connectionConfig: ConnectionConfig,
     val creationSpec: PoolCreationSpec,
+    val sandboxCreator: PooledSandboxCreator?,
     val reconcileInterval: Duration,
     val degradedThreshold: Int,
     val acquireReadyTimeout: Duration,
@@ -151,6 +154,7 @@ class PoolConfig private constructor(
             stateStore = stateStore,
             connectionConfig = connectionConfig,
             creationSpec = creationSpec,
+            sandboxCreator = sandboxCreator,
             reconcileInterval = reconcileInterval,
             degradedThreshold = degradedThreshold,
             acquireReadyTimeout = acquireReadyTimeout,
@@ -177,6 +181,7 @@ class PoolConfig private constructor(
         private var stateStore: PoolStateStore? = null
         private var connectionConfig: ConnectionConfig? = null
         private var creationSpec: PoolCreationSpec? = null
+        private var sandboxCreator: PooledSandboxCreator? = null
         private var reconcileInterval: Duration = DEFAULT_RECONCILE_INTERVAL
         private var degradedThreshold: Int = DEFAULT_DEGRADED_THRESHOLD
         private var acquireReadyTimeout: Duration = DEFAULT_ACQUIRE_READY_TIMEOUT
@@ -229,6 +234,11 @@ class PoolConfig private constructor(
 
         fun creationSpec(creationSpec: PoolCreationSpec): Builder {
             this.creationSpec = creationSpec
+            return this
+        }
+
+        fun sandboxCreator(sandboxCreator: PooledSandboxCreator): Builder {
+            this.sandboxCreator = sandboxCreator
             return this
         }
 
@@ -337,6 +347,7 @@ class PoolConfig private constructor(
                 stateStore = store,
                 connectionConfig = conn,
                 creationSpec = spec,
+                sandboxCreator = sandboxCreator,
                 reconcileInterval = reconcileInterval,
                 degradedThreshold = degradedThreshold,
                 acquireReadyTimeout = acquireReadyTimeout,

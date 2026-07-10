@@ -13,8 +13,43 @@
 # limitations under the License.
 
 from opensandbox_server.services.k8s.workload_mapper import (
+    _build_sandbox_from_workload,
     _extract_platform_from_workload,
 )
+
+
+class _WorkloadProvider:
+    @staticmethod
+    def get_expiration(_workload):
+        return None
+
+    @staticmethod
+    def get_status(_workload):
+        return {
+            "state": "Running",
+            "reason": "",
+            "message": "Running",
+            "last_transition_at": None,
+        }
+
+
+class TestBuildSandboxFromWorkload:
+    def test_restores_extensions_from_annotations(self):
+        workload = {
+            "metadata": {
+                "labels": {"opensandbox.io/id": "sandbox-1"},
+                "annotations": {
+                    "opensandbox.io/extensions.custom-label": "中文数据",
+                    "opensandbox.io/access-renew-extend-seconds": "1800",
+                },
+                "creationTimestamp": "2026-06-22T00:00:00Z",
+            },
+            "spec": {"template": {"spec": {"containers": [{"image": "python:3.11", "command": ["python"]}]}}},
+        }
+
+        sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+
+        assert sandbox.extensions == {"opensandbox.extensions.custom-label": "中文数据"}
 
 
 class TestExtractPlatformFromWorkload:

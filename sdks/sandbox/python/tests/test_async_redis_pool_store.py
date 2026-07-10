@@ -9,8 +9,12 @@ from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 from test_redis_pool_store import _FakeRedis
 
-from opensandbox.exceptions import PoolStateStoreUnavailableException
+from opensandbox.exceptions import (
+    PoolDestroyedException,
+    PoolStateStoreUnavailableException,
+)
 from opensandbox.pool_redis import AsyncRedisPoolStateStore
+from opensandbox.pool_types import PoolDestroyState
 
 
 @pytest.fixture()
@@ -150,6 +154,37 @@ async def test_async_redis_store_max_idle_is_shared(
 
 
 @pytest.mark.asyncio
+async def test_async_redis_store_destroy_fences_writes_and_preserves_tombstone(
+    async_redis_store: tuple[AsyncRedisPoolStateStore, Any, str],
+) -> None:
+    store, _, _ = async_redis_store
+    await store.put_idle("pool", "id-1")
+    assert await store.try_acquire_primary_lock("pool", "owner-1", timedelta(seconds=60))
+
+    await store.begin_destroy("pool", "destroyer")
+
+    assert await store.get_destroy_state("pool") == PoolDestroyState.DESTROYING
+    assert not await store.try_acquire_primary_lock(
+        "pool", "owner-1", timedelta(seconds=60)
+    )
+    assert not await store.renew_primary_lock("pool", "owner-1", timedelta(seconds=60))
+    with pytest.raises(PoolDestroyedException):
+        await store.put_idle("pool", "id-2")
+    with pytest.raises(PoolDestroyedException):
+        await store.set_max_idle("pool", 2)
+
+    await store.clear_pool_state("pool")
+    assert (await store.snapshot_counters("pool")).idle_count == 0
+    assert await store.get_destroy_state("pool") == PoolDestroyState.DESTROYING
+
+    await store.mark_destroyed("pool", "destroyer", timedelta(seconds=60))
+    assert await store.get_destroy_state("pool") == PoolDestroyState.DESTROYED
+    with pytest.raises(PoolDestroyedException):
+        await store.begin_destroy("pool", "destroyer-2")
+    assert await store.get_destroy_state("pool") == PoolDestroyState.DESTROYED
+
+
+@pytest.mark.asyncio
 async def test_async_redis_store_wraps_client_failures() -> None:
     store = AsyncRedisPoolStateStore(_BrokenAsyncRedis())
 
@@ -197,6 +232,9 @@ class _BrokenAsyncRedis(AsyncRedis):
     async def hgetall(self, key: str) -> dict[str, str]:
         raise RuntimeError("redis unavailable")
 
+    async def delete(self, *keys: str) -> int:
+        raise RuntimeError("redis unavailable")
+
 
 class _FakeSyncRedis(Redis):
     def __init__(self) -> None:
@@ -237,3 +275,6 @@ class _FakeAsyncRedis(AsyncRedis):
 
     async def hgetall(self, key: str) -> dict[str, str]:
         return self._sync.hgetall(key)
+
+    async def delete(self, *keys: str) -> int:
+        return self._sync.delete(*keys)

@@ -1,0 +1,70 @@
+# Isolation configuration for execd.
+#
+# Usage:
+#   execd --isolation-config /etc/execd/isolation.toml
+#   EXECD_ISOLATION_CONFIG=/etc/execd/isolation.toml execd
+#
+# All fields are optional. Missing fields use the defaults shown below.
+# If no config file is specified, all built-in defaults are used.
+
+# Parent directory for per-session overlay upper directories.
+upper_root = "/var/lib/execd/isolation"
+
+# Hard limit on total upper directory size across all sessions (bytes).
+upper_max_bytes = 8589934592  # 8 GiB
+
+# Maximum tar.gz diff output size (bytes). Phase 2.
+diff_max_bytes = 4294967296  # 4 GiB
+
+# Host paths callers may request via extra_writable or binds. Sources are
+# enforced against the fully symlink-resolved real path; subpaths are allowed.
+# NOTE: this key REPLACES the built-in default (no merge), so setting it here
+# overrides the defaults below. Empty ([]) rejects all extra_writable/binds.
+# Built-in default: ["/workspace", "/mnt", "/media", "/data"].
+allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
+
+# Seccomp is ALWAYS ACTIVE by default — the built-in denylist blocks ~30
+# dangerous syscalls (mount, ptrace, bpf, etc.) even without this section.
+#
+# Only add [seccomp] if you need to REPLACE the built-in denylist with a
+# custom one. When present, deny COMPLETELY REPLACES the built-in list —
+# no merging. Syscalls not present on the current architecture are silently
+# skipped.
+#
+# Built-in default denylist for reference:
+#
+# [seccomp]
+# deny = [
+#   # Filesystem manipulation
+#   "mount", "umount2", "chroot", "pivot_root",
+#
+#   # Process introspection / manipulation
+#   "ptrace", "process_vm_readv", "process_vm_writev", "kcmp",
+#
+#   # Kernel module loading
+#   "init_module", "finit_module", "delete_module",
+#
+#   # BPF / seccomp manipulation
+#   "bpf", "seccomp",
+#
+#   # Execution domain
+#   "personality",
+#
+#   # Kernel key management
+#   "add_key", "request_key", "keyctl",
+#
+#   # I/O privilege
+#   "iopl", "ioperm",
+#
+#   # System state
+#   "reboot", "syslog", "swapon", "swapoff",
+#
+#   # Namespace manipulation
+#   "setns", "unshare",
+#
+#   # Handle-based operations
+#   "name_to_handle_at", "open_by_handle_at",
+#
+#   # Other potentially dangerous
+#   "userfaultfd", "kexec_load", "kexec_file_load", "acct",
+# ]

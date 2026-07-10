@@ -1,0 +1,68 @@
+# ⚠️  DEMO VALUES — NOT FOR PRODUCTION
+# This file uses insecure, well-known demo credentials so the local
+# port-forward walkthrough works out of the box:
+#   - configToml [server].api_key = "aks-kata-demo-key"
+#   - server.gateway.secureAccess.keys[0].key (a fixed base64 signing key)
+# Replace BOTH with unique secret values (e.g. a random api_key and
+# `openssl rand -base64 32` for the signing key) before exposing the server or
+# ingress gateway to anything other than 127.0.0.1.
+server:
+  replicaCount: 1
+  gateway:
+    enabled: true
+    host: "127.0.0.1:28080"
+    gatewayRouteMode: "header"
+    dataplaneNamespace: "opensandbox"
+    providerType: "batchsandbox"
+    secureAccess:
+      activeKey: "a"
+      keys:
+        - key_id: "a"
+          key: "b3BlbnNhbmRib3gtYWtzLWthdGEtc2VjdXJlLWFjY2Vzcy1rZXk="
+  volumeMounts:
+    - name: aks-kata-template
+      mountPath: /etc/opensandbox/aks-kata.batchsandbox-template.yaml
+      subPath: batchsandbox-template.yaml
+      readOnly: true
+  volumes:
+    - name: aks-kata-template
+      configMap:
+        name: aks-kata-batchsandbox-template
+
+configToml: |
+  [server]
+  host = "0.0.0.0"
+  port = 80
+  api_key = "aks-kata-demo-key"
+  max_sandbox_timeout_seconds = 86400
+
+  [log]
+  level = "INFO"
+
+  [runtime]
+  type = "kubernetes"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20"
+
+  [storage]
+  allowed_host_paths = []
+  volume_default_size = "1Gi"
+
+  [kubernetes]
+  kubeconfig_path = ""
+  namespace = "opensandbox"
+  informer_enabled = true
+  informer_resync_seconds = 300
+  informer_watch_timeout_seconds = 60
+  snapshot_create_timeout_seconds = 900
+  workload_provider = "batchsandbox"
+  image_pull_policy = "IfNotPresent"
+  batchsandbox_template_file = "/etc/opensandbox/aks-kata.batchsandbox-template.yaml"
+
+  [egress]
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3"
+  mode = "dns+nft"
+  disable_ipv6 = true
+
+  [secure_runtime]
+  type = "kata"
+  k8s_runtime_class = "kata-vm-isolation"

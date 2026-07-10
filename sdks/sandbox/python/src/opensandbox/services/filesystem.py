@@ -49,6 +49,8 @@ class Filesystem(Protocol):
         *,
         encoding: str = "utf-8",
         range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> str:
         """
         Read the content of a file as a string with specified encoding.
@@ -56,7 +58,12 @@ class Filesystem(Protocol):
         Args:
             path: The absolute or relative path to the file to read
             encoding: Character encoding for the file content (default: UTF-8)
-            range_header: HTTP byte range to read (e.g., "bytes=0-1023")
+            range_header: HTTP byte range to read (e.g., "bytes=0-1023").
+                Mutually exclusive with offset/limit.
+            offset: Starting line number (1-based) for line-based reading.
+                Mutually exclusive with range_header.
+            limit: Number of lines to return for line-based reading.
+                Mutually exclusive with range_header.
 
         Returns:
             The file content as a string
@@ -71,13 +78,20 @@ class Filesystem(Protocol):
         path: str,
         *,
         range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> bytes:
         """
         Read the content of a file as bytes.
 
         Args:
             path: The absolute or relative path to the file to read
-            range_header: HTTP byte range to read (e.g., "bytes=0-1023")
+            range_header: HTTP byte range to read (e.g., "bytes=0-1023").
+                Mutually exclusive with offset/limit.
+            offset: Starting line number (1-based) for line-based reading.
+                Mutually exclusive with range_header.
+            limit: Number of lines to return for line-based reading.
+                Mutually exclusive with range_header.
 
         Returns:
             The file content as bytes
@@ -93,6 +107,8 @@ class Filesystem(Protocol):
         *,
         chunk_size: int = 64 * 1024,
         range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> AsyncIterator[bytes]:
         """
         Stream file content as bytes chunks (read_* naming).

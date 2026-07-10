@@ -20,6 +20,7 @@ import { CommandsAdapter } from "../adapters/commandsAdapter.js";
 import { EgressAdapter } from "../adapters/egressAdapter.js";
 import { FilesystemAdapter } from "../adapters/filesystemAdapter.js";
 import { HealthAdapter } from "../adapters/healthAdapter.js";
+import { IsolatedSessionsAdapter } from "../adapters/isolatedSessionsAdapter.js";
 import { MetricsAdapter } from "../adapters/metricsAdapter.js";
 import { SandboxesAdapter } from "../adapters/sandboxesAdapter.js";
 
@@ -41,7 +42,11 @@ export class DefaultAdapterFactory implements AdapterFactory {
       headers: opts.connectionConfig.headers,
       fetch: opts.connectionConfig.fetch,
     });
-    const sandboxes = new SandboxesAdapter(lifecycleClient);
+    const sandboxes = new SandboxesAdapter(lifecycleClient, {
+      ttlMs: opts.connectionConfig.endpointCacheTtlMs,
+      maxSize: opts.connectionConfig.endpointCacheSize,
+      disabled: opts.connectionConfig.endpointCacheDisabled,
+    });
     return { sandboxes };
   }
 
@@ -69,11 +74,19 @@ export class DefaultAdapterFactory implements AdapterFactory {
       headers,
     });
 
+    const isolated = new IsolatedSessionsAdapter({
+      baseUrl: opts.execdBaseUrl,
+      fetch: opts.connectionConfig.fetch,
+      sseFetch: opts.connectionConfig.sseFetch,
+      headers,
+    });
+
     return {
       commands,
       files,
       health,
       metrics,
+      isolation: isolated,
     };
   }
 

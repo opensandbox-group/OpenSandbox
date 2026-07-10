@@ -16,6 +16,11 @@ package assign
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
@@ -51,4 +56,31 @@ func (p *imagePredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.Batch
 		}
 	}
 	return false
+}
+
+func (p *imagePredicate) Reason(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) string {
+	sbxImages := collectImages(sbx.Spec.Template)
+	poolImages := collectImages(pool.Spec.Template)
+	if len(poolImages) == 0 {
+		return fmt.Sprintf("pool has no images, sandbox requires %s", formatStringSet(sbxImages))
+	}
+	return fmt.Sprintf("pool images %s do not contain any sandbox images %s", formatStringSet(poolImages), formatStringSet(sbxImages))
+}
+
+func collectImages(template *corev1.PodTemplateSpec) []string {
+	if template == nil {
+		return nil
+	}
+	var images []string
+	for _, c := range template.Spec.Containers {
+		if c.Image != "" {
+			images = append(images, c.Image)
+		}
+	}
+	sort.Strings(images)
+	return images
+}
+
+func formatStringSet(items []string) string {
+	return "[" + strings.Join(items, ", ") + "]"
 }

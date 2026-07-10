@@ -115,7 +115,7 @@ export interface CredentialMatch extends Record<string, unknown> {
    */
   schemes?: CredentialMatchScheme[];
   /**
-   * Destination ports to match. Defaults to 443 in the sidecar.
+   * @deprecated Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected by the server.
    */
   ports?: number[];
   /**
@@ -132,6 +132,23 @@ export interface CredentialMatch extends Record<string, unknown> {
   paths?: string[];
 }
 
+export type CredentialSubstitutionSurface = "path" | "query" | "header" | "body";
+
+export interface CredentialSubstitution extends Record<string, unknown> {
+  /**
+   * Name of the sandbox-local credential used as the replacement value.
+   */
+  credential: string;
+  /**
+   * Literal placeholder to replace.
+   */
+  placeholder: string;
+  /**
+   * Request surfaces where the placeholder may be replaced.
+   */
+  in: CredentialSubstitutionSurface[];
+}
+
 export interface CustomHeaderEntry extends Record<string, unknown> {
   /**
    * Header name to inject.
@@ -143,27 +160,34 @@ export interface CustomHeaderEntry extends Record<string, unknown> {
   credential: string;
 }
 
+interface CredentialAuthSubstitutions {
+  substitutions?: CredentialSubstitution[];
+}
+
 export type CredentialAuth =
-  | {
+  | ({
       type: "bearer";
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "basic";
       /**
        * Credential containing pre-encoded base64(username:password).
        */
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "apiKey";
       name: string;
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "customHeaders";
       headers: CustomHeaderEntry[];
-    };
+    } & CredentialAuthSubstitutions)
+  | ({
+      type: "passthrough";
+    } & CredentialAuthSubstitutions);
 
 export interface CredentialBinding extends Record<string, unknown> {
   /**
@@ -286,7 +310,8 @@ export interface PVC extends Record<string, unknown> {
    */
   createIfNotExists?: boolean;
   /**
-   * When true, delete auto-created volume on sandbox deletion (Docker-only).
+   * When true, the auto-created volume (Docker named volume or Kubernetes PVC)
+   * is removed on sandbox deletion. Pre-existing volumes are never removed.
    */
   deleteOnSandboxTermination?: boolean;
   /**
@@ -408,6 +433,7 @@ export interface SandboxInfo extends Record<string, unknown> {
   platform?: PlatformSpec;
   entrypoint: string[];
   metadata?: Record<string, string>;
+  extensions?: Record<string, string>;
   status: SandboxStatus;
   /**
    * Sandbox creation time.
@@ -433,6 +459,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    */
   timeout?: number | null;
   resourceLimits: ResourceLimits;
+  resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
   /**
@@ -455,6 +482,7 @@ export interface CreateSandboxResponse extends Record<string, unknown> {
   status: SandboxStatus;
   platform?: PlatformSpec;
   metadata?: Record<string, string>;
+  extensions?: Record<string, string>;
   /**
    * Sandbox expiration time after creation.
    */

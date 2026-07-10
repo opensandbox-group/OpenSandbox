@@ -262,6 +262,7 @@ internal object SandboxModelConverter {
         extensions: Map<String, String>,
         volumes: List<Volume>?,
         snapshotId: String?,
+        resourceRequests: Map<String, String>? = null,
     ): CreateSandboxRequest {
         return CreateSandboxRequest(
             image = spec?.toApiImageSpec(),
@@ -271,6 +272,7 @@ internal object SandboxModelConverter {
             env = env,
             metadata = metadata,
             resourceLimits = resource,
+            resourceRequests = resourceRequests,
             platform = platform?.toApiPlatformSpec(),
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
             credentialProxy = credentialProxy?.toApiCredentialProxyConfig(),
@@ -321,6 +323,7 @@ internal object SandboxModelConverter {
             platform = this.platform?.toDomainPlatformSpec(),
             status = this.status.toSandboxStatus(),
             metadata = metadata,
+            extensions = extensions,
         )
     }
 
@@ -370,6 +373,7 @@ internal object SandboxModelConverter {
         return SandboxCreateResponse(
             id = this.id,
             platform = this.platform?.toDomainPlatformSpec(),
+            extensions = this.extensions,
         )
     }
 

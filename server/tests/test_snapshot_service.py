@@ -89,17 +89,17 @@ class StubSnapshotRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 
-    def create_snapshot(self, snapshot_id: str, sandbox_id: str):
+    def create_snapshot(self, snapshot_id: str, sandbox_id: str, *, namespace: str | None = None):
         self.calls.append((snapshot_id, sandbox_id))
         return None
 
     def get_snapshot_status(self, snapshot_id: str):
         return None
 
-    def delete_snapshot(self, snapshot_id: str, image: str | None = None) -> None:
+    def delete_snapshot(self, snapshot_id: str, image: str | None = None, *, namespace: str | None = None) -> None:
         self.delete_calls.append((snapshot_id, image))
 
-    def inspect_snapshot(self, snapshot_id: str, image: str | None = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(self, snapshot_id: str, image: str | None = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
         return self.inspect_status_by_snapshot_id.get(
             snapshot_id,
             SnapshotRuntimeStatus(
@@ -206,7 +206,7 @@ def test_snapshot_service_marks_snapshot_ready_from_worker(tmp_path) -> None:
         message="Docker snapshot image created successfully.",
     )
 
-    def create_snapshot(snapshot_id: str, sandbox_id: str):
+    def create_snapshot(snapshot_id: str, sandbox_id: str, **kwargs):
         runtime.calls.append((snapshot_id, sandbox_id))
         return ready_status
 
@@ -238,7 +238,7 @@ def test_snapshot_service_marks_snapshot_failed_from_worker(tmp_path) -> None:
         message="Docker snapshot creation timed out after 45 seconds.",
     )
 
-    def create_snapshot(snapshot_id: str, sandbox_id: str):
+    def create_snapshot(snapshot_id: str, sandbox_id: str, **kwargs):
         runtime.calls.append((snapshot_id, sandbox_id))
         return failed_status
 
@@ -377,11 +377,11 @@ def test_snapshot_service_deletes_runtime_artifact_before_metadata(tmp_path) -> 
         message="Docker snapshot image created successfully.",
     )
 
-    def create_snapshot(snapshot_id: str, sandbox_id: str):
+    def create_snapshot(snapshot_id: str, sandbox_id: str, **kwargs):
         runtime.calls.append((snapshot_id, sandbox_id))
         return ready_status
 
-    def delete_snapshot(snapshot_id: str, image: str | None = None) -> None:
+    def delete_snapshot(snapshot_id: str, image: str | None = None, **kwargs) -> None:
         stored = repo.get(snapshot_id)
         assert stored is not None
         assert stored.status.state == SnapshotState.DELETING
@@ -413,7 +413,7 @@ def test_snapshot_service_propagates_snapshot_delete_conflict(tmp_path) -> None:
     )
     repo.create(record)
 
-    def delete_snapshot(snapshot_id: str, image: str | None = None) -> None:
+    def delete_snapshot(snapshot_id: str, image: str | None = None, **kwargs) -> None:
         raise HTTPException(
             status_code=409,
             detail={
@@ -489,7 +489,7 @@ def test_snapshot_service_worker_cleans_up_snapshot_deleted_during_creation(tmp_
         message="Docker snapshot image created successfully.",
     )
 
-    def create_snapshot(snapshot_id: str, sandbox_id: str):
+    def create_snapshot(snapshot_id: str, sandbox_id: str, **kwargs):
         runtime.calls.append((snapshot_id, sandbox_id))
         return ready_status
 
@@ -520,7 +520,7 @@ def test_snapshot_service_worker_does_not_overwrite_transitioned_snapshot(tmp_pa
         message="Docker snapshot image created successfully.",
     )
 
-    def create_snapshot(snapshot_id: str, sandbox_id: str):
+    def create_snapshot(snapshot_id: str, sandbox_id: str, **kwargs):
         runtime.calls.append((snapshot_id, sandbox_id))
         return ready_status
 

@@ -2,35 +2,31 @@
   --vp-c-brand-1: #2563eb;
   --vp-c-brand-2: #1d4ed8;
   --vp-c-brand-3: #1e40af;
+  --vp-c-brand-soft: rgba(37, 99, 235, 0.14);
+}
+
+.dark {
+  --vp-c-brand-1: #3b82f6;
+  --vp-c-brand-2: #60a5fa;
+  --vp-c-brand-3: #93bbfd;
+  --vp-c-brand-soft: rgba(59, 130, 246, 0.16);
 }
 
 .VPFeature {
   border: 1px solid var(--vp-c-divider);
   border-radius: 14px;
+  transition: border-color 0.25s, box-shadow 0.25s;
+}
+
+.VPFeature:hover {
+  border-color: var(--vp-c-brand-1);
 }
 
 .vp-doc blockquote {
   border-left: 3px solid var(--vp-c-brand-1);
 }
 
-/* Keep README badge rows inline in VitePress docs pages */
-.vp-doc p[align="center"] {
-  text-align: center;
-}
-
-.vp-doc p[align="center"] a {
-  display: inline-flex;
-  align-items: center;
-  text-decoration: none;
-  margin: 2px 4px;
-}
-
-.vp-doc p[align="center"] a img {
-  display: inline-block;
-  margin: 0;
-  vertical-align: middle;
-}
-
+/* Scenario cards grid */
 .scenario-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -46,12 +42,13 @@
   text-decoration: none;
   color: inherit;
   background: var(--vp-c-bg-soft);
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .vp-doc .scenario-card:hover {
   border-color: var(--vp-c-brand-1);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px var(--vp-c-brand-soft);
   text-decoration: none;
 }
 
@@ -67,4 +64,14 @@
   line-height: 1.5;
   color: var(--vp-c-text-2);
   text-decoration: none;
+}
+
+/* Code group enhancements */
+.vp-code-group .tabs label {
+  font-size: 13px;
+}
+
+/* Footer styling */
+.VPFooter {
+  border-top: 1px solid var(--vp-c-divider);
 }

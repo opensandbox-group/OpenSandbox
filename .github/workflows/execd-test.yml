@@ -116,9 +116,42 @@ jobs:
           chmod +x tests/sigterm_forward.sh
           ./tests/sigterm_forward.sh
 
+      - name: Smoke test bwrap (Docker image build + extraction)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          chmod +x components/execd/tests/smoke_bwrap.sh
+          bash components/execd/tests/smoke_bwrap.sh
+
       - name: Show logs
         if: always()
         run: |
           set -x
           cat components/execd/startup.log || true
           cat components/execd/execd.log || true
+
+  bwrap-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.9'
+
+      - name: Build latest bubblewrap (v0.11.2)
+        run: |
+          sudo apt-get install -y meson ninja-build libcap-dev pkg-config
+          git clone --depth 1 --branch v0.11.2 https://github.com/containers/bubblewrap /tmp/bwrap
+          cd /tmp/bwrap
+          meson setup builddir -Dprefix=/usr -Dman=disabled -Dtests=false
+          ninja -C builddir
+          sudo cp builddir/bwrap /usr/local/bin/bwrap
+          bwrap --version
+
+      - name: Run bwrap integration tests
+        working-directory: components/execd
+        run: sudo -E env "PATH=$PATH" go test -tags="linux,bwrap" -v -count=1 -timeout=5m ./pkg/runtime/bwrap_test/

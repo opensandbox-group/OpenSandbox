@@ -409,12 +409,29 @@ func (e *ExecdClient) newUploadFilesRequest(ctx context.Context, entries []Uploa
 	return req, pr, nil
 }
 
+// DownloadFileOptions configures line-based reading for DownloadFile.
+type DownloadFileOptions struct {
+	// Offset is the starting line number (1-based). Mutually exclusive with Range header.
+	Offset int
+	// Limit is the number of lines to return. Mutually exclusive with Range header.
+	Limit int
+}
+
 // DownloadFile downloads a file from the sandbox. The caller must close the
 // returned io.ReadCloser. Pass rangeHeader (e.g. "bytes=0-1023") for partial
-// content, or empty string for the full file.
-func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, rangeHeader string) (io.ReadCloser, error) {
+// content, or empty string for the full file. Use opts for line-based reading.
+func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, rangeHeader string, opts ...DownloadFileOptions) (io.ReadCloser, error) {
 	params := url.Values{}
 	params.Set("path", remotePath)
+	if len(opts) > 0 {
+		o := opts[0]
+		if o.Offset > 0 {
+			params.Set("offset", strconv.Itoa(o.Offset))
+		}
+		if o.Limit > 0 {
+			params.Set("limit", strconv.Itoa(o.Limit))
+		}
+	}
 	reqPath := "/files/download?" + params.Encode()
 
 	var resp *http.Response

@@ -121,6 +121,34 @@ test("01 sandbox lifecycle, health, endpoint, metrics, renew, connect", async ()
   }
 });
 
+test("01 extensions round-trip", async () => {
+  const connectionConfig = createConnectionConfig();
+  const extSandbox = await Sandbox.create({
+    connectionConfig,
+    image: getSandboxImage(),
+    timeoutSeconds: 2 * 60,
+    readyTimeoutSeconds: 60,
+    metadata: { tag: "e2e-extensions" },
+    extensions: {
+      "opensandbox.extensions.test-key": "test-value",
+      "opensandbox.extensions.second": "second-value",
+    },
+    healthCheckPollingInterval: 200,
+  });
+  try {
+    const info = await extSandbox.getInfo();
+    expect(info.extensions).toBeDefined();
+    expect(info.extensions!["opensandbox.extensions.test-key"]).toBe("test-value");
+    expect(info.extensions!["opensandbox.extensions.second"]).toBe("second-value");
+  } finally {
+    try {
+      await extSandbox.kill();
+    } catch {
+      // ignore teardown errors
+    }
+  }
+});
+
 test("01b manual cleanup sandbox returns null expiresAt", async () => {
   const connectionConfig = createConnectionConfig();
   const manualSandbox = await Sandbox.create({
@@ -985,6 +1013,28 @@ test("03 filesystem operations: CRUD + replace/move/delete + range + stream", as
   }
   expect(verify.error).toBeUndefined();
   expect(verify.logs.stdout[0]?.text).toBe("OK");
+});
+
+test("03a line-based file reading with offset and limit", async () => {
+  if (!sandbox) throw new Error("sandbox not created");
+
+  const testPath = "/tmp/line-read-e2e.txt";
+  const content = "line1\nline2\nline3\nline4\nline5";
+  await sandbox.files.writeFiles([{ path: testPath, data: content }]);
+
+  // offset=2, limit=2 → lines 2-3
+  const result1 = await sandbox.files.readFile(testPath, { offset: 2, limit: 2 });
+  expect(result1).toBe("line2\nline3");
+
+  // offset=4, no limit → lines 4-5
+  const result2 = await sandbox.files.readFile(testPath, { offset: 4 });
+  expect(result2).toBe("line4\nline5");
+
+  // limit=2, no offset → lines 1-2
+  const result3 = await sandbox.files.readFile(testPath, { limit: 2 });
+  expect(result3).toBe("line1\nline2");
+
+  await sandbox.files.deleteFiles([testPath]);
 });
 
 test("04 interrupt command", async () => {

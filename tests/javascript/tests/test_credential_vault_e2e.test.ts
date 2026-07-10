@@ -26,6 +26,9 @@ const SECRET_VALUES: Record<string, string> = {
   "api-key-token": "vault-api-key-token",
   "client-id": "vault-client-id",
   "client-secret": "vault-client-secret",
+  "query-secret": "vault-query-secret",
+  "path-secret": "vault-path-secret",
+  "body-secret": "vault-body-secret",
   "runtime-token": "vault-runtime-token",
   "runtime-token-replaced": "vault-runtime-token-replaced",
 };
@@ -34,7 +37,7 @@ const credentialVaultTest = process.env.OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_
 
 credentialVaultTest("credential vault injects all auth types", async () => {
   const targetIp = credentialVaultTargetIp();
-  const sandbox = await createCredentialVaultSandbox();
+  const sandbox = await createCredentialVaultSandbox(targetIp);
 
   try {
     const state = await sandbox.credentialVault.create({
@@ -84,9 +87,87 @@ credentialVaultTest("credential vault injects all auth types", async () => {
   }
 }, 5 * 60_000);
 
+credentialVaultTest("credential vault substitutes placeholders in query path and body", async () => {
+  const targetIp = credentialVaultTargetIp();
+  const sandbox = await createCredentialVaultSandbox(targetIp);
+
+  try {
+    const state = await sandbox.credentialVault.create({
+      credentials: credentialVaultCredentials("query-secret", "path-secret", "body-secret"),
+      bindings: [
+        credentialVaultBinding("query-substitution", "/query-substitution", {
+          type: "passthrough",
+          substitutions: [
+            {
+              credential: "query-secret",
+              placeholder: "__query_secret__",
+              in: ["query"],
+            },
+          ],
+        }),
+        credentialVaultBinding("path-substitution", "/tenant/*", {
+          type: "passthrough",
+          substitutions: [
+            {
+              credential: "path-secret",
+              placeholder: "__path_secret__",
+              in: ["path"],
+            },
+          ],
+        }),
+        credentialVaultBinding(
+          "body-substitution",
+          "/body-substitution",
+          {
+            type: "passthrough",
+            substitutions: [
+              {
+                credential: "body-secret",
+                placeholder: "__body_secret__",
+                in: ["body"],
+              },
+            ],
+          },
+          ["POST"],
+        ),
+      ],
+    });
+
+    const statePayload = JSON.stringify(state);
+    for (const secret of Object.values(SECRET_VALUES)) {
+      expect(statePayload).not.toContain(secret);
+    }
+    for (const placeholder of ["__query_secret__", "__path_secret__", "__body_secret__"]) {
+      expect(statePayload).not.toContain(placeholder);
+    }
+    expect(new Set(state.bindings.map((binding) => binding.auth?.type))).toEqual(new Set(["passthrough"]));
+
+    let response = await curlJson(sandbox, targetIp, "/query-substitution?api_key=__query_secret__");
+    expect(response.ok).toBe(true);
+    expect(response.case).toBe("query-substitution");
+    expect(response.missingOrInvalid).toEqual([]);
+
+    response = await curlJson(sandbox, targetIp, "/tenant/__path_secret__/resource?tenant=__path_secret__");
+    expect(response.ok).toBe(true);
+    expect(response.case).toBe("path-substitution");
+    expect(response.queryStillPlaceholder).toBe(true);
+
+    response = await curlJson(sandbox, targetIp, "/body-substitution", {
+      method: "POST",
+      headers: ["content-type: application/json"],
+      data: '{"client_secret":"__body_secret__"}',
+    });
+    expect(response.ok).toBe(true);
+    expect(response.case).toBe("body-substitution");
+    expect(response.missingOrInvalid).toEqual([]);
+  } finally {
+    await killSandbox(sandbox);
+  }
+}, 5 * 60_000);
+
 credentialVaultTest("credential vault runtime mutation adds replaces and deletes binding", async () => {
   const targetIp = credentialVaultTargetIp();
-  const sandbox = await createCredentialVaultSandbox();
+  const sandbox = await createCredentialVaultSandbox(targetIp);
 
   try {
     let state = await sandbox.credentialVault.create({ credentials: [], bindings: [] });
@@ -189,7 +270,7 @@ function credentialVaultTargetIp(): string {
   return targetIp;
 }
 
-async function createCredentialVaultSandbox(): Promise<Sandbox> {
+async function createCredentialVaultSandbox(targetIp: string): Promise<Sandbox> {
   const image = process.env.OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE ?? getSandboxImage();
   return Sandbox.create({
     connectionConfig: createConnectionConfig(),
@@ -201,8 +282,11 @@ async function createCredentialVaultSandbox(): Promise<Sandbox> {
     readyTimeoutSeconds: 90,
     timeoutSeconds: 5 * 60,
     networkPolicy: {
-      defaultAction: "allow",
-      egress: [{ action: "allow", target: credentialVaultTargetHost() }],
+      defaultAction: "deny",
+      egress: [
+        { action: "allow", target: credentialVaultTargetHost() },
+        { action: "allow", target: targetIp },
+      ],
     },
     credentialProxy: { enabled: true },
     metadata: {
@@ -226,29 +310,45 @@ function credentialVaultCredential(name: string, valueName: string): Credential 
   };
 }
 
-function credentialVaultBinding(name: string, path: string, auth: CredentialAuth): CredentialBinding {
+function credentialVaultBinding(
+  name: string,
+  path: string,
+  auth: CredentialAuth,
+  methods: string[] = ["GET"],
+): CredentialBinding {
   return {
     name,
     match: {
       schemes: ["http"],
-      ports: [80],
       hosts: [credentialVaultTargetHost()],
-      methods: ["GET"],
+      methods,
       paths: [path],
     },
     auth,
   };
 }
 
+interface CurlJsonOptions {
+  failOnHttpError?: boolean;
+  method?: string;
+  headers?: string[];
+  data?: string;
+}
+
 async function curlJson(
   sandbox: Sandbox,
   targetIp: string,
   path: string,
-  failOnHttpError = true,
+  options: CurlJsonOptions | boolean = {},
 ): Promise<Record<string, unknown>> {
+  const resolvedOptions = typeof options === "boolean" ? { failOnHttpError: options } : options;
+  const failOnHttpError = resolvedOptions.failOnHttpError ?? true;
   const failFlag = failOnHttpError ? "--fail " : "";
+  const methodFlag = resolvedOptions.method ? `--request ${resolvedOptions.method} ` : "";
+  const headerFlags = (resolvedOptions.headers ?? []).map((header) => `--header '${header}' `).join("");
+  const dataFlag = resolvedOptions.data === undefined ? "" : `--data '${resolvedOptions.data}' `;
   const command =
-    `curl ${failFlag}--silent --show-error --connect-timeout 5 --max-time 20 ` +
+    `curl ${failFlag}--silent --show-error --connect-timeout 5 --max-time 20 ${methodFlag}${headerFlags}${dataFlag}` +
     `--resolve ${credentialVaultTargetHost()}:80:${targetIp} ` +
     `http://${credentialVaultTargetHost()}${path}`;
   for (const secret of Object.values(SECRET_VALUES)) {

@@ -15,16 +15,19 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
+	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
@@ -46,6 +49,13 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	proxyType := "http"
+	if p.isWebSocketRequest(r) {
+		proxyType = "websocket"
+	}
+
 	defer func() {
 		if rcv := recover(); rcv != nil {
 			panicErr := fmt.Sprintf("%v", rcv)
@@ -58,8 +68,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				slogger.Field{Key: "host", Value: r.Host},
 				slogger.Field{Key: "method", Value: r.Method},
 			).Errorf("ingress: proxy causes panic")
-			http.Error(w, panicErr, http.StatusBadGateway)
+			sw.WriteHeader(http.StatusBadGateway)
+			http.Error(sw, panicErr, http.StatusBadGateway)
 		}
+		telemetry.RecordHTTPRequest(r.Method, sw.statusCode, proxyType, float64(time.Since(start))/float64(time.Millisecond))
 	}()
 
 	host, status, err := p.getSandboxHostDefinition(r)
@@ -67,13 +79,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = http.StatusBadRequest
 		}
-		http.Error(w, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
 		return
 	}
 
 	targetHost, err, code := p.resolveRealHost(host)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
+		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
 		return
 	}
 
@@ -97,7 +109,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slogger.Field{Key: "uri", Value: r.RequestURI},
 		slogger.Field{Key: "method", Value: r.Method},
 	).Infof("ingress requested")
-	p.serve(w, r)
+	p.serve(sw, r)
 }
 
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request) {
@@ -162,6 +174,45 @@ func (p *Proxy) resolveRealHost(host *sandboxHost) (string, error, int) {
 	// Construct target host with port
 	targetHost := fmt.Sprintf("%s:%d", endpoint, host.port)
 	return targetHost, nil, 0
+}
+
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	written    bool
+}
+
+func (w *statusCapturingResponseWriter) WriteHeader(code int) {
+	if !w.written {
+		w.statusCode = code
+		w.written = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {
+	if !w.written {
+		w.written = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		conn, buf, err := hj.Hijack()
+		if err == nil && !w.written {
+			w.statusCode = http.StatusSwitchingProtocols
+			w.written = true
+		}
+		return conn, buf, err
+	}
+	return nil, nil, fmt.Errorf("upstream ResponseWriter does not implement http.Hijacker")
+}
+
+func (w *statusCapturingResponseWriter) Flush() {
+	if fl, ok := w.ResponseWriter.(http.Flusher); ok {
+		fl.Flush()
+	}
 }
 
 func (p *Proxy) getClientIP(r *http.Request) string {

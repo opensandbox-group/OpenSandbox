@@ -124,6 +124,80 @@ spec:
 		})
 	})
 
+	Context("gVisor + egress sidecar incompatibility", func() {
+		var podName string
+
+		BeforeEach(func() {
+			podName = fmt.Sprintf("test-gvisor-egress-%d", time.Now().UnixNano())
+		})
+
+		AfterEach(func() {
+			By("cleaning up Pod")
+			if podName != "" {
+				_, _ = runKubectl("delete", "pod", podName, "-n", testNamespace,
+					"--ignore-not-found=true", "--grace-period=0", "--force")
+			}
+		})
+
+		It("should fail to start the egress sidecar under gVisor due to missing iptables nat table", func() {
+			egressImage := os.Getenv("EGRESS_IMG")
+			if egressImage == "" {
+				Skip("EGRESS_IMG not set; skipping gVisor + egress incompatibility test")
+			}
+
+			By("creating a Pod with gVisor runtimeClassName and egress sidecar")
+			podYAML := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  runtimeClassName: %s
+  restartPolicy: Never
+  containers:
+    - name: workload
+      image: %s
+      command: ["sleep", "300"]
+    - name: egress
+      image: %s
+      securityContext:
+        capabilities:
+          add: ["NET_ADMIN"]
+      env:
+        - name: OPENSANDBOX_EGRESS_MODE
+          value: "dns+nft"
+        - name: OPENSANDBOX_EGRESS_RULES
+          value: '{"defaultAction":"deny","egress":[]}'
+`, podName, testNamespace, RuntimeClassName, utils.SandboxImage, egressImage)
+
+			podFile := filepath.Join("/tmp", fmt.Sprintf("test-pod-%s.yaml", podName))
+			err := os.WriteFile(podFile, []byte(podYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(podFile)
+
+			_, err = runKubectl("apply", "-f", podFile)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create Pod")
+
+			By("verifying the egress container terminates with an error")
+			Eventually(func(g Gomega) {
+				output, err := runKubectl("get", "pod", podName, "-n", testNamespace,
+					"-o", "jsonpath={.status.containerStatuses[?(@.name==\"egress\")].state.terminated.exitCode}")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty(), "egress container should have terminated")
+				g.Expect(output).NotTo(Equal("0"), "egress container should exit with non-zero code")
+			}, 2*time.Minute).Should(Succeed())
+
+			By("verifying egress logs mention iptables nat failure")
+			output, err := runKubectl("logs", podName, "-n", testNamespace, "-c", "egress")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(SatisfyAny(
+				ContainSubstring("Failed to initialize nft"),
+				ContainSubstring("can't initialize iptables table"),
+				ContainSubstring("nat"),
+			))
+		})
+	})
+
 	Context("Pool with gVisor RuntimeClass", func() {
 		var poolName string
 		var batchSandboxName string

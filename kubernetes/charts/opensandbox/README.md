@@ -4,7 +4,7 @@
 
 All-in-one Helm chart for deploying OpenSandbox controller and server
 
-**Homepage:** <https://github.com/alibaba/OpenSandbox>
+**Homepage:** <https://github.com/opensandbox-group/OpenSandbox>
 
 ## Maintainers
 
@@ -14,7 +14,7 @@ All-in-one Helm chart for deploying OpenSandbox controller and server
 
 ## Source Code
 
-* <https://github.com/alibaba/OpenSandbox/tree/main/kubernetes>
+* <https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes>
 
 ## Requirements
 
@@ -33,7 +33,7 @@ Kubernetes: `>=1.21.1-0`
 | opensandbox-controller.controller.logLevel | string | `"info"` |  |
 | opensandbox-controller.controller.replicaCount | int | `1` |  |
 | opensandbox-controller.controller.snapshot.commitJobTimeout | string | `"10m"` |  |
-| opensandbox-controller.controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.0"` |  |
+| opensandbox-controller.controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1"` |  |
 | opensandbox-controller.controller.snapshot.registry | string | `""` |  |
 | opensandbox-controller.controller.snapshot.registryInsecure | bool | `false` |  |
 | opensandbox-controller.controller.snapshot.resumePullSecret | string | `""` |  |

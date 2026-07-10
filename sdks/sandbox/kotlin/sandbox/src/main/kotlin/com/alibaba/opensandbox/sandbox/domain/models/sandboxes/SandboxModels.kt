@@ -406,7 +406,7 @@ class Host private constructor(
  * @property claimName Name of the platform volume. In Kubernetes this is the PVC name;
  * in Docker this is the named volume name.
  * @property createIfNotExists When true (default), auto-create volume if absent.
- * @property deleteOnSandboxTermination When true, delete auto-created Docker volume on sandbox deletion.
+ * @property deleteOnSandboxTermination When true, delete the auto-created volume (Docker named volume or Kubernetes PVC) on sandbox deletion. Pre-existing volumes are never removed.
  * @property storageClass Kubernetes StorageClass for auto-created PVCs. Null means default class.
  * @property storage PVC storage request for auto-created PVCs (e.g. "1Gi").
  * @property accessModes Access modes for auto-created PVCs (e.g. ["ReadWriteOnce"]).
@@ -714,6 +714,7 @@ class Volume private constructor(
  * @property image Image specification used to create this sandbox
  * @property platform Effective platform used for sandbox provisioning
  * @property metadata Custom metadata attached to the sandbox
+ * @property extensions Opaque extension data returned by the server
  */
 class SandboxInfo(
     val id: String,
@@ -725,6 +726,7 @@ class SandboxInfo(
     val snapshotId: String? = null,
     val platform: PlatformSpec? = null,
     val metadata: Map<String, String>? = null,
+    val extensions: Map<String, String>? = null,
 )
 
 /**
@@ -747,11 +749,37 @@ class SandboxStatus(
  *
  * @property id Unique identifier of the newly created sandbox
  * @property platform Effective platform used for sandbox provisioning
+ * @property extensions Opaque extension data returned by the server
  */
 class SandboxCreateResponse(
     val id: String,
     val platform: PlatformSpec? = null,
+    val extensions: Map<String, String>? = null,
 )
+
+/**
+ * Lifecycle state of a snapshot.
+ *
+ * Common state values:
+ * - Creating: Snapshot is being captured from the sandbox
+ * - Ready: Snapshot has been captured and can be used to restore a sandbox
+ * - Failed: Snapshot capture encountered a critical error
+ * - Deleting: Snapshot is being deleted
+ *
+ * State transitions:
+ * - Creating → Ready (capture completes successfully)
+ * - Creating → Failed (on error)
+ *
+ * Note: New state values may be added in future versions.
+ * Clients should handle unknown state values gracefully.
+ */
+object SnapshotState {
+    const val CREATING = "Creating"
+    const val READY = "Ready"
+    const val FAILED = "Failed"
+    const val DELETING = "Deleting"
+    const val UNKNOWN = "Unknown"
+}
 
 class SnapshotStatus(
     val state: String,

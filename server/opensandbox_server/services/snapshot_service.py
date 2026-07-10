@@ -57,6 +57,7 @@ from opensandbox_server.services.snapshot_repository import (
     SnapshotListQuery,
     SnapshotRepository,
 )
+from opensandbox_server.tenants.context import get_current_tenant
 
 logger = logging.getLogger(__name__)
 SNAPSHOT_RECOVERY_PAGE_SIZE = 200
@@ -131,6 +132,7 @@ class PersistedSnapshotService(SnapshotService):
         record = SnapshotRecord(
             id=str(uuid4()),
             source_sandbox_id=sandbox_id,
+            namespace=self._get_tenant_namespace(),
             name=request.name,
             restore_config=self._default_restore_config(),
             status=SnapshotStatusRecord(
@@ -152,12 +154,14 @@ class PersistedSnapshotService(SnapshotService):
 
     def list_snapshots(self, request: ListSnapshotsRequest) -> ListSnapshotsResponse:
         pagination = request.pagination or self._default_pagination()
+        tenant = get_current_tenant()
         result = self._snapshot_repository.list(
             SnapshotListQuery(
                 page=pagination.page,
                 page_size=pagination.page_size,
                 source_sandbox_id=request.filter.sandbox_id,
                 states=request.filter.state or [],
+                namespace=tenant.namespace if tenant else None,
             )
         )
 
@@ -183,6 +187,7 @@ class PersistedSnapshotService(SnapshotService):
                     "message": f"Snapshot {snapshot_id} not found",
                 },
             )
+        self._verify_tenant_access(record)
         return self._to_snapshot_response(record)
 
     def delete_snapshot(self, snapshot_id: str) -> None:
@@ -195,6 +200,7 @@ class PersistedSnapshotService(SnapshotService):
                     "message": f"Snapshot {snapshot_id} not found",
                 },
             )
+        self._verify_tenant_access(record)
 
         if record.status.state == SnapshotState.CREATING:
             raise HTTPException(
@@ -213,6 +219,7 @@ class PersistedSnapshotService(SnapshotService):
         self._snapshot_runtime.delete_snapshot(
             snapshot_id,
             image=record.restore_config.image,
+            namespace=record.namespace,
         )
         self._snapshot_repository.delete(snapshot_id)
 
@@ -232,11 +239,31 @@ class PersistedSnapshotService(SnapshotService):
 
         return PaginationRequest()
 
+    @staticmethod
+    def _get_tenant_namespace() -> str | None:
+        tenant = get_current_tenant()
+        return tenant.namespace if tenant else None
+
+    @staticmethod
+    def _verify_tenant_access(record: SnapshotRecord) -> None:
+        tenant = get_current_tenant()
+        if tenant is None:
+            return
+        if record.namespace is None or record.namespace != tenant.namespace:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "SNAPSHOT::NOT_FOUND",
+                    "message": f"Snapshot {record.id} not found",
+                },
+            )
+
     def _mark_snapshot_deleting(self, record: SnapshotRecord) -> SnapshotRecord | None:
         now = datetime.now(timezone.utc)
         deleting_record = SnapshotRecord(
             id=record.id,
             source_sandbox_id=record.source_sandbox_id,
+            namespace=record.namespace,
             name=record.name,
             description=record.description,
             restore_config=record.restore_config,
@@ -274,6 +301,7 @@ class PersistedSnapshotService(SnapshotService):
             runtime_status = self._snapshot_runtime.create_snapshot(
                 record.id,
                 record.source_sandbox_id,
+                namespace=record.namespace,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -308,11 +336,11 @@ class PersistedSnapshotService(SnapshotService):
     def _complete_snapshot(self, record: SnapshotRecord, runtime_status) -> None:
         current_record = self._snapshot_repository.get(record.id)
         if current_record is None:
-            self._cleanup_runtime_artifact(record.id, runtime_status.image)
+            self._cleanup_runtime_artifact(record.id, runtime_status.image, record.namespace)
             return
 
         if current_record.status.state == SnapshotState.DELETING:
-            self._cleanup_runtime_artifact(current_record.id, runtime_status.image)
+            self._cleanup_runtime_artifact(current_record.id, runtime_status.image, current_record.namespace)
             self._snapshot_repository.delete(current_record.id)
             return
 
@@ -372,6 +400,7 @@ class PersistedSnapshotService(SnapshotService):
             runtime_status = self._snapshot_runtime.inspect_snapshot(
                 record.id,
                 image=record.restore_config.image,
+                namespace=record.namespace,
             )
             if runtime_status.state == SnapshotState.CREATING:
                 future = self._snapshot_executor.submit(
@@ -388,6 +417,7 @@ class PersistedSnapshotService(SnapshotService):
                 self._snapshot_runtime.delete_snapshot(
                     record.id,
                     image=record.restore_config.image,
+                    namespace=record.namespace,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -414,6 +444,7 @@ class PersistedSnapshotService(SnapshotService):
                 return SnapshotRecord(
                     id=record.id,
                     source_sandbox_id=record.source_sandbox_id,
+                    namespace=record.namespace,
                     name=record.name,
                     description=record.description,
                     restore_config=record.restore_config,
@@ -430,6 +461,7 @@ class PersistedSnapshotService(SnapshotService):
             return SnapshotRecord(
                 id=record.id,
                 source_sandbox_id=record.source_sandbox_id,
+                namespace=record.namespace,
                 name=record.name,
                 description=record.description,
                 restore_config=SnapshotRestoreConfig(image=runtime_status.image),
@@ -447,6 +479,7 @@ class PersistedSnapshotService(SnapshotService):
             return SnapshotRecord(
                 id=record.id,
                 source_sandbox_id=record.source_sandbox_id,
+                namespace=record.namespace,
                 name=record.name,
                 description=record.description,
                 restore_config=record.restore_config,
@@ -462,12 +495,12 @@ class PersistedSnapshotService(SnapshotService):
 
         return None
 
-    def _cleanup_runtime_artifact(self, snapshot_id: str, image: str | None) -> None:
+    def _cleanup_runtime_artifact(self, snapshot_id: str, image: str | None, namespace: str = "default") -> None:
         if not image:
             return
 
         try:
-            self._snapshot_runtime.delete_snapshot(snapshot_id, image=image)
+            self._snapshot_runtime.delete_snapshot(snapshot_id, image=image, namespace=namespace)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Failed to cleanup snapshot artifact for %s: %s",

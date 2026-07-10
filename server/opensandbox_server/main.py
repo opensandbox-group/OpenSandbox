@@ -34,10 +34,37 @@ from opensandbox_server.config import load_config
 from opensandbox_server.integrations.renew_intent import start_renew_intent_consumer
 from opensandbox_server.logging_config import configure_logging
 from opensandbox_server.startup_guard import api_key_confirm
+from opensandbox_server.tenants import validate_tenant_config, TenantProvider
 
 # Load configuration before initializing routers/middleware
 app_config = load_config()
 _log_config = configure_logging(app_config.log)
+validate_tenant_config(app_config)
+
+
+def _build_tenant_provider(config) -> TenantProvider | None:
+    if config.tenants is None:
+        return None
+    if config.tenants.provider == "http":
+        from opensandbox_server.tenants.http_provider import (
+            HTTPTenantProvider,
+            HTTPTenantProviderConfig,
+        )
+
+        http_cfg = HTTPTenantProviderConfig(
+            endpoint=config.tenants.endpoint,
+            max_stale_seconds=config.tenants.max_stale_seconds,
+            timeout_seconds=config.tenants.timeout_seconds,
+            auth_header=config.tenants.auth_header,
+            auth_token=config.tenants.auth_token,
+        )
+        return HTTPTenantProvider(http_cfg)
+    from opensandbox_server.tenants.file_provider import FileTenantProvider
+
+    return FileTenantProvider()
+
+
+tenant_provider: TenantProvider | None = _build_tenant_provider(app_config)
 
 from opensandbox_server.api.devops import router as devops_router  # noqa: E402
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
@@ -55,11 +82,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        api_key_confirm(configured_api_key=app_config.server.api_key)
-    except Exception as exc:
-        logger.error("API key startup confirmation failed: %s", exc)
-        os._exit(1)
+    if tenant_provider is None:
+        try:
+            api_key_confirm(configured_api_key=app_config.server.api_key)
+        except Exception as exc:
+            logger.error("API key startup confirmation failed: %s", exc)
+            os._exit(1)
+
+    if tenant_provider is not None:
+        tenant_provider.start()
+        sandbox_service.set_tenant_provider(tenant_provider)
 
     from anyio.to_thread import current_default_thread_limiter
 
@@ -114,6 +146,8 @@ async def lifespan(app: FastAPI):
     if consumer is not None:
         await consumer.stop()
     snapshot_service.close()
+    if tenant_provider is not None:
+        tenant_provider.close()
     await app.state.http_client.aclose()
 
 
@@ -130,10 +164,11 @@ app = FastAPI(
 
 # Attach global config for runtime access
 app.state.config = app_config
+app.state.tenant_provider = tenant_provider
 
 # Middleware run in reverse order of addition: last added = first to run (outermost).
 # Add auth and CORS first so they run after RequestIdMiddleware.
-app.add_middleware(AuthMiddleware, config=app_config)
+app.add_middleware(AuthMiddleware, config=app_config, tenant_provider=tenant_provider)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -210,4 +245,5 @@ if __name__ == "__main__":
         timeout_keep_alive=app_config.server.timeout_keep_alive,
         loop=app_config.server.loop,
         http=app_config.server.http,
+        timeout_graceful_shutdown=app_config.server.timeout_graceful_shutdown,
     )

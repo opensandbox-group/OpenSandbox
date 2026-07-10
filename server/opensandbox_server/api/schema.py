@@ -198,9 +198,9 @@ class PVC(BaseModel):
         description=(
             "When true, the volume is automatically removed when the sandbox is "
             "deleted. Only applies to volumes that were auto-created by the server "
-            "(Docker only). Pre-existing volumes are never removed. Has no effect "
-            "on Kubernetes PVCs, whose lifecycle is managed by the StorageClass "
-            "reclaim policy."
+            "on this request; pre-existing volumes are never removed. For "
+            "Kubernetes, the resulting PVC delete then triggers the bound PV's "
+            "StorageClass reclaim policy (Retain/Delete)."
         ),
     )
 
@@ -424,7 +424,16 @@ class CreateSandboxRequest(BaseModel):
     resource_limits: Optional[ResourceLimits] = Field(
         None,
         alias="resourceLimits",
-        description="Runtime resource constraints for the sandbox instance. Optional when poolRef is provided.",
+        description="Runtime resource constraints (hard caps) for the sandbox instance. Optional when poolRef is provided.",
+    )
+    resource_requests: Optional[ResourceLimits] = Field(
+        None,
+        alias="resourceRequests",
+        description=(
+            "Resource reservations (guaranteed minimums) for the sandbox instance. "
+            "When provided, used as Kubernetes resource requests, enabling Burstable QoS. "
+            "When omitted, resourceLimits values are used for both limits and requests."
+        ),
     )
     env: Optional[Dict[str, Optional[str]]] = Field(
         None,
@@ -498,8 +507,9 @@ class CreateSandboxRequest(BaseModel):
                 self.snapshot_id = None
             return self
 
-        if self.credential_proxy and self.credential_proxy.enabled and self.network_policy is None:
-            raise ValueError("credentialProxy.enabled requires networkPolicy.")
+        if self.credential_proxy and self.credential_proxy.enabled:
+            if self.network_policy is None:
+                raise ValueError("credentialProxy.enabled requires networkPolicy.")
 
         has_image = self.image is not None and bool(self.image.uri.strip())
         has_snapshot = bool((self.snapshot_id or "").strip())
@@ -534,6 +544,10 @@ class CreateSandboxResponse(BaseModel):
     id: str = Field(..., description="Unique sandbox identifier")
     status: SandboxStatus = Field(..., description="Current lifecycle status and detailed state information")
     metadata: Optional[Dict[str, str]] = Field(None, description="Custom metadata from creation request")
+    extensions: Optional[Dict[str, str]] = Field(
+        None,
+        description="Opaque extension data restored from provider-specific storage",
+    )
     platform: Optional[PlatformSpec] = Field(
         None,
         description=(
@@ -575,6 +589,10 @@ class Sandbox(BaseModel):
     )
     status: SandboxStatus = Field(..., description="Current lifecycle status and detailed state information")
     metadata: Optional[Dict[str, str]] = Field(None, description="Custom metadata from creation request")
+    extensions: Optional[Dict[str, str]] = Field(
+        None,
+        description="Opaque extension data restored from provider-specific storage",
+    )
     entrypoint: Optional[List[str]] = Field(None, description="The command to execute as the sandbox's entry process")
     expires_at: Optional[datetime] = Field(
         None,

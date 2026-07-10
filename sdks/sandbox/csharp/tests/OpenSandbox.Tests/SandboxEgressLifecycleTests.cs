@@ -248,7 +248,8 @@ public class SandboxEgressLifecycleTests
                 Commands = new Mock<IExecdCommands>(MockBehavior.Strict).Object,
                 Files = new StubFiles(),
                 Health = new StubHealth(),
-                Metrics = new StubMetrics()
+                Metrics = new StubMetrics(),
+                Isolation = new Mock<IIsolatedSessions>(MockBehavior.Strict).Object
             };
         }
 
@@ -342,6 +343,7 @@ public class SandboxEgressLifecycleTests
                 }
             });
         }
+
     }
 
     private sealed class StubEgress : IEgress

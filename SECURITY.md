@@ -31,7 +31,7 @@ Only the latest release and main branch are actively supported with security upd
 
 OpenSandbox signs public release outputs with GitHub/Sigstore attestations,
 cosign keyless container signatures, and Maven Central package signatures where
-applicable. See [Release Verification](docs/release-verification.md) for the
+applicable. See [Release Verification](docs/community/release-verification.md) for the
 trusted signer identities and verification commands.
 
 ## Security Best Practices

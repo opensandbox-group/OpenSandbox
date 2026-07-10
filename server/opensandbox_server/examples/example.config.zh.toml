@@ -14,7 +14,7 @@
 
 # Example Docker Runtime Configuration for OpenSandbox Server
 #
-# 完整配置参考：https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md
+# 完整配置参考：https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md
 
 [server]
 host = "127.0.0.1"
@@ -32,7 +32,7 @@ level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20"
 
 [storage]
 allowed_host_paths = []
@@ -47,6 +47,11 @@ path = "~/.opensandbox/opensandbox.db"
 [docker]
 # Supported values for network_mode: "host", "bridge"
 network_mode = "bridge"
+# Bridge 模式下沙箱端口映射的宿主机端口范围。
+# 每个沙箱需要 2–3 个宿主机端口（无 egress 需要 2 个，有 egress sidecar 需要 3 个）。
+# 可根据防火墙策略缩小范围 — 例如 100 个并发沙箱 ≈ 需要 300 个端口。
+port_range_min = 40000
+port_range_max = 60000
 # Drop dangerous capabilities and block privilege escalation
 drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
 no_new_privileges = true
@@ -61,7 +66,7 @@ seccomp_profile = ""
 mode = "direct"
 
 [egress]
-image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.0"
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3"
 mode = "dns"
 
 # 🧪 [EXPERIMENTAL] 按访问续期。默认关闭 — 见 server/README_zh.md。

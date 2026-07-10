@@ -35,7 +35,9 @@ func readPolicyRequestBody(r *http.Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(body)), nil
+	raw := strings.TrimSpace(string(body))
+	log.Infof("policy API: request body (%s %s): %s", r.Method, r.URL.Path, raw)
+	return raw, nil
 }
 
 func patchMergedPolicy(base *policy.NetworkPolicy, patchRules []policy.EgressRule) (*policy.NetworkPolicy, error) {

@@ -65,9 +65,7 @@ def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
         if timeout_ms < 0:
             raise InvalidArgumentException("timeout must be positive")
         return timeout_ms
-    raise InvalidArgumentException(
-        "timeout must be a datetime.timedelta or None"
-    )
+    raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
 
 
 def _infer_foreground_exit_code(execution: Execution) -> int | None:
@@ -117,7 +115,7 @@ def _decode_sse_event_line(line: str) -> EventNode | None:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error("Failed to parse SSE line: %s", line, exc_info=e)
+        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
         return None
 
 
@@ -232,10 +230,7 @@ class CommandsAdapter(Commands):
                 await response.aread()
                 error_body = response.text
                 logger.error(
-                    "%s. Status: %s, Body: %s",
-                    failure_message,
-                    response.status_code,
-                    error_body,
+                    f"{failure_message}. Status: {response.status_code}, Body: {error_body}"
                 )
                 raise SandboxApiException(
                     message=f"{failure_message}. Status code: {response.status_code}",
@@ -283,11 +278,7 @@ class CommandsAdapter(Commands):
             )
 
         except Exception as e:
-            logger.error(
-                "Failed to run command (length: %s)",
-                len(command),
-                exc_info=e,
-            )
+            logger.error(f"Failed to run command (length: {len(command)})", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def interrupt(self, execution_id: str) -> None:
@@ -321,7 +312,9 @@ class CommandsAdapter(Commands):
             )
 
             handle_api_error(response_obj, "Get command status")
-            parsed = require_parsed(response_obj, CommandStatusResponse, "Get command status")
+            parsed = require_parsed(
+                response_obj, CommandStatusResponse, "Get command status"
+            )
             return to_command_status(parsed)
         except Exception as e:
             logger.error("Failed to get command status", exc_info=e)
@@ -371,9 +364,7 @@ class CommandsAdapter(Commands):
         from opensandbox.api.execd.types import UNSET
 
         body = (
-            CreateSessionRequest(cwd=working_directory)
-            if working_directory
-            else UNSET
+            CreateSessionRequest(cwd=working_directory) if working_directory else UNSET
         )
         try:
             client = await self._get_client()
@@ -434,9 +425,7 @@ class CommandsAdapter(Commands):
 
         try:
             client = await self._get_client()
-            parsed = await delete_session_asyncio(
-                client=client, session_id=session_id
-            )
+            parsed = await delete_session_asyncio(client=client, session_id=session_id)
             if parsed is not None:
                 handle_api_error(parsed, "delete_session")
         except Exception as e:

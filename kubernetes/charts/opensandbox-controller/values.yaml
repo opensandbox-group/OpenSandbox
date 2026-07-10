@@ -47,8 +47,8 @@ controller:
   # -- Pause/Resume snapshot configuration
   snapshot:
     # -- Image used for commit operations (must contain nerdctl tool)
-    # DockerHub: opensandbox/image-committer:v0.1.0
-    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.0"
+    # DockerHub: opensandbox/image-committer:v0.1.1
+    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1"
     # -- Containerd socket path of host
     containerdSocketPath: "/var/run/containerd/containerd.sock"
     # -- Timeout duration for commit jobs
@@ -150,14 +150,6 @@ crds:
   # -- Additional annotations to add to CRDs (will be merged with resource-policy if keep is true)
   annotations: {}
 
-# Network Policy configuration
-networkPolicy:
-  # -- Enable network policy
-  enabled: false
-  # -- Ingress rules for network policy
-  ingress: []
-  # -- Egress rules for network policy
-  egress: []
 
 # -- Additional environment variables for the controller
 extraEnv: []

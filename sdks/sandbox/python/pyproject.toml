@@ -51,13 +51,14 @@ dependencies = [
 [project.optional-dependencies]
 pool-redis = [
     "redis>=5.0,<6.0",
+    "pyjwt>=2.13.0",
 ]
 
 [project.urls]
 Homepage = "https://open-sandbox.ai"
-Repository = "https://github.com/alibaba/OpenSandbox"
+Repository = "https://github.com/opensandbox-group/OpenSandbox"
 Documentation = "https://open-sandbox.ai"
-Issues = "https://github.com/alibaba/OpenSandbox/issues"
+Issues = "https://github.com/opensandbox-group/OpenSandbox/issues"
 
 [tool.hatch.version]
 source = "vcs"
@@ -67,7 +68,7 @@ source = "vcs"
 root = "../../.."
 tag_regex = "^python/sandbox/v(?P<version>\\d+\\.\\d+\\.\\d+(?:[\\.\\w\\+\\-]*)?)$"
 git_describe_command = 'git describe --dirty --tags --long --match "python/sandbox/v*"'
-fallback_version = "0.1.10"
+fallback_version = "0.1.14"
 
 [tool.hatch.build]
 include = [
@@ -135,6 +136,11 @@ python_files = [
     "*_test.py",
 ]
 asyncio_mode = "auto"
+
+[tool.uv]
+constraint-dependencies = [
+    "pyjwt>=2.13.0",
+]
 
 [tool.coverage.run]
 source = ["src"]

@@ -48,7 +48,6 @@ jobs:
       - name: Build docs
         working-directory: docs
         env:
-          # Use root base when custom domain is configured via CNAME.
           DOCS_BASE: ${{ hashFiles('docs/public/CNAME') != '' && '/' || steps.pages.outputs.base_path }}
         run: pnpm docs:build
 

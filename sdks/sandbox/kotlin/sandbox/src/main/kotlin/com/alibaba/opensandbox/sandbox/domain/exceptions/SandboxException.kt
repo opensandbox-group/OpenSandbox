@@ -35,6 +35,17 @@ open class SandboxException(
         cause: Throwable?,
         error: SandboxError,
     ) : this(message = message, cause = cause, error = error, requestId = null)
+
+    override fun toString(): String {
+        val parts = mutableListOf(super.toString())
+        if (!error.message.isNullOrBlank()) {
+            parts += "[${error.code}] ${error.message}"
+        }
+        if (!requestId.isNullOrBlank()) {
+            parts += "request_id=$requestId"
+        }
+        return parts.joinToString(" | ")
+    }
 }
 
 /**
@@ -93,6 +104,18 @@ class SandboxReadyTimeoutException(
     )
 
 /**
+ * Thrown when a snapshot reaches the `Failed` state while waiting for it to become ready.
+ */
+class SnapshotFailedException(
+    message: String? = null,
+    cause: Throwable? = null,
+) : SandboxException(
+        message = message,
+        cause = cause,
+        error = SandboxError(SandboxError.SNAPSHOT_FAILED, message),
+    )
+
+/**
  * Thrown when an invalid argument is provided to an SDK method.
  * Similar to [IllegalArgumentException] but within the SDK's exception hierarchy.
  */
@@ -143,18 +166,6 @@ class PoolStateStoreUnavailableException(
     )
 
 /**
- * Thrown when atomic take or lock-update conflicts occur in the state store.
- */
-class PoolStateStoreContentionException(
-    message: String? = null,
-    cause: Throwable? = null,
-) : SandboxException(
-        message = message,
-        cause = cause,
-        error = SandboxError(SandboxError.POOL_STATE_STORE_CONTENTION, message),
-    )
-
-/**
  * Thrown when acquire is called while pool is not in RUNNING state.
  */
 class PoolNotRunningException(
@@ -164,6 +175,32 @@ class PoolNotRunningException(
         message = message,
         cause = cause,
         error = SandboxError(SandboxError.POOL_NOT_RUNNING, message),
+    )
+
+/**
+ * Thrown when a pool namespace is being destroyed or has already been destroyed.
+ */
+class PoolDestroyedException(
+    message: String? = "Pool namespace is destroyed",
+    cause: Throwable? = null,
+) : SandboxException(
+        message = message,
+        cause = cause,
+        error = SandboxError(SandboxError.POOL_DESTROYED, message),
+    )
+
+/**
+ * Thrown when a pool destroy operation has started but did not complete. The pool namespace
+ * remains fenced in DESTROYING state so callers can retry destroy instead of silently resuming
+ * a partially-cleaned pool.
+ */
+class PoolDestroyIncompleteException(
+    message: String? = "Pool destroy did not complete",
+    cause: Throwable? = null,
+) : SandboxException(
+        message = message,
+        cause = cause,
+        error = SandboxError(SandboxError.POOL_DESTROY_INCOMPLETE, message),
     )
 
 /**
@@ -180,6 +217,9 @@ data class SandboxError(
         const val INVALID_ARGUMENT = "INVALID_ARGUMENT"
         const val UNEXPECTED_RESPONSE = "UNEXPECTED_RESPONSE"
 
+        /** A snapshot reached the `Failed` state while waiting for it to become ready. */
+        const val SNAPSHOT_FAILED = "SNAPSHOT_FAILED"
+
         /** The requested file or directory does not exist (server responds with HTTP 404). */
         const val FILE_NOT_FOUND = "FILE_NOT_FOUND"
 
@@ -192,10 +232,13 @@ data class SandboxError(
         /** Pool state store unavailable during operations. */
         const val POOL_STATE_STORE_UNAVAILABLE = "POOL_STATE_STORE_UNAVAILABLE"
 
-        /** Pool state store contention (atomic take or lock conflicts). */
-        const val POOL_STATE_STORE_CONTENTION = "POOL_STATE_STORE_CONTENTION"
-
         /** Pool is not in RUNNING state when acquire is requested. */
         const val POOL_NOT_RUNNING = "POOL_NOT_RUNNING"
+
+        /** Pool namespace is destroying or destroyed. */
+        const val POOL_DESTROYED = "POOL_DESTROYED"
+
+        /** Pool destroy started but did not complete. */
+        const val POOL_DESTROY_INCOMPLETE = "POOL_DESTROY_INCOMPLETE"
     }
 }

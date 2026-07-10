@@ -106,6 +106,12 @@ public class SandboxCreateOptions
     public IReadOnlyDictionary<string, string>? Resource { get; set; }
 
     /// <summary>
+    /// Gets or sets the resource requests (guaranteed minimums).
+    /// When set, enables Kubernetes Burstable QoS (requests &lt; limits).
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? ResourceRequests { get; set; }
+
+    /// <summary>
     /// Gets or sets the sandbox timeout in seconds.
     /// </summary>
     public int? TimeoutSeconds { get; set; }

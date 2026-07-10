@@ -4,7 +4,7 @@
 
 OpenSandbox Lifecycle API server for sandbox creation and management
 
-**Homepage:** <https://github.com/alibaba/OpenSandbox>
+**Homepage:** <https://github.com/opensandbox-group/OpenSandbox>
 
 ## Maintainers
 
@@ -14,8 +14,8 @@ OpenSandbox Lifecycle API server for sandbox creation and management
 
 ## Source Code
 
-* <https://github.com/alibaba/OpenSandbox/tree/main/server>
-* <https://github.com/alibaba/OpenSandbox/tree/main/components/ingress>
+* <https://github.com/opensandbox-group/OpenSandbox/tree/main/server>
+* <https://github.com/opensandbox-group/OpenSandbox/tree/main/components/ingress>
 
 ## Requirements
 
@@ -25,7 +25,7 @@ Kubernetes: `>=1.21.1-0`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_enabled = true\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nsnapshot_create_timeout_seconds = 900\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.0\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. |
+| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_enabled = true\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nsnapshot_create_timeout_seconds = 900\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. |
 | fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
 | imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |
 | nameOverride | string | `""` | Override the name of the chart |
@@ -37,7 +37,7 @@ Kubernetes: `>=1.21.1-0`
 | server.gateway.gatewayRouteMode | string | `"header"` |  |
 | server.gateway.host | string | `"opensandbox.example.com"` |  |
 | server.gateway.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress"` |  |
-| server.gateway.image.tag | string | `"v1.0.7"` |  |
+| server.gateway.image.tag | string | `"v1.0.9"` |  |
 | server.gateway.logLevel | string | `"info"` |  |
 | server.gateway.port | int | `28888` |  |
 | server.gateway.providerType | string | `"batchsandbox"` |  |
@@ -48,7 +48,7 @@ Kubernetes: `>=1.21.1-0`
 | server.gateway.resources.requests.memory | string | `"4Gi"` |  |
 | server.gateway.secureAccess.activeKey | string | `""` |  |
 | server.gateway.secureAccess.keys | list | `[]` |  |
-| server.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server","tag":"v0.1.14"}` | Server image configuration |
+| server.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server","tag":"v0.2.1"}` | Server image configuration |
 | server.replicaCount | int | `2` | Number of server replicas |
 | server.resources | object | `{"limits":{"cpu":"2","memory":"8Gi"},"requests":{"cpu":"1","memory":"4Gi"}}` | Resource requests and limits |
 | server.tolerations | list | `[]` |  |

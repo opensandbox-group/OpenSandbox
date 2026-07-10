@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -67,7 +68,10 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	)
 
 	if metricsEnabled() {
-		mexp, err := otlpmetrichttp.New(ctx, metricsClientOptions()...)
+		opts := append(metricsClientOptions(),
+			otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector),
+		)
+		mexp, err := otlpmetrichttp.New(ctx, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -165,4 +169,17 @@ func firstEndpoint(primary, fallback string) string {
 		return s
 	}
 	return strings.TrimSpace(fallback)
+}
+
+// deltaTemporalitySelector returns delta temporality for monotonic instruments
+// (Counter, Histogram, ObservableCounter). Gauges and UpDownCounters keep
+// the default cumulative semantics.
+func deltaTemporalitySelector(kind sdkmetric.InstrumentKind) metricdata.Temporality {
+	switch kind {
+	case sdkmetric.InstrumentKindCounter,
+		sdkmetric.InstrumentKindHistogram:
+		return metricdata.DeltaTemporality
+	default:
+		return metricdata.CumulativeTemporality
+	}
 }

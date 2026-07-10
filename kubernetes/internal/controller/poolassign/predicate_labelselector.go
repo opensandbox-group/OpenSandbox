@@ -16,6 +16,9 @@ package assign
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
@@ -67,4 +70,23 @@ func (p *labelSelectorPredicate) Predicate(_ context.Context, sbx *sandboxv1alph
 		}
 	}
 	return true
+}
+
+func (p *labelSelectorPredicate) Reason(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) string {
+	var reasons []string
+	for _, k := range p.keys {
+		sbxVal, sbxOk := sbx.Labels[k]
+		if !sbxOk {
+			reasons = append(reasons, fmt.Sprintf("label key %q missing on sandbox", k))
+			continue
+		}
+		poolVal, poolOk := pool.Labels[k]
+		if !poolOk {
+			reasons = append(reasons, fmt.Sprintf("label key %q missing on pool", k))
+		} else if poolVal != sbxVal {
+			reasons = append(reasons, fmt.Sprintf("label %s mismatch: sandbox=%q, pool=%q", k, sbxVal, poolVal))
+		}
+	}
+	sort.Strings(reasons)
+	return strings.Join(reasons, "; ")
 }

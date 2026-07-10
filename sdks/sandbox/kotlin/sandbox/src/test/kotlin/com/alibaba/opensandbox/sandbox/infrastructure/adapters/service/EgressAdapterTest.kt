@@ -25,6 +25,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialBinding
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialBindingMutationSet
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMatch
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMutationSet
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialSubstitution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultPatchRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CustomHeaderEntry
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -95,7 +96,6 @@ class EgressAdapterTest {
                           "revision": 1,
                           "match": {
                             "schemes": ["https"],
-                            "ports": [443],
                             "hosts": ["api.github.com"],
                             "methods": ["GET"],
                             "paths": ["/repos/*"]
@@ -111,7 +111,6 @@ class EgressAdapterTest {
         val match =
             CredentialMatch.builder()
                 .schemes(CredentialMatch.Scheme.HTTPS)
-                .ports(443)
                 .hosts("api.github.com")
                 .methods("GET")
                 .paths("/repos/*")
@@ -124,6 +123,7 @@ class EgressAdapterTest {
                         credential("basic-token"),
                         credential("api-key-token"),
                         credential("custom-header-token"),
+                        credential("placeholder-token"),
                     ),
                 bindings =
                     listOf(
@@ -156,6 +156,21 @@ class EgressAdapterTest {
                                 ),
                             )
                             .build(),
+                        CredentialBinding.builder()
+                            .name("passthrough-api")
+                            .match(match)
+                            .auth(
+                                CredentialAuth.passthrough(
+                                    listOf(
+                                        CredentialSubstitution.builder()
+                                            .credential("placeholder-token")
+                                            .placeholder("__api_token__")
+                                            .surfaces(CredentialSubstitution.Surface.QUERY, CredentialSubstitution.Surface.BODY)
+                                            .build(),
+                                    ),
+                                ),
+                            )
+                            .build(),
                     ),
             )
 
@@ -167,7 +182,7 @@ class EgressAdapterTest {
 
         val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
         val credentials = payload["credentials"]!!.jsonArray
-        assertEquals(4, credentials.size)
+        assertEquals(5, credentials.size)
         val firstCredential = credentials[0].jsonObject
         assertEquals("bearer-token", firstCredential["name"]!!.jsonPrimitive.content)
         assertEquals("inline", firstCredential["source"]!!.jsonObject["type"]!!.jsonPrimitive.content)
@@ -185,6 +200,11 @@ class EgressAdapterTest {
             "X-Custom-Token",
             customHeadersAuth["headers"]!!.jsonArray[0].jsonObject["name"]!!.jsonPrimitive.content,
         )
+        val passthroughAuth = bindings[4].jsonObject["auth"]!!.jsonObject
+        assertEquals("passthrough", passthroughAuth["type"]!!.jsonPrimitive.content)
+        val substitution = passthroughAuth["substitutions"]!!.jsonArray[0].jsonObject
+        assertEquals("__api_token__", substitution["placeholder"]!!.jsonPrimitive.content)
+        assertEquals("body", substitution["in"]!!.jsonArray[1].jsonPrimitive.content)
 
         assertEquals(1, result.revision)
         assertEquals("bearer-token", result.credentials.single().name)

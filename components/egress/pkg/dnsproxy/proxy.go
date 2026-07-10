@@ -123,9 +123,11 @@ func (p *Proxy) Start(ctx context.Context) error {
 	tcpServer := &dns.Server{Addr: p.listenAddr, Net: "tcp", Handler: handler}
 	p.servers = []*dns.Server{udpServer, tcpServer}
 
+	readyCh := make(chan struct{}, len(p.servers))
 	errCh := make(chan error, len(p.servers))
 	for _, srv := range p.servers {
 		s := srv
+		s.NotifyStartedFunc = func() { readyCh <- struct{}{} }
 		safego.Go(func() {
 			if err := s.ListenAndServe(); err != nil {
 				errCh <- err
@@ -133,13 +135,13 @@ func (p *Proxy) Start(ctx context.Context) error {
 		})
 	}
 
-	timer := time.NewTimer(200 * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case err := <-errCh:
-		return fmt.Errorf("dns proxy failed: %w", err)
-	case <-timer.C:
-		// Start upstream probes only after listeners are up, so the first probe does not fail on "not listening".
+	// Wait for all servers (UDP + TCP) to bind, or fail fast on error.
+	for i := 0; i < len(p.servers); i++ {
+		select {
+		case err := <-errCh:
+			return fmt.Errorf("dns proxy failed: %w", err)
+		case <-readyCh:
+		}
 	}
 
 	safego.Go(func() { p.runUpstreamProbes(ctx) })
@@ -232,11 +234,17 @@ func (p *Proxy) forward(r *dns.Msg) (*dns.Msg, error) {
 	list := p.forwardUpstreams()
 	var lastErr error
 	for _, upstream := range list {
+		const upstreamUDPSize = 4096
+		query := r.Copy()
+		if query.IsEdns0() == nil {
+			query.SetEdns0(upstreamUDPSize, false)
+		}
 		c := &dns.Client{
 			Timeout: p.upstreamExchangeTimeout,
 			Dialer:  p.dialerForUpstream(upstream),
+			UDPSize: upstreamUDPSize,
 		}
-		resp, _, err := c.Exchange(r, upstream)
+		resp, _, err := c.Exchange(query, upstream)
 		if err != nil {
 			lastErr = err
 			log.Warnf("[dns] upstream %s exchange error: %v", upstream, err)

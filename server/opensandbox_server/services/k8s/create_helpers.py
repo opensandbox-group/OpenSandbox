@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Optional
@@ -21,13 +22,17 @@ from typing import Callable, Dict, Optional
 from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.config import AppConfig, EGRESS_MODE_DNS
 from opensandbox_server.services.constants import (
+    OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
     SANDBOX_ID_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_SNAPSHOT_ID_LABEL,
 )
+from opensandbox_server.services.helpers import split_egress_env
 from opensandbox_server.services.validators import calculate_expiration_or_raise
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -36,11 +41,14 @@ class _CreateWorkloadContext:
     annotations: Dict[str, str]
     expires_at: Optional[datetime]
     resource_limits: Dict[str, str]
+    resource_requests: Dict[str, str]
     egress_mode: str
     egress_image: Optional[str]
     egress_auth_token: Optional[str]
     credential_proxy_enabled: bool
     secure_access_token: Optional[str]
+    sandbox_env: Dict[str, Optional[str]]
+    egress_env: Dict[str, Optional[str]]
 
 
 def _build_create_workload_context(
@@ -84,14 +92,38 @@ def _build_create_workload_context(
     if request.resource_limits and request.resource_limits.root:
         resource_limits = request.resource_limits.root
 
+    resource_requests = {}
+    if request.resource_requests and request.resource_requests.root:
+        resource_requests = request.resource_requests.root
+
+    sandbox_env, egress_env = split_egress_env(request.env)
+
+    if credential_proxy_enabled and egress_env.get(OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE):
+        raise ValueError(
+            f"'{OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE}' cannot be set when credential proxy is enabled"
+        )
+
+    if egress_env and not request.network_policy:
+        dropped_keys = sorted(egress_env.keys())
+        logger.warning(
+            "Sandbox %s has OPENSANDBOX_EGRESS_ env vars %s but no networkPolicy; "
+            "these variables will be ignored because no egress sidecar is created",
+            sandbox_id,
+            dropped_keys,
+        )
+        egress_env = {}
+
     return _CreateWorkloadContext(
         labels=labels,
         annotations=annotations,
         expires_at=expires_at,
         resource_limits=resource_limits,
+        resource_requests=resource_requests,
         egress_mode=egress_mode,
         egress_image=egress_image,
         egress_auth_token=egress_auth_token,
         credential_proxy_enabled=credential_proxy_enabled,
         secure_access_token=secure_access_token,
+        sandbox_env=sandbox_env,
+        egress_env=egress_env,
     )

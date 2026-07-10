@@ -66,6 +66,37 @@ func TestSandbox_CreateAndKill(t *testing.T) {
 	t.Log("Sandbox killed successfully")
 }
 
+func TestSandbox_ExtensionsRoundTrip(t *testing.T) {
+	config := getConnectionConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	sb, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
+		Image:      getSandboxImage(),
+		Entrypoint: []string{"tail", "-f", "/dev/null"},
+		ResourceLimits: opensandbox.ResourceLimits{
+			"cpu":    "500m",
+			"memory": "256Mi",
+		},
+		Metadata: map[string]string{"tag": "go-e2e-extensions"},
+		Extensions: map[string]string{
+			"opensandbox.extensions.test-key": "test-value",
+			"opensandbox.extensions.second":   "second-value",
+		},
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = sb.Kill(context.Background())
+	}()
+
+	info, err := sb.GetInfo(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, info.Extensions, "extensions missing from GetInfo")
+	require.Equal(t, "test-value", info.Extensions["opensandbox.extensions.test-key"])
+	require.Equal(t, "second-value", info.Extensions["opensandbox.extensions.second"])
+	t.Logf("extensions round-trip OK: %v", info.Extensions)
+}
+
 func TestSandbox_Renew(t *testing.T) {
 	ctx, sb := createTestSandbox(t)
 

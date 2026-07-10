@@ -39,9 +39,9 @@ export interface SandboxFiles {
   deleteDirectories(paths: string[]): Promise<void>;
 
   writeFiles(entries: WriteEntry[]): Promise<void>;
-  readFile(path: string, opts?: { encoding?: string; range?: string }): Promise<string>;
-  readBytes(path: string, opts?: { range?: string }): Promise<Uint8Array>;
-  readBytesStream(path: string, opts?: { range?: string }): AsyncIterable<Uint8Array>;
+  readFile(path: string, opts?: { encoding?: string; range?: string; offset?: number; limit?: number }): Promise<string>;
+  readBytes(path: string, opts?: { range?: string; offset?: number; limit?: number }): Promise<Uint8Array>;
+  readBytesStream(path: string, opts?: { range?: string; offset?: number; limit?: number }): AsyncIterable<Uint8Array>;
 
   deleteFiles(paths: string[]): Promise<void>;
   moveFiles(entries: MoveEntry[]): Promise<void>;

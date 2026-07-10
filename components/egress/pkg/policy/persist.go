@@ -48,6 +48,7 @@ func loadPolicyFromEnvWithSource(envName string) (*NetworkPolicy, PolicyInitialS
 	if raw == "" {
 		return p, PolicyFromDefault, nil
 	}
+	log.Infof("loaded egress policy from env %s: %s", envName, raw)
 	return p, PolicyFromEnv, nil
 }
 
@@ -82,7 +83,7 @@ func LoadInitialPolicyDetailed(policyFile, envName string) (*NetworkPolicy, Poli
 		return loadPolicyFromEnvWithSource(envName)
 	}
 
-	log.Infof("loaded egress policy from %s", policyFile)
+	log.Infof("loaded egress policy from %s: %s", policyFile, raw)
 	return pol, PolicyFromFile, nil
 }
 

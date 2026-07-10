@@ -34,6 +34,9 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
+// TODO: migrate FilesystemController to use vfs.FS interface,
+// unifying the filesystem backend with IsolatedSessionController's file handlers.
+
 // FilesystemController handles file system operations
 type FilesystemController struct {
 	*basicController

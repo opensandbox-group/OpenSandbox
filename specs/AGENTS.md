@@ -26,14 +26,6 @@ When a contract change affects downstream code, also read the nearest consumer g
 
 ## Commands
 
-Regenerate docs output:
-
-```bash
-node scripts/spec-doc/generate-spec.js
-cd docs
-pnpm docs:spec
-```
-
 Lifecycle consumer validation:
 
 ```bash

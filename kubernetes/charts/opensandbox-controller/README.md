@@ -4,7 +4,7 @@
 
 A Kubernetes operator for managing sandbox environments with resource pooling and batch delivery
 
-**Homepage:** <https://github.com/alibaba/OpenSandbox>
+**Homepage:** <https://github.com/opensandbox-group/OpenSandbox>
 
 ## Maintainers
 
@@ -14,7 +14,7 @@ A Kubernetes operator for managing sandbox environments with resource pooling an
 
 ## Source Code
 
-* <https://github.com/alibaba/OpenSandbox/tree/main/kubernetes>
+* <https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes>
 
 ## Requirements
 
@@ -44,10 +44,10 @@ Kubernetes: `>=1.21.1-0`
 | controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration |
 | controller.replicaCount | int | `1` | Number of controller replicas |
 | controller.resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource requests and limits for the controller |
-| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"/var/run/containerd/containerd.sock","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.0","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
+| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"/var/run/containerd/containerd.sock","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
 | controller.snapshot.commitJobTimeout | string | `"10m"` | Timeout duration for commit jobs |
 | controller.snapshot.containerdSocketPath | string | `"/var/run/containerd/containerd.sock"` | Containerd socket path of host |
-| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.0"` | Image used for commit operations (must contain nerdctl tool) DockerHub: opensandbox/image-committer:v0.1.0 |
+| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1"` | Image used for commit operations (must contain nerdctl tool) DockerHub: opensandbox/image-committer:v0.1.1 |
 | controller.snapshot.registry | string | `""` | OCI registry prefix used for snapshot images. |
 | controller.snapshot.registryInsecure | bool | `false` | Use insecure registry mode when pushing snapshot images. |
 | controller.snapshot.resumePullSecret | string | `""` | Secret name injected into resumed sandboxes for pulling snapshot images. |
@@ -65,9 +65,6 @@ Kubernetes: `>=1.21.1-0`
 | imagePullSecrets | list | `[]` | Image pull secrets for private registries |
 | nameOverride | string | `""` | Override the name of the chart |
 | namespaceOverride | string | `""` | Override the namespace where resources will be created If not set, defaults to "opensandbox-system" |
-| networkPolicy.egress | list | `[]` | Egress rules for network policy |
-| networkPolicy.enabled | bool | `false` | Enable network policy |
-| networkPolicy.ingress | list | `[]` | Ingress rules for network policy |
 | rbac.create | bool | `true` | Specifies whether RBAC resources should be created |
 | serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
 | serviceAccount.create | bool | `true` | Specifies whether a service account should be created |

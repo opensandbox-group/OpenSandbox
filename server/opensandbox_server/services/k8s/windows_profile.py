@@ -67,6 +67,7 @@ def apply_windows_profile_overrides(
     env: Dict[str, str],
     resource_limits: Dict[str, str],
     disable_ipv6_for_egress: bool = False,
+    resource_requests: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Patch the generic BatchSandbox pod spec for windows profile semantics.
@@ -117,10 +118,21 @@ def apply_windows_profile_overrides(
         if resource_limits.get("memory"):
             limits["memory"] = _memory_with_qemu_overhead(resource_limits["memory"])
         if limits:
-            main_container["resources"] = {
-                "limits": limits,
-                "requests": dict(limits),
-            }
+            if resource_requests:
+                requests: Dict[str, str] = {}
+                if resource_requests.get("cpu"):
+                    requests["cpu"] = resource_requests["cpu"]
+                if resource_requests.get("memory"):
+                    requests["memory"] = _memory_with_qemu_overhead(resource_requests["memory"])
+                main_container["resources"] = {
+                    "limits": limits,
+                    "requests": requests or dict(limits),
+                }
+            else:
+                main_container["resources"] = {
+                    "limits": limits,
+                    "requests": dict(limits),
+                }
         else:
             main_container.pop("resources", None)
     else:

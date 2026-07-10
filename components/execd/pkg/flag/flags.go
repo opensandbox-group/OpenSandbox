@@ -38,4 +38,8 @@ var (
 	// JupyterIdlePollInterval controls how often ExecuteCodeStream checks for
 	// late execute_result/error messages after receiving idle status.
 	JupyterIdlePollInterval time.Duration
+
+	// IsolationConfigPath points to the TOML isolation config file.
+	// Empty means use built-in defaults.
+	IsolationConfigPath string
 )

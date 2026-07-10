@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -53,6 +54,112 @@ func TestRenameFile(t *testing.T) {
 	// destination exists -> expect error
 	require.NoError(t, os.WriteFile(src, []byte("data"), 0o644))
 	require.Error(t, RenameFile(model.RenameFileItem{Src: src, Dest: dst}), "expected error when destination already exists")
+}
+
+func TestMakeDir_PreExistingDir(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "existing")
+	require.NoError(t, os.Mkdir(existing, 0o755))
+
+	origInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	origMode := origInfo.Mode().Perm()
+
+	err = MakeDir(existing, model.Permission{Mode: 700})
+	require.NoError(t, err, "MakeDir on pre-existing dir should not fail")
+
+	afterInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	require.Equal(t, origMode, afterInfo.Mode().Perm(), "permissions of pre-existing dir should be unchanged")
+}
+
+func TestMakeDir_NewDir(t *testing.T) {
+	tmp := t.TempDir()
+	newDir := filepath.Join(tmp, "brand-new")
+
+	err := MakeDir(newDir, model.Permission{Mode: 755})
+	require.NoError(t, err)
+
+	info, err := os.Stat(newDir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	if runtime.GOOS != "windows" {
+		require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+	}
+}
+
+func TestMkdirAllWithOwnership_NewNestedDirs(t *testing.T) {
+	tmp := t.TempDir()
+	nested := filepath.Join(tmp, "a", "b", "c")
+
+	err := MkdirAllWithOwnership(nested, 0o755, "", "")
+	require.NoError(t, err)
+
+	for _, seg := range []string{"a", "a/b", "a/b/c"} {
+		info, err := os.Stat(filepath.Join(tmp, seg))
+		require.NoError(t, err)
+		require.True(t, info.IsDir())
+	}
+}
+
+func TestMkdirAllWithOwnership_PreExistingParent(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "existing")
+	require.NoError(t, os.Mkdir(existing, 0o755))
+
+	origInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	origMode := origInfo.Mode().Perm()
+
+	nested := filepath.Join(existing, "new-child", "deep")
+	err = MkdirAllWithOwnership(nested, 0o755, "", "")
+	require.NoError(t, err)
+
+	afterInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	require.Equal(t, origMode, afterInfo.Mode().Perm(), "pre-existing dir should be unchanged")
+
+	info, err := os.Stat(nested)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+}
+
+func TestMkdirAllWithOwnership_AllExist(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "already")
+	require.NoError(t, os.MkdirAll(existing, 0o755))
+
+	err := MkdirAllWithOwnership(existing, 0o755, "", "")
+	require.NoError(t, err, "all dirs exist — should be no-op")
+}
+
+func TestSetFileOwnership_EmptyOwnerGroup(t *testing.T) {
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "test.txt")
+	require.NoError(t, os.WriteFile(file, []byte("data"), 0o644))
+
+	err := SetFileOwnership(file, "", "")
+	require.NoError(t, err, "empty owner and group should be a no-op")
+}
+
+func TestSetFileOwnership_MissingFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SetFileOwnership is a no-op on Windows")
+	}
+	err := SetFileOwnership("/nonexistent/path/file.txt", "root", "")
+	require.Error(t, err, "chown on missing file should return error")
+}
+
+func TestSetFileOwnership_InvalidOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SetFileOwnership is a no-op on Windows")
+	}
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "test.txt")
+	require.NoError(t, os.WriteFile(file, []byte("data"), 0o644))
+
+	err := SetFileOwnership(file, "nonexistent_user_xyz", "")
+	require.Error(t, err, "invalid owner should return error")
 }
 
 func TestSearchFileMetadata(t *testing.T) {

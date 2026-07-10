@@ -30,7 +30,7 @@ class ReplaceFileContentItem:
     """Content replacement operation
 
     Attributes:
-        old (str): String to be replaced Example: localhost.
+        old (str): String to be replaced (must not be empty) Example: localhost.
         new (str): Replacement string Example: 0.0.0.0.
     """
 
