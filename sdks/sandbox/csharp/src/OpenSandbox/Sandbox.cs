@@ -64,6 +64,8 @@ public sealed class Sandbox : IAsyncDisposable
     /// </summary>
     public IExecdMetrics Metrics { get; }
 
+    public IIsolatedSessions Isolation { get; }
+
     /// <summary>
     /// Gets the sandbox-scoped Credential Vault service.
     /// </summary>
@@ -96,6 +98,7 @@ public sealed class Sandbox : IAsyncDisposable
         ISandboxFiles files,
         IExecdHealth health,
         IExecdMetrics metrics,
+        IIsolatedSessions isolated,
         IEgress egress,
         ICredentialVault? credentialVault)
     {
@@ -112,6 +115,7 @@ public sealed class Sandbox : IAsyncDisposable
         Files = files;
         Health = health;
         Metrics = metrics;
+        Isolation = isolated;
         _egress = egress;
         CredentialVault = credentialVault
             ?? egress as ICredentialVault
@@ -186,6 +190,7 @@ public sealed class Sandbox : IAsyncDisposable
                 : null,
             Timeout = options.ManualCleanup ? null : options.TimeoutSeconds ?? Constants.DefaultTimeoutSeconds,
             ResourceLimits = options.Resource ?? Constants.DefaultResourceLimits,
+            ResourceRequests = options.ResourceRequests,
             Env = options.Env,
             SecureAccess = options.SecureAccess,
             Metadata = options.Metadata,
@@ -255,6 +260,7 @@ public sealed class Sandbox : IAsyncDisposable
                 execdStack.Files,
                 execdStack.Health,
                 execdStack.Metrics,
+                execdStack.Isolation,
                 egressStack.Egress,
                 egressStack.CredentialVault);
 
@@ -380,6 +386,7 @@ public sealed class Sandbox : IAsyncDisposable
                 execdStack.Files,
                 execdStack.Health,
                 execdStack.Metrics,
+                execdStack.Isolation,
                 egressStack.Egress,
                 egressStack.CredentialVault);
 
@@ -505,6 +512,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task PauseAsync(CancellationToken cancellationToken = default)
     {
+        (_sandboxes as Adapters.SandboxesAdapter)?.InvalidateEndpointCache(Id);
         return _sandboxes.PauseSandboxAsync(Id, cancellationToken);
     }
 
@@ -545,6 +553,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task KillAsync(CancellationToken cancellationToken = default)
     {
+        (_sandboxes as Adapters.SandboxesAdapter)?.InvalidateEndpointCache(Id);
         return _sandboxes.DeleteSandboxAsync(Id, cancellationToken);
     }
 

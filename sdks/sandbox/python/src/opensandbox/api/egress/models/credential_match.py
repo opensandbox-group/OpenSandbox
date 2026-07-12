@@ -33,7 +33,8 @@ class CredentialMatch:
     Attributes:
         hosts (list[str]):
         schemes (list[CredentialMatchSchemesItem] | Unset):
-        ports (list[int] | Unset):
+        ports (list[int] | Unset): Deprecated. Port is derived from scheme (https→443, http→80). Values other than 80 or
+            443 are rejected with a validation error. Standard values (80/443) are accepted but ignored.
         methods (list[str] | Unset):
         paths (list[str] | Unset):
     """

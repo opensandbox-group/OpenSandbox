@@ -3,8 +3,8 @@ title: Credential Vault and Credential Proxy
 authors:
   - "@jwx0925"
 creation-date: 2026-05-28
-last-updated: 2026-06-10
-status: implementing
+last-updated: 2026-06-23
+status: implemented
 ---
 
 # OSEP-0012: Credential Vault and Credential Proxy

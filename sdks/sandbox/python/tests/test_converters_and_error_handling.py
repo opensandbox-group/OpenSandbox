@@ -316,6 +316,9 @@ def test_sandbox_model_converter_maps_platform_from_create_response() -> None:
     from opensandbox.api.lifecycle.models.create_sandbox_response import (
         CreateSandboxResponse,
     )
+    from opensandbox.api.lifecycle.models.create_sandbox_response_extensions import (
+        CreateSandboxResponseExtensions,
+    )
     from opensandbox.api.lifecycle.models.platform_spec import (
         PlatformSpec as ApiPlatformSpec,
     )
@@ -325,6 +328,9 @@ def test_sandbox_model_converter_maps_platform_from_create_response() -> None:
         id="sbx-1",
         status=SandboxStatus(state="Running"),
         platform=ApiPlatformSpec(os="linux", arch="arm64"),
+        extensions=CreateSandboxResponseExtensions.from_dict(
+            {"opensandbox.extensions.custom-label": "中文数据"}
+        ),
         created_at=datetime(2025, 1, 1),
         entrypoint=["/bin/sh"],
     )
@@ -332,6 +338,23 @@ def test_sandbox_model_converter_maps_platform_from_create_response() -> None:
     converted = SandboxModelConverter.to_sandbox_create_response(api_response)
     assert converted.platform is not None
     assert converted.platform.arch == "arm64"
+    assert converted.extensions == {"opensandbox.extensions.custom-label": "中文数据"}
+
+
+def test_sandbox_model_converter_preserves_missing_metadata_default() -> None:
+    from opensandbox.api.lifecycle.models.sandbox import Sandbox
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    api_sandbox = Sandbox(
+        id="sbx-1",
+        status=SandboxStatus(state="Running"),
+        created_at=datetime(2025, 1, 1),
+        entrypoint=["/bin/sh"],
+    )
+
+    converted = SandboxModelConverter.to_sandbox_info(api_sandbox)
+    assert converted.metadata == {}
+    assert converted.extensions is None
 
 
 def test_sandbox_model_converter_supports_windows_platform_request() -> None:

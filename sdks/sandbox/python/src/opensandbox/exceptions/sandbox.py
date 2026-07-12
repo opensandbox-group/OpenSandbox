@@ -31,8 +31,9 @@ class SandboxError:
     POOL_EMPTY = "POOL_EMPTY"
     POOL_ACQUIRE_FAILED = "POOL_ACQUIRE_FAILED"
     POOL_STATE_STORE_UNAVAILABLE = "POOL_STATE_STORE_UNAVAILABLE"
-    POOL_STATE_STORE_CONTENTION = "POOL_STATE_STORE_CONTENTION"
     POOL_NOT_RUNNING = "POOL_NOT_RUNNING"
+    POOL_DESTROYED = "POOL_DESTROYED"
+    POOL_DESTROY_INCOMPLETE = "POOL_DESTROY_INCOMPLETE"
 
     def __init__(self, code: str, message: str | None = None) -> None:
         self.code = code
@@ -61,6 +62,14 @@ class SandboxException(Exception):
         self.__cause__ = cause
         self.error = error or SandboxError(SandboxError.INTERNAL_UNKNOWN_ERROR)
         self.request_id = request_id
+
+    def __str__(self) -> str:
+        parts = [super().__str__()]
+        if self.error and self.error.message:
+            parts.append(f"[{self.error.code}] {self.error.message}")
+        if self.request_id:
+            parts.append(f"request_id={self.request_id}")
+        return " | ".join(parts)
 
 
 class SandboxApiException(SandboxException):
@@ -184,21 +193,6 @@ class PoolStateStoreUnavailableException(SandboxException):
         )
 
 
-class PoolStateStoreContentionException(SandboxException):
-    """Thrown when atomic store operations encounter contention."""
-
-    def __init__(
-        self,
-        message: str | None = None,
-        cause: Exception | None = None,
-    ) -> None:
-        super().__init__(
-            message,
-            cause,
-            SandboxError(SandboxError.POOL_STATE_STORE_CONTENTION, message),
-        )
-
-
 class PoolNotRunningException(SandboxException):
     """Thrown when acquire is called while the pool is not running."""
 
@@ -209,4 +203,32 @@ class PoolNotRunningException(SandboxException):
     ) -> None:
         super().__init__(
             message, cause, SandboxError(SandboxError.POOL_NOT_RUNNING, message)
+        )
+
+
+class PoolDestroyedException(SandboxException):
+    """Thrown when a pool namespace is being destroyed or has been destroyed."""
+
+    def __init__(
+        self,
+        message: str | None = "Pool namespace is destroyed",
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message, cause, SandboxError(SandboxError.POOL_DESTROYED, message)
+        )
+
+
+class PoolDestroyIncompleteException(SandboxException):
+    """Thrown when pool destroy starts but does not complete."""
+
+    def __init__(
+        self,
+        message: str | None = "Pool destroy did not complete",
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            cause,
+            SandboxError(SandboxError.POOL_DESTROY_INCOMPLETE, message),
         )

@@ -28,4 +28,7 @@ resources:
 - batchsandbox_admin_role.yaml
 - batchsandbox_editor_role.yaml
 - batchsandbox_viewer_role.yaml
+- sandboxsnapshot_admin_role.yaml
+- sandboxsnapshot_editor_role.yaml
+- sandboxsnapshot_viewer_role.yaml
 

@@ -37,6 +37,11 @@ type SandboxCreateOptions struct {
 	// Defaults to DefaultResourceLimits.
 	ResourceLimits ResourceLimits
 
+	// ResourceRequests sets Kubernetes resource requests (guaranteed minimums).
+	// When set, enables Burstable QoS (requests < limits).
+	// When nil, limits are used for both limits and requests (Guaranteed QoS).
+	ResourceRequests ResourceLimits
+
 	// TimeoutSeconds is the sandbox TTL. Nil means use DefaultTimeoutSeconds.
 	TimeoutSeconds *int
 
@@ -128,19 +133,20 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 	lc := config.lifecycleClient()
 
 	req := CreateSandboxRequest{
-		Image:           nil,
-		SnapshotID:      opts.SnapshotID,
-		Entrypoint:      entrypoint,
-		ResourceLimits:  limits,
-		Timeout:         timeout,
-		Env:             opts.Env,
-		SecureAccess:    opts.SecureAccess,
-		Metadata:        opts.Metadata,
-		NetworkPolicy:   opts.NetworkPolicy,
-		CredentialProxy: opts.CredentialProxy,
-		Volumes:         opts.Volumes,
-		Extensions:      opts.Extensions,
-		Platform:        opts.Platform,
+		Image:            nil,
+		SnapshotID:       opts.SnapshotID,
+		Entrypoint:       entrypoint,
+		ResourceLimits:   limits,
+		ResourceRequests: opts.ResourceRequests,
+		Timeout:          timeout,
+		Env:              opts.Env,
+		SecureAccess:     opts.SecureAccess,
+		Metadata:         opts.Metadata,
+		NetworkPolicy:    opts.NetworkPolicy,
+		CredentialProxy:  opts.CredentialProxy,
+		Volumes:          opts.Volumes,
+		Extensions:       opts.Extensions,
+		Platform:         opts.Platform,
 	}
 	if opts.Image != "" {
 		req.Image = &ImageSpec{URI: opts.Image, Auth: opts.ImageAuth}
@@ -232,6 +238,9 @@ func (s *Sandbox) Resume(ctx context.Context, opts ...ReadyOptions) (*Sandbox, e
 
 // Kill terminates the sandbox. This is irreversible.
 func (s *Sandbox) Kill(ctx context.Context) error {
+	if s.lifecycle.cache != nil {
+		s.lifecycle.cache.Invalidate(s.id)
+	}
 	return s.lifecycle.DeleteSandbox(ctx, s.id)
 }
 
@@ -243,7 +252,11 @@ func (s *Sandbox) Close() error {
 }
 
 // Pause pauses the sandbox while preserving its state.
+// Endpoint cache is invalidated because endpoints may change across pause/resume.
 func (s *Sandbox) Pause(ctx context.Context) error {
+	if s.lifecycle.cache != nil {
+		s.lifecycle.cache.Invalidate(s.id)
+	}
 	return s.lifecycle.PauseSandbox(ctx, s.id)
 }
 

@@ -21,7 +21,11 @@ on:
       - 'helm/**'  # Format: helm/<component>/<app_version>, e.g., helm/opensandbox-controller/0.1.0
 
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+
   publish:
+    needs: release-preflight
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -59,10 +63,36 @@ jobs:
             
             echo "component=$COMPONENT" >> $GITHUB_OUTPUT
             echo "app_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "release_tag=$TAG_PATH" >> $GITHUB_OUTPUT
           else
             echo "component=${{ inputs.component }}" >> $GITHUB_OUTPUT
             echo "app_version=${{ inputs.app_version }}" >> $GITHUB_OUTPUT
+            echo "release_tag=helm/${{ inputs.component }}/${{ inputs.app_version }}" >> $GITHUB_OUTPUT
           fi
+
+      - name: Verify release tag on origin
+        env:
+          RELEASE_TAG: ${{ steps.parse_tag.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          local_commit="$(git rev-parse 'HEAD^{commit}')"
+          remote_commit="$(git ls-remote origin "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 { print $1 }')"
+
+          if [[ -z "$remote_commit" ]]; then
+            remote_commit="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 { print $1 }')"
+          fi
+
+          if [[ -z "$remote_commit" ]]; then
+            echo "::error::Release tag '${RELEASE_TAG}' does not exist on origin. Have an authorized release manager push the protected tag before publishing the Helm chart."
+            exit 1
+          fi
+
+          if [[ "$local_commit" != "$remote_commit" ]]; then
+            echo "::error::Current commit is ${local_commit}, but origin tag '${RELEASE_TAG}' resolves to ${remote_commit}. Refusing to publish the Helm chart."
+            exit 1
+          fi
+
+          echo "Verified release tag '${RELEASE_TAG}' at ${remote_commit}."
 
       - name: Set chart path
         id: chart_path
@@ -126,7 +156,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: helm/${{ steps.parse_tag.outputs.component }}/${{ steps.parse_tag.outputs.app_version }}
+          tag_name: ${{ steps.parse_tag.outputs.release_tag }}
           name: Helm Chart ${{ steps.parse_tag.outputs.component }} ${{ steps.chart_version.outputs.version }} (App v${{ steps.parse_tag.outputs.app_version }})
           body: |
             ## ${{ steps.parse_tag.outputs.component }} Helm Chart
@@ -140,7 +170,7 @@ jobs:
             
             ```bash
             helm install ${{ steps.parse_tag.outputs.component }} \
-              https://github.com/${{ github.repository }}/releases/download/helm/${{ steps.parse_tag.outputs.component }}/${{ steps.parse_tag.outputs.app_version }}/${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}.tgz \
+              https://github.com/${{ github.repository }}/releases/download/${{ steps.parse_tag.outputs.release_tag }}/${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}.tgz \
               --namespace opensandbox-system \
               --create-namespace
             ```
@@ -149,7 +179,7 @@ jobs:
             
             ```bash
             # 下载
-            wget https://github.com/${{ github.repository }}/releases/download/helm/${{ steps.parse_tag.outputs.component }}/${{ steps.parse_tag.outputs.app_version }}/${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}.tgz
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.parse_tag.outputs.release_tag }}/${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}.tgz
             
             # 安装
             helm install ${{ steps.parse_tag.outputs.component }} ./${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}.tgz \

@@ -40,14 +40,21 @@ func (a *defaultAssigner) AssignPool(ctx context.Context, sbx *sandboxv1alpha1.B
 	}
 
 	var candidates []*sandboxv1alpha1.Pool
+	var rejections []PoolRejection
 	for _, pool := range pools {
-		if a.passesAllPredicates(ctx, sbx, pool, predicates) {
+		if reasons := a.collectRejections(ctx, sbx, pool, predicates); len(reasons) > 0 {
+			rejections = append(rejections, PoolRejection{PoolName: pool.Name, Reasons: reasons})
+		} else {
 			candidates = append(candidates, pool)
 		}
 	}
 
 	if len(candidates) == 0 {
-		return "", fmt.Errorf("no eligible pool found for BatchSandbox %s", sbx.Name)
+		return "", &NoEligiblePoolError{
+			SandboxName: sbx.Name,
+			TotalPools:  len(pools),
+			Rejections:  rejections,
+		}
 	}
 
 	best := candidates[0]
@@ -62,13 +69,20 @@ func (a *defaultAssigner) AssignPool(ctx context.Context, sbx *sandboxv1alpha1.B
 	return best.Name, nil
 }
 
-func (a *defaultAssigner) passesAllPredicates(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, predicates []Predicate) bool {
+func (a *defaultAssigner) collectRejections(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, predicates []Predicate) []string {
+	var reasons []string
 	for _, p := range predicates {
 		if !p.Predicate(ctx, sbx, pool) {
-			return false
+			if pr, ok := p.(PredicateWithReason); ok {
+				if reason := pr.Reason(ctx, sbx, pool); reason != "" {
+					reasons = append(reasons, reason)
+					continue
+				}
+			}
+			reasons = append(reasons, "predicate failed")
 		}
 	}
-	return true
+	return reasons
 }
 
 func (a *defaultAssigner) weightedScore(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, scorers []weightedScorer) float64 {

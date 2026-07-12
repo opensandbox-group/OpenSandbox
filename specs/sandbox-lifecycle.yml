@@ -12,8 +12,8 @@ info:
 
     A sandbox follows this lifecycle:
 
-    1. **Creation** → Sandbox enters `Pending` state (auto-starts)
-    2. **Execution** → Transitions to `Running` state
+    1. **Creation** → Sandbox is provisioned and enters `Running` state
+    2. **Execution** → Sandbox is running and ready to accept requests
     3. **Pause** (optional) → `Pausing` → `Paused` (asynchronous process)
     4. **Resume** (optional) → `Resuming` → `Running` (asynchronous process)
     5. **Termination** → `Stopping` → `Terminated` (can be triggered by kill action, TTL expiry, or error)
@@ -204,19 +204,16 @@ paths:
       responses:
         '202':
           description: |
-            Sandbox created and accepted for provisioning.
+            Sandbox created and provisioned successfully.
 
             The returned sandbox includes:
             - `id`: Unique sandbox identifier
-            - `status.state: "Pending"` (auto-starting provisioning or restore)
-            - `status.reason` and `status.message` indicating initialization stage
+            - `status.state: "Running"` (provisioning completed synchronously)
+            - `status.reason` and `status.message` indicating current state
             - `metadata`, `expiresAt`, `createdAt`: Core sandbox information
 
             Note: startup source details and `updatedAt` are not included in the create response.
             Use GET /sandboxes/{sandboxId} to retrieve the complete sandbox information.
-
-            To track provisioning progress, poll GET /sandboxes/{sandboxId}.
-            The sandbox will automatically transition to `Running` state once provisioning or restore completes.
           content:
             application/json:
               schema:
@@ -846,6 +843,12 @@ components:
             type: string
           description: Custom metadata from creation request
 
+        extensions:
+          type: object
+          additionalProperties:
+            type: string
+          description: Opaque extension data restored from provider-specific storage
+
         platform:
           $ref: '#/components/schemas/PlatformSpec'
           description: |
@@ -996,6 +999,12 @@ components:
           additionalProperties:
             type: string
           description: Custom metadata from creation request
+
+        extensions:
+          type: object
+          additionalProperties:
+            type: string
+          description: Opaque extension data restored from provider-specific storage
 
         entrypoint:
           type: array
@@ -1210,10 +1219,20 @@ components:
         resourceLimits:
           $ref: '#/components/schemas/ResourceLimits'
           description: |
-            Runtime resource constraints for the sandbox instance.
+            Runtime resource constraints (hard caps) for the sandbox instance.
             Required when `extensions.poolRef` is not set.
             Optional when using pool mode (resource limits are defined by the Pool CRD template).
             SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
+
+        resourceRequests:
+          $ref: '#/components/schemas/ResourceLimits'
+          description: |
+            Resource reservations (guaranteed minimums) for the sandbox instance.
+            When provided, these values are used as Kubernetes resource `requests`,
+            enabling Burstable QoS class (where `requests < limits`).
+            When omitted, `resourceLimits` values are used for both limits and requests,
+            resulting in Guaranteed QoS class.
+            Only meaningful for Kubernetes-based runtimes; ignored by Docker runtime.
 
         env:
           type: object
@@ -1418,8 +1437,10 @@ components:
       type: object
       description: |
         Credential Vault proxy startup settings. This is an explicit opt-in for
-        transparent MITM support used by credential injection; plain egress
-        network policy remains DNS/FQDN policy enforcement only.
+        transparent MITM support used by credential injection. Credential Vault
+        requires `dns+nft` enforcement and a network policy. A deny-default policy
+        is strongly recommended; default-allow remains temporarily supported for
+        backward compatibility and emits a security warning.
       properties:
         enabled:
           type: boolean
@@ -1427,7 +1448,9 @@ components:
           description: |
             When true, the server starts the egress sidecar with transparent
             MITM enabled and installs the runtime-managed MITM CA bundle into
-            the sandbox container. Requires `networkPolicy`.
+            the sandbox container. Requires `networkPolicy` and server
+            `[egress].mode = "dns+nft"`. `defaultAction: deny` is strongly
+            recommended; default-allow support is deprecated.
       additionalProperties: false
 
     NetworkRule:
@@ -1538,9 +1561,9 @@ components:
           description: |
             When true, the volume is automatically removed when the sandbox
             is deleted. Only applies to volumes that were auto-created by the
-            server (Docker only). Pre-existing volumes are never removed.
-            Has no effect on Kubernetes PVCs, whose lifecycle is managed by
-            the StorageClass reclaim policy.
+            server on this request; pre-existing volumes are never removed.
+            For Kubernetes, the resulting PVC delete triggers the bound PV's
+            StorageClass reclaim policy (`Retain`/`Delete`).
         storageClass:
           type: string
           nullable: true

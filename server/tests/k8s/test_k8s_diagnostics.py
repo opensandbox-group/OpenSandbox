@@ -122,9 +122,11 @@ def test_get_sandbox_logs_passes_tail_and_since() -> None:
 
     assert service.get_sandbox_logs("sbx-1", tail=10, since="1h") == "log line"
 
+    # Single-container pod uses its only container ("main") as the default.
     service.core_v1.read_namespaced_pod_log.assert_called_once_with(
         name="pod-1",
         namespace="sandbox-system",
+        container="main",
         tail_lines=10,
         timestamps=True,
         since_seconds=3600,
@@ -136,6 +138,111 @@ def test_get_sandbox_logs_returns_placeholder_for_empty_output() -> None:
     service.core_v1.read_namespaced_pod_log.return_value = ""
 
     assert service.get_sandbox_logs("sbx-1") == "(no logs)"
+
+
+def _multi_container_pod():
+    """Pod modelled after a real OSB sandbox: init + user "sandbox" + egress sidecar."""
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name="pod-1",
+            namespace="sandbox-system",
+            labels={SANDBOX_ID_LABEL: "sbx-1"},
+        ),
+        spec=SimpleNamespace(
+            node_name="node-1",
+            runtime_class_name=None,
+            containers=[
+                SimpleNamespace(name="sandbox", resources=None),
+                SimpleNamespace(name="egress", resources=None),
+            ],
+            init_containers=[SimpleNamespace(name="execd-installer", resources=None)],
+        ),
+        status=SimpleNamespace(
+            phase="Running",
+            pod_ip="10.1.2.3",
+            host_ip="192.168.1.10",
+            start_time="2026-01-01T00:00:00Z",
+            container_statuses=[],
+            init_container_statuses=[],
+            conditions=[],
+        ),
+    )
+
+
+def test_get_sandbox_logs_defaults_to_sandbox_container_on_multi_container_pod() -> None:
+    service = _DiagnosticsService([_multi_container_pod()])
+    service.core_v1.read_namespaced_pod_log.return_value = "user log"
+
+    assert service.get_sandbox_logs("sbx-1", tail=5) == "user log"
+
+    service.core_v1.read_namespaced_pod_log.assert_called_once_with(
+        name="pod-1",
+        namespace="sandbox-system",
+        container="sandbox",
+        tail_lines=5,
+        timestamps=True,
+    )
+
+
+def test_get_sandbox_logs_accepts_container_override_for_sidecars() -> None:
+    service = _DiagnosticsService([_multi_container_pod()])
+    service.core_v1.read_namespaced_pod_log.return_value = "egress log"
+
+    assert service.get_sandbox_logs("sbx-1", container="egress") == "egress log"
+
+    service.core_v1.read_namespaced_pod_log.assert_called_once_with(
+        name="pod-1",
+        namespace="sandbox-system",
+        container="egress",
+        tail_lines=100,
+        timestamps=True,
+    )
+
+
+def test_get_sandbox_logs_allows_init_container_by_name() -> None:
+    service = _DiagnosticsService([_multi_container_pod()])
+    service.core_v1.read_namespaced_pod_log.return_value = "init log"
+
+    assert service.get_sandbox_logs("sbx-1", container="execd-installer") == "init log"
+
+
+def test_get_sandbox_logs_unknown_container_returns_404() -> None:
+    service = _DiagnosticsService([_multi_container_pod()])
+
+    with pytest.raises(HTTPException) as exc:
+        service.get_sandbox_logs("sbx-1", container="not-a-container")
+    assert exc.value.status_code == 404
+    assert "not-a-container" in str(exc.value.detail["message"])
+
+
+def test_get_sandbox_logs_maps_kubernetes_400_to_400_response() -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    service = _DiagnosticsService([_multi_container_pod()])
+    api_exc = ApiException(status=400, reason="Bad Request")
+    api_exc.body = (
+        'a container name must be specified for pod sbx-1-0, '
+        'choose one of: [sandbox egress]'
+    )
+    service.core_v1.read_namespaced_pod_log.side_effect = api_exc
+
+    with pytest.raises(HTTPException) as exc:
+        service.get_sandbox_logs("sbx-1")
+    assert exc.value.status_code == 400
+    assert "sandbox" in str(exc.value.detail["message"])
+
+
+def test_get_sandbox_logs_maps_kubernetes_403_to_forbidden_response() -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    service = _DiagnosticsService([_multi_container_pod()])
+    api_exc = ApiException(status=403, reason="Forbidden")
+    api_exc.body = "pods/log forbidden"
+    service.core_v1.read_namespaced_pod_log.side_effect = api_exc
+
+    with pytest.raises(HTTPException) as exc:
+        service.get_sandbox_logs("sbx-1")
+    assert exc.value.status_code == 403
 
 
 def test_get_sandbox_inspect_formats_runtime_statuses_and_resources() -> None:

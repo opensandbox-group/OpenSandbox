@@ -320,6 +320,9 @@ async def test_create_resolves_egress_endpoint_and_builds_service(
         def create_diagnostics_service(self):
             return _DiagnosticsServiceStub()
 
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
     sandbox_service = _SandboxServiceCreateStub()
     monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
 
@@ -444,6 +447,9 @@ async def test_create_preserves_manual_cleanup_timeout(
         def create_diagnostics_service(self):
             return _DiagnosticsServiceStub()
 
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
     sandbox_service = _SandboxServiceCreateStub()
     monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
 
@@ -484,6 +490,7 @@ async def test_create_passes_new_signature_keywords_even_when_unused(
             secure_access=False,
             snapshot_id=None,
             credential_proxy=None,
+            resource_requests=None,
         ):
             assert spec is not None
             assert entrypoint is not None
@@ -530,6 +537,9 @@ async def test_create_passes_new_signature_keywords_even_when_unused(
         def create_diagnostics_service(self):
             return _DiagnosticsServiceStub()
 
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
     monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
     await Sandbox.create(
         "python:3.11",
@@ -567,6 +577,7 @@ async def test_create_restore_from_snapshot_passes_snapshot_id(
             secure_access=False,
             snapshot_id=None,
             credential_proxy=None,
+            resource_requests=None,
         ):
             self.create_calls.append((spec, entrypoint))
             assert isinstance(env, dict)
@@ -614,6 +625,9 @@ async def test_create_restore_from_snapshot_passes_snapshot_id(
         def create_diagnostics_service(self):
             return _DiagnosticsServiceStub()
 
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
     monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
     await Sandbox.create(snapshot_id="snap-123", skip_health_check=True)
 
@@ -641,6 +655,7 @@ async def test_create_restore_from_snapshot_preserves_custom_entrypoint(
             secure_access=False,
             snapshot_id=None,
             credential_proxy=None,
+            resource_requests=None,
         ):
             assert isinstance(env, dict)
             assert isinstance(metadata, dict)
@@ -686,6 +701,9 @@ async def test_create_restore_from_snapshot_preserves_custom_entrypoint(
 
         def create_diagnostics_service(self):
             return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
 
     monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
     await Sandbox.create(

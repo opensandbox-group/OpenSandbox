@@ -54,7 +54,6 @@ def k8s_runtime_config():
     return KubernetesRuntimeConfig(
         kubeconfig_path="/tmp/test-kubeconfig",
         namespace="test-namespace",
-        service_account="test-sa",
         workload_provider=PROVIDER_TYPE_BATCHSANDBOX,
     )
 
@@ -65,7 +64,6 @@ def agent_sandbox_runtime_config():
     return KubernetesRuntimeConfig(
         kubeconfig_path="/tmp/test-kubeconfig",
         namespace="test-namespace",
-        service_account="test-sa",
         workload_provider="agent-sandbox",
     )
 
@@ -89,7 +87,6 @@ spec:
     return KubernetesRuntimeConfig(
         kubeconfig_path="/tmp/test-kubeconfig",
         namespace="test-namespace",
-        service_account="test-sa",
         workload_provider=PROVIDER_TYPE_BATCHSANDBOX,
         batchsandbox_template_file=str(template_file),
     )

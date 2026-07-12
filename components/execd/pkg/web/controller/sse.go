@@ -161,7 +161,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 }
 
 // writeSingleEvent serializes one SSE frame.
-func (c *CodeInterpretingController) writeSingleEvent(handler string, data []byte, verbose bool, summary string) {
+func (c *basicController) writeSingleEvent(handler string, data []byte, verbose bool, summary string) {
 	if c == nil || c.ctx == nil || c.ctx.Writer == nil {
 		return
 	}

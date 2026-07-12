@@ -102,12 +102,23 @@ from importlib.metadata import version as _pkg_version
 from opensandbox.manager import SandboxManager
 from opensandbox.pool import (
     AcquirePolicy,
+    AsyncPooledSandboxCreator,
     AsyncSandboxPool,
     InMemoryAsyncPoolStateStore,
     InMemoryPoolStateStore,
     PoolCreationSpec,
+    PoolDestroyOptions,
+    PoolDestroyResult,
+    PoolDestroyState,
+    PoolDestroyStrategy,
+    PooledSandboxCreateContext,
+    PooledSandboxCreateReason,
+    PooledSandboxCreator,
     SandboxPool,
     SandboxPoolAsync,
+    SandboxPoolManager,
+    SandboxPoolManagerAsync,
+    SandboxPoolManagerSync,
 )
 from opensandbox.sandbox import Sandbox
 from opensandbox.sync import SandboxManagerSync, SandboxPoolSync, SandboxSync
@@ -128,7 +139,18 @@ __all__ = [
     "AsyncSandboxPool",
     "SandboxPool",
     "AcquirePolicy",
+    "AsyncPooledSandboxCreator",
+    "PooledSandboxCreateContext",
+    "PooledSandboxCreateReason",
+    "PooledSandboxCreator",
     "PoolCreationSpec",
+    "PoolDestroyOptions",
+    "PoolDestroyResult",
+    "PoolDestroyState",
+    "PoolDestroyStrategy",
     "InMemoryAsyncPoolStateStore",
     "InMemoryPoolStateStore",
+    "SandboxPoolManager",
+    "SandboxPoolManagerAsync",
+    "SandboxPoolManagerSync",
 ]

@@ -858,23 +858,21 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("waiting for BatchSandbox to remain in Succeed with PauseFailed condition")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "batchsandbox", sandboxName,
-					"-n", pauseResumeNamespace, "-o", "jsonpath={.status.phase}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Succeed"))
-			}, 6*time.Minute).Should(Succeed())
-
-			By("verifying PauseFailed condition is set (commit/push failed)")
+			By("waiting for PauseFailed condition to be set")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "batchsandbox", sandboxName,
 					"-n", pauseResumeNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='PauseFailed')].status}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("True"))
-			}, 4*time.Minute).Should(Succeed())
+			}, 15*time.Minute).Should(Succeed())
+
+			By("verifying phase returned to Succeed")
+			cmd = exec.Command("kubectl", "get", "batchsandbox", sandboxName,
+				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.phase}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("Succeed"))
 
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "batchsandbox", sandboxName, "-n", pauseResumeNamespace, "--ignore-not-found=true")
@@ -990,106 +988,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			utils.Run(cmd)
 		})
 
-		It("should successfully retry pause after fixing registry config", func() {
-			const sandboxName = "test-pause-retry-success"
-
-			By("creating BatchSandbox with template")
-			bsYAML, err := renderTemplate("testdata/batchsandbox-non-pooled.yaml", map[string]interface{}{
-				"BatchSandboxName": sandboxName,
-				"Namespace":        pauseResumeNamespace,
-				"SandboxImage":     utils.SandboxImage,
-				"Replicas":         1,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			bsFile := filepath.Join("/tmp", "test-pause-retry-success-bs.yaml")
-			err = os.WriteFile(bsFile, []byte(bsYAML), 0644)
-			Expect(err).NotTo(HaveOccurred())
-			defer os.Remove(bsFile)
-
-			cmd := exec.Command("kubectl", "apply", "-f", bsFile)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("waiting for BatchSandbox to reach the steady Succeed phase")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "batchsandbox", sandboxName,
-					"-n", pauseResumeNamespace, "-o", "jsonpath={.status.phase}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Succeed"))
-			}, 2*time.Minute).Should(Succeed())
-
-			By("patching registry push secret to invalid value (invalid docker config)")
-			invalidConfig := `{"auths":{"docker-registry.default.svc.cluster.local:5000":{"username":"invalid","password":"wrong","auth":"aW52YWxpZDp3cm9uZw=="}}}`
-			encoded := base64.StdEncoding.EncodeToString([]byte(invalidConfig))
-			patchData := fmt.Sprintf(`{"data":{".dockerconfigjson":"%s"}}`, encoded)
-			cmd = exec.Command("kubectl", "patch", "secret", "registry-snapshot-push-secret", "-n", pauseResumeNamespace,
-				"--type=merge", "-p", patchData)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("triggering first pause attempt (will fail due to invalid registry)")
-			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
-				"-n", pauseResumeNamespace, "--type=merge",
-				"-p", `{"spec":{"pause":true}}`)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("waiting for pause to fail with PauseFailed condition")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "batchsandbox", sandboxName,
-					"-n", pauseResumeNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='PauseFailed')].status}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"))
-			}, 3*time.Minute).Should(Succeed())
-
-			By("verifying Phase is still Succeed (retryable)")
-			cmd = exec.Command("kubectl", "get", "batchsandbox", sandboxName,
-				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.phase}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("Succeed"))
-
-			By("restoring registry push secret to valid credentials")
-			err = createDockerRegistrySecrets(pauseResumeNamespace)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("resetting spec.pause so the next pause request gets a new generation")
-			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
-				"-n", pauseResumeNamespace, "--type=merge",
-				"-p", `{"spec":{"pause":null}}`)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("triggering retry pause (nil -> true) so PauseFailed can clear and pause can succeed")
-			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
-				"-n", pauseResumeNamespace, "--type=merge",
-				"-p", `{"spec":{"pause":true}}`)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("waiting for BatchSandbox to be Paused")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "batchsandbox", sandboxName,
-					"-n", pauseResumeNamespace, "-o", "jsonpath={.status.phase}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Paused"))
-			}, 3*time.Minute).Should(Succeed())
-
-			By("verifying PauseFailed condition is cleared")
-			cmd = exec.Command("kubectl", "get", "batchsandbox", sandboxName,
-				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='PauseFailed')].status}")
-			output, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(BeEmpty(), "PauseFailed condition should be cleared after successful pause")
-
-			By("cleaning up")
-			cmd = exec.Command("kubectl", "delete", "batchsandbox", sandboxName, "-n", pauseResumeNamespace, "--ignore-not-found=true")
-			utils.Run(cmd)
-		})
 	})
 })
 

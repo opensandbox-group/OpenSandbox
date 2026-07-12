@@ -74,13 +74,15 @@ def allocate_host_port(
 
 def allocate_port_bindings(
     container_ports: list[str],
+    min_port: int = 40000,
+    max_port: int = 60000,
 ) -> Dict[str, tuple[str, int]]:
     """Allocate distinct random host ports for each container port spec."""
     allocated_ports: set[int] = set()
     bindings: Dict[str, tuple[str, int]] = {}
     for container_port in container_ports:
         while True:
-            host_port = allocate_host_port()
+            host_port = allocate_host_port(min_port=min_port, max_port=max_port)
             if host_port is None:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

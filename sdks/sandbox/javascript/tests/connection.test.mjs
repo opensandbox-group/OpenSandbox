@@ -32,3 +32,13 @@ test("ConnectionConfig preserves path prefix while normalizing v1 suffix", () =>
 
   assert.equal(connectionConfig.getBaseUrl(), "https://api.opensandbox.test/proxy/v1");
 });
+
+// Regression: the default User-Agent version is hand-maintained and must be
+// bumped together with the package version. Update this expectation when releasing.
+test("ConnectionConfig default userAgent matches package version", () => {
+  const connectionConfig = new ConnectionConfig({
+    domain: "https://api.opensandbox.test",
+  });
+
+  assert.equal(connectionConfig.userAgent, "OpenSandbox-JS-SDK/0.1.10");
+});

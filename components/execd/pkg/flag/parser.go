@@ -30,6 +30,7 @@ const (
 	accessTokenEnv             = "EXECD_ACCESS_TOKEN"
 	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
+	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
 )
 
 // InitFlags registers CLI flags and env overrides.
@@ -40,6 +41,7 @@ func InitFlags() {
 	ServerAccessToken = ""
 	ApiGracefulShutdownTimeout = time.Second * 1
 	JupyterIdlePollInterval = 100 * time.Millisecond
+	IsolationConfigPath = ""
 
 	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
@@ -86,6 +88,12 @@ func InitFlags() {
 
 	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 1s)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
+
+	// Isolation config
+	if v := os.Getenv(isolationConfigEnv); v != "" {
+		IsolationConfigPath = v
+	}
+	flag.StringVar(&IsolationConfigPath, "isolation-config", IsolationConfigPath, "Path to isolation TOML config file (default: built-in defaults)")
 
 	// Parse flags - these will override environment variables if provided
 	flag.Parse()

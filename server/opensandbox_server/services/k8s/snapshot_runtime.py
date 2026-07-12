@@ -74,6 +74,7 @@ class KubernetesSnapshotRuntime:
         self._namespace = namespace
         self._wait_timeout_seconds = wait_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
+        self._snapshot_namespaces: dict[str, str] = {}
 
     def supports_create_snapshot(self) -> bool:
         return True
@@ -85,16 +86,20 @@ class KubernetesSnapshotRuntime:
         self,
         snapshot_id: str,
         sandbox_id: str,
+        *,
+        namespace: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         snapshot_name = build_public_snapshot_name(snapshot_id)
-        body = self._build_snapshot_body(snapshot_id, sandbox_id, snapshot_name)
+        ns = namespace if namespace is not None else self._namespace
+        self._snapshot_namespaces[snapshot_id] = ns
+        body = self._build_snapshot_body(snapshot_id, sandbox_id, snapshot_name, namespace=ns)
         should_validate_existing_source = False
 
         try:
             self._k8s_client.create_custom_object(
                 group=_GROUP,
                 version=_VERSION,
-                namespace=self._namespace,
+                namespace=ns,
                 plural=_PLURAL,
                 body=body,
             )
@@ -117,7 +122,7 @@ class KubernetesSnapshotRuntime:
 
         if should_validate_existing_source:
             try:
-                current = self._get_snapshot_cr(snapshot_name)
+                current = self._get_snapshot_cr(snapshot_name, namespace=ns)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Failed to inspect existing Kubernetes SandboxSnapshot %s after create conflict: %s",
@@ -129,18 +134,21 @@ class KubernetesSnapshotRuntime:
                 if conflict is not None:
                     return conflict
 
-        return self._wait_for_terminal_snapshot(snapshot_id)
+        return self._wait_for_terminal_snapshot(snapshot_id, namespace=ns)
 
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
-        return self.inspect_snapshot(snapshot_id)
+        ns = self._snapshot_namespaces.get(snapshot_id)
+        return self.inspect_snapshot(snapshot_id, namespace=ns)
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None) -> None:
+    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
         snapshot_name = build_public_snapshot_name(snapshot_id)
+        fallback = namespace if namespace is not None else self._namespace
+        ns = self._snapshot_namespaces.pop(snapshot_id, fallback)
         try:
             self._k8s_client.delete_custom_object(
                 group=_GROUP,
                 version=_VERSION,
-                namespace=self._namespace,
+                namespace=ns,
                 plural=_PLURAL,
                 name=snapshot_name,
             )
@@ -150,10 +158,11 @@ class KubernetesSnapshotRuntime:
                 return
             raise RuntimeError(f"Failed to delete Kubernetes SandboxSnapshot {snapshot_name}: {exc}") from exc
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
         snapshot_name = build_public_snapshot_name(snapshot_id)
+        ns = namespace or self._snapshot_namespaces.get(snapshot_id)
         try:
-            snapshot = self._get_snapshot_cr(snapshot_name)
+            snapshot = self._get_snapshot_cr(snapshot_name, namespace=ns)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to inspect Kubernetes SandboxSnapshot %s: %s", snapshot_name, exc)
             return SnapshotRuntimeStatus(
@@ -171,13 +180,13 @@ class KubernetesSnapshotRuntime:
 
         return self._snapshot_status_from_cr(snapshot)
 
-    def _build_snapshot_body(self, snapshot_id: str, sandbox_id: str, snapshot_name: str) -> dict:
+    def _build_snapshot_body(self, snapshot_id: str, sandbox_id: str, snapshot_name: str, *, namespace: str = "default") -> dict:
         return {
             "apiVersion": f"{_GROUP}/{_VERSION}",
             "kind": "SandboxSnapshot",
             "metadata": {
                 "name": snapshot_name,
-                "namespace": self._namespace,
+                "namespace": namespace,
                 "labels": {
                     PUBLIC_SNAPSHOT_ID_LABEL: snapshot_id,
                     PUBLIC_SNAPSHOT_SOURCE_SANDBOX_ID_LABEL: sandbox_id,
@@ -189,11 +198,11 @@ class KubernetesSnapshotRuntime:
             },
         }
 
-    def _get_snapshot_cr(self, snapshot_name: str) -> Optional[dict]:
+    def _get_snapshot_cr(self, snapshot_name: str, *, namespace: str | None = None) -> Optional[dict]:
         return self._k8s_client.get_custom_object(
             group=_GROUP,
             version=_VERSION,
-            namespace=self._namespace,
+            namespace=namespace if namespace is not None else self._namespace,
             plural=_PLURAL,
             name=snapshot_name,
         )
@@ -219,10 +228,10 @@ class KubernetesSnapshotRuntime:
             ),
         )
 
-    def _wait_for_terminal_snapshot(self, snapshot_id: str) -> SnapshotRuntimeStatus:
+    def _wait_for_terminal_snapshot(self, snapshot_id: str, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
         deadline = time.monotonic() + self._wait_timeout_seconds
         while True:
-            runtime_status = self.inspect_snapshot(snapshot_id)
+            runtime_status = self.inspect_snapshot(snapshot_id, namespace=namespace)
             if runtime_status.state in (SnapshotState.READY, SnapshotState.FAILED):
                 return runtime_status
 

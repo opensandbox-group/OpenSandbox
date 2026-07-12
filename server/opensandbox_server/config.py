@@ -470,6 +470,15 @@ class ServerConfig(BaseModel):
         # no concurrency cap. TOML has no null literal, so 0 is the only way
         # to disable the limit from the config file.
         return None if value == 0 else value
+    timeout_graceful_shutdown: Optional[int] = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Seconds uvicorn waits for in-flight requests to finish before "
+            "forcing shutdown. Ensures Ctrl+C terminates promptly even when "
+            "a long-running operation (e.g. image pull) is in progress."
+        ),
+    )
     backlog: int = Field(
         default=2048,
         ge=1,
@@ -581,10 +590,6 @@ class KubernetesRuntimeConfig(BaseModel):
     namespace: Optional[str] = Field(
         default=None,
         description="Namespace used for sandbox workloads.",
-    )
-    service_account: Optional[str] = Field(
-        default=None,
-        description="Service account bound to sandbox workloads.",
     )
     workload_provider: Optional[str] = Field(
         default=None,
@@ -834,11 +839,44 @@ class DockerConfig(BaseModel):
             "Optional seccomp profile name or path applied to sandbox containers. Leave unset to use Docker's default profile."
         ),
     )
+    port_range_min: int = Field(
+        default=40000,
+        ge=1024,
+        le=65535,
+        description=(
+            "Lower bound of the host port range for bridge-mode sandbox port allocation. "
+            "Must be less than port_range_max. Narrow the range to match your firewall policy."
+        ),
+    )
+    port_range_max: int = Field(
+        default=60000,
+        ge=1024,
+        le=65535,
+        description=(
+            "Upper bound of the host port range for bridge-mode sandbox port allocation. "
+            "Range must span at least 100 ports for reliable allocation. "
+            "Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar)."
+        ),
+    )
     pids_limit: Optional[int] = Field(
         default=4096,
         ge=1,
         description="Maximum number of processes allowed per sandbox container. Set to null to disable the limit.",
     )
+
+    @model_validator(mode="after")
+    def validate_port_range(self) -> "DockerConfig":
+        if self.port_range_min >= self.port_range_max:
+            raise ValueError(
+                f"docker.port_range_min ({self.port_range_min}) must be less than "
+                f"docker.port_range_max ({self.port_range_max})."
+            )
+        if self.port_range_max - self.port_range_min < 100:
+            raise ValueError(
+                f"Port range ({self.port_range_min}-{self.port_range_max}) is too narrow. "
+                f"Need at least 100 ports for reliable allocation."
+            )
+        return self
 
 
 class StoreConfig(BaseModel):
@@ -855,6 +893,43 @@ class StoreConfig(BaseModel):
     )
 
 
+class TenantsConfig(BaseModel):
+    """Multi-tenant provider configuration."""
+
+    provider: Literal["file", "http"] = Field(
+        default="file",
+        description="Tenant provider type: 'file' (tenants.toml) or 'http' (remote endpoint).",
+    )
+    endpoint: Optional[str] = Field(
+        default=None,
+        description="HTTP tenant provider endpoint URL. Required when provider='http'.",
+    )
+    max_stale_seconds: float = Field(
+        default=300.0,
+        ge=0,
+        description="Maximum seconds to serve stale cache when HTTP endpoint is unreachable.",
+    )
+    timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="HTTP request timeout in seconds.",
+    )
+    auth_header: Optional[str] = Field(
+        default=None,
+        description="Optional header name for provider-level authentication to HTTP endpoint.",
+    )
+    auth_token: Optional[str] = Field(
+        default=None,
+        description="Optional token value for provider-level authentication to HTTP endpoint.",
+    )
+
+    @model_validator(mode="after")
+    def require_endpoint_for_http(self) -> "TenantsConfig":
+        if self.provider == "http" and not self.endpoint:
+            raise ValueError("[tenants] endpoint must be set when provider='http'.")
+        return self
+
+
 class AppConfig(BaseModel):
     """Root application configuration model."""
 
@@ -862,6 +937,10 @@ class AppConfig(BaseModel):
     log: LogConfig = Field(
         default_factory=LogConfig,
         description="Logging configuration (level, file output, rotation).",
+    )
+    tenants: Optional[TenantsConfig] = Field(
+        default=None,
+        description="Multi-tenant configuration. When present, enables multi-tenant mode.",
     )
     renew_intent: RenewIntentConfig = Field(
         default_factory=RenewIntentConfig,

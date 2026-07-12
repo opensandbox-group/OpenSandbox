@@ -84,6 +84,7 @@ def test_install_bootstrap_script_uses_full_bootstrap_sh(mock_docker):
 
     # Full bootstrap.sh features (absent from the old inline shim).
     assert "trust_mitm_ca" in script
+    assert "trust_mitm_ca_jdk" in script
     assert "_forward_signal" in script
     assert "OPENSANDBOX_MERGED_CA" in script
     assert "EXECD_BOOTSTRAP_PRE_SCRIPT" in script

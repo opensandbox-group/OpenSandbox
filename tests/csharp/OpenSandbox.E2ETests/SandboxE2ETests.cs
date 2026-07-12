@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Text;
 using OpenSandbox.Config;
 using OpenSandbox.Core;
@@ -81,6 +82,37 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         finally
         {
             await sandbox2.DisposeAsync();
+        }
+    }
+
+    [Fact(Timeout = 2 * 60 * 1000)]
+    public async Task Sandbox_Extensions_RoundTrip()
+    {
+        var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+        {
+            ConnectionConfig = _fixture.ConnectionConfig,
+            Image = _fixture.DefaultImage,
+            TimeoutSeconds = 120,
+            ReadyTimeoutSeconds = _fixture.DefaultReadyTimeoutSeconds,
+            Metadata = new Dictionary<string, string> { ["tag"] = "e2e-extensions" },
+            Extensions = new Dictionary<string, string>
+            {
+                ["opensandbox.extensions.test-key"] = "test-value",
+                ["opensandbox.extensions.second"] = "second-value",
+            },
+            HealthCheckPollingInterval = 500
+        });
+        try
+        {
+            var info = await sandbox.GetInfoAsync();
+            Assert.NotNull(info.Extensions);
+            Assert.Equal("test-value", info.Extensions["opensandbox.extensions.test-key"]);
+            Assert.Equal("second-value", info.Extensions["opensandbox.extensions.second"]);
+        }
+        finally
+        {
+            try { await sandbox.KillAsync(); } catch (SandboxApiException) { }
+            await sandbox.DisposeAsync();
         }
     }
 
@@ -903,6 +935,37 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         Assert.Single(multiResults);
         Assert.Equal(3, multiResults[0].ReplacedCount);
 
+        // Batch replace across multiple files
+        var batchA = $"{testDir1}/batch_a.txt";
+        var batchB = $"{testDir1}/batch_b.txt";
+        await sandbox.Files.WriteFilesAsync(new[]
+        {
+            new WriteEntry { Path = batchA, Data = "hello world" },
+            new WriteEntry { Path = batchB, Data = "hello hello" }
+        });
+        var batchResults = await sandbox.Files.ReplaceContentsDetailedAsync(new[]
+        {
+            new ContentReplaceEntry { Path = batchA, OldContent = "hello", NewContent = "hi" },
+            new ContentReplaceEntry { Path = batchB, OldContent = "hello", NewContent = "hi" }
+        });
+        Assert.Equal(2, batchResults.Count);
+        var resultsByPath = batchResults.ToDictionary(r => r.Path, r => r.ReplacedCount);
+        Assert.Equal(1, resultsByPath[batchA]);
+        Assert.Equal(2, resultsByPath[batchB]);
+        Assert.Equal("hi world", await sandbox.Files.ReadFileAsync(batchA, new ReadFileOptions { Encoding = "utf-8" }));
+        Assert.Equal("hi hi", await sandbox.Files.ReadFileAsync(batchB, new ReadFileOptions { Encoding = "utf-8" }));
+
+        // Verify original ReplaceContentsAsync (verbose=false, void return) still works
+        await sandbox.Files.ReplaceContentsAsync(new[]
+        {
+            new ContentReplaceEntry { Path = testFile1, OldContent = "Replaced line.", NewContent = "Final line." }
+        });
+        var finalContent = await sandbox.Files.ReadFileAsync(testFile1, new ReadFileOptions { Encoding = "utf-8" });
+        Assert.Contains("Final line.", finalContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("Replaced line.", finalContent, StringComparison.Ordinal);
+
+        await sandbox.Files.DeleteFilesAsync(new[] { $"{testDir1}/multi.txt", batchA, batchB });
+
         var movedPath = $"{testDir2}/moved_file3.txt";
         await sandbox.Files.MoveFilesAsync(new[] { new MoveEntry { Src = testFile3, Dest = movedPath } });
         var movedBytes = await sandbox.Files.ReadBytesAsync(movedPath);
@@ -935,6 +998,36 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         Assert.Null(verify.Error);
         Assert.Single(verify.Logs.Stdout);
         Assert.Equal("OK", verify.Logs.Stdout[0].Text);
+    }
+
+    [Fact(Timeout = 60 * 1000)]
+    public async Task Filesystem_LineBasedReading()
+    {
+        var sandbox = _fixture.Sandbox;
+
+        var testPath = "/tmp/line-read-e2e.txt";
+        var content = "line1\nline2\nline3\nline4\nline5";
+        await sandbox.Files.WriteFilesAsync(new[]
+        {
+            new WriteEntry { Path = testPath, Data = content }
+        });
+
+        // offset=2, limit=2 → lines 2-3
+        var result1 = await sandbox.Files.ReadFileAsync(
+            testPath, new ReadFileOptions { Offset = 2, Limit = 2 });
+        Assert.Equal("line2\nline3", result1);
+
+        // offset=4, no limit → lines 4-5
+        var result2 = await sandbox.Files.ReadFileAsync(
+            testPath, new ReadFileOptions { Offset = 4 });
+        Assert.Equal("line4\nline5", result2);
+
+        // limit=2, no offset → lines 1-2
+        var result3 = await sandbox.Files.ReadFileAsync(
+            testPath, new ReadFileOptions { Limit = 2 });
+        Assert.Equal("line1\nline2", result3);
+
+        await sandbox.Files.DeleteFilesAsync(new[] { testPath });
     }
 
     [Fact(Timeout = 2 * 60 * 1000)]

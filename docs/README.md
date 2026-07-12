@@ -22,6 +22,5 @@ pnpm docs:build
 
 ## Notes
 
-- Site content is generated from repository README and docs markdown files.
-- Run `pnpm docs:sync` to regenerate the manifest and routed pages.
-- Run `pnpm docs:spec` to regenerate `docs/public/api/spec-inline.js` from `specs/sandbox-lifecycle.yml`.
+- Site content is maintained directly under `docs/` — not auto-generated from monorepo READMEs.
+- See `AGENTS.md` → "Documentation Rules" for content ownership and conventions.

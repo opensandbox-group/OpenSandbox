@@ -533,6 +533,16 @@ func (r *PoolReconciler) doRelease(ctx context.Context, pool *sandboxv1alpha1.Po
 	succeedMap, toDeletePods, err := r.doRecycle(ctx, pool, batchSandboxes, pods, toRelease)
 	if err != nil {
 		log.Error(err, "Some errors occurred during recycle")
+		r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedRecyclePod, "Failed to recycle some pods: %v", err)
+	}
+
+	// Emit recycle success events.
+	var allRecycled []string
+	for _, recycledPods := range succeedMap {
+		allRecycled = append(allRecycled, recycledPods...)
+	}
+	if len(allRecycled) > 0 {
+		r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonPodRecycled, "Recycled %d pod(s): %v", len(allRecycled), allRecycled)
 	}
 
 	// 2. Compute latest released pods per sandbox (merge current + recycle-succeeded).
@@ -595,6 +605,7 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 	}
 	allocAction, err := r.Allocator.Schedule(ctx, spec)
 	if err != nil {
+		r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonAllocationFailed, "Failed to schedule sandboxes: %v", err)
 		return nil, err
 	}
 	log.Info("Allocate action", "pool", pool.Name, "toAllocate", allocAction.ToAllocate, "toRelease", allocAction.ToRelease)
@@ -605,6 +616,24 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 	if err != nil {
 		return nil, err
 	}
+
+	// Emit allocation events.
+	sandboxByName := make(map[string]*sandboxv1alpha1.BatchSandbox, len(batchSandboxes))
+	for _, bs := range batchSandboxes {
+		sandboxByName[bs.Name] = bs
+	}
+	for sandboxName, allocPods := range allocAction.ToAllocate {
+		if len(allocPods) == 0 {
+			continue
+		}
+		r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonAllocationSucceeded,
+			"Allocated %d pod(s) to sandbox %s: %v", len(allocPods), sandboxName, allocPods)
+		if sbx, ok := sandboxByName[sandboxName]; ok {
+			r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventReasonScheduled,
+				"Successfully assigned %d pod(s) from pool %s: %v", len(allocPods), pool.Name, allocPods)
+		}
+	}
+
 	// 2.2 Execute ToRelease / release in-memory store.
 	toDeletePods, err := r.doRelease(ctx, pool, batchSandboxes, pods, allocAction.ToRelease)
 	if err != nil {
@@ -628,6 +657,7 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 		ToDelete:         toDeletePods,
 		SupplyCnt:        allocAction.PodSupplement,
 	}
+
 	log.Info("Schedule result", "pool", pool.Name, "toDeletePods", toDeletePods, "supplyCnt", allocAction.PodSupplement)
 	return result, nil
 }
@@ -640,6 +670,12 @@ func (r *PoolReconciler) updatePool(ctx context.Context, pool *sandboxv1alpha1.P
 	strategy := NewPoolUpdateStrategy(pool)
 	result := strategy.Compute(ctx, updateRevision, pods, idlePods)
 	result.UpdateRevision = updateRevision
+
+	if len(result.ToDeletePods) > 0 {
+		r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonPodUpdated,
+			"Rolling update: deleting %d pod(s) for revision %s: %v", len(result.ToDeletePods), updateRevision, result.ToDeletePods)
+	}
+
 	return result, nil
 }
 
@@ -744,7 +780,10 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 			log.Info("Deleting pool pod", "pool", pool.Name, "pod", pod.Name)
 			if err := r.Delete(ctx, pod); err != nil {
 				log.Error(err, "Failed to delete pool pod", "pod", pod.Name)
+				r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedDelete, "Failed to delete pool pod %s: %v", pod.Name, err)
 				errs = append(errs, err)
+			} else {
+				r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonSuccessfulDelete, "Deleted pool pod %s (scale-down)", pod.Name)
 			}
 		}
 	}
@@ -871,12 +910,12 @@ func (r *PoolReconciler) createPoolPod(ctx context.Context, pool *sandboxv1alpha
 		return err
 	}
 	if err := r.Create(ctx, pod); err != nil {
-		r.Recorder.Eventf(pool, corev1.EventTypeWarning, "FailedCreate", "Failed to create pool pod: %v", err)
+		r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedCreate, "Failed to create pool pod: %v", err)
 		return err
 	}
 	PoolScaleExpectations.ExpectScale(controllerutils.GetControllerKey(pool), expectations.Create, pod.Name)
 	log.Info("Created pool pod", "pool", pool.Name, "pod", pod.Name, "revision", updateRevision)
-	r.Recorder.Eventf(pool, corev1.EventTypeNormal, "SuccessfulCreate", "Created pool pod: %v", pod.Name)
+	r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonSuccessfulCreate, "Created pool pod: %v", pod.Name)
 	return nil
 }
 
@@ -914,7 +953,7 @@ func (r *PoolReconciler) handleEviction(ctx context.Context, pool *sandboxv1alph
 			log.Error(err, "Failed to evict pod", "pod", pod.Name)
 			evictionErrs = append(evictionErrs, fmt.Errorf("failed to evict pod %s: %w", pod.Name, err))
 		} else {
-			r.Recorder.Eventf(pool, corev1.EventTypeNormal, "PodEvicted", "Evicted idle pod: %s", pod.Name)
+			r.Recorder.Eventf(pool, corev1.EventTypeNormal, EventReasonPodEvicted, "Evicted idle pod: %s", pod.Name)
 		}
 	}
 

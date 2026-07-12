@@ -43,6 +43,8 @@ export type {
   CredentialMetadata,
   CredentialMutationSet,
   CredentialProxyConfig,
+  CredentialSubstitution,
+  CredentialSubstitutionSurface,
   CredentialVaultCreateRequest,
   CredentialVaultPatchRequest,
   CredentialVaultState,
@@ -145,3 +147,16 @@ export type {
   WriteEntry,
 } from "./models/filesystem.js";
 export type { SandboxFiles } from "./services/filesystem.js";
+export type { IsolationService, IsolationSession, RunOnceOpts } from "./services/isolatedSessions.js";
+export type {
+  CreateIsolatedSessionRequest,
+  IsolatedWorkspaceSpec,
+  EnvPassthroughSpec,
+  BindMount,
+  IsolatedSessionInfo,
+  IsolatedSessionState,
+  IsolatedRunOpts,
+  IsolatedCapabilities,
+  IsolatedSessionSummary,
+  ListIsolatedSessionsResponse,
+} from "./models/isolated.js";

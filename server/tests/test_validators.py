@@ -18,6 +18,8 @@ from fastapi import HTTPException
 from opensandbox_server.api.schema import Host, OSSFS, PVC, Volume, PlatformSpec
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.validators import (
+    ensure_credential_proxy_configured,
+    ensure_egress_runtime_compatible,
     ensure_metadata_labels,
     ensure_platform_valid,
     ensure_timeout_within_limit,
@@ -634,3 +636,111 @@ class TestEnsureVolumesValid:
         with pytest.raises(ValidationError) as exc_info:
             PVC(claim_name="Invalid_PVC")  # Invalid: uppercase and underscore
         assert "claim_name" in str(exc_info.value)
+
+
+class TestCredentialProxyConfiguration:
+    def test_allows_dns_nft_mode(self):
+        from opensandbox_server.api.schema import CredentialProxyConfig, NetworkPolicy
+        from opensandbox_server.config import EgressConfig
+
+        ensure_credential_proxy_configured(
+            CredentialProxyConfig(enabled=True),
+            NetworkPolicy(default_action="deny", egress=[]),
+            EgressConfig(image="egress:latest", mode="dns+nft"),
+        )
+
+    def test_warns_for_default_allow_policy(self, monkeypatch):
+        from opensandbox_server.api.schema import CredentialProxyConfig, NetworkPolicy
+        from opensandbox_server.config import EgressConfig
+
+        warnings = []
+        monkeypatch.setattr(
+            "opensandbox_server.services.validators.logger.warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+
+        ensure_credential_proxy_configured(
+            CredentialProxyConfig(enabled=True),
+            NetworkPolicy(default_action="allow", egress=[]),
+            EgressConfig(image="egress:latest", mode="dns+nft"),
+        )
+
+        assert len(warnings) == 1
+        assert "allowed for backward compatibility but is deprecated" in warnings[0]
+
+    def test_rejects_dns_only_mode(self):
+        from opensandbox_server.api.schema import CredentialProxyConfig, NetworkPolicy
+        from opensandbox_server.config import EgressConfig
+
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_credential_proxy_configured(
+                CredentialProxyConfig(enabled=True),
+                NetworkPolicy(default_action="deny", egress=[]),
+                EgressConfig(image="egress:latest", mode="dns"),
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "dns+nft" in exc_info.value.detail["message"]
+
+    def test_ignores_disabled_proxy(self):
+        from opensandbox_server.api.schema import CredentialProxyConfig
+
+        ensure_credential_proxy_configured(
+            CredentialProxyConfig(enabled=False), None, None
+        )
+
+
+class TestEgressRuntimeCompatibility:
+
+    def _network_policy(self):
+        from opensandbox_server.api.schema import NetworkPolicy
+        return NetworkPolicy(default_action="deny", egress=[])
+
+    def _secure_runtime(self, type_: str):
+        from opensandbox_server.config import SecureRuntimeConfig
+        if type_ == "gvisor":
+            return SecureRuntimeConfig(type=type_, k8s_runtime_class="gvisor")
+        if type_ == "kata":
+            return SecureRuntimeConfig(type=type_, k8s_runtime_class="kata-qemu")
+        return SecureRuntimeConfig(type=type_)
+
+    def test_rejects_gvisor_with_network_policy(self):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_egress_runtime_compatible(self._network_policy(), self._secure_runtime("gvisor"))
+        assert exc_info.value.status_code == 400
+        assert "gVisor" in exc_info.value.detail["message"]
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+
+    def test_allows_kata_with_network_policy(self):
+        ensure_egress_runtime_compatible(self._network_policy(), self._secure_runtime("kata"))
+
+    def test_allows_no_secure_runtime(self):
+        ensure_egress_runtime_compatible(self._network_policy(), None)
+
+    def test_allows_empty_secure_runtime(self):
+        ensure_egress_runtime_compatible(self._network_policy(), self._secure_runtime(""))
+
+    def test_allows_gvisor_without_network_policy(self):
+        ensure_egress_runtime_compatible(None, self._secure_runtime("gvisor"))
+
+    def test_rejects_template_gvisor_with_network_policy(self):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_egress_runtime_compatible(
+                self._network_policy(), None, effective_runtime_class="gvisor"
+            )
+        assert exc_info.value.status_code == 400
+        assert "gVisor" in exc_info.value.detail["message"]
+
+    def test_allows_template_kata_with_network_policy(self):
+        ensure_egress_runtime_compatible(
+            self._network_policy(), None, effective_runtime_class="kata-qemu"
+        )
+
+    def test_secure_runtime_takes_precedence_over_template(self):
+        with pytest.raises(HTTPException):
+            ensure_egress_runtime_compatible(
+                self._network_policy(),
+                self._secure_runtime("gvisor"),
+                effective_runtime_class="kata-qemu",
+            )

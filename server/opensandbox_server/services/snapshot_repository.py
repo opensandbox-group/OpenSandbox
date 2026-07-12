@@ -32,6 +32,7 @@ class SnapshotListQuery:
     page_size: int = 20
     source_sandbox_id: str | None = None
     states: list[str] = field(default_factory=list)
+    namespace: str | None = None
 
 
 @dataclass(slots=True)

@@ -43,12 +43,14 @@ classifiers = [
 ]
 dependencies = [
     "docker",
-    "fastapi",
+    "fastapi>=0.137.0",
+    "starlette>=1.3.1",
+    "python-multipart>=0.0.31",
     "httpx[socks]",
     "kubernetes",
     "pydantic",
     "redis>=5",
-    "pydantic-settings",
+    "pydantic-settings>=2.14.2",
     "pyyaml",
     "tomli; python_version < \"3.11\"",
     "uvicorn[standard]",
@@ -56,9 +58,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/alibaba/OpenSandbox"
-Repository = "https://github.com/alibaba/OpenSandbox"
-Issues = "https://github.com/alibaba/OpenSandbox/issues"
+Homepage = "https://github.com/opensandbox-group/OpenSandbox"
+Repository = "https://github.com/opensandbox-group/OpenSandbox"
+Issues = "https://github.com/opensandbox-group/OpenSandbox/issues"
 
 [project.scripts]
 opensandbox-server = "opensandbox_server.cli:main"

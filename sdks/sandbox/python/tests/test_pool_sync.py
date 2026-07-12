@@ -13,6 +13,7 @@ from opensandbox._pool_reconciler import ReconcileState, run_reconcile_tick
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import (
     PoolAcquireFailedException,
+    PoolDestroyedException,
     PoolEmptyException,
     PoolNotRunningException,
 )
@@ -22,6 +23,8 @@ from opensandbox.pool import (
     InMemoryPoolStateStore,
     PoolConfig,
     PoolCreationSpec,
+    PooledSandboxCreateContext,
+    PooledSandboxCreateReason,
 )
 from opensandbox.sync.pool import SandboxPoolSync
 
@@ -43,7 +46,9 @@ def test_degraded_backoff_starts_at_thirty_seconds() -> None:
     state.record_failure("boom")
 
     assert state.is_backoff_active(datetime.now(timezone.utc) + timedelta(seconds=29))
-    assert not state.is_backoff_active(datetime.now(timezone.utc) + timedelta(seconds=31))
+    assert not state.is_backoff_active(
+        datetime.now(timezone.utc) + timedelta(seconds=31)
+    )
 
 
 def test_reconcile_batch_failures_only_advance_backoff_once() -> None:
@@ -74,7 +79,9 @@ def test_reconcile_batch_failures_only_advance_backoff_once() -> None:
 
     assert state.failure_count == 10
     assert state.is_backoff_active(datetime.now(timezone.utc) + timedelta(seconds=29))
-    assert not state.is_backoff_active(datetime.now(timezone.utc) + timedelta(seconds=31))
+    assert not state.is_backoff_active(
+        datetime.now(timezone.utc) + timedelta(seconds=31)
+    )
 
 
 def test_acquire_fail_fast_empty_raises_pool_empty() -> None:
@@ -115,6 +122,100 @@ def test_acquire_direct_create_when_empty() -> None:
         fake_sandbox = cast(FakeSandbox, sandbox)
         assert sandbox.id == "created-1"
         assert fake_sandbox.renewed == [timedelta(minutes=5)]
+    finally:
+        pool.shutdown(False)
+
+
+def test_acquire_does_not_direct_create_when_pool_namespace_is_destroying() -> None:
+    FakeSandbox.reset()
+    store = InMemoryPoolStateStore()
+    pool = _create_pool(max_idle=0, store=store)
+    pool.start()
+
+    try:
+        store.begin_destroy("pool", "destroyer")
+
+        with pytest.raises(PoolDestroyedException):
+            pool.acquire()
+        assert FakeSandbox.created_count == 0
+    finally:
+        pool.shutdown(False)
+
+
+def test_acquire_idle_destroy_race_raises_pool_destroyed() -> None:
+    store = InMemoryPoolStateStore()
+    store.put_idle("pool", "id-1")
+    connected: list[FakeSandbox] = []
+
+    class FencingSandbox(FakeSandbox):
+        @classmethod
+        def connect(cls, sandbox_id: str, *args: Any, **kwargs: Any) -> FakeSandbox:
+            sandbox = cls(sandbox_id)
+            connected.append(sandbox)
+            store.begin_destroy("pool", "destroyer")
+            return sandbox
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=FencingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        with pytest.raises(PoolDestroyedException):
+            pool.acquire(policy=AcquirePolicy.DIRECT_CREATE)
+        assert connected[0].killed
+        assert connected[0].closed
+    finally:
+        pool.shutdown(False)
+
+
+def test_acquire_stopped_destroyed_pool_raises_pool_destroyed() -> None:
+    store = InMemoryPoolStateStore()
+    pool = _create_pool(max_idle=0, store=store)
+    pool.start()
+    store.begin_destroy("pool", "destroyer")
+    pool.shutdown(False)
+
+    with pytest.raises(PoolDestroyedException):
+        pool.acquire()
+
+
+def test_acquire_destroy_race_preserves_pool_destroyed_when_cleanup_fails() -> None:
+    store = InMemoryPoolStateStore()
+    store.put_idle("pool", "id-1")
+
+    class CleanupFailingSandbox(FakeSandbox):
+        @classmethod
+        def connect(cls, sandbox_id: str, *args: Any, **kwargs: Any) -> FakeSandbox:
+            store.begin_destroy("pool", "destroyer")
+            return cls(sandbox_id)
+
+        def kill(self) -> None:
+            raise RuntimeError("kill failed")
+
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=CleanupFailingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        with pytest.raises(PoolDestroyedException):
+            pool.acquire(policy=AcquirePolicy.DIRECT_CREATE)
     finally:
         pool.shutdown(False)
 
@@ -164,6 +265,49 @@ def test_acquire_direct_create_kills_and_closes_when_renew_fails() -> None:
         assert FakeSandbox.last_created.closed
     finally:
         FakeSandbox.fail_renew = False
+        pool.shutdown(False)
+
+
+def test_acquire_direct_create_uses_sandbox_creator() -> None:
+    contexts: list[PooledSandboxCreateContext] = []
+
+    def creator(context: PooledSandboxCreateContext) -> FakeSandbox:
+        contexts.append(context)
+        return FakeSandbox("created-by-hook")
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        idle_timeout=timedelta(minutes=10),
+        sandbox_creator=creator,
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=FakeSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        sandbox = pool.acquire(sandbox_timeout=timedelta(minutes=5))
+        fake_sandbox = cast(FakeSandbox, sandbox)
+
+        assert sandbox.id == "created-by-hook"
+        assert fake_sandbox.renewed == [timedelta(minutes=5)]
+        assert len(contexts) == 1
+        assert contexts[0].pool_name == "pool"
+        assert contexts[0].owner_id == "owner-1"
+        assert contexts[0].idle_timeout == timedelta(minutes=10)
+        assert contexts[0].reason is PooledSandboxCreateReason.DIRECT_CREATE
+        assert contexts[0].ready_timeout == pool._config.acquire_ready_timeout
+        assert (
+            contexts[0].health_check_polling_interval
+            == pool._config.acquire_health_check_polling_interval
+        )
+        assert contexts[0].skip_health_check is False
+        assert contexts[0].health_check is None
+        assert isinstance(contexts[0].connection_config, ConnectionConfigSync)
+    finally:
         pool.shutdown(False)
 
 

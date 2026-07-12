@@ -126,7 +126,8 @@ public class SandboxReadinessDiagnosticsTests
                 Commands = Mock.Of<IExecdCommands>(),
                 Files = Mock.Of<ISandboxFiles>(),
                 Health = healthMock.Object,
-                Metrics = Mock.Of<IExecdMetrics>()
+                Metrics = Mock.Of<IExecdMetrics>(),
+                Isolation = Mock.Of<IIsolatedSessions>()
             });
 
         adapterFactoryMock

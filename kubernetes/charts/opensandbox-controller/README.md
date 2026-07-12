@@ -164,7 +164,7 @@ The chart exposes the snapshot-related settings below:
 ```yaml
 controller:
   snapshot:
-    imageCommitterImage: my-registry/image-committer:v0.1.0
+    imageCommitterImage: my-registry/image-committer:v0.1.1
     commitJobTimeout: 15m
     registry: my-registry/snapshots
     registryInsecure: false
@@ -264,11 +264,11 @@ kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-con
 
 ## Additional Resources
 
-- [OpenSandbox GitHub](https://github.com/alibaba/OpenSandbox)
-- [Documentation](https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/README.md)
-- [Pause and Resume Guide](https://github.com/alibaba/OpenSandbox/blob/main/docs/pause-resume.md)
-- [Server Configuration Reference](https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md)
-- [Examples](https://github.com/alibaba/OpenSandbox/tree/main/kubernetes/config/samples)
+- [OpenSandbox GitHub](https://github.com/opensandbox-group/OpenSandbox)
+- [Documentation](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/README.md)
+- [Pause and Resume Guide](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/pause-resume.md)
+- [Server Configuration Reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md)
+- [Examples](https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes/config/samples)
 
 ## License
 

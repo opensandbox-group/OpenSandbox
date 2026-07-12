@@ -66,7 +66,7 @@ public static class Constants
     /// <summary>
     /// Default user agent string for SDK HTTP requests.
     /// </summary>
-    public const string DefaultUserAgent = "OpenSandbox-CSharp-SDK/0.1.2";
+    public const string DefaultUserAgent = "OpenSandbox-CSharp-SDK/0.1.4";
 
     /// <summary>
     /// Environment variable name for the OpenSandbox domain.

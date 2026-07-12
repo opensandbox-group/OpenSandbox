@@ -1,6 +1,5 @@
 # Alibaba Code Interpreter SDK for Kotlin
 
-English | [中文](README_zh.md)
 
 A powerful Kotlin SDK for executing code in secure, isolated sandboxes. This SDK provides a high-level API for running Python, Java, Go, TypeScript, and other languages safely, with support for code execution contexts.
 

@@ -24,7 +24,7 @@ install-golint:
 
 .PHONY: golint
 golint: fmt install-golint
-	golangci-lint run -v --fix ./...
+	"$$(go env GOPATH)/bin/golangci-lint" run -v ./...
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "dev")
 GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -40,6 +40,10 @@ GO_LDFLAGS := $(strip $(LDFLAGS) $(PROJECT_LDFLAGS))
 build: vet ## Build the binary.
 	@mkdir -p bin
 	go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/execd main.go
+
+.PHONY: test-integration
+test-integration: ## Run integration tests (Linux + bwrap required).
+	go test -v -tags="linux,bwrap" -run Integration ./pkg/runtime/bwrap_test/
 
 .PHONY: multi-build
 multi-build: vet ## Cross-compile for linux/windows/darwin amd64/arm64.

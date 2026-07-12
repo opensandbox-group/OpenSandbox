@@ -1,6 +1,5 @@
 # OpenSandbox Code Interpreter SDK for Python
 
-English | [中文](README_zh.md)
 
 A Python SDK for executing code in secure, isolated sandboxes. It provides a high-level API for running Python, Java,
 Go, TypeScript, and other languages safely, with support for code execution contexts.

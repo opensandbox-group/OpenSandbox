@@ -37,6 +37,7 @@ var (
 	httpRequestDuration      metric.Float64Histogram
 	executionDuration        metric.Float64Histogram
 	filesystemOperationDurMs metric.Float64Histogram
+	isolationRunDurationMs   metric.Float64Histogram
 )
 
 func Init(ctx context.Context) (shutdown func(context.Context) error, err error) {
@@ -145,6 +146,46 @@ func registerExecdMetrics() error {
 			base := append([]attribute.KeyValue{}, execdSharedAttrs()...)
 			obs.Observe(tcpCount, metric.WithAttributes(append(base, attribute.String("protocol", "tcp"))...))
 			obs.Observe(udpCount, metric.WithAttributes(append(base, attribute.String("protocol", "udp"))...))
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	isolationRunDurationMs, err = meter.Float64Histogram(
+		"execd.isolation.run.duration",
+		metric.WithDescription("Duration of isolated session runs by result"),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"execd.isolation.session.count",
+		metric.WithDescription("Current number of active isolated sessions"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			if isolationStatsProvider == nil {
+				return nil
+			}
+			obs.Observe(isolationStatsProvider().ActiveSessions, metric.WithAttributes(execdSharedAttrs()...))
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"execd.isolation.upper.usage_bytes",
+		metric.WithDescription("Total bytes used by isolated session upper directories"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			if isolationStatsProvider == nil {
+				return nil
+			}
+			obs.Observe(isolationStatsProvider().UpperUsageBytes, metric.WithAttributes(execdSharedAttrs()...))
 			return nil
 		}),
 	)

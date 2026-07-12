@@ -1,6 +1,5 @@
 # OpenSandbox SDK for Python
 
-English | [中文](README_zh.md)
 
 A Python SDK for low-level interaction with OpenSandbox. It provides capabilities to create, manage, and interact with secure sandbox environments, including executing shell commands, managing files, and monitoring resources.
 
@@ -528,7 +527,6 @@ await sandbox.credential_vault.create(
             name="api-token",
             match={
                 "schemes": ["https"],
-                "ports": [443],
                 "hosts": ["api.example.com"],
                 "paths": ["/v1/*"],
             },
@@ -538,5 +536,5 @@ await sandbox.credential_vault.create(
 )
 ```
 
-See [Credential Vault](../../../docs/credential-vault.md) for auth types,
+See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
 binding guidance, and Git/curl examples.

@@ -37,6 +37,16 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
 
+var forwardSignals = []os.Signal{
+	syscall.SIGINT,
+	syscall.SIGTERM,
+	syscall.SIGHUP,
+	syscall.SIGQUIT,
+	syscall.SIGUSR1,
+	syscall.SIGUSR2,
+	syscall.SIGWINCH,
+}
+
 // getShell returns the preferred shell, falling back to sh if bash is not available.
 // This is needed for Alpine-based Docker images that only have sh by default.
 func getShell() string {
@@ -90,10 +100,10 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
 	session := c.newContextID()
 
-	signals := make(chan os.Signal, 1)
+	signals := make(chan os.Signal, len(forwardSignals)+1)
 	defer close(signals)
-	signal.Notify(signals)
-	defer signal.Reset()
+	signal.Notify(signals, forwardSignals...)
+	defer signal.Stop(signals)
 
 	stdout, stderr, err := c.stdLogDescriptor(session)
 	if err != nil {
@@ -259,10 +269,10 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	stdoutPath := c.combinedOutputFileName(session)
 	stderrPath := c.combinedOutputFileName(session)
 
-	signals := make(chan os.Signal, 1)
+	signals := make(chan os.Signal, len(forwardSignals)+1)
 	defer close(signals)
-	signal.Notify(signals)
-	defer signal.Reset()
+	signal.Notify(signals, forwardSignals...)
+	defer signal.Stop(signals)
 
 	startAt := time.Now()
 	log.Info("received command: %v", log.SanitizeCommand(request.Code))

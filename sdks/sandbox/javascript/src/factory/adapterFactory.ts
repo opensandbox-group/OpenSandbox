@@ -18,6 +18,7 @@ import type { CredentialVault, Egress } from "../services/egress.js";
 import type { ExecdCommands } from "../services/execdCommands.js";
 import type { ExecdHealth } from "../services/execdHealth.js";
 import type { ExecdMetrics } from "../services/execdMetrics.js";
+import type { IsolationService } from "../services/isolatedSessions.js";
 import type { Sandboxes } from "../services/sandboxes.js";
 
 export interface CreateLifecycleStackOptions {
@@ -40,6 +41,7 @@ export interface ExecdStack {
   files: SandboxFiles;
   health: ExecdHealth;
   metrics: ExecdMetrics;
+  isolation?: IsolationService;
 }
 
 export interface CreateEgressStackOptions {

@@ -1,6 +1,6 @@
 {
   "name": "@alibaba-group/opensandbox",
-  "version": "0.1.8",
+  "version": "0.1.10",
   "description": "OpenSandbox TypeScript/JavaScript SDK (sandbox lifecycle + execd APIs)",
   "license": "Apache-2.0",
   "type": "module",
@@ -24,10 +24,10 @@
   "sideEffects": false,
   "repository": {
     "type": "git",
-    "url": "https://github.com/alibaba/OpenSandbox.git"
+    "url": "https://github.com/opensandbox-group/OpenSandbox.git"
   },
   "bugs": {
-    "url": "https://github.com/alibaba/OpenSandbox/issues"
+    "url": "https://github.com/opensandbox-group/OpenSandbox/issues"
   },
   "homepage": "https://open-sandbox.ai",
   "files": [
@@ -48,7 +48,7 @@
   },
   "dependencies": {
     "openapi-fetch": "^0.14.1",
-    "undici": "^7.25.0"
+    "undici": "^7.28.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

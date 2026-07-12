@@ -68,6 +68,7 @@ spec:
           - --snapshot-push-secret=registry-snapshot-push-secret
           - --resume-pull-secret=registry-pull-secret
           - --image-committer-image=image-committer:dev
+          - --commit-job-timeout=2m
         image: controller:dev
         name: manager
         ports: []

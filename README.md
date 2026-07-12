@@ -1,65 +1,36 @@
 <div align="center">
-  <img src="docs/assets/logo.svg" alt="OpenSandbox logo" width="150" />
+  <img src="docs/public/images/logo.svg" alt="OpenSandbox logo" width="150" />
 
   <h1>OpenSandbox</h1>
 
   <p align="center">
-    <a href="https://trendshift.io/repositories/21828" target="_blank">
-      <img src="https://trendshift.io/api/badge/repositories/21828" alt="alibaba%2FOpenSandbox | Trendshift" style="width: 320px; height: 70px;" width="320" height="70" />
-    </a>
+    <a href="https://trendshift.io/repositories/21828" target="_blank"><img src="https://trendshift.io/api/badge/repositories/21828" alt="opensandbox-group%2FOpenSandbox | Trendshift" style="width: 320px; height: 70px;" width="320" height="70" /></a>
   </p>
 
 <p align="center">
-  <a href="https://github.com/alibaba/OpenSandbox">
-    <img src="https://img.shields.io/github/stars/alibaba/OpenSandbox.svg?style=social" alt="GitHub stars" />
-  </a>
-  <a href="https://deepwiki.com/alibaba/OpenSandbox">
-    <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" />
-  </a>
-  <a href="https://www.apache.org/licenses/LICENSE-2.0.html">
-    <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="license" />
-  </a>
-  <a href="https://www.bestpractices.dev/projects/12588">
-    <img src="https://www.bestpractices.dev/projects/12588/badge" alt="OpenSSF Best Practices" />
-  </a>
-  <a href="https://badge.fury.io/py/opensandbox">
-    <img src="https://badge.fury.io/py/opensandbox.svg" alt="PyPI version" />
-  </a>
-  <a href="https://badge.fury.io/js/@alibaba-group%2Fopensandbox">
-    <img src="https://badge.fury.io/js/@alibaba-group%2Fopensandbox.svg" alt="npm version" />
-  </a>
-  <a href="https://landscape.cncf.io/?item=orchestration-management--scheduling-orchestration--opensandbox">
-    <img src="https://img.shields.io/badge/CNCF-Landscape-0C66E4" alt="CNCF Landscape" />
-  </a>
-  <a href="https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11">
-    <img src="https://img.shields.io/badge/DingTalk-Join-0089FF?logo=dingtalk&logoColor=white" alt="DingTalk" />
-  </a>
-  <a href="https://github.com/alibaba/OpenSandbox/actions">
-    <img src="https://github.com/alibaba/OpenSandbox/actions/workflows/real-e2e.yml/badge.svg?branch=main" alt="E2E Status" />
-  </a>
-  <a href="https://github.com/alibaba/OpenSandbox/actions">
-    <img src="https://github.com/alibaba/OpenSandbox/actions/workflows/kubernetes-nightly-build.yml/badge.svg?branch=main" alt="E2E Status" />
-  </a>
+  <a href="https://github.com/opensandbox-group/OpenSandbox"><img src="https://img.shields.io/github/stars/opensandbox-group/OpenSandbox?style=flat-square&logo=github&logoColor=white&label=Stars&color=181717" alt="Stars" /></a>
+  <a href="https://www.bestpractices.dev/projects/12588"><img src="https://img.shields.io/badge/OpenSSF-Best-4C566A?style=flat-square" alt="OpenSSF Best Practices" /></a>
+  <a href="https://landscape.cncf.io/?item=orchestration-management--scheduling-orchestration--opensandbox"><img src="https://img.shields.io/badge/CNCF-Landscape-0C66E4?style=flat-square" alt="CNCF Landscape" /></a>
+  <a href="https://discord.gg/g7FuPs8YeD"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11"><img src="https://img.shields.io/badge/DingTalk-Join-0089FF?style=flat-square" alt="DingTalk" /></a>
+  <a href="https://github.com/opensandbox-group/OpenSandbox/actions"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/real-e2e.yml?branch=main&label=TEST&style=flat-square&logo=github&logoColor=white" alt="E2E Status" /></a>
+  <a href="https://github.com/opensandbox-group/OpenSandbox/actions"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/kubernetes-nightly-build.yml?branch=main&label=K8S&style=flat-square&logo=kubernetes&logoColor=white" alt="Kubernetes nightly build status" /></a>
 </p>
 
   <hr />
 </div>
 
-[Documentation](https://open-sandbox.ai/) | [中文文档](https://open-sandbox.ai/zh/)
-
 OpenSandbox is a **general-purpose sandbox platform** for AI applications, offering multi-language SDKs, unified sandbox APIs, and Docker/Kubernetes runtimes for scenarios like Coding Agents, GUI Agents, Agent Evaluation, AI Code Execution, and RL Training.
-
-OpenSandbox is now listed in the [CNCF Landscape](https://landscape.cncf.io/?item=orchestration-management--scheduling-orchestration--opensandbox).
 
 ## Features
 
-- **Multi-language SDKs**: Provides sandbox SDKs in Python, Java/Kotlin, JavaScript/TypeScript, C#/.NET, Go.
-- **Sandbox Protocol**: Defines sandbox lifecycle management APIs and sandbox execution APIs so you can extend custom sandbox runtimes.
-- **Sandbox Runtime**: Built-in lifecycle management supporting Docker and [high-performance Kubernetes runtime](./kubernetes), enabling both local runs and large-scale distributed scheduling.
-- **Sandbox Environments**: Built-in Command, Filesystem, and Code Interpreter implementations. Examples cover Coding Agents (e.g., Claude Code), browser automation (Chrome, Playwright), and desktop environments (VNC, VS Code).
-- **Network Policy**: Unified [Ingress Gateway](components/ingress) with multiple routing strategies plus per-sandbox [egress controls](components/egress).
-- **Credential Vault**: [Secure credential injection](docs/credential-vault.md) for sandbox outbound requests without exposing real secrets to workloads.
-- **Strong Isolation**: Supports secure container runtimes like gVisor, Kata Containers, and Firecracker microVM for enhanced isolation between sandbox workloads and the host. See [Secure Container Runtime Guide](docs/secure-container.md) for details.
+- 🧩 **SDKs, CLI, and MCP**: Provides multi-language SDKs, the osb CLI, and MCP server integration for sandbox creation, command execution, and file operations. See [SDKs](#sdks), [CLI](#cli), and [MCP](#mcp).
+- 📜 **Sandbox Protocol**: Defines sandbox lifecycle management APIs and sandbox execution APIs so you can extend custom sandbox runtimes. See [API specs](specs/README.md).
+- 🚀 **Sandbox Runtime**: Built-in lifecycle management supporting Docker and high-performance Kubernetes runtime, enabling both local runs and large-scale distributed scheduling. See [Kubernetes runtime](./kubernetes).
+- 🖥️ **Sandbox Environments**: Built-in Command, Filesystem, and Code Interpreter implementations. Examples cover Coding Agents (e.g., Claude Code), browser automation (Chrome, Playwright), and desktop environments (VNC, VS Code).
+- 🚦 **Network Policy**: Unified ingress gateway with multiple routing strategies plus per-sandbox egress controls. See [Ingress Gateway](components/ingress) and [egress controls](components/egress).
+- 🔑 **Credential Vault**: Secure credential injection for sandbox outbound requests without exposing real secrets to workloads. See [Credential Vault](docs/guides/credential-vault.md).
+- 🏰 **Strong Isolation**: Supports secure container runtimes like gVisor, Kata Containers, and Firecracker microVM for enhanced isolation between sandbox workloads and the host. See [Secure Container Runtime Guide](docs/guides/secure-container.md) for details.
 
 ## SDKs
 
@@ -233,8 +204,8 @@ async def main() -> None:
         print(result.result[0].text) # 4
         print(result.logs.stdout[0].text) # 3.11.14
 
-    # 7. Cleanup the sandbox
-    await sandbox.kill()
+        # 7. Cleanup the sandbox
+        await sandbox.kill()
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -246,30 +217,31 @@ OpenSandbox provides examples covering SDK usage, agent integrations, browser au
 
 #### 🎯 Basic Examples
 
-- **[code-interpreter](examples/code-interpreter/README.md)** - End-to-end Code Interpreter SDK workflow in a sandbox.
-- **[aio-sandbox](examples/aio-sandbox/README.md)** - All-in-One sandbox setup using the OpenSandbox SDK.
-- **[agent-sandbox](examples/agent-sandbox/README.md)** - Example integration for running OpenSandbox workloads on Kubernetes with [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox).
-- **Volumes** — [Docker PVC / named volumes](examples/docker-pvc-volume-mount/README.md), [Docker OSSFS](examples/docker-ossfs-volume-mount/README.md), [Kubernetes PVC](examples/kubernetes-pvc-volume-mount/README.md): persistent and shared storage patterns.
+- **[code-interpreter](docs/examples/code-interpreter.md)** - End-to-end Code Interpreter SDK workflow in a sandbox.
+- **[aio-sandbox](docs/examples/aio-sandbox.md)** - All-in-One sandbox setup using the OpenSandbox SDK.
+- **[agent-sandbox](docs/examples/agent-sandbox.md)** - Example integration for running OpenSandbox workloads on Kubernetes with [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox).
+- **Volumes** — [Docker PVC / named volumes](docs/examples/docker-pvc-volume-mount.md), [Docker OSSFS](docs/examples/docker-ossfs-volume-mount.md), [Kubernetes PVC](docs/examples/kubernetes-pvc-volume-mount.md): persistent and shared storage patterns.
 
 #### 🤖 Coding Agent Integrations
 
-- **Coding CLIs** — [Claude Code](examples/claude-code/README.md), [Gemini CLI](examples/gemini-cli/README.md), [OpenAI Codex CLI](examples/codex-cli/README.md), [Qwen Code](examples/qwen-code/README.md), [Kimi CLI](examples/kimi-cli/README.md): run each vendor CLI inside OpenSandbox.
-- **[langgraph](examples/langgraph/README.md)** - LangGraph state-machine workflow that creates/runs a sandbox job with fallback retry.
-- **[google-adk](examples/google-adk/README.md)** - Google ADK agent using OpenSandbox tools to write/read files and run commands.
-- **[openclaw](examples/openclaw/README.md)** - Launch an OpenClaw Gateway inside a sandbox.
+- **Coding CLIs** — [Claude Code](docs/examples/claude-code.md), [Gemini CLI](docs/examples/gemini-cli.md), [OpenAI Codex CLI](docs/examples/codex-cli.md), [Qwen Code](docs/examples/qwen-code.md), [Kimi CLI](docs/examples/kimi-cli.md): run each vendor CLI inside OpenSandbox.
+- **[langgraph](docs/examples/langgraph.md)** - LangGraph state-machine workflow that creates/runs a sandbox job with fallback retry.
+- **[google-adk](docs/examples/google-adk.md)** - Google ADK agent using OpenSandbox tools to write/read files and run commands.
+- **[openclaw](docs/examples/openclaw.md)** - Launch an OpenClaw Gateway inside a sandbox.
 
 #### 🌐 Browser and Desktop Environments
 
-- **[chrome](examples/chrome/README.md)** - Chromium sandbox with VNC and DevTools access for automation and debugging.
-- **[playwright](examples/playwright/README.md)** - Playwright + Chromium headless scraping and testing example.
-- **[desktop](examples/desktop/README.md)** - Full desktop environment in a sandbox with VNC access.
-- **[vscode](examples/vscode/README.md)** - code-server (VS Code Web) running inside a sandbox for remote dev.
+- **[chrome](docs/examples/chrome.md)** - Chromium sandbox with VNC and DevTools access for automation and debugging.
+- **[playwright](docs/examples/playwright.md)** - Playwright + Chromium headless scraping and testing example.
+- **[desktop](docs/examples/desktop.md)** - Full desktop environment in a sandbox with VNC access.
+- **[vscode](docs/examples/vscode.md)** - code-server (VS Code Web) running inside a sandbox for remote dev.
 
-#### 🧠 ML and Training
+#### 🧠 Training and Evaluation
 
-- **[rl-training](examples/rl-training/README.md)** - DQN CartPole training in a sandbox with checkpoints and summary output.
+- **[rl-training](docs/examples/rl-training.md)** - DQN CartPole training in a sandbox with checkpoints and summary output.
+- **[harbor-evaluation](docs/examples/harbor-evaluation.md)** - Run a [Harbor](https://github.com/harbor-framework/harbor) agent evaluation on OpenSandbox, one sandbox per trial.
 
-For more details, please refer to [examples](examples/README.md) and the README files in each example directory.
+For more details, please refer to the [examples documentation](docs/examples/index.md).
 
 ## Project Structure
 
@@ -284,19 +256,20 @@ For more details, please refer to [examples](examples/README.md) and the README 
 | [`components/ingress/`](components/ingress/README.md) | Sandbox traffic ingress proxy                                    |
 | [`components/egress/`](components/egress/README.md) | Sandbox network egress control                                   |
 | [`sandboxes/`](sandboxes/) | Runtime sandbox implementations                                   |
-| [`examples/`](examples/README.md) | Integration examples and use cases                               |
+| [`examples/`](examples/) | Runnable example code                                            |
+| [`docs/examples/`](docs/examples/index.md) | Example documentation and use cases                              |
 | [`oseps/`](oseps/README.md) | OpenSandbox Enhancement Proposals                                |
 | [`docs/`](docs/) | Architecture and design documentation                            |
 | [`tests/`](tests/) | Cross-component E2E tests                                        |
 | [`scripts/`](scripts/) | Development and maintenance scripts                              |
 
-For detailed architecture, see [docs/architecture.md](docs/architecture.md).
+For detailed architecture, see [Architecture](docs/architecture/).
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) – Overall architecture & design philosophy
-- [docs/credential-vault.md](docs/credential-vault.md) - Credential Vault credential injection guide
-- [docs/release-verification.md](docs/release-verification.md) - Release signing and artifact verification
+- [Architecture](docs/architecture/) – Overall architecture & design philosophy
+- [Credential Vault](docs/guides/credential-vault.md) - Credential Vault credential injection guide
+- [Release Verification](docs/community/release-verification.md) - Release signing and artifact verification
 - [oseps/README.md](oseps/README.md) – OpenSandbox Enhancement Proposals
 - SDK
   - Sandbox base SDK ([Java/Kotlin SDK](sdks/sandbox/kotlin/README.md), [Python SDK](sdks/sandbox/python/README.md), [JavaScript/TypeScript SDK](sdks/sandbox/javascript/README.md), [C#/.NET SDK](sdks/sandbox/csharp/README.md)), [Go SDK](sdks/sandbox/go/README.md) - includes sandbox lifecycle, command execution, file operations
@@ -319,8 +292,9 @@ and how roadmap items are managed.
 ## Contact and Discussion
 
 - Issues: Submit bugs, feature requests, or design discussions through GitHub Issues
+- Discord: Join the [OpenSandbox Discord community](https://discord.gg/g7FuPs8YeD)
 - DingTalk: Join the [OpenSandbox technical discussion group](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11)
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=alibaba/OpenSandbox&type=date&legend=top-left)](https://www.star-history.com/#alibaba/OpenSandbox&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=opensandbox-group/OpenSandbox&type=date&legend=top-left)](https://www.star-history.com/#opensandbox-group/OpenSandbox&type=date&legend=top-left)

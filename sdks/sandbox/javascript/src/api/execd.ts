@@ -461,6 +461,10 @@ export interface paths {
          * @description Downloads a file from the specified path within the sandbox. Supports HTTP
          *     range requests for resumable downloads and partial content retrieval.
          *     Returns file as octet-stream with appropriate headers.
+         *
+         *     When offset/limit query parameters are provided, the endpoint performs
+         *     line-based reading and returns text/plain content instead. Line-based
+         *     parameters are mutually exclusive with the Range header.
          */
         get: operations["downloadFile"];
         put?: never;
@@ -484,6 +488,17 @@ export interface paths {
          *     only immediate children are returned (`depth=1`). Set `depth` to a larger
          *     value to include descendants up to that many levels below `path`. The
          *     root directory itself is not included in the response.
+         *
+         *     Symbolic links are reported with `type=symlink` and are not traversed:
+         *     the listing never descends into a link target, even when `depth` would
+         *     otherwise allow it. For the same reason, when `path` itself resolves to
+         *     a symbolic link the request is rejected with `400`; callers must pass
+         *     the real directory path they want listed.
+         *
+         *     Entries are returned in lexical order by entry name within each
+         *     directory. Descendants reported via `depth>1` follow their parent in
+         *     the same lexical order, so a depth-2 listing yields stable, predictable
+         *     output for file-browser style clients.
          */
         get: operations["listDirectory"];
         put?: never;
@@ -561,6 +576,297 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create an isolated bash session */
+        post: operations["createIsolatedSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List isolated sessions */
+        get: operations["listIsolatedSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get isolator capabilities */
+        get: operations["isolatedCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get isolated session state */
+        get: operations["getIsolatedSession"];
+        put?: never;
+        post?: never;
+        /** Delete an isolated session */
+        delete: operations["deleteIsolatedSession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run code in an isolated session (SSE streaming) */
+        post: operations["runInIsolatedSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download upper directory diff (stub) */
+        get: operations["isolatedSessionDiff"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Commit upper changes to workspace (stub) */
+        post: operations["isolatedSessionCommit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/files/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get file information */
+        get: operations["isolatedGetFilesInfo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/files/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download a file */
+        get: operations["isolatedDownloadFile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/files/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload a file */
+        post: operations["isolatedUploadFile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove files */
+        delete: operations["isolatedRemoveFiles"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/files/mv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rename or move files */
+        post: operations["isolatedRenameFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/files/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Change file permissions */
+        post: operations["isolatedChmodFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/files/replace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace file content */
+        post: operations["isolatedReplaceContent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/files/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search files */
+        get: operations["isolatedSearchFiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/directories/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List directory contents */
+        get: operations["isolatedListDirectory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/directories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create directories */
+        post: operations["isolatedMakeDirs"];
+        /** Remove directories */
+        delete: operations["isolatedRemoveDirs"];
         options?: never;
         head?: never;
         patch?: never;
@@ -956,8 +1262,103 @@ export interface components {
              */
             message: string;
         };
+        CreateIsolatedSessionRequest: {
+            /** @enum {string} */
+            profile?: "strict" | "balanced";
+            workspace: components["schemas"]["IsolatedWorkspaceSpec"];
+            extra_writable?: string[];
+            /** @description Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist. */
+            binds?: components["schemas"]["BindMount"][];
+            share_net?: boolean;
+            env_passthrough?: components["schemas"]["EnvPassthroughSpec"];
+            /** Format: uint32 */
+            uid?: number;
+            /** Format: uint32 */
+            gid?: number;
+            /**
+             * @description Controls how user identity is established inside the namespace. "setpriv" (default) uses real setuid via setpriv(1). "userns" creates a user namespace via --unshare-user --disable-userns.
+             * @enum {string}
+             */
+            uid_mode?: "setpriv" | "userns";
+            idle_timeout_seconds?: number;
+        };
+        IsolatedWorkspaceSpec: {
+            path: string;
+            /** @enum {string} */
+            mode?: "rw" | "overlay" | "ro";
+        };
+        BindMount: {
+            /** @description Host path to bind-mount into the namespace. */
+            source: string;
+            /** @description Mount destination inside the namespace. Defaults to source when omitted. */
+            dest?: string;
+            /**
+             * @description When true the mount is read-only (--ro-bind); otherwise it is read-write (--bind).
+             * @default false
+             */
+            readonly: boolean;
+        };
+        EnvPassthroughSpec: {
+            /** @enum {string} */
+            mode?: "allow" | "deny";
+            keys?: string[];
+        };
+        IsolatedCreateSessionResponse: {
+            /** Format: uuid */
+            session_id?: string;
+            /** Format: date-time */
+            created_at?: string;
+        };
+        IsolatedRunRequest: {
+            code: string;
+            envs?: {
+                [key: string]: string;
+            };
+            timeout_seconds?: number;
+        };
+        SessionState: {
+            /** @enum {string} */
+            status?: "active" | "dead" | "destroyed";
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            last_run_at?: string;
+            idle_remaining_seconds?: number | null;
+        };
+        IsolatedSessionSummary: {
+            /** Format: uuid */
+            session_id: string;
+            /** @enum {string} */
+            status: "active" | "dead" | "destroyed";
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            last_run_at: string;
+            idle_remaining_seconds?: number | null;
+        };
+        ListIsolatedSessionsResponse: {
+            sessions: components["schemas"]["IsolatedSessionSummary"][];
+        };
+        CapabilitiesResponse: {
+            available?: boolean;
+            isolator?: string;
+            version?: string;
+            /** @description Diagnostic message when isolation is unavailable */
+            message?: string;
+            commit_supported?: boolean;
+            diff_supported?: boolean;
+        };
     };
     responses: {
+        /** @description Isolation subsystem is not available */
+        ServiceUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description Invalid request body format or missing required fields */
         BadRequest: {
             headers: {
@@ -1687,10 +2088,20 @@ export interface operations {
                  * @example /workspace/data.csv
                  */
                 path: string;
+                /**
+                 * @description Starting line number (1-based) for line-based reading. Mutually exclusive with the Range header.
+                 * @example 100
+                 */
+                offset?: number;
+                /**
+                 * @description Number of lines to return for line-based reading. Mutually exclusive with the Range header.
+                 * @example 20
+                 */
+                limit?: number;
             };
             header?: {
                 /**
-                 * @description HTTP Range header for partial content requests
+                 * @description HTTP Range header for partial content requests. Mutually exclusive with offset/limit.
                  * @example bytes=0-1023
                  */
                 Range?: string;
@@ -1700,17 +2111,21 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description File content */
+            /**
+             * @description File content. Returns application/octet-stream for full or byte-range
+             *     downloads, or text/plain for line-based reads (when offset/limit are provided).
+             */
             200: {
                 headers: {
-                    /** @description Attachment header with filename */
+                    /** @description Attachment header with filename (byte-range mode only) */
                     "Content-Disposition"?: string;
-                    /** @description File size in bytes */
+                    /** @description File size in bytes (byte-range mode only) */
                     "Content-Length"?: number;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/octet-stream": string;
+                    "text/plain": string;
                 };
             };
             /** @description Partial file content (when Range header is provided) */
@@ -1905,6 +2320,501 @@ export interface operations {
                 };
             };
             500: components["responses"]["InternalServerError"];
+        };
+    };
+    createIsolatedSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateIsolatedSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IsolatedCreateSessionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listIsolatedSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of active isolated sessions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListIsolatedSessionsResponse"];
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Isolator capabilities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilitiesResponse"];
+                };
+            };
+        };
+    };
+    getIsolatedSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionState"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    deleteIsolatedSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    runInIsolatedSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IsolatedRunRequest"];
+            };
+        };
+        responses: {
+            /** @description SSE stream of execution output */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["ServerStreamEvent"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedSessionDiff: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedSessionCommit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedGetFilesInfo: {
+        parameters: {
+            query: {
+                /** @description File path(s) to get info for (can be specified multiple times) */
+                path: string[];
+            };
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description File metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: components["schemas"]["FileInfo"];
+                    };
+                };
+            };
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedDownloadFile: {
+        parameters: {
+            query: {
+                path: string;
+                /** @description Starting line number (1-based) for line-based reading. Mutually exclusive with Range header. */
+                offset?: number;
+                /** @description Number of lines to return for line-based reading. Mutually exclusive with Range header. */
+                limit?: number;
+            };
+            header?: {
+                /** @description HTTP Range header for partial content requests. Mutually exclusive with offset/limit. */
+                Range?: string;
+            };
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description File content */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                    "text/plain": string;
+                };
+            };
+            /** @description Partial file content (when Range header is provided) */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedUploadFile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** @description JSON-encoded file metadata */
+                    metadata?: string;
+                    /**
+                     * Format: binary
+                     * @description File to upload
+                     */
+                    file?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description File uploaded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedRemoveFiles: {
+        parameters: {
+            query: {
+                /** @description File path(s) to delete (can be specified multiple times) */
+                path: string[];
+            };
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Files removed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedRenameFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameFileItem"][];
+            };
+        };
+        responses: {
+            /** @description Files renamed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedChmodFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: components["schemas"]["Permission"];
+                };
+            };
+        };
+        responses: {
+            /** @description Permissions changed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedReplaceContent: {
+        parameters: {
+            query?: {
+                /** @description When true, return per-file replacement counts */
+                verbose?: boolean;
+            };
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: components["schemas"]["ReplaceFileContentItem"];
+                };
+            };
+        };
+        responses: {
+            /** @description Content replaced */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: components["schemas"]["ReplaceFileContentResult"];
+                    };
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedSearchFiles: {
+        parameters: {
+            query: {
+                /** @description Root directory path to search in */
+                path: string;
+                /** @description Glob pattern to match files (default is **) */
+                pattern?: string;
+            };
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Matched files */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileInfo"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedListDirectory: {
+        parameters: {
+            query: {
+                /** @description Directory path to list */
+                path: string;
+                /** @description Maximum depth to traverse (default 1) */
+                depth?: number;
+            };
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Directory entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileInfo"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedMakeDirs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: components["schemas"]["Permission"];
+                };
+            };
+        };
+        responses: {
+            /** @description Directories created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    isolatedRemoveDirs: {
+        parameters: {
+            query: {
+                /** @description Directory path(s) to delete (can be specified multiple times) */
+                path: string[];
+            };
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Directories removed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
 }

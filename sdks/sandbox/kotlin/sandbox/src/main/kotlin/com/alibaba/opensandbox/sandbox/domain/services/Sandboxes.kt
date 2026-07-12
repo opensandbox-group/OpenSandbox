@@ -70,6 +70,7 @@ interface Sandboxes {
         platform: PlatformSpec? = null,
         secureAccess: Boolean = false,
         snapshotId: String? = null,
+        resourceRequests: Map<String, String>? = null,
     ): SandboxCreateResponse
 
     /**
@@ -89,6 +90,7 @@ interface Sandboxes {
         secureAccess: Boolean = false,
         snapshotId: String? = null,
         credentialProxy: CredentialProxyConfig?,
+        resourceRequests: Map<String, String>? = null,
     ): SandboxCreateResponse {
         if (credentialProxy == null) {
             return createSandbox(
@@ -104,6 +106,7 @@ interface Sandboxes {
                 platform = platform,
                 secureAccess = secureAccess,
                 snapshotId = snapshotId,
+                resourceRequests = resourceRequests,
             )
         }
         throw UnsupportedOperationException(
@@ -225,4 +228,7 @@ interface Sandboxes {
      * @param sandboxId Unique identifier of the sandbox
      */
     fun killSandbox(sandboxId: String)
+
+    /** Remove all cached endpoints for a sandbox. No-op if caching is disabled. */
+    fun invalidateEndpointCache(sandboxId: String) {}
 }

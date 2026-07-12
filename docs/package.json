@@ -7,14 +7,12 @@
       "rollup": "4.60.2",
       "postcss": "8.5.10",
       "esbuild": "0.25.2",
-      "vite": "6.4.2"
+      "vite": "6.4.3"
     }
   },
   "scripts": {
-    "docs:sync": "node .vitepress/scripts/docs-manifest.mjs",
-    "docs:spec": "node ../scripts/spec-doc/generate-spec.js --output docs/public/api/spec-inline.js",
-    "docs:dev": "pnpm docs:sync && pnpm docs:spec && vitepress dev",
-    "docs:build": "pnpm docs:sync && pnpm docs:spec && vitepress build",
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
     "docs:preview": "vitepress preview"
   },
   "devDependencies": {

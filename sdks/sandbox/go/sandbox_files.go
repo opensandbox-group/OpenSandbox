@@ -96,11 +96,11 @@ func (s *Sandbox) UploadFiles(ctx context.Context, entries []UploadFileEntry) er
 }
 
 // DownloadFile downloads a file from the sandbox.
-func (s *Sandbox) DownloadFile(ctx context.Context, remotePath, rangeHeader string) (io.ReadCloser, error) {
+func (s *Sandbox) DownloadFile(ctx context.Context, remotePath, rangeHeader string, opts ...DownloadFileOptions) (io.ReadCloser, error) {
 	if s.execd == nil {
 		return nil, fmt.Errorf("opensandbox: execd client not initialized")
 	}
-	return s.execd.DownloadFile(ctx, remotePath, rangeHeader)
+	return s.execd.DownloadFile(ctx, remotePath, rangeHeader, opts...)
 }
 
 // CreateDirectory creates a directory in the sandbox.

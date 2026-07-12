@@ -27,6 +27,7 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.create_sandbox_response_extensions import CreateSandboxResponseExtensions
     from ..models.create_sandbox_response_metadata import CreateSandboxResponseMetadata
     from ..models.platform_spec import PlatformSpec
     from ..models.sandbox_status import SandboxStatus
@@ -47,6 +48,8 @@ class CreateSandboxResponse:
             this is copied from the creation request. For snapshot-created sandboxes,
             this is restored from the snapshot.
         metadata (CreateSandboxResponseMetadata | Unset): Custom metadata from creation request
+        extensions (CreateSandboxResponseExtensions | Unset): Opaque extension data restored from provider-specific
+            storage
         platform (PlatformSpec | Unset): Runtime platform constraint used for scheduling/provisioning.
 
             This field is independent from `image` and expresses the expected target
@@ -68,6 +71,7 @@ class CreateSandboxResponse:
     created_at: datetime.datetime
     entrypoint: list[str]
     metadata: CreateSandboxResponseMetadata | Unset = UNSET
+    extensions: CreateSandboxResponseExtensions | Unset = UNSET
     platform: PlatformSpec | Unset = UNSET
     expires_at: datetime.datetime | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -84,6 +88,10 @@ class CreateSandboxResponse:
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
             metadata = self.metadata.to_dict()
+
+        extensions: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.extensions, Unset):
+            extensions = self.extensions.to_dict()
 
         platform: dict[str, Any] | Unset = UNSET
         if not isinstance(self.platform, Unset):
@@ -105,6 +113,8 @@ class CreateSandboxResponse:
         )
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
+        if extensions is not UNSET:
+            field_dict["extensions"] = extensions
         if platform is not UNSET:
             field_dict["platform"] = platform
         if expires_at is not UNSET:
@@ -114,6 +124,7 @@ class CreateSandboxResponse:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.create_sandbox_response_extensions import CreateSandboxResponseExtensions
         from ..models.create_sandbox_response_metadata import CreateSandboxResponseMetadata
         from ..models.platform_spec import PlatformSpec
         from ..models.sandbox_status import SandboxStatus
@@ -133,6 +144,13 @@ class CreateSandboxResponse:
             metadata = UNSET
         else:
             metadata = CreateSandboxResponseMetadata.from_dict(_metadata)
+
+        _extensions = d.pop("extensions", UNSET)
+        extensions: CreateSandboxResponseExtensions | Unset
+        if isinstance(_extensions, Unset):
+            extensions = UNSET
+        else:
+            extensions = CreateSandboxResponseExtensions.from_dict(_extensions)
 
         _platform = d.pop("platform", UNSET)
         platform: PlatformSpec | Unset
@@ -154,6 +172,7 @@ class CreateSandboxResponse:
             created_at=created_at,
             entrypoint=entrypoint,
             metadata=metadata,
+            extensions=extensions,
             platform=platform,
             expires_at=expires_at,
         )

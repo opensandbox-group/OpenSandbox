@@ -335,24 +335,61 @@ func parseContainerSpec(specStr string) (ContainerSpec, error) {
 //   - io.kubernetes.pod.namespace
 //   - io.kubernetes.container.name
 func getContainerIDByNerdctl(podName, podNamespace, containerName string) (string, error) {
-	// Use nerdctl ps with label filters to find the container directly
-	args := append(nerdctlBaseArgs(),
-		"ps", "-q",
+	containerID, err := lookupContainerIDByNerdctl(podName, podNamespace, containerName, false)
+	if err != nil {
+		return "", err
+	}
+	if containerID != "" {
+		return containerID, nil
+	}
+
+	containerID, err = lookupContainerIDByNerdctl(podName, podNamespace, containerName, true)
+	if err != nil {
+		return "", err
+	}
+	if containerID != "" {
+		return containerID, nil
+	}
+
+	return "", fmt.Errorf(
+		"container '%s' not found in pod %s/%s (nerdctl ps and nerdctl ps -a returned empty)",
+		containerName,
+		podNamespace,
+		podName,
+	)
+}
+
+func lookupContainerIDByNerdctl(podName, podNamespace, containerName string, includeStopped bool) (string, error) {
+	args := append(nerdctlBaseArgs(), "ps")
+	if includeStopped {
+		args = append(args, "-a")
+	}
+	args = append(args,
+		"-q",
 		"--filter", fmt.Sprintf("label=io.kubernetes.pod.name=%s", podName),
 		"--filter", fmt.Sprintf("label=io.kubernetes.pod.namespace=%s", podNamespace),
 		"--filter", fmt.Sprintf("label=io.kubernetes.container.name=%s", containerName),
 	)
-	cmd := exec.Command("nerdctl", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := commandCombinedOutput("nerdctl", args...)
 	if err != nil {
-		return "", fmt.Errorf("nerdctl ps failed for pod=%s ns=%s container=%s: %v, output: %s",
-			podName, podNamespace, containerName, err, strings.TrimSpace(string(output)))
+		mode := "nerdctl ps"
+		if includeStopped {
+			mode = "nerdctl ps -a"
+		}
+		return "", fmt.Errorf(
+			"%s failed for pod=%s ns=%s container=%s: %v, output: %s",
+			mode,
+			podName,
+			podNamespace,
+			containerName,
+			err,
+			strings.TrimSpace(string(output)),
+		)
 	}
 
 	containerID := strings.TrimSpace(string(output))
 	if containerID == "" {
-		return "", fmt.Errorf("container '%s' not found in pod %s/%s (nerdctl ps returned empty)",
-			containerName, podNamespace, podName)
+		return "", nil
 	}
 
 	// nerdctl ps -q may return multiple lines; take the first (most recently started)

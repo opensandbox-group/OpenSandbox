@@ -102,6 +102,7 @@ class SandboxTest {
                 metricsService = metricsService,
                 egressService = egressService,
                 credentialVaultService = credentialVaultService,
+                isolatedService = mockk(),
                 customHealthCheck = null,
                 httpClientProvider = httpClientProvider,
                 diagnosticsService = diagnosticsService,
@@ -254,19 +255,23 @@ class SandboxTest {
 
     @Test
     fun `pause should delegate to sandboxService`() {
+        every { sandboxService.invalidateEndpointCache(sandboxId) } just Runs
         every { sandboxService.pauseSandbox(sandboxId) } just Runs
 
         sandbox.pause()
 
+        verify { sandboxService.invalidateEndpointCache(sandboxId) }
         verify { sandboxService.pauseSandbox(sandboxId) }
     }
 
     @Test
     fun `kill should delegate to sandboxService`() {
+        every { sandboxService.invalidateEndpointCache(sandboxId) } just Runs
         every { sandboxService.killSandbox(sandboxId) } just Runs
 
         sandbox.kill()
 
+        verify { sandboxService.invalidateEndpointCache(sandboxId) }
         verify { sandboxService.killSandbox(sandboxId) }
     }
 

@@ -36,7 +36,6 @@ def agent_sandbox_runtime_config():
     return KubernetesRuntimeConfig(
         kubeconfig_path="/tmp/test-kubeconfig",
         namespace="test-namespace",
-        service_account="test-sa",
         workload_provider="agent-sandbox",
     )
 

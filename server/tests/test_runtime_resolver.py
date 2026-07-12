@@ -12,23 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest.mock
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from kubernetes.client.exceptions import ApiException
 
-from opensandbox_server.config import AppConfig, RuntimeConfig, SecureRuntimeConfig
+from opensandbox_server.config import AppConfig, EgressConfig, RuntimeConfig, SecureRuntimeConfig
 from opensandbox_server.services.runtime_resolver import (
     SecureRuntimeResolver,
     validate_secure_runtime_on_startup,
 )
 
 
-def _config(runtime_type: str = "docker", secure_runtime=None):
+def _config(runtime_type: str = "docker", secure_runtime=None, egress=None):
     return AppConfig(
         runtime=RuntimeConfig(type=runtime_type, execd_image="opensandbox/execd:test"),
         secure_runtime=secure_runtime,
+        egress=egress,
     )
 
 
@@ -171,3 +173,54 @@ async def test_validate_secure_runtime_skips_unknown_runtime_type() -> None:
     )
 
     await validate_secure_runtime_on_startup(config)
+
+
+@pytest.mark.asyncio
+async def test_validate_startup_warns_gvisor_with_egress() -> None:
+    k8s_client = MagicMock()
+    config = _config(
+        runtime_type="kubernetes",
+        secure_runtime=SecureRuntimeConfig(type="gvisor", k8s_runtime_class="gvisor"),
+        egress=EgressConfig(image="opensandbox/egress:latest"),
+    )
+
+    with unittest.mock.patch(
+        "opensandbox_server.services.runtime_resolver.logger"
+    ) as mock_logger:
+        await validate_secure_runtime_on_startup(config, k8s_client=k8s_client)
+
+    mock_logger.warning.assert_called_once()
+    assert "iptables nat" in mock_logger.warning.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_validate_startup_no_warn_gvisor_without_egress() -> None:
+    k8s_client = MagicMock()
+    config = _config(
+        runtime_type="kubernetes",
+        secure_runtime=SecureRuntimeConfig(type="gvisor", k8s_runtime_class="gvisor"),
+    )
+
+    with unittest.mock.patch(
+        "opensandbox_server.services.runtime_resolver.logger"
+    ) as mock_logger:
+        await validate_secure_runtime_on_startup(config, k8s_client=k8s_client)
+
+    mock_logger.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_validate_startup_no_warn_kata_with_egress() -> None:
+    k8s_client = MagicMock()
+    config = _config(
+        runtime_type="kubernetes",
+        secure_runtime=SecureRuntimeConfig(type="kata", k8s_runtime_class="kata-qemu"),
+        egress=EgressConfig(image="opensandbox/egress:latest"),
+    )
+
+    with unittest.mock.patch(
+        "opensandbox_server.services.runtime_resolver.logger"
+    ) as mock_logger:
+        await validate_secure_runtime_on_startup(config, k8s_client=k8s_client)
+
+    mock_logger.warning.assert_not_called()

@@ -180,7 +180,7 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         ReadFileOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        var bytes = await ReadBytesAsync(path, new ReadBytesOptions { Range = options?.Range }, cancellationToken).ConfigureAwait(false);
+        var bytes = await ReadBytesAsync(path, new ReadBytesOptions { Range = options?.Range, Offset = options?.Offset, Limit = options?.Limit }, cancellationToken).ConfigureAwait(false);
         var encoding = GetEncoding(options?.Encoding ?? "utf-8");
         return encoding.GetString(bytes);
     }
@@ -202,6 +202,15 @@ internal sealed class FilesystemAdapter : ISandboxFiles
             ["path"] = path
         };
 
+        if (options?.Offset != null)
+        {
+            queryParams["offset"] = options.Offset.Value.ToString();
+        }
+        if (options?.Limit != null)
+        {
+            queryParams["limit"] = options.Limit.Value.ToString();
+        }
+
         return await _client.GetBytesAsync("/files/download", queryParams, headers, cancellationToken).ConfigureAwait(false);
     }
 
@@ -211,6 +220,14 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var url = $"{_baseUrl}/files/download?path={Uri.EscapeDataString(path)}";
+        if (options?.Offset != null)
+        {
+            url += $"&offset={options.Offset.Value}";
+        }
+        if (options?.Limit != null)
+        {
+            url += $"&limit={options.Limit.Value}";
+        }
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         foreach (var header in _headers)

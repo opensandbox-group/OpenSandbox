@@ -16,6 +16,9 @@ package assign
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -48,6 +51,41 @@ func (p *resourcePredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.Ba
 		}
 	}
 	return true
+}
+
+func (p *resourcePredicate) Reason(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) string {
+	if sbx.Spec.Template == nil {
+		return ""
+	}
+	sbxResources := aggregateRequests(sbx.Spec.Template.Spec.Containers)
+	if len(sbxResources) == 0 {
+		return ""
+	}
+	if pool.Spec.Template == nil {
+		return fmt.Sprintf("pool has no template, sandbox requests %s", formatResourceList(sbxResources))
+	}
+	poolResources := aggregateRequests(pool.Spec.Template.Spec.Containers)
+
+	var insufficient []string
+	for name, req := range sbxResources {
+		poolReq, ok := poolResources[name]
+		if !ok {
+			insufficient = append(insufficient, fmt.Sprintf("%s (pool: 0, sandbox: %s)", name, req.String()))
+		} else if poolReq.Cmp(req) < 0 {
+			insufficient = append(insufficient, fmt.Sprintf("%s (pool: %s, sandbox: %s)", name, poolReq.String(), req.String()))
+		}
+	}
+	sort.Strings(insufficient)
+	return fmt.Sprintf("insufficient resources: %s", strings.Join(insufficient, ", "))
+}
+
+func formatResourceList(rl corev1.ResourceList) string {
+	var parts []string
+	for name, qty := range rl {
+		parts = append(parts, fmt.Sprintf("%s=%s", name, qty.String()))
+	}
+	sort.Strings(parts)
+	return "{" + strings.Join(parts, ", ") + "}"
 }
 
 func aggregateRequests(containers []corev1.Container) corev1.ResourceList {

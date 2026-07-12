@@ -1,6 +1,5 @@
 # Alibaba Sandbox SDK for JavaScript/TypeScript
 
-English | [中文](README_zh.md)
 
 A TypeScript/JavaScript SDK for low-level interaction with OpenSandbox. It provides the ability to create, manage, and interact with secure sandbox environments, including executing shell commands, managing files, and reading resource metrics.
 
@@ -324,7 +323,6 @@ await sandbox.credentialVault.create({
       name: "api-token",
       match: {
         schemes: ["https"],
-        ports: [443],
         hosts: ["api.example.com"],
         paths: ["/v1/*"],
       },
@@ -334,7 +332,7 @@ await sandbox.credentialVault.create({
 });
 ```
 
-See [Credential Vault](../../../docs/credential-vault.md) for auth types,
+See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
 binding guidance, and Git/curl examples.
 
 ### 5. Resource cleanup

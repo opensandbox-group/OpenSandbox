@@ -56,6 +56,9 @@ SECRET_VALUES = {
     "api-key-token": "vault-api-key-token",
     "client-id": "vault-client-id",
     "client-secret": "vault-client-secret",
+    "query-secret": "vault-query-secret",
+    "path-secret": "vault-path-secret",
+    "body-secret": "vault-body-secret",
     "runtime-token": "vault-runtime-token",
     "runtime-token-replaced": "vault-runtime-token-replaced",
 }
@@ -71,7 +74,7 @@ def credential_vault_target_ip() -> str:
 def test_credential_vault_injects_all_auth_types(
     credential_vault_target_ip: str,
 ) -> None:
-    cfg, sandbox = _create_credential_proxy_sandbox()
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
     try:
         state = sandbox.credential_vault.create(
             credentials=[
@@ -131,10 +134,106 @@ def test_credential_vault_injects_all_auth_types(
         _close_sandbox(cfg, sandbox)
 
 
+def test_credential_vault_substitutes_placeholders_in_query_path_and_body(
+    credential_vault_target_ip: str,
+) -> None:
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
+    try:
+        state = sandbox.credential_vault.create(
+            credentials=[
+                Credential(name=name, source={"value": SECRET_VALUES[name]})
+                for name in ["query-secret", "path-secret", "body-secret"]
+            ],
+            bindings=[
+                _binding(
+                    "query-substitution",
+                    "/query-substitution",
+                    {
+                        "type": "passthrough",
+                        "substitutions": [
+                            {
+                                "credential": "query-secret",
+                                "placeholder": "__query_secret__",
+                                "in": ["query"],
+                            }
+                        ],
+                    },
+                ),
+                _binding(
+                    "path-substitution",
+                    "/tenant/*",
+                    {
+                        "type": "passthrough",
+                        "substitutions": [
+                            {
+                                "credential": "path-secret",
+                                "placeholder": "__path_secret__",
+                                "in": ["path"],
+                            }
+                        ],
+                    },
+                ),
+                _binding(
+                    "body-substitution",
+                    "/body-substitution",
+                    {
+                        "type": "passthrough",
+                        "substitutions": [
+                            {
+                                "credential": "body-secret",
+                                "placeholder": "__body_secret__",
+                                "in": ["body"],
+                            }
+                        ],
+                    },
+                    methods=["POST"],
+                ),
+            ],
+        )
+
+        state_payload = state.model_dump_json(by_alias=True)
+        for secret in SECRET_VALUES.values():
+            assert secret not in state_payload
+        for placeholder in ["__query_secret__", "__path_secret__", "__body_secret__"]:
+            assert placeholder not in state_payload
+
+        response = _curl_json(
+            sandbox,
+            credential_vault_target_ip,
+            "/query-substitution?api_key=__query_secret__",
+        )
+        assert response["ok"] is True
+        assert response["case"] == "query-substitution"
+        assert response["missingOrInvalid"] == []
+
+        response = _curl_json(
+            sandbox,
+            credential_vault_target_ip,
+            "/tenant/__path_secret__/resource?tenant=__path_secret__",
+        )
+        assert response["ok"] is True
+        assert response["case"] == "path-substitution"
+        assert response["queryStillPlaceholder"] is True
+
+        response = _curl_json(
+            sandbox,
+            credential_vault_target_ip,
+            "/body-substitution",
+            method="POST",
+            headers=["content-type: application/json"],
+            data='{"client_secret":"__body_secret__"}',
+        )
+        assert response["ok"] is True
+        assert response["case"] == "body-substitution"
+        assert response["missingOrInvalid"] == []
+    finally:
+        _close_sandbox(cfg, sandbox)
+
+
 def test_credential_vault_runtime_mutation_adds_replaces_and_deletes_binding(
     credential_vault_target_ip: str,
 ) -> None:
-    cfg, sandbox = _create_credential_proxy_sandbox()
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
     try:
         state = sandbox.credential_vault.create(credentials=[], bindings=[])
         assert state.revision == 1
@@ -245,7 +344,7 @@ def test_credential_vault_runtime_mutation_adds_replaces_and_deletes_binding(
         _close_sandbox(cfg, sandbox)
 
 
-def _create_credential_proxy_sandbox() -> tuple[object, SandboxSync]:
+def _create_credential_proxy_sandbox(target_ip: str) -> tuple[object, SandboxSync]:
     cfg = create_connection_config_sync()
     sandbox = SandboxSync.create(
         image=SandboxImageSpec(
@@ -256,8 +355,11 @@ def _create_credential_proxy_sandbox() -> tuple[object, SandboxSync]:
         timeout=timedelta(minutes=5),
         ready_timeout=timedelta(seconds=60),
         network_policy=NetworkPolicy(
-            defaultAction="allow",
-            egress=[NetworkRule(action="allow", target=TARGET_HOST)],
+            defaultAction="deny",
+            egress=[
+                NetworkRule(action="allow", target=TARGET_HOST),
+                NetworkRule(action="allow", target=target_ip),
+            ],
         ),
         credential_proxy=CredentialProxyConfig(enabled=True),
         metadata={E2E_LABEL_KEY: E2E_LABEL_VALUE},
@@ -278,14 +380,19 @@ def _close_sandbox(cfg: object, sandbox: SandboxSync) -> None:
             pass
 
 
-def _binding(name: str, path: str, auth: dict[str, object]) -> CredentialBinding:
+def _binding(
+    name: str,
+    path: str,
+    auth: dict[str, object],
+    *,
+    methods: list[str] | None = None,
+) -> CredentialBinding:
     return CredentialBinding(
         name=name,
         match={
             "schemes": ["http"],
-            "ports": [80],
             "hosts": [TARGET_HOST],
-            "methods": ["GET"],
+            "methods": methods or ["GET"],
             "paths": [path],
         },
         auth=auth,
@@ -298,11 +405,17 @@ def _curl_json(
     path: str,
     *,
     fail_on_http_error: bool = True,
+    method: str | None = None,
+    headers: list[str] | None = None,
+    data: str | None = None,
 ) -> dict[str, object]:
     fail_flag = "--fail " if fail_on_http_error else ""
+    method_flag = f"--request {method} " if method else ""
+    header_flags = "".join(f"--header {_shell_quote(header)} " for header in headers or [])
+    data_flag = f"--data {_shell_quote(data)} " if data is not None else ""
     command = (
         f"curl {fail_flag}--silent --show-error "
-        "--connect-timeout 5 --max-time 20 "
+        f"--connect-timeout 5 --max-time 20 {method_flag}{header_flags}{data_flag}"
         f"--resolve {TARGET_HOST}:80:{target_ip} "
         f"http://{TARGET_HOST}{path}"
     )
@@ -314,3 +427,7 @@ def _curl_json(
     stdout = "".join(part.text for part in result.logs.stdout)
     assert stdout
     return json.loads(stdout)
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"

@@ -117,6 +117,14 @@ class DockerRuntimeMixin:
                     with self._docker_operation("execd cache read bootstrap", "execd-cache"):
                         bs_stream, _ = container.get_archive("/bootstrap.sh")
                         self._bootstrap_script_cache[cache_key] = b"".join(bs_stream)
+                # Cache bwrap binary (best-effort — may not exist in older images).
+                if cache_key not in self._bwrap_archive_cache:
+                    try:
+                        with self._docker_operation("execd cache read bwrap", "execd-cache"):
+                            bwrap_stream, _ = container.get_archive("/usr/local/bin/bwrap")
+                            self._bwrap_archive_cache[cache_key] = b"".join(bwrap_stream)
+                    except DockerException:
+                        logger.warning("bwrap not found in execd image — isolation will be unavailable, upgrade execd image to v1.1.0+")
             except DockerException as exc:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -227,6 +235,33 @@ class DockerRuntimeMixin:
                 },
             ) from exc
 
+    def _copy_bwrap_to_container(
+        self,
+        container,
+        sandbox_id: str,
+        platform: Optional[PlatformSpec] = None,
+    ) -> None:
+        """Copy bwrap binary into /opt/opensandbox/bin/ (best-effort).
+
+        Bwrap may not exist in older execd images, so failure is non-fatal —
+        isolation will simply be unavailable at runtime.
+        """
+        cache_key = self._normalize_platform_key(platform)
+        archive = self._bwrap_archive_cache.get(cache_key)
+        if archive is None:
+            logger.warning("bwrap archive not cached for %s — isolation will be unavailable, upgrade execd image to v1.1.0+", cache_key)
+            return
+
+        try:
+            with self._docker_operation("copy bwrap to sandbox", sandbox_id):
+                container.put_archive(path=OPENSANDBOX_DIR, data=archive)
+        except DockerException as exc:
+            logger.warning(
+                "Failed to copy bwrap into sandbox %s: %s (isolation will be unavailable)",
+                sandbox_id,
+                exc,
+            )
+
     def _prepare_sandbox_runtime(
         self,
         container,
@@ -236,3 +271,4 @@ class DockerRuntimeMixin:
         """Copy execd artifacts and bootstrap launcher into the sandbox container."""
         self._copy_execd_to_container(container, sandbox_id, platform)
         self._install_bootstrap_script(container, sandbox_id, platform)
+        self._copy_bwrap_to_container(container, sandbox_id, platform)

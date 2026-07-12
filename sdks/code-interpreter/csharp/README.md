@@ -1,6 +1,5 @@
 # OpenSandbox Code Interpreter SDK for C#
 
-English | [中文](README_zh.md)
 
 A C# SDK for code interpretation with OpenSandbox. Provides high-level APIs for executing code in multiple languages (Python, JavaScript, TypeScript, Go, Java, Bash) within secure sandbox environments.
 

@@ -27,6 +27,7 @@ namespace OpenSandbox.Adapters;
 internal sealed class SandboxesAdapter : ISandboxes
 {
     private readonly HttpClientWrapper _client;
+    private readonly EndpointCache? _endpointCache;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -35,9 +36,10 @@ internal sealed class SandboxesAdapter : ISandboxes
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
-    public SandboxesAdapter(HttpClientWrapper client)
+    public SandboxesAdapter(HttpClientWrapper client, EndpointCache? endpointCache = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        _endpointCache = endpointCache;
     }
 
     public async Task<CreateSandboxResponse> CreateSandboxAsync(
@@ -211,6 +213,26 @@ internal sealed class SandboxesAdapter : ISandboxes
         bool useServerProxy = false,
         CancellationToken cancellationToken = default)
     {
+        if (_endpointCache != null)
+        {
+            var key = new EndpointCacheKey(sandboxId, port, useServerProxy);
+            // Shared fetch uses CancellationToken.None so one caller's cancellation
+            // doesn't kill the request for all waiters. Per-caller cancellation is
+            // handled in GetOrFetchAsync via Task.WhenAny.
+            return await _endpointCache.GetOrFetchAsync(key,
+                () => FetchSandboxEndpointAsync(sandboxId, port, useServerProxy, CancellationToken.None),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return await FetchSandboxEndpointAsync(sandboxId, port, useServerProxy, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Endpoint> FetchSandboxEndpointAsync(
+        string sandboxId,
+        int port,
+        bool useServerProxy,
+        CancellationToken cancellationToken)
+    {
         var queryParams = new Dictionary<string, string?>
         {
             ["use_server_proxy"] = useServerProxy ? "true" : "false"
@@ -222,6 +244,11 @@ internal sealed class SandboxesAdapter : ISandboxes
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return ParseEndpointResponse(response);
+    }
+
+    public void InvalidateEndpointCache(string sandboxId)
+    {
+        _endpointCache?.Invalidate(sandboxId);
     }
 
     public async Task<Endpoint> GetSignedSandboxEndpointAsync(
@@ -277,6 +304,13 @@ internal sealed class SandboxesAdapter : ISandboxes
         return element.ValueKind == JsonValueKind.Null ? null : ParseIsoDate(fieldName, element);
     }
 
+    private static IReadOnlyDictionary<string, string>? ParseStringMap(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.Object
+            ? property.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString() ?? string.Empty)
+            : null;
+    }
+
     private static SandboxInfo ParseSandboxInfo(JsonElement element)
     {
         var status = element.GetProperty("status");
@@ -300,9 +334,8 @@ internal sealed class SandboxesAdapter : ISandboxes
                 ? JsonSerializer.Deserialize<PlatformSpec>(platform.GetRawText(), JsonOptions)
                 : null,
             Entrypoint = element.GetProperty("entrypoint").EnumerateArray().Select(e => e.GetString() ?? string.Empty).ToList(),
-            Metadata = element.TryGetProperty("metadata", out var metadata) && metadata.ValueKind == JsonValueKind.Object
-                ? metadata.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString() ?? string.Empty)
-                : null,
+            Metadata = ParseStringMap(element, "metadata"),
+            Extensions = ParseStringMap(element, "extensions"),
             Status = new SandboxStatus
             {
                 State = status.GetProperty("state").GetString() ?? throw new SandboxApiException("Missing status.state in response"),
@@ -332,9 +365,8 @@ internal sealed class SandboxesAdapter : ISandboxes
             Platform = element.TryGetProperty("platform", out var platform) && platform.ValueKind == JsonValueKind.Object
                 ? JsonSerializer.Deserialize<PlatformSpec>(platform.GetRawText(), JsonOptions)
                 : null,
-            Metadata = element.TryGetProperty("metadata", out var metadata) && metadata.ValueKind == JsonValueKind.Object
-                ? metadata.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString() ?? string.Empty)
-                : null,
+            Metadata = ParseStringMap(element, "metadata"),
+            Extensions = ParseStringMap(element, "extensions"),
             CreatedAt = ParseIsoDate("createdAt", element.GetProperty("createdAt")),
             ExpiresAt = element.TryGetProperty("expiresAt", out var expiresAtElement)
                 ? ParseOptionalIsoDate("expiresAt", expiresAtElement)

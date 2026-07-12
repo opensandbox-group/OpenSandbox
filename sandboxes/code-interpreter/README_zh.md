@@ -60,7 +60,7 @@ docker run -it --rm \
 
 ### `EXECD_CLONE3_COMPAT`（clone3-workaround）
 
-若将 `EXECD_CLONE3_COMPAT` 设为 `1`、`true`、`yes`、`on` 或 `reexec`（与 [execd](../../components/execd/README_zh.md#沙箱内的-linux-clone3-兼容) 一致），入口脚本会在启动 Jupyter/内核前用 **`/usr/local/bin/clone3-workaround` 重新 `exec` 自身**。**linux/amd64** 镜像内含该二进制；**arm64** 构建会打印警告并跳过包装。包装成功后脚本会在当前进程树中 **`unset` `EXECD_CLONE3_COMPAT`**。设为 `0`、`false`、`off`、`no` 或不设置则关闭此逻辑。
+若将 `EXECD_CLONE3_COMPAT` 设为 `1`、`true`、`yes`、`on` 或 `reexec`（与 [execd](../../components/execd/README.md#沙箱内的-linux-clone3-兼容) 一致），入口脚本会在启动 Jupyter/内核前用 **`/usr/local/bin/clone3-workaround` 重新 `exec` 自身**。**linux/amd64** 镜像内含该二进制；**arm64** 构建会打印警告并跳过包装。包装成功后脚本会在当前进程树中 **`unset` `EXECD_CLONE3_COMPAT`**。设为 `0`、`false`、`off`、`no` 或不设置则关闭此逻辑。
 
 ## 如何切换版本
 
@@ -231,7 +231,7 @@ code-interpreter/
 
 问题和疑问：
 
-- GitHub Issues: [OpenSandbox Issues](https://github.com/alibaba/OpenSandbox/issues)
+- GitHub Issues: [OpenSandbox Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
 
 ## 相关项目
 

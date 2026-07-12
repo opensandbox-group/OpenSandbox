@@ -147,14 +147,23 @@ async def test_create_sandbox_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(out.id, str)
     assert "image" in called["body"].to_dict()
     assert called["body"].to_dict()["secureAccess"] is True
-    assert called["body"].to_dict()["extensions"] == {"storage.id": "abc123", "debug": "true"}
+    assert called["body"].to_dict()["extensions"] == {
+        "storage.id": "abc123",
+        "debug": "true",
+    }
+    assert called["body"].to_dict()["extensions"] == {
+        "storage.id": "abc123",
+        "debug": "true",
+    }
     network_policy = called["body"].to_dict()["networkPolicy"]
     assert network_policy["defaultAction"] == "deny"
     assert network_policy["egress"] == [{"action": "allow", "target": "pypi.org"}]
 
 
 @pytest.mark.asyncio
-async def test_create_sandbox_manual_cleanup_preserves_null_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_create_sandbox_manual_cleanup_preserves_null_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     called = {}
 
     async def _fake_asyncio_detailed(*, client, body):
@@ -184,7 +193,9 @@ async def test_create_sandbox_manual_cleanup_preserves_null_timeout(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_create_sandbox_restore_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_create_sandbox_restore_from_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     called = {}
 
     async def _fake_asyncio_detailed(*, client, body):
@@ -302,7 +313,9 @@ async def test_create_sandbox_unexpected_status_preserves_fastapi_detail_payload
 
 
 @pytest.mark.asyncio
-async def test_create_sandbox_empty_response_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_create_sandbox_empty_response_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def _fake_asyncio_detailed(*, client, body):
         return _Resp(status_code=200, parsed=None)
 
@@ -328,7 +341,9 @@ async def test_create_sandbox_empty_response_raises(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_list_sandboxes_metadata_double_encoded(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_list_sandboxes_metadata_double_encoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from opensandbox.api.lifecycle.types import UNSET as API_UNSET
 
     captured = {}
@@ -391,7 +406,9 @@ async def test_pause_resume_kill_call_openapi(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.asyncio
-async def test_patch_sandbox_metadata_sends_metadata_body(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_patch_sandbox_metadata_sends_metadata_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sbx_id = str(uuid4())
     captured = {}
 
@@ -419,7 +436,9 @@ async def test_patch_sandbox_metadata_sends_metadata_body(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_renew_sandbox_expiration_sends_timezone_aware(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_renew_sandbox_expiration_sends_timezone_aware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured = {}
 
     async def _fake_asyncio_detailed(*, client, sandbox_id, body):
@@ -445,7 +464,9 @@ async def test_renew_sandbox_expiration_sends_timezone_aware(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_snapshot_lifecycle_calls_openapi(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_snapshot_lifecycle_calls_openapi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, object]] = []
 
     async def _create_snapshot(*, client, sandbox_id, body):
@@ -499,7 +520,9 @@ async def test_snapshot_lifecycle_calls_openapi(monkeypatch: pytest.MonkeyPatch)
     )
 
     adapter = SandboxesAdapter(ConnectionConfig())
-    created = await adapter.create_snapshot("sbx-1", CreateSnapshotRequest(name="before-upgrade"))
+    created = await adapter.create_snapshot(
+        "sbx-1", CreateSnapshotRequest(name="before-upgrade")
+    )
     loaded = await adapter.get_snapshot("snap-1")
     listed = await adapter.list_snapshots(
         SnapshotFilter(sandbox_id="sbx-1", states=["Ready"], page=1, page_size=10)
@@ -515,3 +538,61 @@ async def test_snapshot_lifecycle_calls_openapi(monkeypatch: pytest.MonkeyPatch)
         ("list", ("sbx-1", ["Ready"], 1, 10)),
         ("delete", "snap-1"),
     ]
+
+
+async def test_get_sandbox_endpoint_logs_warning_and_not_error_on_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _boom(*, client, sandbox_id, port, use_server_proxy=False):
+        raise RuntimeError("endpoint exploded")
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.sandboxes.get_sandboxes_sandbox_id_endpoints_port.asyncio_detailed",
+        _boom,
+    )
+
+    adapter = SandboxesAdapter(ConnectionConfig())
+
+    with caplog.at_level("WARNING", logger="opensandbox.adapters.sandboxes_adapter"):
+        with pytest.raises(Exception) as exc_info:
+            await adapter.get_sandbox_endpoint("sbx-1", 8080)
+
+    assert "endpoint exploded" in str(exc_info.value)
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    debug_messages = [
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    ]
+    assert any(
+        "Failed to retrieve sandbox endpoint for sandbox sbx-1" in msg
+        for msg in debug_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_sandbox_logs_warning_and_not_error_on_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _boom(*, client, sandbox_id):
+        raise RuntimeError("resume exploded")
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.sandboxes.post_sandboxes_sandbox_id_resume.asyncio_detailed",
+        _boom,
+    )
+
+    adapter = SandboxesAdapter(ConnectionConfig())
+
+    with caplog.at_level("WARNING", logger="opensandbox.adapters.sandboxes_adapter"):
+        with pytest.raises(Exception) as exc_info:
+            await adapter.resume_sandbox("sbx-2")
+
+    assert "resume exploded" in str(exc_info.value)
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    debug_messages = [
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    ]
+    assert any(
+        "Failed to resume sandbox sbx-2: resume exploded" in msg
+        for msg in debug_messages
+    )
+    assert all(r.exc_info is None for r in caplog.records if r.levelname == "WARNING")

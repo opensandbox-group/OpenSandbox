@@ -32,6 +32,7 @@ build_arg_if_set() {
 }
 
 TAG=${TAG:-latest}
+GHCR_REPO=${GHCR_REPO:-}
 VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo "dev")}
 GIT_COMMIT=${GIT_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo "unknown")}
 BUILD_TIME=${BUILD_TIME:-$(default_build_time)}
@@ -53,14 +54,20 @@ docker buildx inspect --bootstrap
 
 docker buildx ls
 
+IMAGE_TAGS=(-t opensandbox/ingress:${TAG} -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress:${TAG})
 LATEST_TAGS=()
+if [[ -n "${GHCR_REPO}" ]]; then
+  IMAGE_TAGS+=(-t "${GHCR_REPO}/ingress:${TAG}")
+fi
 if [[ "${TAG}" == v* ]]; then
   LATEST_TAGS+=(-t opensandbox/ingress:latest -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress:latest)
+  if [[ -n "${GHCR_REPO}" ]]; then
+    LATEST_TAGS+=(-t "${GHCR_REPO}/ingress:latest")
+  fi
 fi
 
 docker buildx build \
-  -t opensandbox/ingress:${TAG} \
-  -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress:${TAG} \
+  "${IMAGE_TAGS[@]}" \
   "${LATEST_TAGS[@]}" \
   -f components/ingress/Dockerfile \
   "${BUILD_ARGS[@]}" \

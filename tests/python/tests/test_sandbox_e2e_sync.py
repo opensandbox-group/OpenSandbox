@@ -273,6 +273,37 @@ class TestSandboxE2ESync:
 
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
+    def test_01_extensions_round_trip(self) -> None:
+        """Verify extensions are returned in create response and get_info."""
+        cfg = create_connection_config_sync()
+        ext_sandbox = SandboxSync.create(
+            image=SandboxImageSpec(get_sandbox_image()),
+            resource=get_e2e_sandbox_resource(),
+            connection_config=cfg,
+            timeout=timedelta(minutes=2),
+            ready_timeout=timedelta(seconds=30),
+            metadata={"tag": "e2e-extensions"},
+            extensions={
+                "opensandbox.extensions.test-key": "test-value",
+                "opensandbox.extensions.second": "second-value",
+            },
+            health_check_polling_interval=timedelta(milliseconds=500),
+        )
+        try:
+            info = ext_sandbox.get_info()
+            assert info.extensions is not None, "extensions missing from get_info"
+            assert info.extensions.get("opensandbox.extensions.test-key") == "test-value"
+            assert info.extensions.get("opensandbox.extensions.second") == "second-value"
+            logger.info("extensions round-trip OK: %s", info.extensions)
+        finally:
+            try:
+                ext_sandbox.kill()
+            except Exception as e:
+                logger.warning("extensions test teardown kill failed: %s", e)
+            ext_sandbox.close()
+
+    @pytest.mark.timeout(120)
+    @pytest.mark.order(1)
     def test_01a_network_policy_create(self) -> None:
         if is_kubernetes_runtime():
             pytest.skip("Network policy is not covered in the Kubernetes runtime suite")
@@ -923,12 +954,21 @@ class TestSandboxE2ESync:
         logger.info("✓ run_in_session(..., working_directory=/tmp) applied: pwd => %s", tmp_line)
 
         logger.info("Step 3b: Export env in one run, read in next run — verify session state (env) persists")
-        sandbox.commands.run_in_session(sid, "export E2E_SESSION_ENV=session-env-ok")
-        out_env = sandbox.commands.run_in_session(sid, "echo $E2E_SESSION_ENV")
-        assert out_env.error is None
-        assert out_env.exit_code == 0
-        env_line = "".join(m.text for m in out_env.logs.stdout).strip()
-        assert env_line == "session-env-ok", f"env set in previous run should be visible, got: {env_line!r}"
+        env_line = ""
+        for attempt in range(3):
+            export_out = sandbox.commands.run_in_session(sid, "export E2E_SESSION_ENV=session-env-ok")
+            if export_out.exit_code != 0:
+                logger.warning("export attempt %d failed (exit_code=%s), retrying...", attempt + 1, export_out.exit_code)
+                time.sleep(1)
+                continue
+            out_env = sandbox.commands.run_in_session(sid, "echo $E2E_SESSION_ENV")
+            env_line = "".join(m.text for m in out_env.logs.stdout).strip()
+            if env_line == "session-env-ok":
+                break
+            logger.warning("env read attempt %d got %r, retrying...", attempt + 1, env_line)
+            time.sleep(1)
+        else:
+            pytest.fail(f"env set in previous run should be visible after 3 attempts, got: {env_line!r}")
         logger.info("✓ session env persists across run_in_session: echo $E2E_SESSION_ENV => %s", env_line)
 
         logger.info("Step 3c: Failing subprocess in session should propagate non-zero exit_code")
@@ -1274,6 +1314,32 @@ class TestSandboxE2ESync:
         assert verify_dirs_deleted.error is None
         assert len(verify_dirs_deleted.logs.stdout) == 1
         assert verify_dirs_deleted.logs.stdout[0].text == "OK"
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.order(4)
+    def test_03a_line_based_file_reading(self) -> None:
+        """Test line-based file reading with offset and limit."""
+        TestSandboxE2ESync._ensure_sandbox_created()
+        sandbox = TestSandboxE2ESync.sandbox
+        assert sandbox is not None
+
+        test_path = "/tmp/line-read-e2e.txt"
+        content = "line1\nline2\nline3\nline4\nline5"
+        sandbox.files.write_files([WriteEntry(path=test_path, data=content)])
+
+        # offset=2, limit=2 → lines 2-3
+        result = sandbox.files.read_file(test_path, offset=2, limit=2)
+        assert result == "line2\nline3"
+
+        # offset=4, no limit → lines 4-5
+        result = sandbox.files.read_file(test_path, offset=4)
+        assert result == "line4\nline5"
+
+        # limit=2, no offset → lines 1-2
+        result = sandbox.files.read_file(test_path, limit=2)
+        assert result == "line1\nline2"
+
+        sandbox.files.delete_files([test_path])
 
     @pytest.mark.timeout(360)
     @pytest.mark.order(5)

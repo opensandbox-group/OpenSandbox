@@ -40,8 +40,6 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.isFileN
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -92,9 +90,11 @@ internal class FilesystemAdapter(
         path: String,
         encoding: String,
         range: String?,
+        offset: Int?,
+        limit: Int?,
     ): String {
         try {
-            val request = buildDownloadRequest(path, range)
+            val request = buildDownloadRequest(path, range, offset, limit)
             httpClientProvider.httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     val errorBodyString = response.body?.string()
@@ -120,9 +120,11 @@ internal class FilesystemAdapter(
     override fun readByteArray(
         path: String,
         range: String?,
+        offset: Int?,
+        limit: Int?,
     ): ByteArray {
         try {
-            val request = buildDownloadRequest(path, range)
+            val request = buildDownloadRequest(path, range, offset, limit)
             httpClientProvider.httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     val errorBodyString = response.body?.string()
@@ -146,9 +148,11 @@ internal class FilesystemAdapter(
     override fun readStream(
         path: String,
         range: String?,
+        offset: Int?,
+        limit: Int?,
     ): InputStream {
         try {
-            val request = buildDownloadRequest(path, range)
+            val request = buildDownloadRequest(path, range, offset, limit)
             val response = httpClientProvider.httpClient.newCall(request).execute()
 
             if (!response.isSuccessful) {
@@ -324,7 +328,13 @@ internal class FilesystemAdapter(
     override fun replaceContents(entries: List<ContentReplaceEntry>) {
         try {
             val replaceMap = entries.toApiReplaceFileContentMap()
-            api.replaceContent(replaceMap)
+            try {
+                api.replaceContent(replaceMap)
+            } catch (_: NullPointerException) {
+                // Older execd versions return an empty body for verbose=false,
+                // which the generated client cannot deserialize. The replacement
+                // itself succeeded if no HTTP error was thrown.
+            }
         } catch (e: Exception) {
             logger.error("Failed to replace contents", e)
             throw e.toSandboxException()
@@ -334,50 +344,12 @@ internal class FilesystemAdapter(
     override fun replaceContentsDetailed(entries: List<ContentReplaceEntry>): List<ContentReplaceResult> {
         return try {
             val replaceMap = entries.toApiReplaceFileContentMap()
-            val jsonBody =
-                buildJsonObject {
-                    replaceMap.forEach { (path, item) ->
-                        put(
-                            path,
-                            buildJsonObject {
-                                put("old", item.old)
-                                put("new", item.new)
-                            },
-                        )
-                    }
-                }.toString()
-
-            val baseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
-            val request =
-                Request.Builder()
-                    .url("$baseUrl/files/replace?verbose=true")
-                    .post(jsonBody.toRequestBody("application/json".toMediaType()))
-                    .apply { execdEndpoint.headers.forEach { (k, v) -> header(k, v) } }
-                    .build()
-
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    val errorBody = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBody)
-                    throw SandboxApiException(
-                        message = "Failed to replace contents. Status: ${response.code}, Body: $errorBody",
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
-                }
-                val body = response.body?.string()
-                if (body.isNullOrBlank()) {
-                    emptyList()
-                } else {
-                    val parsed = kotlinx.serialization.json.Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonObject>>(body)
-                    parsed.map { (path, result) ->
-                        ContentReplaceResult(
-                            path = path,
-                            replacedCount = result["replacedCount"]?.jsonPrimitive?.intOrNull ?: 0,
-                        )
-                    }
-                }
+            val response = api.replaceContent(replaceMap, verbose = true)
+            response.map { (path, result) ->
+                ContentReplaceResult(
+                    path = path,
+                    replacedCount = result.replacedCount,
+                )
             }
         } catch (e: Exception) {
             logger.error("Failed to replace contents", e)
@@ -437,17 +409,25 @@ internal class FilesystemAdapter(
     private fun buildDownloadRequest(
         path: String,
         range: String?,
+        offset: Int? = null,
+        limit: Int? = null,
     ): Request {
         val baseUrlString = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}$FILESYSTEM_DOWNLOAD_PATH"
-        val httpUrl =
+        val urlBuilder =
             baseUrlString.toHttpUrl()
                 .newBuilder()
                 .addQueryParameter("path", path)
-                .build()
+
+        if (offset != null) {
+            urlBuilder.addQueryParameter("offset", offset.toString())
+        }
+        if (limit != null) {
+            urlBuilder.addQueryParameter("limit", limit.toString())
+        }
 
         val requestBuilder =
             Request.Builder()
-                .url(httpUrl)
+                .url(urlBuilder.build())
                 .headers(execdEndpoint.headers.toHeaders())
                 .get()
 

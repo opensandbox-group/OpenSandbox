@@ -1,0 +1,36 @@
+version = "1.0"
+
+[task]
+name = "opensandbox/hello-opensandbox"
+authors = []
+keywords = []
+
+[metadata]
+author_name = "OpenSandbox"
+difficulty = "easy"
+category = "programming"
+tags = [ "trivial", "example",]
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+# OpenSandbox runs prebuilt images only, so docker_image is required. The
+# Dockerfile under environment/ is informational and lets the same task also run
+# on Harbor's local Docker backend. workdir makes the agent's relative paths
+# resolve under /app, matching the image's intended working directory.
+docker_image = "ubuntu:24.04"
+workdir = "/app"
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+mcp_servers = []
+
+[verifier.env]
+
+[solution.env]

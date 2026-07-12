@@ -14,7 +14,7 @@
 
 # Example Kubernetes Runtime Configuration for OpenSandbox Server
 #
-# Full configuration reference: https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md
+# Full configuration reference: https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md
 
 [server]
 host = "0.0.0.0"
@@ -32,7 +32,7 @@ level = "INFO"
 
 [runtime]
 type = "kubernetes"
-execd_image = "opensandbox/execd:v1.0.18"
+execd_image = "opensandbox/execd:v1.0.20"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
@@ -75,7 +75,7 @@ batchsandbox_template_file = "~/batchsandbox-template.yaml"
 mode = "direct"
 
 [egress]
-image = "opensandbox/egress:v1.1.0"
+image = "opensandbox/egress:v1.1.3"
 mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false

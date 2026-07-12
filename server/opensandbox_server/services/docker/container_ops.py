@@ -31,6 +31,7 @@ from fastapi import HTTPException, status
 
 from opensandbox_server.extensions import (
     apply_access_renew_extend_seconds_to_mapping,
+    apply_extensions_to_mapping,
 )
 
 from opensandbox_server.api.schema import (
@@ -304,6 +305,7 @@ class DockerContainerOpsMixin:
             labels[SANDBOX_SNAPSHOT_ID_LABEL] = request.snapshot_id
 
         apply_access_renew_extend_seconds_to_mapping(labels, request.extensions)
+        apply_extensions_to_mapping(labels, request.extensions)
 
         env_dict = request.env or {}
         environment = []

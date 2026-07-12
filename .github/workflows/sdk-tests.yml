@@ -17,10 +17,6 @@ name: SDK Tests
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "cli/**"
-      - "sdks/**"
-      - "specs/**"
   push:
     branches: [main]
     paths:
@@ -30,14 +26,22 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: sdk
+
   cli-quality:
     name: CLI Quality
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -70,6 +74,8 @@ jobs:
 
   cli-tests:
     name: CLI Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -106,6 +112,8 @@ jobs:
 
   python-sdk-quality:
     name: Python SDK Quality (${{ matrix.package_name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -152,6 +160,8 @@ jobs:
 
   python-sdk-tests:
     name: Python SDK Tests (${{ matrix.package_name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -208,6 +218,8 @@ jobs:
 
   javascript-sdk-quality:
     name: JavaScript SDK Quality And Tests (${{ matrix.package_name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -270,6 +282,8 @@ jobs:
 
   kotlin-sdk-quality:
     name: Kotlin SDK Quality And Tests (${{ matrix.package_name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -318,6 +332,8 @@ jobs:
 
   csharp-sdk-quality:
     name: C# SDK Quality And Tests (${{ matrix.package_name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -365,6 +381,8 @@ jobs:
 
   go-sdk-quality:
     name: Go SDK Quality And Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -403,3 +421,41 @@ jobs:
           name: go-sdk-reports
           path: |
             sdks/sandbox/go/reports/**
+
+  required:
+    name: SDK CI
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs:
+      - changes
+      - cli-quality
+      - cli-tests
+      - python-sdk-quality
+      - python-sdk-tests
+      - javascript-sdk-quality
+      - kotlin-sdk-quality
+      - csharp-sdk-quality
+      - go-sdk-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CLI_QUALITY_RESULT: ${{ needs.cli-quality.result }}
+          CLI_TESTS_RESULT: ${{ needs.cli-tests.result }}
+          PYTHON_QUALITY_RESULT: ${{ needs.python-sdk-quality.result }}
+          PYTHON_TESTS_RESULT: ${{ needs.python-sdk-tests.result }}
+          JAVASCRIPT_RESULT: ${{ needs.javascript-sdk-quality.result }}
+          KOTLIN_RESULT: ${{ needs.kotlin-sdk-quality.result }}
+          CSHARP_RESULT: ${{ needs.csharp-sdk-quality.result }}
+          GO_RESULT: ${{ needs.go-sdk-quality.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$CLI_QUALITY_RESULT" == "success" && "$CLI_TESTS_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$PYTHON_TESTS_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$CLI_TESTS_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$PYTHON_TESTS_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
+          fi

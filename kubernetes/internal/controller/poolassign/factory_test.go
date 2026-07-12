@@ -22,13 +22,14 @@ import (
 )
 
 func TestNewPredicates(t *testing.T) {
-	t.Run("default profile creates image, resource, nodeselector predicates", func(t *testing.T) {
+	t.Run("default profile creates capacity, image, resource, nodeselector predicates", func(t *testing.T) {
 		predicates, err := NewPredicates(DefaultProfile())
 		require.NoError(t, err)
-		assert.Len(t, predicates, 3)
-		assert.IsType(t, &imagePredicate{}, predicates[0])
-		assert.IsType(t, &resourcePredicate{}, predicates[1])
-		assert.IsType(t, &nodeSelectorPredicate{}, predicates[2])
+		assert.Len(t, predicates, 4)
+		assert.IsType(t, &capacityPredicate{}, predicates[0])
+		assert.IsType(t, &imagePredicate{}, predicates[1])
+		assert.IsType(t, &resourcePredicate{}, predicates[2])
+		assert.IsType(t, &nodeSelectorPredicate{}, predicates[3])
 	})
 
 	t.Run("profile with labelselector predicate", func(t *testing.T) {

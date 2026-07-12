@@ -16,6 +16,7 @@
 set -ex
 
 TAG=${TAG:-latest}
+GHCR_REPO=${GHCR_REPO:-}
 BUILD_METADATA_FILE=${BUILD_METADATA_FILE:-build/code-interpreter-image-metadata.json}
 mkdir -p "$(dirname "${BUILD_METADATA_FILE}")"
 
@@ -33,9 +34,13 @@ docker buildx ls
 #  --push \
 #  .
 
+IMAGE_TAGS=(-t opensandbox/code-interpreter:${TAG} -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:${TAG})
+if [[ -n "${GHCR_REPO}" ]]; then
+  IMAGE_TAGS+=(-t "${GHCR_REPO}/code-interpreter:${TAG}")
+fi
+
 docker buildx build \
-  -t opensandbox/code-interpreter:${TAG} \
-  -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:${TAG} \
+  "${IMAGE_TAGS[@]}" \
   --platform linux/amd64,linux/arm64 \
   --metadata-file "${BUILD_METADATA_FILE}" \
   --push \

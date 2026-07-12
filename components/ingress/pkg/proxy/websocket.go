@@ -100,17 +100,31 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		dialer = defaultWebSocketDialer
 	}
 
-	// Pass headers from the incoming request to the dialer to forward them to
-	// the final destinations.
+	// Forward all incoming headers to the backend except hop-by-hop headers
+	// (RFC 7230 §6.1) and WebSocket handshake headers managed by the dialer.
+	// Per RFC 7230, also strip any header named by Connection tokens.
+	connTokens := map[string]bool{}
+	for _, v := range r.Header[HopByHopConnection] {
+		for _, token := range strings.Split(v, ",") {
+			if h := http.CanonicalHeaderKey(strings.TrimSpace(token)); h != "" {
+				connTokens[h] = true
+			}
+		}
+	}
 	requestHeader := http.Header{}
-	if origin := r.Header.Get(Origin); origin != "" {
-		requestHeader.Add(Origin, origin)
-	}
-	for _, prot := range r.Header[SecWebSocketProtocol] {
-		requestHeader.Add(SecWebSocketProtocol, prot)
-	}
-	for _, cokiee := range r.Header[Cookie] {
-		requestHeader.Add(Cookie, cokiee)
+	for key, values := range r.Header {
+		switch key {
+		case HopByHopConnection, HopByHopKeepAlive, HopByHopProxyAuth, HopByHopProxyAuthz,
+			HopByHopTE, HopByHopTrailer, HopByHopTransferEncoding, HopByHopUpgrade,
+			HopByHopProxyConnection, SecWebSocketKey, SecWebSocketVersion, SecWebSocketExtensions:
+			continue
+		}
+		if connTokens[key] {
+			continue
+		}
+		for _, v := range values {
+			requestHeader.Add(key, v)
+		}
 	}
 	if r.Host != "" {
 		requestHeader.Set(Host, r.Host)

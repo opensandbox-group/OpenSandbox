@@ -156,7 +156,7 @@ async def validate_secure_runtime_on_startup(
         return
 
     if config.runtime.type == "docker":
-        await _validate_docker_runtime(resolver, docker_client)
+        await _validate_docker_runtime(resolver, docker_client, config)
     elif config.runtime.type == "kubernetes":
         await _validate_k8s_runtime_class(resolver, k8s_client, config)
     else:
@@ -169,6 +169,7 @@ async def validate_secure_runtime_on_startup(
 async def _validate_docker_runtime(
     resolver: SecureRuntimeResolver,
     docker_client: Optional["DockerClient"],
+    config: "AppConfig",
 ) -> None:
     """Validate that the Docker OCI runtime exists."""
     runtime_name = resolver.get_docker_runtime()
@@ -210,6 +211,8 @@ async def _validate_docker_runtime(
         logger.error("Failed to validate Docker runtime: %s", exc)
         raise
 
+    _warn_gvisor_egress_incompatibility(config)
+
 
 async def _validate_k8s_runtime_class(
     resolver: SecureRuntimeResolver,
@@ -248,6 +251,19 @@ async def _validate_k8s_runtime_class(
     except Exception as exc:
         logger.error("Failed to validate RuntimeClass: %s", exc)
         raise
+
+    _warn_gvisor_egress_incompatibility(config)
+
+
+def _warn_gvisor_egress_incompatibility(config: "AppConfig") -> None:
+    """Log a warning when gVisor is configured alongside an egress sidecar image."""
+    egress_image = config.egress.image if getattr(config, "egress", None) else None
+    if config.secure_runtime and config.secure_runtime.type == "gvisor" and egress_image:
+        logger.warning(
+            "gVisor runtime is configured with egress sidecar image. "
+            "The egress sidecar's iptables nat-based DNS redirect is incompatible with gVisor. "
+            "Sandboxes created with network_policy will be rejected at creation time."
+        )
 
 
 __all__ = [

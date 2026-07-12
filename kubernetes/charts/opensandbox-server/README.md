@@ -76,5 +76,5 @@ helm uninstall opensandbox-server -n opensandbox-system
 
 ## References
 
-- [OpenSandbox](https://github.com/alibaba/OpenSandbox)
+- [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox)
 - [Helm deployment docs](../../docs/HELM-DEPLOYMENT.md)

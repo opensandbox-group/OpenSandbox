@@ -149,19 +149,20 @@ type CredentialProxyConfig struct {
 
 // CreateSandboxRequest is the request body for creating a new sandbox.
 type CreateSandboxRequest struct {
-	Image           *ImageSpec             `json:"image,omitempty"`
-	SnapshotID      string                 `json:"snapshotId,omitempty"`
-	Timeout         *int                   `json:"timeout,omitempty"`
-	ResourceLimits  ResourceLimits         `json:"resourceLimits"`
-	Env             map[string]string      `json:"env,omitempty"`
-	SecureAccess    bool                   `json:"secureAccess,omitempty"`
-	Metadata        map[string]string      `json:"metadata,omitempty"`
-	Entrypoint      []string               `json:"entrypoint,omitempty"`
-	NetworkPolicy   *NetworkPolicy         `json:"networkPolicy,omitempty"`
-	CredentialProxy *CredentialProxyConfig `json:"credentialProxy,omitempty"`
-	Volumes         []Volume               `json:"volumes,omitempty"`
-	Extensions      map[string]string      `json:"extensions,omitempty"`
-	Platform        *PlatformSpec          `json:"platform,omitempty"`
+	Image            *ImageSpec             `json:"image,omitempty"`
+	SnapshotID       string                 `json:"snapshotId,omitempty"`
+	Timeout          *int                   `json:"timeout,omitempty"`
+	ResourceLimits   ResourceLimits         `json:"resourceLimits"`
+	ResourceRequests ResourceLimits         `json:"resourceRequests,omitempty"`
+	Env              map[string]string      `json:"env,omitempty"`
+	SecureAccess     bool                   `json:"secureAccess,omitempty"`
+	Metadata         map[string]string      `json:"metadata,omitempty"`
+	Entrypoint       []string               `json:"entrypoint,omitempty"`
+	NetworkPolicy    *NetworkPolicy         `json:"networkPolicy,omitempty"`
+	CredentialProxy  *CredentialProxyConfig `json:"credentialProxy,omitempty"`
+	Volumes          []Volume               `json:"volumes,omitempty"`
+	Extensions       map[string]string      `json:"extensions,omitempty"`
+	Platform         *PlatformSpec          `json:"platform,omitempty"`
 }
 
 // SandboxInfo represents a runtime execution environment provisioned from a
@@ -172,6 +173,7 @@ type SandboxInfo struct {
 	SnapshotID string            `json:"snapshotId,omitempty"`
 	Status     SandboxStatus     `json:"status"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
+	Extensions map[string]string `json:"extensions,omitempty"`
 	Entrypoint []string          `json:"entrypoint"`
 	ExpiresAt  *time.Time        `json:"expiresAt,omitempty"`
 	CreatedAt  time.Time         `json:"createdAt"`
@@ -308,16 +310,35 @@ const (
 // applies.
 type CredentialMatch struct {
 	Schemes []CredentialScheme `json:"schemes,omitempty"`
-	Ports   []int              `json:"ports,omitempty"`
-	Hosts   []string           `json:"hosts"`
-	Methods []string           `json:"methods,omitempty"`
-	Paths   []string           `json:"paths,omitempty"`
+	// Deprecated: Ports is ignored; port is derived from Schemes (https→443, http→80).
+	Ports   []int    `json:"ports,omitempty"`
+	Hosts   []string `json:"hosts"`
+	Methods []string `json:"methods,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
 }
 
 // CustomHeaderEntry describes one custom header injection rule.
 type CustomHeaderEntry struct {
 	Name       string `json:"name"`
 	Credential string `json:"credential"`
+}
+
+// CredentialSubstitutionSurface is a request surface where a Credential Vault
+// placeholder may be replaced.
+type CredentialSubstitutionSurface string
+
+const (
+	CredentialSubstitutionPath   CredentialSubstitutionSurface = "path"
+	CredentialSubstitutionQuery  CredentialSubstitutionSurface = "query"
+	CredentialSubstitutionHeader CredentialSubstitutionSurface = "header"
+	CredentialSubstitutionBody   CredentialSubstitutionSurface = "body"
+)
+
+// CredentialSubstitution describes one scoped literal placeholder replacement.
+type CredentialSubstitution struct {
+	Credential  string                          `json:"credential"`
+	Placeholder string                          `json:"placeholder"`
+	In          []CredentialSubstitutionSurface `json:"in"`
 }
 
 // CredentialAuthType is the Credential Vault auth discriminator.
@@ -328,15 +349,17 @@ const (
 	CredentialAuthBasic         CredentialAuthType = "basic"
 	CredentialAuthAPIKey        CredentialAuthType = "apiKey"
 	CredentialAuthCustomHeaders CredentialAuthType = "customHeaders"
+	CredentialAuthPassthrough   CredentialAuthType = "passthrough"
 )
 
 // CredentialAuth configures how a binding injects credential material into
 // matching outbound requests.
 type CredentialAuth struct {
-	Type       CredentialAuthType  `json:"type"`
-	Credential string              `json:"credential,omitempty"`
-	Name       string              `json:"name,omitempty"`
-	Headers    []CustomHeaderEntry `json:"headers,omitempty"`
+	Type          CredentialAuthType       `json:"type"`
+	Credential    string                   `json:"credential,omitempty"`
+	Name          string                   `json:"name,omitempty"`
+	Headers       []CustomHeaderEntry      `json:"headers,omitempty"`
+	Substitutions []CredentialSubstitution `json:"substitutions,omitempty"`
 }
 
 // CredentialBinding is a sandbox-local Credential Vault binding create/update

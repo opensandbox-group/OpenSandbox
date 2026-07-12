@@ -30,6 +30,9 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
         ["api-key-token"] = "vault-api-key-token",
         ["client-id"] = "vault-client-id",
         ["client-secret"] = "vault-client-secret",
+        ["query-secret"] = "vault-query-secret",
+        ["path-secret"] = "vault-path-secret",
+        ["body-secret"] = "vault-body-secret",
         ["runtime-token"] = "vault-runtime-token",
         ["runtime-token-replaced"] = "vault-runtime-token-replaced"
     };
@@ -50,7 +53,7 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
             return;
         }
 
-        var sandbox = await CreateCredentialVaultSandboxAsync();
+        var sandbox = await CreateCredentialVaultSandboxAsync(targetIp);
 
         try
         {
@@ -104,6 +107,82 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
     }
 
     [Fact(Timeout = 5 * 60 * 1000)]
+    public async Task CredentialVault_Substitutes_Placeholders_In_Query_Path_And_Body()
+    {
+        var targetIp = CredentialVaultTargetIp();
+        if (targetIp is null)
+        {
+            return;
+        }
+
+        var sandbox = await CreateCredentialVaultSandboxAsync(targetIp);
+
+        try
+        {
+            var state = await sandbox.CreateCredentialVaultAsync(
+                Credentials("query-secret", "path-secret", "body-secret"),
+                new[]
+                {
+                    Binding(
+                        "query-substitution",
+                        "/query-substitution",
+                        PassthroughAuth(
+                            Substitution("query-secret", "__query_secret__", "query"))),
+                    Binding(
+                        "path-substitution",
+                        "/tenant/*",
+                        PassthroughAuth(
+                            Substitution("path-secret", "__path_secret__", "path"))),
+                    Binding(
+                        "body-substitution",
+                        "/body-substitution",
+                        PassthroughAuth(
+                            Substitution("body-secret", "__body_secret__", "body")),
+                        new[] { "POST" })
+                });
+
+            AssertStateDoesNotContainSecrets(state);
+            var statePayload = JsonSerializer.Serialize(state);
+            foreach (var placeholder in new[] { "__query_secret__", "__path_secret__", "__body_secret__" })
+            {
+                Assert.DoesNotContain(placeholder, statePayload, StringComparison.Ordinal);
+            }
+
+            using (var response = await CurlJsonAsync(
+                       sandbox,
+                       targetIp,
+                       "/query-substitution?api_key=__query_secret__"))
+            {
+                AssertJsonCase(response, "query-substitution", expectedOk: true, Array.Empty<string>());
+            }
+
+            using (var response = await CurlJsonAsync(
+                       sandbox,
+                       targetIp,
+                       "/tenant/__path_secret__/resource?tenant=__path_secret__"))
+            {
+                AssertJsonCase(response, "path-substitution", expectedOk: true, Array.Empty<string>());
+                Assert.True(response.RootElement.GetProperty("queryStillPlaceholder").GetBoolean());
+            }
+
+            using (var response = await CurlJsonAsync(
+                       sandbox,
+                       targetIp,
+                       "/body-substitution",
+                       method: "POST",
+                       headers: new[] { "content-type: application/json" },
+                       data: "{\"client_secret\":\"__body_secret__\"}"))
+            {
+                AssertJsonCase(response, "body-substitution", expectedOk: true, Array.Empty<string>());
+            }
+        }
+        finally
+        {
+            await KillSandboxAsync(sandbox);
+        }
+    }
+
+    [Fact(Timeout = 5 * 60 * 1000)]
     public async Task CredentialVault_Runtime_Mutation_Adds_Replaces_And_Deletes_Binding()
     {
         var targetIp = CredentialVaultTargetIp();
@@ -112,7 +191,7 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
             return;
         }
 
-        var sandbox = await CreateCredentialVaultSandboxAsync();
+        var sandbox = await CreateCredentialVaultSandboxAsync(targetIp);
 
         try
         {
@@ -221,7 +300,7 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
         }
     }
 
-    private async Task<Sandbox> CreateCredentialVaultSandboxAsync()
+    private async Task<Sandbox> CreateCredentialVaultSandboxAsync(string targetIp)
     {
         return await Sandbox.CreateAsync(new SandboxCreateOptions
         {
@@ -237,10 +316,11 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
             TimeoutSeconds = 5 * 60,
             NetworkPolicy = new NetworkPolicy
             {
-                DefaultAction = NetworkRuleAction.Allow,
+                DefaultAction = NetworkRuleAction.Deny,
                 Egress = new List<NetworkRule>
                 {
-                    new() { Action = NetworkRuleAction.Allow, Target = CredentialVaultTargetHost() }
+                    new() { Action = NetworkRuleAction.Allow, Target = CredentialVaultTargetHost() },
+                    new() { Action = NetworkRuleAction.Allow, Target = targetIp }
                 }
             },
             CredentialProxy = new CredentialProxyConfig { Enabled = true },
@@ -266,7 +346,11 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
         };
     }
 
-    private static CredentialBinding Binding(string name, string path, CredentialAuth auth)
+    private static CredentialBinding Binding(
+        string name,
+        string path,
+        CredentialAuth auth,
+        IReadOnlyList<string>? methods = null)
     {
         return new CredentialBinding
         {
@@ -274,9 +358,8 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
             Match = new CredentialMatch
             {
                 Schemes = new[] { "http" },
-                Ports = new[] { 80 },
                 Hosts = new[] { CredentialVaultTargetHost() },
-                Methods = new[] { "GET" },
+                Methods = methods ?? new[] { "GET" },
                 Paths = new[] { path }
             },
             Auth = auth
@@ -303,15 +386,36 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
         return new CredentialAuth { Type = "customHeaders", Headers = headers };
     }
 
+    private static CredentialAuth PassthroughAuth(params CredentialSubstitution[] substitutions)
+    {
+        return new CredentialAuth { Type = "passthrough", Substitutions = substitutions };
+    }
+
+    private static CredentialSubstitution Substitution(string credential, string placeholder, params string[] surfaces)
+    {
+        return new CredentialSubstitution
+        {
+            Credential = credential,
+            Placeholder = placeholder,
+            In = surfaces
+        };
+    }
+
     private static async Task<JsonDocument> CurlJsonAsync(
         Sandbox sandbox,
         string targetIp,
         string path,
-        bool failOnHttpError = true)
+        bool failOnHttpError = true,
+        string? method = null,
+        IReadOnlyList<string>? headers = null,
+        string? data = null)
     {
         var failFlag = failOnHttpError ? "--fail " : "";
+        var methodFlag = method is null ? "" : $"--request {method} ";
+        var headerFlags = string.Concat((headers ?? Array.Empty<string>()).Select(header => $"--header {ShellQuote(header)} "));
+        var dataFlag = data is null ? "" : $"--data {ShellQuote(data)} ";
         var command =
-            $"curl {failFlag}--silent --show-error --connect-timeout 5 --max-time 20 " +
+            $"curl {failFlag}--silent --show-error --connect-timeout 5 --max-time 20 {methodFlag}{headerFlags}{dataFlag}" +
             $"--resolve {CredentialVaultTargetHost()}:80:{targetIp} " +
             $"http://{CredentialVaultTargetHost()}{path}";
         foreach (var secret in SecretValues.Values)
@@ -325,6 +429,11 @@ public class CredentialVaultE2ETests : IClassFixture<E2ETestFixture>
         var stdout = string.Join("", result.Logs.Stdout.Select(output => output.Text));
         Assert.False(string.IsNullOrWhiteSpace(stdout));
         return JsonDocument.Parse(stdout);
+    }
+
+    private static string ShellQuote(string value)
+    {
+        return "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
     }
 
     private static void AssertJsonCase(

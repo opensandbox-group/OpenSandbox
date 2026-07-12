@@ -66,6 +66,10 @@ spec:
         app.kubernetes.io/part-of: opensandbox
     spec:
       serviceAccountName: {{ include "opensandbox-server.ingressGatewayFullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: main
           image: {{ include "opensandbox-server.ingressGatewayImage" . }}

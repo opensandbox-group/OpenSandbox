@@ -16,6 +16,8 @@
 
 package com.alibaba.opensandbox.sandbox.infrastructure.pool
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyedException
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolStateStore
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -306,6 +308,28 @@ class InMemoryPoolStateStoreTest {
 
         val queueSize = extractQueueSize(store as InMemoryPoolStateStore, poolName)
         assertEquals(1, queueSize)
+    }
+
+    @Test
+    fun `destroy state fences writes and clearPoolState keeps tombstone`() {
+        val inMemoryStore = store as InMemoryPoolStateStore
+        inMemoryStore.putIdle(poolName, "id-1")
+
+        inMemoryStore.beginDestroy(poolName, "owner-1")
+
+        assertEquals(PoolDestroyState.DESTROYING, inMemoryStore.getDestroyState(poolName))
+        assertThrows(PoolDestroyedException::class.java) {
+            inMemoryStore.putIdle(poolName, "id-2")
+        }
+        assertEquals(false, inMemoryStore.tryAcquirePrimaryLock(poolName, "owner-2", Duration.ofSeconds(30)))
+        assertEquals(false, inMemoryStore.renewPrimaryLock(poolName, "owner-2", Duration.ofSeconds(30)))
+
+        assertEquals("id-1", inMemoryStore.tryTakeIdle(poolName))
+        inMemoryStore.clearPoolState(poolName)
+        inMemoryStore.markDestroyed(poolName, "owner-1", Duration.ofMinutes(5))
+
+        assertEquals(PoolDestroyState.DESTROYED, inMemoryStore.getDestroyState(poolName))
+        assertEquals(0, inMemoryStore.snapshotCounters(poolName).idleCount)
     }
 
     private fun extractQueueSize(

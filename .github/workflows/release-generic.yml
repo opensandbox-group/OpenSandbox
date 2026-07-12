@@ -50,11 +50,6 @@ on:
         required: true
         default: false
         type: boolean
-      push_tag:
-        description: "Push new tag to origin"
-        required: true
-        default: false
-        type: boolean
       dry_run:
         description: "Preview only, no side effects"
         required: true
@@ -68,7 +63,13 @@ permissions:
   artifact-metadata: write
 
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      require_approval: ${{ inputs.dry_run == false }}
+
   release:
+    needs: release-preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -112,10 +113,6 @@ jobs:
             ARGS+=(--initial-release)
           fi
 
-          if [[ "${{ inputs.push_tag }}" == "true" ]]; then
-            ARGS+=(--push)
-          fi
-
           if [[ "${{ inputs.dry_run }}" == "true" ]]; then
             ARGS+=(--dry-run)
           fi
@@ -136,7 +133,7 @@ jobs:
           fi
 
           if [[ -z "$remote_commit" ]]; then
-            echo "::error::Release tag '${RELEASE_TAG}' does not exist on origin. Re-run with push_tag=true or push the tag before publishing source artifacts."
+            echo "::error::Release tag '${RELEASE_TAG}' does not exist on origin. Have an authorized release manager push the tag before publishing source artifacts."
             exit 1
           fi
 

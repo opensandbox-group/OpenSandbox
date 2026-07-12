@@ -248,7 +248,7 @@ def _parse_error_body(body: Any) -> SandboxError | None:
         return None
 
     except Exception as ex:
-        logger.debug("Failed to parse error body: %s", ex)
+        logger.debug(f"Failed to parse error body: {ex}")
         return None
 
 

@@ -425,3 +425,127 @@ func TestFormatContentDisposition(t *testing.T) {
 		})
 	}
 }
+
+func writeTestFileWithLines(t *testing.T, lines []string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "lines.txt")
+	content := ""
+	for i, l := range lines {
+		if i > 0 {
+			content += "\n"
+		}
+		content += l
+	}
+	require.NoError(t, os.WriteFile(target, []byte(content), 0o644))
+	return target
+}
+
+func TestDownloadFileLineBasedReading(t *testing.T) {
+	target := writeTestFileWithLines(t, []string{"line1", "line2", "line3", "line4", "line5"})
+	rawURL := fmt.Sprintf("/files/download?path=%s&offset=2&limit=2", url.QueryEscape(target))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "line2\nline3", rec.Body.String())
+	require.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"))
+}
+
+func TestDownloadFileLineBasedOffsetOnly(t *testing.T) {
+	target := writeTestFileWithLines(t, []string{"line1", "line2", "line3"})
+	rawURL := fmt.Sprintf("/files/download?path=%s&offset=2", url.QueryEscape(target))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "line2\nline3", rec.Body.String())
+}
+
+func TestDownloadFileLimitOnly(t *testing.T) {
+	target := writeTestFileWithLines(t, []string{"line1", "line2", "line3"})
+	rawURL := fmt.Sprintf("/files/download?path=%s&limit=2", url.QueryEscape(target))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "line1\nline2", rec.Body.String())
+}
+
+func TestDownloadFileOffsetBeyondEOF(t *testing.T) {
+	target := writeTestFileWithLines(t, []string{"line1", "line2"})
+	rawURL := fmt.Sprintf("/files/download?path=%s&offset=100", url.QueryEscape(target))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, rec.Body.String())
+}
+
+func TestDownloadFileLimitBeyondRemaining(t *testing.T) {
+	target := writeTestFileWithLines(t, []string{"line1", "line2", "line3"})
+	rawURL := fmt.Sprintf("/files/download?path=%s&offset=2&limit=100", url.QueryEscape(target))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "line2\nline3", rec.Body.String())
+}
+
+func TestDownloadFileLineRangeConflict(t *testing.T) {
+	target := writeTestFileWithLines(t, []string{"line1"})
+	rawURL := fmt.Sprintf("/files/download?path=%s&offset=1&limit=1", url.QueryEscape(target))
+	ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+	ctx.Request.Header.Set("Range", "bytes=0-10")
+	ctrl := NewFilesystemController(ctx)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+}
+
+func TestDownloadFileInvalidOffset(t *testing.T) {
+	target := writeTestFileWithLines(t, []string{"line1"})
+	tests := []struct {
+		name   string
+		rawURL string
+	}{
+		{name: "non-numeric", rawURL: fmt.Sprintf("/files/download?path=%s&offset=abc", url.QueryEscape(target))},
+		{name: "zero", rawURL: fmt.Sprintf("/files/download?path=%s&offset=0", url.QueryEscape(target))},
+		{name: "negative", rawURL: fmt.Sprintf("/files/download?path=%s&offset=-1", url.QueryEscape(target))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl, rec := newFilesystemController(t, http.MethodGet, tt.rawURL, nil)
+			ctrl.DownloadFile()
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
+}
+
+func TestDownloadFileInvalidLimit(t *testing.T) {
+	target := writeTestFileWithLines(t, []string{"line1"})
+	tests := []struct {
+		name   string
+		rawURL string
+	}{
+		{name: "non-numeric", rawURL: fmt.Sprintf("/files/download?path=%s&limit=abc", url.QueryEscape(target))},
+		{name: "zero", rawURL: fmt.Sprintf("/files/download?path=%s&limit=0", url.QueryEscape(target))},
+		{name: "negative", rawURL: fmt.Sprintf("/files/download?path=%s&limit=-1", url.QueryEscape(target))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl, rec := newFilesystemController(t, http.MethodGet, tt.rawURL, nil)
+			ctrl.DownloadFile()
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
+}

@@ -675,6 +675,11 @@ if [[ "$DRY_RUN" == true ]]; then
 fi
 
 if git rev-parse -q --verify "refs/tags/${NEW_TAG}" >/dev/null; then
+  existing_tag_commit="$(git rev-parse "${NEW_TAG}^{commit}")"
+  head_commit="$(git rev-parse 'HEAD^{commit}')"
+  if [[ "$existing_tag_commit" != "$head_commit" ]]; then
+    die "Existing tag '${NEW_TAG}' resolves to ${existing_tag_commit}, but HEAD resolves to ${head_commit}."
+  fi
   warn "Tag '${NEW_TAG}' already exists. Reusing existing tag."
 else
   if [[ "$SIGN_TAG" == true ]]; then

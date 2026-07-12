@@ -76,6 +76,7 @@ def apply_egress_to_spec(
     egress_auth_token: Optional[str] = None,
     egress_mode: str = EGRESS_MODE_DNS,
     credential_proxy_enabled: bool = False,
+    extra_env: Optional[Dict[str, Optional[str]]] = None,
 ) -> None:
     """
     Append the egress sidecar to ``containers``. When ``egress.disable_ipv6`` is enabled,
@@ -94,6 +95,11 @@ def apply_egress_to_spec(
         env.append({"name": OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT, "value": "true"})
     if egress_auth_token:
         env.append({"name": OPENSANDBOX_EGRESS_TOKEN, "value": egress_auth_token})
+    if extra_env:
+        for name, value in extra_env.items():
+            if credential_proxy_enabled and name == OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:
+                continue
+            env.append({"name": name, "value": value or ""})
 
     sidecar: Dict[str, Any] = {
         "name": "egress",
@@ -112,13 +118,12 @@ def apply_egress_to_spec(
             "failureThreshold": 30,
         },
     }
-    if credential_proxy_enabled:
-        sidecar["volumeMounts"] = [
-            {
-                "name": OPENSANDBOX_RUNTIME_VOLUME_NAME,
-                "mountPath": OPENSANDBOX_RUNTIME_MOUNT_PATH,
-            }
-        ]
+    sidecar["volumeMounts"] = [
+        {
+            "name": OPENSANDBOX_RUNTIME_VOLUME_NAME,
+            "mountPath": OPENSANDBOX_RUNTIME_MOUNT_PATH,
+        }
+    ]
     if egress_auth_token:
         sidecar["readinessProbe"]["httpGet"]["httpHeaders"] = [
             {"name": OPEN_SANDBOX_EGRESS_AUTH_HEADER, "value": egress_auth_token}

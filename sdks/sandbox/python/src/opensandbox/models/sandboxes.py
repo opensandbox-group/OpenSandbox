@@ -204,7 +204,7 @@ class CredentialMatch(BaseModel):
     """Request match for a Credential Vault binding."""
 
     schemes: list[Literal["https", "http"]] | None = Field(default=None)
-    ports: list[int] | None = Field(default=None)
+    ports: list[int] | None = Field(default=None, deprecated="Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected by the server.")
     hosts: list[str] = Field(description="Exact FQDNs or leftmost-label wildcards.")
     methods: list[str] | None = Field(default=None)
     paths: list[str] | None = Field(default=None)
@@ -226,13 +226,24 @@ class CustomHeaderEntry(BaseModel):
     credential: str
 
 
+class CredentialSubstitution(BaseModel):
+    """Scoped placeholder substitution entry."""
+
+    credential: str
+    placeholder: str
+    in_: list[Literal["path", "query", "header", "body"]] = Field(alias="in")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class CredentialAuth(BaseModel):
     """Typed Credential Vault auth rule."""
 
-    type: Literal["bearer", "basic", "apiKey", "customHeaders"]
+    type: Literal["bearer", "basic", "apiKey", "customHeaders", "passthrough"]
     credential: str | None = None
     name: str | None = None
     headers: list[CustomHeaderEntry] | None = None
+    substitutions: list[CredentialSubstitution] | None = None
 
 
 class CredentialBinding(BaseModel):
@@ -387,8 +398,9 @@ class PVC(BaseModel):
         default=False,
         alias="deleteOnSandboxTermination",
         description=(
-            "When true, auto-created Docker volume is removed on sandbox deletion. "
-            "Ignored for Kubernetes PVCs."
+            "When true, the auto-created volume (Docker named volume or "
+            "Kubernetes PVC) is removed on sandbox deletion. Pre-existing "
+            "volumes are never removed."
         ),
     )
     storage_class: str | None = Field(
@@ -638,6 +650,9 @@ class SandboxInfo(BaseModel):
         default=None, description="Effective platform used for sandbox provisioning."
     )
     metadata: dict[str, str] | None = Field(default=None, description="Custom metadata")
+    extensions: dict[str, str] | None = Field(
+        default=None, description="Opaque extension data returned by the server"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -650,6 +665,9 @@ class SandboxCreateResponse(BaseModel):
     id: str = Field(description="Unique identifier of the newly created sandbox")
     platform: PlatformSpec | None = Field(
         default=None, description="Effective platform used for sandbox provisioning."
+    )
+    extensions: dict[str, str] | None = Field(
+        default=None, description="Opaque extension data returned by the server"
     )
 
 

@@ -10,23 +10,25 @@ configs:
 
       [runtime]
       type = "docker"
-      # execd_image = "opensandbox/execd:v1.0.18"
-      execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18"
+      # execd_image = "opensandbox/execd:v1.0.20"
+      execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20"
 
       [egress]
-      image = "opensandbox/egress:v1.1.0"
-      # image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.0"
+      image = "opensandbox/egress:v1.1.3"
+      # image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3"
 
       [docker]
       network_mode = "bridge"
       # When server runs in a container, set host_ip to the host's IP or hostname so bridge-mode endpoints are reachable (e.g. host.docker.internal or the host LAN IP).
       # It's required when server deployed with docker container under host.
       host_ip = "host.docker.internal"
+      port_range_min = 40000
+      port_range_max = 60000
       drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
       no_new_privileges = true
       # TODO: For production environments, it is recommended to set this to '4096' or higher to avoid
       # "can't start new thread" errors when multiple sandboxes are running concurrently.
-      # See: https://github.com/alibaba/OpenSandbox/issues/447
+      # See: https://github.com/opensandbox-group/OpenSandbox/issues/447
       pids_limit = 4096
 
       [ingress]
