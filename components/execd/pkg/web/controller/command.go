@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
@@ -68,15 +67,28 @@ func (c *CodeInterpretingController) RunCommand() {
 
 	runCodeRequest := c.buildExecuteCommandRequest(request)
 	eventsHandler := c.setServerEventsHandler(ctx)
+	// completeCh is closed when OnExecuteComplete or OnExecuteError fires,
+	// meaning the final SSE event has been written and flushed. Match the
+	// completion semantics used by RunCode/RunInSession so chunked HTTP/1.1
+	// responses terminate cleanly without fixed tail latency.
+	completeCh := make(chan struct{})
+	var completeOnce sync.Once
+	signalComplete := func() {
+		completeOnce.Do(func() {
+			close(completeCh)
+		})
+	}
 	origComplete := eventsHandler.OnExecuteComplete
 	eventsHandler.OnExecuteComplete = func(executionTime time.Duration) {
 		origComplete(executionTime)
 		recordExecution("success")
+		signalComplete()
 	}
 	origError := eventsHandler.OnExecuteError
 	eventsHandler.OnExecuteError = func(err *execute.ErrorOutput) {
 		origError(err)
 		recordExecution("failure")
+		signalComplete()
 	}
 	runCodeRequest.Hooks = eventsHandler
 
@@ -94,7 +106,7 @@ func (c *CodeInterpretingController) RunCommand() {
 		return
 	}
 
-	time.Sleep(flag.ApiGracefulShutdownTimeout)
+	waitForExecutionComplete(ctx, completeCh)
 }
 
 // InterruptCommand stops a running shell command session.
