@@ -10,7 +10,11 @@ permissions:
   contents: read
 
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+
   publish:
+    needs: release-preflight
     name: Publish (${{ matrix.sdk.name }})
     runs-on: ubuntu-latest
     strategy:

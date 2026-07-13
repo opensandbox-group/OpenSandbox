@@ -632,7 +632,9 @@ Use GitHub Discussions for:
 
 - **Issues**: Technical problems or bugs
 - **Discussions**: Questions and community support
-- **Email**: For security issues, email conduct@opensandbox.io
+- **Security vulnerabilities**: Follow [SECURITY.md](SECURITY.md) and use
+  GitHub private vulnerability reporting. Do not open a public issue.
+- **Code of Conduct reports**: Email conduct@opensandbox.io
 
 ## Additional Resources
 

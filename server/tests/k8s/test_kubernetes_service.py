@@ -96,7 +96,7 @@ class TestKubernetesSandboxServiceCreate:
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
         create_sandbox_request.credential_proxy = CredentialProxyConfig(enabled=True)
         k8s_service.app_config.egress = EgressConfig(
-            image="opensandbox/egress:v1.1.2", mode=EGRESS_MODE_DNS
+            image="opensandbox/egress:v1.1.4", mode=EGRESS_MODE_DNS
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -323,7 +323,7 @@ class TestKubernetesSandboxServiceCreate:
         self, k8s_service, create_sandbox_request
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
-        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.1.3")
+        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.1.4")
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-id", "uid": "uid-1"
         }
@@ -397,7 +397,7 @@ class TestKubernetesSandboxServiceCreate:
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
         k8s_service.app_config.egress = EgressConfig(
-            image="opensandbox/egress:v1.1.3",
+            image="opensandbox/egress:v1.1.4",
             mode=EGRESS_MODE_DNS_NFT,
         )
         k8s_service.workload_provider.create_workload.return_value = {
@@ -1538,6 +1538,56 @@ class TestCreateSandboxPvcFailureCleanup:
 
         assert exc_info.value.status_code == 400
         # No PVC was created, no workload was attempted, no cleanup needed.
+        k8s_service.k8s_client.create_pvc.assert_not_called()
+        k8s_service.workload_provider.create_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_shared_pvc_mixed_read_only_rejected_before_pvc_creation(
+        self, k8s_service
+    ):
+        from opensandbox_server.api.schema import (
+            CreateSandboxRequest,
+            ImageSpec,
+            PVC,
+            ResourceLimits,
+            Volume,
+        )
+
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash", "-c", "sleep 3600"],
+            timeout=3600,
+            resourceLimits=ResourceLimits(root={"cpu": "1", "memory": "1Gi"}),
+            volumes=[
+                Volume(
+                    name="shared-rw",
+                    mountPath="/data/rw",
+                    readOnly=False,
+                    pvc=PVC(
+                        claimName="auto-data",
+                        createIfNotExists=True,
+                        deleteOnSandboxTermination=True,
+                    ),
+                ),
+                Volume(
+                    name="shared-ro",
+                    mountPath="/data/ro",
+                    readOnly=True,
+                    pvc=PVC(
+                        claimName="auto-data",
+                        createIfNotExists=True,
+                        deleteOnSandboxTermination=True,
+                    ),
+                ),
+            ],
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "mixed read_only values" in exc_info.value.detail["message"]
         k8s_service.k8s_client.create_pvc.assert_not_called()
         k8s_service.workload_provider.create_workload.assert_not_called()
 

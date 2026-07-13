@@ -3,12 +3,10 @@ name: Sandbox Kubernetes Tests
 on:
   pull_request:
     branches: [ main ]
-    paths:
-      - 'kubernetes/**'
-      - '!kubernetes/docs/**'
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -18,8 +16,15 @@ env:
   GO_VERSION: '1.24'
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: kubernetes
+
   controller-e2e-core:
     name: Controller E2E Core (Kubernetes v${{ matrix.version }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +46,8 @@ jobs:
 
   controller-e2e-pause-resume:
     name: Controller E2E PauseResume (Kubernetes v${{ matrix.version }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +68,8 @@ jobs:
           make test-e2e-pause-resume KIND_K8S_VERSION=v${{ matrix.version }}
 
   test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -95,3 +104,27 @@ jobs:
         working-directory: kubernetes
         run: |
           make test
+
+  required:
+    name: Kubernetes CI
+    if: always()
+    needs: [changes, controller-e2e-core, controller-e2e-pause-resume, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CORE_RESULT: ${{ needs.controller-e2e-core.result }}
+          PAUSE_RESUME_RESULT: ${{ needs.controller-e2e-pause-resume.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$CORE_RESULT" == "success" && "$PAUSE_RESUME_RESULT" == "success" && "$TEST_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$CORE_RESULT" == "skipped" && "$PAUSE_RESUME_RESULT" == "skipped" && "$TEST_RESULT" == "skipped" ]]
+          fi

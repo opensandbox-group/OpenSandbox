@@ -2,6 +2,7 @@ name: Real E2E Tests
 
 permissions:
   contents: read
+  pull-requests: read
 
 on:
   workflow_dispatch:
@@ -13,12 +14,6 @@ on:
         default: false
   pull_request:
     branches: [ main ]
-    paths:
-      - 'server/opensandbox_server/**'
-      - 'components/execd/**'
-      - 'components/egress/**'
-      - 'sdks/**'
-      - 'tests/**'
   push:
     branches: [ main ]
 
@@ -27,8 +22,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: real-e2e
+
   python-e2e:
     name: Python E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
       UV_BIN: /home/admin/.local/bin
@@ -127,6 +129,8 @@ jobs:
 
   java-e2e:
     name: Java E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
       UV_BIN: /home/admin/.local/bin
@@ -245,6 +249,8 @@ jobs:
 
   javascript-e2e:
     name: JavaScript E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
       UV_BIN: /home/admin/.local/bin
@@ -347,6 +353,8 @@ jobs:
 
   csharp-e2e:
     name: C# E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
       UV_BIN: /home/admin/.local/bin
@@ -438,6 +446,8 @@ jobs:
 
   go-e2e:
     name: Go E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
       UV_BIN: /home/admin/.local/bin
@@ -528,3 +538,29 @@ jobs:
           docker rm -f opensandbox-e2e-credential-vault-target || true
           docker ps -aq --filter "label=opensandbox.e2e=credential-vault" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+
+  required:
+    name: Real E2E CI
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [changes, python-e2e, java-e2e, javascript-e2e, csharp-e2e, go-e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          PYTHON_RESULT: ${{ needs.python-e2e.result }}
+          JAVA_RESULT: ${{ needs.java-e2e.result }}
+          JAVASCRIPT_RESULT: ${{ needs.javascript-e2e.result }}
+          CSHARP_RESULT: ${{ needs.csharp-e2e.result }}
+          GO_RESULT: ${{ needs.go-e2e.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$PYTHON_RESULT" == "success" && "$JAVA_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$PYTHON_RESULT" == "skipped" && "$JAVA_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
+          fi

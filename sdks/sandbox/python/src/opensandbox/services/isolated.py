@@ -19,6 +19,8 @@ Isolated session service interface.
 Protocol for namespace-isolated execution operations (OSEP-0013).
 """
 
+from __future__ import annotations
+
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
