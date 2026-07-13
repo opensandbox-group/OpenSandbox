@@ -56,7 +56,7 @@ spec:
           command:
             - /bin/sh
             - -c
-          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21
           name: execd-installer
           volumeMounts:
             - mountPath: /opt/opensandbox

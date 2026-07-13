@@ -32,7 +32,7 @@ level = "INFO"
 
 [runtime]
 type = "kubernetes"
-execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21"
 
 [storage]
 # 允许进行 bind mount 的宿主机路径前缀白名单。
@@ -76,7 +76,7 @@ batchsandbox_template_file = "~/batchsandbox-template.yaml"
 mode = "direct"
 
 [egress]
-image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3"
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.4"
 mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false

@@ -51,7 +51,7 @@ server:
     gatewayRouteMode: "header"
     image:
       repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress
-      tag: "v1.0.9"
+      tag: "v1.0.10"
     replicaCount: 2
     port: 28888
     dataplaneNamespace: "opensandbox"
@@ -85,7 +85,7 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21"
 
   [kubernetes]
   kubeconfig_path = ""
@@ -98,5 +98,5 @@ configToml: |
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
   
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.4"
   mode = "dns+nft"

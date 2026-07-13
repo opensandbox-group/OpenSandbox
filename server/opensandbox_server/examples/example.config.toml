@@ -32,7 +32,7 @@ level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.20"
+execd_image = "opensandbox/execd:v1.0.21"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
@@ -68,7 +68,7 @@ seccomp_profile = ""
 mode = "direct"
 
 [egress]
-image = "opensandbox/egress:v1.1.3"
+image = "opensandbox/egress:v1.1.4"
 mode = "dns"
 
 # 🧪 [EXPERIMENTAL] Renew-on-access. Off by default — see server/README.md.
