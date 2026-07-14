@@ -43,6 +43,20 @@ server:
   affinity: {}
   volumeMounts: []
   volumes: []
+  # -- Node selector for the server pod.
+  nodeSelector: {}
+  # -- Pod-level security context for the server pod.
+  podSecurityContext: {}
+  # -- Container-level security context for the server container.
+  containerSecurityContext: {}
+  # -- Extra annotations for the server pod.
+  podAnnotations: {}
+  # -- Extra labels for the server pod.
+  podLabels: {}
+  # -- Priority class name for the server pod.
+  priorityClassName: ""
+  # -- Topology spread constraints for the server pod.
+  topologySpreadConstraints: []
 
   # Gateway (components/ingress): when enabled, writes config [ingress] and deploys the gateway
   gateway:
@@ -72,6 +86,20 @@ server:
       # List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }.
       # key_id must be exactly one character in [0-9a-z].
       keys: []
+    # -- Node selector for the ingress gateway pod.
+    nodeSelector: {}
+    # -- Pod-level security context for the ingress gateway pod.
+    podSecurityContext: {}
+    # -- Container-level security context for the ingress gateway container.
+    containerSecurityContext: {}
+    # -- Extra annotations for the ingress gateway pod.
+    podAnnotations: {}
+    # -- Extra labels for the ingress gateway pod.
+    podLabels: {}
+    # -- Priority class name for the ingress gateway pod.
+    priorityClassName: ""
+    # -- Topology spread constraints for the ingress gateway pod.
+    topologySpreadConstraints: []
 
 # -- Server config (TOML). Mounted at /etc/opensandbox/config.toml.
 configToml: |

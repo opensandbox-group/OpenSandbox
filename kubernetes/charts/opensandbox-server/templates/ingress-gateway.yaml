@@ -64,15 +64,41 @@ spec:
         {{- include "opensandbox-server.ingressGatewaySelectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: ingress-gateway
         app.kubernetes.io/part-of: opensandbox
+        {{- with .Values.server.gateway.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.server.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "opensandbox-server.ingressGatewayFullname" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.server.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.gateway.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.gateway.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.server.gateway.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: main
           image: {{ include "opensandbox-server.ingressGatewayImage" . }}
+          {{- with .Values.server.gateway.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           imagePullPolicy: IfNotPresent
           args:
             - "--namespace={{ .Values.server.gateway.dataplaneNamespace }}"

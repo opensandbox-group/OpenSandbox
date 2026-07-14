@@ -48,17 +48,15 @@ async def main():
             "ubuntu",
             connection_config=config
         )
-        async with sandbox:
-
+        try:
             # 3. Execute a shell command
             execution = await sandbox.commands.run("echo 'Hello Sandbox!'")
 
             # 4. Print output
             print(execution.logs.stdout[0].text)
-
-            # 5. Cleanup (sandbox.close() called automatically)
-            # Note: kill() must be called explicitly if you want to terminate the remote sandbox instance immediately
-            await sandbox.kill()
+        finally:
+            # 5. Terminate the remote sandbox and close local resources
+            await sandbox.destroy()
 
     except SandboxException as e:
         # Handle Sandbox specific exceptions
@@ -91,11 +89,17 @@ config = ConnectionConfigSync(
 )
 
 sandbox = SandboxSync.create("ubuntu", connection_config=config)
-with sandbox:
+try:
     execution = sandbox.commands.run("echo 'Hello Sandbox!'")
     print(execution.logs.stdout[0].text)
-    sandbox.kill()
+finally:
+    sandbox.destroy()
 ```
+
+Use `destroy()` for create-use-discard workflows. It calls `kill()` before
+`close()` and still closes local resources if remote termination fails. Context
+managers continue to call only `close()`, so the remote sandbox remains available
+for later `connect()` calls unless you explicitly kill or destroy it.
 
 ### Synchronous Sandbox Pool
 
@@ -134,8 +138,7 @@ try:
         result = sandbox.commands.run("echo pool-ok")
         print(result.logs.stdout[0].text)
     finally:
-        sandbox.kill()
-        sandbox.close()
+        sandbox.destroy()
 finally:
     pool.shutdown(graceful=True)
 ```
@@ -173,8 +176,7 @@ try:
         result = await sandbox.commands.run("echo pool-ok")
         print(result.logs.stdout[0].text)
     finally:
-        await sandbox.kill()
-        await sandbox.close()
+        await sandbox.destroy()
 finally:
     await pool.shutdown(graceful=True)
 ```
