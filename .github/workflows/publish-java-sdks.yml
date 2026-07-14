@@ -1,10 +1,9 @@
-name: Publish Java SDKs
+name: Publish Kotlin/JVM SDKs
 
 on:
   push:
     tags:
       - "java/sandbox/v*"
-      - "java/code-interpreter/v*"
 
 permissions:
   contents: read
@@ -15,18 +14,8 @@ jobs:
 
   publish:
     needs: release-preflight
-    name: Publish (${{ matrix.sdk.name }})
+    name: Publish Kotlin SDKs
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        sdk:
-          - name: sandbox
-            tagPrefix: sandbox
-            workingDirectory: sdks/sandbox/kotlin
-          - name: code-interpreter
-            tagPrefix: code-interpreter
-            workingDirectory: sdks/code-interpreter/kotlin
 
     steps:
       - name: Checkout code
@@ -42,8 +31,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
 
       - name: Publish to Maven Central
-        working-directory: ${{ matrix.sdk.workingDirectory }}
-        if: startsWith(github.ref, format('refs/tags/java/{0}/v', matrix.sdk.tagPrefix))
+        working-directory: sdks/sandbox/kotlin
         env:
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME }}
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.ORG_GRADLE_PROJECT_MAVENCENTRALPASSWORD }}

@@ -78,10 +78,6 @@ cd sdks/sandbox/kotlin
 ./gradlew clean publishToMavenLocal --no-build-cache
 cd ../../../
 
-cd sdks/code-interpreter/kotlin
-./gradlew clean publishToMavenLocal --no-build-cache -PuseMavenLocal
-cd ../../../
-
 # run Java e2e
 cd tests/java
 if [ "${RUN_CODE_INTERPRETER_E2E}" = "true" ]; then

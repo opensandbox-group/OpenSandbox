@@ -14,7 +14,6 @@ on:
           - python/code-interpreter
           - python/mcp/sandbox
           - java/sandbox
-          - java/code-interpreter
           - csharp/sandbox
           - csharp/code-interpreter
           - sdks/sandbox/go

@@ -25,7 +25,6 @@ Script path:
 - `python/code-interpreter`
 - `python/mcp/sandbox`
 - `java/sandbox`
-- `java/code-interpreter`
 - `csharp/sandbox`
 - `csharp/code-interpreter`
 - `sdks/sandbox/go`
@@ -39,6 +38,10 @@ Script path:
 - `k8s/task-executor`
 - `helm/opensandbox`
 - `helm` (alias of `helm/opensandbox`)
+
+The `java/sandbox` target publishes the Kotlin/JVM SDK release train, including
+`sandbox`, `sandbox-api`, `sandbox-pool-redis`, `code-interpreter`, and
+`sandbox-bom`.
 
 ## Tag Rules
 
