@@ -41,8 +41,8 @@ data class CreateIsolatedSessionRequest(
     val binds: List<BindMount>? = null,
     val shareNet: Boolean? = null,
     val envPassthrough: EnvPassthroughSpec? = null,
-    val uid: Int? = null,
-    val gid: Int? = null,
+    val uid: Long? = null,
+    val gid: Long? = null,
     val uidMode: String? = null,
     val idleTimeoutSeconds: Int? = null,
 )
@@ -50,6 +50,17 @@ data class CreateIsolatedSessionRequest(
 data class IsolatedSessionInfo(
     val sessionId: String,
     val createdAt: OffsetDateTime?,
+    // Creation-parameter fields echoed by execd (may be absent on older builds).
+    val profile: String? = null,
+    val workspace: IsolatedWorkspaceSpec? = null,
+    val extraWritable: List<String>? = null,
+    val binds: List<BindMount>? = null,
+    val shareNet: Boolean? = null,
+    val envPassthrough: EnvPassthroughSpec? = null,
+    val uid: Long? = null,
+    val gid: Long? = null,
+    val uidMode: String? = null,
+    val idleTimeoutSeconds: Int? = null,
 )
 
 data class IsolatedSessionState(
@@ -57,6 +68,17 @@ data class IsolatedSessionState(
     val createdAt: OffsetDateTime? = null,
     val lastRunAt: OffsetDateTime? = null,
     val idleRemainingSeconds: Int? = null,
+    // Creation-parameter fields echoed by execd (may be absent on older builds).
+    val profile: String? = null,
+    val workspace: IsolatedWorkspaceSpec? = null,
+    val extraWritable: List<String>? = null,
+    val binds: List<BindMount>? = null,
+    val shareNet: Boolean? = null,
+    val envPassthrough: EnvPassthroughSpec? = null,
+    val uid: Long? = null,
+    val gid: Long? = null,
+    val uidMode: String? = null,
+    val idleTimeoutSeconds: Int? = null,
 )
 
 data class IsolatedSessionSummary(

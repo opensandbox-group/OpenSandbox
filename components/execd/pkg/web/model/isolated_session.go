@@ -132,11 +132,30 @@ func (r *IsolatedRunRequest) Validate() error {
 // Session State
 
 // SessionState is returned by GET /v1/isolated/session/<id>.
+//
+// Runtime fields (Status/CreatedAt/LastRunAt/IdleRemainingSeconds) are always
+// populated. The remaining fields echo the parameters used to create the
+// session and let a stateless client rebuild a session handle from just a
+// session ID (e.g. after a client restart). Older execd builds may omit
+// these fields; clients must tolerate them being absent.
 type SessionState struct {
-	Status               string    `json:"status"` // "active" | "destroyed"
+	Status               string    `json:"status"` // "active" | "dead" | "destroyed"
 	CreatedAt            time.Time `json:"created_at"`
 	LastRunAt            time.Time `json:"last_run_at"`
 	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
+
+	// Creation-parameter echoes. All optional; a session_id-only client
+	// must tolerate any of these being absent.
+	Profile            string              `json:"profile,omitempty"`
+	Workspace          *WorkspaceSpec      `json:"workspace,omitempty"`
+	ExtraWritable      []string            `json:"extra_writable,omitempty"`
+	Binds              []BindMount         `json:"binds,omitempty"`
+	ShareNet           *bool               `json:"share_net,omitempty"`
+	EnvPassthrough     *EnvPassthroughSpec `json:"env_passthrough,omitempty"`
+	Uid                *uint32             `json:"uid,omitempty"`
+	Gid                *uint32             `json:"gid,omitempty"`
+	UidMode            string              `json:"uid_mode,omitempty"`
+	IdleTimeoutSeconds *int                `json:"idle_timeout_seconds,omitempty"`
 }
 
 // IsolatedSessionSummary describes a single session in a list response.

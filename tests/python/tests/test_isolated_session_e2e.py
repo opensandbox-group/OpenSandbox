@@ -211,6 +211,54 @@ class TestIsolatedSessionE2E:
             await fake_session.delete()
             await fake_session.delete()  # second delete should fail
 
+    # ── Attach (stateless recovery) ───────────────────────────────────
+
+    async def test_attach_roundtrip(self):
+        """Stateless-recovery flow: create → drop handle → attach by
+        sessionId only → run/get/delete all work through the new handle.
+        """
+        created = await self._create_session(mode="rw")
+        session_id = created.session_id
+        try:
+            # Prove the original handle can write state we want to
+            # observe after we re-attach.
+            await created.run("echo attached-state > /tmp/attach-marker.txt")
+
+            # Simulate a stateless client that only kept the sessionId.
+            attached = await self.sandbox.isolation.attach(session_id)
+            assert attached.session_id == session_id
+            # Creation-param echo fields should now be populated.
+            assert attached.info.workspace is not None
+            assert attached.info.workspace.path == "/tmp"
+            assert attached.info.workspace.mode == "rw"
+
+            # Handle must work end-to-end via sessionId alone.
+            state = await attached.get()
+            assert state.status == "active"
+
+            result = await attached.run("cat /tmp/attach-marker.txt")
+            assert "attached-state" in result.text
+
+            await attached.delete()
+        except Exception:
+            # If attach failed before delete, clean up via the original handle.
+            # Best-effort: swallow cleanup errors so the original exception
+            # surfaces, but log them for debuggability.
+            try:
+                await created.delete()
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "attach roundtrip cleanup: failed to delete session %s: %s",
+                    session_id, cleanup_exc,
+                )
+            raise
+
+    async def test_attach_nonexistent_session_raises(self):
+        with pytest.raises(SandboxApiException):
+            await self.sandbox.isolation.attach(
+                "00000000-0000-0000-0000-000000000000",
+            )
+
     # ── RW mode: run-based file tests ─────────────────────────────────
 
     async def test_rw_files_write_via_run(self):

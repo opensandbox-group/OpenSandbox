@@ -102,15 +102,50 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         return new IsolationSessionHandle(info, this);
     }
 
-    internal async Task<IsolatedSessionState> GetInternalAsync(
+    public async Task<IIsolationSession> AttachAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId cannot be empty", nameof(sessionId));
+        }
+
+        var state = await GetStateAsync(sessionId, "attach isolated session", cancellationToken)
+            .ConfigureAwait(false);
+        // Build an IsolatedSessionInfo from the SessionState response. The
+        // creation-parameter echo fields are additive/optional; older execd
+        // builds omit them. Missing fields remain null on the info so the
+        // handle is still usable via sessionId for RunAsync/GetAsync/DeleteAsync.
+        var info = new IsolatedSessionInfo(
+            SessionId: sessionId,
+            CreatedAt: state.CreatedAt,
+            Profile: state.Profile,
+            Workspace: state.Workspace,
+            ExtraWritable: state.ExtraWritable,
+            Binds: state.Binds,
+            ShareNet: state.ShareNet,
+            EnvPassthrough: state.EnvPassthrough,
+            Uid: state.Uid,
+            Gid: state.Gid,
+            UidMode: state.UidMode,
+            IdleTimeoutSeconds: state.IdleTimeoutSeconds);
+        return new IsolationSessionHandle(info, this);
+    }
+
+    internal Task<IsolatedSessionState> GetInternalAsync(
         string sessionId, CancellationToken cancellationToken = default)
+        => GetStateAsync(sessionId, "get isolated session", cancellationToken);
+
+    private async Task<IsolatedSessionState> GetStateAsync(
+        string sessionId, string operation, CancellationToken cancellationToken)
     {
         var url = $"{_baseUrl}/v1/isolated/session/{Uri.EscapeDataString(sessionId)}";
         using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
         ApplyHeaders(httpRequest);
 
         using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
-        await EnsureSuccessAsync(response, "get isolated session");
+        await EnsureSuccessAsync(response, operation);
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         return JsonSerializer.Deserialize<IsolatedSessionState>(body, JsonOptions)!;
     }

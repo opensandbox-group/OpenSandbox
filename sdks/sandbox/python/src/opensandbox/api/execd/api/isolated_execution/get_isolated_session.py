@@ -83,6 +83,10 @@ def sync_detailed(
 ) -> Response[ErrorResponse | SessionState]:
     """Get isolated session state
 
+     Returns runtime status plus the creation parameters of the session. A stateless client that only has
+    a session ID (e.g. after a restart) can call this endpoint to rebuild a session handle without
+    needing to have retained the original create request.
+
     Args:
         session_id (UUID):
 
@@ -112,6 +116,10 @@ def sync(
 ) -> ErrorResponse | SessionState | None:
     """Get isolated session state
 
+     Returns runtime status plus the creation parameters of the session. A stateless client that only has
+    a session ID (e.g. after a restart) can call this endpoint to rebuild a session handle without
+    needing to have retained the original create request.
+
     Args:
         session_id (UUID):
 
@@ -135,6 +143,10 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
 ) -> Response[ErrorResponse | SessionState]:
     """Get isolated session state
+
+     Returns runtime status plus the creation parameters of the session. A stateless client that only has
+    a session ID (e.g. after a restart) can call this endpoint to rebuild a session handle without
+    needing to have retained the original create request.
 
     Args:
         session_id (UUID):
@@ -162,6 +174,10 @@ async def asyncio(
     client: AuthenticatedClient | Client,
 ) -> ErrorResponse | SessionState | None:
     """Get isolated session state
+
+     Returns runtime status plus the creation parameters of the session. A stateless client that only has
+    a session ID (e.g. after a restart) can call this endpoint to rebuild a session handle without
+    needing to have retained the original create request.
 
     Args:
         session_id (UUID):

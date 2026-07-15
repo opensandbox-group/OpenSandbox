@@ -41,6 +41,19 @@ public interface IIsolatedSessions
         CreateIsolatedSessionRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Rebuild a session handle for an existing isolated session from just its
+    /// session ID. Useful for stateless callers that need to reattach to a
+    /// session after a restart (e.g. serverless workers). Issues a GET on
+    /// /v1/isolated/session/{id} and populates <see cref="IsolatedSessionInfo"/>
+    /// with any creation-parameter fields echoed by execd. Older execd builds
+    /// may omit those fields; the returned handle still works for run/get/delete.
+    /// A missing session surfaces as a <see cref="Core.SandboxApiException"/> with status 404.
+    /// </summary>
+    Task<IIsolationSession> AttachAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default);
+
     Task<IsolatedCapabilities> CapabilitiesAsync(
         CancellationToken cancellationToken = default);
 

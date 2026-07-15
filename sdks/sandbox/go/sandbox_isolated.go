@@ -74,13 +74,58 @@ func (s *Sandbox) IsolationCreate(ctx context.Context, req CreateIsolatedSession
 	if err != nil {
 		return nil, err
 	}
+	return s.newIsolationSession(info), nil
+}
+
+// IsolationAttach rebuilds an IsolationSession handle for an existing isolated
+// session identified by sessionID. It performs GET /v1/isolated/session/{id}
+// and, when the server echoes the creation parameters (execd
+// feat/isolated-session-attach and later), copies them into the returned
+// session's Info(). Missing echo fields are left zero-valued; the returned
+// handle is still usable for Run/Get/Delete/Files because those endpoints
+// only require the sessionID.
+//
+// A 404 from the server surfaces as the same *APIError that IsolatedGet
+// returns for a missing session.
+func (s *Sandbox) IsolationAttach(ctx context.Context, sessionID string) (*IsolationSession, error) {
+	if s.execd == nil {
+		return nil, fmt.Errorf("opensandbox: execd client not initialized")
+	}
+	if sessionID == "" {
+		return nil, &InvalidArgumentError{Field: "sessionID", Message: "must not be empty"}
+	}
+	state, err := s.execd.IsolatedGet(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	info := &IsolatedSessionInfo{
+		SessionID:          sessionID,
+		CreatedAt:          state.CreatedAt,
+		Profile:            state.Profile,
+		Workspace:          state.Workspace,
+		ExtraWritable:      state.ExtraWritable,
+		Binds:              state.Binds,
+		ShareNet:           state.ShareNet,
+		EnvPassthrough:     state.EnvPassthrough,
+		Uid:                state.Uid,
+		Gid:                state.Gid,
+		UidMode:            state.UidMode,
+		IdleTimeoutSeconds: state.IdleTimeoutSeconds,
+	}
+	return s.newIsolationSession(info), nil
+}
+
+// newIsolationSession wraps an IsolatedSessionInfo into an IsolationSession
+// handle, constructing the session-scoped files ExecdClient the same way
+// IsolationCreate does.
+func (s *Sandbox) newIsolationSession(info *IsolatedSessionInfo) *IsolationSession {
 	sessionBaseURL := s.execd.client.baseURL + "/v1/isolated/session/" + info.SessionID
 	var filesOpts []Option
 	if len(s.execd.client.headers) > 0 {
 		filesOpts = append(filesOpts, WithHeaders(s.execd.client.headers))
 	}
 	filesClient := NewExecdClient(sessionBaseURL, s.execd.client.apiKey, filesOpts...)
-	return &IsolationSession{info: info, sandbox: s, files: filesClient}, nil
+	return &IsolationSession{info: info, sandbox: s, files: filesClient}
 }
 
 // IsolationCapabilities retrieves isolation capabilities.

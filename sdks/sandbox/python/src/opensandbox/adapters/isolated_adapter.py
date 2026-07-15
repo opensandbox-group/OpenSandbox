@@ -80,6 +80,70 @@ def _infer_exit_code(execution: Execution) -> int | None:
     return None
 
 
+# Creation-parameter fields execd may echo back in GET /v1/isolated/session/{id}.
+# Older execd builds omit them; when absent we leave the corresponding field as
+# None so the returned handle/state remains usable via session_id for
+# run/get/delete/files.
+#
+# NOTE: ``idle_timeout_seconds`` uses ``is not None`` (not falsy) checks
+# because 0 is a valid, meaningful configuration value ("no idle timeout").
+_ECHO_FIELDS = (
+    "profile",
+    "workspace",
+    "extra_writable",
+    "binds",
+    "share_net",
+    "env_passthrough",
+    "uid",
+    "gid",
+    "uid_mode",
+    "idle_timeout_seconds",
+)
+
+
+def _forward_echo_fields(state: dict, payload: dict) -> None:
+    """Copy creation-parameter echo fields from ``state`` into ``payload``.
+
+    Only fields present and non-null are forwarded; absent/null fields fall
+    back to the model defaults (``None``). ``0`` is preserved (e.g. for
+    ``idle_timeout_seconds``).
+    """
+    for key in _ECHO_FIELDS:
+        if key in state and state[key] is not None:
+            payload[key] = state[key]
+
+
+def _build_attach_info(session_id: str, state: dict) -> IsolatedSessionInfo:
+    """Build an :class:`IsolatedSessionInfo` from a ``GET`` session state payload.
+
+    Only fields actually returned by execd are forwarded; missing fields fall
+    back to the model defaults (``None``). ``session_id`` comes from the
+    caller because the endpoint identifies the session by path, not payload.
+    """
+    payload: dict = {"session_id": session_id}
+    created_at = state.get("created_at")
+    if created_at is not None:
+        payload["created_at"] = created_at
+    _forward_echo_fields(state, payload)
+    return IsolatedSessionInfo(**payload)
+
+
+def _build_session_state(state: dict) -> IsolatedSessionState:
+    """Build an :class:`IsolatedSessionState` from a ``GET`` session state payload.
+
+    Preserves the required ``status`` field and the runtime timestamps
+    (``created_at``, ``last_run_at``, ``idle_remaining_seconds``), and
+    forwards the same creation-parameter echo fields as
+    :func:`_build_attach_info` when execd includes them.
+    """
+    payload: dict = {"status": state["status"]}
+    for key in ("created_at", "last_run_at", "idle_remaining_seconds"):
+        if key in state and state[key] is not None:
+            payload[key] = state[key]
+    _forward_echo_fields(state, payload)
+    return IsolatedSessionState(**payload)
+
+
 class IsolationSessionHandle(IsolationSession):
     """Async handle to a single isolated session."""
 
@@ -201,6 +265,23 @@ class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
+    async def attach(self, session_id: str) -> IsolationSessionHandle:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        try:
+            url = self._get_url(self.SESSION_PATH.format(session_id=session_id))
+            response = await self._httpx_client.get(url)
+            if response.status_code != 200:
+                raise SandboxApiException(
+                    message=f"attach isolated session failed. Status: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
+            info = _build_attach_info(session_id, response.json())
+            return IsolationSessionHandle(info, self)
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
     async def _get(self, session_id: str) -> IsolatedSessionState:
         if not (session_id and session_id.strip()):
             raise InvalidArgumentException("session_id cannot be empty")
@@ -213,8 +294,7 @@ class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
-            data = response.json()
-            return IsolatedSessionState(**data)
+            return _build_session_state(response.json())
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 

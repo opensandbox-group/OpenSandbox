@@ -143,6 +143,199 @@ func TestGetIsolatedSession_Found(t *testing.T) {
 	runner.DeleteIsolatedSession(id)
 }
 
+// TestGetIsolatedSession_ReturnsCreationParams verifies GetIsolatedSession
+// echoes back the parameters the session was created with, so a
+// stateless client (that only holds the sessionId) can rebuild a session
+// handle without needing to have retained the original create request.
+func TestGetIsolatedSession_ReturnsCreationParams(t *testing.T) {
+	runner := newTestRunner(t)
+
+	// Extend the runner's writable allowlist so a bind can be validated.
+	bindSrc := filepath.Join(t.TempDir(), "bind-src")
+	if err := os.MkdirAll(bindSrc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extraDir := filepath.Join(t.TempDir(), "extra")
+	if err := os.MkdirAll(extraDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner.allowedWritable = []string{bindSrc, extraDir}
+
+	shareNet := true
+	uid := uint32(1234)
+	gid := uint32(5678)
+
+	opts := &IsolatedSessionOptions{
+		Profile:            "balanced",
+		WorkspacePath:      filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode:      "overlay",
+		ExtraWritable:      []string{extraDir},
+		Binds:              []isolation.BindMount{{Source: bindSrc, Dest: "/mnt/in", ReadOnly: true}},
+		ShareNet:           &shareNet,
+		EnvPassthroughMode: "allow",
+		EnvPassthroughKeys: []string{"HOME", "PATH"},
+		Uid:                &uid,
+		Gid:                &gid,
+		UidMode:            "setpriv",
+		IdleTimeoutSeconds: 900,
+	}
+
+	id, err := runner.CreateIsolatedSession(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	state, err := runner.GetIsolatedSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if state.Profile != "balanced" {
+		t.Errorf("Profile = %q, want balanced", state.Profile)
+	}
+	if state.WorkspacePath == "" {
+		t.Error("WorkspacePath is empty")
+	}
+	if state.WorkspaceMode != "overlay" {
+		t.Errorf("WorkspaceMode = %q, want overlay", state.WorkspaceMode)
+	}
+	if len(state.ExtraWritable) != 1 {
+		t.Errorf("ExtraWritable len = %d, want 1", len(state.ExtraWritable))
+	}
+	if len(state.Binds) != 1 || state.Binds[0].Dest != "/mnt/in" || !state.Binds[0].ReadOnly {
+		t.Errorf("Binds = %+v, want [{Source:%s Dest:/mnt/in ReadOnly:true}]", state.Binds, bindSrc)
+	}
+	if state.ShareNet == nil || !*state.ShareNet {
+		t.Error("ShareNet not echoed")
+	}
+	if state.EnvPassthroughMode != "allow" {
+		t.Errorf("EnvPassthroughMode = %q, want allow", state.EnvPassthroughMode)
+	}
+	if len(state.EnvPassthroughKeys) != 2 {
+		t.Errorf("EnvPassthroughKeys len = %d, want 2", len(state.EnvPassthroughKeys))
+	}
+	if state.Uid == nil || *state.Uid != 1234 {
+		t.Errorf("Uid = %v, want 1234", state.Uid)
+	}
+	if state.Gid == nil || *state.Gid != 5678 {
+		t.Errorf("Gid = %v, want 5678", state.Gid)
+	}
+	if state.UidMode != "setpriv" {
+		t.Errorf("UidMode = %q, want setpriv", state.UidMode)
+	}
+	if state.IdleTimeoutSeconds != 900 {
+		t.Errorf("IdleTimeoutSeconds = %d, want 900", state.IdleTimeoutSeconds)
+	}
+	if state.IdleRemainingSeconds == nil {
+		t.Error("IdleRemainingSeconds nil despite IdleTimeoutSeconds > 0")
+	}
+}
+
+// TestGetIsolatedSession_EchoesEffectiveDefaults verifies that a session
+// created with omitted Profile/WorkspaceMode/EnvPassthroughMode/UidMode
+// is echoed back with the effective values execd actually applied, not
+// the empty strings the caller sent. This lets a stateless client
+// (attaching by sessionId only) rebuild handle info that matches the
+// running configuration.
+func TestGetIsolatedSession_EchoesEffectiveDefaults(t *testing.T) {
+	runner := newTestRunner(t)
+
+	// Bare-minimum create request: only workspace path is required.
+	opts := &IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		// Profile / WorkspaceMode / EnvPassthroughMode / UidMode all omitted.
+	}
+
+	id, err := runner.CreateIsolatedSession(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	state, err := runner.GetIsolatedSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Each of these must be the effective value, not "".
+	if state.Profile != "strict" {
+		t.Errorf("Profile = %q, want strict (execd default)", state.Profile)
+	}
+	if state.WorkspaceMode != "overlay" {
+		t.Errorf("WorkspaceMode = %q, want overlay (execd default)", state.WorkspaceMode)
+	}
+	if state.EnvPassthroughMode != "deny" {
+		t.Errorf("EnvPassthroughMode = %q, want deny (execd default)", state.EnvPassthroughMode)
+	}
+	if state.UidMode != "setpriv" {
+		t.Errorf("UidMode = %q, want setpriv (execd default)", state.UidMode)
+	}
+}
+
+// TestNormalize_EnvPassthroughEmptyModeDropsKeys verifies that a create
+// request supplying env_passthrough.keys without an explicit mode has
+// its keys dropped during normalization. Rationale: the pre-normalize
+// behavior of start() forwarded EnvSpec{Mode: deny, Keys: nil} to
+// bwrap on empty mode, which bwrapEnvSegment interprets as "apply the
+// built-in secret blacklist". Normalizing mode to "deny" while
+// preserving keys would flip bwrap to "unset only those keys, skip
+// the blacklist" — a silent security regression. Keys must be
+// dropped so the effective config (blacklist wins) is echoed and run
+// unchanged.
+func TestNormalize_EnvPassthroughEmptyModeDropsKeys(t *testing.T) {
+	runner := newTestRunner(t)
+
+	opts := &IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		// mode omitted, but caller supplied keys — must be dropped
+		// so the built-in secret blacklist is not silently bypassed.
+		EnvPassthroughMode: "",
+		EnvPassthroughKeys: []string{"USER_TOKEN", "AWS_SECRET_ACCESS_KEY"},
+	}
+
+	id, err := runner.CreateIsolatedSession(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	state, err := runner.GetIsolatedSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if state.EnvPassthroughMode != "deny" {
+		t.Errorf("EnvPassthroughMode = %q, want deny", state.EnvPassthroughMode)
+	}
+	if len(state.EnvPassthroughKeys) != 0 {
+		t.Errorf("EnvPassthroughKeys should be dropped when mode was omitted, got %v", state.EnvPassthroughKeys)
+	}
+
+	// Caller-supplied keys are preserved when mode is explicit.
+	opts2 := &IsolatedSessionOptions{
+		WorkspacePath:      filepath.Join(t.TempDir(), "ws2"),
+		EnvPassthroughMode: "deny",
+		EnvPassthroughKeys: []string{"USER_TOKEN"},
+	}
+	id2, err := runner.CreateIsolatedSession(opts2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id2)
+
+	state2, err := runner.GetIsolatedSession(id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state2.EnvPassthroughMode != "deny" {
+		t.Errorf("explicit deny: mode = %q, want deny", state2.EnvPassthroughMode)
+	}
+	if len(state2.EnvPassthroughKeys) != 1 || state2.EnvPassthroughKeys[0] != "USER_TOKEN" {
+		t.Errorf("explicit deny should preserve keys, got %v", state2.EnvPassthroughKeys)
+	}
+}
+
 func TestDeleteIsolatedSession_NotFound(t *testing.T) {
 	runner := newTestRunner(t)
 	err := runner.DeleteIsolatedSession("nonexistent")

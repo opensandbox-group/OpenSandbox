@@ -370,6 +370,29 @@ public class ModelsTests
     }
 
     [Fact]
+    public void CreateIsolatedSessionRequest_ShouldRoundTripUidAboveInt32Max()
+    {
+        // Spec declares uid/gid as uint32; values above Int32.MaxValue must not fail.
+        const long uidAboveInt32 = 3_000_000_000L;
+        const long gidAboveInt32 = 4_000_000_000L;
+        var request = new CreateIsolatedSessionRequest(
+            Workspace: new IsolatedWorkspaceSpec("/workspace"),
+            Uid: uidAboveInt32,
+            Gid: gidAboveInt32
+        );
+
+        var json = JsonSerializer.Serialize(request);
+        var restored = JsonSerializer.Deserialize<CreateIsolatedSessionRequest>(json);
+
+        restored.Should().NotBeNull();
+        restored!.Uid.Should().Be(uidAboveInt32);
+        restored.Gid.Should().Be(gidAboveInt32);
+        using var doc = JsonDocument.Parse(json);
+        doc.RootElement.GetProperty("uid").GetInt64().Should().Be(uidAboveInt32);
+        doc.RootElement.GetProperty("gid").GetInt64().Should().Be(gidAboveInt32);
+    }
+
+    [Fact]
     public void CreateSessionOptions_ShouldStoreWorkingDirectory()
     {
         var options = new CreateSessionOptions
