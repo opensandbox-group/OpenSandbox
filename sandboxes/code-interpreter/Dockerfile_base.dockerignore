@@ -1,0 +1,5 @@
+**
+!Dockerfile_base
+!scripts/code-interpreter-env.sh
+!sandboxes/code-interpreter/Dockerfile_base
+!sandboxes/code-interpreter/scripts/code-interpreter-env.sh

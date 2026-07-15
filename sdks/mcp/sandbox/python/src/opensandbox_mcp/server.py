@@ -25,6 +25,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.models.execd import Execution, RunCommandOpts
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
+    ContentReplaceResult,
     EntryInfo,
     MoveEntry,
     SearchEntry,
@@ -680,7 +681,7 @@ def register_tools(
         entries: list[ContentReplaceEntry],
         *,
         connect_if_missing: bool = False,
-    ) -> StatusResponse:
+    ) -> list[ContentReplaceResult]:
         """Replace content inside files.
 
         Parameters:
@@ -689,7 +690,7 @@ def register_tools(
             connect_if_missing: Connect if sandbox not in local registry.
 
         Returns:
-            {"status": "updated"} when successful.
+            List of replacement results with counts per file.
         """
         sandbox = await _get_or_connect_sandbox(
             sandbox_id,
@@ -699,8 +700,7 @@ def register_tools(
             ContentReplaceEntry(**entry.model_dump(exclude_none=True))
             for entry in entries
         ]
-        await sandbox.files.replace_contents(replace_entries)
-        return StatusResponse(status="updated")
+        return await sandbox.files.replace_contents_detailed(replace_entries)
 
     @tool()
     async def sandbox_get_endpoint(

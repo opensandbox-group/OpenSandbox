@@ -32,8 +32,3 @@ func NewAuth() *Auth {
 func (a *Auth) IsValid() bool {
 	return a.Token != "" || (a.Username != "" && a.Password != "")
 }
-
-// GetAuthType returns token/basic/none.
-func (a *Auth) GetAuthType() string {
-	return a.Validate()
-}

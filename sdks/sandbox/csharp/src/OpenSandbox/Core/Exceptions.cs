@@ -86,18 +86,41 @@ public class SandboxException : Exception
     public SandboxError Error { get; }
 
     /// <summary>
+    /// Gets the request ID from the server response when available.
+    /// </summary>
+    public string? RequestId { get; }
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="SandboxException"/> class.
+    /// Kept for binary compatibility with previous SDK versions.
     /// </summary>
     /// <param name="message">The error message.</param>
     /// <param name="innerException">The inner exception.</param>
     /// <param name="error">The structured error information.</param>
     public SandboxException(
+        string? message,
+        Exception? innerException,
+        SandboxError? error)
+        : this(message, innerException, error, null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="SandboxException"/> class.
+    /// </summary>
+    /// <param name="message">The error message.</param>
+    /// <param name="innerException">The inner exception.</param>
+    /// <param name="error">The structured error information.</param>
+    /// <param name="requestId">The request ID.</param>
+    public SandboxException(
         string? message = null,
         Exception? innerException = null,
-        SandboxError? error = null)
+        SandboxError? error = null,
+        string? requestId = null)
         : base(message ?? error?.Message, innerException)
     {
         Error = error ?? new SandboxError(SandboxErrorCodes.InternalUnknownError, message);
+        RequestId = requestId;
     }
 }
 
@@ -112,9 +135,10 @@ public class SandboxApiException : SandboxException
     public int? StatusCode { get; }
 
     /// <summary>
-    /// Gets the request ID from the server response.
+    /// Gets the request ID from the server response when available.
+    /// Kept on the derived type for binary compatibility with older releases.
     /// </summary>
-    public string? RequestId { get; }
+    public new string? RequestId => base.RequestId;
 
     /// <summary>
     /// Gets the raw response body.
@@ -137,10 +161,9 @@ public class SandboxApiException : SandboxException
         object? rawBody = null,
         Exception? innerException = null,
         SandboxError? error = null)
-        : base(message, innerException, error ?? new SandboxError(SandboxErrorCodes.UnexpectedResponse, message))
+        : base(message, innerException, error ?? new SandboxError(SandboxErrorCodes.UnexpectedResponse, message), requestId)
     {
         StatusCode = statusCode;
-        RequestId = requestId;
         RawBody = rawBody;
     }
 }

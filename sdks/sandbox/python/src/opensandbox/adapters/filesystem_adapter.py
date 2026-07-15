@@ -22,10 +22,11 @@ This adapter handles file operations within sandboxes using the auto-generated A
 
 import json
 import logging
+import os
+import time
 from collections.abc import AsyncIterator
 from io import IOBase, TextIOBase
 from typing import TypedDict
-from urllib.parse import quote
 
 import httpx
 
@@ -35,11 +36,16 @@ from opensandbox.adapters.converter.exception_converter import (
 from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
 )
-from opensandbox.adapters.converter.response_handler import handle_api_error
+from opensandbox.adapters.converter.response_handler import (
+    extract_request_id,
+    handle_api_error,
+)
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
+    ContentReplaceResult,
+    DirectoryListEntry,
     EntryInfo,
     MoveEntry,
     SearchEntry,
@@ -51,9 +57,23 @@ from opensandbox.services.filesystem import Filesystem
 
 logger = logging.getLogger(__name__)
 
+
+def _multipart_header_filename(filename: str) -> str:
+    return (
+        filename.replace("\\", "\\\\")
+        .replace('"', r'\"')
+        .replace("\r", "_")
+        .replace("\n", "_")
+    )
+
+
+def _rewind_seekable_stream(stream: IOBase) -> None:
+    if not stream.seekable():
+        return
+    stream.seek(0)
 class _DownloadRequest(TypedDict):
     url: str
-    params: dict[str, str] | None
+    params: dict[str, str]
     headers: dict[str, str]
 
 
@@ -131,9 +151,11 @@ class FilesystemAdapter(Filesystem):
         *,
         encoding: str = "utf-8",
         range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> str:
         """Read file content as string via HTTP API."""
-        content = await self.read_bytes(path, range_header=range_header)
+        content = await self.read_bytes(path, range_header=range_header, offset=offset, limit=limit)
         return content.decode(encoding)
 
     async def read_bytes(
@@ -141,12 +163,19 @@ class FilesystemAdapter(Filesystem):
         path: str,
         *,
         range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> bytes:
-        """Read file content as bytes with support for range requests.
+        """Read file content as bytes with support for range and line-based requests.
 
         Args:
             path: Path to the file to read
-            range_header: Optional range header for partial content requests
+            range_header: Optional range header for partial content requests.
+                Mutually exclusive with offset/limit.
+            offset: Starting line number (1-based) for line-based reading.
+                Mutually exclusive with range_header.
+            limit: Number of lines to return for line-based reading.
+                Mutually exclusive with range_header.
 
         Returns:
             File content as bytes
@@ -156,20 +185,14 @@ class FilesystemAdapter(Filesystem):
         """
         logger.debug(f"Reading file as bytes: {path}")
         try:
-            request_data = self._build_download_request(path, range_header)
+            request_data = self._build_download_request(path, range_header, offset=offset, limit=limit)
             client = await self._get_httpx_client()
 
-            if request_data["params"] is None:
-                response = await client.get(
-                    request_data["url"],
-                    headers=request_data["headers"],
-                )
-            else:
-                response = await client.get(
-                    request_data["url"],
-                    headers=request_data["headers"],
-                    params=request_data["params"],
-                )
+            response = await client.get(
+                request_data["url"],
+                headers=request_data["headers"],
+                params=request_data["params"],
+            )
             response.raise_for_status()
             return response.content
         except Exception as e:
@@ -182,26 +205,25 @@ class FilesystemAdapter(Filesystem):
             *,
             chunk_size: int = 64 * 1024,
             range_header: str | None = None,
+            offset: int | None = None,
+            limit: int | None = None,
     ) -> AsyncIterator[bytes]:
         """Stream file content as bytes chunks via HTTP (true streaming)."""
         logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
         try:
-            request_data = self._build_download_request(path, range_header)
+            request_data = self._build_download_request(path, range_header, offset=offset, limit=limit)
             client = await self._get_httpx_client()
 
             url = request_data["url"]
             params = request_data["params"]
             headers = request_data["headers"]
 
-            if params is None:
-                request = client.build_request("GET", url, headers=headers)
-            else:
-                request = client.build_request(
-                    "GET",
-                    url,
-                    headers=headers,
-                    params=params,
-                )
+            request = client.build_request(
+                "GET",
+                url,
+                headers=headers,
+                params=params,
+            )
 
             response = await client.send(request, stream=True)
 
@@ -214,6 +236,7 @@ class FilesystemAdapter(Filesystem):
                 raise SandboxApiException(
                     f"Failed to stream file {path}: {response.status_code}",
                     status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
                 )
             return response.aiter_bytes(chunk_size=chunk_size)
         except Exception as e:
@@ -223,7 +246,9 @@ class FilesystemAdapter(Filesystem):
     async def write_files(self, entries: list[WriteEntry]) -> None:
         """Write multiple files in a single operation using multipart upload.
 
-        Aligned with Kotlin SDK implementation.
+        Uses chunked transfer encoding for direct execd access to bypass
+        ingress proxy body size limits. Uses Content-Length when going
+        through the server proxy, which does not support chunked multipart.
         """
         if not entries:
             return
@@ -232,8 +257,88 @@ class FilesystemAdapter(Filesystem):
 
         try:
             client = await self._get_httpx_client()
-            multipart_parts = []
+            url = self._get_execd_url(self.FILESYSTEM_UPLOAD_PATH)
 
+            if self.connection_config.use_server_proxy:
+                response = await self._write_files_with_content_length(
+                    url, client, entries
+                )
+            else:
+                response = await self._write_files_chunked(url, client, entries)
+
+            response.raise_for_status()
+        except Exception as e:
+            logger.error(f"Failed to write {len(entries)} files", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def _write_files_with_content_length(
+        self,
+        url: str,
+        client: httpx.AsyncClient,
+        entries: list[WriteEntry],
+    ) -> httpx.Response:
+        """Upload via httpx ``files=`` parameter with Content-Length.
+
+        Used when going through the server proxy, which requires Content-Length
+        for multipart requests.
+        """
+        multipart_parts = []
+        for entry in entries:
+            if not entry.path:
+                raise InvalidArgumentException("File path cannot be null")
+            if entry.data is None:
+                raise InvalidArgumentException("File data cannot be null")
+
+            metadata = {
+                "path": entry.path,
+                "owner": entry.owner,
+                "group": entry.group,
+                "mode": entry.mode,
+            }
+            metadata_json = json.dumps(metadata)
+            multipart_parts.append(
+                ("metadata", ("metadata", metadata_json, "application/json"))
+            )
+
+            content: bytes | str | IOBase
+            content_type: str
+
+            if isinstance(entry.data, bytes):
+                content = entry.data
+                content_type = "application/octet-stream"
+            elif isinstance(entry.data, str):
+                encoding = entry.encoding or "utf-8"
+                content = entry.data.encode(encoding)
+                content_type = f"text/plain; charset={encoding}"
+            elif isinstance(entry.data, IOBase):
+                if isinstance(entry.data, TextIOBase):
+                    raise InvalidArgumentException(
+                        "File stream must be binary (opened with 'rb'). Text streams are not supported."
+                    )
+                content = entry.data
+                content_type = "application/octet-stream"
+            else:
+                raise InvalidArgumentException(
+                    f"Unsupported file data type: {type(entry.data)}"
+                )
+
+            multipart_parts.append(("file", (entry.path, content, content_type)))
+
+        return await client.post(url, files=multipart_parts)
+
+    async def _write_files_chunked(
+        self,
+        url: str,
+        client: httpx.AsyncClient,
+        entries: list[WriteEntry],
+    ) -> httpx.Response:
+        """Upload via chunked transfer encoding.
+
+        Used for direct execd access to bypass ingress proxy body size limits.
+        """
+        boundary = f"opensandbox_{os.urandom(8).hex()}_{int(time.time())}"
+
+        async def _body() -> AsyncIterator[bytes]:
             for entry in entries:
                 if not entry.path:
                     raise InvalidArgumentException("File path cannot be null")
@@ -248,42 +353,63 @@ class FilesystemAdapter(Filesystem):
                 }
                 metadata_json = json.dumps(metadata)
 
-                multipart_parts.append(
-                    ("metadata", ("metadata", metadata_json, "application/json"))
-                )
-
                 content: bytes | str | IOBase
                 content_type: str
 
                 if isinstance(entry.data, bytes):
                     content = entry.data
                     content_type = "application/octet-stream"
-
                 elif isinstance(entry.data, str):
                     encoding = entry.encoding or "utf-8"
-                    content = entry.data
+                    content = entry.data.encode(encoding)
                     content_type = f"text/plain; charset={encoding}"
-
                 elif isinstance(entry.data, IOBase):
                     if isinstance(entry.data, TextIOBase):
                         raise InvalidArgumentException(
                             "File stream must be binary (opened with 'rb'). Text streams are not supported."
                         )
-                    else:
-                        content = entry.data
-                        content_type = "application/octet-stream"
+                    content = entry.data
+                    _rewind_seekable_stream(content)
+                    content_type = "application/octet-stream"
                 else:
                     raise InvalidArgumentException(
                         f"Unsupported file data type: {type(entry.data)}"
                     )
-                multipart_parts.append(("file", (entry.path, content, content_type)))
 
-            url = self._get_execd_url(self.FILESYSTEM_UPLOAD_PATH)
-            response = await client.post(url, files=multipart_parts)
-            response.raise_for_status()
-        except Exception as e:
-            logger.error(f"Failed to write {len(entries)} files", exc_info=e)
-            raise ExceptionConverter.to_sandbox_exception(e) from e
+                yield f"--{boundary}\r\n".encode()
+                yield b'Content-Disposition: form-data; name="metadata"; filename="metadata"\r\n'
+                yield b"Content-Type: application/json\r\n\r\n"
+                yield metadata_json.encode()
+                yield b"\r\n"
+
+                filename = _multipart_header_filename(os.path.basename(entry.path) or "file")
+                yield f"--{boundary}\r\n".encode()
+                yield (
+                    f'Content-Disposition: form-data; name="file"; '
+                    f'filename="{filename}"\r\n'
+                ).encode()
+                yield f"Content-Type: {content_type}\r\n\r\n".encode()
+
+                if isinstance(content, bytes):
+                    yield content
+                else:
+                    while True:
+                        chunk = content.read(64 * 1024)
+                        if not chunk:
+                            break
+                        if isinstance(chunk, str):
+                            yield chunk.encode()
+                        else:
+                            yield chunk
+                yield b"\r\n"
+
+            yield f"--{boundary}--\r\n".encode()
+
+        return await client.post(
+            url,
+            content=_body(),
+            headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+        )
 
     async def write_file(
         self,
@@ -409,15 +535,39 @@ class FilesystemAdapter(Filesystem):
     async def replace_contents(self, entries: list[ContentReplaceEntry]) -> None:
         """Replace file contents using auto-generated API."""
         try:
+            from json import JSONDecodeError
+
+            from opensandbox.api.execd.api.filesystem import replace_content
+
+            client = await self._get_client()
+            try:
+                response_obj = await replace_content.asyncio_detailed(
+                    client=client,
+                    body=FilesystemModelConverter.to_api_replace_content_body(entries),
+                )
+                handle_api_error(response_obj, "Replace contents")
+            except JSONDecodeError:
+                pass
+
+        except Exception as e:
+            logger.error("Failed to replace contents", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def replace_contents_detailed(self, entries: list[ContentReplaceEntry]) -> list[ContentReplaceResult]:
+        """Replace file contents and return per-file replacement counts."""
+        try:
             from opensandbox.api.execd.api.filesystem import replace_content
 
             client = await self._get_client()
             response_obj = await replace_content.asyncio_detailed(
                 client=client,
                 body=FilesystemModelConverter.to_api_replace_content_body(entries),
+                verbose=True,
             )
 
             handle_api_error(response_obj, "Replace contents")
+
+            return FilesystemModelConverter.to_replace_results(response_obj.parsed)
 
         except Exception as e:
             logger.error("Failed to replace contents", exc_info=e)
@@ -446,10 +596,42 @@ class FilesystemAdapter(Filesystem):
                 return FilesystemModelConverter.to_entry_info_list(parsed)
             raise SandboxApiException(
                 message="Search files failed: unexpected response type",
+                request_id=extract_request_id(getattr(response_obj, "headers", None)),
             )
 
         except Exception as e:
             logger.error("Failed to search files", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def list_directory(self, entry: DirectoryListEntry) -> list[EntryInfo]:
+        """List directory contents using auto-generated API."""
+        try:
+            from opensandbox.api.execd.api.filesystem import list_directory
+            from opensandbox.api.execd.models import FileInfo
+            from opensandbox.api.execd.types import UNSET
+
+            client = await self._get_client()
+            response_obj = await list_directory.asyncio_detailed(
+                client=client,
+                path=entry.path,
+                depth=entry.depth if entry.depth is not None else UNSET,
+            )
+
+            handle_api_error(response_obj, "List directory")
+
+            parsed = response_obj.parsed
+            if not parsed:
+                return []
+
+            if isinstance(parsed, list) and all(isinstance(x, FileInfo) for x in parsed):
+                return FilesystemModelConverter.to_entry_info_list(parsed)
+            raise SandboxApiException(
+                message="List directory failed: unexpected response type",
+                request_id=extract_request_id(getattr(response_obj, "headers", None)),
+            )
+
+        except Exception as e:
+            logger.error("Failed to list directory", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_file_info(self, paths: list[str]) -> dict[str, EntryInfo]:
@@ -475,26 +657,38 @@ class FilesystemAdapter(Filesystem):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def _build_download_request(
-            self, path: str, range_header: str | None = None
+            self,
+            path: str,
+            range_header: str | None = None,
+            *,
+            offset: int | None = None,
+            limit: int | None = None,
     ) -> _DownloadRequest:
         """Build HTTP request for file download operations.
 
         Args:
             path: File path to download
             range_header: Optional range header for partial downloads
+            offset: Starting line number (1-based) for line-based reading
+            limit: Number of lines to return for line-based reading
 
         Returns:
             Dictionary containing URL, parameters, and headers for the request
         """
-        encoded_path = quote(path, safe="/")
-        url = f"{self._get_execd_url(self.FILESYSTEM_DOWNLOAD_PATH)}?path={encoded_path}"
+        url = self._get_execd_url(self.FILESYSTEM_DOWNLOAD_PATH)
         headers: dict[str, str] = {}
+        params: dict[str, str] = {"path": path}
 
         if range_header:
             headers["Range"] = range_header
 
+        if offset is not None:
+            params["offset"] = str(offset)
+        if limit is not None:
+            params["limit"] = str(limit)
+
         return {
             "url": url,
-            "params": None,
+            "params": params,
             "headers": headers,
         }

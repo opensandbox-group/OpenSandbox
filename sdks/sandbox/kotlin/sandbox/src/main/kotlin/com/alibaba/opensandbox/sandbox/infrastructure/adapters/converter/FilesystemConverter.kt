@@ -44,6 +44,7 @@ object FilesystemConverter {
             createdAt = this.createdAt,
             modifiedAt = this.modifiedAt,
             size = this.propertySize,
+            type = this.type?.value,
         )
     }
 

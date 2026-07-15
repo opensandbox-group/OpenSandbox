@@ -19,6 +19,7 @@ using OpenSandbox.Models;
 using OpenSandbox.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Text.RegularExpressions;
 
 namespace OpenSandbox;
 
@@ -31,6 +32,8 @@ namespace OpenSandbox;
 /// </remarks>
 public sealed class Sandbox : IAsyncDisposable
 {
+    private static readonly Regex HostPathPattern = new("^(/|[A-Za-z]:[\\\\/])", RegexOptions.Compiled);
+
     /// <summary>
     /// Gets the sandbox ID.
     /// </summary>
@@ -61,6 +64,15 @@ public sealed class Sandbox : IAsyncDisposable
     /// </summary>
     public IExecdMetrics Metrics { get; }
 
+    public IIsolatedSessions Isolation { get; }
+
+    /// <summary>
+    /// Gets the sandbox-scoped Credential Vault service.
+    /// </summary>
+    public ICredentialVault CredentialVault { get; }
+
+    private readonly IEgress _egress;
+
     private readonly ISandboxes _sandboxes;
     private readonly IAdapterFactory _adapterFactory;
     private readonly string _lifecycleBaseUrl;
@@ -85,7 +97,10 @@ public sealed class Sandbox : IAsyncDisposable
         IExecdCommands commands,
         ISandboxFiles files,
         IExecdHealth health,
-        IExecdMetrics metrics)
+        IExecdMetrics metrics,
+        IIsolatedSessions isolated,
+        IEgress egress,
+        ICredentialVault? credentialVault)
     {
         Id = id;
         ConnectionConfig = connectionConfig;
@@ -100,6 +115,11 @@ public sealed class Sandbox : IAsyncDisposable
         Files = files;
         Health = health;
         Metrics = metrics;
+        Isolation = isolated;
+        _egress = egress;
+        CredentialVault = credentialVault
+            ?? egress as ICredentialVault
+            ?? new UnavailableCredentialVault();
     }
 
     /// <summary>
@@ -121,10 +141,22 @@ public sealed class Sandbox : IAsyncDisposable
         var logger = loggerFactory.CreateLogger("OpenSandbox.Sandbox");
         var lifecycleBaseUrl = connectionConfig.GetBaseUrl();
         var adapterFactory = options.AdapterFactory ?? DefaultAdapterFactory.Create();
+        if (string.IsNullOrWhiteSpace(options.Image) == string.IsNullOrWhiteSpace(options.SnapshotId))
+        {
+            throw new InvalidArgumentException("Exactly one of Image or SnapshotId must be specified.");
+        }
+        if (!string.IsNullOrWhiteSpace(options.SnapshotId) && options.Entrypoint is not null)
+        {
+            throw new InvalidArgumentException("Entrypoint must be omitted when SnapshotId is provided.");
+        }
+        ValidateHostPaths(options.Volumes);
         var httpClientProvider = new HttpClientProvider(connectionConfig, loggerFactory);
 
         ISandboxes sandboxes;
-        logger.LogInformation("Creating sandbox (image={Image}, useServerProxy={UseServerProxy})", options.Image, connectionConfig.UseServerProxy);
+        logger.LogInformation(
+            "Creating sandbox (startupSource={StartupSource}, useServerProxy={UseServerProxy})",
+            options.Image ?? options.SnapshotId,
+            connectionConfig.UseServerProxy);
         try
         {
             var lifecycleStack = adapterFactory.CreateLifecycleStack(new CreateLifecycleStackOptions
@@ -145,16 +177,24 @@ public sealed class Sandbox : IAsyncDisposable
 
         var request = new CreateSandboxRequest
         {
-            Image = new ImageSpec
-            {
-                Uri = options.Image,
-                Auth = options.ImageAuth
-            },
-            Entrypoint = options.Entrypoint ?? Constants.DefaultEntrypoint,
-            Timeout = options.TimeoutSeconds ?? Constants.DefaultTimeoutSeconds,
+            Image = string.IsNullOrWhiteSpace(options.Image)
+                ? null
+                : new ImageSpec
+                {
+                    Uri = options.Image!,
+                    Auth = options.ImageAuth
+                },
+            SnapshotId = options.SnapshotId,
+            Entrypoint = string.IsNullOrWhiteSpace(options.SnapshotId)
+                ? options.Entrypoint ?? Constants.DefaultEntrypoint
+                : null,
+            Timeout = options.ManualCleanup ? null : options.TimeoutSeconds ?? Constants.DefaultTimeoutSeconds,
             ResourceLimits = options.Resource ?? Constants.DefaultResourceLimits,
+            ResourceRequests = options.ResourceRequests,
             Env = options.Env,
+            SecureAccess = options.SecureAccess,
             Metadata = options.Metadata,
+            Platform = options.Platform,
             NetworkPolicy = options.NetworkPolicy != null
                 ? new NetworkPolicy
                 {
@@ -162,6 +202,7 @@ public sealed class Sandbox : IAsyncDisposable
                     Egress = options.NetworkPolicy.Egress
                 }
                 : null,
+            CredentialProxy = options.CredentialProxy,
             Volumes = options.Volumes,
             Extensions = options.Extensions?.ToDictionary(kv => kv.Key, kv => (object)kv.Value)
         };
@@ -181,12 +222,27 @@ public sealed class Sandbox : IAsyncDisposable
             var protocol = connectionConfig.Protocol == ConnectionProtocol.Https ? "https" : "http";
             var execdBaseUrl = $"{protocol}://{endpoint.EndpointAddress}";
             var execdHeaders = MergeHeaders(connectionConfig.Headers, endpoint.Headers);
+            var egressEndpoint = await sandboxes.GetSandboxEndpointAsync(
+                sandboxId,
+                Constants.DefaultEgressPort,
+                connectionConfig.UseServerProxy,
+                cancellationToken).ConfigureAwait(false);
+            var egressBaseUrl = $"{protocol}://{egressEndpoint.EndpointAddress}";
+            var egressHeaders = MergeHeaders(connectionConfig.Headers, egressEndpoint.Headers);
 
             var execdStack = adapterFactory.CreateExecdStack(new CreateExecdStackOptions
             {
                 ConnectionConfig = connectionConfig,
                 ExecdBaseUrl = execdBaseUrl,
                 ExecdHeaders = execdHeaders,
+                HttpClientProvider = httpClientProvider,
+                LoggerFactory = loggerFactory
+            });
+            var egressStack = adapterFactory.CreateEgressStack(new CreateEgressStackOptions
+            {
+                ConnectionConfig = connectionConfig,
+                EgressBaseUrl = egressBaseUrl,
+                EgressHeaders = egressHeaders,
                 HttpClientProvider = httpClientProvider,
                 LoggerFactory = loggerFactory
             });
@@ -203,7 +259,10 @@ public sealed class Sandbox : IAsyncDisposable
                 execdStack.Commands,
                 execdStack.Files,
                 execdStack.Health,
-                execdStack.Metrics);
+                execdStack.Metrics,
+                execdStack.Isolation,
+                egressStack.Egress,
+                egressStack.CredentialVault);
 
             if (!options.SkipHealthCheck)
             {
@@ -289,12 +348,27 @@ public sealed class Sandbox : IAsyncDisposable
             var protocol = connectionConfig.Protocol == ConnectionProtocol.Https ? "https" : "http";
             var execdBaseUrl = $"{protocol}://{endpoint.EndpointAddress}";
             var execdHeaders = MergeHeaders(connectionConfig.Headers, endpoint.Headers);
+            var egressEndpoint = await sandboxes.GetSandboxEndpointAsync(
+                options.SandboxId,
+                Constants.DefaultEgressPort,
+                connectionConfig.UseServerProxy,
+                cancellationToken).ConfigureAwait(false);
+            var egressBaseUrl = $"{protocol}://{egressEndpoint.EndpointAddress}";
+            var egressHeaders = MergeHeaders(connectionConfig.Headers, egressEndpoint.Headers);
 
             var execdStack = adapterFactory.CreateExecdStack(new CreateExecdStackOptions
             {
                 ConnectionConfig = connectionConfig,
                 ExecdBaseUrl = execdBaseUrl,
                 ExecdHeaders = execdHeaders,
+                HttpClientProvider = httpClientProvider,
+                LoggerFactory = loggerFactory
+            });
+            var egressStack = adapterFactory.CreateEgressStack(new CreateEgressStackOptions
+            {
+                ConnectionConfig = connectionConfig,
+                EgressBaseUrl = egressBaseUrl,
+                EgressHeaders = egressHeaders,
                 HttpClientProvider = httpClientProvider,
                 LoggerFactory = loggerFactory
             });
@@ -311,7 +385,10 @@ public sealed class Sandbox : IAsyncDisposable
                 execdStack.Commands,
                 execdStack.Files,
                 execdStack.Health,
-                execdStack.Metrics);
+                execdStack.Metrics,
+                execdStack.Isolation,
+                egressStack.Egress,
+                egressStack.CredentialVault);
 
             if (!options.SkipHealthCheck)
             {
@@ -386,6 +463,20 @@ public sealed class Sandbox : IAsyncDisposable
     }
 
     /// <summary>
+    /// Patches metadata for this sandbox.
+    /// </summary>
+    /// <param name="patch">Metadata merge patch. Non-null values add or replace keys; null values delete keys.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The current sandbox information after applying the patch.</returns>
+    /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
+    public Task<SandboxInfo> PatchMetadataAsync(
+        IReadOnlyDictionary<string, string?> patch,
+        CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.PatchSandboxMetadataAsync(Id, patch, cancellationToken);
+    }
+
+    /// <summary>
     /// Checks if the sandbox is healthy.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -421,6 +512,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task PauseAsync(CancellationToken cancellationToken = default)
     {
+        (_sandboxes as Adapters.SandboxesAdapter)?.InvalidateEndpointCache(Id);
         return _sandboxes.PauseSandboxAsync(Id, cancellationToken);
     }
 
@@ -461,6 +553,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task KillAsync(CancellationToken cancellationToken = default)
     {
+        (_sandboxes as Adapters.SandboxesAdapter)?.InvalidateEndpointCache(Id);
         return _sandboxes.DeleteSandboxAsync(Id, cancellationToken);
     }
 
@@ -483,6 +576,157 @@ public sealed class Sandbox : IAsyncDisposable
     }
 
     /// <summary>
+    /// Creates a persistent snapshot from this sandbox.
+    /// </summary>
+    public Task<SnapshotInfo> CreateSnapshotAsync(
+        string? name = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.CreateSnapshotAsync(
+            Id,
+            new CreateSnapshotRequest { Name = name },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets current egress policy for this sandbox.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The current egress policy.</returns>
+    public async Task<NetworkPolicy> GetEgressPolicyAsync(CancellationToken cancellationToken = default)
+    {
+        return await _egress.GetPolicyAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Patches egress rules for this sandbox using sidecar merge semantics.
+    ///
+    /// Incoming rules take priority over existing rules with the same target.
+    /// Existing rules for other targets remain unchanged. Within one patch payload,
+    /// the first rule for a target wins. The current defaultAction is preserved.
+    /// </summary>
+    /// <param name="rules">Patch egress rules payload.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public async Task PatchEgressRulesAsync(
+        IReadOnlyList<NetworkRule> rules,
+        CancellationToken cancellationToken = default)
+    {
+        await _egress.PatchRulesAsync(rules, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Deletes egress rules for this sandbox by target.
+    ///
+    /// Each entry is a FQDN or wildcard domain. Matching rules are removed
+    /// from the currently enforced policy. Targets not present in the policy
+    /// are silently ignored (idempotent). The current defaultAction is
+    /// preserved.
+    /// </summary>
+    /// <param name="targets">Target FQDNs or wildcard domains to remove.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public async Task DeleteEgressRulesAsync(
+        IReadOnlyList<string> targets,
+        CancellationToken cancellationToken = default)
+    {
+        await _egress.DeleteRulesAsync(targets, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Creates a sandbox-local Credential Vault.
+    /// </summary>
+    /// <param name="credentials">Credentials to create.</param>
+    /// <param name="bindings">Bindings to create.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized Credential Vault state.</returns>
+    public async Task<CredentialVaultState> CreateCredentialVaultAsync(
+        IReadOnlyList<Credential> credentials,
+        IReadOnlyList<CredentialBinding> bindings,
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.CreateAsync(credentials, bindings, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Gets sanitized Credential Vault state.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized Credential Vault state.</returns>
+    public async Task<CredentialVaultState> GetCredentialVaultAsync(CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.GetAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Atomically patches sandbox-local credentials and bindings.
+    /// </summary>
+    /// <param name="request">Patch request.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized Credential Vault state.</returns>
+    public async Task<CredentialVaultState> PatchCredentialVaultAsync(
+        CredentialVaultPatchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.PatchAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Deletes the sandbox-local Credential Vault.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public async Task DeleteCredentialVaultAsync(CancellationToken cancellationToken = default)
+    {
+        await CredentialVault.DeleteAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Lists sanitized credential metadata.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized credential metadata.</returns>
+    public async Task<IReadOnlyList<CredentialMetadata>> ListCredentialVaultCredentialsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.ListCredentialsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Gets sanitized metadata for one credential.
+    /// </summary>
+    /// <param name="name">Credential name.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized credential metadata.</returns>
+    public async Task<CredentialMetadata> GetCredentialVaultCredentialAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.GetCredentialAsync(name, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Lists sanitized binding metadata.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized binding metadata.</returns>
+    public async Task<IReadOnlyList<CredentialBindingMetadata>> ListCredentialVaultBindingsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.ListBindingsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Gets sanitized metadata for one binding.
+    /// </summary>
+    /// <param name="name">Binding name.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sanitized binding metadata.</returns>
+    public async Task<CredentialBindingMetadata> GetCredentialVaultBindingAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        return await CredentialVault.GetBindingAsync(name, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Gets the endpoint for a port.
     /// </summary>
     /// <param name="port">The port number.</param>
@@ -492,6 +736,19 @@ public sealed class Sandbox : IAsyncDisposable
     public Task<Endpoint> GetEndpointAsync(int port, CancellationToken cancellationToken = default)
     {
         return _sandboxes.GetSandboxEndpointAsync(Id, port, ConnectionConfig.UseServerProxy, cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets a signed endpoint for a port with an OSEP-0011 route token.
+    /// </summary>
+    /// <param name="port">The port number.</param>
+    /// <param name="expires">Unix epoch seconds for the signed route token expiry.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The endpoint information.</returns>
+    /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
+    public Task<Endpoint> GetSignedEndpointAsync(int port, long expires, CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.GetSignedSandboxEndpointAsync(Id, port, expires, ConnectionConfig.UseServerProxy, cancellationToken);
     }
 
     /// <summary>
@@ -587,7 +844,25 @@ public sealed class Sandbox : IAsyncDisposable
         return default;
     }
 
-    private static IReadOnlyDictionary<string, string> MergeHeaders(
+    private static void ValidateHostPaths(IEnumerable<Volume>? volumes)
+    {
+        if (volumes == null)
+        {
+            return;
+        }
+
+        foreach (var volume in volumes)
+        {
+            var hostPath = volume.Host?.Path;
+            if (hostPath != null && !HostPathPattern.IsMatch(hostPath))
+            {
+                throw new InvalidArgumentException(
+                    "Host path must be an absolute path starting with '/' or a Windows drive letter (e.g. 'C:\\' or 'D:/')");
+            }
+        }
+    }
+
+    internal static IReadOnlyDictionary<string, string> MergeHeaders(
         IReadOnlyDictionary<string, string> baseHeaders,
         IReadOnlyDictionary<string, string>? overrideHeaders)
     {
@@ -601,5 +876,46 @@ public sealed class Sandbox : IAsyncDisposable
         }
 
         return merged;
+    }
+
+    private sealed class UnavailableCredentialVault : ICredentialVault
+    {
+        private const string Message =
+            "Credential Vault is not available for this adapter factory. Provide EgressStack.CredentialVault to use Credential Vault with a custom adapter.";
+
+        public Task<CredentialVaultState> CreateAsync(
+            IReadOnlyList<Credential> credentials,
+            IReadOnlyList<CredentialBinding> bindings,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialVaultState>(CreateException());
+
+        public Task<CredentialVaultState> GetAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialVaultState>(CreateException());
+
+        public Task<CredentialVaultState> PatchAsync(
+            CredentialVaultPatchRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialVaultState>(CreateException());
+
+        public Task DeleteAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException(CreateException());
+
+        public Task<IReadOnlyList<CredentialMetadata>> ListCredentialsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<IReadOnlyList<CredentialMetadata>>(CreateException());
+
+        public Task<CredentialMetadata> GetCredentialAsync(
+            string name,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialMetadata>(CreateException());
+
+        public Task<IReadOnlyList<CredentialBindingMetadata>> ListBindingsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<IReadOnlyList<CredentialBindingMetadata>>(CreateException());
+
+        public Task<CredentialBindingMetadata> GetBindingAsync(
+            string name,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<CredentialBindingMetadata>(CreateException());
+
+        private static InvalidArgumentException CreateException() => new(Message);
     }
 }

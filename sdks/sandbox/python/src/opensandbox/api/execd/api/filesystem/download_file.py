@@ -29,6 +29,8 @@ from ...types import UNSET, File, Response, Unset
 def _get_kwargs(
     *,
     path: str,
+    offset: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -38,6 +40,10 @@ def _get_kwargs(
     params: dict[str, Any] = {}
 
     params["path"] = path
+
+    params["offset"] = offset
+
+    params["limit"] = limit
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -103,6 +109,8 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     path: str,
+    offset: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
 ) -> Response[ErrorResponse | File]:
     """Download file from sandbox
@@ -111,8 +119,14 @@ def sync_detailed(
     range requests for resumable downloads and partial content retrieval.
     Returns file as octet-stream with appropriate headers.
 
+    When offset/limit query parameters are provided, the endpoint performs
+    line-based reading and returns text/plain content instead. Line-based
+    parameters are mutually exclusive with the Range header.
+
     Args:
         path (str):
+        offset (int | Unset):
+        limit (int | Unset):
         range_ (str | Unset):
 
     Raises:
@@ -125,6 +139,8 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         path=path,
+        offset=offset,
+        limit=limit,
         range_=range_,
     )
 
@@ -139,6 +155,8 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     path: str,
+    offset: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
 ) -> ErrorResponse | File | None:
     """Download file from sandbox
@@ -147,8 +165,14 @@ def sync(
     range requests for resumable downloads and partial content retrieval.
     Returns file as octet-stream with appropriate headers.
 
+    When offset/limit query parameters are provided, the endpoint performs
+    line-based reading and returns text/plain content instead. Line-based
+    parameters are mutually exclusive with the Range header.
+
     Args:
         path (str):
+        offset (int | Unset):
+        limit (int | Unset):
         range_ (str | Unset):
 
     Raises:
@@ -162,6 +186,8 @@ def sync(
     return sync_detailed(
         client=client,
         path=path,
+        offset=offset,
+        limit=limit,
         range_=range_,
     ).parsed
 
@@ -170,6 +196,8 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     path: str,
+    offset: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
 ) -> Response[ErrorResponse | File]:
     """Download file from sandbox
@@ -178,8 +206,14 @@ async def asyncio_detailed(
     range requests for resumable downloads and partial content retrieval.
     Returns file as octet-stream with appropriate headers.
 
+    When offset/limit query parameters are provided, the endpoint performs
+    line-based reading and returns text/plain content instead. Line-based
+    parameters are mutually exclusive with the Range header.
+
     Args:
         path (str):
+        offset (int | Unset):
+        limit (int | Unset):
         range_ (str | Unset):
 
     Raises:
@@ -192,6 +226,8 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         path=path,
+        offset=offset,
+        limit=limit,
         range_=range_,
     )
 
@@ -204,6 +240,8 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     path: str,
+    offset: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
 ) -> ErrorResponse | File | None:
     """Download file from sandbox
@@ -212,8 +250,14 @@ async def asyncio(
     range requests for resumable downloads and partial content retrieval.
     Returns file as octet-stream with appropriate headers.
 
+    When offset/limit query parameters are provided, the endpoint performs
+    line-based reading and returns text/plain content instead. Line-based
+    parameters are mutually exclusive with the Range header.
+
     Args:
         path (str):
+        offset (int | Unset):
+        limit (int | Unset):
         range_ (str | Unset):
 
     Raises:
@@ -228,6 +272,8 @@ async def asyncio(
         await asyncio_detailed(
             client=client,
             path=path,
+            offset=offset,
+            limit=limit,
             range_=range_,
         )
     ).parsed

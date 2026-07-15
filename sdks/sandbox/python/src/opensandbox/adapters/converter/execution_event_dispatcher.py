@@ -80,7 +80,8 @@ class ExecutionEventDispatcher:
             timestamp=timestamp,
             is_error=False,
         )
-        self.execution.logs.add_stdout(message)
+        if not (self.handlers and self.handlers.skip_accumulation):
+            self.execution.logs.add_stdout(message)
         if self.handlers and self.handlers.on_stdout:
             await self.handlers.on_stdout(message)
 
@@ -91,7 +92,8 @@ class ExecutionEventDispatcher:
             timestamp=timestamp,
             is_error=True,
         )
-        self.execution.logs.add_stderr(message)
+        if not (self.handlers and self.handlers.skip_accumulation):
+            self.execution.logs.add_stderr(message)
         if self.handlers and self.handlers.on_stderr:
             await self.handlers.on_stderr(message)
 
@@ -125,5 +127,6 @@ class ExecutionEventDispatcher:
             timestamp=timestamp,
             execution_time_in_millis=event_node.execution_time_in_millis or 0,
         )
+        self.execution.complete = complete
         if self.handlers and self.handlers.on_execution_complete:
             await self.handlers.on_execution_complete(complete)

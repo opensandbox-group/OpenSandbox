@@ -1,0 +1,13 @@
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!LICENSE
+!README.md
+!opensandbox_server/**
+!server/Dockerfile
+!server/pyproject.toml
+!server/uv.lock
+!server/LICENSE
+!server/README.md
+!server/opensandbox_server/**

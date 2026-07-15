@@ -1,0 +1,154 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: sandboxsnapshots.sandbox.opensandbox.io
+spec:
+  group: sandbox.opensandbox.io
+  names:
+    kind: SandboxSnapshot
+    listKind: SandboxSnapshotList
+    plural: sandboxsnapshots
+    shortNames:
+    - sbxsnap
+    singular: sandboxsnapshot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .spec.sandboxName
+      name: SANDBOX
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SandboxSnapshotSpec defines the desired state of SandboxSnapshot.
+              Pure atomic capability: caller fills spec, Controller only reads spec.
+              Registry/snapshotPushSecret/snapshotType come from Controller Manager startup params.
+            properties:
+              sandboxName:
+                description: |-
+                  SandboxName is the name of the target BatchSandbox (same namespace as SandboxSnapshot).
+                  Controller uses this to find BatchSandbox -> find Pod -> dispatch commit Job.
+                type: string
+            required:
+            - sandboxName
+            type: object
+          status:
+            description: |-
+              SandboxSnapshotStatus defines the observed state of SandboxSnapshot.
+              Status is written by Controller, read-only for callers.
+            properties:
+              conditions:
+                description: Conditions records the readiness or failure of the snapshot.
+                items:
+                  description: SandboxSnapshotCondition represents a condition of
+                    a SandboxSnapshot.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time the condition
+                        transitioned.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable message about the condition.
+                      type: string
+                    reason:
+                      description: Reason is a brief reason for the condition.
+                      type: string
+                    status:
+                      description: Status is the condition status.
+                      enum:
+                      - "True"
+                      - "False"
+                      type: string
+                    type:
+                      description: Type is the condition type.
+                      enum:
+                      - Ready
+                      - Failed
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              containers:
+                description: Containers holds per-container snapshot results, filled
+                  after Succeed.
+                items:
+                  description: ContainerSnapshot records the snapshot result for a
+                    single container.
+                  properties:
+                    containerName:
+                      description: ContainerName is the name of the container.
+                      type: string
+                    imageDigest:
+                      description: ImageDigest is the digest of the pushed snapshot
+                        image.
+                      type: string
+                    imageUri:
+                      description: ImageURI is the snapshot image URI for this container.
+                      type: string
+                  required:
+                  - containerName
+                  - imageUri
+                  type: object
+                type: array
+              observedGeneration:
+                description: ObservedGeneration is the most recent spec generation
+                  observed by the Controller.
+                format: int64
+                type: integer
+              phase:
+                description: Phase indicates the current phase of the snapshot.
+                enum:
+                - Pending
+                - Committing
+                - Succeed
+                - Failed
+                type: string
+              sourceNodeName:
+                description: SourceNodeName is the node where the source Pod runs
+                  (for Job scheduling).
+                type: string
+              sourcePodName:
+                description: SourcePodName is the name of the source Pod (resolved
+                  by Controller).
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

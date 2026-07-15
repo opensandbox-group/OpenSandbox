@@ -23,13 +23,14 @@ authors = [
     { name = "OpenSandbox Team", email = "ninan.nn@alibaba-inc.com" }
 ]
 dependencies = [
-    "pytest>=7.0.0",
+    "pytest>=9.0.3",
     "pytest-asyncio>=0.21.0",
     "pytest-timeout>=2.1.0",
     "pytest-order>=1.2.0",
     "pydantic>=2.0.0",
     "opensandbox",
     "opensandbox-code-interpreter",
+    "redis>=5.0,<6.0",
 ]
 
 [dependency-groups]
@@ -41,6 +42,9 @@ dev = [
 [tool.uv]
 # This is a test runner project (no importable package); don't try to build/install it.
 package = false
+constraint-dependencies = [
+    "pyjwt>=2.13.0",
+]
 
 [tool.uv.sources]
 opensandbox = { path = "../../sdks/sandbox/python", editable = true }
@@ -58,7 +62,6 @@ python_functions = ["test_*"]
 addopts = [
     "-v",
     "-s",
-    "-x",
     "--tb=short",
     "--strict-markers",
     "--asyncio-mode=auto",

@@ -18,7 +18,7 @@
     <Copyright>Copyright 2026 Alibaba Group Holding Ltd.</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://open-sandbox.ai</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/alibaba/OpenSandbox.git</RepositoryUrl>
+    <RepositoryUrl>https://github.com/opensandbox-group/OpenSandbox.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>sandbox;container;docker;execution;opensandbox;alibaba</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>

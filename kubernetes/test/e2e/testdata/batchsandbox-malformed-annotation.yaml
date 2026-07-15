@@ -1,0 +1,10 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: {{.BatchSandboxName}}
+  namespace: {{.Namespace}}
+  annotations:
+    sandbox.opensandbox.io/alloc-status: "{invalid json missing closing brace"
+spec:
+  replicas: {{.Replicas}}
+  poolRef: {{.PoolName}}

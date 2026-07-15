@@ -58,12 +58,3 @@ tasks.withType<JavaCompile> {
         )
     }
 }
-
-tasks.withType<org.jetbrains.dokka.gradle.DokkaTask>().configureEach {
-    dokkaSourceSets {
-        named("main") {
-            moduleName.set("Sandbox")
-            includes.from("Module.md")
-        }
-    }
-}

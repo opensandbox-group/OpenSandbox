@@ -99,6 +99,24 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         await _client.DeleteAsync(pathWithQuery, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<SandboxFileInfo>> ListDirectoryAsync(
+        string path,
+        int? depth = null,
+        CancellationToken cancellationToken = default)
+    {
+        var queryParams = new Dictionary<string, string?>
+        {
+            ["path"] = path
+        };
+        if (depth.HasValue)
+        {
+            queryParams["depth"] = depth.Value.ToString();
+        }
+
+        var response = await _client.GetAsync<JsonElement>("/directories/list", queryParams, cancellationToken).ConfigureAwait(false);
+        return ParseSearchFilesResponse(response);
+    }
+
     public async Task WriteFilesAsync(
         IEnumerable<WriteEntry> entries,
         CancellationToken cancellationToken = default)
@@ -162,7 +180,7 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         ReadFileOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        var bytes = await ReadBytesAsync(path, new ReadBytesOptions { Range = options?.Range }, cancellationToken).ConfigureAwait(false);
+        var bytes = await ReadBytesAsync(path, new ReadBytesOptions { Range = options?.Range, Offset = options?.Offset, Limit = options?.Limit }, cancellationToken).ConfigureAwait(false);
         var encoding = GetEncoding(options?.Encoding ?? "utf-8");
         return encoding.GetString(bytes);
     }
@@ -184,6 +202,15 @@ internal sealed class FilesystemAdapter : ISandboxFiles
             ["path"] = path
         };
 
+        if (options?.Offset != null)
+        {
+            queryParams["offset"] = options.Offset.Value.ToString();
+        }
+        if (options?.Limit != null)
+        {
+            queryParams["limit"] = options.Limit.Value.ToString();
+        }
+
         return await _client.GetBytesAsync("/files/download", queryParams, headers, cancellationToken).ConfigureAwait(false);
     }
 
@@ -193,6 +220,14 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var url = $"{_baseUrl}/files/download?path={Uri.EscapeDataString(path)}";
+        if (options?.Offset != null)
+        {
+            url += $"&offset={options.Offset.Value}";
+        }
+        if (options?.Limit != null)
+        {
+            url += $"&limit={options.Limit.Value}";
+        }
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         foreach (var header in _headers)
@@ -268,6 +303,28 @@ internal sealed class FilesystemAdapter : ISandboxFiles
             });
 
         await _client.PostAsync("/files/replace", body, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<ContentReplaceResult>> ReplaceContentsDetailedAsync(
+        IEnumerable<ContentReplaceEntry> entries,
+        CancellationToken cancellationToken = default)
+    {
+        var body = entries.ToDictionary(
+            e => e.Path,
+            e => new ReplaceFileContentItem
+            {
+                Old = e.OldContent,
+                New = e.NewContent
+            });
+
+        var response = await _client.PostAsync<Dictionary<string, ReplaceFileContentResult>>(
+            "/files/replace?verbose=true", body, cancellationToken).ConfigureAwait(false);
+
+        return response.Select(kv => new ContentReplaceResult
+        {
+            Path = kv.Key,
+            ReplacedCount = kv.Value.ReplacedCount,
+        }).ToList();
     }
 
     public async Task SetPermissionsAsync(
@@ -359,6 +416,7 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         return new SandboxFileInfo
         {
             Path = element.GetProperty("path").GetString() ?? string.Empty,
+            Type = element.TryGetProperty("type", out var type) ? type.GetString() : null,
             Size = element.TryGetProperty("size", out var size) && size.ValueKind == JsonValueKind.Number
                 ? size.GetInt64()
                 : null,

@@ -39,5 +39,10 @@ class ExecutionHandlersSync(BaseModel):
     on_execution_complete: SyncOutputHandler | None = Field(default=None, alias="on_execution_complete")
     on_error: SyncOutputHandler | None = Field(default=None)
     on_init: SyncOutputHandler | None = Field(default=None)
+    skip_accumulation: bool = Field(
+        default=False,
+        description="When True, stdout/stderr messages are only delivered to handlers "
+        "without being accumulated in ExecutionLogs.",
+    )
 
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)

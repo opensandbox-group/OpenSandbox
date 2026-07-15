@@ -18,3 +18,4 @@ Shared constants for the Sandbox SDK.
 """
 
 DEFAULT_EXECD_PORT = 44772
+DEFAULT_EGRESS_PORT = 18080

@@ -13,6 +13,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# If EXECD_CLONE3_COMPAT is set (same accepted values as execd's pkg/clone3compat), re-exec this
+# script under AkihiroSuda/clone3-workaround so the rest of startup runs with clone3 -> ENOSYS.
+# See https://github.com/AkihiroSuda/clone3-workaround — binary is /usr/local/bin/clone3-workaround (amd64 image only).
+_execd_clone3_compat_normalized=$(
+	echo "${EXECD_CLONE3_COMPAT:-}" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+)
+case "${_execd_clone3_compat_normalized}" in
+"" | 0 | false | off | no) ;;
+1 | true | yes | on | reexec)
+	if [ -z "${_CODE_INTERPRETER_CLONE3_WRAPPED:-}" ]; then
+		_ci_script=${BASH_SOURCE[0]}
+		if command -v readlink >/dev/null 2>&1 && _rp=$(readlink -f "${_ci_script}" 2>/dev/null); then
+			_ci_script=${_rp}
+		fi
+		if [ -x /usr/local/bin/clone3-workaround ]; then
+			export _CODE_INTERPRETER_CLONE3_WRAPPED=1
+			exec /usr/local/bin/clone3-workaround /bin/bash "${_ci_script}" "$@"
+		else
+			echo "code-interpreter: EXECD_CLONE3_COMPAT is set but /usr/local/bin/clone3-workaround is missing (not installed for this architecture); continuing without wrapper" >&2
+		fi
+	fi
+	unset _ci_script _rp
+	;;
+*)
+	echo "code-interpreter: invalid EXECD_CLONE3_COMPAT=${EXECD_CLONE3_COMPAT:-} (use 1, true, yes, on, or reexec)" >&2
+	exit 1
+	;;
+esac
+unset _execd_clone3_compat_normalized
+
+if [ -n "${_CODE_INTERPRETER_CLONE3_WRAPPED:-}" ]; then
+	unset EXECD_CLONE3_COMPAT
+fi
+
 declare -a pids=()
 BASHRC_FILE=${BASHRC_FILE:-/root/.bashrc}
 
@@ -28,41 +62,41 @@ record_env_selection() {
 	tmp_file=$(mktemp)
 
 	if [ -f "$BASHRC_FILE" ]; then
-		grep -vE "^source /opt/opensandbox/code-interpreter-env.sh ${lang}(\\s|$)" "$BASHRC_FILE" >"$tmp_file" || true
+		grep -vE "^source /opt/code-interpreter/code-interpreter-env.sh ${lang}(\\s|$)" "$BASHRC_FILE" >"$tmp_file" || true
 	else
 		: >"$tmp_file"
 	fi
 
-	echo "source /opt/opensandbox/code-interpreter-env.sh ${lang} ${version}" >>"$tmp_file"
+	echo "source /opt/code-interpreter/code-interpreter-env.sh ${lang} ${version}" >>"$tmp_file"
 	mv "$tmp_file" "$BASHRC_FILE"
 }
 
 if [ -n "${PYTHON_VERSION:-}" ]; then
-	source /opt/opensandbox/code-interpreter-env.sh python "${PYTHON_VERSION}"
+	source /opt/code-interpreter/code-interpreter-env.sh python "${PYTHON_VERSION}"
 	record_env_selection python "${PYTHON_VERSION}"
 else
-	source /opt/opensandbox/code-interpreter-env.sh python
+	source /opt/code-interpreter/code-interpreter-env.sh python
 fi
 
 if [ -n "${JAVA_VERSION:-}" ]; then
-	source /opt/opensandbox/code-interpreter-env.sh java "${JAVA_VERSION}"
+	source /opt/code-interpreter/code-interpreter-env.sh java "${JAVA_VERSION}"
 	record_env_selection java "${JAVA_VERSION}"
 else
-	source /opt/opensandbox/code-interpreter-env.sh java
+	source /opt/code-interpreter/code-interpreter-env.sh java
 fi
 
 if [ -n "${NODE_VERSION:-}" ]; then
-	source /opt/opensandbox/code-interpreter-env.sh node "${NODE_VERSION}"
+	source /opt/code-interpreter/code-interpreter-env.sh node "${NODE_VERSION}"
 	record_env_selection node "${NODE_VERSION}"
 else
-	source /opt/opensandbox/code-interpreter-env.sh node
+	source /opt/code-interpreter/code-interpreter-env.sh node
 fi
 
 if [ -n "${GO_VERSION:-}" ]; then
-	source /opt/opensandbox/code-interpreter-env.sh go "${GO_VERSION}"
+	source /opt/code-interpreter/code-interpreter-env.sh go "${GO_VERSION}"
 	record_env_selection go "${GO_VERSION}"
 else
-	source /opt/opensandbox/code-interpreter-env.sh go
+	source /opt/code-interpreter/code-interpreter-env.sh go
 fi
 
 setup_python() {
@@ -78,11 +112,27 @@ setup_java() {
 	}
 }
 
+tslab_kernels_installed() {
+	local kernels
+	kernels=$(jupyter kernelspec list 2>/dev/null)
+	grep -Eq '^[[:space:]]+tslab[[:space:]]' <<<"$kernels" && grep -Eq '^[[:space:]]+jslab[[:space:]]' <<<"$kernels"
+}
+
+ensure_tslab_command() {
+	if command -v tslab >/dev/null 2>&1; then
+		return
+	fi
+
+	npm install -g tslab
+}
+
 # setup node
 setup_node() {
 	time {
-		npm install -g tslab
-		tslab install
+		ensure_tslab_command
+		if ! tslab_kernels_installed; then
+			tslab install
+		fi
 	}
 }
 
@@ -117,4 +167,4 @@ pids+=($!)
 setup_bash &
 pids+=($!)
 
-jupyter notebook --ip=127.0.0.1 --port="${JUPYTER_PORT:-44771}" --allow-root --no-browser --NotebookApp.token="${JUPYTER_TOKEN:-opensandboxcodeinterpreterjupyter}" >/opt/opensandbox/jupyter.log
+jupyter notebook --ip=127.0.0.1 --port="${JUPYTER_PORT:-44771}" --allow-root --no-browser --NotebookApp.token="${JUPYTER_TOKEN:-opensandboxcodeinterpreterjupyter}" >/opt/code-interpreter/jupyter.log

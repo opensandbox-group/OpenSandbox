@@ -22,6 +22,7 @@ API clients and handling SSE streaming for real-time code execution.
 
 import json
 import logging
+import time
 
 import httpx
 from opensandbox.adapters.converter.event_node import EventNode
@@ -32,6 +33,7 @@ from opensandbox.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcher,
 )
 from opensandbox.adapters.converter.response_handler import (
+    extract_request_id,
     handle_api_error,
     require_parsed,
 )
@@ -47,6 +49,22 @@ from code_interpreter.models.code import CodeContext, SupportedLanguage
 from code_interpreter.services.code import Codes
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_sse_event(event_dict: dict) -> dict:
+    if "type" in event_dict and "timestamp" in event_dict:
+        return event_dict
+    if "code" in event_dict and "message" in event_dict:
+        return {
+            "type": "error",
+            "timestamp": int(time.time() * 1000),
+            "error": {
+                "ename": str(event_dict["code"]),
+                "evalue": str(event_dict["message"]),
+                "traceback": [],
+            },
+        }
+    return event_dict
 
 
 class CodesAdapter(Codes):
@@ -88,6 +106,7 @@ class CodesAdapter(Codes):
         headers = {
             "User-Agent": self.connection_config.user_agent,
             **self.connection_config.headers,
+            **self.execd_endpoint.headers,
         }
 
         # Execd API does not require authentication
@@ -197,7 +216,9 @@ class CodesAdapter(Codes):
             )
             handle_api_error(response_obj, "List code contexts")
             parsed_list = require_parsed(response_obj, list, "List code contexts")
-            return [CodeExecutionConverter.from_api_code_context(c) for c in parsed_list]
+            return [
+                CodeExecutionConverter.from_api_code_context(c) for c in parsed_list
+            ]
         except Exception as e:
             logger.error("Failed to list contexts", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -250,7 +271,11 @@ class CodesAdapter(Codes):
             raise InvalidArgumentException("Code cannot be empty")
 
         try:
-            if context is not None and language is not None and context.language != language:
+            if (
+                context is not None
+                and language is not None
+                and context.language != language
+            ):
                 raise InvalidArgumentException(
                     f"language '{language}' must match context.language '{context.language}'"
                 )
@@ -280,13 +305,12 @@ class CodesAdapter(Codes):
                     await response.aread()
                     error_body = response.text
                     logger.error(
-                        "Failed to run code. Status: %s, Body: %s",
-                        response.status_code,
-                        error_body,
+                        f"Failed to run code. Status: {response.status_code}, Body: {error_body}"
                     )
                     raise SandboxApiException(
                         message=f"Failed to run code. Status code: {response.status_code}",
                         status_code=response.status_code,
+                        request_id=extract_request_id(response.headers),
                     )
 
                 dispatcher = ExecutionEventDispatcher(execution, handlers)
@@ -301,22 +325,20 @@ class CodesAdapter(Codes):
                         data = data[5:].strip()
 
                     try:
-                        event_dict = json.loads(data)
+                        event_dict = _normalize_sse_event(json.loads(data))
                         event_node = EventNode(**event_dict)
                         await dispatcher.dispatch(event_node)
                     except json.JSONDecodeError:
-                        logger.debug("Failed to parse SSE line: %s", line)
+                        logger.debug(f"Failed to parse SSE line: {line}")
                         continue
                     except Exception as e:
-                        logger.error("Error processing event: %s", data, exc_info=e)
+                        logger.error(f"Error processing event: {data}", exc_info=e)
                         continue
 
             return execution
 
         except Exception as e:
-            logger.error(
-                "Failed to run code (length: %s)", len(code), exc_info=e
-            )
+            logger.error(f"Failed to run code (length: {len(code)})", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def interrupt(self, execution_id: str) -> None:

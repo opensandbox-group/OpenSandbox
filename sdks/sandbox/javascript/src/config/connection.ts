@@ -50,6 +50,18 @@ export interface ConnectionConfigOptions {
    * Useful when the client SDK cannot access the created sandbox directly.
    */
   useServerProxy?: boolean;
+  /**
+   * TTL in milliseconds for cached endpoint entries. Default: 600000 (10 minutes).
+   */
+  endpointCacheTtlMs?: number;
+  /**
+   * Maximum number of cached endpoint entries. Default: 1024.
+   */
+  endpointCacheSize?: number;
+  /**
+   * Disable endpoint caching entirely.
+   */
+  endpointCacheDisabled?: boolean;
 }
 
 function isNodeRuntime(): boolean {
@@ -74,7 +86,11 @@ function readEnv(name: string): string | undefined {
 }
 
 function stripTrailingSlashes(s: string): string {
-  return s.replace(/\/+$/, "");
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === s.length ? s : s.slice(0, end);
 }
 
 function stripV1Suffix(s: string): string {
@@ -262,6 +278,9 @@ export class ConnectionConfig {
    * Use sandbox server as proxy for endpoint requests (default false).
    */
   readonly useServerProxy: boolean;
+  readonly endpointCacheTtlMs: number;
+  readonly endpointCacheSize: number;
+  readonly endpointCacheDisabled: boolean;
   private _closeTransport: () => Promise<void>;
   private _closePromise: Promise<void> | null = null;
   private _transportInitialized = false;
@@ -290,6 +309,9 @@ export class ConnectionConfig {
         : 30;
     this.debug = !!opts.debug;
     this.useServerProxy = !!opts.useServerProxy;
+    this.endpointCacheTtlMs = opts.endpointCacheTtlMs ?? 600_000;
+    this.endpointCacheSize = opts.endpointCacheSize ?? 1024;
+    this.endpointCacheDisabled = !!opts.endpointCacheDisabled;
 
     const headers: Record<string, string> = { ...(opts.headers ?? {}) };
     // Attach API key via header unless the user already provided one.
@@ -374,6 +396,9 @@ export class ConnectionConfig {
       requestTimeoutSeconds: this.requestTimeoutSeconds,
       debug: this.debug,
       useServerProxy: this.useServerProxy,
+      endpointCacheTtlMs: this.endpointCacheTtlMs,
+      endpointCacheSize: this.endpointCacheSize,
+      endpointCacheDisabled: this.endpointCacheDisabled,
     });
     clone.initializeTransport();
     return clone;

@@ -89,4 +89,45 @@ public interface IExecdCommands
         string executionId,
         long? cursor = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Creates a new bash session with optional working directory.
+    /// The session maintains shell state (working directory, environment) across multiple <see cref="RunInSessionAsync"/> calls.
+    /// </summary>
+    /// <param name="options">Optional options (e.g. initial working directory).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The session ID for use with <see cref="RunInSessionAsync"/> and <see cref="DeleteSessionAsync"/>.</returns>
+    /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
+    Task<string> CreateSessionAsync(
+        CreateSessionOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Runs a shell command in an existing bash session and returns the execution result (SSE consumed internally).
+    /// </summary>
+    /// <param name="sessionId">Session ID from <see cref="CreateSessionAsync"/>.</param>
+    /// <param name="command">Shell command to execute.</param>
+    /// <param name="options">Optional working directory and timeout for this run.</param>
+    /// <param name="handlers">Optional event handlers for real-time processing.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The execution result with stdout/stderr and completion status.</returns>
+    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="sessionId"/> or <paramref name="command"/> is null or empty.</exception>
+    /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
+    Task<Execution> RunInSessionAsync(
+        string sessionId,
+        string command,
+        RunInSessionOptions? options = null,
+        ExecutionHandlers? handlers = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes a bash session and releases resources.
+    /// </summary>
+    /// <param name="sessionId">Session ID to delete (from <see cref="CreateSessionAsync"/>).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="sessionId"/> is null or empty.</exception>
+    /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
+    Task DeleteSessionAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default);
 }

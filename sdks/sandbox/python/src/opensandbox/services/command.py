@@ -19,6 +19,7 @@ Command service interface.
 Protocol for sandbox command execution operations.
 """
 
+from datetime import timedelta
 from typing import Protocol
 
 from opensandbox.models.execd import (
@@ -110,5 +111,59 @@ class Commands(Protocol):
 
         Raises:
             SandboxException: if the operation fails
+        """
+        ...
+
+    async def create_session(self, *, working_directory: str | None = None) -> str:
+        """
+        Create a bash session. Returns session_id for run_in_session and delete_session.
+
+        Args:
+            working_directory: Optional working directory for the session.
+
+        Returns:
+            Session ID string.
+
+        Raises:
+            SandboxException: if the operation fails.
+        """
+        ...
+
+    async def run_in_session(
+        self,
+        session_id: str,
+        command: str,
+        *,
+        working_directory: str | None = None,
+        timeout: timedelta | None = None,
+        handlers: ExecutionHandlers | None = None,
+    ) -> Execution:
+        """
+        Run a shell command in an existing bash session (streams output via SSE).
+
+        Args:
+            session_id: Session ID from create_session.
+            command: Shell command to execute.
+            working_directory: Optional working directory override for this run.
+            timeout: Optional max execution time for this session run.
+            handlers: Optional async handlers for streaming events.
+
+        Returns:
+            Execution handle with logs and results.
+
+        Raises:
+            SandboxException: if the operation fails.
+        """
+        ...
+
+    async def delete_session(self, session_id: str) -> None:
+        """
+        Delete a bash session and release resources.
+
+        Args:
+            session_id: Session ID to delete.
+
+        Raises:
+            SandboxException: if the operation fails.
         """
         ...

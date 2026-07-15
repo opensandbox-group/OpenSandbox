@@ -11,6 +11,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 
 	scheduler "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/scheduler"
+	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
 // MockTaskScheduler is a mock of TaskScheduler interface.
@@ -34,6 +35,20 @@ func NewMockTaskScheduler(ctrl *gomock.Controller) *MockTaskScheduler {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockTaskScheduler) EXPECT() *MockTaskSchedulerMockRecorder {
 	return m.recorder
+}
+
+// AddTasks mocks base method.
+func (m *MockTaskScheduler) AddTasks(tasks []*api.Task) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddTasks", tasks)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddTasks indicates an expected call of AddTasks.
+func (mr *MockTaskSchedulerMockRecorder) AddTasks(tasks interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddTasks", reflect.TypeOf((*MockTaskScheduler)(nil).AddTasks), tasks)
 }
 
 // ListTask mocks base method.

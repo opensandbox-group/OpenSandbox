@@ -20,8 +20,11 @@
  * - They are intentionally stable and JS-friendly.
  */
 
+export type FileEntryType = "file" | "directory" | "symlink" | "other";
+
 export interface FileInfo extends Record<string, unknown> {
   path: string;
+  type?: FileEntryType;
   size?: number;
   /**
    * Last modification time.
@@ -84,6 +87,11 @@ export interface SearchEntry {
   pattern?: string;
 }
 
+export interface DirectoryListEntry {
+  path: string;
+  depth?: number;
+}
+
 export interface MoveEntry {
   src: string;
   dest: string;
@@ -93,6 +101,11 @@ export interface ContentReplaceEntry {
   path: string;
   oldContent: string;
   newContent: string;
+}
+
+export interface ContentReplaceResult {
+  path: string;
+  replacedCount: number;
 }
 
 export interface SetPermissionEntry {

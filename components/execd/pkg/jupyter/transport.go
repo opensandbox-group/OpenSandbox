@@ -14,15 +14,36 @@
 
 package jupyter
 
-import "net/http"
+import (
+	"net/http"
+	"sync"
+)
 
 type AuthTransport struct {
 	Token string
 	Base  http.RoundTripper
+
+	host   string
+	scheme string
+	mu     sync.Mutex
 }
 
 func (t *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	reqClone := req.Clone(req.Context())
-	reqClone.Header.Set("Authorization", "Token "+t.Token)
+	allowAuth := true
+	if reqClone.URL != nil {
+		t.mu.Lock()
+		if t.host == "" {
+			t.host = reqClone.URL.Host
+		}
+		if t.scheme == "" {
+			t.scheme = reqClone.URL.Scheme
+		}
+		allowAuth = reqClone.URL.Host == t.host && reqClone.URL.Scheme == t.scheme
+		t.mu.Unlock()
+	}
+	if allowAuth {
+		reqClone.Header.Set("Authorization", "Token "+t.Token)
+	}
 	return t.Base.RoundTrip(reqClone)
 }

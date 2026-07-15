@@ -1,0 +1,19 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: {{.PoolName}}
+  namespace: {{.Namespace}}
+spec:
+  template:
+    spec:
+      containers:
+      - name: sandbox-container
+        image: {{.SandboxImage}}{{ if .Command}}
+        command: {{.Command}}{{ end}}
+  capacitySpec:
+    bufferMax: {{.BufferMax}}
+    bufferMin: {{.BufferMin}}
+    poolMax: {{.PoolMax}}
+    poolMin: {{.PoolMin}}
+  recycleStrategy:
+    type: {{.RecycleType}}

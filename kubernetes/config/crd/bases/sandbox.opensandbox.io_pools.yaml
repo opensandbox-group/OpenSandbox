@@ -27,6 +27,13 @@ spec:
       jsonPath: .status.available
       name: AVAILABLE
       type: integer
+    - description: The number of nodes updated to the latest revision.
+      jsonPath: .status.updated
+      name: UPDATED
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -84,9 +91,53 @@ spec:
                 - poolMax
                 - poolMin
                 type: object
+              recycleStrategy:
+                description: |-
+                  RecycleStrategy controls how pods are handled when returned to the pool.
+                  Default is Delete, which deletes the pod.
+                  Restart strategy restarts the pod containers instead of deleting.
+                properties:
+                  type:
+                    default: Delete
+                    description: |-
+                      Type specifies the recycle policy type.
+                      Default is Delete.
+                    enum:
+                    - Delete
+                    - Restart
+                    - Noop
+                    type: string
+                type: object
+              scaleStrategy:
+                description: ScaleStrategy controls the scaling behavior.
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxUnavailable is the maximum number of pods that can be unavailable during scaling.
+                      Can be an absolute number (ex: 5) or a percentage of desired pods (ex: "20%").
+                      Defaults to 25%.
+                    x-kubernetes-int-or-string: true
+                type: object
               template:
                 description: Pod Template used to create pre-warmed nodes in the pool.
                 x-kubernetes-preserve-unknown-fields: true
+              updateStrategy:
+                description: UpdateStrategy controls how pool pods are updated when
+                  the template changes.
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxUnavailable is the maximum number of pods that can be unavailable during an update.
+                      Can be an absolute number (ex: 5) or a percentage of desired pods (ex: "20%").
+                      Defaults to 25%.
+                    x-kubernetes-int-or-string: true
+                type: object
             required:
             - capacitySpec
             type: object
@@ -114,6 +165,11 @@ spec:
                 type: string
               total:
                 description: Total is the total number of nodes in the pool.
+                format: int32
+                type: integer
+              updated:
+                description: Updated is the number of nodes that have been updated
+                  to the latest revision.
                 format: int32
                 type: integer
             required:

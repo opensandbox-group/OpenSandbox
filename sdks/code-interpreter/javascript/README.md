@@ -1,6 +1,5 @@
 # Alibaba Code Interpreter SDK for JavaScript/TypeScript
 
-English | [中文](README_zh.md)
 
 A TypeScript/JavaScript SDK for executing code in secure, isolated sandboxes. It provides a high-level API for running Python, Java, Go, TypeScript, and other languages safely, with support for code execution contexts.
 
@@ -49,8 +48,8 @@ const config = new ConnectionConfig({
 // 2. Create a Sandbox with the code-interpreter image + runtime versions
 const sandbox = await Sandbox.create({
   connectionConfig: config,
-  image: "opensandbox/code-interpreter:v1.0.1",
-  entrypoint: ["/opt/opensandbox/code-interpreter.sh"],
+  image: "opensandbox/code-interpreter:v1.1.0",
+  entrypoint: ["/opt/code-interpreter/code-interpreter.sh"],
   env: {
     PYTHON_VERSION: "3.11",
     JAVA_VERSION: "17",
@@ -99,8 +98,8 @@ You can specify the desired version of a programming language by setting the cor
 ```ts
 const sandbox = await Sandbox.create({
   connectionConfig: config,
-  image: "opensandbox/code-interpreter:v1.0.1",
-  entrypoint: ["/opt/opensandbox/code-interpreter.sh"],
+  image: "opensandbox/code-interpreter:v1.1.0",
+  entrypoint: ["/opt/code-interpreter/code-interpreter.sh"],
   env: {
     JAVA_VERSION: "17",
     GO_VERSION: "1.24",

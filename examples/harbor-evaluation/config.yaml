@@ -1,0 +1,33 @@
+# Harbor job configuration that runs an evaluation on OpenSandbox.
+#
+# Harbor docs: https://github.com/harbor-framework/harbor
+# Run from this directory with:  harbor run -c config.yaml
+
+jobs_dir: jobs/opensandbox       # where Harbor writes outputs (logs, artifacts, results)
+n_attempts: 1
+timeout_multiplier: 1.0
+n_concurrent_trials: 1
+quiet: false
+
+environment:
+  type: opensandbox
+  force_build: false             # OpenSandbox runs prebuilt images only
+  delete: true                   # delete each sandbox after its trial
+  kwargs:
+    # Connection settings. Leave `domain` / `api_key` unset to read them from the
+    # OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY environment variables, or set them
+    # explicitly here. `api_key: ""` is valid for a local / no-auth server.
+    # domain: localhost:8080
+    # api_key: ""
+    protocol: http               # use "https" for a TLS-terminated server
+    use_server_proxy: true       # route exec through the server when the client
+                                 # cannot reach the sandbox container directly
+    ready_timeout_sec: 300       # leave headroom for on-demand image pulls
+    request_timeout_sec: 120
+
+agents:
+  - name: oracle                 # runs the task's reference solution; swap for a
+                                 # real agent + model (see README) to evaluate it
+
+tasks:
+  - path: ./tasks/hello-opensandbox

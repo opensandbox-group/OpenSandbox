@@ -1,0 +1,36 @@
+name: Release Preflight
+
+on:
+  workflow_call:
+    inputs:
+      require_approval:
+        description: Require approval through the release environment
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  verify-source:
+    name: Verify release source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify release commit is reachable from main
+        run: scripts/release/verify-release-ref.sh
+
+  approve-release:
+    name: Approve release
+    if: ${{ inputs.require_approval }}
+    needs: verify-source
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Record approval
+        run: echo "Release environment approval granted."

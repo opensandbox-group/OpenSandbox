@@ -1,0 +1,29 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: {{.PoolName}}
+  namespace: {{.Namespace}}
+  {{- if .Labels }}
+  labels:
+    {{- range $key, $val := .Labels }}
+    {{ $key }}: "{{ $val }}"
+    {{- end }}
+  {{- end }}
+spec:
+  template:
+    spec:
+      containers:
+      - name: sandbox-container
+        image: {{.SandboxImage}}
+        command: ["sleep", "3600"]
+      {{- if .NodeSelector }}
+      nodeSelector:
+        {{- range $key, $val := .NodeSelector }}
+        {{ $key }}: "{{ $val }}"
+        {{- end }}
+      {{- end }}
+  capacitySpec:
+    bufferMax: {{.BufferMax}}
+    bufferMin: {{.BufferMin}}
+    poolMax: {{.PoolMax}}
+    poolMin: {{.PoolMin}}

@@ -1,0 +1,100 @@
+name: Detect Relevant Changes
+
+on:
+  workflow_call:
+    inputs:
+      area:
+        description: Test area whose existing path scope should be evaluated
+        required: true
+        type: string
+    outputs:
+      relevant:
+        description: Whether the caller's tests are relevant to this event
+        value: ${{ jobs.detect.outputs.relevant }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+      - name: Detect relevant changes
+        id: changes
+        uses: actions/github-script@v7
+        env:
+          AREA: ${{ inputs.area }}
+        with:
+          script: |
+            if (context.eventName !== "pull_request") {
+              core.info(`Running ${process.env.AREA} tests for ${context.eventName}.`);
+              core.setOutput("relevant", "true");
+              return;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const paths = files.flatMap((file) =>
+              [file.filename, file.previous_filename].filter(Boolean),
+            );
+
+            const workflowChanged = (path, caller) =>
+              path === ".github/workflows/detect-changes.yml" ||
+              path === `.github/workflows/${caller}`;
+
+            const matchers = {
+              server: (path) =>
+                workflowChanged(path, "server-test.yml") ||
+                path.startsWith("server/"),
+              kubernetes: (path) =>
+                workflowChanged(path, "kubernetes-test.yml") ||
+                (path.startsWith("kubernetes/") &&
+                  !path.startsWith("kubernetes/docs/")),
+              "real-e2e": (path) =>
+                workflowChanged(path, "real-e2e.yml") ||
+                path.startsWith("server/opensandbox_server/") ||
+                path.startsWith("components/execd/") ||
+                path.startsWith("components/egress/") ||
+                path.startsWith("sdks/") ||
+                path.startsWith("tests/"),
+              egress: (path) =>
+                workflowChanged(path, "egress-test.yaml.yml") ||
+                path.startsWith("components/egress/") ||
+                path.startsWith("components/internal/"),
+              "kubernetes-mini-e2e": (path) =>
+                workflowChanged(path, "kubernetes-nightly-build.yml") ||
+                path === "scripts/python-k8s-e2e.sh" ||
+                path === "scripts/python-k8s-e2e-ingress.sh" ||
+                path === "scripts/common/kubernetes-e2e.sh" ||
+                path.startsWith("kubernetes/charts/"),
+              ingress: (path) =>
+                workflowChanged(path, "ingress-test.yaml") ||
+                path.startsWith("components/ingress/") ||
+                path.startsWith("components/internal/"),
+              execd: (path) =>
+                workflowChanged(path, "execd-test.yml") ||
+                path.startsWith("components/execd/") ||
+                path.startsWith("components/internal/"),
+              sdk: (path) =>
+                workflowChanged(path, "sdk-tests.yml") ||
+                path.startsWith("cli/") ||
+                path.startsWith("sdks/") ||
+                path.startsWith("specs/"),
+            };
+
+            const area = process.env.AREA;
+            if (!Object.hasOwn(matchers, area)) {
+              core.setFailed(`Unknown test area: ${area}`);
+              return;
+            }
+
+            const relevant = paths.some(matchers[area]);
+            core.info(`${area}: relevant=${relevant}; files=${files.length}`);
+            core.setOutput("relevant", String(relevant));

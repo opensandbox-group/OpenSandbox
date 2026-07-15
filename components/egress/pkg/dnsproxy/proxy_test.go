@@ -20,69 +20,41 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
 
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
 
 func TestProxyUpdatePolicy(t *testing.T) {
-	proxy, err := New(nil, "127.0.0.1:15353")
-	if err != nil {
-		t.Fatalf("init proxy: %v", err)
-	}
+	proxy, err := New(nil, "127.0.0.1:15353", nil, nil)
+	require.NoError(t, err, "init proxy")
 
-	if proxy.CurrentPolicy() == nil {
-		t.Fatalf("expected default deny policy (non-nil)")
-	}
-	if got := proxy.CurrentPolicy().Evaluate("example.com."); got != policy.ActionDeny {
-		t.Fatalf("expected default deny, got %s", got)
-	}
+	require.NotNil(t, proxy.CurrentPolicy(), "expected default deny policy (non-nil)")
+	require.Equal(t, policy.ActionDeny, proxy.CurrentPolicy().Evaluate("example.com."), "expected default deny")
 
 	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
-	if err != nil {
-		t.Fatalf("parse policy: %v", err)
-	}
+	require.NoError(t, err, "parse policy")
 
 	proxy.UpdatePolicy(pol)
-	if proxy.CurrentPolicy() == nil {
-		t.Fatalf("expected policy after update")
-	}
-	if got := proxy.CurrentPolicy().Evaluate("example.com."); got != policy.ActionAllow {
-		t.Fatalf("policy evaluation mismatch, want allow got %s", got)
-	}
+	require.NotNil(t, proxy.CurrentPolicy(), "expected policy after update")
+	require.Equal(t, policy.ActionAllow, proxy.CurrentPolicy().Evaluate("example.com."), "policy evaluation mismatch")
 
 	proxy.UpdatePolicy(nil)
-	if proxy.CurrentPolicy() == nil {
-		t.Fatalf("expected default deny policy after clearing")
-	}
-	if got := proxy.CurrentPolicy().Evaluate("example.com."); got != policy.ActionDeny {
-		t.Fatalf("expected default deny after clearing, got %s", got)
-	}
+	require.NotNil(t, proxy.CurrentPolicy(), "expected default deny policy after clearing")
+	require.Equal(t, policy.ActionDeny, proxy.CurrentPolicy().Evaluate("example.com."), "expected default deny after clearing")
 }
 
-func TestLoadPolicyFromEnvVar(t *testing.T) {
-	const envName = "TEST_EGRESS_POLICY"
-	t.Setenv(envName, `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
-
-	pol, err := LoadPolicyFromEnvVar(envName)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pol == nil || pol.Evaluate("example.com.") != policy.ActionAllow {
-		t.Fatalf("expected parsed policy to allow example.com")
-	}
-
-	t.Setenv(envName, "")
-	pol, err = LoadPolicyFromEnvVar(envName)
-	if err != nil {
-		t.Fatalf("unexpected error on empty env: %v", err)
-	}
-	if pol == nil {
-		t.Fatalf("expected default deny policy when env is empty")
-	}
-	if pol.DefaultAction != policy.ActionDeny {
-		t.Fatalf("expected default deny when env is empty, got %+v", pol)
-	}
+func TestProxyAlwaysOverlayPrecedence(t *testing.T) {
+	deny, err := policy.ParseValidatedEgressRule(policy.ActionDeny, "nope.test")
+	require.NoError(t, err)
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"nope.test"}]}`)
+	require.NoError(t, err)
+	proxy, err := New(pol, "127.0.0.1:15353", []policy.EgressRule{deny}, nil)
+	require.NoError(t, err)
+	require.Equal(t, policy.ActionAllow, proxy.CurrentPolicy().Evaluate("nope.test."), "user policy without overlay")
+	require.Equal(t, policy.ActionDeny, proxy.effectivePolicy.Evaluate("nope.test."), "effective policy includes always deny")
 }
 
 func TestExtractResolvedIPs(t *testing.T) {
@@ -93,40 +65,69 @@ func TestExtractResolvedIPs(t *testing.T) {
 		&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Ttl: 90}, A: net.ParseIP("5.6.7.8")},
 	}
 	ips := extractResolvedIPs(msg)
-	if len(ips) != 3 {
-		t.Fatalf("expected 3 IPs, got %d", len(ips))
-	}
+	require.Len(t, ips, 3, "expected 3 IPs")
 	// Order follows Answer; check first A and AAAA
-	if ips[0].Addr.String() != "1.2.3.4" || ips[0].TTL != 120*time.Second {
-		t.Fatalf("first IP: got %s TTL %v", ips[0].Addr, ips[0].TTL)
-	}
-	if ips[1].Addr.String() != "2001:db8::1" || ips[1].TTL != 60*time.Second {
-		t.Fatalf("second IP: got %s TTL %v", ips[1].Addr, ips[1].TTL)
-	}
-	if ips[2].Addr.String() != "5.6.7.8" || ips[2].TTL != 90*time.Second {
-		t.Fatalf("third IP: got %s TTL %v", ips[2].Addr, ips[2].TTL)
-	}
+	require.Equal(t, "1.2.3.4", ips[0].Addr.String(), "first IP mismatch")
+	require.Equal(t, 120*time.Second, ips[0].TTL, "first IP TTL mismatch")
+	require.Equal(t, "2001:db8::1", ips[1].Addr.String(), "second IP mismatch")
+	require.Equal(t, 60*time.Second, ips[1].TTL, "second IP TTL mismatch")
+	require.Equal(t, "5.6.7.8", ips[2].Addr.String(), "third IP mismatch")
+	require.Equal(t, 90*time.Second, ips[2].TTL, "third IP TTL mismatch")
 }
 
 func TestExtractResolvedIPs_EmptyOrNil(t *testing.T) {
-	if got := extractResolvedIPs(nil); got != nil {
-		t.Fatalf("nil msg: expected nil, got %v", got)
-	}
+	require.Nil(t, extractResolvedIPs(nil), "nil msg: expected nil")
 	msg := new(dns.Msg)
-	if got := extractResolvedIPs(msg); got != nil {
-		t.Fatalf("empty answer: expected nil, got %v", got)
-	}
+	require.Nil(t, extractResolvedIPs(msg), "empty answer: expected nil")
 	msg.Answer = []dns.RR{&dns.CNAME{Hdr: dns.RR_Header{Name: "x."}, Target: "y."}}
-	if got := extractResolvedIPs(msg); got != nil {
-		t.Fatalf("CNAME only: expected nil, got %v", got)
+	require.Nil(t, extractResolvedIPs(msg), "CNAME only: expected nil")
+}
+
+func TestForwardAddsEDNS0BufferSize(t *testing.T) {
+	t.Cleanup(func() { resetNameserverExemptCache(t) })
+	t.Setenv(constants.EnvNameserverExempt, "127.0.0.1")
+	resetNameserverExemptCache(t)
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	seen := make(chan uint16, 1)
+	server := &dns.Server{
+		PacketConn: conn,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			opt := r.IsEdns0()
+			require.NotNil(t, opt)
+			seen <- opt.UDPSize()
+
+			resp := new(dns.Msg)
+			resp.SetReply(r)
+			resp.Answer = []dns.RR{
+				&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("1.2.3.4")},
+			}
+			_ = w.WriteMsg(resp)
+		}),
 	}
+	go func() { _ = server.ActivateAndServe() }()
+	t.Cleanup(func() { _ = server.Shutdown() })
+
+	proxy := &Proxy{
+		upstreams:               []string{conn.LocalAddr().String()},
+		activeUpstreams:         []string{conn.LocalAddr().String()},
+		upstreamExchangeTimeout: time.Second,
+	}
+	query := new(dns.Msg)
+	query.SetQuestion("example.com.", dns.TypeA)
+
+	resp, err := proxy.forward(query)
+	require.NoError(t, err)
+	require.Len(t, resp.Answer, 1)
+	require.Equal(t, uint16(4096), <-seen)
 }
 
 func TestSetOnResolved(t *testing.T) {
-	proxy, err := New(policy.DefaultDenyPolicy(), "")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	proxy, err := New(policy.DefaultDenyPolicy(), "", nil, nil)
+	require.NoError(t, err)
 	var called bool
 	var capturedDomain string
 	var capturedIPs []nftables.ResolvedIP
@@ -135,23 +136,17 @@ func TestSetOnResolved(t *testing.T) {
 		capturedDomain = domain
 		capturedIPs = ips
 	})
-	if proxy.onResolved == nil {
-		t.Fatalf("SetOnResolved did not set callback")
-	}
+	require.NotNil(t, proxy.onResolved, "SetOnResolved did not set callback")
 	proxy.SetOnResolved(nil)
-	if proxy.onResolved != nil {
-		t.Fatalf("SetOnResolved(nil) did not clear callback")
-	}
+	require.Nil(t, proxy.onResolved, "SetOnResolved(nil) did not clear callback")
 	_ = called
 	_ = capturedDomain
 	_ = capturedIPs
 }
 
 func TestMaybeNotifyResolved_CallsCallbackWhenAOrAAAA(t *testing.T) {
-	proxy, err := New(policy.DefaultDenyPolicy(), "")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	proxy, err := New(policy.DefaultDenyPolicy(), "", nil, nil)
+	require.NoError(t, err)
 	ch := make(chan struct {
 		domain string
 		ips    []nftables.ResolvedIP
@@ -171,22 +166,17 @@ func TestMaybeNotifyResolved_CallsCallbackWhenAOrAAAA(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		if got.domain != "example.com." {
-			t.Fatalf("domain: got %q", got.domain)
-		}
-		if len(got.ips) != 1 || got.ips[0].Addr.String() != "1.2.3.4" {
-			t.Fatalf("ips: got %v", got.ips)
-		}
+		require.Equal(t, "example.com.", got.domain, "domain mismatch")
+		require.Len(t, got.ips, 1, "expected one resolved IP")
+		require.Equal(t, "1.2.3.4", got.ips[0].Addr.String(), "resolved IP mismatch")
 	case <-time.After(2 * time.Second):
-		t.Fatal("callback was not invoked")
+		require.FailNow(t, "callback was not invoked")
 	}
 }
 
 func TestMaybeNotifyResolved_NoCallWhenOnResolvedNil(t *testing.T) {
-	proxy, err := New(policy.DefaultDenyPolicy(), "")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	proxy, err := New(policy.DefaultDenyPolicy(), "", nil, nil)
+	require.NoError(t, err)
 	msg := new(dns.Msg)
 	msg.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "x.", Ttl: 60}, A: net.ParseIP("10.0.0.1")}}
 	proxy.maybeNotifyResolved("x.", msg)
@@ -194,10 +184,8 @@ func TestMaybeNotifyResolved_NoCallWhenOnResolvedNil(t *testing.T) {
 }
 
 func TestMaybeNotifyResolved_NoCallWhenNoAOrAAAA(t *testing.T) {
-	proxy, err := New(policy.DefaultDenyPolicy(), "")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	proxy, err := New(policy.DefaultDenyPolicy(), "", nil, nil)
+	require.NoError(t, err)
 	ch := make(chan struct {
 		domain string
 		ips    []nftables.ResolvedIP
@@ -215,8 +203,36 @@ func TestMaybeNotifyResolved_NoCallWhenNoAOrAAAA(t *testing.T) {
 
 	select {
 	case <-ch:
-		t.Fatal("callback should not be invoked when resp has no A/AAAA")
+		require.FailNow(t, "callback should not be invoked when resp has no A/AAAA")
 	case <-time.After(200 * time.Millisecond):
 		// Expected: no callback
 	}
+}
+
+func TestProxyShouldSkipOutboundLog_Default(t *testing.T) {
+	p := &Proxy{}
+	require.False(t, p.shouldSkipOutboundLog("metadata.internal"),
+		"default (no SetLogSkip call) must preserve current behavior: log every outbound")
+}
+
+func TestProxyShouldSkipOutboundLog_MatchesAndMisses(t *testing.T) {
+	p := &Proxy{}
+	p.SetLogSkip([]string{"metadata.internal", "*.cluster.local"})
+
+	require.True(t, p.shouldSkipOutboundLog("metadata.internal"), "exact pattern hit")
+	require.True(t, p.shouldSkipOutboundLog("svc.cluster.local"), "wildcard subdomain hit")
+	require.True(t, p.shouldSkipOutboundLog("METADATA.INTERNAL."), "case + trailing dot normalised")
+	require.False(t, p.shouldSkipOutboundLog("cluster.local"),
+		"wildcard *.cluster.local must not match bare cluster.local")
+	require.False(t, p.shouldSkipOutboundLog("evil.com"), "non-listed host must not be skipped")
+}
+
+func TestProxyShouldSkipOutboundLog_ClearedByEmptyList(t *testing.T) {
+	p := &Proxy{}
+	p.SetLogSkip([]string{"metadata.internal"})
+	require.True(t, p.shouldSkipOutboundLog("metadata.internal"))
+
+	p.SetLogSkip(nil)
+	require.False(t, p.shouldSkipOutboundLog("metadata.internal"),
+		"clearing the list must re-enable logging for all hosts")
 }

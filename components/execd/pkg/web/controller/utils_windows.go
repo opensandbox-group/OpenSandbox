@@ -20,6 +20,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,18 +28,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
 func DeleteFile(filePath string) error {
-	absPath, err := filepath.Abs(filePath)
+	absPath, err := pathutil.ExpandAbsPath(filePath)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
 	}
 
 	fileInfo, err := os.Stat(absPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -56,7 +58,7 @@ func DeleteFile(filePath string) error {
 }
 
 func ChmodFile(file string, perms model.Permission) error {
-	abs, err := filepath.Abs(file)
+	abs, err := pathutil.ExpandAbsPath(file)
 	if err != nil {
 		return err
 	}
@@ -81,18 +83,18 @@ func SetFileOwnership(_ string, _ string, _ string) error {
 }
 
 func RenameFile(item model.RenameFileItem) error {
-	srcPath, err := filepath.Abs(item.Src)
+	srcPath, err := pathutil.ExpandAbsPath(item.Src)
 	if err != nil {
 		return fmt.Errorf("invalid source path: %w", err)
 	}
 
-	dstPath, err := filepath.Abs(item.Dest)
+	dstPath, err := pathutil.ExpandAbsPath(item.Dest)
 	if err != nil {
 		return fmt.Errorf("invalid destination path: %w", err)
 	}
 
 	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		return fmt.Errorf("source path not found: %s", item.Src)
+		return fmt.Errorf("source path not found: %s: %w", item.Src, err)
 	}
 
 	dstDir := filepath.Dir(dstPath)
@@ -112,33 +114,90 @@ func RenameFile(item model.RenameFileItem) error {
 	return nil
 }
 
-func MakeDir(dir string, perm model.Permission) error {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return err
+// MkdirAllWithOwnership creates targetDir and any missing parents, then applies
+// owner/group only to the directories that were actually created (not pre-existing ones).
+func MkdirAllWithOwnership(targetDir string, dirPerm os.FileMode, owner, group string) error {
+	firstNew := ""
+	cur := targetDir
+	for {
+		if _, err := os.Stat(cur); err == nil {
+			break
+		}
+		firstNew = cur
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
 	}
-	err = os.MkdirAll(abs, os.ModePerm)
-	if err != nil {
+
+	if err := os.MkdirAll(targetDir, dirPerm); err != nil {
 		return err
 	}
 
-	return ChmodFile(abs, perm)
+	if firstNew == "" || (owner == "" && group == "") {
+		return nil
+	}
+
+	rel, err := filepath.Rel(firstNew, targetDir)
+	if err != nil {
+		return err
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	cur = firstNew
+	if err := SetFileOwnership(cur, owner, group); err != nil {
+		return err
+	}
+	for _, p := range parts {
+		if p == "." {
+			continue
+		}
+		cur = filepath.Join(cur, p)
+		if err := SetFileOwnership(cur, owner, group); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func GetFileInfo(filePath string) (model.FileInfo, error) {
-	absPath, err := filepath.Abs(filePath)
+func MakeDir(dir string, perm model.Permission) error {
+	abs, err := pathutil.ExpandAbsPath(dir)
 	if err != nil {
-		return model.FileInfo{}, fmt.Errorf("invalid path %s: %w", filePath, err)
+		return err
 	}
 
-	fileInfo, err := os.Stat(absPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return model.FileInfo{}, fmt.Errorf("file not found: %s", filePath)
+	_, statErr := os.Stat(abs)
+	existed := statErr == nil
+
+	if err := MkdirAllWithOwnership(abs, os.ModePerm, perm.Owner, perm.Group); err != nil {
+		return err
+	}
+
+	if !existed && perm.Mode != 0 {
+		mode, err := strconv.ParseUint(strconv.Itoa(perm.Mode), 8, 32)
+		if err != nil {
+			return err
 		}
-		return model.FileInfo{}, fmt.Errorf("error accessing file %s: %w", filePath, err)
+		return os.Chmod(abs, os.FileMode(mode))
 	}
+	return nil
+}
 
+func fileType(fileInfo os.FileInfo) string {
+	mode := fileInfo.Mode()
+	if mode&os.ModeSymlink != 0 {
+		return "symlink"
+	}
+	if fileInfo.IsDir() {
+		return "directory"
+	}
+	if mode.IsRegular() {
+		return "file"
+	}
+	return "other"
+}
+
+func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error) {
 	createdAt := getFileCreateTime(fileInfo)
 	if data, ok := fileInfo.Sys().(*syscall.Win32FileAttributeData); ok && data != nil {
 		createdAt = time.Unix(0, data.CreationTime.Nanoseconds())
@@ -148,6 +207,7 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 
 	return model.FileInfo{
 		Path:       absPath,
+		Type:       fileType(fileInfo),
 		Size:       fileInfo.Size(),
 		ModifiedAt: fileInfo.ModTime(),
 		CreatedAt:  createdAt,
@@ -160,6 +220,23 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 			}(),
 		},
 	}, nil
+}
+
+func GetFileInfo(filePath string) (model.FileInfo, error) {
+	absPath, err := pathutil.ExpandAbsPath(filePath)
+	if err != nil {
+		return model.FileInfo{}, fmt.Errorf("invalid path %s: %w", filePath, err)
+	}
+
+	fileInfo, err := os.Lstat(absPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return model.FileInfo{}, fmt.Errorf("file not found: %s: %w", filePath, err)
+		}
+		return model.FileInfo{}, fmt.Errorf("error accessing file %s: %w", filePath, err)
+	}
+
+	return buildFileInfo(absPath, fileInfo)
 }
 
 func SearchFileMetadata(metadata map[string]model.FileMetadata, filePath string) (string, model.FileMetadata, bool) {

@@ -11,6 +11,7 @@
 - **版本切换**：无需重新构建，支持运行时快速切换版本
 - **Jupyter 集成**：内置 Jupyter Notebook 并支持多语言内核
 - **多架构支持**：同时支持 amd64 和 arm64 架构
+- **clone3-workaround（仅 amd64）**：在 **linux/amd64** 镜像中安装 [AkihiroSuda/clone3-workaround](https://github.com/AkihiroSuda/clone3-workaround) v1.0.0 至 `/usr/local/bin/clone3-workaround`（上游无 arm64 预编译包），并安装 **`libseccomp2`**（上游二进制动态链接 `libseccomp`）。在极旧 Docker/containerd 宿主机上可用其包裹命令，例如 `clone3-workaround apt-get update`。
 - **生产就绪**：针对容器化执行环境进行了优化
 
 ## 支持的语言与版本
@@ -57,15 +58,19 @@ docker run -it --rm \
   sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:latest
 ```
 
+### `EXECD_CLONE3_COMPAT`（clone3-workaround）
+
+若将 `EXECD_CLONE3_COMPAT` 设为 `1`、`true`、`yes`、`on` 或 `reexec`（与 [execd](../../components/execd/README.md#沙箱内的-linux-clone3-兼容) 一致），入口脚本会在启动 Jupyter/内核前用 **`/usr/local/bin/clone3-workaround` 重新 `exec` 自身**。**linux/amd64** 镜像内含该二进制；**arm64** 构建会打印警告并跳过包装。包装成功后脚本会在当前进程树中 **`unset` `EXECD_CLONE3_COMPAT`**。设为 `0`、`false`、`off`、`no` 或不设置则关闭此逻辑。
+
 ## 如何切换版本
 
-镜像内置了一个环境切换脚本 `/opt/opensandbox/code-interpreter-env.sh`，你需要使用 `source` 命令加载它来修改当前 Shell
+镜像内置了一个环境切换脚本 `/opt/code-interpreter/code-interpreter-env.sh`，你需要使用 `source` 命令加载它来修改当前 Shell
 的环境变量。
 
 ### 基本用法
 
 ```bash
-source /opt/opensandbox/code-interpreter-env.sh <language> <version>
+source /opt/code-interpreter/code-interpreter-env.sh <language> <version>
 ```
 
 ### 示例
@@ -74,7 +79,7 @@ source /opt/opensandbox/code-interpreter-env.sh <language> <version>
 
 ```bash
 # 切换到 Python 3.11
-source /opt/opensandbox/code-interpreter-env.sh python 3.11
+source /opt/code-interpreter/code-interpreter-env.sh python 3.11
 python3 --version
 # Output: Python 3.11.x
 ```
@@ -83,7 +88,7 @@ python3 --version
 
 ```bash
 # 切换到 Java 8
-source /opt/opensandbox/code-interpreter-env.sh java 8
+source /opt/code-interpreter/code-interpreter-env.sh java 8
 java -version
 ```
 
@@ -91,7 +96,7 @@ java -version
 
 ```bash
 # 切换到 Node 22
-source /opt/opensandbox/code-interpreter-env.sh node 22
+source /opt/code-interpreter/code-interpreter-env.sh node 22
 node -v
 ```
 
@@ -99,7 +104,7 @@ node -v
 
 ```bash
 # 切换到 Go 1.25
-source /opt/opensandbox/code-interpreter-env.sh go 1.25
+source /opt/code-interpreter/code-interpreter-env.sh go 1.25
 go version
 ```
 
@@ -109,16 +114,16 @@ go version
 
 ```bash
 # 查看所有 Python 版本
-source /opt/opensandbox/code-interpreter-env.sh python
+source /opt/code-interpreter/code-interpreter-env.sh python
 
 # 查看所有 Java 版本
-source /opt/opensandbox/code-interpreter-env.sh java
+source /opt/code-interpreter/code-interpreter-env.sh java
 
 # 查看所有 Node.js 版本
-source /opt/opensandbox/code-interpreter-env.sh node
+source /opt/code-interpreter/code-interpreter-env.sh node
 
 # 查看所有 Go 版本
-source /opt/opensandbox/code-interpreter-env.sh go
+source /opt/code-interpreter/code-interpreter-env.sh go
 ```
 
 ## 默认版本
@@ -147,7 +152,7 @@ source /opt/opensandbox/code-interpreter-env.sh go
 ### 启动 Jupyter
 
 ```bash
-/opt/opensandbox/code-interpreter.sh
+/opt/code-interpreter/code-interpreter.sh
 ```
 
 ### 环境变量
@@ -226,7 +231,7 @@ code-interpreter/
 
 问题和疑问：
 
-- GitHub Issues: [OpenSandbox Issues](https://github.com/alibaba/OpenSandbox/issues)
+- GitHub Issues: [OpenSandbox Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
 
 ## 相关项目
 

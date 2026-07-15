@@ -30,24 +30,54 @@ export { ConnectionConfig } from "./config/connection.js";
 export type { ConnectionConfigOptions, ConnectionProtocol } from "./config/connection.js";
 
 export type {
+  Credential,
+  CredentialAuth,
+  CredentialAuthMetadata,
+  CredentialBinding,
+  CredentialBindingListResponse,
+  CredentialBindingMetadata,
+  CredentialBindingMutationSet,
+  CredentialListResponse,
+  CredentialMatch,
+  CredentialMatchScheme,
+  CredentialMetadata,
+  CredentialMutationSet,
+  CredentialProxyConfig,
+  CredentialSubstitution,
+  CredentialSubstitutionSurface,
+  CredentialVaultCreateRequest,
+  CredentialVaultPatchRequest,
+  CredentialVaultState,
+  CreateSnapshotRequest,
   CreateSandboxRequest,
   CreateSandboxResponse,
+  CustomHeaderEntry,
   Endpoint,
   Host,
+  InlineCredentialSource,
+  ListSnapshotsParams,
+  ListSnapshotsResponse,
   ListSandboxesParams,
   ListSandboxesResponse,
   NetworkPolicy,
   NetworkRule,
   NetworkRuleAction,
+  OSSFS,
+  PlatformSpec,
   PVC,
   RenewSandboxExpirationRequest,
   RenewSandboxExpirationResponse,
+  SnapshotInfo,
+  SnapshotState,
+  SnapshotStatus,
   SandboxId,
   SandboxInfo,
+  SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
 
 export type { Sandboxes } from "./services/sandboxes.js";
+export type { CredentialVault, Egress } from "./services/egress.js";
 
 export { SandboxManager } from "./manager.js";
 export type { SandboxFilter, SandboxManagerOptions } from "./manager.js";
@@ -55,6 +85,7 @@ export type { SandboxFilter, SandboxManagerOptions } from "./manager.js";
 export type { ExecdHealth } from "./services/execdHealth.js";
 export type { ExecdMetrics } from "./services/execdMetrics.js";
 export type {
+  FileEntryType,
   FileInfo,
   FileMetadata,
   Permission,
@@ -91,6 +122,7 @@ export { ExecutionEventDispatcher } from "./models/executionEventDispatcher.js";
 
 export {
   DEFAULT_ENTRYPOINT,
+  DEFAULT_EGRESS_PORT,
   DEFAULT_EXECD_PORT,
   DEFAULT_RESOURCE_LIMITS,
   DEFAULT_TIMEOUT_SECONDS,
@@ -107,9 +139,24 @@ export { Sandbox } from "./sandbox.js";
 
 export type {
   ContentReplaceEntry,
+  ContentReplaceResult,
+  DirectoryListEntry,
   MoveEntry,
   SearchEntry,
   SetPermissionEntry,
   WriteEntry,
 } from "./models/filesystem.js";
 export type { SandboxFiles } from "./services/filesystem.js";
+export type { IsolationService, IsolationSession, RunOnceOpts } from "./services/isolatedSessions.js";
+export type {
+  CreateIsolatedSessionRequest,
+  IsolatedWorkspaceSpec,
+  EnvPassthroughSpec,
+  BindMount,
+  IsolatedSessionInfo,
+  IsolatedSessionState,
+  IsolatedRunOpts,
+  IsolatedCapabilities,
+  IsolatedSessionSummary,
+  ListIsolatedSessionsResponse,
+} from "./models/isolated.js";

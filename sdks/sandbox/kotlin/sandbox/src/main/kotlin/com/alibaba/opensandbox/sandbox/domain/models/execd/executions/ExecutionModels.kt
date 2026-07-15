@@ -27,6 +27,8 @@ package com.alibaba.opensandbox.sandbox.domain.models.execd.executions
  * @property executionCount Sequential execution counter for tracking execution order
  * @property result List of structured results produced by the code execution
  * @property error Error information if the execution failed
+ * @property complete Completion metadata for the streamed execution
+ * @property exitCode Command exit code when available; null for code execution or unfinished/background commands
  * @property logs Container for stdout and stderr output messages
  */
 class Execution(
@@ -34,6 +36,8 @@ class Execution(
     var executionCount: Long? = null,
     val result: MutableList<ExecutionResult> = mutableListOf(),
     var error: ExecutionError? = null,
+    var complete: ExecutionComplete? = null,
+    var exitCode: Int? = null,
     val logs: ExecutionLogs = ExecutionLogs(),
 ) {
     /**
@@ -212,6 +216,12 @@ class ExecutionHandlers private constructor(
      * Called when code execution starts.
      */
     val onInit: OutputHandler<ExecutionInit>? = null,
+    /**
+     * When true, stdout/stderr messages are only delivered to handlers without
+     * being accumulated in [ExecutionLogs]. Use this for long-running executions
+     * to prevent unbounded memory growth.
+     */
+    val skipAccumulation: Boolean = false,
 ) {
     companion object {
         @JvmStatic
@@ -225,6 +235,7 @@ class ExecutionHandlers private constructor(
         private var onExecutionComplete: OutputHandler<ExecutionComplete>? = null
         private var onError: OutputHandler<ExecutionError>? = null
         private var onInit: OutputHandler<ExecutionInit>? = null
+        private var skipAccumulation: Boolean = false
 
         fun onStdout(handler: OutputHandler<OutputMessage>): Builder {
             this.onStdout = handler
@@ -256,6 +267,11 @@ class ExecutionHandlers private constructor(
             return this
         }
 
+        fun skipAccumulation(skip: Boolean): Builder {
+            this.skipAccumulation = skip
+            return this
+        }
+
         fun build(): ExecutionHandlers {
             return ExecutionHandlers(
                 onStdout = onStdout,
@@ -264,6 +280,7 @@ class ExecutionHandlers private constructor(
                 onExecutionComplete = onExecutionComplete,
                 onError = onError,
                 onInit = onInit,
+                skipAccumulation = skipAccumulation,
             )
         }
     }

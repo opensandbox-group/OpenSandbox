@@ -18,57 +18,148 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDeleteFile(t *testing.T) {
 	tmp := t.TempDir()
 	file := filepath.Join(tmp, "sample.txt")
-	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
+	require.NoError(t, os.WriteFile(file, []byte("hello"), 0o644))
 
-	if err := DeleteFile(file); err != nil {
-		t.Fatalf("DeleteFile returned error: %v", err)
-	}
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
-		t.Fatalf("expected file removed, got err=%v", err)
-	}
+	require.NoError(t, DeleteFile(file))
+	_, err := os.Stat(file)
+	require.True(t, os.IsNotExist(err), "expected file removed, got err=%v", err)
 
 	// removing a non-existent file should be a no-op
-	if err := DeleteFile(file); err != nil {
-		t.Fatalf("expected no error deleting missing file, got %v", err)
-	}
+	require.NoError(t, DeleteFile(file), "expected no error deleting missing file")
 }
 
 func TestRenameFile(t *testing.T) {
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.txt")
-	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
+	require.NoError(t, os.WriteFile(src, []byte("data"), 0o644))
 
 	dst := filepath.Join(tmp, "nested", "renamed.txt")
-	if err := RenameFile(model.RenameFileItem{Src: src, Dest: dst}); err != nil {
-		t.Fatalf("RenameFile returned error: %v", err)
-	}
+	require.NoError(t, RenameFile(model.RenameFileItem{Src: src, Dest: dst}))
 
-	if _, err := os.Stat(dst); err != nil {
-		t.Fatalf("expected destination file, got %v", err)
-	}
-	if _, err := os.Stat(src); !os.IsNotExist(err) {
-		t.Fatalf("expected source removed, got err=%v", err)
-	}
+	_, err := os.Stat(dst)
+	require.NoError(t, err)
+	_, err = os.Stat(src)
+	require.True(t, os.IsNotExist(err), "expected source removed, got err=%v", err)
 
 	// destination exists -> expect error
-	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
-		t.Fatalf("rewrite src: %v", err)
+	require.NoError(t, os.WriteFile(src, []byte("data"), 0o644))
+	require.Error(t, RenameFile(model.RenameFileItem{Src: src, Dest: dst}), "expected error when destination already exists")
+}
+
+func TestMakeDir_PreExistingDir(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "existing")
+	require.NoError(t, os.Mkdir(existing, 0o755))
+
+	origInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	origMode := origInfo.Mode().Perm()
+
+	err = MakeDir(existing, model.Permission{Mode: 700})
+	require.NoError(t, err, "MakeDir on pre-existing dir should not fail")
+
+	afterInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	require.Equal(t, origMode, afterInfo.Mode().Perm(), "permissions of pre-existing dir should be unchanged")
+}
+
+func TestMakeDir_NewDir(t *testing.T) {
+	tmp := t.TempDir()
+	newDir := filepath.Join(tmp, "brand-new")
+
+	err := MakeDir(newDir, model.Permission{Mode: 755})
+	require.NoError(t, err)
+
+	info, err := os.Stat(newDir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	if runtime.GOOS != "windows" {
+		require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 	}
-	if err := RenameFile(model.RenameFileItem{Src: src, Dest: dst}); err == nil {
-		t.Fatalf("expected error when destination already exists")
+}
+
+func TestMkdirAllWithOwnership_NewNestedDirs(t *testing.T) {
+	tmp := t.TempDir()
+	nested := filepath.Join(tmp, "a", "b", "c")
+
+	err := MkdirAllWithOwnership(nested, 0o755, "", "")
+	require.NoError(t, err)
+
+	for _, seg := range []string{"a", "a/b", "a/b/c"} {
+		info, err := os.Stat(filepath.Join(tmp, seg))
+		require.NoError(t, err)
+		require.True(t, info.IsDir())
 	}
+}
+
+func TestMkdirAllWithOwnership_PreExistingParent(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "existing")
+	require.NoError(t, os.Mkdir(existing, 0o755))
+
+	origInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	origMode := origInfo.Mode().Perm()
+
+	nested := filepath.Join(existing, "new-child", "deep")
+	err = MkdirAllWithOwnership(nested, 0o755, "", "")
+	require.NoError(t, err)
+
+	afterInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	require.Equal(t, origMode, afterInfo.Mode().Perm(), "pre-existing dir should be unchanged")
+
+	info, err := os.Stat(nested)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+}
+
+func TestMkdirAllWithOwnership_AllExist(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "already")
+	require.NoError(t, os.MkdirAll(existing, 0o755))
+
+	err := MkdirAllWithOwnership(existing, 0o755, "", "")
+	require.NoError(t, err, "all dirs exist — should be no-op")
+}
+
+func TestSetFileOwnership_EmptyOwnerGroup(t *testing.T) {
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "test.txt")
+	require.NoError(t, os.WriteFile(file, []byte("data"), 0o644))
+
+	err := SetFileOwnership(file, "", "")
+	require.NoError(t, err, "empty owner and group should be a no-op")
+}
+
+func TestSetFileOwnership_MissingFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SetFileOwnership is a no-op on Windows")
+	}
+	err := SetFileOwnership("/nonexistent/path/file.txt", "root", "")
+	require.Error(t, err, "chown on missing file should return error")
+}
+
+func TestSetFileOwnership_InvalidOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SetFileOwnership is a no-op on Windows")
+	}
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "test.txt")
+	require.NoError(t, os.WriteFile(file, []byte("data"), 0o644))
+
+	err := SetFileOwnership(file, "nonexistent_user_xyz", "")
+	require.Error(t, err, "invalid owner should return error")
 }
 
 func TestSearchFileMetadata(t *testing.T) {
@@ -78,16 +169,12 @@ func TestSearchFileMetadata(t *testing.T) {
 	}
 
 	path, info, ok := SearchFileMetadata(metadata, "/any/notes.txt")
-	if !ok {
-		t.Fatalf("expected metadata entry")
-	}
-	if path != "/tmp/a/notes.txt" || info.Path != "/tmp/a/notes.txt" {
-		t.Fatalf("unexpected match path=%s info=%v", path, info)
-	}
+	require.True(t, ok, "expected metadata entry")
+	require.Equal(t, "/tmp/a/notes.txt", path)
+	require.Equal(t, "/tmp/a/notes.txt", info.Path)
 
-	if _, _, ok := SearchFileMetadata(metadata, "/foo/unknown.txt"); ok {
-		t.Fatalf("expected no match")
-	}
+	_, _, ok = SearchFileMetadata(metadata, "/foo/unknown.txt")
+	require.False(t, ok, "expected no match")
 }
 
 func TestParseRange(t *testing.T) {
@@ -122,17 +209,11 @@ func TestParseRange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseRange(tt.header, tt.size)
 			if tt.expectErr {
-				if err == nil {
-					t.Fatalf("expected error")
-				}
+				require.Error(t, err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("got %+v want %+v", got, tt.want)
-			}
+			require.NoError(t, err)
+			require.True(t, reflect.DeepEqual(got, tt.want), "got %+v want %+v", got, tt.want)
 		})
 	}
 }

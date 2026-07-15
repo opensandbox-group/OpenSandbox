@@ -17,17 +17,8 @@ resources:
   controller: true
   domain: opensandbox.io
   group: sandbox
-  kind: Sandbox
-  path: github.com/alibaba/OpenSandbox/sandbox-k8s/api/v1alpha1
-  version: v1alpha1
-- api:
-    crdVersion: v1
-    namespaced: true
-  controller: true
-  domain: opensandbox.io
-  group: sandbox
   kind: BatchSandbox
-  path: github.com/alibaba/OpenSandbox/sandbox-k8s/api/v1alpha1
+  path: github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -36,6 +27,15 @@ resources:
   domain: opensandbox.io
   group: sandbox
   kind: Pool
-  path: github.com/alibaba/OpenSandbox/sandbox-k8s/api/v1alpha1
+  path: github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: opensandbox.io
+  group: sandbox
+  kind: SandboxSnapshot
+  path: github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1
   version: v1alpha1
 version: "3"

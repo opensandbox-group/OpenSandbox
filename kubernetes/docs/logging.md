@@ -1,48 +1,48 @@
-# 日志配置说明
+# Logging Configuration
 
-## 功能特性
+## Features
 
-OpenSandbox Kubernetes Controller 支持灵活的日志配置，包括：
+The OpenSandbox Kubernetes Controller supports flexible logging configuration, including:
 
-- ✅ **日志输出到控制台**（默认启用）
-- ✅ **日志输出到文件**（可选）
-- ✅ **自动日志轮转**（按文件大小）
-- ✅ **自动压缩旧日志**（gzip）
-- ✅ **自动清理过期日志**（按时间或数量）
-- ✅ **支持 zap 所有标准选项**（日志级别、格式等）
+- Console log output (enabled by default)
+- File log output (optional)
+- Automatic log rotation (by file size)
+- Automatic compression of old logs (gzip)
+- Automatic cleanup of expired logs (by age or count)
+- All standard zap options (log level, format, etc.)
 
-## 命令行参数
+## Command-Line Flags
 
-### 日志文件相关参数
+### Log File Flags
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--enable-file-log` | bool | false | 是否启用日志输出到文件 |
-| `--log-file-path` | string | `/var/log/sandbox-controller/controller.log` | 日志文件路径 |
-| `--log-max-size` | int | 100 | 日志文件最大大小（MB），超过后自动轮转 |
-| `--log-max-backups` | int | 10 | 保留的旧日志文件最大数量 |
-| `--log-max-age` | int | 30 | 保留旧日志文件的最大天数 |
-| `--log-compress` | bool | true | 是否压缩轮转后的日志文件（gzip） |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--enable-file-log` | bool | false | Enable log output to file |
+| `--log-file-path` | string | `/var/log/sandbox-controller/controller.log` | Log file path |
+| `--log-max-size` | int | 100 | Maximum size of a single log file in MB; rotates when exceeded |
+| `--log-max-backups` | int | 10 | Maximum number of old log files to retain |
+| `--log-max-age` | int | 30 | Maximum number of days to retain old log files |
+| `--log-compress` | bool | true | Compress rotated log files (gzip) |
 
-### zap 标准参数（继承自 controller-runtime）
+### Standard zap Flags (inherited from controller-runtime)
 
-| 参数 | 说明 |
-|------|------|
-| `--zap-devel` | 启用开发模式（彩色输出、更详细的堆栈跟踪） |
-| `--zap-encoder` | 日志编码格式：json 或 console |
-| `--zap-log-level` | 日志级别：debug, info, error 等 |
-| `--zap-stacktrace-level` | 打印堆栈跟踪的最低级别 |
-| `--zap-time-encoding` | 时间编码格式：iso8601, millis, nano 等 |
+| Flag | Description |
+|------|-------------|
+| `--zap-devel` | Enable development mode (colorized output, more verbose stack traces) |
+| `--zap-encoder` | Log encoding format: json or console |
+| `--zap-log-level` | Log level: debug, info, error, etc. |
+| `--zap-stacktrace-level` | Minimum log level at which stack traces are printed |
+| `--zap-time-encoding` | Time encoding format: iso8601, millis, nano, etc. |
 
-## 使用示例
+## Usage Examples
 
-### 1. 仅输出到控制台（默认）
+### 1. Console Output Only (Default)
 
 ```bash
 ./controller
 ```
 
-### 2. 同时输出到控制台和文件
+### 2. Output to Both Console and File
 
 ```bash
 ./controller \
@@ -50,7 +50,7 @@ OpenSandbox Kubernetes Controller 支持灵活的日志配置，包括：
   --log-file-path=/var/log/sandbox-controller/controller.log
 ```
 
-### 3. 自定义日志轮转配置
+### 3. Custom Log Rotation Configuration
 
 ```bash
 ./controller \
@@ -62,13 +62,13 @@ OpenSandbox Kubernetes Controller 支持灵活的日志配置，包括：
   --log-compress=true
 ```
 
-这将：
-- 每个日志文件最大 50MB
-- 最多保留 5 个旧日志文件
-- 日志文件最多保留 7 天
-- 压缩旧日志文件
+This configuration:
+- Each log file can be up to 50MB
+- Retain at most 5 old log files
+- Retain log files for at most 7 days
+- Compress old log files
 
-### 4. 开发模式 + 文件输出
+### 4. Development Mode + File Output
 
 ```bash
 ./controller \
@@ -77,7 +77,7 @@ OpenSandbox Kubernetes Controller 支持灵活的日志配置，包括：
   --log-file-path=/tmp/controller-dev.log
 ```
 
-### 5. JSON 格式 + 文件输出
+### 5. JSON Format + File Output
 
 ```bash
 ./controller \
@@ -86,7 +86,7 @@ OpenSandbox Kubernetes Controller 支持灵活的日志配置，包括：
   --log-file-path=/var/log/sandbox-controller/controller.log
 ```
 
-### 6. 调试级别 + 文件输出
+### 6. Debug Level + File Output
 
 ```bash
 ./controller \
@@ -95,9 +95,9 @@ OpenSandbox Kubernetes Controller 支持灵活的日志配置，包括：
   --log-file-path=/var/log/sandbox-controller/debug.log
 ```
 
-## Kubernetes 部署配置
+## Kubernetes Deployment Configuration
 
-在 Kubernetes 中部署时，可以通过 Deployment 的 `args` 配置日志选项：
+When deploying in Kubernetes, configure logging options via the Deployment's `args`:
 
 ```yaml
 apiVersion: apps/v1
@@ -124,52 +124,52 @@ spec:
       volumes:
       - name: log-volume
         emptyDir: {}
-        # 或使用 PersistentVolumeClaim
+        # Or use a PersistentVolumeClaim
         # persistentVolumeClaim:
         #   claimName: controller-logs
 ```
 
-## 日志文件格式
+## Log File Format
 
-### 开发模式（--zap-devel=true）
+### Development Mode (--zap-devel=true)
 
 ```
 2026-02-12T10:30:45.123+0800	INFO	setup	starting manager
 2026-02-12T10:30:45.456+0800	INFO	controller	Reconciling	{"namespace": "default", "name": "example"}
 ```
 
-### 生产模式（JSON）
+### Production Mode (JSON)
 
 ```json
 {"level":"info","ts":"2026-02-12T10:30:45.123+0800","logger":"setup","msg":"starting manager"}
 {"level":"info","ts":"2026-02-12T10:30:45.456+0800","logger":"controller","msg":"Reconciling","namespace":"default","name":"example"}
 ```
 
-## 日志轮转机制
+## Log Rotation Mechanism
 
-日志轮转由 [lumberjack](https://github.com/natefinch/lumberjack) 实现，支持：
+Log rotation is implemented by [lumberjack](https://github.com/natefinch/lumberjack) and supports:
 
-1. **按大小轮转**：当日志文件达到 `--log-max-size` 指定的大小时，自动创建新文件
-2. **文件命名**：轮转后的文件名格式为 `controller.log.2026-02-12T10-30-45.123`
-3. **自动压缩**：如果启用 `--log-compress`，旧日志文件会被压缩为 `.gz` 格式
-4. **自动清理**：
-   - 根据 `--log-max-backups` 保留最新的 N 个文件
-   - 根据 `--log-max-age` 删除超过指定天数的文件
+1. **Size-based rotation**: When a log file reaches the size specified by `--log-max-size`, a new file is automatically created
+2. **File naming**: Rotated files are named in the format `controller.log.2026-02-12T10-30-45.123`
+3. **Automatic compression**: If `--log-compress` is enabled, old log files are compressed to `.gz` format
+4. **Automatic cleanup**:
+   - Retain the most recent N files based on `--log-max-backups`
+   - Delete files older than the specified number of days based on `--log-max-age`
 
-## 目录权限
+## Directory Permissions
 
-确保日志目录存在且有写入权限：
+Ensure the log directory exists and has write permissions:
 
 ```bash
-# 创建日志目录
+# Create the log directory
 mkdir -p /var/log/sandbox-controller
 
-# 设置权限（根据实际运行用户调整）
+# Set permissions (adjust based on the actual runtime user)
 chown controller:controller /var/log/sandbox-controller
 chmod 755 /var/log/sandbox-controller
 ```
 
-在 Kubernetes 中，可以使用 `initContainer` 或 `securityContext` 确保权限正确：
+In Kubernetes, you can use an `initContainer` or `securityContext` to ensure correct permissions:
 
 ```yaml
 spec:
@@ -187,33 +187,33 @@ spec:
       runAsGroup: 1000
 ```
 
-## 监控和查看日志
+## Monitoring and Viewing Logs
 
-### 查看当前日志
+### View Current Logs
 
 ```bash
 tail -f /var/log/sandbox-controller/controller.log
 ```
 
-### 查看压缩的日志
+### View Compressed Logs
 
 ```bash
 zcat /var/log/sandbox-controller/controller.log.2026-02-12T10-30-45.123.gz | less
 ```
 
-### 搜索日志
+### Search Logs
 
 ```bash
-# 搜索错误日志
+# Search for error logs
 grep -i error /var/log/sandbox-controller/controller.log
 
-# 在所有日志文件中搜索（包括压缩文件）
+# Search across all log files (including compressed)
 zgrep -i error /var/log/sandbox-controller/*.log*
 ```
 
-## 最佳实践
+## Best Practices
 
-1. **生产环境建议**：
+1. **Production environment**:
    ```bash
    --enable-file-log=true
    --log-file-path=/var/log/sandbox-controller/controller.log
@@ -224,7 +224,7 @@ zgrep -i error /var/log/sandbox-controller/*.log*
    --zap-encoder=json
    ```
 
-2. **开发环境建议**：
+2. **Development environment**:
    ```bash
    --zap-devel=true
    --enable-file-log=true
@@ -232,7 +232,7 @@ zgrep -i error /var/log/sandbox-controller/*.log*
    --log-compress=false
    ```
 
-3. **调试问题时**：
+3. **Debugging issues**:
    ```bash
    --zap-log-level=debug
    --enable-file-log=true
@@ -240,7 +240,7 @@ zgrep -i error /var/log/sandbox-controller/*.log*
    --log-compress=false
    ```
 
-4. **磁盘空间有限时**：
+4. **Limited disk space**:
    ```bash
    --enable-file-log=true
    --log-max-size=50
@@ -249,24 +249,24 @@ zgrep -i error /var/log/sandbox-controller/*.log*
    --log-compress=true
    ```
 
-## 故障排查
+## Troubleshooting
 
-### 日志文件未创建
+### Log File Not Created
 
-1. 检查目录是否存在：`ls -la /var/log/sandbox-controller/`
-2. 检查权限：`ls -ld /var/log/sandbox-controller/`
-3. 检查进程是否有写入权限
-4. 查看 controller 启动日志中是否有错误
+1. Check if the directory exists: `ls -la /var/log/sandbox-controller/`
+2. Check permissions: `ls -ld /var/log/sandbox-controller/`
+3. Verify the process has write permissions
+4. Check controller startup logs for errors
 
-### 日志文件不轮转
+### Log File Not Rotating
 
-1. 确认 `--enable-file-log=true` 已设置
-2. 检查文件大小是否达到 `--log-max-size` 限制
-3. 确认 lumberjack 库已正确安装：`go list -m gopkg.in/natefinch/lumberjack.v2`
+1. Confirm `--enable-file-log=true` is set
+2. Check if the file size has reached the `--log-max-size` limit
+3. Verify the lumberjack library is correctly installed: `go list -m gopkg.in/natefinch/lumberjack.v2`
 
-### 磁盘空间占用过大
+### Excessive Disk Space Usage
 
-1. 减小 `--log-max-size` 的值
-2. 减少 `--log-max-backups` 的数量
-3. 减小 `--log-max-age` 的天数
-4. 确保 `--log-compress=true` 已启用
+1. Reduce the value of `--log-max-size`
+2. Reduce the number of `--log-max-backups`
+3. Reduce the number of days in `--log-max-age`
+4. Ensure `--log-compress=true` is enabled

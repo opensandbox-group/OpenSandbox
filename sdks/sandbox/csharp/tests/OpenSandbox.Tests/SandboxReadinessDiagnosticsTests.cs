@@ -126,7 +126,15 @@ public class SandboxReadinessDiagnosticsTests
                 Commands = Mock.Of<IExecdCommands>(),
                 Files = Mock.Of<ISandboxFiles>(),
                 Health = healthMock.Object,
-                Metrics = Mock.Of<IExecdMetrics>()
+                Metrics = Mock.Of<IExecdMetrics>(),
+                Isolation = Mock.Of<IIsolatedSessions>()
+            });
+
+        adapterFactoryMock
+            .Setup(x => x.CreateEgressStack(It.IsAny<CreateEgressStackOptions>()))
+            .Returns(new EgressStack
+            {
+                Egress = Mock.Of<IEgress>()
             });
 
         return await Sandbox.ConnectAsync(new SandboxConnectOptions

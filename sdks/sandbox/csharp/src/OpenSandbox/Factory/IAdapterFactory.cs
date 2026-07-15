@@ -112,6 +112,28 @@ public class ExecdStack
     /// Gets the metrics service.
     /// </summary>
     public required IExecdMetrics Metrics { get; init; }
+
+    public required IIsolatedSessions Isolation { get; init; }
+}
+
+public class CreateEgressStackOptions
+{
+    public required ConnectionConfig ConnectionConfig { get; set; }
+
+    public required string EgressBaseUrl { get; set; }
+
+    public IReadOnlyDictionary<string, string>? EgressHeaders { get; set; }
+
+    public required HttpClientProvider HttpClientProvider { get; set; }
+
+    public required ILoggerFactory LoggerFactory { get; set; }
+}
+
+public class EgressStack
+{
+    public required IEgress Egress { get; init; }
+
+    public ICredentialVault? CredentialVault { get; init; }
 }
 
 /// <summary>
@@ -132,4 +154,11 @@ public interface IAdapterFactory
     /// <param name="options">The creation options.</param>
     /// <returns>The execd stack.</returns>
     ExecdStack CreateExecdStack(CreateExecdStackOptions options);
+
+    /// <summary>
+    /// Creates an egress service stack.
+    /// </summary>
+    /// <param name="options">The creation options.</param>
+    /// <returns>The egress stack.</returns>
+    EgressStack CreateEgressStack(CreateEgressStackOptions options);
 }

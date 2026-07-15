@@ -30,16 +30,36 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import java.io.IOException
+import com.alibaba.opensandbox.sandbox.api.diagnostic.infrastructure.ClientError as DiagnosticClientError
+import com.alibaba.opensandbox.sandbox.api.diagnostic.infrastructure.ClientException as DiagnosticClientException
+import com.alibaba.opensandbox.sandbox.api.diagnostic.infrastructure.ServerError as DiagnosticServerError
+import com.alibaba.opensandbox.sandbox.api.diagnostic.infrastructure.ServerException as DiagnosticServerException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientError as ExecdClientError
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException as ExecdClientException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerError as ExecdServerError
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerException as ExecdServerException
+
+/**
+ * Returns `true` when this throwable represents an expected "file or directory does not exist"
+ * outcome rather than a genuine failure.
+ *
+ * Detection is intentionally restricted to the explicit [SandboxError.FILE_NOT_FOUND] server
+ * error code rather than a bare HTTP 404. A 404 whose body cannot be parsed is mapped to
+ * [SandboxError.UNEXPECTED_RESPONSE] and may indicate a real endpoint/routing/configuration
+ * regression, which must stay loud (ERROR) instead of being silently downgraded.
+ *
+ * Callers (and the adapters themselves) use this to avoid treating a missing file as an error,
+ * e.g. logging it at ERROR level with a full stack trace, which is just noise for a perfectly
+ * normal control-flow case such as polling for a not-yet-created file.
+ */
+fun Throwable.isFileNotFound(): Boolean = this is SandboxApiException && error.code == SandboxError.FILE_NOT_FOUND
 
 fun Exception.toSandboxException(): SandboxException {
     return when (this) {
         is SandboxException -> this
         is ClientException, is ServerException,
         is ExecdClientException, is ExecdServerException,
+        is DiagnosticClientException, is DiagnosticServerException,
         -> this.toApiException()
         is IOException ->
             SandboxInternalException(
@@ -71,7 +91,20 @@ private fun Exception.toApiException(): SandboxApiException {
             is ServerException -> this.statusCode to this.response
             is ExecdClientException -> this.statusCode to this.response
             is ExecdServerException -> this.statusCode to this.response
+            is DiagnosticClientException -> this.statusCode to this.response
+            is DiagnosticServerException -> this.statusCode to this.response
             else -> 0 to null
+        }
+
+    val requestId =
+        when (rawResponse) {
+            is ClientError<*> -> rawResponse.headers.extractRequestId()
+            is ServerError<*> -> rawResponse.headers.extractRequestId()
+            is ExecdClientError<*> -> rawResponse.headers.extractRequestId()
+            is ExecdServerError<*> -> rawResponse.headers.extractRequestId()
+            is DiagnosticClientError<*> -> rawResponse.headers.extractRequestId()
+            is DiagnosticServerError<*> -> rawResponse.headers.extractRequestId()
+            else -> null
         }
 
     val errorBody =
@@ -80,6 +113,8 @@ private fun Exception.toApiException(): SandboxApiException {
             is ExecdServerError<*> -> rawResponse.body
             is ServerError<*> -> rawResponse.body
             is ExecdClientError<*> -> rawResponse.body
+            is DiagnosticClientError<*> -> rawResponse.body
+            is DiagnosticServerError<*> -> rawResponse.body
             else -> null
         }
 
@@ -95,7 +130,14 @@ private fun Exception.toApiException(): SandboxApiException {
         statusCode = statusCode,
         cause = this,
         error = sandboxError,
+        requestId = requestId,
     )
+}
+
+private fun Map<String, List<String>>.extractRequestId(): String? {
+    return entries.firstOrNull { (key, _) ->
+        key.equals("X-Request-ID", ignoreCase = true)
+    }?.value?.firstOrNull()?.takeIf { it.isNotBlank() }
 }
 
 fun parseSandboxError(body: Any?): SandboxError? {

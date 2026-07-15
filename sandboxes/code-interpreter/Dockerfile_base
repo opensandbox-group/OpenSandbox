@@ -106,8 +106,8 @@ RUN mkdir -p ${GO_ROOT} && \
 ENV GOROOT=${GO_ROOT}/${GO_V1_25} \
     PATH="${NODE_ROOT}/v${NODE_V22}/bin:${GO_ROOT}/${GO_V1_25}/bin:${PATH}"
 
-RUN mkdir -p /opt/opensandbox
-COPY scripts/code-interpreter-env.sh /opt/opensandbox/code-interpreter-env.sh
-RUN chmod +x /opt/opensandbox/code-interpreter-env.sh
+RUN mkdir -p /opt/code-interpreter
+COPY scripts/code-interpreter-env.sh /opt/code-interpreter/code-interpreter-env.sh
+RUN chmod +x /opt/code-interpreter/code-interpreter-env.sh
 
 CMD ["/bin/bash"]

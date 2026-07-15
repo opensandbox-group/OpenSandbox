@@ -48,27 +48,22 @@ var (
 	dns1035DuplicateHyphens = regexp.MustCompile(`-+`)
 )
 
-// AgentSandboxProvider implements Provider for agents.x-k8s.io Sandbox CR.
-// It uses a dynamic informer to watch resources in the target namespace.
 type AgentSandboxProvider struct {
 	informerFactory dynamicinformer.DynamicSharedInformerFactory
 	informer        cache.SharedIndexInformer
-	namespace       string
 	gvr             schema.GroupVersionResource
 }
 
-// NewAgentSandboxProvider creates a Provider backed by dynamic informer.
-func NewAgentSandboxProvider(config *rest.Config, namespace string, resyncPeriod time.Duration) *AgentSandboxProvider {
+func NewAgentSandboxProvider(config *rest.Config, resyncPeriod time.Duration) *AgentSandboxProvider {
 	dyn, err := dynamic.NewForConfig(config)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create dynamic client: %v", err))
 	}
 
-	return newAgentSandboxProviderWithClient(dyn, namespace, resyncPeriod)
+	return newAgentSandboxProviderWithClient(dyn, resyncPeriod)
 }
 
-// newAgentSandboxProviderWithClient is a helper for tests to inject fake dynamic client.
-func newAgentSandboxProviderWithClient(dyn dynamic.Interface, namespace string, resyncPeriod time.Duration) *AgentSandboxProvider {
+func newAgentSandboxProviderWithClient(dyn dynamic.Interface, resyncPeriod time.Duration) *AgentSandboxProvider {
 	gvr := schema.GroupVersionResource{
 		Group:    agentSandboxGroup,
 		Version:  agentSandboxVersion,
@@ -78,16 +73,26 @@ func newAgentSandboxProviderWithClient(dyn dynamic.Interface, namespace string, 
 	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
 		dyn,
 		resyncPeriod,
-		namespace,
+		metav1.NamespaceAll,
 		nil, // no extra list options
 	)
 
 	informer := factory.ForResource(gvr).Informer()
+	if err := informer.AddIndexers(cache.Indexers{
+		sandboxNameIndex: func(obj any) ([]string, error) {
+			u, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				return []string{}, nil
+			}
+			return []string{u.GetName()}, nil
+		},
+	}); err != nil {
+		panic(fmt.Sprintf("failed to add AgentSandbox indexer: %v", err))
+	}
 
 	return &AgentSandboxProvider{
 		informerFactory: factory,
 		informer:        informer,
-		namespace:       namespace,
 		gvr:             gvr,
 	}
 }
@@ -157,32 +162,56 @@ func resourceNameCandidates(sandboxId string) []string {
 	return candidates
 }
 
-func (a *AgentSandboxProvider) GetEndpoint(sandboxId string) (string, error) {
+func (a *AgentSandboxProvider) lookupAgentSandbox(sandboxId string) (*unstructured.Unstructured, error) {
 	candidates := resourceNameCandidates(sandboxId)
-	var (
-		obj    any
-		exists bool
-		err    error
-	)
 	for _, name := range candidates {
-		key := fmt.Sprintf("%s/%s", a.namespace, name)
-		obj, exists, err = a.informer.GetStore().GetByKey(key)
+		indexed, err := a.informer.GetIndexer().ByIndex(sandboxNameIndex, name)
 		if err != nil {
-			return "", fmt.Errorf("failed to get AgentSandbox %s: %w", key, err)
+			return nil, fmt.Errorf("failed to query AgentSandbox index for %q: %w", name, err)
 		}
-		if exists {
-			break
+		matches := make([]string, 0, len(indexed))
+		var matchObj *unstructured.Unstructured
+		for _, item := range indexed {
+			u, ok := item.(*unstructured.Unstructured)
+			if !ok {
+				continue
+			}
+			matches = append(matches, fmt.Sprintf("%s/%s", u.GetNamespace(), u.GetName()))
+			if matchObj == nil {
+				matchObj = u
+			}
+		}
+		if len(matches) > 1 {
+			return nil, fmt.Errorf("ambiguous sandbox id %q found in multiple namespaces: %v", sandboxId, matches)
+		}
+		if len(matches) == 1 {
+			return matchObj, nil
 		}
 	}
-	if !exists {
-		return "", fmt.Errorf("%w: %s/%s", ErrSandboxNotFound, a.namespace, sandboxId)
-	}
+	return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxId)
+}
 
-	u, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		return "", fmt.Errorf("unexpected object type for sandbox %s: %T", sandboxId, obj)
+func (a *AgentSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, error) {
+	u, err := a.lookupAgentSandbox(sandboxId)
+	if err != nil {
+		return nil, err
 	}
+	endpoint, err := a.resolveEndpointFromSandbox(sandboxId, u)
+	if err != nil {
+		return nil, err
+	}
+	accessToken := ""
+	ann := u.GetAnnotations()
+	if ann != nil {
+		accessToken = strings.TrimSpace(ann[AnnotationAccessToken])
+	}
+	return &EndpointInfo{
+		Endpoint:          endpoint,
+		SecureAccessToken: accessToken,
+	}, nil
+}
 
+func (a *AgentSandboxProvider) resolveEndpointFromSandbox(sandboxId string, u *unstructured.Unstructured) (string, error) {
 	status, ok := u.Object["status"].(map[string]any)
 	if !ok {
 		return "", fmt.Errorf("%w: sandbox %s missing status", ErrSandboxNotReady, sandboxId)
@@ -201,7 +230,6 @@ func (a *AgentSandboxProvider) GetEndpoint(sandboxId string) (string, error) {
 	return serviceFQDN, nil
 }
 
-// Start starts the informer factory and waits for cache sync.
 func (a *AgentSandboxProvider) Start(ctx context.Context) error {
 	a.informerFactory.Start(ctx.Done())
 

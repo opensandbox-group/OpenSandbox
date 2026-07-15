@@ -15,31 +15,62 @@
 
 set -ex
 
+default_build_time() {
+  if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
+    date -u -d "@${SOURCE_DATE_EPOCH}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null ||
+      date -u -r "${SOURCE_DATE_EPOCH}" +"%Y-%m-%dT%H:%M:%SZ"
+  else
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+  fi
+}
+
+build_arg_if_set() {
+  local name="$1"
+  if [[ -n "${!name+x}" ]]; then
+    BUILD_ARGS+=(--build-arg "${name}=${!name}")
+  fi
+}
+
 TAG=${TAG:-latest}
+GHCR_REPO=${GHCR_REPO:-}
 VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo "dev")}
 GIT_COMMIT=${GIT_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo "unknown")}
-BUILD_TIME=${BUILD_TIME:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}
+BUILD_TIME=${BUILD_TIME:-$(default_build_time)}
+BUILD_METADATA_FILE=${BUILD_METADATA_FILE:-build/egress-image-metadata.json}
+BUILD_ARGS=()
+for name in GOFLAGS LDFLAGS CGO_ENABLED CC CXX CFLAGS CXXFLAGS CGO_CFLAGS CGO_CXXFLAGS CGO_LDFLAGS; do
+  build_arg_if_set "${name}"
+done
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || realpath "$(dirname "$0")/../..")
 cd "${REPO_ROOT}"
+mkdir -p "$(dirname "${BUILD_METADATA_FILE}")"
 
 docker buildx rm egress-builder || true
 docker buildx create --use --name egress-builder
 docker buildx inspect --bootstrap
 docker buildx ls
 
+IMAGE_TAGS=(-t opensandbox/egress:${TAG} -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:${TAG})
 LATEST_TAGS=()
+if [[ -n "${GHCR_REPO}" ]]; then
+  IMAGE_TAGS+=(-t "${GHCR_REPO}/egress:${TAG}")
+fi
 if [[ "${TAG}" == v* ]]; then
   LATEST_TAGS+=(-t opensandbox/egress:latest -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:latest)
+  if [[ -n "${GHCR_REPO}" ]]; then
+    LATEST_TAGS+=(-t "${GHCR_REPO}/egress:latest")
+  fi
 fi
 
 docker buildx build \
-  -t opensandbox/egress:${TAG} \
-  -t sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:${TAG} \
+  "${IMAGE_TAGS[@]}" \
   "${LATEST_TAGS[@]}" \
   -f components/egress/Dockerfile \
+  "${BUILD_ARGS[@]}" \
   --build-arg VERSION="${VERSION}" \
   --build-arg GIT_COMMIT="${GIT_COMMIT}" \
   --build-arg BUILD_TIME="${BUILD_TIME}" \
   --platform linux/amd64,linux/arm64 \
+  --metadata-file "${BUILD_METADATA_FILE}" \
   --push \
   .

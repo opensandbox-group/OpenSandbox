@@ -39,9 +39,14 @@ export class CodeInterpreter {
   ) {}
 
   static async create(sandbox: Sandbox, opts: CodeInterpreterCreateOptions = {}): Promise<CodeInterpreter> {
-    const execdBaseUrl = await sandbox.getEndpointUrl(DEFAULT_EXECD_PORT);
+    const endpoint = await sandbox.getEndpoint(DEFAULT_EXECD_PORT);
+    const execdBaseUrl = `${sandbox.connectionConfig.protocol}://${endpoint.endpoint}`;
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
-    const codes = adapterFactory.createCodes({ sandbox, execdBaseUrl });
+    const codes = adapterFactory.createCodes({
+      sandbox,
+      execdBaseUrl,
+      endpointHeaders: endpoint.headers,
+    });
 
     return new CodeInterpreter(sandbox, codes);
   }

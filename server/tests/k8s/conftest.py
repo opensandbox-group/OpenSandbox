@@ -26,10 +26,9 @@ def stub_workload_informer(monkeypatch):
     """
     Prevent real informer threads in unit tests.
     
-    Default informer behavior is enabled in production, but for unit tests we
-    stub it out so that API calls are still exercised without starting watch
-    threads or requiring cluster connections. Tests that need informer behavior
-    can supply a custom informer_factory explicitly.
+    Stubs the WorkloadInformer used inside K8sClient so that watch threads are
+    not started during unit tests. Cache is always empty (has_synced=False),
+    so get_custom_object falls through to the mocked API call.
     """
 
     class _FakeInformer:
@@ -49,8 +48,5 @@ def stub_workload_informer(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "src.services.k8s.agent_sandbox_provider.WorkloadInformer", _FakeInformer
-    )
-    monkeypatch.setattr(
-        "src.services.k8s.batchsandbox_provider.WorkloadInformer", _FakeInformer
+        "opensandbox_server.services.k8s.client.WorkloadInformer", _FakeInformer
     )

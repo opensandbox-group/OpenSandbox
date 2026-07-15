@@ -15,9 +15,11 @@
 package log
 
 import (
+	"context"
 	"os"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
+	"github.com/alibaba/opensandbox/internal/safego"
 )
 
 const logFileEnvKey = "EXECD_LOG_FILE"
@@ -28,6 +30,7 @@ var current slogger.Logger
 // Legacy levels: 0/1/2=fatal, 3=error, 4=warn, 5/6=info, 7+=debug.
 func Init(level int) {
 	current = newLogger(mapLevel(level))
+	safego.InitPanicLogger(context.Background(), current)
 }
 
 func mapLevel(level int) string {
@@ -75,11 +78,6 @@ func Info(format string, args ...any) {
 
 func Warn(format string, args ...any) {
 	getLogger().Warnf(format, args...)
-}
-
-// Warning is an alias to Warn for compatibility.
-func Warning(format string, args ...any) {
-	Warn(format, args...)
 }
 
 func Error(format string, args ...any) {

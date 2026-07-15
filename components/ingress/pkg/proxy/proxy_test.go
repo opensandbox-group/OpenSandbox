@@ -15,13 +15,24 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/stretchr/testify/assert"
 )
+
+// stubNoSecureProvider is a minimal sandbox.Provider for unit tests (no access-token / secure routing).
+type stubNoSecureProvider struct{}
+
+func (stubNoSecureProvider) GetEndpoint(string) (*sandbox.EndpointInfo, error) {
+	return &sandbox.EndpointInfo{Endpoint: "127.0.0.1"}, nil
+}
+
+func (stubNoSecureProvider) Start(context.Context) error { return nil }
 
 // Test_WatchPods is removed as we now use BatchSandbox Provider instead of direct Pod watching
 
@@ -45,23 +56,21 @@ func TestIsWebSocketRequest(t *testing.T) {
 	assert.False(t, proxy.isWebSocketRequest(req))
 }
 
-func TestParseSandboxHost(t *testing.T) {
-	proxy := &Proxy{}
-
-	host, err := proxy.parseSandboxHost("sandbox-1234.example.com")
+func TestParseHostRoute(t *testing.T) {
+	pr, err := parseHostRoute("sandbox-1234.example.com")
 	assert.NoError(t, err)
-	assert.Equal(t, "sandbox", host.ingressKey)
-	assert.Equal(t, 1234, host.port)
+	assert.Equal(t, "sandbox", pr.sandboxID)
+	assert.Equal(t, 1234, pr.port)
 
-	host, err = proxy.parseSandboxHost("https://alpha-beta-8080.sandbox.test")
+	pr, err = parseHostRoute("https://alpha-beta-8080.sandbox.test")
 	assert.NoError(t, err)
-	assert.Equal(t, "alpha-beta", host.ingressKey)
-	assert.Equal(t, 8080, host.port)
+	assert.Equal(t, "alpha-beta", pr.sandboxID)
+	assert.Equal(t, 8080, pr.port)
 
-	_, err = proxy.parseSandboxHost("invalidhost")
+	_, err = parseHostRoute("invalidhost")
 	assert.Error(t, err)
 
-	_, err = proxy.parseSandboxHost("-1234.example.com")
+	_, err = parseHostRoute("-1234.example.com")
 	assert.Error(t, err)
 }
 

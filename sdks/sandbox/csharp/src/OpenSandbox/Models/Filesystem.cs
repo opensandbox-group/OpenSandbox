@@ -28,6 +28,12 @@ public class SandboxFileInfo
     public required string Path { get; set; }
 
     /// <summary>
+    /// Gets or sets the entry type.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public string? Type { get; set; }
+
+    /// <summary>
     /// Gets or sets the file size in bytes.
     /// </summary>
     [JsonPropertyName("size")]
@@ -267,8 +273,21 @@ public class ReadFileOptions
 
     /// <summary>
     /// Gets or sets the byte range to read (e.g., "bytes=0-1023").
+    /// Mutually exclusive with Offset/Limit.
     /// </summary>
     public string? Range { get; set; }
+
+    /// <summary>
+    /// Gets or sets the starting line number (1-based) for line-based reading.
+    /// Mutually exclusive with Range.
+    /// </summary>
+    public int? Offset { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of lines to return for line-based reading.
+    /// Mutually exclusive with Range.
+    /// </summary>
+    public int? Limit { get; set; }
 }
 
 /// <summary>
@@ -278,8 +297,21 @@ public class ReadBytesOptions
 {
     /// <summary>
     /// Gets or sets the byte range to read (e.g., "bytes=0-1023").
+    /// Mutually exclusive with Offset/Limit.
     /// </summary>
     public string? Range { get; set; }
+
+    /// <summary>
+    /// Gets or sets the starting line number (1-based) for line-based reading.
+    /// Mutually exclusive with Range.
+    /// </summary>
+    public int? Offset { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of lines to return for line-based reading.
+    /// Mutually exclusive with Range.
+    /// </summary>
+    public int? Limit { get; set; }
 }
 
 /// <summary>
@@ -316,4 +348,32 @@ public class ReplaceFileContentItem
     /// </summary>
     [JsonPropertyName("new")]
     public required string New { get; set; }
+}
+
+/// <summary>
+/// Result of a content replacement operation on a single file.
+/// </summary>
+public class ContentReplaceResult
+{
+    /// <summary>
+    /// Gets or sets the file path.
+    /// </summary>
+    public required string Path { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of occurrences replaced. 0 means old content was not found.
+    /// </summary>
+    public int ReplacedCount { get; set; }
+}
+
+/// <summary>
+/// API response model for replace file content result.
+/// </summary>
+public class ReplaceFileContentResult
+{
+    /// <summary>
+    /// Gets or sets the number of occurrences replaced.
+    /// </summary>
+    [JsonPropertyName("replacedCount")]
+    public int ReplacedCount { get; set; }
 }

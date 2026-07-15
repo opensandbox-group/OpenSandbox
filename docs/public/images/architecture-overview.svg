@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">OpenSandbox Architecture Overview</title>
+  <desc id="desc">OpenSandbox architecture overview showing clients, public contracts, lifecycle control plane, runtime backends, sandbox data plane, and network and security plane.</desc>
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1e3a5f"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2410c"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 34px; font-weight: 700; fill: #1e40af; }
+      .subtitle { font-size: 17px; font-weight: 500; fill: #64748b; }
+      .stage { font-size: 18px; font-weight: 700; fill: #64748b; }
+      .panel-title { font-size: 23px; font-weight: 700; fill: #1e40af; }
+      .card-title { font-size: 16px; font-weight: 700; fill: #374151; }
+      .card-text { font-size: 15px; font-weight: 600; fill: #374151; }
+      .small-text { font-size: 13px; font-weight: 600; fill: #374151; }
+      .detail { font-size: 13px; font-weight: 600; fill: #64748b; }
+      .accent { font-size: 13px; font-weight: 600; fill: #3b82f6; }
+      .line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+      .panel { stroke-width: 2.5; rx: 8; ry: 8; }
+      .card { stroke-width: 2.5; rx: 8; ry: 8; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1000" fill="#ffffff"/>
+
+  <text class="title" x="42" y="62">OpenSandbox Architecture Overview</text>
+  <text class="subtitle" x="45" y="103">Public contracts define stable client boundaries; the lifecycle server dispatches one API surface to Docker or Kubernetes.</text>
+
+  <line x1="130" y1="170" x2="1470" y2="170" stroke="#1e3a5f" stroke-width="3"/>
+  <g fill="#3b82f6" stroke="#1e3a5f" stroke-width="2">
+    <circle cx="130" cy="170" r="12"/>
+    <circle cx="530" cy="170" r="12"/>
+    <circle cx="930" cy="170" r="12"/>
+    <circle cx="1330" cy="170" r="12"/>
+    <circle cx="1470" cy="170" r="12"/>
+  </g>
+  <text class="stage" x="88" y="210">Clients</text>
+  <text class="stage" x="455" y="210">OpenAPI Specs</text>
+  <text class="stage" x="850" y="210">Lifecycle Server</text>
+  <text class="stage" x="1235" y="210">Runtime</text>
+  <text class="stage" x="1390" y="210">Sandbox Data Plane</text>
+
+  <rect class="panel" x="30" y="250" width="330" height="330" fill="#ddd6fe" stroke="#6d28d9"/>
+  <text class="panel-title" x="65" y="306">Client Entry Points</text>
+  <rect class="card" x="70" y="345" width="250" height="92" fill="#ffffff" stroke="#6d28d9"/>
+  <text class="card-title" x="195" y="377" text-anchor="middle">Sandbox SDKs</text>
+  <text class="card-text" x="195" y="407" text-anchor="middle">Python / JS/TS</text>
+  <text class="card-text" x="195" y="432" text-anchor="middle">Java / C# / Go</text>
+  <rect class="card" x="70" y="470" width="250" height="72" fill="#ffffff" stroke="#6d28d9"/>
+  <text class="card-title" x="195" y="501" text-anchor="middle">osb CLI + MCP Server</text>
+  <text class="card-text" x="195" y="526" text-anchor="middle">operator / agent tools</text>
+
+  <rect class="panel" x="400" y="250" width="330" height="330" fill="#fed7aa" stroke="#c2410c"/>
+  <text class="panel-title" x="435" y="306">Public Contracts</text>
+  <path class="line" d="M 465 365 L 465 520 M 465 385 H 510 M 465 430 H 510 M 465 475 H 510 M 465 520 H 510" stroke="#c2410c" stroke-width="2.5"/>
+  <text class="card-text" x="530" y="390">sandbox-lifecycle.yml</text>
+  <text class="card-text" x="530" y="435">diagnostic-api.yml</text>
+  <text class="card-text" x="530" y="480">execd-api.yaml</text>
+  <text class="card-text" x="530" y="525">egress-api.yaml</text>
+
+  <rect class="panel" x="770" y="250" width="380" height="330" fill="#a7f3d0" stroke="#047857"/>
+  <text class="panel-title" x="805" y="306">Lifecycle Control Plane</text>
+  <rect class="card" x="810" y="345" width="300" height="82" fill="#ffffff" stroke="#047857"/>
+  <text class="card-title" x="960" y="378" text-anchor="middle">FastAPI Lifecycle Server</text>
+  <text class="card-text" x="960" y="405" text-anchor="middle">Auth / config / validation</text>
+  <text class="card-text" x="810" y="466">SandboxService</text>
+  <text class="card-text" x="810" y="492">SnapshotService</text>
+  <text class="card-text" x="810" y="518">Pool routes</text>
+  <text class="card-text" x="810" y="544">Server proxy / diagnostics</text>
+  <text class="card-text" x="810" y="570">SQLite store + renew intents</text>
+
+  <rect class="panel" x="1190" y="250" width="380" height="330" fill="#93c5fd" stroke="#1e3a5f"/>
+  <text class="panel-title" x="1230" y="306">Runtime Backends</text>
+  <rect class="card" x="1230" y="345" width="300" height="90" fill="#ffffff" stroke="#1e3a5f"/>
+  <text class="card-title" x="1380" y="376" text-anchor="middle">Docker Runtime</text>
+  <text class="card-text" x="1380" y="404" text-anchor="middle">Local containers</text>
+  <text class="card-text" x="1380" y="429" text-anchor="middle">Ports / volumes / snapshots</text>
+  <rect class="card" x="1230" y="460" width="300" height="96" fill="#ffffff" stroke="#1e3a5f"/>
+  <text class="card-title" x="1380" y="492" text-anchor="middle">Kubernetes Runtime</text>
+  <text class="card-text" x="1380" y="522" text-anchor="middle">BatchSandbox / Pool</text>
+  <text class="card-text" x="1380" y="548" text-anchor="middle">agent-sandbox provider</text>
+
+  <path class="line" d="M 360 415 H 400" stroke="#6d28d9" stroke-width="4" marker-end="url(#arrow-purple)"/>
+  <path class="line" d="M 730 415 H 770" stroke="#c2410c" stroke-width="4" marker-end="url(#arrow-orange)"/>
+  <path class="line" d="M 1150 415 H 1190" stroke="#047857" stroke-width="4" marker-end="url(#arrow-green)"/>
+
+  <rect class="panel" x="30" y="650" width="730" height="320" fill="#dbeafe" stroke="#1e40af"/>
+  <text class="panel-title" x="65" y="708">Sandbox Data Plane</text>
+  <rect class="card" x="75" y="745" width="660" height="210" fill="#ffffff" stroke="#1e3a5f"/>
+  <rect x="105" y="765" width="600" height="40" rx="7" ry="7" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
+  <text class="accent" x="405" y="790" text-anchor="middle">user image + injected OpenSandbox control processes</text>
+  <rect class="card" x="125" y="835" width="170" height="70" fill="#93c5fd" stroke="#1e3a5f"/>
+  <text class="card-title" x="210" y="864" text-anchor="middle">User workload</text>
+  <text class="card-text" x="210" y="890" text-anchor="middle">entrypoint</text>
+  <rect class="card" x="350" y="825" width="190" height="90" fill="#a7f3d0" stroke="#047857"/>
+  <text class="card-title" x="445" y="855" text-anchor="middle">execd</text>
+  <text class="card-text" x="445" y="881" text-anchor="middle">commands / files</text>
+  <text class="card-text" x="445" y="906" text-anchor="middle">PTY / metrics</text>
+  <rect class="card" x="560" y="820" width="160" height="58" fill="#ddd6fe" stroke="#6d28d9"/>
+  <text class="card-title" x="640" y="845" text-anchor="middle">Jupyter</text>
+  <text class="card-text" x="640" y="869" text-anchor="middle">kernels</text>
+  <rect class="card" x="560" y="886" width="160" height="58" fill="#ffffff" stroke="#1e3a5f"/>
+  <text class="card-title" x="640" y="909" text-anchor="middle">Volumes</text>
+  <text class="small-text" x="640" y="931" text-anchor="middle">host / PVC / OSSFS</text>
+  <path class="line" d="M 295 870 H 350" stroke="#1e3a5f" stroke-width="3" marker-end="url(#arrow-blue)"/>
+  <path class="line" d="M 540 850 H 560" stroke="#047857" stroke-width="3" marker-end="url(#arrow-green)"/>
+  <path class="line" d="M 540 890 L 560 912" stroke="#047857" stroke-width="3" marker-end="url(#arrow-green)"/>
+
+  <rect class="panel" x="800" y="650" width="770" height="310" fill="#fef3c7" stroke="#b45309"/>
+  <text class="panel-title" x="1020" y="708">Network &amp; Security Plane</text>
+  <rect class="card" x="850" y="745" width="190" height="68" fill="#ffffff" stroke="#b45309"/>
+  <text class="card-title" x="945" y="774" text-anchor="middle">Ingress Gateway</text>
+  <text class="card-text" x="945" y="800" text-anchor="middle">Header routing</text>
+  <rect class="card" x="1085" y="745" width="190" height="68" fill="#ffffff" stroke="#b45309"/>
+  <text class="card-title" x="1180" y="774" text-anchor="middle">Server Proxy</text>
+  <text class="card-text" x="1180" y="800" text-anchor="middle">HTTP + WebSocket</text>
+  <rect class="card" x="1320" y="745" width="190" height="68" fill="#ffffff" stroke="#b45309"/>
+  <text class="card-title" x="1415" y="774" text-anchor="middle">Secure Access</text>
+  <text class="card-text" x="1415" y="800" text-anchor="middle">Signed routes</text>
+  <rect class="card" x="850" y="855" width="300" height="76" fill="#a7f3d0" stroke="#047857"/>
+  <text class="card-title" x="1000" y="885" text-anchor="middle">Egress Sidecar</text>
+  <text class="card-text" x="1000" y="913" text-anchor="middle">Policy enforcement</text>
+  <rect class="card" x="1200" y="855" width="300" height="76" fill="#dbeafe" stroke="#1e40af"/>
+  <text class="card-title" x="1350" y="883" text-anchor="middle">Secure Runtime</text>
+  <text class="card-text" x="1350" y="909" text-anchor="middle">gVisor / Kata / Firecracker</text>
+
+  <path class="line" d="M 940 580 V 735" stroke="#047857" stroke-width="3" stroke-dasharray="8 10" marker-end="url(#arrow-green)"/>
+  <path class="line" d="M 1380 580 V 625 H 395 V 745" stroke="#1e3a5f" stroke-width="3" marker-end="url(#arrow-blue)"/>
+  <path class="line" d="M 850 893 H 720" stroke="#b45309" stroke-width="3" stroke-dasharray="8 10" marker-end="url(#arrow-orange)"/>
+</svg>

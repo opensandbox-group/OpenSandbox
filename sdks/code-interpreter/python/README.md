@@ -1,6 +1,5 @@
 # OpenSandbox Code Interpreter SDK for Python
 
-English | [中文](README_zh.md)
 
 A Python SDK for executing code in secure, isolated sandboxes. It provides a high-level API for running Python, Java,
 Go, TypeScript, and other languages safely, with support for code execution contexts.
@@ -52,9 +51,9 @@ async def main() -> None:
 
     # 2. Create a Sandbox with the code-interpreter image + runtime versions
     sandbox = await Sandbox.create(
-        "opensandbox/code-interpreter:v1.0.1",
+        "opensandbox/code-interpreter:v1.1.0",
         connection_config=config,
-        entrypoint=["/opt/opensandbox/code-interpreter.sh"],
+        entrypoint=["/opt/code-interpreter/code-interpreter.sh"],
         env={
             "PYTHON_VERSION": "3.11",
             "JAVA_VERSION": "17",
@@ -113,9 +112,9 @@ config = ConnectionConfigSync(
 )
 
 sandbox = SandboxSync.create(
-    "opensandbox/code-interpreter:v1.0.1",
+    "opensandbox/code-interpreter:v1.1.0",
     connection_config=config,
-    entrypoint=["/opt/opensandbox/code-interpreter.sh"],
+    entrypoint=["/opt/code-interpreter/code-interpreter.sh"],
     env={"PYTHON_VERSION": "3.11"},
 )
 with sandbox:

@@ -24,6 +24,9 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..models.file_info_type import FileInfoType
+from ..types import UNSET, Unset
+
 T = TypeVar("T", bound="FileInfo")
 
 
@@ -39,6 +42,7 @@ class FileInfo:
         owner (str): File owner username Example: admin.
         group (str): File group name Example: admin.
         mode (int): File permissions in octal format Example: 755.
+        type_ (FileInfoType | Unset): Entry type Example: file.
     """
 
     path: str
@@ -48,6 +52,7 @@ class FileInfo:
     owner: str
     group: str
     mode: int
+    type_: FileInfoType | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +70,10 @@ class FileInfo:
 
         mode = self.mode
 
+        type_: str | Unset = UNSET
+        if not isinstance(self.type_, Unset):
+            type_ = self.type_.value
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -78,6 +87,8 @@ class FileInfo:
                 "mode": mode,
             }
         )
+        if type_ is not UNSET:
+            field_dict["type"] = type_
 
         return field_dict
 
@@ -98,6 +109,13 @@ class FileInfo:
 
         mode = d.pop("mode")
 
+        _type_ = d.pop("type", UNSET)
+        type_: FileInfoType | Unset
+        if isinstance(_type_, Unset):
+            type_ = UNSET
+        else:
+            type_ = FileInfoType(_type_)
+
         file_info = cls(
             path=path,
             size=size,
@@ -106,6 +124,7 @@ class FileInfo:
             owner=owner,
             group=group,
             mode=mode,
+            type_=type_,
         )
 
         file_info.additional_properties = d

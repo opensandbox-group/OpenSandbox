@@ -23,3 +23,5 @@ plugins {
 include(":sandbox")
 include(":sandbox-api")
 include(":sandbox-bom")
+include(":sandbox-pool-redis")
+include(":code-interpreter")

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aks-kata-batchsandbox-template
+  namespace: opensandbox-system
+data:
+  batchsandbox-template.yaml: |
+    metadata:
+      labels:
+        example.opensandbox.io/profile: aks-kata
+    spec:
+      replicas: 1
+      template:
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 30
+          nodeSelector:
+            kubernetes.azure.com/kata-vm-isolation: "true"
+          tolerations:
+            - operator: "Exists"

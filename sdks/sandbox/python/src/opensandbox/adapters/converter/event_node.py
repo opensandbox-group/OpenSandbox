@@ -17,7 +17,9 @@
 EventNode model for parsing Server-Sent Events from execd.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class EventNodeError(BaseModel):
@@ -26,6 +28,18 @@ class EventNodeError(BaseModel):
     name: str | None = Field(default=None, alias="ename")
     value: str | None = Field(default=None, alias="evalue")
     traceback: list[str] = Field(default_factory=list)
+
+    @field_validator("traceback", mode="before")
+    @classmethod
+    def normalize_traceback(cls, value: Any) -> list[str]:
+        """Normalize older or malformed SSE payloads into a stable list form."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if isinstance(value, tuple):
+            return [str(item) for item in value]
+        return [str(value)]
 
 
 class EventNodeResults(BaseModel):

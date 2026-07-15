@@ -26,23 +26,31 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 IMG="opensandbox/egress:local"
 containerName="egress-smoke-dns"
 POLICY_PORT=18080
+POLICY_FILE_HOST="$(mktemp)"
 
 info() { echo "[$(date +%H:%M:%S)] $*"; }
 
 cleanup() {
   docker rm -f "${containerName}" >/dev/null 2>&1 || true
+  rm -f "${POLICY_FILE_HOST}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 info "Building image ${IMG}"
 docker build -t "${IMG}" -f "${REPO_ROOT}/components/egress/Dockerfile" "${REPO_ROOT}"
 
-info "Starting containerName"
+info "Writing policy JSON to ${POLICY_FILE_HOST} (default deny; allow *.github.com)"
+printf '%s\n' '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.github.com"}]}' >"${POLICY_FILE_HOST}"
+
+info "Starting containerName (policy from file; env rules intentionally wrong to assert file wins)"
 docker run -d --name "${containerName}" \
   --cap-add=NET_ADMIN \
   --sysctl net.ipv6.conf.all.disable_ipv6=1 \
   --sysctl net.ipv6.conf.default.disable_ipv6=1 \
   -e OPENSANDBOX_EGRESS_MODE=dns \
+  -e OPENSANDBOX_EGRESS_POLICY_FILE=/etc/opensandbox/egress-policy.json \
+  -e OPENSANDBOX_EGRESS_RULES='{"defaultAction":"allow"}' \
+  -v "${POLICY_FILE_HOST}:/etc/opensandbox/egress-policy.json" \
   -p ${POLICY_PORT}:18080 \
   "${IMG}"
 
@@ -53,10 +61,6 @@ for i in {1..50}; do
   fi
   sleep 0.5
 done
-
-info "Pushing policy (allow by default; deny github.com & 10.0.0.0/8)"
-curl -sSf -XPOST "http://127.0.0.1:${POLICY_PORT}/policy" \
-  -d '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.github.com"}]}'
 
 run_in_app() {
   docker run --rm --network container:"${containerName}" curlimages/curl "$@"

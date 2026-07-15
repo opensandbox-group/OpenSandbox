@@ -4,7 +4,7 @@ authors:
   - "@ninan"
 creation-date: 2026-03-02
 last-updated: 2026-03-06
-status: draft
+status: implementing
 ---
 
 # OSEP-0005: Client-Side Sandbox Pool

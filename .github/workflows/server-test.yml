@@ -3,19 +3,24 @@ name: Server Tests
 on:
   pull_request:
     branches: [ main ]
-    paths:
-      - 'server/src/**'
-      - 'server/tests/**'
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: server
+
   test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -42,13 +47,29 @@ jobs:
           cd server
           uv sync --all-groups
           uv run ruff check
-          uv run pytest
+          mkdir -p reports
+          uv run pytest \
+            --cov=opensandbox_server \
+            --cov-report=term \
+            --cov-report=xml:reports/coverage.xml \
+            --cov-fail-under=80
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage-${{ matrix.os }}
+          path: server/reports/coverage.xml
 
   docker-smoke:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     strategy:
       matrix:
         network: [host, bridge]
     runs-on: ubuntu-latest
+    env:
+      OPENSANDBOX_INSECURE_SERVER: YES
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -77,8 +98,9 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 32888
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:latest"
@@ -91,7 +113,7 @@ jobs:
           EOF
 
           # Start server in background
-          uv run python -m src.main > app.log 2>&1 &
+          uv run python -m opensandbox_server.main > app.log 2>&1 &
 
           # Wait for server to start
           sleep 10
@@ -103,3 +125,26 @@ jobs:
         if: always()
         run: |
           cat server/app.log
+
+  required:
+    name: Server CI
+    if: always()
+    needs: [changes, test, docker-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          DOCKER_SMOKE_RESULT: ${{ needs.docker-smoke.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$TEST_RESULT" == "success" && "$DOCKER_SMOKE_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$DOCKER_SMOKE_RESULT" == "skipped" ]]
+          fi

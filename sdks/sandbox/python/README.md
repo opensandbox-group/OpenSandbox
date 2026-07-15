@@ -1,6 +1,5 @@
 # OpenSandbox SDK for Python
 
-English | [中文](README_zh.md)
 
 A Python SDK for low-level interaction with OpenSandbox. It provides capabilities to create, manage, and interact with secure sandbox environments, including executing shell commands, managing files, and monitoring resources.
 
@@ -43,21 +42,21 @@ async def main():
             "ubuntu",
             connection_config=config
         )
-        async with sandbox:
-
+        try:
             # 3. Execute a shell command
             execution = await sandbox.commands.run("echo 'Hello Sandbox!'")
 
             # 4. Print output
             print(execution.logs.stdout[0].text)
-
-            # 5. Cleanup (sandbox.close() called automatically)
-            # Note: kill() must be called explicitly if you want to terminate the remote sandbox instance immediately
-            await sandbox.kill()
+        finally:
+            # 5. Terminate the remote sandbox and close local resources
+            await sandbox.destroy()
 
     except SandboxException as e:
         # Handle Sandbox specific exceptions
         print(f"Sandbox Error: [{e.error.code}] {e.error.message}")
+        # Server logs can be correlated by this request id (if available)
+        print(f"Request ID: {e.request_id}")
     except Exception as e:
         print(f"Error: {e}")
 
@@ -84,11 +83,156 @@ config = ConnectionConfigSync(
 )
 
 sandbox = SandboxSync.create("ubuntu", connection_config=config)
-with sandbox:
+try:
     execution = sandbox.commands.run("echo 'Hello Sandbox!'")
     print(execution.logs.stdout[0].text)
-    sandbox.kill()
+finally:
+    sandbox.destroy()
 ```
+
+Use `destroy()` for create-use-discard workflows. It calls `kill()` before
+`close()` and still closes local resources if remote termination fails. Context
+managers continue to call only `close()`, so the remote sandbox remains available
+for later `connect()` calls unless you explicitly kill or destroy it.
+
+### Synchronous Sandbox Pool
+
+`SandboxPoolSync` keeps a buffer of ready sandboxes to reduce acquire latency. The
+pool API is synchronous and aligned with the Kotlin `SandboxPool` semantics: acquire
+is allowed on any node, while replenish/shrink is gated by the store's primary lock.
+
+```python
+from datetime import timedelta
+
+from opensandbox import (
+    AcquirePolicy,
+    InMemoryPoolStateStore,
+    PoolCreationSpec,
+    SandboxPoolSync,
+)
+from opensandbox.config import ConnectionConfigSync
+
+pool = SandboxPoolSync(
+    pool_name="demo-pool",
+    owner_id="worker-1",
+    max_idle=2,
+    state_store=InMemoryPoolStateStore(),  # single-process only
+    connection_config=ConnectionConfigSync(domain="api.opensandbox.io"),
+    creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+    reconcile_interval=timedelta(seconds=5),
+)
+
+pool.start()
+try:
+    sandbox = pool.acquire(
+        sandbox_timeout=timedelta(minutes=30),
+        policy=AcquirePolicy.FAIL_FAST,
+    )
+    try:
+        result = sandbox.commands.run("echo pool-ok")
+        print(result.logs.stdout[0].text)
+    finally:
+        sandbox.destroy()
+finally:
+    pool.shutdown(graceful=True)
+```
+
+Use `SandboxPoolAsync` in asyncio applications so pool acquire, warmup, health
+checks, and lifecycle calls do not block the event loop:
+
+```python
+from datetime import timedelta
+
+from opensandbox import (
+    AcquirePolicy,
+    InMemoryAsyncPoolStateStore,
+    PoolCreationSpec,
+    SandboxPoolAsync,
+)
+from opensandbox.config import ConnectionConfig
+
+pool = SandboxPoolAsync(
+    pool_name="demo-pool",
+    owner_id="worker-1",
+    max_idle=2,
+    state_store=InMemoryAsyncPoolStateStore(),  # single-event-loop only
+    connection_config=ConnectionConfig(domain="api.opensandbox.io"),
+    creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+)
+
+await pool.start()
+try:
+    sandbox = await pool.acquire(
+        sandbox_timeout=timedelta(minutes=30),
+        policy=AcquirePolicy.FAIL_FAST,
+    )
+    try:
+        result = await sandbox.commands.run("echo pool-ok")
+        print(result.logs.stdout[0].text)
+    finally:
+        await sandbox.destroy()
+finally:
+    await pool.shutdown(graceful=True)
+```
+
+For Python production services with multiple processes or pods, use Redis-backed
+pool state. Install the optional dependency:
+
+```bash
+pip install "opensandbox[pool-redis]"
+```
+
+Create and configure the Redis client yourself, then pass it to `RedisPoolStateStore`.
+The store does not create or close Redis clients.
+
+```python
+import redis
+
+from opensandbox import PoolCreationSpec, SandboxPoolSync
+from opensandbox.config import ConnectionConfigSync
+from opensandbox.pool_redis import RedisPoolStateStore
+
+redis_client = redis.Redis.from_url(
+    "redis://user:password@redis.example.com:6379/0",
+    decode_responses=True,
+)
+
+pool = SandboxPoolSync(
+    pool_name="prod-pool",
+    owner_id="worker-1",
+    max_idle=10,
+    state_store=RedisPoolStateStore(redis_client, key_prefix="opensandbox:pool:prod"),
+    connection_config=ConnectionConfigSync(domain="api.opensandbox.io"),
+    creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+    primary_lock_ttl=timedelta(seconds=60),
+)
+```
+
+For async pools, pass a `redis.asyncio` client to `AsyncRedisPoolStateStore`.
+
+Notes:
+
+- `InMemoryPoolStateStore` is for single-process development and tests. It is not
+  a process-wide or pod-wide pool for gunicorn, uvicorn workers, Celery, or Kubernetes.
+- `max_idle` is the target/cap for ready idle sandboxes. It is not a global limit
+  on borrowed or directly-created sandboxes.
+- For distributed deployment, all nodes in one logical pool must share the same
+  `key_prefix` and `pool_name`.
+- Each running process should use a unique `owner_id`; it identifies the primary
+  lock owner and is not the pool identifier.
+- All nodes sharing one pool must use the same creation and warmup definition. If
+  that definition changes, use a new `pool_name` or `key_prefix` and drain the old pool.
+- `resize(max_idle)` can be called from any node. The call returns after the new
+  idle target is stored in the shared state store; the current primary applies
+  replenish or shrink work during periodic reconcile.
+- Use `resize(0)` and wait for `snapshot().idle_count == 0` to drain a distributed
+  idle buffer. `release_all_idle()` is only a best-effort cleanup pass in distributed
+  mode because another primary may put new idle sandboxes concurrently unless the
+  shared target has already been reduced.
+- Configure `primary_lock_ttl` greater than `warmup_ready_timeout` plus expected
+  warmup preparer time and buffer.
+- Redis outages are surfaced as pool state store errors. The pool fails closed; it
+  does not bypass shared state.
 
 ## Usage Examples
 
@@ -115,6 +259,16 @@ sandbox = await Sandbox.resume(
 # Get current status
 info = await sandbox.get_info()
 print(f"State: {info.status.state}")
+print(f"Expires: {info.expires_at}")  # None when no automatic expiration is configured
+```
+
+Create a non-expiring sandbox by omitting `timeout`:
+
+```python
+manual = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+)
 ```
 
 ### 2. Custom Health Check
@@ -265,7 +419,10 @@ import httpx
 config = ConnectionConfig(
     api_key="your-key",
     domain="api.opensandbox.io",
-    headers={"X-Custom-Header": "value"},
+    headers={
+        "X-Custom-Header": "value",
+        "X-Request-ID": "trace-123",
+    },
     transport=httpx.AsyncHTTPTransport(
         limits=httpx.Limits(
             max_connections=100,
@@ -292,7 +449,11 @@ The `Sandbox.create()` allows configuring the sandbox environment.
 | `env`           | Environment variables                    | Empty                           |
 | `metadata`      | Custom metadata tags                     | Empty                           |
 | `network_policy` | Optional outbound network policy (egress) | -                             |
+| `credential_proxy` | Optional Credential Vault proxy startup settings | -                     |
 | `ready_timeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
+
+Note: metadata keys under `opensandbox.io/` are reserved for system-managed
+labels and will be rejected by the server.
 
 ```python
 from datetime import timedelta
@@ -312,3 +473,70 @@ sandbox = await Sandbox.create(
     ),
 )
 ```
+
+### 3. Runtime Egress Policy Updates
+
+Runtime egress policy reads and patches are sent directly to the sandbox egress sidecar.
+The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+
+Patch uses merge semantics:
+- Incoming rules take priority over existing rules with the same `target`.
+- Existing rules for other targets remain unchanged.
+- Within a single patch payload, the first rule for a `target` wins.
+- The current `defaultAction` is preserved.
+
+```python
+policy = await sandbox.get_egress_policy()
+
+await sandbox.patch_egress_rules(
+    [
+        NetworkRule(action="allow", target="www.github.com"),
+        NetworkRule(action="deny", target="pypi.org"),
+    ]
+)
+```
+
+### 4. Credential Vault
+
+Credential Vault injects outbound credentials from the egress sidecar while
+keeping real secrets out of sandbox environment variables, commands, files, and
+logs. Create the sandbox with `credential_proxy` enabled, then write credentials
+and bindings through `sandbox.credential_vault`.
+
+```python
+from opensandbox.models.sandboxes import (
+    Credential,
+    CredentialBinding,
+    CredentialProxyConfig,
+    NetworkPolicy,
+    NetworkRule,
+)
+
+sandbox = await Sandbox.create(
+    "python:3.11",
+    connection_config=config,
+    network_policy=NetworkPolicy(
+        defaultAction="deny",
+        egress=[NetworkRule(action="allow", target="api.example.com")],
+    ),
+    credential_proxy=CredentialProxyConfig(enabled=True),
+)
+
+await sandbox.credential_vault.create(
+    credentials=[Credential(name="api-token", source={"value": "<token>"})],
+    bindings=[
+        CredentialBinding(
+            name="api-token",
+            match={
+                "schemes": ["https"],
+                "hosts": ["api.example.com"],
+                "paths": ["/v1/*"],
+            },
+            auth={"type": "apiKey", "name": "x-api-key", "credential": "api-token"},
+        )
+    ],
+)
+```
+
+See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
+binding guidance, and Git/curl examples.

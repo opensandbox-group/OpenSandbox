@@ -19,13 +19,20 @@ package com.alibaba.opensandbox.sandbox.infrastructure.factory
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Commands
+import com.alibaba.opensandbox.sandbox.domain.services.CredentialVault
+import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
+import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.Health
+import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.Metrics
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.CommandsAdapter
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.DiagnosticsAdapter
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.EgressAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.FilesystemAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.HealthAdapter
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.IsolatedSessionsAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.MetricsAdapter
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.SandboxesAdapter
 
@@ -38,8 +45,17 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.service.Sandboxes
 internal class AdapterFactory(
     private val httpClientProvider: HttpClientProvider,
 ) {
+    data class EgressStack(
+        val egress: Egress,
+        val credentialVault: CredentialVault,
+    )
+
     fun createSandboxes(): Sandboxes {
         return SandboxesAdapter(httpClientProvider)
+    }
+
+    fun createDiagnostics(): Diagnostics {
+        return DiagnosticsAdapter(httpClientProvider)
     }
 
     fun createFilesystem(endpoint: SandboxEndpoint): Filesystem {
@@ -50,11 +66,23 @@ internal class AdapterFactory(
         return CommandsAdapter(httpClientProvider, endpoint)
     }
 
+    fun createEgressStack(endpoint: SandboxEndpoint): EgressStack {
+        val adapter = EgressAdapter(httpClientProvider, endpoint)
+        return EgressStack(
+            egress = adapter,
+            credentialVault = adapter,
+        )
+    }
+
     fun createMetrics(endpoint: SandboxEndpoint): Metrics {
         return MetricsAdapter(httpClientProvider, endpoint)
     }
 
     fun createHealth(endpoint: SandboxEndpoint): Health {
         return HealthAdapter(httpClientProvider, endpoint)
+    }
+
+    fun createIsolatedSessions(endpoint: SandboxEndpoint): IsolationService {
+        return IsolatedSessionsAdapter(httpClientProvider, endpoint)
     }
 }

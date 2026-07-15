@@ -18,11 +18,23 @@ import pytest
 
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException
+from opensandbox.models.sandboxes import NetworkPolicy, NetworkRule
 from opensandbox.sandbox import Sandbox
 
 
 class _NoopService:
     pass
+
+
+class _NoopEgressService:
+    async def get_policy(self) -> NetworkPolicy:  # pragma: no cover
+        return NetworkPolicy(
+            defaultAction="deny",
+            egress=[NetworkRule(action="allow", target="pypi.org")],
+        )
+
+    async def patch_rules(self, rules: list[NetworkRule]) -> None:  # pragma: no cover
+        return None
 
 
 @pytest.mark.asyncio
@@ -47,6 +59,8 @@ async def test_sandbox_close_does_not_close_user_transport() -> None:
         command_service=_NoopService(),
         health_service=_NoopService(),
         metrics_service=_NoopService(),
+        egress_service=_NoopEgressService(),
+        diagnostics_service=_NoopService(),
         connection_config=cfg,
         custom_health_check=None,
     )

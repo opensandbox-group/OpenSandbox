@@ -60,7 +60,7 @@ func (c *Client) Get(url string) (*http.Response, error) {
 
 // Post sends a POST request.
 func (c *Client) Post(url, contentType string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodPut, url, body)
+	req, err := http.NewRequest(http.MethodPost, url, body)
 	if err != nil {
 		return nil, err
 	}

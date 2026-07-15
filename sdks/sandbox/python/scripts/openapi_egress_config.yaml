@@ -1,0 +1,7 @@
+# openapi-python-client configuration for egress API
+# This generates a httpx-based async client that supports custom httpx.AsyncClient injection
+
+project_name_override: opensandbox_api_egress
+package_name_override: opensandbox_api_egress
+
+use_path_prefix_for_title_model_names: true

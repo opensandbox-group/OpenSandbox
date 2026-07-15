@@ -92,7 +92,8 @@ def sync_detailed(
     The command can run in foreground or background mode. The response includes stdout, stderr,
     execution status, and completion events.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
-    terminate the process when the timeout is reached.
+    terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
+    with specific user/group IDs, and `envs` to inject environment variables.
 
     Args:
         body (RunCommandRequest): Request to execute a shell command
@@ -127,7 +128,8 @@ def sync(
     The command can run in foreground or background mode. The response includes stdout, stderr,
     execution status, and completion events.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
-    terminate the process when the timeout is reached.
+    terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
+    with specific user/group IDs, and `envs` to inject environment variables.
 
     Args:
         body (RunCommandRequest): Request to execute a shell command
@@ -157,7 +159,8 @@ async def asyncio_detailed(
     The command can run in foreground or background mode. The response includes stdout, stderr,
     execution status, and completion events.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
-    terminate the process when the timeout is reached.
+    terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
+    with specific user/group IDs, and `envs` to inject environment variables.
 
     Args:
         body (RunCommandRequest): Request to execute a shell command
@@ -190,7 +193,8 @@ async def asyncio(
     The command can run in foreground or background mode. The response includes stdout, stderr,
     execution status, and completion events.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
-    terminate the process when the timeout is reached.
+    terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
+    with specific user/group IDs, and `envs` to inject environment variables.
 
     Args:
         body (RunCommandRequest): Request to execute a shell command

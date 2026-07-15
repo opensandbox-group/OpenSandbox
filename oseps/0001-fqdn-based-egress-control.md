@@ -1118,9 +1118,9 @@ The key insight is that `CAP_NET_ADMIN` grants permission to modify network conf
 
 #### 1. Server (`server/`)
 
-**`server/src/api/schema.py`**: Add `NetworkPolicy` schema classes.
+**`server/opensandbox_server/api/schema.py`**: Add `NetworkPolicy` schema classes.
 
-**`server/src/services/docker.py`** (sidecar pattern):
+**`server/opensandbox_server/services/docker.py`** (sidecar pattern):
 - Create an egress sidecar container when `network_policy` is present.
 - Add `CAP_NET_ADMIN` only to the sidecar.
 - Set `OPENSANDBOX_EGRESS_TOKEN` env (random per-sandbox) and optionally `OPENSANDBOX_EGRESS_HTTP_ADDR`.
@@ -1128,7 +1128,7 @@ The key insight is that `CAP_NET_ADMIN` grants permission to modify network conf
 - Wait for sidecar `/healthz` 200, then POST `networkPolicy` to `/policy` with header `OPENSANDBOX-EGRESS-AUTH: <token>`.
 - Reject `--network host` when `network_policy` is set (hostNetwork not supported).
 
-**`server/src/services/k8s/batchsandbox_provider.py`** (Pod pattern):
+**`server/opensandbox_server/services/k8s/batchsandbox_provider.py`** (Pod pattern):
 - Pod spec includes `egress-sidecar` with `capabilities.add: [NET_ADMIN]` and the application container without extra caps.
 - Sidecar env includes `OPENSANDBOX_EGRESS_TOKEN` (and `OPENSANDBOX_EGRESS_HTTP_ADDR` if non-default); may optionally seed `OPENSANDBOX_EGRESS_RULES`.
 - Server (inside cluster) waits for `/healthz` on the Pod IP, then POSTs `networkPolicy` to `/policy` with header `OPENSANDBOX-EGRESS-AUTH`.

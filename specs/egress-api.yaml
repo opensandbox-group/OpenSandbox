@@ -1,0 +1,708 @@
+openapi: 3.1.0
+info:
+  title: OpenSandbox Egress API
+  version: 0.1.0
+  description: |
+    The OpenSandbox Egress API exposes the runtime policy interface served by the
+    egress sidecar inside a sandbox. Unlike the lifecycle API, these operations are
+    performed by connecting to a sandbox endpoint for the egress port and calling
+    the sidecar directly.
+
+    This API is intended for runtime inspection and mutation of outbound network
+    policy after sandbox creation. Initial egress policy configuration during sandbox
+    provisioning remains part of the Sandbox Lifecycle API create request.
+
+    ## Access Model
+
+    Clients typically access this API in two steps:
+
+    1. Use the Sandbox Lifecycle API to resolve the sandbox endpoint for the egress
+       service port.
+    2. Send requests directly to that endpoint's `/policy` or
+       `/credential-vault` route.
+
+    ## Authentication
+
+    The sidecar may optionally require the `OPENSANDBOX-EGRESS-AUTH` header. When
+    the sandbox endpoint resolver returns required headers, clients must forward
+    them on every egress API request.
+servers:
+  - url: http://localhost:18080
+    description: Local egress sidecar
+tags:
+  - name: Policy
+    description: Inspect and mutate sandbox egress policy at runtime
+  - name: CredentialVault
+    description: Manage sandbox-local Credential Vault bindings at runtime
+paths:
+  /policy:
+    get:
+      tags: [Policy]
+      summary: Get current egress policy
+      description: |
+        Returns the currently enforced egress policy and the sidecar's derived
+        runtime mode metadata.
+      responses:
+        '200':
+          description: Current policy returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyStatusResponse'
+              examples:
+                deny-with-allowlist:
+                  summary: Current deny-by-default policy
+                  value:
+                    status: ok
+                    mode: deny_all
+                    enforcementMode: dns
+                    policy:
+                      defaultAction: deny
+                      egress:
+                        - action: allow
+                          target: pypi.org
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    patch:
+      tags: [Policy]
+      summary: Patch egress rules
+      description: |
+        Merge incoming egress rules with the currently enforced policy.
+
+        This endpoint uses merge semantics:
+        - Existing rules remain unless overridden by incoming rules.
+        - Incoming rules are applied with higher priority than existing rules.
+        - If multiple incoming rules refer to the same `target`, the first one wins.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/NetworkRule'
+            examples:
+              duplicate-target-first-wins:
+                summary: First rule wins for duplicate target within the same patch payload
+                value:
+                  - action: allow
+                    target: example.com
+                  - action: deny
+                    target: example.com
+      responses:
+        '200':
+          description: Patch applied successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyStatusResponse'
+              examples:
+                patched:
+                  summary: Patch applied
+                  value:
+                    status: ok
+                    mode: deny_all
+                    enforcementMode: dns
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      tags: [Policy]
+      summary: Delete egress rules
+      description: |
+        Remove specific egress rules from the currently enforced policy by target.
+
+        - Accepts a list of target strings (FQDNs or wildcard domains).
+        - Matching rules are removed; targets not found in the current policy
+          are silently ignored (idempotent).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              items:
+                type: string
+                description: FQDN or wildcard domain to remove from the policy.
+              example:
+                - bad.example.com
+                - "*.blocked.org"
+      responses:
+        '200':
+          description: Rules removed successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyStatusResponse'
+              examples:
+                removed:
+                  summary: Rules removed
+                  value:
+                    status: ok
+                    mode: deny_all
+                    enforcementMode: dns
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /credential-vault:
+    post:
+      tags: [CredentialVault]
+      summary: Create a sandbox-local Credential Vault
+      description: |
+        Create the initial sandbox-local Credential Vault revision and activate it
+        in Credential Proxy. Inline credential values are write-only and are never
+        returned by this API. The sidecar must run in `dns+nft` mode and requires
+        an egress policy. `defaultAction: deny` is strongly recommended;
+        default-allow remains temporarily supported with a security warning.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialVaultCreateRequest'
+      responses:
+        '201':
+          description: Credential Vault created and acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+    get:
+      tags: [CredentialVault]
+      summary: Get sanitized Credential Vault state
+      responses:
+        '200':
+          description: Sanitized Credential Vault state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [CredentialVault]
+      summary: Atomically mutate sandbox-local credentials and bindings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialVaultMutationRequest'
+      responses:
+        '200':
+          description: Mutation applied and acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialVaultState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+    delete:
+      tags: [CredentialVault]
+      summary: Delete the sandbox-local Credential Vault
+      responses:
+        '204':
+          description: Credential Vault deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /credential-vault/credentials:
+    get:
+      tags: [CredentialVault]
+      summary: List sanitized credential metadata
+      responses:
+        '200':
+          description: Sanitized credential metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /credential-vault/credentials/{credential_name}:
+    get:
+      tags: [CredentialVault]
+      summary: Get sanitized metadata for one credential
+      parameters:
+        - name: credential_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sanitized credential metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialMetadata'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /credential-vault/bindings:
+    get:
+      tags: [CredentialVault]
+      summary: List sanitized credential binding metadata
+      responses:
+        '200':
+          description: Sanitized binding metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBindingListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /credential-vault/bindings/{binding_name}:
+    get:
+      tags: [CredentialVault]
+      summary: Get sanitized metadata for one binding
+      parameters:
+        - name: binding_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sanitized binding metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBindingMetadata'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  responses:
+    BadRequest:
+      description: The request was invalid or malformed.
+      content:
+        text/plain:
+          schema:
+            type: string
+    Unauthorized:
+      description: Authentication failed for the egress sidecar.
+      content:
+        text/plain:
+          schema:
+            type: string
+    NotFound:
+      description: The requested Credential Vault resource was not found.
+      content:
+        text/plain:
+          schema:
+            type: string
+    Conflict:
+      description: The request conflicts with the current Credential Vault revision.
+      content:
+        text/plain:
+          schema:
+            type: string
+    PreconditionFailed:
+      description: Credential Proxy prerequisites are not ready.
+      content:
+        text/plain:
+          schema:
+            type: string
+    InternalServerError:
+      description: The sidecar failed to apply or fetch policy state.
+      content:
+        text/plain:
+          schema:
+            type: string
+  schemas:
+    PolicyStatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          description: Operation status reported by the sidecar.
+          example: ok
+        mode:
+          type: string
+          description: Derived runtime mode for the current policy.
+          example: deny_all
+        enforcementMode:
+          type: string
+          description: Egress sidecar enforcement backend mode.
+          example: dns
+        reason:
+          type: string
+          description: Optional human-readable reason when the sidecar returns extra context.
+        policy:
+          $ref: '#/components/schemas/NetworkPolicy'
+      additionalProperties: false
+    NetworkPolicy:
+      type: object
+      description: |
+        Egress network policy matching the sidecar `/policy` request body.
+        If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
+        object or null results in allow-all behavior at startup.
+      properties:
+        defaultAction:
+          type: string
+          enum: [allow, deny]
+          description: Default action when no egress rule matches. Defaults to "deny".
+        egress:
+          type: array
+          description: List of egress rules evaluated in order.
+          items:
+            $ref: '#/components/schemas/NetworkRule'
+      additionalProperties: false
+    NetworkRule:
+      type: object
+      properties:
+        action:
+          type: string
+          enum: [allow, deny]
+          description: Whether to allow or deny matching targets.
+        target:
+          type: string
+          description: |
+            FQDN or wildcard domain (e.g., "example.com", "*.example.com").
+            IP/CIDR not yet supported in the egress MVP.
+      required: [action, target]
+      additionalProperties: false
+    CredentialVaultCreateRequest:
+      type: object
+      required: [credentials, bindings]
+      properties:
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+      additionalProperties: false
+    CredentialVaultMutationRequest:
+      type: object
+      properties:
+        expectedRevision:
+          type: integer
+          description: Optional optimistic concurrency guard.
+        credentials:
+          $ref: '#/components/schemas/CredentialMutationSet'
+        bindings:
+          $ref: '#/components/schemas/CredentialBindingMutationSet'
+      additionalProperties: false
+    CredentialMutationSet:
+      type: object
+      properties:
+        add:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        replace:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        delete:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+    CredentialBindingMutationSet:
+      type: object
+      properties:
+        add:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+        replace:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBinding'
+        delete:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+    CredentialVaultState:
+      type: object
+      required: [revision, credentials, bindings]
+      properties:
+        revision:
+          type: integer
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialMetadata'
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBindingMetadata'
+      additionalProperties: false
+    CredentialListResponse:
+      type: object
+      required: [revision, credentials]
+      properties:
+        revision:
+          type: integer
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialMetadata'
+      additionalProperties: false
+    CredentialBindingListResponse:
+      type: object
+      required: [revision, bindings]
+      properties:
+        revision:
+          type: integer
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialBindingMetadata'
+      additionalProperties: false
+    CredentialMetadata:
+      type: object
+      required: [name, sourceType, revision]
+      properties:
+        name:
+          type: string
+        sourceType:
+          type: string
+        revision:
+          type: integer
+      additionalProperties: false
+    CredentialBindingMetadata:
+      type: object
+      required: [name, revision]
+      properties:
+        name:
+          type: string
+        revision:
+          type: integer
+        match:
+          $ref: '#/components/schemas/CredentialMatch'
+        auth:
+          $ref: '#/components/schemas/CredentialAuthMetadata'
+      additionalProperties: false
+    Credential:
+      type: object
+      required: [name, source]
+      properties:
+        name:
+          type: string
+        source:
+          $ref: '#/components/schemas/InlineCredentialSource'
+      additionalProperties: false
+    InlineCredentialSource:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [inline]
+        value:
+          type: string
+          writeOnly: true
+      additionalProperties: false
+    CredentialBinding:
+      type: object
+      required: [name, match, auth]
+      properties:
+        name:
+          type: string
+        match:
+          $ref: '#/components/schemas/CredentialMatch'
+        auth:
+          $ref: '#/components/schemas/CredentialAuth'
+      additionalProperties: false
+    CredentialMatch:
+      type: object
+      required: [hosts]
+      properties:
+        schemes:
+          type: array
+          items:
+            type: string
+            enum: [https, http]
+          default: [https]
+        ports:
+          type: array
+          items:
+            type: integer
+          deprecated: true
+          description: "Deprecated. Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected with a validation error. Standard values (80/443) are accepted but ignored."
+        hosts:
+          type: array
+          items:
+            type: string
+        methods:
+          type: array
+          items:
+            type: string
+          default: [GET, POST, PUT, PATCH, DELETE]
+        paths:
+          type: array
+          items:
+            type: string
+          default: ["/*"]
+      additionalProperties: false
+    CredentialAuth:
+      oneOf:
+        - $ref: '#/components/schemas/BearerCredentialAuth'
+        - $ref: '#/components/schemas/BasicCredentialAuth'
+        - $ref: '#/components/schemas/ApiKeyCredentialAuth'
+        - $ref: '#/components/schemas/CustomHeadersCredentialAuth'
+        - $ref: '#/components/schemas/PassthroughCredentialAuth'
+      discriminator:
+        propertyName: type
+        mapping:
+          bearer: '#/components/schemas/BearerCredentialAuth'
+          basic: '#/components/schemas/BasicCredentialAuth'
+          apiKey: '#/components/schemas/ApiKeyCredentialAuth'
+          customHeaders: '#/components/schemas/CustomHeadersCredentialAuth'
+          passthrough: '#/components/schemas/PassthroughCredentialAuth'
+    BearerCredentialAuth:
+      type: object
+      required: [type, credential]
+      properties:
+        type:
+          type: string
+          enum: [bearer]
+        credential:
+          type: string
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      additionalProperties: false
+    BasicCredentialAuth:
+      type: object
+      required: [type, credential]
+      properties:
+        type:
+          type: string
+          enum: [basic]
+        credential:
+          type: string
+          description: Credential containing pre-encoded base64(username:password).
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      additionalProperties: false
+    ApiKeyCredentialAuth:
+      type: object
+      required: [type, name, credential]
+      properties:
+        type:
+          type: string
+          enum: [apiKey]
+        name:
+          type: string
+          pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
+        credential:
+          type: string
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      additionalProperties: false
+    CustomHeadersCredentialAuth:
+      type: object
+      required: [type, headers]
+      properties:
+        type:
+          type: string
+          enum: [customHeaders]
+        headers:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CustomHeaderEntry'
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      additionalProperties: false
+    PassthroughCredentialAuth:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [passthrough]
+        substitutions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSubstitution'
+      additionalProperties: false
+    CustomHeaderEntry:
+      type: object
+      required: [name, credential]
+      properties:
+        name:
+          type: string
+          pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
+        credential:
+          type: string
+      additionalProperties: false
+    CredentialSubstitution:
+      type: object
+      required: [credential, placeholder, in]
+      description: Literal case-sensitive placeholder replacement for selected request surfaces. Replacement is opt-in and scoped per binding.
+      properties:
+        credential:
+          type: string
+          description: Name of the sandbox-local credential used as the replacement value.
+        placeholder:
+          type: string
+          minLength: 1
+          description: Literal placeholder to replace. The placeholder and resolved credential value are added to the active redaction set.
+        in:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [path, query, header, body]
+          description: Request surfaces where the placeholder may be replaced. Query and path replacements are URL-encoded, JSON string bodies are escaped, x-www-form-urlencoded bodies are form-encoded, compressed bodies are skipped, and multipart bodies are skipped.
+      additionalProperties: false
+    CredentialAuthMetadata:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+        name:
+          type: string
+      additionalProperties: false

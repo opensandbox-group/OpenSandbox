@@ -95,7 +95,10 @@ internal sealed class ExecutionEventDispatcher
             IsError = false
         };
 
-        _execution.Logs.Stdout.Add(msg);
+        if (_handlers is not { SkipAccumulation: true })
+        {
+            _execution.Logs.Stdout.Add(msg);
+        }
 
         if (_handlers?.OnStdout != null)
         {
@@ -112,7 +115,10 @@ internal sealed class ExecutionEventDispatcher
             IsError = true
         };
 
-        _execution.Logs.Stderr.Add(msg);
+        if (_handlers is not { SkipAccumulation: true })
+        {
+            _execution.Logs.Stderr.Add(msg);
+        }
 
         if (_handlers?.OnStderr != null)
         {

@@ -16,13 +16,26 @@
 
 FROM opensandbox/code-interpreter-base:latest
 
+ARG TARGETARCH
+# Prebuilt binary from https://github.com/AkihiroSuda/clone3-workaround/releases/tag/v1.0.0 (amd64 only).
+# The binary is linked against libseccomp (runtime package libseccomp2 on Ubuntu).
+RUN set -eux; \
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends libseccomp2 && rm -rf /var/lib/apt/lists/*; \
+        curl -fsSL -o /usr/local/bin/clone3-workaround \
+            https://github.com/AkihiroSuda/clone3-workaround/releases/download/v1.0.0/clone3-workaround.x86_64; \
+        chmod 755 /usr/local/bin/clone3-workaround; \
+    else \
+        echo "Skipping clone3-workaround: upstream provides amd64/x86_64 binary only (TARGETARCH=${TARGETARCH})"; \
+    fi
+
 # Install Python kernels
 RUN set -euo pipefail \
     && echo "Setting up ipykernel for Python 3.10, 3.11, 3.12, 3.13, 3.14" \
     && versions=("3.10" "3.11" "3.12" "3.13" "3.14") \
     && for version in "${versions[@]}"; do \
         echo "Setting up ipykernel for Python $version" \
-        && . /opt/opensandbox/code-interpreter-env.sh python $version \
+        && . /opt/code-interpreter/code-interpreter-env.sh python $version \
         && python3 --version \
         && python3 -m pip install ipykernel jupyter bash_kernel --break-system-packages; \
     done \
@@ -43,7 +56,7 @@ RUN set -euo pipefail \
     && versions=("18" "20" "22") \
     && for version in "${versions[@]}"; do \
         echo "Setting up tslab for Node $version" \
-        && . /opt/opensandbox/code-interpreter-env.sh node $version \
+        && . /opt/code-interpreter/code-interpreter-env.sh node $version \
         && node --version \
         && npm --version \
         && npm install -g tslab; \
@@ -56,7 +69,7 @@ RUN set -euo pipefail \
     && versions=("1.25" "1.24" "1.23") \
     && for version in "${versions[@]}"; do \
         echo "Setting up gonb for Go $version" \
-        && . /opt/opensandbox/code-interpreter-env.sh go $version \
+        && . /opt/code-interpreter/code-interpreter-env.sh go $version \
         && go version \
         && go install github.com/janpfeifer/gonb@latest \
         && go install golang.org/x/tools/cmd/goimports@latest \
@@ -72,9 +85,9 @@ ENV JUPYTER_HOST=http://127.0.0.1:44771 \
     GO_VERSION=1.25 \
     JAVA_VERSION=21
 
-COPY scripts/code-interpreter.sh /opt/opensandbox/code-interpreter.sh
+COPY scripts/code-interpreter.sh /opt/code-interpreter/code-interpreter.sh
 COPY scripts/jupyter_notebook_config.py /root/.jupyter/
-RUN chmod +x /opt/opensandbox/code-interpreter.sh
+RUN chmod +x /opt/code-interpreter/code-interpreter.sh
 
 WORKDIR /workspace
-ENTRYPOINT ["/opt/opensandbox/code-interpreter.sh"]
+ENTRYPOINT ["/opt/code-interpreter/code-interpreter.sh"]

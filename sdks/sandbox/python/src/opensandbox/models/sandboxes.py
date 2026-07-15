@@ -19,6 +19,7 @@ Sandbox-related data models.
 Models for sandbox creation, configuration, status, and lifecycle management.
 """
 
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -71,7 +72,11 @@ class SandboxImageSpec(BaseModel):
     )
 
     def __init__(
-        self, image: str | None = None, *, auth: SandboxImageAuth | None = None, **data: object
+        self,
+        image: str | None = None,
+        *,
+        auth: SandboxImageAuth | None = None,
+        **data: object,
     ) -> None:
         """
         Initialize SandboxImageSpec.
@@ -92,6 +97,17 @@ class SandboxImageSpec(BaseModel):
         if not v.strip():
             raise ValueError("Image cannot be blank")
         return v
+
+
+class PlatformSpec(BaseModel):
+    """Runtime platform constraint for sandbox provisioning."""
+
+    os: Literal["linux", "windows"] = Field(
+        description="Target operating system for sandbox provisioning."
+    )
+    arch: Literal["amd64", "arm64"] = Field(
+        description="Target CPU architecture for sandbox provisioning."
+    )
 
 
 class NetworkRule(BaseModel):
@@ -132,9 +148,208 @@ class NetworkPolicy(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class CredentialProxyConfig(BaseModel):
+    """
+    Credential Vault proxy startup settings.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable transparent MITM support required by Credential Vault injection.",
+    )
+
+
+class InlineCredentialSource(BaseModel):
+    """
+    Write-only inline credential material for Credential Vault.
+    """
+
+    value: str = Field(repr=False, description="Inline credential value.")
+    type: Literal["inline"] = Field(
+        default="inline",
+        description="Credential source type. Defaults to inline for the Python SDK.",
+    )
+
+    @field_validator("value")
+    @classmethod
+    def value_must_not_be_empty(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Credential source value cannot be empty")
+        return v
+
+
+class Credential(BaseModel):
+    """Sandbox-local Credential Vault credential."""
+
+    name: str = Field(description="Sandbox-local credential name.")
+    source: InlineCredentialSource | dict[str, str] = Field(
+        description="Write-only credential source."
+    )
+
+    @field_validator("name")
+    @classmethod
+    def credential_name_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Credential name cannot be blank")
+        return v
+
+    @model_validator(mode="after")
+    def normalize_source(self) -> "Credential":
+        if isinstance(self.source, dict):
+            self.source = InlineCredentialSource.model_validate(self.source)
+        return self
+
+
+class CredentialMatch(BaseModel):
+    """Request match for a Credential Vault binding."""
+
+    schemes: list[Literal["https", "http"]] | None = Field(default=None)
+    ports: list[int] | None = Field(default=None, deprecated="Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected by the server.")
+    hosts: list[str] = Field(description="Exact FQDNs or leftmost-label wildcards.")
+    methods: list[str] | None = Field(default=None)
+    paths: list[str] | None = Field(default=None)
+
+    @field_validator("hosts")
+    @classmethod
+    def hosts_must_not_be_empty(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("Credential match hosts cannot be empty")
+        if any(not host.strip() for host in v):
+            raise ValueError("Credential match host cannot be blank")
+        return v
+
+
+class CustomHeaderEntry(BaseModel):
+    """Custom header injection entry."""
+
+    name: str
+    credential: str
+
+
+class CredentialSubstitution(BaseModel):
+    """Scoped placeholder substitution entry."""
+
+    credential: str
+    placeholder: str
+    in_: list[Literal["path", "query", "header", "body"]] = Field(alias="in")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CredentialAuth(BaseModel):
+    """Typed Credential Vault auth rule."""
+
+    type: Literal["bearer", "basic", "apiKey", "customHeaders", "passthrough"]
+    credential: str | None = None
+    name: str | None = None
+    headers: list[CustomHeaderEntry] | None = None
+    substitutions: list[CredentialSubstitution] | None = None
+
+
+class CredentialBinding(BaseModel):
+    """Sandbox-local Credential Vault binding."""
+
+    name: str
+    match: CredentialMatch | dict[str, object]
+    auth: CredentialAuth | dict[str, object]
+
+    @field_validator("name")
+    @classmethod
+    def binding_name_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Credential binding name cannot be blank")
+        return v
+
+    @model_validator(mode="after")
+    def normalize_nested_models(self) -> "CredentialBinding":
+        if isinstance(self.match, dict):
+            self.match = CredentialMatch.model_validate(self.match)
+        if isinstance(self.auth, dict):
+            self.auth = CredentialAuth.model_validate(self.auth)
+        return self
+
+
+class CredentialMetadata(BaseModel):
+    """Sanitized credential metadata returned by Credential Vault."""
+
+    name: str
+    source_type: str = Field(alias="sourceType")
+    revision: int
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CredentialAuthMetadata(BaseModel):
+    """Sanitized auth metadata returned for a Credential Vault binding."""
+
+    type: str
+    name: str | None = None
+
+
+class CredentialBindingMetadata(BaseModel):
+    """Sanitized binding metadata returned by Credential Vault."""
+
+    name: str
+    revision: int
+    match: CredentialMatch | None = None
+    auth: CredentialAuthMetadata | None = None
+
+
+class CredentialVaultState(BaseModel):
+    """Sanitized Credential Vault state."""
+
+    revision: int
+    credentials: list[CredentialMetadata]
+    bindings: list[CredentialBindingMetadata]
+
+
+class CredentialListResponse(BaseModel):
+    """Sanitized Credential Vault credential list response."""
+
+    revision: int
+    credentials: list[CredentialMetadata]
+
+
+class CredentialBindingListResponse(BaseModel):
+    """Sanitized Credential Vault binding list response."""
+
+    revision: int
+    bindings: list[CredentialBindingMetadata]
+
+
+class CredentialMutationSet(BaseModel):
+    """Atomic credential mutation set for Credential Vault patch."""
+
+    add: list[Credential | dict[str, object]] | None = None
+    replace: list[Credential | dict[str, object]] | None = None
+    delete: list[str] | None = None
+
+
+class CredentialBindingMutationSet(BaseModel):
+    """Atomic binding mutation set for Credential Vault patch."""
+
+    add: list[CredentialBinding | dict[str, object]] | None = None
+    replace: list[CredentialBinding | dict[str, object]] | None = None
+    delete: list[str] | None = None
+
+
+class CredentialVaultPatchRequest(BaseModel):
+    """Credential Vault patch request."""
+
+    expected_revision: int | None = Field(default=None, alias="expectedRevision")
+    credentials: CredentialMutationSet | dict[str, object] | None = None
+    bindings: CredentialBindingMutationSet | dict[str, object] | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 # ============================================================================
 # Volume Models
 # ============================================================================
+
+# Matches Unix absolute paths (/…) and Windows drive-letter paths (C:\ or C:/).
+# Aligned with server-side pattern in server/opensandbox_server/api/schema.py.
+_HOST_PATH_RE = re.compile(r"^(/|[A-Za-z]:[\\/])")
 
 
 class Host(BaseModel):
@@ -145,29 +360,71 @@ class Host(BaseModel):
     Only available when the runtime supports host mounts.
     """
 
-    path: str = Field(
-        description="Absolute path on the host filesystem to mount."
-    )
+    path: str = Field(description="Absolute path on the host filesystem to mount.")
 
     @field_validator("path")
     @classmethod
     def path_must_be_absolute(cls, v: str) -> str:
-        if not v.startswith("/"):
-            raise ValueError("Host path must be an absolute path starting with '/'")
+        if not _HOST_PATH_RE.match(v):
+            raise ValueError(
+                "Host path must be an absolute path starting with '/' "
+                "or a Windows drive letter (e.g. 'C:\\' or 'D:/')"
+            )
         return v
 
 
 class PVC(BaseModel):
     """
-    Kubernetes PersistentVolumeClaim mount backend.
+    Platform-managed named volume backend.
 
-    References an existing PVC in the same namespace as the sandbox pod.
-    Only available in Kubernetes runtime.
+    Runtime-neutral abstraction for referencing a pre-existing named volume:
+    - Kubernetes: maps to a PersistentVolumeClaim in the same namespace.
+    - Docker: maps to a Docker named volume.
     """
 
     claim_name: str = Field(
-        description="Name of the PersistentVolumeClaim in the same namespace.",
+        description=(
+            "Name of the platform volume. In Kubernetes this is the PVC name; "
+            "in Docker this is the named volume name."
+        ),
         alias="claimName",
+    )
+    create_if_not_exists: bool = Field(
+        default=True,
+        alias="createIfNotExists",
+        description="When true, auto-create the volume if it does not exist.",
+    )
+    delete_on_sandbox_termination: bool = Field(
+        default=False,
+        alias="deleteOnSandboxTermination",
+        description=(
+            "When true, the auto-created volume (Docker named volume or "
+            "Kubernetes PVC) is removed on sandbox deletion. Pre-existing "
+            "volumes are never removed."
+        ),
+    )
+    storage_class: str | None = Field(
+        default=None,
+        alias="storageClass",
+        description=(
+            "Kubernetes StorageClass for auto-created PVCs. "
+            "Null means cluster default. Ignored for Docker."
+        ),
+    )
+    storage: str | None = Field(
+        default=None,
+        description=(
+            "Storage capacity request for auto-created PVCs (e.g. '1Gi'). "
+            "Ignored for Docker."
+        ),
+    )
+    access_modes: list[str] | None = Field(
+        default=None,
+        alias="accessModes",
+        description=(
+            "Access modes for auto-created PVCs (e.g. ['ReadWriteOnce']). "
+            "Ignored for Docker."
+        ),
     )
 
     model_config = ConfigDict(populate_by_name=True)
@@ -180,13 +437,49 @@ class PVC(BaseModel):
         return v
 
 
+class OSSFS(BaseModel):
+    """Alibaba Cloud OSS mount backend via ossfs."""
+
+    bucket: str = Field(description="OSS bucket name.")
+    endpoint: str = Field(
+        description="OSS endpoint (e.g., oss-cn-hangzhou.aliyuncs.com)."
+    )
+    version: Literal["1.0", "2.0"] = Field(
+        default="2.0",
+        description="ossfs major version used by runtime mount integration.",
+    )
+    options: list[str] | None = Field(
+        default=None,
+        description="Additional ossfs mount options.",
+    )
+    access_key_id: str | None = Field(
+        default=None,
+        alias="accessKeyId",
+        description="OSS access key ID for inline credentials mode.",
+    )
+    access_key_secret: str | None = Field(
+        default=None,
+        alias="accessKeySecret",
+        description="OSS access key secret for inline credentials mode.",
+    )
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def validate_inline_credentials(self) -> "OSSFS":
+        if not self.access_key_id or not self.access_key_secret:
+            raise ValueError(
+                "OSSFS inline credentials are required: accessKeyId and accessKeySecret."
+            )
+        return self
+
+
 class Volume(BaseModel):
     """
     Storage mount definition for a sandbox.
 
     Each volume entry contains:
     - A unique name identifier
-    - Exactly one backend (host, pvc) with backend-specific fields
+    - Exactly one backend (host, pvc, ossfs) with backend-specific fields
     - Common mount settings (mount_path, read_only, sub_path)
 
     Usage:
@@ -216,6 +509,10 @@ class Volume(BaseModel):
     pvc: PVC | None = Field(
         default=None,
         description="Kubernetes PersistentVolumeClaim mount backend.",
+    )
+    ossfs: OSSFS | None = Field(
+        default=None,
+        description="OSSFS mount backend.",
     )
     mount_path: str = Field(
         description="Absolute path inside the container where the volume is mounted.",
@@ -250,16 +547,16 @@ class Volume(BaseModel):
 
     @model_validator(mode="after")
     def validate_exactly_one_backend(self) -> "Volume":
-        """Ensure exactly one backend (host or pvc) is specified."""
-        backends = [self.host, self.pvc]
+        """Ensure exactly one backend (host, pvc, or ossfs) is specified."""
+        backends = [self.host, self.pvc, self.ossfs]
         specified = [b for b in backends if b is not None]
         if len(specified) == 0:
             raise ValueError(
-                "Exactly one backend (host, pvc) must be specified, but none was provided."
+                "Exactly one backend (host, pvc, ossfs) must be specified, but none was provided."
             )
         if len(specified) > 1:
             raise ValueError(
-                "Exactly one backend (host, pvc) must be specified, but multiple were provided."
+                "Exactly one backend (host, pvc, ossfs) must be specified, but multiple were provided."
             )
         return self
 
@@ -287,6 +584,44 @@ class SandboxStatus(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SnapshotStatus(BaseModel):
+    """
+    Status information for a snapshot.
+    """
+
+    state: str = Field(description="Current snapshot lifecycle state")
+    reason: str | None = Field(
+        default=None, description="Short reason code for current state"
+    )
+    message: str | None = Field(
+        default=None, description="Human-readable status message"
+    )
+    last_transition_at: datetime | None = Field(
+        default=None,
+        description="Timestamp of last state transition",
+        alias="last_transition_at",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SnapshotInfo(BaseModel):
+    """
+    Detailed information about a snapshot instance.
+    """
+
+    id: str = Field(description="Unique identifier of the snapshot")
+    sandbox_id: str = Field(
+        description="Source sandbox identifier used to create this snapshot",
+        alias="sandbox_id",
+    )
+    name: str | None = Field(default=None, description="Optional snapshot name")
+    status: SnapshotStatus = Field(description="Current status of the snapshot")
+    created_at: datetime = Field(description="Creation timestamp", alias="created_at")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class SandboxInfo(BaseModel):
     """
     Detailed information about a sandbox instance.
@@ -297,14 +632,27 @@ class SandboxInfo(BaseModel):
     entrypoint: list[str] = Field(
         description="Command line arguments used to start the sandbox"
     )
-    expires_at: datetime = Field(
-        description="Scheduled termination timestamp", alias="expires_at"
+    expires_at: datetime | None = Field(
+        default=None,
+        description="Scheduled termination timestamp. Null means manual cleanup mode.",
+        alias="expires_at",
     )
     created_at: datetime = Field(description="Creation timestamp", alias="created_at")
     image: SandboxImageSpec | None = Field(
         default=None, description="Image specification used to create sandbox"
     )
+    snapshot_id: str | None = Field(
+        default=None,
+        description="Snapshot identifier used to restore sandbox",
+        alias="snapshot_id",
+    )
+    platform: PlatformSpec | None = Field(
+        default=None, description="Effective platform used for sandbox provisioning."
+    )
     metadata: dict[str, str] | None = Field(default=None, description="Custom metadata")
+    extensions: dict[str, str] | None = Field(
+        default=None, description="Opaque extension data returned by the server"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -315,6 +663,20 @@ class SandboxCreateResponse(BaseModel):
     """
 
     id: str = Field(description="Unique identifier of the newly created sandbox")
+    platform: PlatformSpec | None = Field(
+        default=None, description="Effective platform used for sandbox provisioning."
+    )
+    extensions: dict[str, str] | None = Field(
+        default=None, description="Opaque extension data returned by the server"
+    )
+
+
+class CreateSnapshotRequest(BaseModel):
+    """
+    Request returned when creating a snapshot.
+    """
+
+    name: str | None = Field(default=None, description="Optional snapshot name")
 
 
 class SandboxRenewResponse(BaseModel):
@@ -347,7 +709,7 @@ class PaginationInfo(BaseModel):
     Pagination metadata.
     """
 
-    page: int = Field(description="Current page number (0-indexed)")
+    page: int = Field(description="Current page number (1-indexed)")
     page_size: int = Field(description="Number of items per page", alias="page_size")
     total_items: int = Field(
         description="Total number of items across all pages", alias="total_items"
@@ -373,6 +735,19 @@ class PagedSandboxInfos(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class PagedSnapshotInfos(BaseModel):
+    """
+    A paginated list of snapshot information.
+    """
+
+    snapshot_infos: list[SnapshotInfo] = Field(
+        description="List of snapshot details for current page", alias="snapshot_infos"
+    )
+    pagination: PaginationInfo = Field(description="Pagination metadata")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class SandboxFilter(BaseModel):
     """
     Filter criteria for listing sandboxes.
@@ -387,7 +762,7 @@ class SandboxFilter(BaseModel):
     page_size: int | None = Field(
         default=None, description="Number of items per page", alias="page_size"
     )
-    page: int | None = Field(default=None, description="Page number (0-indexed)")
+    page: int | None = Field(default=None, description="Page number (1-indexed)")
 
     @field_validator("page_size")
     @classmethod
@@ -399,6 +774,41 @@ class SandboxFilter(BaseModel):
     @field_validator("page")
     @classmethod
     def page_must_be_non_negative(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError("Page must be non-negative")
+        return v
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SnapshotFilter(BaseModel):
+    """
+    Filter criteria for listing snapshots.
+    """
+
+    sandbox_id: str | None = Field(
+        default=None,
+        description="Filter by source sandbox id",
+        alias="sandbox_id",
+    )
+    states: list[str] | None = Field(
+        default=None, description="Filter by snapshot states"
+    )
+    page_size: int | None = Field(
+        default=None, description="Number of items per page", alias="page_size"
+    )
+    page: int | None = Field(default=None, description="Page number (1-indexed)")
+
+    @field_validator("page_size")
+    @classmethod
+    def snapshot_page_size_must_be_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("Page size must be positive")
+        return v
+
+    @field_validator("page")
+    @classmethod
+    def snapshot_page_must_be_non_negative(cls, v: int | None) -> int | None:
         if v is not None and v < 0:
             raise ValueError("Page must be non-negative")
         return v
@@ -471,6 +881,5 @@ class SandboxState:
     def values(cls) -> set[str]:
         """Returns a set of all known state values."""
         return {
-            v for k, v in cls.__dict__.items()
-            if k.isupper() and not k.startswith("_")
+            v for k, v in cls.__dict__.items() if k.isupper() and not k.startswith("_")
         }

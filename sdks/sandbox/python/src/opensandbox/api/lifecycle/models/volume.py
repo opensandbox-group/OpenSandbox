@@ -25,6 +25,7 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.host import Host
+    from ..models.ossfs import OSSFS
     from ..models.pvc import PVC
 
 
@@ -35,7 +36,7 @@ T = TypeVar("T", bound="Volume")
 class Volume:
     """Storage mount definition for a sandbox. Each volume entry contains:
     - A unique name identifier
-    - Exactly one backend struct (host, pvc, etc.) with backend-specific fields
+    - Exactly one backend struct (host, pvc, ossfs, etc.) with backend-specific fields
     - Common mount settings (mountPath, readOnly, subPath)
 
         Attributes:
@@ -48,13 +49,23 @@ class Volume:
 
                 Security note: Host paths are restricted by server-side allowlist.
                 Users must specify paths under permitted prefixes.
-            pvc (PVC | Unset): Kubernetes PersistentVolumeClaim mount backend. References an existing
-                PVC in the same namespace as the sandbox pod.
+            pvc (PVC | Unset): Platform-managed named volume backend. A runtime-neutral abstraction
+                for referencing a platform-managed named volume. If `createIfNotExists`
+                is true (the default) and the volume does not yet exist, it will be
+                created automatically using the provisioning hints below.
 
-                Only available in Kubernetes runtime.
+                - Kubernetes: maps to a PersistentVolumeClaim in the same namespace.
+                - Docker: maps to a Docker named volume (created via `docker volume create`).
+            ossfs (OSSFS | Unset): Alibaba Cloud OSS mount backend via ossfs.
+
+                The runtime mounts a host-side OSS path under `storage.ossfs_mount_root`
+                and bind-mounts the resolved path into the sandbox container.
+                Prefix selection is expressed via `Volume.subPath`.
+                In Docker runtime, OSSFS backend requires OpenSandbox Server to run on a Linux host with FUSE support.
             read_only (bool | Unset): If true, the volume is mounted as read-only. Defaults to false (read-write).
                  Default: False.
             sub_path (str | Unset): Optional subdirectory under the backend path to mount.
+                For `ossfs` backend, this field is used as the bucket prefix.
                 Must be a relative path without '..' components.
     """
 
@@ -62,6 +73,7 @@ class Volume:
     mount_path: str
     host: Host | Unset = UNSET
     pvc: PVC | Unset = UNSET
+    ossfs: OSSFS | Unset = UNSET
     read_only: bool | Unset = False
     sub_path: str | Unset = UNSET
 
@@ -77,6 +89,10 @@ class Volume:
         pvc: dict[str, Any] | Unset = UNSET
         if not isinstance(self.pvc, Unset):
             pvc = self.pvc.to_dict()
+
+        ossfs: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.ossfs, Unset):
+            ossfs = self.ossfs.to_dict()
 
         read_only = self.read_only
 
@@ -94,6 +110,8 @@ class Volume:
             field_dict["host"] = host
         if pvc is not UNSET:
             field_dict["pvc"] = pvc
+        if ossfs is not UNSET:
+            field_dict["ossfs"] = ossfs
         if read_only is not UNSET:
             field_dict["readOnly"] = read_only
         if sub_path is not UNSET:
@@ -104,6 +122,7 @@ class Volume:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.host import Host
+        from ..models.ossfs import OSSFS
         from ..models.pvc import PVC
 
         d = dict(src_dict)
@@ -125,6 +144,13 @@ class Volume:
         else:
             pvc = PVC.from_dict(_pvc)
 
+        _ossfs = d.pop("ossfs", UNSET)
+        ossfs: OSSFS | Unset
+        if isinstance(_ossfs, Unset):
+            ossfs = UNSET
+        else:
+            ossfs = OSSFS.from_dict(_ossfs)
+
         read_only = d.pop("readOnly", UNSET)
 
         sub_path = d.pop("subPath", UNSET)
@@ -134,6 +160,7 @@ class Volume:
             mount_path=mount_path,
             host=host,
             pvc=pvc,
+            ossfs=ossfs,
             read_only=read_only,
             sub_path=sub_path,
         )

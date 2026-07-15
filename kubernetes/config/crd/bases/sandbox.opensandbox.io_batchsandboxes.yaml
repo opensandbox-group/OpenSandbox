@@ -95,6 +95,14 @@ spec:
                   If a time in the past is provided, the batch-sandbox will be deleted immediately.
                 format: date-time
                 type: string
+              pause:
+                description: |-
+                  Pause is the pause/resume intent written by Server and executed by Controller.
+                  nil = no operation / server retry bridge
+                  true = request Pause
+                  false = request Resume
+                  Controller never clears this field; Server may temporarily patch nil to force a new generation for retries.
+                type: boolean
               poolRef:
                 description: |-
                   PoolRef references the Pool resource name for pooled sandbox creation.
@@ -138,12 +146,70 @@ spec:
                 description: "\tAllocated is the number of actual scheduled Pod"
                 format: int32
                 type: integer
+              conditions:
+                description: Conditions records operation failure context
+                items:
+                  description: BatchSandboxCondition represents a condition of a BatchSandbox
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time the condition
+                        transitioned
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable message about the condition
+                      type: string
+                    reason:
+                      description: Reason is a brief reason for the condition
+                      type: string
+                    status:
+                      description: Status is the condition status
+                      enum:
+                      - "True"
+                      - "False"
+                      type: string
+                    type:
+                      description: Type is the condition type
+                      enum:
+                      - Ready
+                      - Progressing
+                      - Paused
+                      - PauseFailed
+                      - ResumeFailed
+                      - PodFailed
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed for this BatchSandbox. It corresponds to the
                   BatchSandbox's generation, which is updated on mutation by the API Server.
                 format: int64
                 type: integer
+              pauseObservedGeneration:
+                description: |-
+                  PauseObservedGeneration is the generation most recently ACKed by the Controller
+                  when entering pause/resume dispatch logic. Written immediately to prevent reentry (idempotent gating).
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  Phase is the overall phase of the BatchSandbox, aggregated and written by Controller.
+                  Server reads this field directly without combining multiple fields.
+                enum:
+                - Pending
+                - Succeed
+                - Pausing
+                - Paused
+                - Resuming
+                - Failed
+                type: string
               ready:
                 description: "\tReady is the number of actual Ready Pod"
                 format: int32

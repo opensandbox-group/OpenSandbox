@@ -15,7 +15,7 @@
 #
 
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any
 
 import httpx
 
@@ -23,18 +23,27 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
 from ...models.replace_content_body import ReplaceContentBody
-from ...types import Response
+from ...models.replace_content_response_200 import ReplaceContentResponse200
+from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     *,
     body: ReplaceContentBody,
+    verbose: bool | Unset = False,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
+
+    params: dict[str, Any] = {}
+
+    params["verbose"] = verbose
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "post",
         "url": "/files/replace",
+        "params": params,
     }
 
     _kwargs["json"] = body.to_dict()
@@ -45,9 +54,12 @@ def _get_kwargs(
     return _kwargs
 
 
-def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> Any | ErrorResponse | None:
+def _parse_response(
+    *, client: AuthenticatedClient | Client, response: httpx.Response
+) -> ErrorResponse | ReplaceContentResponse200 | None:
     if response.status_code == 200:
-        response_200 = cast(Any, None)
+        response_200 = ReplaceContentResponse200.from_dict(response.json())
+
         return response_200
 
     if response.status_code == 400:
@@ -66,7 +78,9 @@ def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Res
         return None
 
 
-def _build_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> Response[Any | ErrorResponse]:
+def _build_response(
+    *, client: AuthenticatedClient | Client, response: httpx.Response
+) -> Response[ErrorResponse | ReplaceContentResponse200]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -79,14 +93,19 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: ReplaceContentBody,
-) -> Response[Any | ErrorResponse]:
+    verbose: bool | Unset = False,
+) -> Response[ErrorResponse | ReplaceContentResponse200]:
     """Replace file content
 
      Performs text replacement in one or multiple files. Replaces all occurrences
     of the old string with the new string (similar to strings.ReplaceAll).
     Preserves file permissions. Useful for batch text substitution across files.
 
+    When `verbose=true` is set, the response includes per-file replacement counts.
+    Without this parameter, the response body is empty (backward-compatible behavior).
+
     Args:
+        verbose (bool | Unset):  Default: False.
         body (ReplaceContentBody):
 
     Raises:
@@ -94,11 +113,12 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | ErrorResponse]
+        Response[ErrorResponse | ReplaceContentResponse200]
     """
 
     kwargs = _get_kwargs(
         body=body,
+        verbose=verbose,
     )
 
     response = client.get_httpx_client().request(
@@ -112,14 +132,19 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     body: ReplaceContentBody,
-) -> Any | ErrorResponse | None:
+    verbose: bool | Unset = False,
+) -> ErrorResponse | ReplaceContentResponse200 | None:
     """Replace file content
 
      Performs text replacement in one or multiple files. Replaces all occurrences
     of the old string with the new string (similar to strings.ReplaceAll).
     Preserves file permissions. Useful for batch text substitution across files.
 
+    When `verbose=true` is set, the response includes per-file replacement counts.
+    Without this parameter, the response body is empty (backward-compatible behavior).
+
     Args:
+        verbose (bool | Unset):  Default: False.
         body (ReplaceContentBody):
 
     Raises:
@@ -127,12 +152,13 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | ErrorResponse
+        ErrorResponse | ReplaceContentResponse200
     """
 
     return sync_detailed(
         client=client,
         body=body,
+        verbose=verbose,
     ).parsed
 
 
@@ -140,14 +166,19 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: ReplaceContentBody,
-) -> Response[Any | ErrorResponse]:
+    verbose: bool | Unset = False,
+) -> Response[ErrorResponse | ReplaceContentResponse200]:
     """Replace file content
 
      Performs text replacement in one or multiple files. Replaces all occurrences
     of the old string with the new string (similar to strings.ReplaceAll).
     Preserves file permissions. Useful for batch text substitution across files.
 
+    When `verbose=true` is set, the response includes per-file replacement counts.
+    Without this parameter, the response body is empty (backward-compatible behavior).
+
     Args:
+        verbose (bool | Unset):  Default: False.
         body (ReplaceContentBody):
 
     Raises:
@@ -155,11 +186,12 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | ErrorResponse]
+        Response[ErrorResponse | ReplaceContentResponse200]
     """
 
     kwargs = _get_kwargs(
         body=body,
+        verbose=verbose,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -171,14 +203,19 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     body: ReplaceContentBody,
-) -> Any | ErrorResponse | None:
+    verbose: bool | Unset = False,
+) -> ErrorResponse | ReplaceContentResponse200 | None:
     """Replace file content
 
      Performs text replacement in one or multiple files. Replaces all occurrences
     of the old string with the new string (similar to strings.ReplaceAll).
     Preserves file permissions. Useful for batch text substitution across files.
 
+    When `verbose=true` is set, the response includes per-file replacement counts.
+    Without this parameter, the response body is empty (backward-compatible behavior).
+
     Args:
+        verbose (bool | Unset):  Default: False.
         body (ReplaceContentBody):
 
     Raises:
@@ -186,12 +223,13 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | ErrorResponse
+        ErrorResponse | ReplaceContentResponse200
     """
 
     return (
         await asyncio_detailed(
             client=client,
             body=body,
+            verbose=verbose,
         )
     ).parsed

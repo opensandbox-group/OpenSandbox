@@ -17,8 +17,10 @@
 [server]
 host = "0.0.0.0"
 port = 8080
-log_level = "DEBUG"
 api_key = "test-k8s-api-key"
+
+[log]
+level = "DEBUG"
 
 [runtime]
 type = "kubernetes"
@@ -27,5 +29,4 @@ execd_image = "ghcr.io/opensandbox/execd:test"
 [kubernetes]
 kubeconfig_path = "/tmp/test-kubeconfig"
 namespace = "test-namespace"
-service_account = "test-sa"
 workload_provider = "batchsandbox"

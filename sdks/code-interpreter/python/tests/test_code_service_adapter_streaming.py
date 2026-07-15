@@ -31,8 +31,16 @@ from code_interpreter.models.code import CodeContext, SupportedLanguage
 
 
 class _SseTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.last_request: httpx.Request | None = None
+
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        body = request.content.decode("utf-8") if isinstance(request.content, (bytes, bytearray)) else ""
+        self.last_request = request
+        body = (
+            request.content.decode("utf-8")
+            if isinstance(request.content, (bytes, bytearray))
+            else ""
+        )
         payload = json.loads(body) if body else {}
 
         if request.url.path == "/code" and payload.get("code") == "print(1)":
@@ -41,7 +49,12 @@ class _SseTransport(httpx.AsyncBaseTransport):
                 b'data: {"type":"stdout","text":"1\\n","timestamp":2}\n\n'
                 b'data: {"type":"execution_complete","timestamp":3,"execution_time":7}\n\n'
             )
-            return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=sse, request=request)
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=sse,
+                request=request,
+            )
 
         if request.url.path == "/code" and payload.get("code") == "print(2)":
             assert payload["context"]["language"] == "go"
@@ -50,9 +63,19 @@ class _SseTransport(httpx.AsyncBaseTransport):
                 b'data: {"type":"stdout","text":"2\\n","timestamp":2}\n\n'
                 b'data: {"type":"execution_complete","timestamp":3,"execution_time":7}\n\n'
             )
-            return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=sse, request=request)
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=sse,
+                request=request,
+            )
 
-        return httpx.Response(400, content=b"bad", request=request)
+        return httpx.Response(
+            400,
+            headers={"x-request-id": "req-code-123"},
+            content=b"bad",
+            request=request,
+        )
 
 
 def test_code_execution_converter_includes_context() -> None:
@@ -72,6 +95,30 @@ async def test_run_code_streaming_happy_path_updates_execution() -> None:
     execution = await adapter.run("print(1)")
     assert execution.id == "exec-1"
     assert execution.logs.stdout[0].text == "1\n"
+
+
+@pytest.mark.asyncio
+async def test_run_code_streaming_merges_endpoint_headers() -> None:
+    transport = _SseTransport()
+    cfg = ConnectionConfig(
+        protocol="http",
+        transport=transport,
+        headers={"X-Base": "base", "X-Shared": "base"},
+    )
+    endpoint = SandboxEndpoint(
+        endpoint="localhost:44772",
+        port=44772,
+        headers={"X-Endpoint": "endpoint", "X-Shared": "endpoint"},
+    )
+    adapter = CodesAdapter(endpoint, cfg)
+
+    execution = await adapter.run("print(1)")
+
+    assert execution.id == "exec-1"
+    assert transport.last_request is not None
+    assert transport.last_request.headers["X-Base"] == "base"
+    assert transport.last_request.headers["X-Endpoint"] == "endpoint"
+    assert transport.last_request.headers["X-Shared"] == "endpoint"
 
 
 @pytest.mark.asyncio
@@ -115,5 +162,6 @@ async def test_run_code_non_200_raises_api_exception() -> None:
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CodesAdapter(endpoint, cfg)
 
-    with pytest.raises(SandboxApiException):
+    with pytest.raises(SandboxApiException) as ei:
         await adapter.run("other")
+    assert ei.value.request_id == "req-code-123"

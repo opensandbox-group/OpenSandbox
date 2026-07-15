@@ -46,7 +46,7 @@ func IsPodAvailable(pod *v1.Pod, minReadySeconds int32, now metav1.Time) bool {
 
 // IsPodReady returns true if a pod is ready; false otherwise.
 func IsPodReady(pod *v1.Pod) bool {
-	return IsPodReadyConditionTrue(pod.Status)
+	return pod.Status.Phase == v1.PodRunning && IsPodReadyConditionTrue(pod.Status)
 }
 
 // IsPodTerminal returns true if a pod is terminal, all containers are stopped and cannot ever regress.
@@ -213,4 +213,59 @@ func (m MultiPodSorter) Sort(a, b *v1.Pod) int {
 		}
 	}
 	return 0
+}
+
+// ComparePodsForDeletion compares two pods for deletion priority.
+// Returns true if p1 should be deleted before p2.
+// Priority order: Unassigned < Assigned, Pending < Unknown < Running,
+// NotReady < Ready, shorter ready time < longer ready time,
+// higher restarts < lower restarts, newer < older, name for tie-breaking.
+func ComparePodsForDeletion(p1, p2 *v1.Pod) bool {
+	if len(p1.Spec.NodeName) != len(p2.Spec.NodeName) && (len(p1.Spec.NodeName) == 0 || len(p2.Spec.NodeName) == 0) {
+		return len(p1.Spec.NodeName) == 0
+	}
+
+	phaseOrder := map[v1.PodPhase]int{
+		v1.PodPending: 0,
+		v1.PodUnknown: 1,
+		v1.PodRunning: 2,
+	}
+	if phaseOrder[p1.Status.Phase] != phaseOrder[p2.Status.Phase] {
+		return phaseOrder[p1.Status.Phase] < phaseOrder[p2.Status.Phase]
+	}
+
+	p1Ready := IsPodReady(p1)
+	p2Ready := IsPodReady(p2)
+	if p1Ready != p2Ready {
+		return !p1Ready
+	}
+
+	if p1Ready && p2Ready {
+		p1Cond := GetPodReadyCondition(p1.Status)
+		p2Cond := GetPodReadyCondition(p2.Status)
+		if p1Cond != nil && p2Cond != nil && !p1Cond.LastTransitionTime.Equal(&p2Cond.LastTransitionTime) {
+			return p1Cond.LastTransitionTime.Before(&p2Cond.LastTransitionTime)
+		}
+	}
+
+	p1Restarts := maxContainerRestarts(p1)
+	p2Restarts := maxContainerRestarts(p2)
+	if p1Restarts != p2Restarts {
+		return p1Restarts > p2Restarts
+	}
+
+	if !p1.CreationTimestamp.Equal(&p2.CreationTimestamp) {
+		return p2.CreationTimestamp.Before(&p1.CreationTimestamp)
+	}
+	return p1.Name < p2.Name
+}
+
+func maxContainerRestarts(pod *v1.Pod) int32 {
+	var maxRestarts int32
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.RestartCount > maxRestarts {
+			maxRestarts = cs.RestartCount
+		}
+	}
+	return maxRestarts
 }

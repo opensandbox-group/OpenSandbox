@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,7 +28,10 @@ import (
 
 	"github.com/alibaba/opensandbox/ingress/pkg/flag"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy"
+	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
+	"github.com/alibaba/opensandbox/ingress/pkg/signature"
+	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/alibaba/opensandbox/internal/version"
 )
@@ -36,9 +40,6 @@ func main() {
 	version.EchoVersion("OpenSandbox Ingress")
 
 	flag.InitFlags()
-	if flag.Namespace == "" {
-		log.Panicf("'-namespace' not set.")
-	}
 
 	cfg := injection.ParseAndGetRESTConfigOrDie()
 	cfg.ContentType = runtime.ContentTypeProtobuf
@@ -47,10 +48,22 @@ func main() {
 	ctx := signals.NewContext()
 	ctx = withLogger(ctx, flag.LogLevel)
 
+	otelShutdown, err := telemetry.Init(ctx)
+	if err != nil {
+		log.Printf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
+		otelShutdown = nil
+	}
+	if otelShutdown != nil {
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			_ = otelShutdown(shutdownCtx)
+		}()
+	}
+
 	// Create sandbox provider factory
 	providerFactory := sandbox.NewProviderFactory(
 		cfg,
-		flag.Namespace,
 		time.Second*30, // resync period
 	)
 
@@ -65,12 +78,36 @@ func main() {
 		log.Panicf("Failed to start sandbox provider: %v", err)
 	}
 
-	// Create reverse proxy with sandbox provider
-	reverseProxy := proxy.NewProxy(ctx, sandboxProvider, proxy.Mode(flag.Mode))
-	http.Handle("/", reverseProxy)
-	http.HandleFunc("/status.ok", proxy.Healthz)
+	var renewPublisher renewintent.Publisher
+	if flag.RenewIntentEnabled {
+		redisClient, err := renewintent.RedisClientFromDSN(flag.RenewIntentRedisDSN)
+		if err != nil {
+			log.Panicf("Failed to create Redis client for renew-intent: %v", err)
+		}
+		renewPublisher = renewintent.NewRedisPublisher(ctx, redisClient, renewintent.RedisPublisherConfig{
+			QueueKey:    flag.RenewIntentQueueKey,
+			QueueMaxLen: flag.RenewIntentQueueMaxLen,
+			MinInterval: time.Duration(flag.RenewIntentMinIntervalSec) * time.Second,
+			Logger:      proxy.Logger,
+		})
+	}
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), nil); err != nil {
+	var secure *signature.Verifier
+	if keyStr := strings.TrimSpace(flag.SecureAccessKeys); keyStr != "" {
+		keys, err := signature.ParseKeys(flag.SecureAccessKeys)
+		if err != nil {
+			log.Panicf("parse secure-access-keys: %v", err)
+		}
+		secure = &signature.Verifier{Keys: keys}
+	}
+
+	// Create reverse proxy with sandbox provider
+	reverseProxy := proxy.NewProxy(ctx, sandboxProvider, proxy.Mode(flag.Mode), renewPublisher, secure)
+	mux := http.NewServeMux()
+	mux.Handle("/", reverseProxy)
+	mux.HandleFunc("/status.ok", proxy.Healthz)
+
+	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), mux); err != nil {
 		log.Panicf("Error starting http server: %v", err)
 	}
 

@@ -44,6 +44,7 @@ docker run -d --name "${containerName}" \
   --sysctl net.ipv6.conf.all.disable_ipv6=1 \
   --sysctl net.ipv6.conf.default.disable_ipv6=1 \
   -e OPENSANDBOX_EGRESS_MODE=dns+nft \
+  -e OPENSANDBOX_EGRESS_DNS_UPSTREAM=8.8.8.8,8.8.4.4 \
   -p ${POLICY_PORT}:18080 \
   "${IMG}"
 
@@ -67,7 +68,7 @@ pass() { info "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 info "Test: allowed domain (google.com) should succeed via dynamic IP"
-run_in_app -I https://google.com --max-time 15 >/dev/null 2>&1 || fail "google.com should succeed (DNS allow + dynamic IP in nft)"
+run_in_app -I https://google.com --max-time 20 >/dev/null 2>&1 || fail "google.com should succeed (DNS allow + dynamic IP in nft)"
 pass "google.com allowed"
 
 info "Test: denied domain (api.github.com) should fail"

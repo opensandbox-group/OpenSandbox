@@ -19,6 +19,7 @@ import "time"
 // FileInfo represents file metadata including path and permissions
 type FileInfo struct {
 	Path       string    `json:"path,omitempty"`
+	Type       string    `json:"type,omitempty"`
 	Size       int64     `json:"size"`
 	ModifiedAt time.Time `json:"modified_at,omitempty"`
 	CreatedAt  time.Time `json:"created_at,omitempty"`
@@ -47,4 +48,9 @@ type RenameFileItem struct {
 type ReplaceFileContentItem struct {
 	Old string `json:"old,omitempty"`
 	New string `json:"new,omitempty"`
+}
+
+// ReplaceFileContentResult represents the result of a content replacement on a single file
+type ReplaceFileContentResult struct {
+	ReplacedCount int `json:"replacedCount"`
 }

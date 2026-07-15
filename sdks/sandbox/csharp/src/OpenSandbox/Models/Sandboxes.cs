@@ -59,6 +59,24 @@ public class ImageSpec
 }
 
 /// <summary>
+/// Runtime platform constraint for sandbox provisioning.
+/// </summary>
+public class PlatformSpec
+{
+    /// <summary>
+    /// Gets or sets the target operating system.
+    /// </summary>
+    [JsonPropertyName("os")]
+    public required string Os { get; set; }
+
+    /// <summary>
+    /// Gets or sets the target CPU architecture.
+    /// </summary>
+    [JsonPropertyName("arch")]
+    public required string Arch { get; set; }
+}
+
+/// <summary>
 /// Action for a network rule.
 /// </summary>
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -114,12 +132,423 @@ public class NetworkPolicy
 }
 
 /// <summary>
+/// Credential Vault proxy startup settings.
+/// </summary>
+public class CredentialProxyConfig
+{
+    /// <summary>
+    /// Gets or sets whether transparent MITM support for Credential Vault injection is enabled.
+    /// </summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+}
+
+/// <summary>
+/// Write-only inline credential material for Credential Vault.
+/// </summary>
+public class InlineCredentialSource
+{
+    /// <summary>
+    /// Gets or sets the credential source type.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "inline";
+
+    /// <summary>
+    /// Gets or sets the inline credential value.
+    /// </summary>
+    [JsonPropertyName("value")]
+    public required string Value { get; set; }
+}
+
+/// <summary>
+/// Sandbox-local Credential Vault credential.
+/// </summary>
+public class Credential
+{
+    /// <summary>
+    /// Gets or sets the sandbox-local credential name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the write-only credential source.
+    /// </summary>
+    [JsonPropertyName("source")]
+    public required InlineCredentialSource Source { get; set; }
+}
+
+/// <summary>
+/// Request match for a Credential Vault binding.
+/// </summary>
+public class CredentialMatch
+{
+    /// <summary>
+    /// Gets or sets the request schemes to match.
+    /// </summary>
+    [JsonPropertyName("schemes")]
+    public IReadOnlyList<string>? Schemes { get; set; }
+
+    /// <summary>
+    /// Deprecated: ignored, port is derived from scheme.
+    /// </summary>
+    [JsonPropertyName("ports")]
+    [Obsolete("Ports is ignored; port is derived from Schemes (https→443, http→80).")]
+    public IReadOnlyList<int>? Ports { get; set; }
+
+    /// <summary>
+    /// Gets or sets exact FQDNs or leftmost-label wildcards.
+    /// </summary>
+    [JsonPropertyName("hosts")]
+    public required IReadOnlyList<string> Hosts { get; set; }
+
+    /// <summary>
+    /// Gets or sets the HTTP methods to match.
+    /// </summary>
+    [JsonPropertyName("methods")]
+    public IReadOnlyList<string>? Methods { get; set; }
+
+    /// <summary>
+    /// Gets or sets the request paths to match.
+    /// </summary>
+    [JsonPropertyName("paths")]
+    public IReadOnlyList<string>? Paths { get; set; }
+}
+
+/// <summary>
+/// Custom header injection entry.
+/// </summary>
+public class CustomHeaderEntry
+{
+    /// <summary>
+    /// Gets or sets the header name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the credential name used as the header value.
+    /// </summary>
+    [JsonPropertyName("credential")]
+    public required string Credential { get; set; }
+}
+
+/// <summary>
+/// Scoped placeholder substitution entry.
+/// </summary>
+public class CredentialSubstitution
+{
+    /// <summary>
+    /// Gets or sets the credential name used as the replacement value.
+    /// </summary>
+    [JsonPropertyName("credential")]
+    public required string Credential { get; set; }
+
+    /// <summary>
+    /// Gets or sets the literal placeholder to replace.
+    /// </summary>
+    [JsonPropertyName("placeholder")]
+    public required string Placeholder { get; set; }
+
+    /// <summary>
+    /// Gets or sets the request surfaces where replacement may occur.
+    /// </summary>
+    [JsonPropertyName("in")]
+    public required IReadOnlyList<string> In { get; set; }
+}
+
+/// <summary>
+/// Typed Credential Vault auth rule.
+/// </summary>
+public class CredentialAuth
+{
+    /// <summary>
+    /// Gets or sets the auth rule type: bearer, basic, apiKey, customHeaders, or passthrough.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public required string Type { get; set; }
+
+    /// <summary>
+    /// Gets or sets the referenced credential name for bearer, basic, or apiKey auth.
+    /// </summary>
+    [JsonPropertyName("credential")]
+    public string? Credential { get; set; }
+
+    /// <summary>
+    /// Gets or sets the API key header or query parameter name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets custom header injection entries.
+    /// </summary>
+    [JsonPropertyName("headers")]
+    public IReadOnlyList<CustomHeaderEntry>? Headers { get; set; }
+
+    /// <summary>
+    /// Gets or sets scoped placeholder substitutions for matching requests.
+    /// </summary>
+    [JsonPropertyName("substitutions")]
+    public IReadOnlyList<CredentialSubstitution>? Substitutions { get; set; }
+}
+
+/// <summary>
+/// Sandbox-local Credential Vault binding.
+/// </summary>
+public class CredentialBinding
+{
+    /// <summary>
+    /// Gets or sets the sandbox-local binding name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the request match.
+    /// </summary>
+    [JsonPropertyName("match")]
+    public required CredentialMatch Match { get; set; }
+
+    /// <summary>
+    /// Gets or sets the auth injection rule.
+    /// </summary>
+    [JsonPropertyName("auth")]
+    public required CredentialAuth Auth { get; set; }
+}
+
+/// <summary>
+/// Sanitized credential metadata returned by Credential Vault.
+/// </summary>
+public class CredentialMetadata
+{
+    /// <summary>
+    /// Gets or sets the credential name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the credential source type.
+    /// </summary>
+    [JsonPropertyName("sourceType")]
+    public required string SourceType { get; set; }
+
+    /// <summary>
+    /// Gets or sets the credential revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+}
+
+/// <summary>
+/// Sanitized auth metadata returned for a Credential Vault binding.
+/// </summary>
+public class CredentialAuthMetadata
+{
+    /// <summary>
+    /// Gets or sets the auth rule type.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public required string Type { get; set; }
+
+    /// <summary>
+    /// Gets or sets the API key header or query parameter name when applicable.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+}
+
+/// <summary>
+/// Sanitized binding metadata returned by Credential Vault.
+/// </summary>
+public class CredentialBindingMetadata
+{
+    /// <summary>
+    /// Gets or sets the binding name.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the binding revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+
+    /// <summary>
+    /// Gets or sets the sanitized request match.
+    /// </summary>
+    [JsonPropertyName("match")]
+    public CredentialMatch? Match { get; set; }
+
+    /// <summary>
+    /// Gets or sets the sanitized auth metadata.
+    /// </summary>
+    [JsonPropertyName("auth")]
+    public CredentialAuthMetadata? Auth { get; set; }
+}
+
+/// <summary>
+/// Sanitized Credential Vault state.
+/// </summary>
+public class CredentialVaultState
+{
+    /// <summary>
+    /// Gets or sets the vault revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+
+    /// <summary>
+    /// Gets or sets sanitized credential metadata.
+    /// </summary>
+    [JsonPropertyName("credentials")]
+    public required IReadOnlyList<CredentialMetadata> Credentials { get; set; }
+
+    /// <summary>
+    /// Gets or sets sanitized binding metadata.
+    /// </summary>
+    [JsonPropertyName("bindings")]
+    public required IReadOnlyList<CredentialBindingMetadata> Bindings { get; set; }
+}
+
+/// <summary>
+/// Sanitized Credential Vault credential list response.
+/// </summary>
+public class CredentialListResponse
+{
+    /// <summary>
+    /// Gets or sets the vault revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+
+    /// <summary>
+    /// Gets or sets sanitized credential metadata.
+    /// </summary>
+    [JsonPropertyName("credentials")]
+    public required IReadOnlyList<CredentialMetadata> Credentials { get; set; }
+}
+
+/// <summary>
+/// Sanitized Credential Vault binding list response.
+/// </summary>
+public class CredentialBindingListResponse
+{
+    /// <summary>
+    /// Gets or sets the vault revision.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public int Revision { get; set; }
+
+    /// <summary>
+    /// Gets or sets sanitized binding metadata.
+    /// </summary>
+    [JsonPropertyName("bindings")]
+    public required IReadOnlyList<CredentialBindingMetadata> Bindings { get; set; }
+}
+
+/// <summary>
+/// Initial Credential Vault creation request.
+/// </summary>
+public class CredentialVaultCreateRequest
+{
+    /// <summary>
+    /// Gets or sets credentials to create.
+    /// </summary>
+    [JsonPropertyName("credentials")]
+    public required IReadOnlyList<Credential> Credentials { get; set; }
+
+    /// <summary>
+    /// Gets or sets bindings to create.
+    /// </summary>
+    [JsonPropertyName("bindings")]
+    public required IReadOnlyList<CredentialBinding> Bindings { get; set; }
+}
+
+/// <summary>
+/// Atomic credential mutation set for Credential Vault patch.
+/// </summary>
+public class CredentialMutationSet
+{
+    /// <summary>
+    /// Gets or sets credentials to add.
+    /// </summary>
+    [JsonPropertyName("add")]
+    public IReadOnlyList<Credential>? Add { get; set; }
+
+    /// <summary>
+    /// Gets or sets credentials to replace.
+    /// </summary>
+    [JsonPropertyName("replace")]
+    public IReadOnlyList<Credential>? Replace { get; set; }
+
+    /// <summary>
+    /// Gets or sets credential names to delete.
+    /// </summary>
+    [JsonPropertyName("delete")]
+    public IReadOnlyList<string>? Delete { get; set; }
+}
+
+/// <summary>
+/// Atomic binding mutation set for Credential Vault patch.
+/// </summary>
+public class CredentialBindingMutationSet
+{
+    /// <summary>
+    /// Gets or sets bindings to add.
+    /// </summary>
+    [JsonPropertyName("add")]
+    public IReadOnlyList<CredentialBinding>? Add { get; set; }
+
+    /// <summary>
+    /// Gets or sets bindings to replace.
+    /// </summary>
+    [JsonPropertyName("replace")]
+    public IReadOnlyList<CredentialBinding>? Replace { get; set; }
+
+    /// <summary>
+    /// Gets or sets binding names to delete.
+    /// </summary>
+    [JsonPropertyName("delete")]
+    public IReadOnlyList<string>? Delete { get; set; }
+}
+
+/// <summary>
+/// Credential Vault patch request.
+/// </summary>
+public class CredentialVaultPatchRequest
+{
+    /// <summary>
+    /// Gets or sets the optional optimistic concurrency guard.
+    /// </summary>
+    [JsonPropertyName("expectedRevision")]
+    public int? ExpectedRevision { get; set; }
+
+    /// <summary>
+    /// Gets or sets credential mutations.
+    /// </summary>
+    [JsonPropertyName("credentials")]
+    public CredentialMutationSet? Credentials { get; set; }
+
+    /// <summary>
+    /// Gets or sets binding mutations.
+    /// </summary>
+    [JsonPropertyName("bindings")]
+    public CredentialBindingMutationSet? Bindings { get; set; }
+}
+
+/// <summary>
 /// Host path bind mount backend for a volume.
 /// </summary>
 public class Host
 {
     /// <summary>
     /// Gets or sets the absolute host path.
+    /// Must start with '/' (Unix) or a drive letter such as 'C:\' or 'D:/'
+    /// (Windows), and be under an allowed prefix.
     /// </summary>
     [JsonPropertyName("path")]
     public required string Path { get; set; }
@@ -135,11 +564,84 @@ public class PVC
     /// </summary>
     [JsonPropertyName("claimName")]
     public required string ClaimName { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether to auto-create the volume if it does not exist. Defaults to true.
+    /// </summary>
+    [JsonPropertyName("createIfNotExists")]
+    public bool? CreateIfNotExists { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether the auto-created volume (Docker named volume or Kubernetes PVC)
+    /// should be removed on sandbox deletion. Pre-existing volumes are never removed.
+    /// </summary>
+    [JsonPropertyName("deleteOnSandboxTermination")]
+    public bool? DeleteOnSandboxTermination { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Kubernetes StorageClass for auto-created PVCs. Ignored for Docker.
+    /// </summary>
+    [JsonPropertyName("storageClass")]
+    public string? StorageClass { get; set; }
+
+    /// <summary>
+    /// Gets or sets the storage request for auto-created PVCs (e.g. "1Gi"). Ignored for Docker.
+    /// </summary>
+    [JsonPropertyName("storage")]
+    public string? Storage { get; set; }
+
+    /// <summary>
+    /// Gets or sets access modes for auto-created PVCs (e.g. "ReadWriteOnce"). Ignored for Docker.
+    /// </summary>
+    [JsonPropertyName("accessModes")]
+    public IReadOnlyList<string>? AccessModes { get; set; }
+}
+
+/// <summary>
+/// Alibaba Cloud OSS mount backend via ossfs.
+/// </summary>
+public class OSSFS
+{
+    /// <summary>
+    /// Gets or sets the OSS bucket name.
+    /// </summary>
+    [JsonPropertyName("bucket")]
+    public required string Bucket { get; set; }
+
+    /// <summary>
+    /// Gets or sets the OSS endpoint.
+    /// </summary>
+    [JsonPropertyName("endpoint")]
+    public required string Endpoint { get; set; }
+
+    /// <summary>
+    /// Gets or sets the OSS access key ID for inline credentials mode.
+    /// </summary>
+    [JsonPropertyName("accessKeyId")]
+    public required string AccessKeyId { get; set; }
+
+    /// <summary>
+    /// Gets or sets the OSS access key secret for inline credentials mode.
+    /// </summary>
+    [JsonPropertyName("accessKeySecret")]
+    public required string AccessKeySecret { get; set; }
+
+    /// <summary>
+    /// Gets or sets the ossfs major version used by runtime mount integration. Defaults to "2.0".
+    /// </summary>
+    [JsonPropertyName("version")]
+    public string Version { get; set; } = "2.0";
+
+    /// <summary>
+    /// Gets or sets additional ossfs mount options.
+    /// </summary>
+    [JsonPropertyName("options")]
+    public IReadOnlyList<string>? Options { get; set; }
 }
 
 /// <summary>
 /// Storage mount definition for sandbox creation.
-/// Exactly one backend (Host or PVC) should be provided per volume.
+/// Exactly one backend (Host, PVC, or OSSFS) should be provided per volume.
 /// </summary>
 public class Volume
 {
@@ -160,6 +662,12 @@ public class Volume
     /// </summary>
     [JsonPropertyName("pvc")]
     public PVC? Pvc { get; set; }
+
+    /// <summary>
+    /// Gets or sets the OSSFS backend configuration.
+    /// </summary>
+    [JsonPropertyName("ossfs")]
+    public OSSFS? Ossfs { get; set; }
 
     /// <summary>
     /// Gets or sets the absolute mount path inside the container.
@@ -219,7 +727,13 @@ public class SandboxInfo
     /// Gets or sets the container image specification.
     /// </summary>
     [JsonPropertyName("image")]
-    public required ImageSpec Image { get; set; }
+    public ImageSpec? Image { get; set; }
+
+    /// <summary>
+    /// Gets or sets the snapshot identifier used to restore this sandbox.
+    /// </summary>
+    [JsonPropertyName("snapshotId")]
+    public string? SnapshotId { get; set; }
 
     /// <summary>
     /// Gets or sets the entrypoint command.
@@ -234,10 +748,22 @@ public class SandboxInfo
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
 
     /// <summary>
+    /// Gets or sets opaque extension data returned by the server.
+    /// </summary>
+    [JsonPropertyName("extensions")]
+    public IReadOnlyDictionary<string, string>? Extensions { get; set; }
+
+    /// <summary>
     /// Gets or sets the sandbox status.
     /// </summary>
     [JsonPropertyName("status")]
     public required SandboxStatus Status { get; set; }
+
+    /// <summary>
+    /// Gets or sets the effective platform used for sandbox provisioning.
+    /// </summary>
+    [JsonPropertyName("platform")]
+    public PlatformSpec? Platform { get; set; }
 
     /// <summary>
     /// Gets or sets the sandbox creation time.
@@ -249,7 +775,21 @@ public class SandboxInfo
     /// Gets or sets the sandbox expiration time.
     /// </summary>
     [JsonPropertyName("expiresAt")]
-    public required DateTime ExpiresAt { get; set; }
+    public DateTime? ExpiresAt { get; set; }
+}
+
+/// <summary>
+/// Metadata merge patch for a sandbox. Non-null values add or replace keys; null values delete keys.
+/// </summary>
+public class SandboxMetadataPatch : Dictionary<string, string?>
+{
+    public SandboxMetadataPatch()
+    {
+    }
+
+    public SandboxMetadataPatch(IDictionary<string, string?> dictionary) : base(dictionary)
+    {
+    }
 }
 
 /// <summary>
@@ -261,19 +801,25 @@ public class CreateSandboxRequest
     /// Gets or sets the container image specification.
     /// </summary>
     [JsonPropertyName("image")]
-    public required ImageSpec Image { get; set; }
+    public ImageSpec? Image { get; set; }
+
+    /// <summary>
+    /// Gets or sets the snapshot identifier to restore from.
+    /// </summary>
+    [JsonPropertyName("snapshotId")]
+    public string? SnapshotId { get; set; }
 
     /// <summary>
     /// Gets or sets the entrypoint command.
     /// </summary>
     [JsonPropertyName("entrypoint")]
-    public required IReadOnlyList<string> Entrypoint { get; set; }
+    public IReadOnlyList<string>? Entrypoint { get; set; }
 
     /// <summary>
     /// Gets or sets the timeout in seconds.
     /// </summary>
     [JsonPropertyName("timeout")]
-    public required int Timeout { get; set; }
+    public int? Timeout { get; set; }
 
     /// <summary>
     /// Gets or sets the resource limits.
@@ -282,10 +828,23 @@ public class CreateSandboxRequest
     public required IReadOnlyDictionary<string, string> ResourceLimits { get; set; }
 
     /// <summary>
+    /// Gets or sets the resource requests (guaranteed minimums).
+    /// When set, enables Kubernetes Burstable QoS (requests &lt; limits).
+    /// </summary>
+    [JsonPropertyName("resourceRequests")]
+    public IReadOnlyDictionary<string, string>? ResourceRequests { get; set; }
+
+    /// <summary>
     /// Gets or sets the environment variables.
     /// </summary>
     [JsonPropertyName("env")]
     public IReadOnlyDictionary<string, string>? Env { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether to enable secured access for sandbox endpoints.
+    /// </summary>
+    [JsonPropertyName("secureAccess")]
+    public bool? SecureAccess { get; set; }
 
     /// <summary>
     /// Gets or sets the custom metadata tags.
@@ -298,6 +857,18 @@ public class CreateSandboxRequest
     /// </summary>
     [JsonPropertyName("networkPolicy")]
     public NetworkPolicy? NetworkPolicy { get; set; }
+
+    /// <summary>
+    /// Gets or sets optional Credential Vault proxy startup settings.
+    /// </summary>
+    [JsonPropertyName("credentialProxy")]
+    public CredentialProxyConfig? CredentialProxy { get; set; }
+
+    /// <summary>
+    /// Gets or sets an optional platform constraint for sandbox provisioning.
+    /// </summary>
+    [JsonPropertyName("platform")]
+    public PlatformSpec? Platform { get; set; }
 
     /// <summary>
     /// Gets or sets storage volumes to mount into the sandbox.
@@ -330,16 +901,28 @@ public class CreateSandboxResponse
     public required SandboxStatus Status { get; set; }
 
     /// <summary>
+    /// Gets or sets the effective platform used for sandbox provisioning.
+    /// </summary>
+    [JsonPropertyName("platform")]
+    public PlatformSpec? Platform { get; set; }
+
+    /// <summary>
     /// Gets or sets the custom metadata tags.
     /// </summary>
     [JsonPropertyName("metadata")]
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
 
     /// <summary>
+    /// Gets or sets opaque extension data returned by the server.
+    /// </summary>
+    [JsonPropertyName("extensions")]
+    public IReadOnlyDictionary<string, string>? Extensions { get; set; }
+
+    /// <summary>
     /// Gets or sets the sandbox expiration time.
     /// </summary>
     [JsonPropertyName("expiresAt")]
-    public required DateTime ExpiresAt { get; set; }
+    public DateTime? ExpiresAt { get; set; }
 
     /// <summary>
     /// Gets or sets the sandbox creation time.
@@ -352,6 +935,54 @@ public class CreateSandboxResponse
     /// </summary>
     [JsonPropertyName("entrypoint")]
     public required IReadOnlyList<string> Entrypoint { get; set; }
+}
+
+/// <summary>
+/// Status of a snapshot.
+/// </summary>
+public class SnapshotStatus
+{
+    [JsonPropertyName("state")]
+    public required string State { get; set; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
+
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
+
+    [JsonPropertyName("lastTransitionAt")]
+    public DateTime? LastTransitionAt { get; set; }
+}
+
+/// <summary>
+/// Information about a snapshot.
+/// </summary>
+public class SnapshotInfo
+{
+    [JsonPropertyName("id")]
+    public required string Id { get; set; }
+
+    [JsonPropertyName("sandboxId")]
+    public required string SandboxId { get; set; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("status")]
+    public required SnapshotStatus Status { get; set; }
+
+    [JsonPropertyName("createdAt")]
+    public required DateTime CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Request to create a snapshot.
+/// </summary>
+public class CreateSnapshotRequest
+{
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
 }
 
 /// <summary>
@@ -431,6 +1062,29 @@ public class ListSandboxesParams
     /// <summary>
     /// Gets or sets the page size.
     /// </summary>
+    public int? PageSize { get; set; }
+}
+
+/// <summary>
+/// Response from listing snapshots.
+/// </summary>
+public class ListSnapshotsResponse
+{
+    [JsonPropertyName("items")]
+    public required IReadOnlyList<SnapshotInfo> Items { get; set; }
+
+    [JsonPropertyName("pagination")]
+    public PaginationInfo? Pagination { get; set; }
+}
+
+/// <summary>
+/// Parameters for listing snapshots.
+/// </summary>
+public class ListSnapshotsParams
+{
+    public string? SandboxId { get; set; }
+    public IReadOnlyList<string>? States { get; set; }
+    public int? Page { get; set; }
     public int? PageSize { get; set; }
 }
 

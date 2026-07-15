@@ -41,6 +41,7 @@ class SandboxStatus:
             - Running: Sandbox is running and ready to accept requests
             - Pausing: Sandbox is in the process of pausing
             - Paused: Sandbox has been paused while retaining its state
+            - Resuming: Sandbox is being restored after a pause
             - Stopping: Sandbox is being terminated
             - Terminated: Sandbox has been successfully terminated
             - Failed: Sandbox encountered a critical error
@@ -49,10 +50,11 @@ class SandboxStatus:
             - Pending → Running (after creation completes)
             - Running → Pausing (when pause is requested)
             - Pausing → Paused (pause operation completes)
-            - Paused → Running (when resume is requested)
+            - Paused → Resuming (when resume is requested)
+            - Resuming → Running (when resume operation completes)
             - Running/Paused → Stopping (when kill is requested or TTL expires)
             - Stopping → Terminated (kill/timeout operation completes)
-            - Pending/Running/Paused → Failed (on error)
+            - Pending/Running/Paused/Resuming → Failed (on error)
 
             Note: New state values may be added in future versions.
             Clients should handle unknown state values gracefully.

@@ -1,6 +1,5 @@
 # Alibaba Sandbox SDK for JavaScript/TypeScript
 
-English | [中文](README_zh.md)
 
 A TypeScript/JavaScript SDK for low-level interaction with OpenSandbox. It provides the ability to create, manage, and interact with secure sandbox environments, including executing shell commands, managing files, and reading resource metrics.
 
@@ -58,6 +57,7 @@ try {
     console.error(
       `Sandbox Error: [${err.error.code}] ${err.error.message ?? ""}`,
     );
+    console.error(`Request ID: ${err.requestId ?? "N/A"}`);
   } else {
     console.error(err);
   }
@@ -74,7 +74,7 @@ Manage the sandbox lifecycle, including renewal, pausing, and resuming.
 const info = await sandbox.getInfo();
 console.log("State:", info.status.state);
 console.log("Created:", info.createdAt);
-console.log("Expires:", info.expiresAt);
+console.log("Expires:", info.expiresAt); // null when manual cleanup mode is used
 
 await sandbox.pause();
 
@@ -83,6 +83,16 @@ const resumed = await sandbox.resume();
 
 // Renew: expiresAt = now + timeoutSeconds
 await resumed.renew(30 * 60);
+```
+
+Create a non-expiring sandbox by passing `timeoutSeconds: null`:
+
+```ts
+const manual = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  timeoutSeconds: null,
+});
 ```
 
 ### 2. Custom Health Check
@@ -154,7 +164,32 @@ const { endpoint } = await sandbox.getEndpoint(44772);
 const url = await sandbox.getEndpointUrl(44772);
 ```
 
-### 6. Sandbox Management (Admin)
+### 6. Volume Mounts
+
+`volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must specify exactly one backend.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  volumes: [
+    {
+      name: "oss-data",
+      ossfs: {
+        bucket: "bucket-a",
+        endpoint: "oss-cn-hangzhou.aliyuncs.com",
+        accessKeyId: process.env.OSS_ACCESS_KEY_ID!,
+        accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET!,
+        version: "2.0",
+      },
+      mountPath: "/mnt/oss",
+      subPath: "prefix",
+    },
+  ],
+});
+```
+
+### 7. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 
@@ -222,11 +257,15 @@ const config2 = new ConnectionConfig({
 | `env`                        | Environment variables                            | `{}`                         |
 | `metadata`                   | Custom metadata tags                             | `{}`                         |
 | `networkPolicy`              | Optional outbound network policy (egress)        | -                            |
+| `credentialProxy`            | Optional Credential Vault proxy startup settings | -                            |
 | `extensions`                 | Extra server-defined fields                      | `{}`                         |
 | `skipHealthCheck`            | Skip readiness checks (`Running` + health check) | `false`                      |
 | `healthCheck`                | Custom readiness check                           | -                            |
 | `readyTimeoutSeconds`        | Max time to wait for readiness                   | 30 seconds                   |
 | `healthCheckPollingInterval` | Poll interval while waiting (milliseconds)       | 200 ms                       |
+
+Note: metadata keys under `opensandbox.io/` are reserved for system-managed
+labels and will be rejected by the server.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -239,7 +278,64 @@ const sandbox = await Sandbox.create({
 });
 ```
 
-### 3. Resource cleanup
+### 3. Runtime Egress Policy Updates
+
+Runtime egress reads and patches go directly to the sandbox egress sidecar.
+The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+
+Patch uses merge semantics:
+- Incoming rules take priority over existing rules with the same `target`.
+- Existing rules for other targets remain unchanged.
+- Within a single patch payload, the first rule for a `target` wins.
+- The current `defaultAction` is preserved.
+
+```ts
+const policy = await sandbox.getEgressPolicy();
+
+await sandbox.patchEgressRules([
+  { action: "allow", target: "www.github.com" },
+  { action: "deny", target: "pypi.org" },
+]);
+```
+
+### 4. Credential Vault
+
+Credential Vault injects outbound credentials from the egress sidecar while
+keeping real secrets out of sandbox environment variables, commands, files, and
+logs. Create the sandbox with `credentialProxy` enabled, then write credentials
+and bindings through `sandbox.credentialVault`.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "python:3.11",
+  networkPolicy: {
+    defaultAction: "deny",
+    egress: [{ action: "allow", target: "api.example.com" }],
+  },
+  credentialProxy: { enabled: true },
+});
+
+await sandbox.credentialVault.create({
+  credentials: [{ name: "api-token", source: { value: "<token>" } }],
+  bindings: [
+    {
+      name: "api-token",
+      match: {
+        schemes: ["https"],
+        hosts: ["api.example.com"],
+        paths: ["/v1/*"],
+      },
+      auth: { type: "apiKey", name: "x-api-key", credential: "api-token" },
+    },
+  ],
+});
+```
+
+See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
+binding guidance, and Git/curl examples.
+
+### 5. Resource cleanup
 
 Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js
 so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting

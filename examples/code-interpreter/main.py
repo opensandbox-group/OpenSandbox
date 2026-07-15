@@ -26,7 +26,7 @@ async def main() -> None:
     api_key = os.getenv("SANDBOX_API_KEY")
     image = os.getenv(
         "SANDBOX_IMAGE",
-        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
+        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.1.0",
     )
 
     config = ConnectionConfig(
@@ -38,7 +38,7 @@ async def main() -> None:
     sandbox = await Sandbox.create(
         image,
         connection_config=config,
-        entrypoint=["/opt/opensandbox/code-interpreter.sh"]
+        entrypoint=["/opt/code-interpreter/code-interpreter.sh"]
     )
 
     async with sandbox:

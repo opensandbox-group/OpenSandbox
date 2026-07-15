@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Pytest configuration and fixtures for sandbox server tests.
-
-This module provides shared fixtures and configuration for all test modules.
-"""
-
 import os
 from pathlib import Path
 
@@ -35,38 +29,26 @@ _mock_docker_client = MagicMock()
 _mock_docker_client.containers.list.return_value = []
 docker.from_env = lambda: _mock_docker_client  # type: ignore
 
-from src.main import app  # noqa: E402
+from opensandbox_server.main import app  # noqa: E402
 
 
 @pytest.fixture(scope="session")
 def test_api_key() -> str:
-    """
-    Fixture providing a test API key (matches test configuration file).
-    """
     return "test-api-key-12345"
 
 
 @pytest.fixture(scope="function")
 def client() -> TestClient:
-    """
-    Fixture providing a FastAPI test client.
-    """
     return TestClient(app)
 
 
 @pytest.fixture(scope="function")
 def auth_headers(test_api_key: str) -> dict:
-    """
-    Fixture providing authentication headers.
-    """
     return {"OPEN-SANDBOX-API-KEY": test_api_key}
 
 
 @pytest.fixture(scope="session")
 def sample_sandbox_request() -> dict:
-    """
-    Fixture providing a sample sandbox creation request.
-    """
     return {
         "image": {"uri": "python:3.11"},
         "timeout": 3600,

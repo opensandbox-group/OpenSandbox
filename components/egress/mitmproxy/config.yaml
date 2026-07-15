@@ -1,0 +1,44 @@
+# Static mitmproxy options that override mitm built-in defaults for the
+# OpenSandbox egress sidecar. Loaded automatically by mitmdump from
+# /var/lib/mitmproxy/.mitmproxy/config.yaml.
+#
+# Only deviations from mitm defaults are listed here. Options that
+# happen to match the mitm default (http2=true, etc.) are intentionally
+# omitted — the file is meant to be the diff against upstream defaults,
+# not a full enumeration. Two intentional exceptions to this rule:
+# ignore_hosts (kept as a discoverable extension point) and
+# connection_strategy (mitmproxy 10+ changed the default from lazy to
+# eager; we pin lazy explicitly to preserve the historical behavior).
+#
+# Per-deployment overrides remain env-driven and applied as --set by
+# launch.go. Precedence: command-line --set > this file > mitm defaults.
+
+mode:
+  - transparent
+
+# mitm default changed from lazy to eager in mitmproxy 10+. We pin
+# lazy explicitly: upstream connections are deferred until the full
+# request arrives, avoiding unnecessary upstream opens for blocked
+# or filtered requests.
+connection_strategy: lazy
+
+# mitm default 0.0.0.0; transparent mode must only accept loopback inside
+# the netns (iptables REDIRECT pushes outbound traffic here, and exposing
+# mitm on the LAN would route any inbound connection through it).
+listen_host: 127.0.0.1
+
+# mitm default None (whole body buffered in memory). 1m bounds RSS for
+# the allow path; chunked / SSE responses are forced to stream regardless
+# by the system addon's responseheaders hook.
+stream_large_bodies: 1m
+
+# mitm default None (Python certifi bundle). Match the OS trust store so
+# private-CA additions land where mitm reads them.
+ssl_verify_upstream_trusted_confdir: /etc/ssl/certs
+
+# Hosts (Python regex) for TLS pass-through: mitm forwards bytes without
+# decryption and addons do not see request/response content. Empty matches
+# the mitm default; kept here as a discoverable extension point. Append
+# entries here rather than passing --set on the command line, because
+# --set on a list option REPLACES the entire list.
+ignore_hosts: []

@@ -115,6 +115,21 @@ public class CodesAdapterTests
         Assert.Contains(sseHandler.AcceptHeaders, value => value.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task InterruptAsync_SendsExecutionIdAsQueryParameter()
+    {
+        var httpHandler = new StubHttpMessageHandler((request, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
+
+        var adapter = CreateAdapter(
+            httpHandler,
+            new StubHttpMessageHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK))));
+
+        await adapter.InterruptAsync("exec-123");
+
+        Assert.Contains(httpHandler.RequestUris, uri => uri.Contains("/code?id=exec-123", StringComparison.Ordinal));
+    }
+
     private static async Task DrainAsync<T>(IAsyncEnumerable<T> source)
     {
         await foreach (var _ in source)

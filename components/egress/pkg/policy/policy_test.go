@@ -16,7 +16,10 @@ package policy
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestParsePolicy_EmptyOrNullDefaultsDeny(t *testing.T) {
@@ -28,45 +31,25 @@ func TestParsePolicy_EmptyOrNullDefaultsDeny(t *testing.T) {
 	}
 	for _, raw := range cases {
 		p, err := ParsePolicy(raw)
-		if err != nil {
-			t.Fatalf("raw %q returned error: %v", raw, err)
-		}
-		if p == nil {
-			t.Fatalf("raw %q expected default deny policy, got nil", raw)
-		}
-		if p.DefaultAction != ActionDeny {
-			t.Fatalf("raw %q expected defaultAction deny, got %+v", raw, p)
-		}
-		if got := p.Evaluate("example.com."); got != ActionDeny {
-			t.Fatalf("raw %q expected deny evaluation, got %s", raw, got)
-		}
+		require.NoErrorf(t, err, "raw %q returned error", raw)
+		require.NotNilf(t, p, "raw %q expected default deny policy, got nil", raw)
+		require.Equalf(t, ActionDeny, p.DefaultAction, "raw %q expected defaultAction deny", raw)
+		require.Equalf(t, ActionDeny, p.Evaluate("example.com."), "raw %q expected deny evaluation", raw)
 	}
 }
 
 func TestParsePolicy_DefaultActionFallback(t *testing.T) {
 	p, err := ParsePolicy(`{"egress":[{"action":"allow","target":"example.com"}]}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if p == nil {
-		t.Fatalf("expected policy object, got nil")
-	}
-	if p.DefaultAction != ActionDeny {
-		t.Fatalf("expected defaultAction fallback to deny, got %+v", p)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, p, "expected policy object, got nil")
+	require.Equal(t, ActionDeny, p.DefaultAction, "expected defaultAction fallback to deny")
 }
 
 func TestParsePolicy_EmptyEgressDefaultsDeny(t *testing.T) {
 	p, err := ParsePolicy(`{"defaultAction":""}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if p.DefaultAction != ActionDeny {
-		t.Fatalf("expected default deny when defaultAction missing, got %+v", p)
-	}
-	if got := p.Evaluate("anything.com."); got != ActionDeny {
-		t.Fatalf("expected evaluation deny for empty egress, got %s", got)
-	}
+	require.NoError(t, err)
+	require.Equal(t, ActionDeny, p.DefaultAction, "expected default deny when defaultAction missing")
+	require.Equal(t, ActionDeny, p.Evaluate("anything.com."), "expected evaluation deny for empty egress")
 }
 
 func TestParsePolicy_IPAndCIDRSupported(t *testing.T) {
@@ -80,61 +63,108 @@ func TestParsePolicy_IPAndCIDRSupported(t *testing.T) {
 		]
 	}`
 	p, err := ParsePolicy(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
-	if len(allowV4) != 2 || allowV4[0] != "1.1.1.1" || allowV4[1] != "2.2.0.0/16" {
-		t.Fatalf("allowV4 unexpected: %+v", allowV4)
-	}
-	if len(denyV6) != 2 {
-		t.Fatalf("expected 2 denyV6 entries, got %+v", denyV6)
-	}
-	if len(allowV6) != 0 || len(denyV4) != 0 {
-		t.Fatalf("allowV6/denyV4 should be empty, got %v / %v", allowV6, denyV4)
-	}
+	require.Len(t, allowV4, 2, "allowV4 length mismatch")
+	require.Equal(t, "1.1.1.1", allowV4[0])
+	require.Equal(t, "2.2.0.0/16", allowV4[1])
+	require.Len(t, denyV6, 2, "expected 2 denyV6 entries")
+	require.Empty(t, allowV6, "allowV6 should be empty")
+	require.Empty(t, denyV4, "denyV4 should be empty")
 }
 
 func TestParsePolicy_InvalidAction(t *testing.T) {
-	if _, err := ParsePolicy(`{"egress":[{"action":"foo","target":"example.com"}]}`); err == nil {
-		t.Fatalf("expected error for invalid action")
-	}
+	_, err := ParsePolicy(`{"egress":[{"action":"foo","target":"example.com"}]}`)
+	require.Error(t, err, "expected error for invalid action")
 }
 
 func TestParsePolicy_EmptyTargetError(t *testing.T) {
-	if _, err := ParsePolicy(`{"egress":[{"action":"allow","target":""}]}`); err == nil {
-		t.Fatalf("expected error for empty target")
-	}
+	_, err := ParsePolicy(`{"egress":[{"action":"allow","target":""}]}`)
+	require.Error(t, err, "expected error for empty target")
 }
 
 func TestWithExtraAllowIPs(t *testing.T) {
-	p, _ := ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	p, err := ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
 	allowV4, allowV6, _, _ := p.StaticIPSets()
-	if len(allowV4) != 0 || len(allowV6) != 0 {
-		t.Fatalf("domain-only policy should have no static allow IPs, got allowV4=%v allowV6=%v", allowV4, allowV6)
-	}
+	require.Empty(t, allowV4, "domain-only policy should have no static allowV4 IPs")
+	require.Empty(t, allowV6, "domain-only policy should have no static allowV6 IPs")
 
 	ips := []netip.Addr{
 		netip.MustParseAddr("192.168.65.7"),
 		netip.MustParseAddr("2001:db8::1"),
 	}
 	merged := p.WithExtraAllowIPs(ips)
-	if merged == p {
-		t.Fatalf("expected new policy instance")
-	}
+	require.NotSame(t, p, merged, "expected new policy instance")
 	allowV4, allowV6, _, _ = merged.StaticIPSets()
-	if len(allowV4) != 1 || allowV4[0] != "192.168.65.7" {
-		t.Fatalf("allowV4 expected [192.168.65.7], got %v", allowV4)
-	}
-	if len(allowV6) != 1 || allowV6[0] != "2001:db8::1" {
-		t.Fatalf("allowV6 expected [2001:db8::1], got %v", allowV6)
-	}
+	require.Len(t, allowV4, 1, "allowV4 length mismatch")
+	require.Equal(t, "192.168.65.7", allowV4[0])
+	require.Len(t, allowV6, 1, "allowV6 length mismatch")
+	require.Equal(t, "2001:db8::1", allowV6[0])
 
 	// nil/empty ips returns same policy
-	if got := p.WithExtraAllowIPs(nil); got != p {
-		t.Fatalf("WithExtraAllowIPs(nil) should return same policy")
+	require.Same(t, p, p.WithExtraAllowIPs(nil), "WithExtraAllowIPs(nil) should return same policy")
+	require.Same(t, p, p.WithExtraAllowIPs([]netip.Addr{}), "WithExtraAllowIPs([]) should return same policy")
+}
+
+func TestEvaluate_CompiledIndexMatchesLinear(t *testing.T) {
+	p, err := ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"*.example.com"},
+			{"action":"deny","target":"api.example.com"},
+			{"action":"allow","target":"*.internal.example.com"},
+			{"action":"deny","target":"10.0.0.1"},
+			{"action":"allow","target":"10.0.0.0/24"}
+		]
+	}`)
+	require.NoError(t, err)
+	require.NotNil(t, p.domainIndex, "parsed policy should build compiled domain index")
+
+	queries := []string{
+		"api.example.com.",
+		"www.example.com.",
+		"a.internal.example.com.",
+		"internal.example.com.",
+		"unknown.test.",
 	}
-	if got := p.WithExtraAllowIPs([]netip.Addr{}); got != p {
-		t.Fatalf("WithExtraAllowIPs([]) should return same policy")
+	for _, q := range queries {
+		got := p.Evaluate(q)
+		want, matched := p.evaluateLinear(normalizeQueryForTest(q))
+		if !matched {
+			want = p.DefaultAction
+		}
+		require.Equalf(t, want, got, "compiled evaluate mismatch for query=%s", q)
 	}
+}
+
+func TestEvaluate_ManualPolicyFallsBackToLinear(t *testing.T) {
+	manual := &NetworkPolicy{
+		DefaultAction: ActionDeny,
+		Egress: []EgressRule{
+			{Action: ActionAllow, Target: "*.example.com", targetKind: targetDomain},
+			{Action: ActionDeny, Target: "api.example.com", targetKind: targetDomain},
+		},
+	}
+	require.Nil(t, manual.domainIndex, "manual policy intentionally skips compile")
+	require.Equal(t, ActionAllow, manual.Evaluate("api.example.com."))
+	require.Equal(t, ActionAllow, manual.Evaluate("www.example.com."))
+	require.Equal(t, ActionDeny, manual.Evaluate("unknown.example."))
+}
+
+func TestEvaluate_CompiledIndexKeepsFirstMatchPriority(t *testing.T) {
+	p := &NetworkPolicy{
+		DefaultAction: ActionDeny,
+		Egress: []EgressRule{
+			{Action: ActionAllow, Target: "*.example.com", targetKind: targetDomain},
+			{Action: ActionDeny, Target: "api.example.com", targetKind: targetDomain},
+		},
+	}
+	p = ensureDefaults(p)
+	require.NotNil(t, p.domainIndex)
+	require.Equal(t, ActionAllow, p.Evaluate("api.example.com."))
+}
+
+func normalizeQueryForTest(domain string) string {
+	return strings.ToLower(strings.TrimSuffix(domain, "."))
 }

@@ -48,13 +48,17 @@ export class ExecutionEventDispatcher {
       }
       case "stdout": {
         const msg: OutputMessage = { text: ev.text ?? "", timestamp: ts, isError: false };
-        this.execution.logs.stdout.push(msg);
+        if (!this.handlers?.skipAccumulation) {
+          this.execution.logs.stdout.push(msg);
+        }
         await this.handlers?.onStdout?.(msg);
         return;
       }
       case "stderr": {
         const msg: OutputMessage = { text: ev.text ?? "", timestamp: ts, isError: true };
-        this.execution.logs.stderr.push(msg);
+        if (!this.handlers?.skipAccumulation) {
+          this.execution.logs.stderr.push(msg);
+        }
         await this.handlers?.onStderr?.(msg);
         return;
       }

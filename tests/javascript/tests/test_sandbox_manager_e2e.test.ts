@@ -72,17 +72,20 @@ beforeAll(async () => {
   s1 = await Sandbox.create({
     ...common,
     metadata: { tag, team: "t1", env: "prod" },
-    env: { E2E_TEST: "true", CASE: "mgr-s1" },
+    env: { E2E_TEST: "true", CASE: "mgr-s1", EXECD_API_GRACE_SHUTDOWN: "3s",
+      EXECD_JUPYTER_IDLE_POLL_INTERVAL: "200ms" },
   });
   s2 = await Sandbox.create({
     ...common,
     metadata: { tag, team: "t1", env: "dev" },
-    env: { E2E_TEST: "true", CASE: "mgr-s2" },
+    env: { E2E_TEST: "true", CASE: "mgr-s2", EXECD_API_GRACE_SHUTDOWN: "3s",
+      EXECD_JUPYTER_IDLE_POLL_INTERVAL: "200ms" },
   });
   s3 = await Sandbox.create({
     ...common,
     metadata: { tag, env: "prod" },
-    env: { E2E_TEST: "true", CASE: "mgr-s3" },
+    env: { E2E_TEST: "true", CASE: "mgr-s3", EXECD_API_GRACE_SHUTDOWN: "3s",
+      EXECD_JUPYTER_IDLE_POLL_INTERVAL: "200ms" },
   });
 
   expect(await s1.isHealthy()).toBe(true);
@@ -180,6 +183,17 @@ test("02 metadata filter uses AND semantics", async () => {
   expect(noneMatchIds.has(s1.id)).toBe(false);
   expect(noneMatchIds.has(s2.id)).toBe(false);
   expect(noneMatchIds.has(s3.id)).toBe(false);
+
+  const patched = await manager.patchSandboxMetadata(s2.id, {
+    env: "stage",
+    team: null,
+  });
+  expect(patched.metadata?.env).toBe("stage");
+  expect(patched.metadata?.team).toBeUndefined();
+
+  const refreshed = await manager.getSandboxInfo(s2.id);
+  expect(refreshed.metadata?.env).toBe("stage");
+  expect(refreshed.metadata?.team).toBeUndefined();
 }, 2 * 60_000);
 
 test("03 invalid operations reject", async () => {

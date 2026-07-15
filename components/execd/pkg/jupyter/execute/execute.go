@@ -23,8 +23,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alibaba/opensandbox/internal/safego"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+
+	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
 )
 
 // HTTPClient defines the HTTP client interface
@@ -88,7 +91,7 @@ func (c *Client) Connect(wsURL string) error {
 	c.registerDefaultHandlers()
 
 	// Start message receiving goroutine
-	go c.receiveMessages()
+	safego.Go(func() { c.receiveMessages() })
 
 	return nil
 }
@@ -111,16 +114,50 @@ func (c *Client) IsConnected() bool {
 	return c.conn != nil
 }
 
+type streamExecutionState struct {
+	startTime    time.Time
+	result       *ExecutionResult
+	executeDone  bool
+	executeMutex sync.Mutex
+	resultMutex  sync.Mutex
+}
+
+func newStreamExecutionState(startTime time.Time) *streamExecutionState {
+	return &streamExecutionState{
+		startTime: startTime,
+		result: &ExecutionResult{
+			Status:        "ok",
+			Stream:        make([]*StreamOutput, 0),
+			ExecutionTime: 0,
+		},
+	}
+}
+
 // ExecuteCodeStream executes code in streaming mode, sending results to the provided channel
 func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult) error {
 	if !c.IsConnected() {
 		return errors.New("not connected to kernel, please call Connect method")
 	}
 
-	// record start time
-	startTime := time.Now()
+	msg, err := c.buildExecuteMessage(code)
+	if err != nil {
+		return err
+	}
 
-	// prepare execution request
+	state := newStreamExecutionState(time.Now())
+
+	// Clear temporary handlers
+	c.clearTemporaryHandlers()
+	c.registerExecuteCodeStreamHandlers(state, resultChan)
+
+	if err := c.writeMessage(msg); err != nil {
+		return fmt.Errorf("failed to send execution request: %w", err)
+	}
+
+	return nil
+}
+
+func (c *Client) buildExecuteMessage(code string) (*Message, error) {
 	msgID := c.nextMessageID()
 	request := &ExecuteRequest{
 		Code:            code,
@@ -131,13 +168,11 @@ func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult
 		StopOnError:     true,
 	}
 
-	// serialize request content
 	content, err := json.Marshal(request)
 	if err != nil {
-		return fmt.Errorf("failed to serialize request: %w", err)
+		return nil, fmt.Errorf("failed to serialize request: %w", err)
 	}
 
-	// create message
 	msg := &Message{
 		Header: Header{
 			MessageID:   msgID,
@@ -153,142 +188,139 @@ func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult
 		Channel:      "shell",
 	}
 
-	// Create result object
-	result := &ExecutionResult{
-		Status:        "ok",
-		Stream:        make([]*StreamOutput, 0),
-		ExecutionTime: 0,
-	}
+	return msg, nil
+}
 
-	// Register temporary handler to receive execution result
-	var executeDone bool
-	var executeMutex sync.Mutex
-	var executeResult *ExecuteResult
-
-	// Create mutex to protect result object
-	var resultMutex sync.Mutex
-
-	// Clear temporary handlers
-	c.clearTemporaryHandlers()
-
+func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, resultChan chan *ExecutionResult) {
 	c.registerHandler(MsgExecuteReply, func(msg *Message) {
-		var execReply ExecuteReply
-		if err := json.Unmarshal(msg.Content, &execReply); err != nil {
-			return
-		}
-
-		resultMutex.Lock()
-		result.ExecutionCount = execReply.ExecutionCount
-		if execReply.EName != "" {
-			result.Error = &execReply.ErrorOutput
-		}
-		resultMutex.Unlock()
+		c.handleExecuteReply(msg, state)
 	})
-
-	// register execution result handler
 	c.registerHandler(MsgExecuteResult, func(msg *Message) {
-		var execResult ExecuteResult
-		if err := json.Unmarshal(msg.Content, &execResult); err != nil {
-			return
-		}
-
-		executeMutex.Lock()
-		executeResult = &execResult
-		executeMutex.Unlock()
-
-		resultMutex.Lock()
-		result.ExecutionCount = execResult.ExecutionCount
-
-		notify := &ExecutionResult{}
-		notify.ExecutionCount = executeResult.ExecutionCount
-		notify.ExecutionData = executeResult.Data
-
-		resultChan <- notify
-		resultMutex.Unlock()
+		c.handleExecuteResult(msg, state, resultChan)
 	})
-
-	// Register stream output handler
 	c.registerHandler(MsgStream, func(msg *Message) {
-		var stream StreamOutput
-		if err := json.Unmarshal(msg.Content, &stream); err != nil {
-			return
-		}
-
-		resultMutex.Lock()
-		result.Stream = append(result.Stream, &stream)
-
-		notify := &ExecutionResult{}
-		notify.Stream = []*StreamOutput{&stream}
-
-		resultChan <- notify
-		resultMutex.Unlock()
+		c.handleStreamOutput(msg, state, resultChan)
 	})
-
-	// register error handler
 	c.registerHandler(MsgError, func(msg *Message) {
-		var errOutput ErrorOutput
-		if err := json.Unmarshal(msg.Content, &errOutput); err != nil {
-			return
-		}
-
-		resultMutex.Lock()
-		result.Status = "error"
-		result.Error = &errOutput
-
-		notify := &ExecutionResult{}
-		notify.Error = &errOutput
-		notify.Status = "error"
-
-		resultChan <- notify
-		resultMutex.Unlock()
+		c.handleExecutionError(msg, state, resultChan)
 	})
-
-	// register status handler
 	c.registerHandler(MsgStatus, func(msg *Message) {
-		var status StatusUpdate
-		if err := json.Unmarshal(msg.Content, &status); err != nil {
-			return
-		}
-
-		if status.ExecutionState == StateIdle {
-			executeMutex.Lock()
-
-			// Check whether execution can be completed
-			if !executeDone {
-				executeDone = true
-				go func() {
-					// calculate execution time
-					resultMutex.Lock()
-					result.ExecutionTime = time.Since(startTime)
-
-					// Send final result
-					notify := &ExecutionResult{}
-					notify.ExecutionTime = result.ExecutionTime
-
-					resultChan <- notify
-					resultMutex.Unlock()
-
-					for result.ExecutionCount <= 0 && result.Error == nil {
-						time.Sleep(300 * time.Millisecond)
-					}
-
-					// Close result channel
-					close(resultChan)
-				}()
-			}
-			executeMutex.Unlock()
-		}
+		c.handleExecutionStatus(msg, state, resultChan)
 	})
+}
 
-	// send execution request
-	c.mu.Lock()
-	err = c.conn.WriteJSON(msg)
-	c.mu.Unlock()
-	if err != nil {
-		return fmt.Errorf("failed to send execution request: %w", err)
+func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
+	var execReply ExecuteReply
+	if err := json.Unmarshal(msg.Content, &execReply); err != nil {
+		return
 	}
 
-	return nil
+	state.resultMutex.Lock()
+	defer state.resultMutex.Unlock()
+	state.result.ExecutionCount = execReply.ExecutionCount
+	if execReply.EName != "" {
+		state.result.Error = &execReply.ErrorOutput
+	}
+}
+
+func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
+	var execResult ExecuteResult
+	if err := json.Unmarshal(msg.Content, &execResult); err != nil {
+		return
+	}
+
+	state.resultMutex.Lock()
+	defer state.resultMutex.Unlock()
+	state.result.ExecutionCount = execResult.ExecutionCount
+
+	notify := &ExecutionResult{
+		ExecutionCount: execResult.ExecutionCount,
+		ExecutionData:  execResult.Data,
+	}
+	resultChan <- notify
+}
+
+func (c *Client) handleStreamOutput(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
+	var stream StreamOutput
+	if err := json.Unmarshal(msg.Content, &stream); err != nil {
+		return
+	}
+
+	state.resultMutex.Lock()
+	defer state.resultMutex.Unlock()
+	state.result.Stream = append(state.result.Stream, &stream)
+	notify := &ExecutionResult{
+		Stream: []*StreamOutput{&stream},
+	}
+	resultChan <- notify
+}
+
+func (c *Client) handleExecutionError(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
+	var errOutput ErrorOutput
+	if err := json.Unmarshal(msg.Content, &errOutput); err != nil {
+		return
+	}
+
+	state.resultMutex.Lock()
+	defer state.resultMutex.Unlock()
+	state.result.Status = "error"
+	state.result.Error = &errOutput
+	notify := &ExecutionResult{
+		Error:  &errOutput,
+		Status: "error",
+	}
+	resultChan <- notify
+}
+
+func (c *Client) handleExecutionStatus(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
+	var status StatusUpdate
+	if err := json.Unmarshal(msg.Content, &status); err != nil {
+		return
+	}
+	if status.ExecutionState != StateIdle {
+		return
+	}
+
+	state.executeMutex.Lock()
+	defer state.executeMutex.Unlock()
+	if state.executeDone {
+		return
+	}
+	state.executeDone = true
+	safego.Go(func() { c.finalizeExecution(state, resultChan) })
+}
+
+func (c *Client) finalizeExecution(state *streamExecutionState, resultChan chan *ExecutionResult) {
+	state.resultMutex.Lock()
+	state.result.ExecutionTime = time.Since(state.startTime)
+	notify := &ExecutionResult{
+		ExecutionTime: state.result.ExecutionTime,
+	}
+	resultChan <- notify
+	state.resultMutex.Unlock()
+
+	pollInterval := execdflag.JupyterIdlePollInterval
+	if pollInterval <= 0 {
+		pollInterval = 100 * time.Millisecond
+	}
+
+	for {
+		state.resultMutex.Lock()
+		done := state.result.ExecutionCount > 0 || state.result.Error != nil
+		state.resultMutex.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(pollInterval)
+	}
+
+	close(resultChan)
+}
+
+func (c *Client) writeMessage(msg *Message) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteJSON(msg)
 }
 
 // ExecuteCodeWithCallback executes code using callback functions

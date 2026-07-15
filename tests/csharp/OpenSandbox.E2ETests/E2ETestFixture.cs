@@ -26,6 +26,8 @@ public sealed class E2ETestFixture : IAsyncLifetime
 
     public ConnectionConfig ConnectionConfig { get; }
 
+    public ConnectionConfig ServerProxyConnectionConfig { get; }
+
     public int DefaultTimeoutSeconds { get; } = 1200;
 
     public int DefaultReadyTimeoutSeconds { get; } = 90;
@@ -61,6 +63,15 @@ public sealed class E2ETestFixture : IAsyncLifetime
             Protocol = protocol,
             ApiKey = apiKey,
             RequestTimeoutSeconds = 180
+        });
+
+        ServerProxyConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+        {
+            Domain = domain,
+            Protocol = protocol,
+            ApiKey = apiKey,
+            RequestTimeoutSeconds = 180,
+            UseServerProxy = true
         });
     }
 

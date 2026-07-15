@@ -17,8 +17,7 @@ import { ConnectionConfig } from "@alibaba-group/opensandbox";
 export const DEFAULT_DOMAIN = "localhost:8080";
 export const DEFAULT_PROTOCOL = "http";
 export const DEFAULT_API_KEY = "e2e-test";
-export const DEFAULT_IMAGE =
-  "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:latest";
+export const DEFAULT_IMAGE = "opensandbox/code-interpreter:latest";
 
 export const TEST_DOMAIN = process.env.OPENSANDBOX_TEST_DOMAIN ?? DEFAULT_DOMAIN;
 export const TEST_PROTOCOL = process.env.OPENSANDBOX_TEST_PROTOCOL ?? DEFAULT_PROTOCOL;
@@ -29,12 +28,13 @@ export function getSandboxImage(): string {
   return TEST_IMAGE;
 }
 
-export function createConnectionConfig(): ConnectionConfig {
+export function createConnectionConfig(useServerProxy = false): ConnectionConfig {
   return new ConnectionConfig({
     domain: TEST_DOMAIN,
     protocol: TEST_PROTOCOL === "https" ? "https" : "http",
     apiKey: TEST_API_KEY,
-    requestTimeoutSeconds: 180
+    requestTimeoutSeconds: 180,
+    useServerProxy
   });
 }
 

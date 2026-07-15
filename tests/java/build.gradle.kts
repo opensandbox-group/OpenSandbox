@@ -48,6 +48,7 @@ configurations.configureEach {
 dependencies {
     // OpenSandbox Kotlin SDKs
     testImplementation("com.alibaba.opensandbox:sandbox:latest.integration")
+    testImplementation("com.alibaba.opensandbox:sandbox-pool-redis:latest.integration")
     testImplementation("com.alibaba.opensandbox:code-interpreter:latest.integration")
 
     // Test frameworks
@@ -57,6 +58,9 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    if (project.findProperty("skipCodeInterpreterE2E") == "true") {
+        exclude("**/CodeInterpreterE2ETest.class")
+    }
 }
 
 tasks.register<Test>("e2eTest") {

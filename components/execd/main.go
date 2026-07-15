@@ -15,31 +15,93 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net"
+	"os"
+	"time"
 
+	"github.com/alibaba/opensandbox/internal/version"
+
+	_ "github.com/alibaba/opensandbox/internal/safego"
 	_ "go.uber.org/automaxprocs/maxprocs"
 
+	"github.com/alibaba/opensandbox/execd/pkg/clone3compat"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
-	_ "github.com/alibaba/opensandbox/execd/pkg/util/safego"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
+	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web"
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
-	"github.com/alibaba/opensandbox/internal/version"
 )
 
-// main initializes and starts the execd server.
 func main() {
+	clone3Compat := clone3compat.MaybeApply()
+
 	version.EchoVersion("OpenSandbox Execd")
 
 	flag.InitFlags()
 
+	// Load isolation config.
+	isoCfg, err := isolation.LoadConfig(flag.IsolationConfigPath)
+	if err != nil {
+		log.Error("isolation: config: %v", err)
+		os.Exit(1)
+	}
+
+	// Probe isolation runtime capabilities.
+	isolationProbe := isolation.Probe(isolation.ProbeConfig{
+		UpperRoot:     isoCfg.UpperRoot,
+		UpperMaxBytes: isoCfg.UpperMaxBytes,
+	})
+	log.Info("isolation: available=%v isolator=%s version=%s",
+		isolationProbe.Available, isolationProbe.Isolator, isolationProbe.Version)
+
 	log.Init(flag.ServerLogLevel)
 
-	controller.InitCodeRunner()
+	ctrl := controller.InitCodeRunner()
+
+	// Always store probe result for capabilities endpoint.
+	controller.InitIsolatedProbe(&isolationProbe)
+
+	// Init isolation runner if probe succeeded.
+	if isolationProbe.Available {
+		iso := isolation.NewBwrap(isoCfg)
+		runner, err := runtime.NewIsolatedRunner(ctrl, iso, isoCfg)
+		if err != nil {
+			log.Error("isolation: runner init failed (continuing without isolation): %v", err)
+		} else {
+			controller.InitIsolatedRunner(runner)
+			log.Info("isolation: runner ready, upper_root=%s", isoCfg.UpperRoot)
+		}
+	}
+	if clone3Compat {
+		log.Warn("execd running with clone3 compatibility (seccomp returns ENOSYS for clone3)")
+	}
+	otelShutdown, err := telemetry.Init(context.Background())
+	if err != nil {
+		log.Warn("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
+		otelShutdown = nil
+	}
+	if otelShutdown != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = otelShutdown(shutdownCtx)
+		}()
+	}
+
 	engine := web.NewRouter(flag.ServerAccessToken)
 	addr := fmt.Sprintf(":%d", flag.ServerPort)
-	log.Info("execd listening on %s", addr)
-	if err := engine.Run(addr); err != nil {
+	listener, err := net.Listen("tcp4", addr)
+	if err != nil {
+		log.Error("failed to listen on %s: %v", addr, err)
+		os.Exit(1)
+	}
+	log.Info("execd listening on %s (IPv4)", addr)
+	if err := engine.RunListener(listener); err != nil {
 		log.Error("failed to start execd server: %v", err)
+		os.Exit(1)
 	}
 }

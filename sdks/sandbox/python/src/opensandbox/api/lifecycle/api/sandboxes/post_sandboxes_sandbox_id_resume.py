@@ -91,8 +91,8 @@ def sync_detailed(
 ) -> Response[Any | ErrorResponse]:
     """Resume a paused sandbox
 
-     Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition to
-    Running.
+     Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition
+    through Resuming and eventually Running.
 
     Args:
         sandbox_id (str):
@@ -123,8 +123,8 @@ def sync(
 ) -> Any | ErrorResponse | None:
     """Resume a paused sandbox
 
-     Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition to
-    Running.
+     Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition
+    through Resuming and eventually Running.
 
     Args:
         sandbox_id (str):
@@ -150,8 +150,8 @@ async def asyncio_detailed(
 ) -> Response[Any | ErrorResponse]:
     """Resume a paused sandbox
 
-     Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition to
-    Running.
+     Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition
+    through Resuming and eventually Running.
 
     Args:
         sandbox_id (str):
@@ -180,8 +180,8 @@ async def asyncio(
 ) -> Any | ErrorResponse | None:
     """Resume a paused sandbox
 
-     Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition to
-    Running.
+     Resume execution of a paused sandbox. Poll GET /sandboxes/{sandboxId} to track state transition
+    through Resuming and eventually Running.
 
     Args:
         sandbox_id (str):

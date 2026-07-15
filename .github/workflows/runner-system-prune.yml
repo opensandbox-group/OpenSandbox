@@ -1,0 +1,25 @@
+name: Runners prune
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  system-prune:
+    name: Runner system prune
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - name: Docker system prune
+        run: |
+          docker system prune -a -f
+

@@ -12,6 +12,7 @@ provide an out-of-the-box multi-language code execution environment.
 - **Version Switching**: Easy runtime version switching without rebuilding
 - **Jupyter Integration**: Built-in Jupyter Notebook with multi-language kernels
 - **Multi-Architecture**: Supports both amd64 and arm64 architectures
+- **clone3-workaround (amd64)**: The image installs [AkihiroSuda/clone3-workaround](https://github.com/AkihiroSuda/clone3-workaround) v1.0.0 as `/usr/local/bin/clone3-workaround` on **linux/amd64** only (upstream ships no arm64 binary), plus **`libseccomp2`** because the upstream binary is dynamically linked to `libseccomp`. Use it to wrap commands on very old Docker/containerd hosts, e.g. `clone3-workaround apt-get update`.
 - **Production Ready**: Optimized for containerized execution environments
 
 ## Supported Languages & Versions
@@ -58,15 +59,19 @@ docker run -it --rm \
   opensandbox/code-interpreter:latest
 ```
 
+### `EXECD_CLONE3_COMPAT` (clone3-workaround)
+
+If you set `EXECD_CLONE3_COMPAT` to `1`, `true`, `yes`, `on`, or `reexec` (same semantics as [execd](../../components/execd/README.md#linux-clone3-compatibility-inside-sandboxes)), the entrypoint script **re-executes itself** under `/usr/local/bin/clone3-workaround` before Jupyter and kernel setup. That binary is included on **linux/amd64** only; on **arm64** builds the script prints a warning and continues without wrapping. After a successful wrap, the script **unsets** `EXECD_CLONE3_COMPAT` in the running process tree. Use `0`, `false`, `off`, `no`, or leave unset to disable.
+
 ## Version Switching
 
-The image includes a built-in version switching script `/opt/opensandbox/code-interpreter-env.sh`. You need to use the
+The image includes a built-in version switching script `/opt/code-interpreter/code-interpreter-env.sh`. You need to use the
 `source` command to load it to modify the current shell's environment variables.
 
 ### Basic Usage
 
 ```bash
-source /opt/opensandbox/code-interpreter-env.sh <language> <version>
+source /opt/code-interpreter/code-interpreter-env.sh <language> <version>
 ```
 
 ### Examples
@@ -75,7 +80,7 @@ source /opt/opensandbox/code-interpreter-env.sh <language> <version>
 
 ```bash
 # Switch to Python 3.11
-source /opt/opensandbox/code-interpreter-env.sh python 3.11
+source /opt/code-interpreter/code-interpreter-env.sh python 3.11
 python3 --version
 # Output: Python 3.11.x
 ```
@@ -84,7 +89,7 @@ python3 --version
 
 ```bash
 # Switch to Java 8
-source /opt/opensandbox/code-interpreter-env.sh java 8
+source /opt/code-interpreter/code-interpreter-env.sh java 8
 java -version
 ```
 
@@ -92,7 +97,7 @@ java -version
 
 ```bash
 # Switch to Node 22
-source /opt/opensandbox/code-interpreter-env.sh node 22
+source /opt/code-interpreter/code-interpreter-env.sh node 22
 node -v
 ```
 
@@ -100,7 +105,7 @@ node -v
 
 ```bash
 # Switch to Go 1.25
-source /opt/opensandbox/code-interpreter-env.sh go 1.25
+source /opt/code-interpreter/code-interpreter-env.sh go 1.25
 go version
 ```
 
@@ -110,16 +115,16 @@ If you don't specify a version number, the script will list all available versio
 
 ```bash
 # List all Python versions
-source /opt/opensandbox/code-interpreter-env.sh python
+source /opt/code-interpreter/code-interpreter-env.sh python
 
 # List all Java versions
-source /opt/opensandbox/code-interpreter-env.sh java
+source /opt/code-interpreter/code-interpreter-env.sh java
 
 # List all Node.js versions
-source /opt/opensandbox/code-interpreter-env.sh node
+source /opt/code-interpreter/code-interpreter-env.sh node
 
 # List all Go versions
-source /opt/opensandbox/code-interpreter-env.sh go
+source /opt/code-interpreter/code-interpreter-env.sh go
 ```
 
 ## Default Versions
@@ -149,7 +154,7 @@ The image comes with pre-configured Jupyter kernels for all supported languages:
 ### Starting Jupyter
 
 ```bash
-/opt/opensandbox/code-interpreter.sh
+/opt/code-interpreter/code-interpreter.sh
 ```
 
 ### Environment Variables
@@ -225,7 +230,7 @@ code-interpreter/
 If a specific version is not found, list available versions:
 
 ```bash
-source /opt/opensandbox/code-interpreter-env.sh <language>
+source /opt/code-interpreter/code-interpreter-env.sh <language>
 ```
 
 ## License
@@ -236,7 +241,7 @@ This project is part of the OpenSandbox suite. See the main [LICENSE](../../LICE
 
 For issues and questions:
 
-- GitHub Issues: [OpenSandbox Issues](https://github.com/alibaba/OpenSandbox/issues)
+- GitHub Issues: [OpenSandbox Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
 
 ## Related Projects
 

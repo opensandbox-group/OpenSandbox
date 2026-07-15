@@ -69,6 +69,20 @@ public interface ISandboxFiles
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Lists directory contents with optional depth control.
+    /// </summary>
+    /// <param name="path">The directory path to list.</param>
+    /// <param name="depth">Optional maximum child depth to include.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A list of directory entries with metadata.</returns>
+    /// <exception cref="InvalidArgumentException">Thrown when request values are invalid.</exception>
+    /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
+    Task<IReadOnlyList<SandboxFileInfo>> ListDirectoryAsync(
+        string path,
+        int? depth = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Writes files to the sandbox.
     /// </summary>
     /// <param name="entries">The file entries to write.</param>
@@ -151,6 +165,18 @@ public interface ISandboxFiles
     /// <exception cref="InvalidArgumentException">Thrown when request values are invalid.</exception>
     /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
     Task ReplaceContentsAsync(
+        IEnumerable<ContentReplaceEntry> entries,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Replaces content in files and returns per-file replacement counts.
+    /// </summary>
+    /// <param name="entries">The content replace entries.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of replacement results with counts per file.</returns>
+    /// <exception cref="InvalidArgumentException">Thrown when request values are invalid.</exception>
+    /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
+    Task<IReadOnlyList<ContentReplaceResult>> ReplaceContentsDetailedAsync(
         IEnumerable<ContentReplaceEntry> entries,
         CancellationToken cancellationToken = default);
 

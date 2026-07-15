@@ -16,8 +16,25 @@
 set -euxo pipefail
 
 TAG=${TAG:-latest}
+RUN_CODE_INTERPRETER_E2E=${RUN_CODE_INTERPRETER_E2E:-false}
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SERVER_PID=""
+
+source "${REPO_ROOT}/scripts/credential-vault-e2e-target.sh"
+
+cleanup_server() {
+  if [ -n "${SERVER_PID}" ]; then
+    kill "${SERVER_PID}" 2>/dev/null || true
+    wait "${SERVER_PID}" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  cleanup_server
+  cleanup_credential_vault_e2e_target
+}
+trap cleanup EXIT
 
 # build execd image locally (context must include internal/)
 docker build -f components/execd/Dockerfile -t opensandbox/execd:local "${REPO_ROOT}"
@@ -42,10 +59,16 @@ docker run --rm -v opensandbox-e2e-pvc-test:/data alpine sh -c "\
   echo 'pvc-subpath-marker' > /data/datasets/train/marker.txt"
 echo "-------- CSHARP E2E test logs for execd --------" > /tmp/opensandbox-e2e/logs/execd.log
 
+export OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE="${OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE:-opensandbox/code-interpreter:${TAG}}"
+setup_credential_vault_e2e_target
+
 # setup server
 cd server
 : > server.log
-(uv sync && uv run python -m src.main) > server.log 2>&1 &
+export OPENSANDBOX_INSECURE_SERVER=YES
+uv sync
+uv run python -m opensandbox_server.main > server.log 2>&1 &
+SERVER_PID=$!
 cd ..
 
 # wait for server
@@ -59,8 +82,13 @@ export OPENSANDBOX_SANDBOX_DEFAULT_IMAGE="opensandbox/code-interpreter:${TAG}"
 
 mkdir -p tests/csharp/build/test-results
 dotnet restore "tests/csharp/OpenSandbox.E2ETests/OpenSandbox.E2ETests.csproj"
+DOTNET_TEST_FILTER=()
+if [ "${RUN_CODE_INTERPRETER_E2E}" != "true" ]; then
+  DOTNET_TEST_FILTER=(--filter "FullyQualifiedName!~CodeInterpreterE2ETests")
+fi
 dotnet test "tests/csharp/OpenSandbox.E2ETests/OpenSandbox.E2ETests.csproj" \
   --configuration Release \
   --no-restore \
   --results-directory "tests/csharp/build/test-results" \
-  --logger "trx;LogFileName=csharp-e2e.trx"
+  --logger "trx;LogFileName=csharp-e2e.trx" \
+  "${DOTNET_TEST_FILTER[@]}"

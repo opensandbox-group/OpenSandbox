@@ -1290,3 +1290,81 @@ func Test_initTaskNodes(t *testing.T) {
 		})
 	}
 }
+
+func Test_addTasks(t *testing.T) {
+	tests := []struct {
+		name          string
+		initial       []*api.Task
+		addTasks      []*api.Task
+		wantNodeNames []string
+		wantNodeCount int
+	}{
+		{
+			name: "scale-out: new tasks are appended, existing tasks are skipped",
+			initial: []*api.Task{
+				{Name: "sandbox-0", Process: &api.Process{Command: []string{"echo", "0"}}},
+			},
+			addTasks: []*api.Task{
+				{Name: "sandbox-0", Process: &api.Process{Command: []string{"echo", "0"}}},
+				{Name: "sandbox-1", Process: &api.Process{Command: []string{"echo", "1"}}},
+			},
+			wantNodeNames: []string{"sandbox-0", "sandbox-1"},
+			wantNodeCount: 2,
+		},
+		{
+			name: "no-op: add same tasks as already tracked",
+			initial: []*api.Task{
+				{Name: "sandbox-0"},
+				{Name: "sandbox-1"},
+			},
+			addTasks: []*api.Task{
+				{Name: "sandbox-0"},
+				{Name: "sandbox-1"},
+			},
+			wantNodeNames: []string{"sandbox-0", "sandbox-1"},
+			wantNodeCount: 2,
+		},
+		{
+			name:    "empty scheduler: add initial tasks",
+			initial: []*api.Task{},
+			addTasks: []*api.Task{
+				{Name: "sandbox-0"},
+			},
+			wantNodeNames: []string{"sandbox-0"},
+			wantNodeCount: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initialNodes, err := initTaskNodes(tt.initial)
+			if err != nil {
+				t.Fatalf("initTaskNodes() error = %v", err)
+			}
+			sch := &defaultTaskScheduler{
+				taskNodes:           initialNodes,
+				taskNodeByNameIndex: indexByName(initialNodes),
+				logger:              testLogger,
+			}
+
+			if err := sch.AddTasks(tt.addTasks); err != nil {
+				t.Fatalf("AddTasks() unexpected error = %v", err)
+			}
+
+			if len(sch.taskNodes) != tt.wantNodeCount {
+				t.Errorf("AddTasks() taskNodes count = %d, want %d", len(sch.taskNodes), tt.wantNodeCount)
+			}
+
+			nodeNames := make([]string, len(sch.taskNodes))
+			for i, n := range sch.taskNodes {
+				nodeNames[i] = n.Name
+			}
+			if !reflect.DeepEqual(nodeNames, tt.wantNodeNames) {
+				t.Errorf("AddTasks() taskNode names = %v, want %v", nodeNames, tt.wantNodeNames)
+			}
+
+			if len(sch.taskNodeByNameIndex) != tt.wantNodeCount {
+				t.Errorf("AddTasks() taskNodeByNameIndex size = %d, want %d", len(sch.taskNodeByNameIndex), tt.wantNodeCount)
+			}
+		})
+	}
+}

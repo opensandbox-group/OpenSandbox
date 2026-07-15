@@ -26,6 +26,8 @@ from typing import Protocol
 
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
+    ContentReplaceResult,
+    DirectoryListEntry,
     EntryInfo,
     MoveEntry,
     SearchEntry,
@@ -52,6 +54,8 @@ class FilesystemSync(Protocol):
         *,
         encoding: str = "utf-8",
         range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> str:
         """
         Read the content of a file as a string with specified encoding.
@@ -60,6 +64,11 @@ class FilesystemSync(Protocol):
             path: The absolute or relative path to the file to read.
             encoding: Character encoding for the file content (default: UTF-8).
             range_header: HTTP byte range to read (e.g., "bytes=0-1023").
+                Mutually exclusive with offset/limit.
+            offset: Starting line number (1-based) for line-based reading.
+                Mutually exclusive with range_header.
+            limit: Number of lines to return for line-based reading.
+                Mutually exclusive with range_header.
 
         Returns:
             The file content as a string.
@@ -69,13 +78,25 @@ class FilesystemSync(Protocol):
         """
         ...
 
-    def read_bytes(self, path: str, *, range_header: str | None = None) -> bytes:
+    def read_bytes(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> bytes:
         """
         Read the content of a file as bytes.
 
         Args:
             path: The absolute or relative path to the file to read.
             range_header: HTTP byte range to read (e.g., "bytes=0-1023").
+                Mutually exclusive with offset/limit.
+            offset: Starting line number (1-based) for line-based reading.
+                Mutually exclusive with range_header.
+            limit: Number of lines to return for line-based reading.
+                Mutually exclusive with range_header.
 
         Returns:
             The file content as bytes.
@@ -86,7 +107,13 @@ class FilesystemSync(Protocol):
         ...
 
     def read_bytes_stream(
-        self, path: str, *, chunk_size: int = 64 * 1024, range_header: str | None = None
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> Iterator[bytes]:
         """
         Stream file content as bytes chunks (blocking iterator).
@@ -214,6 +241,21 @@ class FilesystemSync(Protocol):
         """
         ...
 
+    def replace_contents_detailed(self, entries: list[ContentReplaceEntry]) -> list[ContentReplaceResult]:
+        """
+        Replace content in files and return per-file replacement counts.
+
+        Args:
+            entries: List of ContentReplaceEntry objects specifying replacement operations.
+
+        Returns:
+            List of ContentReplaceResult with replacement counts per file.
+
+        Raises:
+            SandboxException: If the operation fails.
+        """
+        ...
+
     def search(self, entry: SearchEntry) -> list[EntryInfo]:
         """
         Search for files and directories based on the specified criteria.
@@ -223,6 +265,21 @@ class FilesystemSync(Protocol):
 
         Returns:
             List of EntryInfo objects containing metadata for matching files/directories.
+
+        Raises:
+            SandboxException: If the operation fails.
+        """
+        ...
+
+    def list_directory(self, entry: DirectoryListEntry) -> list[EntryInfo]:
+        """
+        List directory contents with optional depth control.
+
+        Args:
+            entry: DirectoryListEntry object containing path and optional depth.
+
+        Returns:
+            List of EntryInfo objects containing metadata for directory entries.
 
         Raises:
             SandboxException: If the operation fails.

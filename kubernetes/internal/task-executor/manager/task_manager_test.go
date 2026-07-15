@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/task-executor/config"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/task-executor/runtime"
@@ -28,6 +29,43 @@ import (
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/task-executor/types"
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
+
+type fakeExecutor struct {
+	inspect map[string]*types.Status
+	starts  int
+}
+
+func newFakeExecutor() *fakeExecutor {
+	return &fakeExecutor{inspect: make(map[string]*types.Status)}
+}
+
+func (f *fakeExecutor) Start(_ context.Context, task *types.Task) error {
+	f.starts++
+	f.inspect[task.Name] = &types.Status{
+		State: types.TaskStateRunning,
+		SubStatuses: []types.SubStatus{{
+			Reason: "Running",
+		}},
+	}
+	return nil
+}
+
+func (f *fakeExecutor) Inspect(_ context.Context, task *types.Task) (*types.Status, error) {
+	if status, ok := f.inspect[task.Name]; ok {
+		return status, nil
+	}
+	return &types.Status{
+		State: types.TaskStateFailed,
+		SubStatuses: []types.SubStatus{{
+			Reason:  "ProcessCrashed",
+			Message: "Process exited without writing exit code",
+		}},
+	}, nil
+}
+
+func (f *fakeExecutor) Stop(_ context.Context, _ *types.Task) error {
+	return nil
+}
 
 func setupTestManager(t *testing.T) (TaskManager, *config.Config) {
 	cfg := &config.Config{
@@ -404,6 +442,92 @@ func TestTaskManager_DeleteNonExistent(t *testing.T) {
 	if err != nil {
 		t.Errorf("Delete() should not fail for non-existent task: %v", err)
 	}
+}
+
+func TestTaskManager_SyncRestartsRecoveredActiveTaskWhenRuntimeStateIsLost(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		DataDir:           t.TempDir(),
+		EnableSidecarMode: false,
+		ReconcileInterval: time.Hour,
+	}
+	taskStore, err := store.NewFileStore(cfg.DataDir)
+	require.NoError(t, err)
+
+	persisted := &types.Task{
+		Name: "resume-task",
+		Process: &api.Process{
+			Command: []string{"sleep", "3600"},
+		},
+		Status: types.Status{
+			State: types.TaskStateRunning,
+		},
+	}
+	require.NoError(t, taskStore.Create(ctx, persisted))
+
+	exec := newFakeExecutor()
+	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+
+	mgr := mgrIface.(*taskManager)
+	require.NoError(t, mgr.recoverTasks(ctx))
+
+	tasks, err := mgr.Sync(ctx, []*types.Task{{
+		Name: "resume-task",
+		Process: &api.Process{
+			Command: []string{"sleep", "3600"},
+		},
+	}})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, 1, exec.starts, "sync should recreate an active task whose recovered runtime state was lost")
+	assert.Equal(t, types.TaskStateRunning, tasks[0].Status.State)
+}
+
+func TestTaskManager_SyncKeepsRecoveredSucceededTask(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		DataDir:           t.TempDir(),
+		EnableSidecarMode: false,
+		ReconcileInterval: time.Hour,
+	}
+	taskStore, err := store.NewFileStore(cfg.DataDir)
+	require.NoError(t, err)
+
+	persisted := &types.Task{
+		Name: "completed-task",
+		Process: &api.Process{
+			Command: []string{"echo", "done"},
+		},
+		Status: types.Status{
+			State: types.TaskStateSucceeded,
+		},
+	}
+	require.NoError(t, taskStore.Create(ctx, persisted))
+
+	exec := newFakeExecutor()
+	exec.inspect["completed-task"] = &types.Status{
+		State: types.TaskStateSucceeded,
+		SubStatuses: []types.SubStatus{{
+			Reason: "Succeeded",
+		}},
+	}
+	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+
+	mgr := mgrIface.(*taskManager)
+	require.NoError(t, mgr.recoverTasks(ctx))
+
+	tasks, err := mgr.Sync(ctx, []*types.Task{{
+		Name: "completed-task",
+		Process: &api.Process{
+			Command: []string{"echo", "done"},
+		},
+	}})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, 0, exec.starts, "sync should not recreate tasks that were already completed before recovery")
+	assert.Equal(t, types.TaskStateSucceeded, tasks[0].Status.State)
 }
 
 func TestTaskManager_Sync(t *testing.T) {

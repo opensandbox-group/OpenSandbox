@@ -34,6 +34,7 @@ class EntryInfo(BaseModel):
     """
 
     path: str = Field(description="Absolute path of the file or directory")
+    entry_type: str | None = Field(default=None, description="Entry type", alias="type")
     mode: int = Field(description="Unix file mode/permissions as integer (e.g., 644)")
     owner: str = Field(description="Owner username of the file or directory")
     group: str = Field(description="Group name of the file or directory")
@@ -87,6 +88,29 @@ class WriteEntry(BaseModel):
     def encoding_must_not_be_empty(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("Encoding cannot be blank")
+        return v
+
+
+class DirectoryListEntry(BaseModel):
+    """Request to list directory contents with optional depth control."""
+
+    path: str = Field(description="Directory path to list")
+    depth: int | None = Field(
+        default=None, description="Maximum child depth to include"
+    )
+
+    @field_validator("path")
+    @classmethod
+    def path_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Path cannot be blank")
+        return v
+
+    @field_validator("depth")
+    @classmethod
+    def depth_must_be_non_negative(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError("Depth must be non-negative")
         return v
 
 
@@ -175,6 +199,15 @@ class ContentReplaceEntry(BaseModel):
         return v
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class ContentReplaceResult(BaseModel):
+    """
+    Result of a content replacement operation on a single file.
+    """
+
+    path: str = Field(description="File path where replacement was performed")
+    replaced_count: int = Field(description="Number of occurrences replaced. 0 means old content was not found.")
 
 
 class SearchEntry(BaseModel):

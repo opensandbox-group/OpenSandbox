@@ -25,8 +25,10 @@ This converter is designed to work with openapi-python-client generated models.
 from typing import Any
 
 from opensandbox.api.execd.models import FileInfo
+from opensandbox.api.execd.types import UNSET
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
+    ContentReplaceResult,
     EntryInfo,
     MoveEntry,
     SetPermissionEntry,
@@ -45,8 +47,13 @@ class FilesystemModelConverter:
     @staticmethod
     def to_entry_info(api_file_info: FileInfo) -> EntryInfo:
         """Convert API FileInfo to domain EntryInfo."""
+        entry_type = None
+        if api_file_info.type_ is not UNSET:
+            entry_type = str(api_file_info.type_)
+
         return EntryInfo(
             path=api_file_info.path,
+            type=entry_type,
             mode=api_file_info.mode,
             owner=api_file_info.owner,
             group=api_file_info.group,
@@ -128,8 +135,82 @@ class FilesystemModelConverter:
         return ReplaceContentBody.from_dict(replace_data)
 
     @staticmethod
+    def to_replace_results(api_response: Any) -> list[ContentReplaceResult]:
+        """Convert API replace response to list of ContentReplaceResult."""
+        if not api_response:
+            return []
+
+        results: list[ContentReplaceResult] = []
+        items: dict = {}
+        if hasattr(api_response, "additional_properties"):
+            items = api_response.additional_properties
+        elif isinstance(api_response, dict):
+            items = api_response
+
+        for path, result_data in items.items():
+            if hasattr(result_data, "replaced_count"):
+                count = result_data.replaced_count
+            elif isinstance(result_data, dict):
+                count = result_data.get("replacedCount", 0)
+            else:
+                count = 0
+            results.append(ContentReplaceResult(path=path, replaced_count=count))
+
+        return results
+
+    @staticmethod
     def to_api_rename_file_items(entries: list[MoveEntry]):
         """Convert move entries to list of RenameFileItem."""
         from opensandbox.api.execd.models.rename_file_item import RenameFileItem
 
         return [RenameFileItem(src=e.src, dest=e.dest) for e in entries]
+
+    @staticmethod
+    def to_api_isolated_make_dirs_body(entries: list[WriteEntry]):
+        """Convert directory entries to IsolatedMakeDirsBody."""
+        from opensandbox.api.execd.models.isolated_make_dirs_body import (
+            IsolatedMakeDirsBody,
+        )
+
+        dirs_data = {
+            entry.path: {
+                "mode": entry.mode,
+                "owner": entry.owner,
+                "group": entry.group,
+            }
+            for entry in entries
+        }
+        return IsolatedMakeDirsBody.from_dict(dirs_data)
+
+    @staticmethod
+    def to_api_isolated_chmod_files_body(entries: list[SetPermissionEntry]):
+        """Convert permission entries to IsolatedChmodFilesBody."""
+        from opensandbox.api.execd.models.isolated_chmod_files_body import (
+            IsolatedChmodFilesBody,
+        )
+
+        permission_data = {
+            entry.path: {
+                "mode": entry.mode,
+                "owner": entry.owner,
+                "group": entry.group,
+            }
+            for entry in entries
+        }
+        return IsolatedChmodFilesBody.from_dict(permission_data)
+
+    @staticmethod
+    def to_api_isolated_replace_content_body(entries: list[ContentReplaceEntry]):
+        """Convert content replacement entries to IsolatedReplaceContentBody."""
+        from opensandbox.api.execd.models.isolated_replace_content_body import (
+            IsolatedReplaceContentBody,
+        )
+
+        replace_data = {
+            entry.path: {
+                "old": entry.old_content,
+                "new": entry.new_content,
+            }
+            for entry in entries
+        }
+        return IsolatedReplaceContentBody.from_dict(replace_data)

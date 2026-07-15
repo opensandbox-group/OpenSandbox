@@ -43,14 +43,14 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.4.2,<3.0",
-    "opensandbox>=0.1.1,<0.2.0",
+    "opensandbox>=0.1.10,<0.2.0",
 ]
 
 [project.urls]
 Homepage = "https://open-sandbox.ai"
-Repository = "https://github.com/alibaba/OpenSandbox"
+Repository = "https://github.com/opensandbox-group/OpenSandbox"
 Documentation = "https://open-sandbox.ai"
-Issues = "https://github.com/alibaba/OpenSandbox/issues"
+Issues = "https://github.com/opensandbox-group/OpenSandbox/issues"
 
 [tool.hatch.version]
 source = "vcs"
@@ -60,7 +60,7 @@ source = "vcs"
 root = "../../.."
 tag_regex = "^python/code-interpreter/v(?P<version>\\d+\\.\\d+\\.\\d+(?:[\\.\\w\\+\\-]*)?)$"
 git_describe_command = 'git describe --dirty --tags --long --match "python/code-interpreter/v*"'
-fallback_version = "0.1.0"
+fallback_version = "0.1.3"
 
 [tool.hatch.build]
 include = [

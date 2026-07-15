@@ -1,0 +1,107 @@
+name: PR Auto Label
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  auto-label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const prNumber = pr.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            function inferLabels(files) {
+              const dirs = new Set();
+              for (const f of files) {
+                const p = f.filename.split("/");
+                for (let i = 1; i <= p.length; i++) {
+                  dirs.add(p.slice(0, i).join("/"));
+                }
+              }
+              const s = [];
+
+              if (dirs.has("docs") || dirs.has("oseps") || dirs.has("specs") ||
+                  dirs.has("examples")) {
+                s.push("documentation");
+              }
+
+              if (dirs.has("components/egress")) s.push("component/egress");
+              if (dirs.has("components/ingress")) s.push("component/ingress");
+              if (dirs.has("components/execd")) s.push("component/execd");
+              if (dirs.has("components/code-interpreter")) s.push("component/code-interpreter");
+              if (dirs.has("components/internal")) {
+                s.push("component/egress", "component/ingress");
+              }
+
+              if (dirs.has("kubernetes")) s.push("component/k8s");
+              if (dirs.has("server")) s.push("component/server");
+
+              // SDK — layout: sdks/{sandbox,code-interpreter,mcp}/{go,python,...};
+              // Kotlin code-interpreter lives under sdks/sandbox/kotlin/code-interpreter.
+              if (dirs.has("sdks")) {
+                s.push("sdks");
+                const langMap = {
+                  go: "sdk/go",
+                  kotlin: "sdk/java",
+                  python: "sdk/python",
+                  javascript: "sdk/js",
+                  csharp: "sdk/c#",
+                };
+                for (const [dir, label] of Object.entries(langMap)) {
+                  for (const d of dirs) {
+                    if (d.startsWith("sdks/") && d.endsWith("/" + dir)) {
+                      s.push(label);
+                      break;
+                    }
+                  }
+                }
+              }
+
+              return [...new Set(s)].sort();
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: prNumber,
+            });
+            const inferred = inferLabels(files);
+
+            if (inferred.length === 0) {
+              core.info("No labels inferred from changed files, skipping.");
+              return;
+            }
+
+            const existing = new Set(pr.labels.map(l => l.name));
+            const toAdd = inferred.filter(l => !existing.has(l));
+
+            if (toAdd.length === 0) {
+              core.info("All inferred labels already present.");
+              return;
+            }
+
+            const { data: repoLabels } = await github.rest.issues.listLabelsForRepo({
+              owner, repo,
+            });
+            const repoLabelNames = new Set(repoLabels.map(l => l.name));
+            const valid = toAdd.filter(l => repoLabelNames.has(l));
+
+            if (valid.length === 0) {
+              core.info("Inferred labels don't exist in repo, skipping.");
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: prNumber,
+              labels: valid,
+            });
+            core.info(`Added labels: ${valid.join(", ")}`);

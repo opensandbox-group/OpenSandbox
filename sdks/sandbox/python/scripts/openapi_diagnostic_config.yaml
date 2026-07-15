@@ -1,0 +1,6 @@
+# openapi-python-client configuration for diagnostics API
+
+project_name_override: opensandbox_api_diagnostic
+package_name_override: opensandbox_api_diagnostic
+
+use_path_prefix_for_title_model_names: true

@@ -67,13 +67,15 @@ class ExecutionEventDispatcherSync:
 
     def _handle_stdout(self, event_node: EventNode, timestamp: int) -> None:
         message = OutputMessage(text=event_node.text or "", timestamp=timestamp, is_error=False)
-        self.execution.logs.add_stdout(message)
+        if not (self.handlers and self.handlers.skip_accumulation):
+            self.execution.logs.add_stdout(message)
         if self.handlers and self.handlers.on_stdout:
             self.handlers.on_stdout(message)
 
     def _handle_stderr(self, event_node: EventNode, timestamp: int) -> None:
         message = OutputMessage(text=event_node.text or "", timestamp=timestamp, is_error=True)
-        self.execution.logs.add_stderr(message)
+        if not (self.handlers and self.handlers.skip_accumulation):
+            self.execution.logs.add_stderr(message)
         if self.handlers and self.handlers.on_stderr:
             self.handlers.on_stderr(message)
 
@@ -103,5 +105,6 @@ class ExecutionEventDispatcherSync:
             timestamp=timestamp,
             execution_time_in_millis=event_node.execution_time_in_millis or 0,
         )
+        self.execution.complete = complete
         if self.handlers and self.handlers.on_execution_complete:
             self.handlers.on_execution_complete(complete)

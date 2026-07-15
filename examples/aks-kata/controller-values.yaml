@@ -1,0 +1,4 @@
+controller:
+  replicaCount: 1
+  snapshot:
+    containerdSocketPath: ""

@@ -54,6 +54,7 @@ export interface Execution {
   result: ExecutionResult[];
   error?: ExecutionError;
   complete?: ExecutionComplete;
+  exitCode?: number | null;
 }
 
 export interface ExecutionHandlers {
@@ -68,4 +69,10 @@ export interface ExecutionHandlers {
   onExecutionComplete?: (c: ExecutionComplete) => void | Promise<void>;
   onError?: (err: ExecutionError) => void | Promise<void>;
   onInit?: (init: ExecutionInit) => void | Promise<void>;
+  /**
+   * When true, stdout/stderr messages are only delivered to handlers without
+   * being accumulated in the execution logs. Use for long-running executions
+   * to prevent unbounded memory growth.
+   */
+  skipAccumulation?: boolean;
 }

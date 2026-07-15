@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBasicControllerRespondSuccess(t *testing.T) {
@@ -30,16 +31,10 @@ func TestBasicControllerRespondSuccess(t *testing.T) {
 	payload := map[string]string{"status": "ok"}
 	ctrl.RespondSuccess(payload)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rec.Code)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
 	var resp map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if resp["status"] != "ok" {
-		t.Fatalf("unexpected body: %#v", resp)
-	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, "ok", resp["status"])
 }
 
 func TestBasicControllerRespondError(t *testing.T) {
@@ -48,16 +43,11 @@ func TestBasicControllerRespondError(t *testing.T) {
 
 	ctrl.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "boom")
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d", rec.Code)
-	}
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp model.ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if resp.Code != model.ErrorCodeInvalidRequest || resp.Message != "boom" {
-		t.Fatalf("unexpected body: %#v", resp)
-	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+	require.Equal(t, "boom", resp.Message)
 }
 
 func setupBasicController(method string) (*basicController, *httptest.ResponseRecorder) {
@@ -72,16 +62,10 @@ func TestRespondSuccessWritesPayload(t *testing.T) {
 	payload := map[string]string{"status": "ok"}
 	ctrl.RespondSuccess(payload)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 	var got map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-		t.Fatalf("failed to unmarshal body: %v", err)
-	}
-	if got["status"] != "ok" {
-		t.Fatalf("unexpected response body: %#v", got)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	require.Equal(t, "ok", got["status"])
 }
 
 func TestRespondErrorAddsCodeAndMessage(t *testing.T) {
@@ -89,19 +73,11 @@ func TestRespondErrorAddsCodeAndMessage(t *testing.T) {
 
 	ctrl.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "invalid payload")
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
+	require.Equal(t, http.StatusBadRequest, w.Code)
 	var got model.ErrorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-		t.Fatalf("failed to unmarshal error body: %v", err)
-	}
-	if got.Code != model.ErrorCodeInvalidRequest {
-		t.Fatalf("unexpected code: %s", got.Code)
-	}
-	if got.Message != "invalid payload" {
-		t.Fatalf("unexpected message: %s", got.Message)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	require.Equal(t, model.ErrorCodeInvalidRequest, got.Code)
+	require.Equal(t, "invalid payload", got.Message)
 }
 
 func TestQueryInt64(t *testing.T) {
@@ -122,9 +98,7 @@ func TestQueryInt64(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ctrl.QueryInt64(tt.query, tt.def)
-			if got != tt.expected {
-				t.Fatalf("QueryInt64(%q, %d) = %d, want %d", tt.query, tt.def, got, tt.expected)
-			}
+			require.Equalf(t, tt.expected, got, "QueryInt64(%q, %d)", tt.query, tt.def)
 		})
 	}
 }

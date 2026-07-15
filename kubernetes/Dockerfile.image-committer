@@ -1,0 +1,56 @@
+# Copyright 2025 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Build stage
+FROM golang:1.24-alpine AS builder
+
+# Use Aliyun mirror for faster downloads in China
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+
+WORKDIR /workspace
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN  GOPROXY=https://goproxy.cn,direct go mod download
+
+# Copy source code
+COPY cmd/image-committer/ cmd/image-committer/
+
+# Build binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/image-committer ./cmd/image-committer/
+
+# Runtime stage
+FROM alpine:3.19
+
+# Use Aliyun mirror for faster downloads in China
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+
+# Install nerdctl for container operations
+# nerdctl is used to find containers, commit rootfs, and push images.
+# We use nerdctl directly (not crictl or ctr) to avoid CRI API version issues.
+RUN apk add --no-cache \
+    curl \
+    jq \
+    nerdctl
+
+# Create directory for containerd socket mount
+RUN mkdir -p /var/run/containerd
+
+# Copy the built binary from builder stage
+COPY --from=builder /usr/local/bin/image-committer /usr/local/bin/image-committer
+RUN chmod +x /usr/local/bin/image-committer
+
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/image-committer"]

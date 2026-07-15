@@ -40,6 +40,7 @@ class EntryInfo(
     val size: Long,
     val modifiedAt: OffsetDateTime,
     val createdAt: OffsetDateTime,
+    val type: String? = null,
 )
 
 /**
@@ -282,6 +283,17 @@ class ContentReplaceEntry private constructor(
         }
     }
 }
+
+/**
+ * Result of a content replacement operation on a single file.
+ *
+ * @property path File path where replacement was performed
+ * @property replacedCount Number of occurrences replaced. 0 means old content was not found.
+ */
+data class ContentReplaceResult(
+    val path: String,
+    val replacedCount: Int,
+)
 
 /**
  * Request to search for files matching a pattern.

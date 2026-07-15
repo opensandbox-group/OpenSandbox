@@ -8,6 +8,10 @@ metadata:
   namespace: {{ include "opensandbox-server.namespace" . }}
   labels:
     {{- include "opensandbox-server.labels" . | nindent 4 }}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
 ---
 apiVersion: {{ include "opensandbox-server.rbac.apiVersion" . }}
 kind: ClusterRole
@@ -17,8 +21,14 @@ metadata:
     {{- include "opensandbox-server.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/status", "events", "services", "configmaps"]
+    resources: ["pods", "pods/status", "pods/log", "events", "services", "configmaps"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete", "get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete", "get", "list", "patch"]
   - apiGroups: ["node.k8s.io"]
     resources: ["runtimeclasses"]
     verbs: ["get", "list"]
@@ -27,6 +37,9 @@ rules:
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   - apiGroups: ["sandbox.opensandbox.io"]
     resources: ["pools", "pools/status", "pools/finalizers"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["sandbox.opensandbox.io"]
+    resources: ["sandboxsnapshots", "sandboxsnapshots/status", "sandboxsnapshots/finalizers"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
 ---
 apiVersion: {{ include "opensandbox-server.rbac.apiVersion" . }}
@@ -73,11 +86,41 @@ spec:
       labels:
         {{- include "opensandbox-server.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/part-of: opensandbox
+        {{- with .Values.server.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.server.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: {{ include "opensandbox-server.serviceAccountName" . }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.server.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: main
           image: {{ include "opensandbox-server.serverImage" . }}
+          {{- with .Values.server.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           imagePullPolicy: {{ include "opensandbox-server.imagePullPolicy" . }}
           args:
             - "--config"
@@ -89,11 +132,17 @@ spec:
           env:
             - name: SANDBOX_CONFIG_PATH
               value: "/etc/opensandbox/config.toml"
+            {{- with .Values.server.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/opensandbox/config.toml
               subPath: config.toml
               readOnly: true
+            {{- with .Values.server.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -114,6 +163,9 @@ spec:
         - name: config
           configMap:
             name: {{ include "opensandbox-server.fullname" . }}-config
+        {{- with .Values.server.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.server.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}

@@ -117,6 +117,16 @@ mode = {{ .Values.server.gateway.enabled | ternary "gateway" "direct" | quote }}
 gateway.address = {{ .Values.server.gateway.host | quote }}
 gateway.route.mode = {{ .Values.server.gateway.gatewayRouteMode | quote }}
 {{- end }}
+{{- if and .Values.server.gateway.enabled .Values.server.gateway.secureAccess.keys }}
+
+[ingress.secure_access]
+active_key = {{ .Values.server.gateway.secureAccess.activeKey | quote }}
+{{- range .Values.server.gateway.secureAccess.keys }}
+[[ingress.secure_access.keys]]
+key_id = {{ .key_id | quote }}
+key = {{ .key | quote }}
+{{- end }}
+{{- end }}
 
 {{- end }}
 

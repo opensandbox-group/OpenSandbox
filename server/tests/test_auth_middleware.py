@@ -15,8 +15,8 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.config import AppConfig, IngressConfig, RuntimeConfig, ServerConfig
-from src.middleware.auth import AuthMiddleware
+from opensandbox_server.config import AppConfig, IngressConfig, RuntimeConfig, ServerConfig
+from opensandbox_server.middleware.auth import AuthMiddleware
 
 
 def _app_config_with_api_key() -> AppConfig:
@@ -113,6 +113,35 @@ def test_auth_middleware_requires_key_for_malformed_proxy_port():
     response = client.get("/sandboxes/s1/proxy/not-a-port/x")
     assert response.status_code == 401
     assert response.json()["code"] == "MISSING_API_KEY"
+
+
+def test_auth_middleware_proxy_requires_auth_in_multi_tenant_mode():
+    """In multi-tenant mode, proxy paths must require auth to establish tenant context."""
+    from unittest.mock import MagicMock
+
+    from opensandbox_server.tenants.models import TenantEntry
+
+    app = FastAPI()
+    config = _app_config_with_api_key()
+    mock_provider = MagicMock()
+    tenant = TenantEntry(name="tenant-a", namespace="ns-a", api_keys=["key-a"])
+    mock_provider.lookup.return_value = tenant
+    app.add_middleware(AuthMiddleware, config=config, tenant_provider=mock_provider)
+
+    @app.get("/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}")
+    def proxy_echo(sandbox_id: str, port: int, full_path: str):
+        return {"proxied": True}
+
+    client = TestClient(app)
+
+    response = client.get("/sandboxes/abc/proxy/8080/foo")
+    assert response.status_code == 401, "proxy must require auth in multi-tenant mode"
+
+    response = client.get(
+        "/sandboxes/abc/proxy/8080/foo",
+        headers={"OPEN-SANDBOX-API-KEY": "key-a"},
+    )
+    assert response.status_code == 200
 
 
 def test_auth_middleware_is_proxy_path_rejects_traversal():

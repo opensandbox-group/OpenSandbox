@@ -13,15 +13,26 @@
 // limitations under the License.
 
 import { createExecdClient } from "../openapi/execdClient.js";
+import { createEgressClient } from "../openapi/egressClient.js";
 import { createLifecycleClient } from "../openapi/lifecycleClient.js";
 
 import { CommandsAdapter } from "../adapters/commandsAdapter.js";
+import { EgressAdapter } from "../adapters/egressAdapter.js";
 import { FilesystemAdapter } from "../adapters/filesystemAdapter.js";
 import { HealthAdapter } from "../adapters/healthAdapter.js";
+import { IsolatedSessionsAdapter } from "../adapters/isolatedSessionsAdapter.js";
 import { MetricsAdapter } from "../adapters/metricsAdapter.js";
 import { SandboxesAdapter } from "../adapters/sandboxesAdapter.js";
 
-import type { AdapterFactory, CreateExecdStackOptions, CreateLifecycleStackOptions, ExecdStack, LifecycleStack } from "./adapterFactory.js";
+import type {
+  AdapterFactory,
+  CreateEgressStackOptions,
+  CreateExecdStackOptions,
+  CreateLifecycleStackOptions,
+  EgressStack,
+  ExecdStack,
+  LifecycleStack,
+} from "./adapterFactory.js";
 
 export class DefaultAdapterFactory implements AdapterFactory {
   createLifecycleStack(opts: CreateLifecycleStackOptions): LifecycleStack {
@@ -31,7 +42,11 @@ export class DefaultAdapterFactory implements AdapterFactory {
       headers: opts.connectionConfig.headers,
       fetch: opts.connectionConfig.fetch,
     });
-    const sandboxes = new SandboxesAdapter(lifecycleClient);
+    const sandboxes = new SandboxesAdapter(lifecycleClient, {
+      ttlMs: opts.connectionConfig.endpointCacheTtlMs,
+      maxSize: opts.connectionConfig.endpointCacheSize,
+      disabled: opts.connectionConfig.endpointCacheDisabled,
+    });
     return { sandboxes };
   }
 
@@ -59,11 +74,40 @@ export class DefaultAdapterFactory implements AdapterFactory {
       headers,
     });
 
+    const isolated = new IsolatedSessionsAdapter({
+      baseUrl: opts.execdBaseUrl,
+      fetch: opts.connectionConfig.fetch,
+      sseFetch: opts.connectionConfig.sseFetch,
+      headers,
+    });
+
     return {
       commands,
       files,
       health,
       metrics,
+      isolation: isolated,
+    };
+  }
+
+  createEgressStack(opts: CreateEgressStackOptions): EgressStack {
+    const headers: Record<string, string> = {
+      ...(opts.connectionConfig.headers ?? {}),
+      ...(opts.endpointHeaders ?? {}),
+    };
+    const egressClient = createEgressClient({
+      baseUrl: opts.egressBaseUrl,
+      headers,
+      fetch: opts.connectionConfig.fetch,
+    });
+    const egress = new EgressAdapter(egressClient, {
+      baseUrl: opts.egressBaseUrl,
+      fetch: opts.connectionConfig.fetch,
+      headers,
+    });
+    return {
+      egress,
+      credentialVault: egress,
     };
   }
 }

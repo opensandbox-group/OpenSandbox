@@ -8,11 +8,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   verify-license:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
