@@ -259,7 +259,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 // runBackgroundCommand executes shell commands in detached mode.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
 	session := c.newContextID()
-	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
 	if err != nil {
@@ -323,15 +322,16 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		kernel.running = false
 		c.storeCommandKernel(session, kernel)
 		c.markCommandFinished(session, 255, err.Error())
+		request.Hooks.OnExecuteInit(session)
 		return fmt.Errorf("failed to start commands: %w", err)
 	}
 
+	kernel.pid = cmd.Process.Pid
+	c.storeCommandKernel(session, kernel)
+	request.Hooks.OnExecuteInit(session)
+
 	safego.Go(func() {
 		defer pipe.Close()
-
-		kernel.running = true
-		kernel.pid = cmd.Process.Pid
-		c.storeCommandKernel(session, kernel)
 
 		err = cmd.Wait()
 		cancel()

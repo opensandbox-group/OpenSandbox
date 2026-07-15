@@ -18,7 +18,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -35,12 +34,18 @@ func TestGetCommandStatus_NotFound(t *testing.T) {
 func TestGetCommandStatus_Running(t *testing.T) {
 	c := NewController("", "")
 
-	var session string
+	var (
+		session       string
+		initStatusErr error
+	)
 	req := &ExecuteCodeRequest{
 		Language: BackgroundCommand,
 		Code:     "sleep 2",
 		Hooks: ExecuteResultHook{
-			OnExecuteInit:     func(id string) { session = id },
+			OnExecuteInit: func(id string) {
+				session = id
+				_, initStatusErr = c.GetCommandStatus(id)
+			},
 			OnExecuteComplete: func(time.Duration) {},
 		},
 	}
@@ -48,25 +53,10 @@ func TestGetCommandStatus_Running(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	require.NoError(t, c.runBackgroundCommand(ctx, cancel, req))
 	require.NotEmpty(t, session, "session should be set by OnExecuteInit")
+	require.NoError(t, initStatusErr, "status must be registered before the init event is exposed")
 
-	// Poll until status is registered (runBackgroundCommand stores kernel asynchronously).
-	deadline := time.Now().Add(5 * time.Second)
-	var (
-		status *CommandStatus
-		err    error
-	)
-	for time.Now().Before(deadline) {
-		status, err = c.GetCommandStatus(session)
-		if err == nil {
-			break
-		}
-		if strings.Contains(err.Error(), "not found") {
-			time.Sleep(50 * time.Millisecond)
-			continue
-		}
-		require.NoError(t, err, "GetCommandStatus unexpected error")
-	}
-	require.NoError(t, err, "GetCommandStatus error after retry")
+	status, err := c.GetCommandStatus(session)
+	require.NoError(t, err)
 
 	require.NotNil(t, status)
 	require.True(t, status.Running, "expected running=true")

@@ -119,7 +119,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 // runBackgroundCommand executes shell commands in detached mode on Windows.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
 	session := c.newContextID()
-	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
 	if err != nil {
@@ -145,26 +144,35 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	devNull, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0) // best-effort, ignore error
 	cmd.Stdin = devNull
 
-	safego.Go(func() {
-		err := cmd.Start()
-		if err != nil {
-			log.Error("CommandExecError: error starting commands: %v", err)
-			pipe.Close() // best-effort
-			cancel()
-			return
+	err = cmd.Start()
+	kernel := &commandKernel{
+		pid:          -1,
+		content:      request.Code,
+		stdoutPath:   stdoutPath,
+		stderrPath:   stderrPath,
+		startedAt:    startAt,
+		running:      true,
+		isBackground: true,
+	}
+	if err != nil {
+		log.Error("CommandExecError: error starting commands: %v", err)
+		pipe.Close() // best-effort
+		if devNull != nil {
+			devNull.Close() // best-effort
 		}
-
-		kernel := &commandKernel{
-			pid:          cmd.Process.Pid,
-			content:      request.Code,
-			stdoutPath:   stdoutPath,
-			stderrPath:   stderrPath,
-			startedAt:    startAt,
-			running:      true,
-			isBackground: true,
-		}
+		cancel()
+		kernel.running = false
 		c.storeCommandKernel(session, kernel)
+		c.markCommandFinished(session, 255, err.Error())
+		request.Hooks.OnExecuteInit(session)
+		return fmt.Errorf("failed to start commands: %w", err)
+	}
 
+	kernel.pid = cmd.Process.Pid
+	c.storeCommandKernel(session, kernel)
+	request.Hooks.OnExecuteInit(session)
+
+	safego.Go(func() {
 		safego.Go(func() {
 			<-ctx.Done()
 			if cmd.Process != nil {
@@ -174,8 +182,10 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 		err = cmd.Wait()
 		cancel()
-		pipe.Close()    // best-effort
-		devNull.Close() // best-effort
+		pipe.Close() // best-effort
+		if devNull != nil {
+			devNull.Close() // best-effort
+		}
 
 		if err != nil {
 			log.Error("CommandExecError: error running commands: %v", err)
