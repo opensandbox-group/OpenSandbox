@@ -979,3 +979,52 @@ class ListPoolsResponse(BaseModel):
     Collection of pools.
     """
     items: List[PoolResponse] = Field(..., description="List of pools.")
+
+
+# ============================================================================
+# Metrics
+# ============================================================================
+
+class MetricsEvent(BaseModel):
+    """
+    SDK-reported metrics event (Phase 1: sandbox creation latency).
+    """
+
+    event_type: Literal["sandbox.create"] = Field(
+        ...,
+        alias="eventType",
+        description="Metric event type",
+    )
+    sandbox_id: Optional[str] = Field(
+        default=None,
+        alias="sandboxId",
+        description="Sandbox identifier when available",
+    )
+    image: Optional[str] = Field(
+        default=None,
+        description="Container image URI or snapshot startup source label",
+    )
+    create_duration_ms: int = Field(
+        ...,
+        alias="createDurationMs",
+        ge=0,
+        description="Wall-clock duration in milliseconds from create start to ready or failure",
+    )
+    sdk_language: Literal["python", "go", "typescript"] = Field(
+        ...,
+        alias="sdkLanguage",
+        description="SDK language that reported the event",
+    )
+    sdk_version: str = Field(
+        ...,
+        alias="sdkVersion",
+        min_length=1,
+        description="SDK package version string",
+    )
+    success: bool = Field(
+        ...,
+        description="Whether create + readiness completed successfully",
+    )
+
+    class Config:
+        populate_by_name = True

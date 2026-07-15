@@ -140,6 +140,33 @@ class RenewIntentRedisConfig(BaseModel):
         return self
 
 
+class OtelConfig(BaseModel):
+    """Optional OpenTelemetry export for ingested SDK metrics."""
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable OTLP metrics export. When false, SDK events are accepted but recorded as noop."
+        ),
+    )
+    endpoint: Optional[str] = Field(
+        default=None,
+        description=(
+            "OTLP HTTP metrics endpoint. When omitted, OpenTelemetry uses "
+            "OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_METRICS_ENDPOINT."
+        ),
+    )
+    service_name: str = Field(
+        default="opensandbox-server",
+        description="service.name resource attribute for exported metrics.",
+    )
+    export_interval_millis: int = Field(
+        default=60000,
+        ge=1000,
+        description="Periodic export interval in milliseconds.",
+    )
+
+
 class RenewIntentConfig(BaseModel):
     """🧪 [EXPERIMENTAL] Renew sandbox expiration when access is observed (proxy and/or Redis queue)."""
 
@@ -945,6 +972,10 @@ class AppConfig(BaseModel):
     renew_intent: RenewIntentConfig = Field(
         default_factory=RenewIntentConfig,
         description="Auto-renew sandbox expiration when reverse-proxy access is observed.",
+    )
+    otel: OtelConfig = Field(
+        default_factory=OtelConfig,
+        description="OpenTelemetry export for SDK metrics ingestion (Phase 1: create latency).",
     )
     runtime: RuntimeConfig = Field(..., description="Sandbox runtime configuration.")
     kubernetes: Optional[KubernetesRuntimeConfig] = None

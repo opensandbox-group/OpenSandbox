@@ -32,8 +32,9 @@ Example files in this repository:
 11. [`[store]`](#store)
 12. [`[secure_runtime]`](#secure_runtime)
 13. [`[renew_intent]`](#renew_intent--experimental)
-14. [Environment variables (outside TOML)](#environment-variables-outside-toml)
-15. [Cross-field validation rules](#cross-field-validation-rules)
+14. [`[otel]`](#otel)
+15. [Environment variables (outside TOML)](#environment-variables-outside-toml)
+16. [Cross-field validation rules](#cross-field-validation-rules)
 
 ---
 
@@ -53,6 +54,7 @@ Example files in this repository:
 | `[store]` | No | Server-managed persistent metadata backend |
 | `[secure_runtime]` | No | gVisor / Kata / Firecracker |
 | `[renew_intent]` | No | Experimental auto-renew on access |
+| `[otel]` | No | OTLP export for ingested SDK metrics |
 
 ---
 
@@ -296,6 +298,19 @@ Per-sandbox enablement uses create request extensions (see OSEP-0009 and `exampl
 
 ---
 
+## `[otel]`
+
+Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the ingestion endpoint still accepts events and records them as noop.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable OTLP metrics export. |
+| `endpoint` | string \| omitted | `null` | OTLP HTTP metrics endpoint. When omitted, uses `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`. |
+| `service_name` | string | `"opensandbox-server"` | `service.name` resource attribute. |
+| `export_interval_millis` | integer | `60000` | Periodic export interval (≥ 1000). |
+
+---
+
 ## Environment variables (outside TOML)
 
 These are read by the server or runtime code in addition to the TOML file:
@@ -305,6 +320,8 @@ These are read by the server or runtime code in addition to the TOML file:
 | `SANDBOX_CONFIG_PATH` | `config.py`, CLI | Path to the TOML file. Overrides the default `~/.sandbox.toml` when set. |
 | `OPENSANDBOX_SERVER_API_KEY` | `config.py` | Overrides the API key from the TOML file. |
 | `DOCKER_HOST` | Docker service | Standard Docker daemon address (e.g. `unix:///var/run/docker.sock`). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTEL exporter | Default OTLP endpoint when `[otel].endpoint` is omitted. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | OTEL exporter | Metrics-specific OTLP endpoint override. |
 
 ---
 

@@ -31,6 +31,7 @@ from opensandbox.exceptions import (
     SandboxInternalException,
     SandboxReadyTimeoutException,
 )
+from opensandbox.internal.lifecycle_metrics import report_sandbox_create_metric
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
@@ -566,6 +567,7 @@ class SandboxSync:
         factory = AdapterFactorySync(config)
         sandbox_id: str | None = None
         sandbox_service: SandboxesSync | None = None
+        create_started = time.monotonic()
 
         try:
             sandbox_service = factory.create_sandbox_service()
@@ -612,6 +614,13 @@ class SandboxSync:
             if not skip_health_check:
                 sandbox.check_ready(ready_timeout, health_check_polling_interval)
                 logger.info(f"Sandbox {sandbox.id} is ready")
+                report_sandbox_create_metric(
+                    config,
+                    sandbox_id=sandbox.id,
+                    image=startup_source,
+                    create_duration_ms=int((time.monotonic() - create_started) * 1000),
+                    success=True,
+                )
             else:
                 logger.info(
                     f"Sandbox {sandbox.id} created (skip_health_check=true, sandbox may not be ready yet)"
@@ -619,6 +628,13 @@ class SandboxSync:
 
             return sandbox
         except Exception as e:
+            report_sandbox_create_metric(
+                config,
+                sandbox_id=sandbox_id,
+                image=startup_source,
+                create_duration_ms=int((time.monotonic() - create_started) * 1000),
+                success=False,
+            )
             if sandbox_id and sandbox_service:
                 try:
                     logger.warning(
