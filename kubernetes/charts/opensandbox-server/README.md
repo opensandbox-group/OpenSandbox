@@ -1,80 +1,59 @@
-# opensandbox-server Helm Chart
+# opensandbox-server
 
-OpenSandbox Lifecycle API server: provides sandbox create/delete and other lifecycle APIs, typically used with BatchSandbox/Pool on Kubernetes.
+![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.1.0](https://img.shields.io/badge/AppVersion-0.1.0-informational?style=flat-square)
 
-## Prerequisites
+OpenSandbox Lifecycle API server for sandbox creation and management
 
-- Kubernetes 1.21.1+
-- Helm 3.0+
-- OpenSandbox CRDs installed (deploy opensandbox-controller first)
+**Homepage:** <https://github.com/opensandbox-group/OpenSandbox>
 
-## Install
+## Maintainers
 
-```bash
-# Server only (default namespace opensandbox-system)
-helm install opensandbox-server ./kubernetes/charts/opensandbox-server \
-  --namespace opensandbox-system \
-  --create-namespace
+| Name | Email | Url |
+| ---- | ------ | --- |
+| OpenSandbox Team | <opensandbox@example.com> |  |
 
-# With custom image and config
-helm install opensandbox-server ./kubernetes/charts/opensandbox-server \
-  --set server.image.repository=your-registry/opensandbox/server \
-  --set server.image.tag=v0.1.0 \
-  --namespace opensandbox-system \
-  --create-namespace
-```
+## Source Code
 
-### Deploy server and ingress-gateway together
+* <https://github.com/opensandbox-group/OpenSandbox/tree/main/server>
+* <https://github.com/opensandbox-group/OpenSandbox/tree/main/components/ingress>
 
-To run both the Lifecycle API server and the ingress gateway (components/ingress) in one release, set `server.gateway.enabled=true`. The chart will deploy the server and the gateway (Deployment, Service, RBAC), and write server config `[ingress] mode = "gateway"` so the server returns the correct gateway address to clients.
+## Requirements
 
-```bash
-helm install opensandbox-server ./kubernetes/charts/opensandbox-server \
-  --namespace opensandbox-system \
-  --create-namespace \
-  --set server.gateway.enabled=true \
-  --set server.gateway.host=gateway.example.com
-```
+Kubernetes: `>=1.21.1-0`
 
-Optional: override gateway image, replicas, or resources (see `server.gateway.*` in Configuration).
+## Values
 
-## Configuration
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_enabled = true\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nsnapshot_create_timeout_seconds = 900\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. |
+| fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
+| imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |
+| nameOverride | string | `""` | Override the name of the chart |
+| namespaceOverride | string | `""` | Override the namespace (default: opensandbox-system) |
+| server.affinity | object | `{}` |  |
+| server.env | list | `[]` | Additional environment variables for the server container. |
+| server.gateway.dataplaneNamespace | string | `"opensandbox"` |  |
+| server.gateway.enabled | bool | `false` |  |
+| server.gateway.gatewayRouteMode | string | `"header"` |  |
+| server.gateway.host | string | `"opensandbox.example.com"` |  |
+| server.gateway.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress"` |  |
+| server.gateway.image.tag | string | `"v1.0.9"` |  |
+| server.gateway.logLevel | string | `"info"` |  |
+| server.gateway.port | int | `28888` |  |
+| server.gateway.providerType | string | `"batchsandbox"` |  |
+| server.gateway.replicaCount | int | `2` |  |
+| server.gateway.resources.limits.cpu | string | `"2"` |  |
+| server.gateway.resources.limits.memory | string | `"8Gi"` |  |
+| server.gateway.resources.requests.cpu | string | `"1"` |  |
+| server.gateway.resources.requests.memory | string | `"4Gi"` |  |
+| server.gateway.secureAccess.activeKey | string | `""` |  |
+| server.gateway.secureAccess.keys | list | `[]` |  |
+| server.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server","tag":"v0.2.1"}` | Server image configuration |
+| server.replicaCount | int | `2` | Number of server replicas |
+| server.resources | object | `{"limits":{"cpu":"2","memory":"8Gi"},"requests":{"cpu":"1","memory":"4Gi"}}` | Resource requests and limits |
+| server.tolerations | list | `[]` |  |
+| server.volumeMounts | list | `[]` |  |
+| server.volumes | list | `[]` |  |
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `server.image.repository` | Server image repository | `sandbox-registry.../opensandbox/server` |
-| `server.image.tag` | Server image tag | Chart `appVersion` |
-| `server.replicaCount` | Server replicas | `2` |
-| `server.resources` | CPU/memory requests and limits | See values.yaml |
-| `namespaceOverride` | Deployment namespace | `opensandbox-system` |
-| `configToml` | config.toml content ([ingress] block generated from server.gateway) | See values.yaml |
-| `server.gateway.enabled` | When true: set server config to gateway and deploy components/ingress gateway | `false` |
-| `server.gateway.host` | config `gateway.address` (address returned to clients) | `opensandbox.example.com` |
-| `server.gateway.gatewayRouteMode` | server config and gateway route mode (header/uri) | `header` |
-| `server.gateway.*` | Gateway image, replicas, port, dataplaneNamespace, providerType, resources | See values.yaml |
-
-Versioning note:
-
-- `server.image.tag` defaults to the chart `appVersion`.
-- The chart package `version` and the image/app `appVersion` are intentionally
-  separate. A server release branch or tag does not automatically imply a new
-  Helm chart package version.
-- If you want the chart to deploy a specific server release, override
-  `server.image.tag` explicitly or consume a Helm package release whose chart
-  version was published for that purpose.
-
-**Gateway**: When `server.gateway.enabled=true`, the chart writes `[ingress] mode = "gateway"` in config.toml and deploys **components/ingress** Deployment/Service/RBAC; gateway `--mode` matches config. External access must be configured separately.
-
-Set `[kubernetes].namespace` in config for the sandbox workload namespace. Override `api_key` via Secret or values in production.
-
-## Upgrade and uninstall
-
-```bash
-helm upgrade opensandbox-server ./kubernetes/charts/opensandbox-server -n opensandbox-system
-helm uninstall opensandbox-server -n opensandbox-system
-```
-
-## References
-
-- [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox)
-- [Helm deployment docs](../../docs/HELM-DEPLOYMENT.md)
+----------------------------------------------
+Autogenerated from chart metadata using [helm-docs v1.14.2](https://github.com/norwoodj/helm-docs/releases/v1.14.2)
