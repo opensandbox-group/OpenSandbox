@@ -79,11 +79,21 @@ func (c *IsolatedSessionController) Create() {
 		return
 	}
 
+	binds := make([]isolation.BindMount, 0, len(req.Binds))
+	for _, b := range req.Binds {
+		binds = append(binds, isolation.BindMount{
+			Source:   b.Source,
+			Dest:     b.Dest,
+			ReadOnly: b.ReadOnly,
+		})
+	}
+
 	opts := &runtime.IsolatedSessionOptions{
 		Profile:            req.Profile,
 		WorkspacePath:      req.Workspace.Path,
 		WorkspaceMode:      req.Workspace.Mode,
 		ExtraWritable:      req.ExtraWritable,
+		Binds:              binds,
 		ShareNet:           req.ShareNet,
 		EnvPassthroughMode: req.EnvPassthrough.Mode,
 		EnvPassthroughKeys: req.EnvPassthrough.Keys,
@@ -98,7 +108,10 @@ func (c *IsolatedSessionController) Create() {
 		status := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "not in allowlist") ||
 			strings.Contains(err.Error(), "not allowed") ||
-			strings.Contains(err.Error(), "unknown isolation profile") {
+			strings.Contains(err.Error(), "unknown isolation profile") ||
+			strings.Contains(err.Error(), "must be an existing path") ||
+			strings.Contains(err.Error(), "must be an absolute path") ||
+			strings.Contains(err.Error(), "source is required") {
 			status = http.StatusBadRequest
 		}
 		c.RespondError(status, model.ErrorCodeRuntimeError, err.Error())
@@ -135,6 +148,28 @@ func (c *IsolatedSessionController) Get() {
 		LastRunAt:            state.LastRunAt,
 		IdleRemainingSeconds: state.IdleRemainingSeconds,
 	})
+}
+
+// List handles GET /v1/isolated/sessions.
+func (c *IsolatedSessionController) List() {
+	if !c.probed() {
+		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
+		return
+	}
+
+	sessions := isolatedRunner.ListIsolatedSessions()
+	items := make([]model.IsolatedSessionSummary, 0, len(sessions))
+	for _, s := range sessions {
+		items = append(items, model.IsolatedSessionSummary{
+			SessionID:            s.SessionID,
+			Status:               s.Status,
+			CreatedAt:            s.CreatedAt,
+			LastRunAt:            s.LastRunAt,
+			IdleRemainingSeconds: s.IdleRemainingSeconds,
+		})
+	}
+
+	c.RespondSuccess(model.ListIsolatedSessionsResponse{Sessions: items})
 }
 
 // Run handles POST /v1/isolated/session/:sessionId/run (SSE streaming).

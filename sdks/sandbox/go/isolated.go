@@ -33,15 +33,24 @@ type EnvPassthroughSpec struct {
 	Keys []string `json:"keys,omitempty"`
 }
 
+// BindMount describes an explicit source-to-destination bind mount into the namespace.
+type BindMount struct {
+	Source   string `json:"source"`
+	Dest     string `json:"dest,omitempty"`
+	ReadOnly bool   `json:"readonly,omitempty"`
+}
+
 // CreateIsolatedSessionRequest is the request body for creating an isolated session.
 type CreateIsolatedSessionRequest struct {
 	Workspace          IsolatedWorkspaceSpec `json:"workspace"`
 	Profile            string                `json:"profile,omitempty"`
 	ExtraWritable      []string              `json:"extra_writable,omitempty"`
+	Binds              []BindMount           `json:"binds,omitempty"`
 	ShareNet           *bool                 `json:"share_net,omitempty"`
 	EnvPassthrough     *EnvPassthroughSpec   `json:"env_passthrough,omitempty"`
 	Uid                *uint32               `json:"uid,omitempty"`
 	Gid                *uint32               `json:"gid,omitempty"`
+	UidMode            string                `json:"uid_mode,omitempty"` // "setpriv" | "userns"
 	IdleTimeoutSeconds int                   `json:"idle_timeout_seconds,omitempty"`
 }
 
@@ -57,6 +66,20 @@ type IsolatedSessionState struct {
 	CreatedAt            time.Time `json:"created_at"`
 	LastRunAt            time.Time `json:"last_run_at"`
 	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
+}
+
+// IsolatedSessionSummary describes a single isolated session in a list response.
+type IsolatedSessionSummary struct {
+	SessionID            string    `json:"session_id"`
+	Status               string    `json:"status"`
+	CreatedAt            time.Time `json:"created_at"`
+	LastRunAt            time.Time `json:"last_run_at"`
+	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
+}
+
+// listIsolatedSessionsResponse is the wire response for listing isolated sessions.
+type listIsolatedSessionsResponse struct {
+	Sessions []IsolatedSessionSummary `json:"sessions"`
 }
 
 // IsolatedRunRequest is the request body for running code in an isolated session.
@@ -95,6 +118,16 @@ func (e *ExecdClient) IsolatedGet(ctx context.Context, sessionID string) (*Isola
 		return nil, err
 	}
 	return &result, nil
+}
+
+// IsolatedList lists all active isolated sessions.
+func (e *ExecdClient) IsolatedList(ctx context.Context) ([]IsolatedSessionSummary, error) {
+	var result listIsolatedSessionsResponse
+	err := e.client.doRequest(ctx, http.MethodGet, "/v1/isolated/sessions", nil, &result)
+	if err != nil {
+		return nil, err
+	}
+	return result.Sessions, nil
 }
 
 // IsolatedRun runs code in an isolated session, streaming output via SSE.

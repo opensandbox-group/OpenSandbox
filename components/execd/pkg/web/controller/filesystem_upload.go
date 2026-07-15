@@ -205,7 +205,7 @@ func writeUploadFile(resolvedPath string, fileHeader *multipart.FileHeader) *upl
 	targetDir := filepath.Dir(resolvedPath)
 	if d, err := os.Open(targetDir); err == nil {
 		if err := d.Sync(); err != nil {
-			log.Warning("failed to sync parent dir %s: %v", targetDir, err)
+			log.Warn("failed to sync parent dir %s: %v", targetDir, err)
 		}
 		_ = d.Close()
 	}

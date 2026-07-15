@@ -13,7 +13,9 @@ This SDK requires a specific Docker image containing the Code Interpreter runtim
 
 ```kotlin
 dependencies {
-    implementation("com.alibaba.opensandbox:code-interpreter:{latest_version}")
+    implementation(platform("com.alibaba.opensandbox:sandbox-bom:{latest_version}"))
+    implementation("com.alibaba.opensandbox:sandbox")
+    implementation("com.alibaba.opensandbox:code-interpreter")
 }
 ```
 
@@ -26,6 +28,9 @@ dependencies {
     <version>{latest_version}</version>
 </dependency>
 ```
+
+The `code-interpreter` artifact remains a separate dependency. It is published
+with the Kotlin/JVM SDK release train and is version-aligned by `sandbox-bom`.
 
 ## Quick Start
 
@@ -99,7 +104,7 @@ public class QuickStart {
 
 The Code Interpreter SDK relies on a specialized environment. Ensure your sandbox provider has the `opensandbox/code-interpreter` image available.
 
-For detailed information about supported languages and versions, please refer to the [Environment Documentation](../../../sandboxes/code-interpreter/README.md).
+For detailed information about supported languages and versions, please refer to the [Environment Documentation](../../../../sandboxes/code-interpreter/README.md).
 
 ### Troubleshooting: `pip: command not found`
 

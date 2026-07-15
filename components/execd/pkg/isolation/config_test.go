@@ -28,7 +28,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, "/var/lib/execd/isolation", cfg.UpperRoot)
 	assert.Equal(t, int64(8*1024*1024*1024), cfg.UpperMaxBytes)
 	assert.Equal(t, int64(4*1024*1024*1024), cfg.DiffMaxBytes)
-	assert.Nil(t, cfg.AllowedWritable)
+	assert.Equal(t, []string{"/workspace", "/mnt", "/media", "/data"}, cfg.AllowedWritable)
 	assert.Nil(t, cfg.Seccomp)
 }
 
@@ -86,7 +86,8 @@ func TestLoadConfig_PartialFields(t *testing.T) {
 	// Missing fields keep defaults.
 	assert.Equal(t, int64(8*1024*1024*1024), cfg.UpperMaxBytes)
 	assert.Equal(t, int64(4*1024*1024*1024), cfg.DiffMaxBytes)
-	assert.Nil(t, cfg.AllowedWritable)
+	// Missing allowed_writable keeps the built-in default allowlist.
+	assert.Equal(t, []string{"/workspace", "/mnt", "/media", "/data"}, cfg.AllowedWritable)
 	assert.Nil(t, cfg.Seccomp)
 }
 

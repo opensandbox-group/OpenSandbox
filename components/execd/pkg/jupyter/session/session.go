@@ -159,65 +159,6 @@ func (c *Client) CreateSession(name, ipynb, kernel string) (*Session, error) {
 	return &session, nil
 }
 
-// ModifySession modifies properties of an existing session
-func (c *Client) ModifySession(sessionId, name, path, kernel string) (*Session, error) {
-	// Build request URL
-	url := fmt.Sprintf("%s/api/sessions/%s", c.baseURL, sessionId)
-
-	// Build request body
-	reqBody := &SessionUpdateRequest{}
-	if name != "" {
-		reqBody.Name = name
-	}
-	if path != "" {
-		reqBody.Path = path
-	}
-	if kernel != "" {
-		reqBody.Kernel = &KernelSpec{
-			Name: kernel,
-		}
-	}
-
-	// Serialize request body to JSON
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize request: %w", err)
-	}
-
-	// Create PATCH request
-	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Send request
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned error status code: %d", resp.StatusCode)
-	}
-
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Parse JSON response
-	var session Session
-	if err := json.Unmarshal(body, &session); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &session, nil
-}
-
 // DeleteSession deletes the specified session
 func (c *Client) DeleteSession(sessionId string) error {
 	// Build request URL

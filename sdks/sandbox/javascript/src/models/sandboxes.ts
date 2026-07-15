@@ -132,6 +132,23 @@ export interface CredentialMatch extends Record<string, unknown> {
   paths?: string[];
 }
 
+export type CredentialSubstitutionSurface = "path" | "query" | "header" | "body";
+
+export interface CredentialSubstitution extends Record<string, unknown> {
+  /**
+   * Name of the sandbox-local credential used as the replacement value.
+   */
+  credential: string;
+  /**
+   * Literal placeholder to replace.
+   */
+  placeholder: string;
+  /**
+   * Request surfaces where the placeholder may be replaced.
+   */
+  in: CredentialSubstitutionSurface[];
+}
+
 export interface CustomHeaderEntry extends Record<string, unknown> {
   /**
    * Header name to inject.
@@ -143,27 +160,34 @@ export interface CustomHeaderEntry extends Record<string, unknown> {
   credential: string;
 }
 
+interface CredentialAuthSubstitutions {
+  substitutions?: CredentialSubstitution[];
+}
+
 export type CredentialAuth =
-  | {
+  | ({
       type: "bearer";
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "basic";
       /**
        * Credential containing pre-encoded base64(username:password).
        */
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "apiKey";
       name: string;
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "customHeaders";
       headers: CustomHeaderEntry[];
-    };
+    } & CredentialAuthSubstitutions)
+  | ({
+      type: "passthrough";
+    } & CredentialAuthSubstitutions);
 
 export interface CredentialBinding extends Record<string, unknown> {
   /**

@@ -33,6 +33,7 @@ type IsolatedSessionOptions struct {
 	WorkspacePath      string
 	WorkspaceMode      string
 	ExtraWritable      []string
+	Binds              []isolation.BindMount
 	ShareNet           *bool
 	EnvPassthroughMode string
 	EnvPassthroughKeys []string
@@ -78,6 +79,7 @@ func (s *isolatedSession) start() error {
 
 	wrapOpts := isolation.WrapOptions{
 		ExtraWritable: s.opts.ExtraWritable,
+		Binds:         s.opts.Binds,
 		ShareNet:      true,
 	}
 

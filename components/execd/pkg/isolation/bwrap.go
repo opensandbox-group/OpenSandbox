@@ -93,6 +93,19 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 		argv = append(argv, "--bind", p, p)
 	}
 
+	// 8b. Explicit source→dest bind mounts.
+	for _, b := range opts.Binds {
+		dest := b.Dest
+		if dest == "" {
+			dest = b.Source
+		}
+		flag := "--bind"
+		if b.ReadOnly {
+			flag = "--ro-bind"
+		}
+		argv = append(argv, flag, b.Source, dest)
+	}
+
 	// 9. Environment.
 	argv = append(argv, bwrapEnvSegment(opts.EnvPassthrough)...)
 
@@ -152,6 +165,17 @@ func validateWrapOptions(opts WrapOptions) error {
 	}
 	if opts.UidMode != "" && !opts.UidMode.Valid() {
 		return fmt.Errorf("isolation: unknown uid mode %q", opts.UidMode)
+	}
+	for _, b := range opts.Binds {
+		if b.Source == "" {
+			return errors.New("isolation: bind.source is required")
+		}
+		if !filepath.IsAbs(b.Source) {
+			return fmt.Errorf("isolation: bind.source %q must be an absolute path", b.Source)
+		}
+		if b.Dest != "" && !filepath.IsAbs(b.Dest) {
+			return fmt.Errorf("isolation: bind.dest %q must be an absolute path", b.Dest)
+		}
 	}
 	return nil
 }

@@ -19,6 +19,8 @@ Isolated session service interface.
 Protocol for namespace-isolated execution operations (OSEP-0013).
 """
 
+from __future__ import annotations
+
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -26,11 +28,13 @@ from typing import Protocol
 
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.isolated import (
+    BindMount,
     CreateIsolatedSessionRequest,
     IsolatedCapabilities,
     IsolatedRunOpts,
     IsolatedSessionInfo,
     IsolatedSessionState,
+    IsolatedSessionSummary,
     IsolatedWorkspaceSpec,
 )
 from opensandbox.services.filesystem import Filesystem
@@ -72,6 +76,8 @@ class IsolationService(Protocol):
 
     async def capabilities(self) -> IsolatedCapabilities: ...
 
+    async def list(self) -> list[IsolatedSessionSummary]: ...
+
     async def run_once(
         self,
         code: str,
@@ -82,6 +88,7 @@ class IsolationService(Protocol):
         handlers: ExecutionHandlers | None = None,
         profile: str | None = None,
         share_net: bool | None = None,
+        binds: list[BindMount] | None = None,
     ) -> Execution:
         """Create a session, run *code*, and delete the session (auto-cleanup)."""
         ...
@@ -116,11 +123,13 @@ class IsolationServiceMixin:
         handlers: ExecutionHandlers | None = None,
         profile: str | None = None,
         share_net: bool | None = None,
+        binds: list[BindMount] | None = None,
     ) -> Execution:
         request = CreateIsolatedSessionRequest(
             workspace=IsolatedWorkspaceSpec(path=workspace, mode=workspace_mode),
             profile=profile,
             share_net=share_net,
+            binds=binds,
         )
         session = await self.create(request)
         try:

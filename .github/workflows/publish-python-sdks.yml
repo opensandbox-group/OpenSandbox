@@ -14,7 +14,11 @@ on:
       - "python/mcp/sandbox/v*"
 
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+
   publish-sandbox:
+    needs: release-preflight
     if: startsWith(github.ref, 'refs/tags/python/sandbox/v')
     runs-on: ubuntu-latest
     steps:
@@ -55,6 +59,7 @@ jobs:
           uv publish
 
   publish-code-interpreter:
+    needs: release-preflight
     if: startsWith(github.ref, 'refs/tags/python/code-interpreter/v')
     runs-on: ubuntu-latest
     steps:
@@ -90,6 +95,7 @@ jobs:
           uv publish
 
   publish-mcp-sandbox:
+    needs: release-preflight
     if: startsWith(github.ref, 'refs/tags/python/mcp/sandbox/v')
     runs-on: ubuntu-latest
     steps:

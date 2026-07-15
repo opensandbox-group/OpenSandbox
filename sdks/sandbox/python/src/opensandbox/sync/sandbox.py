@@ -83,8 +83,8 @@ class SandboxSync:
 
     - **Blocking**: Do not call these methods directly from an asyncio event loop thread.
       If you need non-blocking behavior, prefer the async :class:`~opensandbox.sandbox.Sandbox`.
-    - **Resource cleanup**: :meth:`close` closes *local* HTTP resources only. It does **not**
-      terminate the remote sandbox instance. Call :meth:`kill` to stop the remote sandbox.
+    - **Resource cleanup**: :meth:`destroy` terminates the remote sandbox and closes local
+      HTTP resources. Use :meth:`close` alone when the sandbox should remain available.
 
     Usage Example:
 
@@ -105,9 +105,8 @@ class SandboxSync:
     sandbox.files.write_file("script.py", "print('Hello World')")
     result = sandbox.commands.run("python script.py")
 
-    # Always clean up resources
-    sandbox.kill()   # terminate remote sandbox
-    sandbox.close()  # close local HTTP resources
+    # Always terminate the remote sandbox and close local resources
+    sandbox.destroy()
 
     # Or use a context manager for automatic close():
     with SandboxSync.create("python:3.11") as sandbox:
@@ -395,6 +394,21 @@ class SandboxSync:
             logger.warning(
                 f"Error closing resources for sandbox {self.id}: {e}", exc_info=True
             )
+
+    def destroy(self) -> None:
+        """
+        Terminate the remote sandbox and close local resources.
+
+        Local resources are always closed, even if terminating the remote sandbox
+        fails. Any termination error is re-raised after local cleanup completes.
+
+        Raises:
+            SandboxException: if termination fails
+        """
+        try:
+            self.kill()
+        finally:
+            self.close()
 
     def is_healthy(self) -> bool:
         """

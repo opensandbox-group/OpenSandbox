@@ -16,8 +16,12 @@ upper_max_bytes = 8589934592  # 8 GiB
 # Maximum tar.gz diff output size (bytes). Phase 2.
 diff_max_bytes = 4294967296  # 4 GiB
 
-# Paths that callers may request as extra_writable. Empty = reject all.
-allowed_writable = []
+# Host paths callers may request via extra_writable or binds. Sources are
+# enforced against the fully symlink-resolved real path; subpaths are allowed.
+# NOTE: this key REPLACES the built-in default (no merge), so setting it here
+# overrides the defaults below. Empty ([]) rejects all extra_writable/binds.
+# Built-in default: ["/workspace", "/mnt", "/media", "/data"].
+allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 
 # Seccomp is ALWAYS ACTIVE by default — the built-in denylist blocks ~30
 # dangerous syscalls (mount, ptrace, bpf, etc.) even without this section.

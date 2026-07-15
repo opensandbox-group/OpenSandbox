@@ -27,6 +27,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapa
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionState
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionSummary
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
@@ -51,15 +52,24 @@ private data class IsolatedCreateBody(
     val workspace: IsolatedWorkspaceBody,
     val profile: String? = null,
     val extra_writable: List<String>? = null,
+    val binds: List<BindMountBody>? = null,
     val share_net: Boolean? = null,
     val env_passthrough: EnvPassthroughBody? = null,
     val uid: Int? = null,
     val gid: Int? = null,
+    val uid_mode: String? = null,
     val idle_timeout_seconds: Int? = null,
 )
 
 @Serializable
 private data class IsolatedWorkspaceBody(val path: String, val mode: String? = null)
+
+@Serializable
+private data class BindMountBody(
+    val source: String,
+    val dest: String? = null,
+    val readonly: Boolean? = null,
+)
 
 @Serializable
 private data class EnvPassthroughBody(val mode: String? = null, val keys: List<String>? = null)
@@ -83,6 +93,20 @@ private data class IsolatedSessionStateResponse(
     val created_at: String? = null,
     val last_run_at: String? = null,
     val idle_remaining_seconds: Int? = null,
+)
+
+@Serializable
+private data class IsolatedSessionSummaryResponse(
+    val session_id: String,
+    val status: String,
+    val created_at: String? = null,
+    val last_run_at: String? = null,
+    val idle_remaining_seconds: Int? = null,
+)
+
+@Serializable
+private data class ListIsolatedSessionsResponse(
+    val sessions: List<IsolatedSessionSummaryResponse> = emptyList(),
 )
 
 @Serializable
@@ -130,11 +154,14 @@ internal class IsolatedSessionsAdapter(
                         IsolatedWorkspaceBody(request.workspace.path, request.workspace.mode),
                     profile = request.profile,
                     extra_writable = request.extraWritable,
+                    binds =
+                        request.binds?.map { BindMountBody(it.source, it.dest, it.readonly) },
                     share_net = request.shareNet,
                     env_passthrough =
                         request.envPassthrough?.let { EnvPassthroughBody(it.mode, it.keys) },
                     uid = request.uid,
                     gid = request.gid,
+                    uid_mode = request.uidMode,
                     idle_timeout_seconds = request.idleTimeoutSeconds,
                 )
             val httpRequest =
@@ -287,6 +314,37 @@ internal class IsolatedSessionsAdapter(
                     commitSupported = resp.commit_supported,
                     diffSupported = resp.diff_supported,
                 )
+            }
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
+    override fun list(): List<IsolatedSessionSummary> {
+        try {
+            val httpRequest =
+                Request.Builder()
+                    .url("$execdBaseUrl/v1/isolated/sessions")
+                    .get()
+                    .headers(execdEndpoint.headers.toHeaders())
+                    .build()
+
+            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+                ensureSuccess(response, "list isolated sessions")
+                val resp =
+                    json.decodeFromString(
+                        ListIsolatedSessionsResponse.serializer(),
+                        response.body!!.string(),
+                    )
+                return resp.sessions.map { summary ->
+                    IsolatedSessionSummary(
+                        sessionId = summary.session_id,
+                        status = summary.status,
+                        createdAt = summary.created_at?.let { parseDateTime(it) },
+                        lastRunAt = summary.last_run_at?.let { parseDateTime(it) },
+                        idleRemainingSeconds = summary.idle_remaining_seconds,
+                    )
+                }
             }
         } catch (e: Exception) {
             throw e.toSandboxException()

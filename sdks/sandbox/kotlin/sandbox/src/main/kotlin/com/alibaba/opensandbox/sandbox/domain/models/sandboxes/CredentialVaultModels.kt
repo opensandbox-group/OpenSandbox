@@ -249,6 +249,64 @@ class CustomHeaderEntry private constructor(
 }
 
 /**
+ * Scoped placeholder substitution entry.
+ */
+class CredentialSubstitution private constructor(
+    val credential: String,
+    val placeholder: String,
+    val surfaces: List<Surface>,
+) {
+    enum class Surface {
+        PATH,
+        QUERY,
+        HEADER,
+        BODY,
+    }
+
+    companion object {
+        @JvmStatic
+        fun builder(): Builder = Builder()
+    }
+
+    class Builder {
+        private var credential: String? = null
+        private var placeholder: String? = null
+        private var surfaces: List<Surface>? = null
+
+        fun credential(credential: String): Builder {
+            require(credential.isNotBlank()) { "Credential substitution credential cannot be blank" }
+            this.credential = credential
+            return this
+        }
+
+        fun placeholder(placeholder: String): Builder {
+            require(placeholder.isNotBlank()) { "Credential substitution placeholder cannot be blank" }
+            this.placeholder = placeholder
+            return this
+        }
+
+        fun surfaces(surfaces: List<Surface>): Builder {
+            require(surfaces.isNotEmpty()) { "Credential substitution surfaces cannot be empty" }
+            this.surfaces = surfaces.toList()
+            return this
+        }
+
+        fun surfaces(vararg surfaces: Surface): Builder = surfaces(surfaces.toList())
+
+        fun build(): CredentialSubstitution {
+            val credentialValue = credential ?: throw IllegalArgumentException("Credential substitution credential must be specified")
+            val placeholderValue = placeholder ?: throw IllegalArgumentException("Credential substitution placeholder must be specified")
+            val surfacesValue = surfaces ?: throw IllegalArgumentException("Credential substitution surfaces must be specified")
+            return CredentialSubstitution(
+                credential = credentialValue,
+                placeholder = placeholderValue,
+                surfaces = surfacesValue,
+            )
+        }
+    }
+}
+
+/**
  * Typed Credential Vault auth rule.
  */
 class CredentialAuth private constructor(
@@ -256,12 +314,14 @@ class CredentialAuth private constructor(
     val credential: String?,
     val name: String?,
     val headers: List<CustomHeaderEntry>?,
+    val substitutions: List<CredentialSubstitution>?,
 ) {
     enum class Type {
         BEARER,
         BASIC,
         API_KEY,
         CUSTOM_HEADERS,
+        PASSTHROUGH,
     }
 
     companion object {
@@ -282,6 +342,10 @@ class CredentialAuth private constructor(
 
         @JvmStatic
         fun customHeaders(headers: List<CustomHeaderEntry>): CredentialAuth = builder().type(Type.CUSTOM_HEADERS).headers(headers).build()
+
+        @JvmStatic
+        fun passthrough(substitutions: List<CredentialSubstitution> = emptyList()): CredentialAuth =
+            builder().type(Type.PASSTHROUGH).substitutions(substitutions).build()
     }
 
     class Builder {
@@ -289,6 +353,7 @@ class CredentialAuth private constructor(
         private var credential: String? = null
         private var name: String? = null
         private var headers: List<CustomHeaderEntry>? = null
+        private var substitutions: List<CredentialSubstitution>? = null
 
         fun type(type: Type): Builder {
             this.type = type
@@ -315,6 +380,15 @@ class CredentialAuth private constructor(
 
         fun headers(vararg headers: CustomHeaderEntry): Builder = headers(headers.toList())
 
+        fun substitutions(substitutions: List<CredentialSubstitution>): Builder {
+            this.substitutions = substitutions.toList()
+            return this
+        }
+
+        fun substitutions(vararg substitutions: CredentialSubstitution): Builder = substitutions(substitutions.toList())
+
+        fun substitution(substitution: CredentialSubstitution): Builder = substitutions((substitutions ?: emptyList()) + substitution)
+
         fun build(): CredentialAuth {
             val typeValue = type ?: throw IllegalArgumentException("Credential auth type must be specified")
             when (typeValue) {
@@ -333,8 +407,15 @@ class CredentialAuth private constructor(
                         throw IllegalArgumentException("Custom headers auth headers must be specified")
                     }
                 }
+                Type.PASSTHROUGH -> Unit
             }
-            return CredentialAuth(type = typeValue, credential = credential, name = name, headers = headers)
+            return CredentialAuth(
+                type = typeValue,
+                credential = credential,
+                name = name,
+                headers = headers,
+                substitutions = substitutions,
+            )
         }
     }
 }

@@ -55,6 +55,13 @@ func TestCreateCredentialVaultPayloadAndHeaders(t *testing.T) {
 						"type":       "apiKey",
 						"name":       "X-Api-Key",
 						"credential": "api-token",
+						"substitutions": []any{
+							map[string]any{
+								"credential":  "api-token",
+								"placeholder": "__api_token__",
+								"in":          []any{"query", "body"},
+							},
+						},
 					},
 				},
 			},
@@ -409,6 +416,13 @@ func sampleCredentialVaultCreateRequest() CredentialVaultCreateRequest {
 					Type:       CredentialAuthAPIKey,
 					Name:       "X-Api-Key",
 					Credential: "api-token",
+					Substitutions: []CredentialSubstitution{
+						{
+							Credential:  "api-token",
+							Placeholder: "__api_token__",
+							In:          []CredentialSubstitutionSurface{CredentialSubstitutionQuery, CredentialSubstitutionBody},
+						},
+					},
 				},
 			},
 		},

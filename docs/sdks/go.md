@@ -164,8 +164,8 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
 })
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, binding
+guidance, and Git/curl examples.
 
 ### Sandbox Pool (Client-Side)
 

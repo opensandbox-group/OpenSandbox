@@ -2,6 +2,7 @@ name: Kubernetes nightly build (Monorepo)
 
 permissions:
   contents: read
+  pull-requests: read
   packages: write
 
 on:
@@ -10,20 +11,21 @@ on:
     - cron: "0 20 * * *"
   pull_request:
     branches: [ main ]
-    paths:
-      - '.github/workflows/kubernetes-nightly-build.yml'
-      - 'scripts/python-k8s-e2e.sh'
-      - 'scripts/python-k8s-e2e-ingress.sh'
-      - 'scripts/common/kubernetes-e2e.sh'
-      - 'kubernetes/charts/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: kubernetes-mini-e2e
+
   k8s-mini-e2e:
     name: Kubernetes mini E2E (${{ matrix.variant }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -173,3 +175,25 @@ jobs:
           fi
           chmod +x build.sh
           ./build.sh
+
+  required:
+    name: Kubernetes Mini E2E CI
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [changes, k8s-mini-e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          E2E_RESULT: ${{ needs.k8s-mini-e2e.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$E2E_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$E2E_RESULT" == "skipped" ]]
+          fi

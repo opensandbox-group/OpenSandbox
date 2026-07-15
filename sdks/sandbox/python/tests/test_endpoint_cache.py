@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import gc
 import threading
 import time
 
@@ -171,6 +172,15 @@ class TestAsyncEndpointCache:
         with caplog.at_level("ERROR", logger="asyncio"):
             with pytest.raises(RuntimeError, match="network error"):
                 await c.get_or_fetch(key, fetch)
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
+
+        assert not [
+            record
+            for record in caplog.records
+            if "Future exception was never retrieved" in record.getMessage()
+        ]
 
         # Cache should not be populated on error
         assert c.get(key) is None

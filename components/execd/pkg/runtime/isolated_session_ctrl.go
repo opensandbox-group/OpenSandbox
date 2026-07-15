@@ -111,7 +111,7 @@ func (r *IsolatedRunner) CollectIdle() {
 		if s.dead() {
 			log.Info("idle GC: cleaning up dead session %s", sessionID)
 			if err := r.DeleteIsolatedSession(sessionID); err != nil {
-				log.Warning("idle GC: delete dead session %s: %v", sessionID, err)
+				log.Warn("idle GC: delete dead session %s: %v", sessionID, err)
 			}
 			return true
 		}
@@ -128,7 +128,7 @@ func (r *IsolatedRunner) CollectIdle() {
 			s.runMu.Unlock()
 			log.Info("idle GC: deleting session %s (idle %v > timeout %v)", sessionID, idle, timeout)
 			if err := r.DeleteIsolatedSession(sessionID); err != nil {
-				log.Warning("idle GC: delete session %s: %v", sessionID, err)
+				log.Warn("idle GC: delete session %s: %v", sessionID, err)
 			}
 		}
 		return true
@@ -148,6 +148,10 @@ func (r *IsolatedRunner) Available() bool {
 // CreateIsolatedSession starts a new bwrap + bash session.
 func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (string, error) {
 	if err := r.validateExtraWritable(opts.ExtraWritable); err != nil {
+		return "", err
+	}
+
+	if err := r.validateBinds(opts.Binds); err != nil {
 		return "", err
 	}
 
@@ -225,6 +229,49 @@ type IsolatedSessionState struct {
 	CreatedAt            time.Time
 	LastRunAt            time.Time
 	IdleRemainingSeconds *int
+}
+
+// IsolatedSessionSummary describes a single session in a list response.
+type IsolatedSessionSummary struct {
+	SessionID string
+	IsolatedSessionState
+}
+
+// ListIsolatedSessions returns a summary of all active isolated sessions.
+func (r *IsolatedRunner) ListIsolatedSessions() []IsolatedSessionSummary {
+	summaries := make([]IsolatedSessionSummary, 0)
+	r.ctrl.isolatedSessionMap.Range(func(key, value any) bool {
+		s, ok := value.(*isolatedSession)
+		if !ok {
+			return true
+		}
+
+		s.mu.RLock()
+		status := SessionStatusActive
+		if s.dead() {
+			status = SessionStatusDead
+		}
+		summary := IsolatedSessionSummary{
+			SessionID: s.id,
+			IsolatedSessionState: IsolatedSessionState{
+				Status:    status,
+				CreatedAt: s.createdAt,
+				LastRunAt: s.lastRunAt,
+			},
+		}
+		if s.opts.IdleTimeoutSeconds > 0 {
+			remaining := s.opts.IdleTimeoutSeconds - int(time.Since(s.lastRunAt).Seconds())
+			if remaining < 0 {
+				remaining = 0
+			}
+			summary.IdleRemainingSeconds = &remaining
+		}
+		s.mu.RUnlock()
+
+		summaries = append(summaries, summary)
+		return true
+	})
+	return summaries
 }
 
 // StdoutCallback is called for each line of stdout output during Run.
@@ -378,12 +425,12 @@ func (r *IsolatedRunner) DeleteIsolatedSession(id string) error {
 	defer s.mu.Unlock()
 
 	if err := s.stop(); err != nil {
-		log.Warning("stop isolated session %s: %v", id, err)
+		log.Warn("stop isolated session %s: %v", id, err)
 	}
 
 	if s.upperID != "" {
 		if err := r.upperMgr.Remove(s.upperID); err != nil {
-			log.Warning("remove upper dir for session %s: %v", id, err)
+			log.Warn("remove upper dir for session %s: %v", id, err)
 		}
 	}
 
@@ -467,21 +514,102 @@ func (r *IsolatedRunner) validateExtraWritable(paths []string) error {
 	if len(r.allowedWritable) == 0 {
 		return fmt.Errorf("extra_writable not allowed: no paths in allowlist")
 	}
-	for _, p := range paths {
-		cleaned := filepath.Clean(p)
-		found := false
-		for _, allowed := range r.allowedWritable {
-			allowedClean := filepath.Clean(allowed)
-			if cleaned == allowedClean || strings.HasPrefix(cleaned, allowedClean+"/") {
-				found = true
-				break
-			}
+	for i := range paths {
+		resolved, err := r.resolveAllowedSource(paths[i])
+		if err != nil {
+			return fmt.Errorf("extra_writable path %q: %w", paths[i], err)
 		}
-		if !found {
-			return fmt.Errorf("extra_writable path %q not in allowlist", p)
-		}
+		// Mount the fully-resolved path so validation and mount target agree.
+		paths[i] = resolved
 	}
 	return nil
+}
+
+// resolveAllowedSource requires src to exist, fully resolves symlinks, checks
+// the resolved real path against the writable allowlist, and returns it. It is
+// shared by extra_writable and binds so both enforce identical semantics:
+//   - the source must already exist (bwrap --bind requires this anyway), and
+//   - the allowlist is enforced against the fully-resolved real path, leaving
+//     no unresolved suffix that could be swapped to an out-of-allowlist symlink
+//     between validation and bwrap start.
+func (r *IsolatedRunner) resolveAllowedSource(src string) (string, error) {
+	if src == "" {
+		return "", fmt.Errorf("source is required")
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(src))
+	if err != nil {
+		return "", fmt.Errorf("must be an existing path: %w", err)
+	}
+	if !r.pathAllowedResolved(resolved) {
+		return "", fmt.Errorf("not in allowlist")
+	}
+	return resolved, nil
+}
+
+// validateBinds checks that every bind's source path falls within the writable
+// allowlist. Read-only binds are validated too, so read access to arbitrary host
+// paths outside the allowlist is not possible.
+//
+// The source of each bind must already exist and is fully resolved via
+// filepath.EvalSymlinks; the resolved real path is written back in place. This
+// enforces the allowlist against the real target and closes the TOCTOU window:
+// bwrap is handed a fully-resolved path with no unresolved suffix, so a symlink
+// created or swapped between validation and bwrap start cannot redirect the
+// mount outside the allowlist. (bwrap's --bind requires the source to exist, so
+// this adds no functional restriction.)
+func (r *IsolatedRunner) validateBinds(binds []isolation.BindMount) error {
+	if len(binds) == 0 {
+		return nil
+	}
+	if len(r.allowedWritable) == 0 {
+		return fmt.Errorf("binds not allowed: no paths in allowlist")
+	}
+	for i := range binds {
+		resolved, err := r.resolveAllowedSource(binds[i].Source)
+		if err != nil {
+			return fmt.Errorf("binds source %q: %w", binds[i].Source, err)
+		}
+		// Mount the fully-resolved path so validation and mount target agree.
+		binds[i].Source = resolved
+	}
+	return nil
+}
+
+// pathAllowedResolved reports whether an already symlink-resolved path is equal
+// to, or nested under, any allowlist entry. Allowlist entries are themselves
+// symlink-resolved so the comparison is between real paths on both sides.
+func (r *IsolatedRunner) pathAllowedResolved(resolved string) bool {
+	for _, allowed := range r.allowedWritable {
+		allowedClean := resolveSymlinks(filepath.Clean(allowed))
+		if resolved == allowedClean || strings.HasPrefix(resolved, allowedClean+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveSymlinks returns the real path of p with symlinks resolved. Because p
+// (or a leading component) may not exist yet, it resolves the longest existing
+// prefix and re-appends the remaining components, so a symlinked ancestor is
+// still followed while a not-yet-created leaf is preserved.
+func resolveSymlinks(p string) string {
+	if p == "" {
+		return p
+	}
+	remaining := ""
+	cur := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Clean(filepath.Join(resolved, remaining))
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the root without an existing prefix; fall back to lexical.
+			return p
+		}
+		remaining = filepath.Join(filepath.Base(cur), remaining)
+		cur = parent
+	}
 }
 
 // shellescape wraps s in single quotes, escaping embedded single quotes.

@@ -22,14 +22,22 @@ export interface EnvPassthroughSpec {
   keys?: string[];
 }
 
+export interface BindMount {
+  source: string;
+  dest?: string;
+  readonly?: boolean;
+}
+
 export interface CreateIsolatedSessionRequest {
   workspace: IsolatedWorkspaceSpec;
   profile?: "strict" | "balanced";
   extra_writable?: string[];
+  binds?: BindMount[];
   share_net?: boolean;
   env_passthrough?: EnvPassthroughSpec;
   uid?: number;
   gid?: number;
+  uid_mode?: "setpriv" | "userns";
   idle_timeout_seconds?: number;
 }
 
@@ -57,4 +65,16 @@ export interface IsolatedCapabilities {
   message?: string;
   commit_supported: boolean;
   diff_supported: boolean;
+}
+
+export interface IsolatedSessionSummary {
+  session_id: string;
+  status: string;
+  created_at?: string;
+  last_run_at?: string;
+  idle_remaining_seconds?: number;
+}
+
+export interface ListIsolatedSessionsResponse {
+  sessions?: IsolatedSessionSummary[];
 }

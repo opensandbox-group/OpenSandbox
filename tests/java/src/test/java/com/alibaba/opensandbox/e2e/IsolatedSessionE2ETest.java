@@ -27,6 +27,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.MoveEntry;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SearchEntry;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SetPermissionEntry;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry;
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest;
@@ -97,7 +98,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 sandbox.isolation()
                         .create(new CreateIsolatedSessionRequest(
                                 new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null));
+                                "balanced", null, null, null, null, null, null, null, null));
         assertNotNull(session.getSessionId());
 
         var state = session.get();
@@ -113,7 +114,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 sandbox.isolation()
                         .create(new CreateIsolatedSessionRequest(
                                 new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null));
+                                "balanced", null, null, null, null, null, null, null, null));
         try {
             Execution exec = session.run(new IsolatedRunRequest("echo hello-isolation", null, null));
             assertTrue(stdoutText(exec).contains("hello-isolation"));
@@ -129,7 +130,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 sandbox.isolation()
                         .create(new CreateIsolatedSessionRequest(
                                 new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null));
+                                "balanced", null, null, null, null, null, null, null, null));
         try {
             Execution exec = session.run(new IsolatedRunRequest("echo $$", null, null));
             int pid = Integer.parseInt(stdoutText(exec).trim());
@@ -146,7 +147,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 sandbox.isolation()
                         .create(new CreateIsolatedSessionRequest(
                                 new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null));
+                                "balanced", null, null, null, null, null, null, null, null));
         try {
             Execution exec =
                     session.run(new IsolatedRunRequest(
@@ -166,7 +167,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 sandbox.isolation()
                         .create(new CreateIsolatedSessionRequest(
                                 new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null));
+                                "balanced", null, null, null, null, null, null, null, null));
         try {
             session.run(new IsolatedRunRequest("export PERSIST_VAR=abc123", null, null));
             Execution exec = session.run(new IsolatedRunRequest("echo $PERSIST_VAR", null, null));
@@ -185,12 +186,12 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 sandbox.isolation()
                         .create(new CreateIsolatedSessionRequest(
                                 new IsolatedWorkspaceSpec("/workspace", "rw"),
-                                "strict", null, null, null, null, null, null));
+                                "strict", null, null, null, null, null, null, null, null));
         IsolationSession sessionB =
                 sandbox.isolation()
                         .create(new CreateIsolatedSessionRequest(
                                 new IsolatedWorkspaceSpec("/workspace", "rw"),
-                                "strict", null, null, null, null, null, null));
+                                "strict", null, null, null, null, null, null, null, null));
         try {
             sessionA.run(new IsolatedRunRequest(
                     "echo secret > /tmp/isolated_test_file.txt", null, null));
@@ -212,7 +213,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         return sandbox.isolation()
                 .create(new CreateIsolatedSessionRequest(
                         new IsolatedWorkspaceSpec(path, mode),
-                        "balanced", null, null, null, null, null, null));
+                        "balanced", null, null, null, null, null, null, null, null));
     }
 
     private IsolationSession createSession(String mode) {
@@ -695,7 +696,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     @Order(33)
     void testRunOnce() {
         Execution exec = sandbox.isolation()
-                .runOnce("echo runonce-e2e", "/tmp", "rw", null, null, null, null);
+                .runOnce("echo runonce-e2e", "/tmp", "rw", null, null, null, null, null);
         assertTrue(stdoutText(exec).contains("runonce-e2e"));
     }
 
@@ -710,6 +711,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                         Map.of("E2E_RUN_ONCE", "kt-value"),
                         null,
                         null,
+                        null,
                         null);
         assertTrue(stdoutText(exec).contains("kt-value"));
     }
@@ -720,7 +722,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         String output = sandbox.isolation().withSession(
                 new CreateIsolatedSessionRequest(
                         new IsolatedWorkspaceSpec("/tmp", "rw"),
-                        "balanced", null, null, null, null, null, null),
+                        "balanced", null, null, null, null, null, null, null, null),
                 session -> {
                     session.run(new IsolatedRunRequest("export WS_VAR=with-session-kt", null, null));
                     Execution exec = session.run(new IsolatedRunRequest("echo $WS_VAR", null, null));
@@ -735,12 +737,103 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         String output = sandbox.isolation().withSession(
                 new CreateIsolatedSessionRequest(
                         new IsolatedWorkspaceSpec("/tmp", "rw"),
-                        "balanced", null, null, null, null, null, null),
+                        "balanced", null, null, null, null, null, null, null, null),
                 session -> {
                     session.run(new IsolatedRunRequest("echo step1 > /tmp/ws_test_kt.txt", null, null));
                     Execution exec = session.run(new IsolatedRunRequest("cat /tmp/ws_test_kt.txt", null, null));
                     return stdoutText(exec);
                 });
         assertTrue(output.contains("step1"));
+    }
+
+    // ── Bind mount tests (explicit source->dest binds) ─────────────────
+
+    @Test
+    @Order(37)
+    void testBindReadWriteHostVisible() {
+        long ts = System.currentTimeMillis();
+        // Source must be within the execd writable allowlist (e.g. /data).
+        String srcDir = "/data/bind_rw_" + ts;
+        String dest = "/mnt/bind_rw";
+        String fileName = "from_sandbox.txt";
+        String content = "bind-rw-visible-on-host";
+
+        // Create the source dir and the destination mount point (bwrap binds
+        // onto an existing dir; it cannot create one under the read-only root).
+        sandbox.commands().run("mkdir -p " + srcDir + " " + dest);
+
+        IsolationSession session =
+                sandbox.isolation()
+                        .create(new CreateIsolatedSessionRequest(
+                                new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                "balanced",
+                                null,
+                                List.of(new BindMount(srcDir, dest, null)),
+                                null, null, null, null, null, null));
+        try {
+            Execution exec = session.run(new IsolatedRunRequest(
+                    "echo -n " + content + " > " + dest + "/" + fileName
+                            + " && cat " + dest + "/" + fileName,
+                    null, null));
+            assertTrue(stdoutText(exec).contains(content));
+
+            Execution hostCheck = sandbox.commands().run("cat " + srcDir + "/" + fileName);
+            assertTrue(stdoutText(hostCheck).contains(content));
+        } finally {
+            session.delete();
+            sandbox.commands().run("rm -rf " + srcDir);
+        }
+    }
+
+    @Test
+    @Order(38)
+    void testBindIllegalRejected() {
+        assertThrows(
+                SandboxException.class,
+                () -> sandbox.isolation()
+                        .create(new CreateIsolatedSessionRequest(
+                                new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                "balanced",
+                                null,
+                                // /etc is not in the writable allowlist.
+                                List.of(new BindMount("/etc", "/mnt/etc", null)),
+                                null, null, null, null, null, null)));
+    }
+
+    @Test
+    @Order(39)
+    void testBindReadOnlyReadable() {
+        long ts = System.currentTimeMillis();
+        String srcDir = "/data/bind_ro_" + ts;
+        String dest = "/mnt/bind_ro";
+        String fileName = "host_created.txt";
+        String content = "bind-ro-host-content";
+
+        sandbox.commands().run(
+                "mkdir -p " + srcDir + " " + dest + " && echo -n " + content + " > " + srcDir + "/" + fileName);
+
+        IsolationSession session =
+                sandbox.isolation()
+                        .create(new CreateIsolatedSessionRequest(
+                                new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                "balanced",
+                                null,
+                                List.of(new BindMount(srcDir, dest, true)),
+                                null, null, null, null, null, null));
+        try {
+            Execution exec = session.run(new IsolatedRunRequest("cat " + dest + "/" + fileName, null, null));
+            assertTrue(stdoutText(exec).contains(content));
+
+            Execution write = session.run(new IsolatedRunRequest(
+                    "echo x > " + dest + "/newfile.txt 2>&1; echo EXIT=$?", null, null));
+            String text = stdoutText(write);
+            assertTrue(
+                    text.contains("EXIT=1") || text.contains("Read-only")
+                            || text.contains("read-only") || text.contains("Permission denied"),
+                    "expected write to fail through read-only bind, got: " + text);
+        } finally {
+            session.delete();
+            sandbox.commands().run("rm -rf " + srcDir);
+        }
     }
 }

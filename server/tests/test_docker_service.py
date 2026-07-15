@@ -52,6 +52,7 @@ from opensandbox_server.services.constants import (
     SandboxErrorCodes,
 )
 from opensandbox_server.services.docker import DockerSandboxService
+from opensandbox_server.services.docker.metadata import DockerMetadataStore
 from opensandbox_server.services.helpers import (
     parse_gpu_request,
     parse_memory_limit,
@@ -69,6 +70,7 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
     PVC,
     ResourceLimits,
+    RenewSandboxExpirationRequest,
     SandboxStatus,
     Volume,
 )
@@ -1348,6 +1350,25 @@ def test_expire_not_found_attempts_windows_oem_volume_cleanup():
     mock_remove.assert_called_once_with("sandbox-missing")
     mock_cleanup_oem.assert_called_once_with("sandbox-missing", None)
 
+
+def test_expire_not_found_deletes_persisted_expiration_override(tmp_path):
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    service._metadata_store.set_expiration("sandbox-missing", datetime(2030, 1, 1, tzinfo=timezone.utc))
+
+    with (
+        patch.object(
+            service,
+            "_get_container_by_sandbox_id",
+            side_effect=HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={}),
+        ),
+        patch.object(service, "_remove_expiration_tracking"),
+        patch.object(service, "_cleanup_windows_oem_volume"),
+    ):
+        service._expire_sandbox("sandbox-missing")
+
+    assert service._metadata_store.get_expiration("sandbox-missing") is None
+
 def test_prepare_creation_context_allows_manual_cleanup():
     service = DockerSandboxService(config=_app_config())
     request = CreateSandboxRequest(
@@ -1703,7 +1724,7 @@ async def test_create_sandbox_windows_profile_injects_runtime_defaults(mock_dock
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1786,7 +1807,7 @@ async def test_create_sandbox_windows_profile_rejects_missing_runtime_devices(mo
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1825,7 +1846,7 @@ async def test_create_sandbox_windows_profile_rejects_below_minimum_resource_lim
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1862,7 +1883,7 @@ async def test_create_sandbox_windows_profile_accepts_dockur_demo_like_request(m
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1916,7 +1937,7 @@ async def test_create_sandbox_windows_profile_with_network_policy_maps_windows_p
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     cfg.egress = EgressConfig(image="opensandbox/egress:latest")
     service = DockerSandboxService(config=cfg)
@@ -2104,6 +2125,85 @@ def test_renew_expiration_rejects_manual_cleanup_sandbox():
 
     assert exc_info.value.status_code == status.HTTP_409_CONFLICT
     assert exc_info.value.detail["message"] == "Sandbox manual-id does not have automatic expiration enabled."
+
+
+def test_renew_expiration_persists_override_when_label_refresh_fails(tmp_path):
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    container = MagicMock()
+    container.attrs = {
+        "Config": {
+            "Labels": {
+                SANDBOX_ID_LABEL: "sandbox-1",
+                SANDBOX_EXPIRES_AT_LABEL: datetime(2026, 7, 9, tzinfo=timezone.utc).isoformat(),
+            }
+        }
+    }
+    new_expiration = datetime.now(timezone.utc) + timedelta(hours=2)
+    request = RenewSandboxExpirationRequest(expiresAt=new_expiration)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=container),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+        patch.object(service, "_update_container_labels", side_effect=TypeError("labels unsupported")),
+    ):
+        response = service.renew_expiration("sandbox-1", request)
+
+    mock_schedule.assert_called_once_with("sandbox-1", new_expiration)
+    assert response.expires_at == new_expiration
+    assert service._metadata_store.get_expiration("sandbox-1") == new_expiration.isoformat()
+
+
+def test_get_tracked_expiration_prefers_persisted_override(tmp_path):
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    persisted = datetime.now(timezone.utc) + timedelta(hours=3)
+    service._metadata_store.set_expiration("sandbox-1", persisted)
+    labels = {SANDBOX_EXPIRES_AT_LABEL: datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()}
+
+    assert service._get_tracked_expiration("sandbox-1", labels) == persisted
+
+
+def test_restore_existing_sandboxes_prefers_persisted_expiration_override(tmp_path):
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    persisted = datetime.now(timezone.utc) + timedelta(hours=1)
+    service._metadata_store.set_expiration("sandbox-1", persisted)
+    container = MagicMock()
+    container.attrs = {
+        "Config": {
+            "Labels": {
+                SANDBOX_ID_LABEL: "sandbox-1",
+                SANDBOX_EXPIRES_AT_LABEL: datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+            }
+        }
+    }
+
+    with (
+        patch.object(service.docker_client.containers, "list", return_value=[container]),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        service._restore_existing_sandboxes()
+
+    mock_schedule.assert_called_once_with("sandbox-1", persisted)
+
+
+def test_expire_sandbox_renewed_reschedules_timer():
+    service = DockerSandboxService(config=_app_config())
+    current_expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    container = MagicMock()
+    container.attrs = {"Config": {"Labels": {SANDBOX_ID_LABEL: "sandbox-1"}}}
+    service._sandbox_expirations["sandbox-1"] = current_expires
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=container),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        service._expire_sandbox("sandbox-1")
+
+    mock_schedule.assert_called_once_with("sandbox-1", current_expires, update_expiration=False)
+    container.kill.assert_not_called()
+    container.remove.assert_not_called()
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")

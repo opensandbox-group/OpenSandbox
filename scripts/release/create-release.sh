@@ -29,7 +29,6 @@ Required:
                         python/code-interpreter
                         python/mcp/sandbox
                         java/sandbox
-                        java/code-interpreter
                         csharp/sandbox
                         csharp/code-interpreter
                         sdks/sandbox/go
@@ -352,15 +351,9 @@ case "$TARGET" in
     ;;
   java/sandbox)
     TAG_NEEDS_V=true
-    DISPLAY_NAME="Java Sandbox SDK"
+    DISPLAY_NAME="Java/Kotlin SDKs"
     WORKFLOW_HINT=".github/workflows/publish-java-sdks.yml"
-    TARGET_PATH_FILTERS=("sdks/sandbox/kotlin" "specs/sandbox-lifecycle.yml")
-    ;;
-  java/code-interpreter)
-    TAG_NEEDS_V=true
-    DISPLAY_NAME="Java Code Interpreter SDK"
-    WORKFLOW_HINT=".github/workflows/publish-java-sdks.yml"
-    TARGET_PATH_FILTERS=("sdks/code-interpreter/kotlin" "specs/execd-api.yaml")
+    TARGET_PATH_FILTERS=("sdks/sandbox/kotlin" "specs/sandbox-lifecycle.yml" "specs/execd-api.yaml")
     ;;
   csharp/sandbox)
     TAG_NEEDS_V=true
@@ -675,6 +668,11 @@ if [[ "$DRY_RUN" == true ]]; then
 fi
 
 if git rev-parse -q --verify "refs/tags/${NEW_TAG}" >/dev/null; then
+  existing_tag_commit="$(git rev-parse "${NEW_TAG}^{commit}")"
+  head_commit="$(git rev-parse 'HEAD^{commit}')"
+  if [[ "$existing_tag_commit" != "$head_commit" ]]; then
+    die "Existing tag '${NEW_TAG}' resolves to ${existing_tag_commit}, but HEAD resolves to ${head_commit}."
+  fi
   warn "Tag '${NEW_TAG}' already exists. Reusing existing tag."
 else
   if [[ "$SIGN_TAG" == true ]]; then

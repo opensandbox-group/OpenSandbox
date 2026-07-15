@@ -86,7 +86,7 @@ func NewBwrap(cfg Config) Isolator {
 
 	// Pre-generate seccomp BPF once at startup.
 	if bpf, err := generateSeccompDenyBPF(cfg.Seccomp); err != nil {
-		log.Warning("seccomp: failed to generate BPF: %v", err)
+		log.Warn("seccomp: failed to generate BPF: %v", err)
 	} else {
 		seccompBPF = bpf
 	}

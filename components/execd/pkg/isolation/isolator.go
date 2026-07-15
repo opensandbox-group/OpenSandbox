@@ -94,6 +94,16 @@ type EnvSpec struct {
 	Keys []string // allowlist (mode=allow) or denylist (mode=deny)
 }
 
+// BindMount describes an additional host path bind-mounted into the namespace
+// with an explicit source-to-destination mapping. Unlike WrapOptions.ExtraWritable
+// (which always mounts Source==Dest read-write), a BindMount may map a distinct
+// destination and be mounted read-only.
+type BindMount struct {
+	Source   string // host path (required)
+	Dest     string // mount destination; defaults to Source when empty
+	ReadOnly bool   // true → --ro-bind; false → --bind
+}
+
 // Capabilities describes what the isolator can and cannot do.
 type Capabilities struct {
 	Available              bool
@@ -117,6 +127,7 @@ type WrapOptions struct {
 	Profile        Profile
 	Workspace      WorkspaceSpec
 	ExtraWritable  []string
+	Binds          []BindMount
 	ShareNet       bool
 	EnvPassthrough EnvSpec
 	Uid, Gid       *uint32

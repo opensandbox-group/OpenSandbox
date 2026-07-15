@@ -33,6 +33,7 @@ from opensandbox.models.filesystem import (
     WriteEntry,
 )
 from opensandbox.models.isolated import (
+    BindMount,
     CreateIsolatedSessionRequest,
     IsolatedRunOpts,
     IsolatedWorkspaceSpec,
@@ -111,6 +112,30 @@ class TestIsolatedSessionE2E:
         assert state.status == "active"
 
         await session.delete()
+
+    async def test_list_sessions(self):
+        session_a = await self._create_session()
+        session_b = await self._create_session()
+        session_b_deleted = False
+        try:
+            sessions = await self.sandbox.isolation.list()
+            by_id = {s.session_id: s for s in sessions}
+
+            assert session_a.session_id in by_id, "session_a should appear in list"
+            assert session_b.session_id in by_id, "session_b should appear in list"
+            assert by_id[session_a.session_id].status == "active"
+            assert by_id[session_a.session_id].created_at is not None
+
+            # After deleting a session it should no longer be listed.
+            await session_b.delete()
+            session_b_deleted = True
+            remaining = await self.sandbox.isolation.list()
+            remaining_ids = {s.session_id for s in remaining}
+            assert session_b.session_id not in remaining_ids
+        finally:
+            await session_a.delete()
+            if not session_b_deleted:
+                await session_b.delete()
 
     async def test_run_echo(self):
         session = await self._create_session()
@@ -612,3 +637,82 @@ class TestIsolatedSessionE2E:
             await session.run("echo step1 > /tmp/ctx_test.txt")
             result = await session.run("cat /tmp/ctx_test.txt")
             assert "step1" in result.text
+
+    # ── Bind mount tests (explicit source->dest binds) ─────────────────
+
+    async def test_bind_read_write_host_visible(self):
+        """Legal RW bind: sandbox writes at dest are visible on host at source."""
+        ts = int(time.time() * 1000)
+        # Source must be within the execd writable allowlist (e.g. /data).
+        src_dir = f"/data/bind_rw_{ts}"
+        dest = "/mnt/bind_rw"
+        file_name = "from_sandbox.txt"
+        content = "bind-rw-visible-on-host"
+
+        # Create the source dir and the destination mount point (bwrap binds
+        # onto an existing dir; it cannot create one under the read-only root).
+        await self.sandbox.commands.run(f"mkdir -p {src_dir} {dest}")
+
+        session = await self.sandbox.isolation.create(
+            CreateIsolatedSessionRequest(
+                workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
+                binds=[BindMount(source=src_dir, dest=dest)],
+            )
+        )
+        try:
+            result = await session.run(
+                f"echo -n {content} > {dest}/{file_name} && cat {dest}/{file_name}"
+            )
+            assert content in result.text
+
+            host_check = await self.sandbox.commands.run(f"cat {src_dir}/{file_name}")
+            assert content in host_check.text
+        finally:
+            await session.delete()
+            await self.sandbox.commands.run(f"rm -rf {src_dir}")
+
+    async def test_bind_illegal_rejected(self):
+        """Bind whose source is outside the allowlist is rejected on create."""
+        with pytest.raises(SandboxApiException):
+            await self.sandbox.isolation.create(
+                CreateIsolatedSessionRequest(
+                    workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
+                    # /etc is not in the writable allowlist.
+                    binds=[BindMount(source="/etc", dest="/mnt/etc")],
+                )
+            )
+
+    async def test_bind_read_only_readable(self):
+        """Read-only bind: host-created file is readable inside the sandbox."""
+        ts = int(time.time() * 1000)
+        src_dir = f"/data/bind_ro_{ts}"
+        dest = "/mnt/bind_ro"
+        file_name = "host_created.txt"
+        content = "bind-ro-host-content"
+
+        await self.sandbox.commands.run(
+            f"mkdir -p {src_dir} {dest} && echo -n {content} > {src_dir}/{file_name}"
+        )
+
+        session = await self.sandbox.isolation.create(
+            CreateIsolatedSessionRequest(
+                workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
+                binds=[BindMount(source=src_dir, dest=dest, readonly=True)],
+            )
+        )
+        try:
+            result = await session.run(f"cat {dest}/{file_name}")
+            assert content in result.text
+
+            write = await session.run(
+                f"echo x > {dest}/newfile.txt 2>&1; echo EXIT=$?"
+            )
+            assert (
+                "EXIT=1" in write.text
+                or "Read-only" in write.text
+                or "read-only" in write.text
+                or "Permission denied" in write.text
+            )
+        finally:
+            await session.delete()
+            await self.sandbox.commands.run(f"rm -rf {src_dir}")

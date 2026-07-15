@@ -12,7 +12,11 @@ permissions:
   artifact-metadata: write
 
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+
   publish-pypi:
+    needs: release-preflight
     if: startsWith(github.ref, 'refs/tags/cli/v')
     runs-on: ubuntu-latest
     steps:

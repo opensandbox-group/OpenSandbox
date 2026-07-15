@@ -21,6 +21,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolat
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionSummary
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationSession
@@ -52,6 +53,8 @@ class IsolationRunOnceTest {
             override fun create(request: CreateIsolatedSessionRequest): IsolationSession = session
 
             override fun capabilities(): IsolatedCapabilities = IsolatedCapabilities()
+
+            override fun list(): List<IsolatedSessionSummary> = emptyList()
         }
     }
 

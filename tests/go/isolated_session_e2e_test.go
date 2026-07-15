@@ -77,6 +77,48 @@ func TestIsolationSessionLifecycle(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestIsolationListSessions(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	// Create two sessions and confirm both appear in the list.
+	sessionA, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	})
+	require.NoError(t, err)
+	defer sessionA.Delete(ctx)
+
+	sessionB, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	})
+	require.NoError(t, err)
+	defer sessionB.Delete(ctx)
+
+	sessions, err := sb.IsolationListSessions(ctx)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(sessions), 2)
+
+	ids := make(map[string]opensandbox.IsolatedSessionSummary, len(sessions))
+	for _, s := range sessions {
+		ids[s.SessionID] = s
+	}
+
+	sumA, okA := ids[sessionA.SessionID()]
+	require.True(t, okA, "sessionA should appear in list")
+	assert.Equal(t, "active", sumA.Status)
+	assert.False(t, sumA.CreatedAt.IsZero(), "created_at should be populated")
+
+	_, okB := ids[sessionB.SessionID()]
+	require.True(t, okB, "sessionB should appear in list")
+
+	// After deleting a session it should no longer be listed.
+	require.NoError(t, sessionB.Delete(ctx))
+	sessions, err = sb.IsolationListSessions(ctx)
+	require.NoError(t, err)
+	for _, s := range sessions {
+		assert.NotEqual(t, sessionB.SessionID(), s.SessionID, "deleted session should not be listed")
+	}
+}
+
 func TestIsolationRunEcho(t *testing.T) {
 	ctx, sb := createIsolatedTestSandbox(t)
 
@@ -1000,6 +1042,115 @@ func TestIsolationRunOnceWithEnvs(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	assert.Contains(t, exec.Text(), "run-once-val")
+}
+
+// ---------------------------------------------------------------------------
+// Bind mount tests (explicit source->dest binds)
+// ---------------------------------------------------------------------------
+
+// TestIsolationBindReadWriteHostVisible verifies a legal read-write bind:
+// data written inside the bwrap namespace at the bind destination is readable
+// on the host at the bind source.
+func TestIsolationBindReadWriteHostVisible(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	ts := time.Now().UnixMilli()
+	// Source must fall within the execd writable allowlist (e.g. /data).
+	srcDir := fmt.Sprintf("/data/bind_rw_%d", ts)
+	dest := "/mnt/bind_rw"
+	fileName := "from_sandbox.txt"
+	content := "bind-rw-visible-on-host"
+
+	// Host-side: create the bind source directory and the destination mount
+	// point (bwrap binds onto an existing dir; it cannot create one under the
+	// read-only root).
+	_, err := sb.RunCommand(ctx, fmt.Sprintf("mkdir -p %s %s", srcDir, dest), nil)
+	require.NoError(t, err)
+
+	session, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+		Binds: []opensandbox.BindMount{
+			{Source: srcDir, Dest: dest},
+		},
+	})
+	require.NoError(t, err)
+	defer session.Delete(ctx)
+
+	// Read back inside the namespace after writing (write + read in sandbox).
+	exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: fmt.Sprintf("echo -n %s > %s/%s && cat %s/%s", content, dest, fileName, dest, fileName),
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), content, "sandbox should read back what it wrote to the bind")
+
+	// Host-side: the write must be visible at the bind source.
+	hostExec, err := sb.RunCommand(ctx, fmt.Sprintf("cat %s/%s", srcDir, fileName), nil)
+	require.NoError(t, err)
+	assert.Contains(t, hostExec.Text(), content, "bind write should be visible on host")
+}
+
+// TestIsolationBindIllegalRejected verifies that a bind whose source is outside
+// the writable allowlist is rejected at session creation.
+func TestIsolationBindIllegalRejected(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	_, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+		Binds: []opensandbox.BindMount{
+			// /etc is not in the writable allowlist.
+			{Source: "/etc", Dest: "/mnt/etc"},
+		},
+	})
+	require.Error(t, err, "bind with source outside allowlist should be rejected")
+	assert.Contains(t, strings.ToLower(err.Error()), "allowlist",
+		"error should indicate the allowlist rejection, got: %v", err)
+}
+
+// TestIsolationBindReadOnlyReadable verifies a read-only bind: a host-created
+// file is readable inside the bwrap namespace via the read-only bind.
+func TestIsolationBindReadOnlyReadable(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	ts := time.Now().UnixMilli()
+	srcDir := fmt.Sprintf("/data/bind_ro_%d", ts)
+	dest := "/mnt/bind_ro"
+	fileName := "host_created.txt"
+	content := "bind-ro-host-content"
+
+	// Host-side: create the source dir (with a file to read), plus the
+	// destination mount point that bwrap will bind onto.
+	_, err := sb.RunCommand(ctx,
+		fmt.Sprintf("mkdir -p %s %s && echo -n %s > %s/%s", srcDir, dest, content, srcDir, fileName), nil)
+	require.NoError(t, err)
+
+	session, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+		Binds: []opensandbox.BindMount{
+			{Source: srcDir, Dest: dest, ReadOnly: true},
+		},
+	})
+	require.NoError(t, err)
+	defer session.Delete(ctx)
+
+	// Read the host-created file inside the namespace via the read-only bind.
+	exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: fmt.Sprintf("cat %s/%s", dest, fileName),
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), content, "read-only bind should be readable inside the sandbox")
+
+	// Writing through the read-only bind must fail.
+	writeExec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: fmt.Sprintf("echo x > %s/newfile.txt 2>&1; echo exit=$?", dest),
+	}, nil)
+	require.NoError(t, err)
+	text := writeExec.Text()
+	assert.True(t,
+		strings.Contains(text, "Read-only") ||
+			strings.Contains(text, "read-only") ||
+			strings.Contains(text, "Permission denied") ||
+			strings.Contains(text, "exit=1"),
+		"expected write to fail through read-only bind, got: %s", text)
 }
 
 func TestIsolationWithSessionE2E(t *testing.T) {

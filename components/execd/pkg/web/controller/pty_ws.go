@@ -107,7 +107,7 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 	//    evicting, so a bad or incomplete handshake cannot kill the current holder.
 	conn, err := wsUpgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 	if err != nil {
-		log.Warning("pty ws upgrade failed for session %s: %v", id, err)
+		log.Warn("pty ws upgrade failed for session %s: %v", id, err)
 		if locked {
 			session.UnlockWS()
 		}
@@ -140,7 +140,7 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 			startErr = session.StartPTY()
 		}
 		if startErr != nil {
-			log.Warning("pty start failed for session %s: %v", id, startErr)
+			log.Warn("pty start failed for session %s: %v", id, startErr)
 			writeErrFrame(conn, model.WSErrCodeStartFailed, startErr.Error())
 			_ = conn.Close()
 			session.UnlockWS()
@@ -236,7 +236,7 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		// No connMu needed — pump goroutines not yet started.
 		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 		if err2 := conn.WriteMessage(websocket.BinaryMessage, frame); err2 != nil {
-			log.Warning("pty ws send replay for session %s: %v", id, err2)
+			log.Warn("pty ws send replay for session %s: %v", id, err2)
 			return
 		}
 	}
@@ -251,7 +251,7 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		SessionID: id,
 		Mode:      mode,
 	}); err2 != nil {
-		log.Warning("pty ws send connected for session %s: %v", id, err2)
+		log.Warn("pty ws send connected for session %s: %v", id, err2)
 		return
 	}
 
@@ -330,7 +330,7 @@ func ptyStreamPump(r io.Reader, typeByte byte, name, id string, conn *websocket.
 			writeErr := conn.WriteMessage(websocket.BinaryMessage, frame[:1+n])
 			connMu.Unlock()
 			if writeErr != nil {
-				log.Warning("pty ws write %s for session %s: %v", name, id, writeErr)
+				log.Warn("pty ws write %s for session %s: %v", name, id, writeErr)
 				cancelOnce()
 				return
 			}
@@ -402,7 +402,7 @@ func ptyHandleTextMsg(session runtime.PTYSession, id string, data []byte, writeJ
 	case "resize":
 		if frame.Cols > 0 && frame.Rows > 0 {
 			if resErr := session.ResizePTY(uint16(frame.Cols), uint16(frame.Rows)); resErr != nil {
-				log.Warning("pty resize session %s: %v", id, resErr)
+				log.Warn("pty resize session %s: %v", id, resErr)
 			}
 		}
 	case "ping":

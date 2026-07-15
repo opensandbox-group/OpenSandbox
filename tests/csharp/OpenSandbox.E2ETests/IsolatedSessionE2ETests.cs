@@ -839,4 +839,87 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             });
         Assert.Contains("step1", output);
     }
+
+    // ── Bind mount tests (explicit source->dest binds) ─────────────────
+
+    [Fact]
+    public async Task TestBindReadWriteHostVisible()
+    {
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // Source must be within the execd writable allowlist (e.g. /data).
+        var srcDir = $"/data/bind_rw_{ts}";
+        var dest = "/mnt/bind_rw";
+        var fileName = "from_sandbox.txt";
+        var content = "bind-rw-visible-on-host";
+
+        // Create the source dir and the destination mount point (bwrap binds
+        // onto an existing dir; it cannot create one under the read-only root).
+        await _sandbox!.Commands.RunAsync($"mkdir -p {srcDir} {dest}");
+
+        var session = await _sandbox.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(
+                new IsolatedWorkspaceSpec("/tmp", "rw"),
+                Binds: new List<BindMount> { new BindMount(srcDir, dest) }));
+        try
+        {
+            var exec = await session.RunAsync(
+                $"echo -n {content} > {dest}/{fileName} && cat {dest}/{fileName}");
+            Assert.Contains(content, StdoutText(exec));
+
+            var hostCheck = await _sandbox.Commands.RunAsync($"cat {srcDir}/{fileName}");
+            Assert.Contains(content, StdoutText(hostCheck));
+        }
+        finally
+        {
+            await session.DeleteAsync();
+            await _sandbox.Commands.RunAsync($"rm -rf {srcDir}");
+        }
+    }
+
+    [Fact]
+    public async Task TestBindIllegalRejected()
+    {
+        await Assert.ThrowsAsync<SandboxApiException>(
+            () => _sandbox!.Isolation.CreateAsync(
+                new CreateIsolatedSessionRequest(
+                    new IsolatedWorkspaceSpec("/tmp", "rw"),
+                    // /etc is not in the writable allowlist.
+                    Binds: new List<BindMount> { new BindMount("/etc", "/mnt/etc") })));
+    }
+
+    [Fact]
+    public async Task TestBindReadOnlyReadable()
+    {
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var srcDir = $"/data/bind_ro_{ts}";
+        var dest = "/mnt/bind_ro";
+        var fileName = "host_created.txt";
+        var content = "bind-ro-host-content";
+
+        await _sandbox!.Commands.RunAsync(
+            $"mkdir -p {srcDir} {dest} && echo -n {content} > {srcDir}/{fileName}");
+
+        var session = await _sandbox.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(
+                new IsolatedWorkspaceSpec("/tmp", "rw"),
+                Binds: new List<BindMount> { new BindMount(srcDir, dest, true) }));
+        try
+        {
+            var exec = await session.RunAsync($"cat {dest}/{fileName}");
+            Assert.Contains(content, StdoutText(exec));
+
+            var write = await session.RunAsync(
+                $"echo x > {dest}/newfile.txt 2>&1; echo EXIT=$?");
+            var text = StdoutText(write);
+            Assert.True(
+                text.Contains("EXIT=1") || text.Contains("Read-only")
+                    || text.Contains("read-only") || text.Contains("Permission denied"),
+                $"expected write to fail through read-only bind, got: {text}");
+        }
+        finally
+        {
+            await session.DeleteAsync();
+            await _sandbox.Commands.RunAsync($"rm -rf {srcDir}");
+        }
+    }
 }

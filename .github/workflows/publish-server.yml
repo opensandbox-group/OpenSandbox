@@ -13,7 +13,11 @@ permissions:
   packages: write
 
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+
   publish-pypi:
+    needs: release-preflight
     if: startsWith(github.ref, 'refs/tags/server/v')
     runs-on: ubuntu-latest
     steps:
@@ -49,6 +53,7 @@ jobs:
           uv publish
 
   publish-image:
+    needs: release-preflight
     if: startsWith(github.ref, 'refs/tags/server/v')
     runs-on: ubuntu-latest
     steps:

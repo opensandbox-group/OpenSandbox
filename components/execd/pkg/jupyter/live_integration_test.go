@@ -24,25 +24,8 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 )
 
-// authTransport is a custom transport layer for adding authentication headers
-type authTransport struct {
-	token string
-	base  http.RoundTripper
-}
-
-// RoundTrip implements the http.RoundTripper interface, adding authentication headers to each request
-func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Clone the request to avoid modifying the original request
-	reqClone := req.Clone(req.Context())
-	// Add authentication header
-	reqClone.Header.Set("Authorization", "Token "+t.token)
-	// Send the request using the base transport layer
-	return t.base.RoundTrip(reqClone)
-}
-
 // TestLiveServerIntegration tests SDK integration with a real Jupyter server
 func TestLiveServerIntegration(t *testing.T) {
-	t.Skip()
 	// Get configuration from environment variables, use default values if not set
 	jupyterURL := getEnv("JUPYTER_URL", "")
 	jupyterToken := getEnv("JUPYTER_TOKEN", "")
@@ -55,9 +38,9 @@ func TestLiveServerIntegration(t *testing.T) {
 
 	// Create HTTP client with authentication capability
 	httpClient := &http.Client{
-		Transport: &authTransport{
-			token: jupyterToken,
-			base:  http.DefaultTransport,
+		Transport: &AuthTransport{
+			Token: jupyterToken,
+			Base:  http.DefaultTransport,
 		},
 	}
 
@@ -199,7 +182,7 @@ func TestLiveServerIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to connect to kernel: %v", err)
 		}
-		defer client.DisconnectFromKernel(kernelID)
+		defer client.DisconnectFromKernel()
 
 		// Execute simple code
 		code := "print('Hello, Jupyter!')\nresult = 2 + 2\nresult"
@@ -222,7 +205,7 @@ func TestLiveServerIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to connect to kernel: %v", err)
 		}
-		defer client.DisconnectFromKernel(kernelID)
+		defer client.DisconnectFromKernel()
 
 		// Execute simple code
 		code := "print(f'2 + 2 = {result}')\nresult"
@@ -245,7 +228,7 @@ func TestLiveServerIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to connect to kernel: %v", err)
 		}
-		defer client.DisconnectFromKernel(kernelID)
+		defer client.DisconnectFromKernel()
 
 		// Execute code that generates multiple output types
 		code := `
@@ -340,21 +323,4 @@ func getEnv(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
-}
-
-// Helper function: Truncate string
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-// Helper function: Get all keys from map
-func getKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }

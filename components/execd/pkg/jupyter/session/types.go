@@ -85,21 +85,6 @@ type KernelSpec struct {
 	ID string `json:"id,omitempty"`
 }
 
-// SessionUpdateRequest request to update an existing session
-type SessionUpdateRequest struct {
-	// Path is the new session path
-	Path string `json:"path,omitempty"`
-
-	// Name is the new session name
-	Name string `json:"name,omitempty"`
-
-	// Type is the new session type
-	Type string `json:"type,omitempty"`
-
-	// Kernel contains the new kernel information
-	Kernel *KernelSpec `json:"kernel,omitempty"`
-}
-
 // SessionListResponse represents the response for listing sessions
 type SessionListResponse []*Session
 

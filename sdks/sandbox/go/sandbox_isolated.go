@@ -91,6 +91,14 @@ func (s *Sandbox) IsolationCapabilities(ctx context.Context) (*IsolatedCapabilit
 	return s.execd.IsolatedCapabilities(ctx)
 }
 
+// IsolationListSessions lists all active isolated sessions.
+func (s *Sandbox) IsolationListSessions(ctx context.Context) ([]IsolatedSessionSummary, error) {
+	if s.execd == nil {
+		return nil, fmt.Errorf("opensandbox: execd client not initialized")
+	}
+	return s.execd.IsolatedList(ctx)
+}
+
 // Deprecated: Use IsolationCreate instead.
 func (s *Sandbox) IsolatedCreate(ctx context.Context, req CreateIsolatedSessionRequest) (*IsolatedSessionInfo, error) {
 	if s.execd == nil {

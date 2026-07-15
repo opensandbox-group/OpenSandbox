@@ -16,11 +16,13 @@ import type { CommandExecution } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import type { SandboxFiles } from "./filesystem.js";
 import type {
+  BindMount,
   CreateIsolatedSessionRequest,
   IsolatedCapabilities,
   IsolatedRunOpts,
   IsolatedSessionInfo,
   IsolatedSessionState,
+  IsolatedSessionSummary,
 } from "../models/isolated.js";
 
 export interface IsolationSession {
@@ -43,12 +45,14 @@ export interface RunOnceOpts {
   handlers?: ExecutionHandlers;
   profile?: "strict" | "balanced";
   shareNet?: boolean;
+  binds?: BindMount[];
   signal?: AbortSignal;
 }
 
 export interface IsolationService {
   create(request: CreateIsolatedSessionRequest): Promise<IsolationSession>;
   capabilities(): Promise<IsolatedCapabilities>;
+  list(): Promise<IsolatedSessionSummary[]>;
   /**
    * Create a session, run `code`, and delete the session (auto-cleanup).
    * Cleanup is best-effort and never masks the original error.

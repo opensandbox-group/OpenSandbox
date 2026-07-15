@@ -70,6 +70,8 @@ class _Request:
         self.method = "GET"
         self.path = "/api/v8/projects"
         self.headers = _Headers({})
+        self.raw_content: bytes | None = None
+        self.content = b""
 
 
 class _Response:
@@ -242,6 +244,290 @@ class SystemAddonRedactionTest(unittest.TestCase):
         system.responseheaders(flow)
 
         self.assertEqual("[REDACTED]", flow.response.headers.get("x-token-echo"))
+
+    def test_responseheaders_redacts_longer_values_first(self) -> None:
+        system = _load_system_module()
+        flow = _Flow()
+        flow.response.headers["x-token-echo"] = "prefix token-abc suffix"
+        flow.metadata[system.FLOW_REDACTIONS_KEY] = ["token", "token-abc"]
+
+        system.responseheaders(flow)
+
+        self.assertEqual("prefix [REDACTED] suffix", flow.response.headers.get("x-token-echo"))
+
+
+class SystemAddonSubstitutionTest(unittest.TestCase):
+    def _make_system_with_substitutions(self):
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "placeholder-api",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET", "POST"],
+                        "paths": ["/lookup", "/tenants/*", "/token", "/form"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__query_secret__",
+                            "value": "query secret+value",
+                            "in": ["query"],
+                        },
+                        {
+                            "placeholder": "__tenant_id__",
+                            "value": "tenant 42",
+                            "in": ["path"],
+                        },
+                        {
+                            "placeholder": "__body_secret__",
+                            "value": 'body "secret" \\ value',
+                            "in": ["body"],
+                        },
+                        {
+                            "placeholder": "__form_secret__",
+                            "value": "form secret+value",
+                            "in": ["body"],
+                        },
+                    ],
+                }
+            ],
+            [
+                "__query_secret__",
+                "query secret+value",
+                "__tenant_id__",
+                "tenant 42",
+                "__body_secret__",
+                'body "secret" \\ value',
+                "__form_secret__",
+                "form secret+value",
+            ],
+        )
+        return system
+
+    def test_query_substitution_url_encodes_value(self) -> None:
+        system = self._make_system_with_substitutions()
+        flow = _Flow()
+        flow.response = None
+        flow.request.path = "/lookup?api_key=__query_secret__&static=1"
+
+        system.request(flow)
+
+        self.assertEqual("/lookup?api_key=query%20secret%2Bvalue&static=1", flow.request.path)
+        self.assertIn("query secret+value", flow.metadata[system.FLOW_REDACTIONS_KEY])
+        self.assertNotIn("query secret+value", "\n".join(system.ctx.log.messages))
+
+    def test_path_substitution_rewrites_only_path(self) -> None:
+        system = self._make_system_with_substitutions()
+        flow = _Flow()
+        flow.response = None
+        flow.request.path = "/tenants/__tenant_id__/items?tenant=__tenant_id__"
+
+        system.request(flow)
+
+        self.assertEqual("/tenants/tenant%2042/items?tenant=__tenant_id__", flow.request.path)
+
+    def test_json_body_substitution_escapes_string_value_and_updates_length(self) -> None:
+        system = self._make_system_with_substitutions()
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.headers["transfer-encoding"] = "chunked"
+        flow.request.content = b'{"client_secret":"__body_secret__"}'
+
+        system.request(flow)
+
+        body = flow.request.content.decode("utf-8")
+        self.assertEqual({"client_secret": 'body "secret" \\ value'}, json.loads(body))
+        self.assertEqual(str(len(flow.request.content)), flow.request.headers.get("content-length"))
+        self.assertEqual("", flow.request.headers.get("transfer-encoding"))
+
+    def test_structured_json_body_substitution_escapes_string_value(self) -> None:
+        system = self._make_system_with_substitutions()
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/merge-patch+json; charset=utf-8"
+        flow.request.content = b'{"client_secret":"__body_secret__"}'
+
+        system.request(flow)
+
+        body = flow.request.content.decode("utf-8")
+        self.assertEqual({"client_secret": 'body "secret" \\ value'}, json.loads(body))
+
+    def test_form_body_substitution_url_encodes_value(self) -> None:
+        system = self._make_system_with_substitutions()
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/form"
+        flow.request.headers["content-type"] = "application/x-www-form-urlencoded"
+        flow.request.content = b"secret=__form_secret__"
+
+        system.request(flow)
+
+        self.assertEqual(b"secret=form+secret%2Bvalue", flow.request.content)
+
+    def test_body_substitution_does_not_rewrite_inserted_values(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "nested-body",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/token"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__a__",
+                            "value": "prefix __b__",
+                            "in": ["body"],
+                        },
+                        {
+                            "placeholder": "__b__",
+                            "value": "secret-b",
+                            "in": ["body"],
+                        },
+                    ],
+                }
+            ],
+            ["__a__", "prefix __b__", "__b__", "secret-b"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "text/plain"
+        flow.request.content = b"first=__a__&second=__b__"
+
+        system.request(flow)
+
+        self.assertEqual(b"first=prefix __b__&second=secret-b", flow.request.content)
+
+    def test_header_substitution_does_not_rewrite_injected_headers(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "header-substitution",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/lookup"],
+                    },
+                    "headers": [
+                        {"name": "Authorization", "value": "Bearer __header_secret__"}
+                    ],
+                    "substitutions": [
+                        {
+                            "placeholder": "__header_secret__",
+                            "value": "substituted-secret",
+                            "in": ["header"],
+                        },
+                    ],
+                }
+            ],
+            ["__header_secret__", "substituted-secret"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.path = "/lookup"
+        flow.request.headers["X-Template"] = "client __header_secret__"
+
+        system.request(flow)
+
+        self.assertEqual("client substituted-secret", flow.request.headers.get("X-Template"))
+        self.assertEqual("Bearer __header_secret__", flow.request.headers.get("Authorization"))
+
+    def test_compressed_body_substitution_is_skipped(self) -> None:
+        system = self._make_system_with_substitutions()
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.headers["content-encoding"] = "gzip"
+        flow.request.content = b'{"client_secret":"__body_secret__"}'
+
+        system.request(flow)
+
+        self.assertEqual(b'{"client_secret":"__body_secret__"}', flow.request.content)
+        self.assertNotIn(system.FLOW_REDACTIONS_KEY, flow.metadata)
+        self.assertIn("substitution miss", "\n".join(system.ctx.log.messages))
+
+    def test_rejected_path_substitution_log_does_not_include_secret_value(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "path-secret",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/tenants/*"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__tenant_id__",
+                            "value": "tenant/secret",
+                            "in": ["path"],
+                        },
+                    ],
+                }
+            ],
+            ["__tenant_id__", "tenant/secret", "tenant%2Fsecret"],
+        )
+        flow = _Flow()
+        flow.request.path = "/tenants/__tenant_id__/items"
+
+        system.request(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        logs = "\n".join(system.ctx.log.messages)
+        self.assertIn("path=[REDACTED]", logs)
+        self.assertNotIn("tenant/secret", logs)
+        self.assertNotIn("tenant%2Fsecret", logs)
+
+    def test_path_substitution_rejects_nested_encoded_separator(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "path-secret",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/tenants/*"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__tenant_id__",
+                            "value": "tenant%2Fsecret",
+                            "in": ["path"],
+                        },
+                    ],
+                }
+            ],
+            ["__tenant_id__", "tenant%2Fsecret", "tenant%252Fsecret"],
+        )
+        flow = _Flow()
+        flow.request.path = "/tenants/__tenant_id__/items"
+
+        system.request(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
 
 
 class SystemAddonPathTraversalTest(unittest.TestCase):

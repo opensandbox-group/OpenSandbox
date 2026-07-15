@@ -17,11 +17,13 @@
 package com.alibaba.opensandbox.sandbox.domain.services
 
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionState
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionSummary
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
 import org.slf4j.LoggerFactory
 
@@ -46,6 +48,8 @@ interface IsolationService {
 
     fun capabilities(): IsolatedCapabilities
 
+    fun list(): List<IsolatedSessionSummary>
+
     fun runOnce(
         code: String,
         workspace: String,
@@ -54,6 +58,7 @@ interface IsolationService {
         timeoutSeconds: Int? = null,
         profile: String? = null,
         shareNet: Boolean? = null,
+        binds: List<BindMount>? = null,
     ): Execution {
         val session =
             create(
@@ -61,6 +66,7 @@ interface IsolationService {
                     workspace = IsolatedWorkspaceSpec(path = workspace, mode = workspaceMode),
                     profile = profile,
                     shareNet = shareNet,
+                    binds = binds,
                 ),
             )
         try {

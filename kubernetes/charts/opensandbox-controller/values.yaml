@@ -150,14 +150,6 @@ crds:
   # -- Additional annotations to add to CRDs (will be merged with resource-policy if keep is true)
   annotations: {}
 
-# Network Policy configuration
-networkPolicy:
-  # -- Enable network policy
-  enabled: false
-  # -- Ingress rules for network policy
-  ingress: []
-  # -- Egress rules for network policy
-  egress: []
 
 # -- Additional environment variables for the controller
 extraEnv: []

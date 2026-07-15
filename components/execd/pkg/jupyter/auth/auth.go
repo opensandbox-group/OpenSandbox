@@ -14,31 +14,11 @@
 
 package auth
 
-import (
-	"fmt"
-	"net/url"
-)
-
 // Auth represents authentication configuration.
 type Auth struct {
 	Token    string
 	Username string
 	Password string
-}
-
-// NewTokenAuth builds a token-based config.
-func NewTokenAuth(token string) *Auth {
-	return &Auth{
-		Token: token,
-	}
-}
-
-// NewBasicAuth builds a basic-auth config.
-func NewBasicAuth(username, password string) *Auth {
-	return &Auth{
-		Username: username,
-		Password: password,
-	}
 }
 
 // Validate reports which auth mode is configured.
@@ -50,21 +30,4 @@ func (a *Auth) Validate() string {
 		return "basic"
 	}
 	return "none"
-}
-
-// AddAuthToURL appends token query parameters to the URL.
-func (a *Auth) AddAuthToURL(baseURL string) (string, error) {
-	parsedURL, err := url.Parse(baseURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse URL: %w", err)
-	}
-
-	query := parsedURL.Query()
-
-	if a.Token != "" {
-		query.Set("token", a.Token)
-	}
-
-	parsedURL.RawQuery = query.Encode()
-	return parsedURL.String(), nil
 }

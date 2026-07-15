@@ -14,26 +14,9 @@
  * limitations under the License.
  */
 
-repositories {
-    if (project.hasProperty("useMavenLocal")) {
-        mavenLocal()
-    }
-    mavenCentral()
-
-    val sandboxVersion = libs.versions.sandbox.get()
-    if (sandboxVersion.contains("SNAPSHOT", ignoreCase = true)) {
-        maven {
-            url = uri("https://central.sonatype.com/repository/maven-snapshots/")
-            mavenContent {
-                snapshotsOnly()
-            }
-        }
-    }
-}
-
 dependencies {
-    api(libs.sandbox)
-    implementation(libs.sandbox.api)
+    api(project(":sandbox"))
+    implementation(project(":sandbox-api"))
 
     api(libs.kotlin.stdlib)
     api(libs.slf4j.api)

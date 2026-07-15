@@ -318,6 +318,9 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             tracked = self._sandbox_expirations.get(sandbox_id)
         if tracked:
             return tracked
+        persisted = self._metadata_store.get_expiration(sandbox_id)
+        if persisted:
+            return parse_timestamp(persisted)
         label_value = labels.get(SANDBOX_EXPIRES_AT_LABEL)
         if label_value:
             return parse_timestamp(label_value)
@@ -338,6 +341,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 self._cleanup_windows_oem_volume(sandbox_id, None)
                 if fallback_mount_keys:
                     self._release_ossfs_mounts(fallback_mount_keys)
+                self._metadata_store.delete(sandbox_id)
             else:
                 with self._expiration_lock:
                     current_expires = self._sandbox_expirations.get(sandbox_id)
@@ -363,9 +367,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     )
             return
 
-        with self._expiration_lock:
-            current_expires = self._sandbox_expirations.get(sandbox_id)
+        labels = container.attrs.get("Config", {}).get("Labels") or {}
+        current_expires = self._get_tracked_expiration(sandbox_id, labels)
         if current_expires and current_expires > datetime.now(timezone.utc):
+            self._schedule_expiration(sandbox_id, current_expires, update_expiration=False)
             logger.info(
                 "Sandbox %s was renewed (expires %s); aborting expiration.",
                 sandbox_id,
@@ -373,7 +378,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             )
             return
 
-        labels = container.attrs.get("Config", {}).get("Labels") or {}
         mount_keys_raw = labels.get(SANDBOX_OSSFS_MOUNTS_LABEL, "[]")
         try:
             parsed_mount_keys = json.loads(mount_keys_raw)
@@ -452,13 +456,11 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
             mount_keys = _parse_and_accumulate_mount_refs(labels)
 
-            expires_label = labels.get(SANDBOX_EXPIRES_AT_LABEL)
-            if expires_label:
-                expires_at = parse_timestamp(expires_label)
-            elif self._has_manual_cleanup(labels):
-                restored += 1
-                continue
-            else:
+            expires_at = self._get_tracked_expiration(sandbox_id, labels)
+            if expires_at is None:
+                if self._has_manual_cleanup(labels):
+                    restored += 1
+                    continue
                 logger.warning(
                     "Sandbox %s missing expires-at label; skipping expiration scheduling.",
                     sandbox_id,
@@ -1165,8 +1167,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 },
             )
 
-        # Persist the new timeout in memory; it will also be respected on restart via _restore_existing_sandboxes
+        # Persist the new timeout in memory; the file-backed override also keeps renewals correct across restarts
         self._schedule_expiration(sandbox_id, new_expiration)
+        try:
+            self._metadata_store.set_expiration(sandbox_id, new_expiration)
+        except OSError as exc:
+            logger.warning("Failed to persist expiration override for sandbox %s: %s", sandbox_id, exc)
         labels[SANDBOX_EXPIRES_AT_LABEL] = new_expiration.isoformat()
         try:
             with self._docker_operation("update sandbox labels", sandbox_id):

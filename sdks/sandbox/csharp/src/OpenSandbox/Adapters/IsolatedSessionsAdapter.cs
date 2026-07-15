@@ -170,6 +170,20 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         return JsonSerializer.Deserialize<IsolatedCapabilities>(body, JsonOptions)!;
     }
 
+    public async Task<IReadOnlyList<IsolatedSessionSummary>> ListAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var url = $"{_baseUrl}/v1/isolated/sessions";
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
+        ApplyHeaders(httpRequest);
+
+        using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
+        await EnsureSuccessAsync(response, "list isolated sessions");
+        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        var result = JsonSerializer.Deserialize<ListIsolatedSessionsResponse>(body, JsonOptions)!;
+        return result.Sessions ?? new List<IsolatedSessionSummary>();
+    }
+
     internal ISandboxFiles CreateFilesForSession(string sessionId)
     {
         var sessionBaseUrl = $"{_baseUrl}/v1/isolated/session/{Uri.EscapeDataString(sessionId)}";

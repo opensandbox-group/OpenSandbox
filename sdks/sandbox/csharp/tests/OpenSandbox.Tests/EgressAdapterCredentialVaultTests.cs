@@ -58,7 +58,16 @@ public class EgressAdapterCredentialVaultTests
                     {
                         Type = "apiKey",
                         Name = "X-Test-Key",
-                        Credential = "api-token"
+                        Credential = "api-token",
+                        Substitutions =
+                        [
+                            new CredentialSubstitution
+                            {
+                                Credential = "api-token",
+                                Placeholder = "__api_token__",
+                                In = ["query", "body"]
+                            }
+                        ]
                     }
                 }
             ]);
@@ -77,6 +86,8 @@ public class EgressAdapterCredentialVaultTests
         root.GetProperty("credentials")[0].GetProperty("source").GetProperty("value").GetString().Should().Be("test-token");
         root.GetProperty("bindings")[0].GetProperty("auth").GetProperty("type").GetString().Should().Be("apiKey");
         root.GetProperty("bindings")[0].GetProperty("auth").GetProperty("name").GetString().Should().Be("X-Test-Key");
+        root.GetProperty("bindings")[0].GetProperty("auth").GetProperty("substitutions")[0].GetProperty("placeholder").GetString().Should().Be("__api_token__");
+        root.GetProperty("bindings")[0].GetProperty("auth").GetProperty("substitutions")[0].GetProperty("in")[1].GetString().Should().Be("body");
         root.GetProperty("bindings")[0].GetProperty("match").GetProperty("hosts")[0].GetString().Should().Be("api.example.com");
         state.Revision.Should().Be(3);
     }

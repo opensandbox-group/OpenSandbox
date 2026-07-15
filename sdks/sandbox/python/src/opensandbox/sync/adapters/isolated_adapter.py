@@ -35,6 +35,7 @@ from opensandbox.models.isolated import (
     IsolatedRunOpts,
     IsolatedSessionInfo,
     IsolatedSessionState,
+    IsolatedSessionSummary,
 )
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.converter.execution_event_dispatcher import (
@@ -136,6 +137,7 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
     CREATE_PATH = "/v1/isolated/session"
     SESSION_PATH = "/v1/isolated/session/{session_id}"
     RUN_PATH = "/v1/isolated/session/{session_id}/run"
+    SESSIONS_PATH = "/v1/isolated/sessions"
     CAPABILITIES_PATH = "/v1/isolated/capabilities"
 
     def __init__(
@@ -276,6 +278,23 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def list(self) -> list[IsolatedSessionSummary]:
+        try:
+            url = self._get_url(self.SESSIONS_PATH)
+            response = self._httpx_client.get(url)
+            if response.status_code != 200:
+                raise SandboxApiException(
+                    message=f"list isolated sessions failed. Status: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
+            data = response.json()
+            return [
+                IsolatedSessionSummary(**item) for item in data.get("sessions", [])
+            ]
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 

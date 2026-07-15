@@ -16,6 +16,7 @@ package model
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -35,6 +36,7 @@ type CreateIsolatedSessionRequest struct {
 	Profile            string             `json:"profile"` // "strict" | "balanced"
 	Workspace          WorkspaceSpec      `json:"workspace" validate:"required"`
 	ExtraWritable      []string           `json:"extra_writable,omitempty"`
+	Binds              []BindMount        `json:"binds,omitempty"`
 	ShareNet           *bool              `json:"share_net,omitempty"`
 	EnvPassthrough     EnvPassthroughSpec `json:"env_passthrough,omitempty"`
 	Uid                *uint32            `json:"uid,omitempty"`
@@ -53,6 +55,13 @@ type WorkspaceSpec struct {
 type EnvPassthroughSpec struct {
 	Mode string   `json:"mode,omitempty"` // "deny" | "allow"
 	Keys []string `json:"keys,omitempty"`
+}
+
+// BindMount describes an explicit source→dest bind mount into the namespace.
+type BindMount struct {
+	Source   string `json:"source" validate:"required"`
+	Dest     string `json:"dest,omitempty"`
+	ReadOnly bool   `json:"readonly,omitempty"`
 }
 
 // IsolatedCreateSessionResponse is the response for POST /v1/isolated/session.
@@ -91,6 +100,17 @@ func (r *CreateIsolatedSessionRequest) Validate() error {
 				r.UidMode)
 		}
 	}
+	for i, b := range r.Binds {
+		if b.Source == "" {
+			return fmt.Errorf("binds[%d].source is required", i)
+		}
+		if !strings.HasPrefix(b.Source, "/") {
+			return fmt.Errorf("binds[%d].source %q must be an absolute path", i, b.Source)
+		}
+		if b.Dest != "" && !strings.HasPrefix(b.Dest, "/") {
+			return fmt.Errorf("binds[%d].dest %q must be an absolute path", i, b.Dest)
+		}
+	}
 	return nil
 }
 
@@ -117,6 +137,20 @@ type SessionState struct {
 	CreatedAt            time.Time `json:"created_at"`
 	LastRunAt            time.Time `json:"last_run_at"`
 	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
+}
+
+// IsolatedSessionSummary describes a single session in a list response.
+type IsolatedSessionSummary struct {
+	SessionID            string    `json:"session_id"`
+	Status               string    `json:"status"` // "active" | "dead"
+	CreatedAt            time.Time `json:"created_at"`
+	LastRunAt            time.Time `json:"last_run_at"`
+	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
+}
+
+// ListIsolatedSessionsResponse is returned by GET /v1/isolated/sessions.
+type ListIsolatedSessionsResponse struct {
+	Sessions []IsolatedSessionSummary `json:"sessions"`
 }
 
 // Capabilities

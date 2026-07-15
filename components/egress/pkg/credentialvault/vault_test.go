@@ -81,6 +81,64 @@ func TestCredentialVaultCreateSanitizesAndRendersActiveSnapshot(t *testing.T) {
 	require.Contains(t, payload.Redactions, "secret-token")
 }
 
+func TestCredentialVaultRendersScopedSubstitutions(t *testing.T) {
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+
+	state, err := store.Create(CreateRequest{
+		Credentials: []Credential{
+			{
+				Name:   "client-secret",
+				Source: mustMarshal(map[string]string{"type": "inline", "value": `real "clé"&value😀`}),
+			},
+		},
+		Bindings: []Binding{
+			{
+				Name: "token-request",
+				Match: Match{
+					Hosts:   []string{"code.example.com"},
+					Methods: []string{"POST"},
+					Paths:   []string{"/oauth/token"},
+				},
+				Auth: Auth{
+					Type: "passthrough",
+					Substitutions: []Substitution{
+						{
+							Credential:  "client-secret",
+							Placeholder: "__client_secret__",
+							In:          []string{"body", "query", "path", "body"},
+						},
+					},
+				},
+			},
+		},
+	}, pol)
+	require.NoError(t, err)
+	require.Equal(t, "passthrough", state.Bindings[0].Auth.Type)
+	require.NotContains(t, string(mustMarshal(state)), "__client_secret__")
+	require.NotContains(t, string(mustMarshal(state)), `real "secret"+value`)
+
+	payload, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), payload.Revision)
+	require.Empty(t, payload.Bindings[0].Headers)
+	require.Equal(t, []InjectionSubstitution{
+		{
+			Placeholder: "__client_secret__",
+			Value:       `real "clé"&value😀`,
+			In:          []string{"body", "query", "path"},
+		},
+	}, payload.Bindings[0].Substitutions)
+	require.Contains(t, payload.Redactions, "__client_secret__")
+	require.Contains(t, payload.Redactions, `real "clé"&value😀`)
+	require.Contains(t, payload.Redactions, "real%20%22cl%C3%A9%22%26value%F0%9F%98%80")
+	require.Contains(t, payload.Redactions, "real%20%22cl%c3%a9%22%26value%f0%9f%98%80")
+	require.Contains(t, payload.Redactions, "real+%22cl%C3%A9%22%26value%F0%9F%98%80")
+	require.Contains(t, payload.Redactions, "real+%22cl%c3%a9%22%26value%f0%9f%98%80")
+	require.Contains(t, payload.Redactions, `real \"clé\"\u0026value😀`)
+	require.Contains(t, payload.Redactions, `real \"cl\u00e9\"&value\ud83d\ude00`)
+}
+
 func TestCredentialVaultAllowsDefaultAllowPolicyForCompatibility(t *testing.T) {
 	store := NewStore(nil, func() bool { return true })
 	pol := testCredentialPolicy(t, `{"defaultAction":"allow","egress":[]}`)
@@ -122,6 +180,99 @@ func TestCredentialVaultRejectsReservedAndDuplicateHeaderNamesCaseInsensitively(
 		},
 	})
 	require.ErrorContains(t, err, "duplicate custom header name")
+}
+
+func TestCredentialVaultRejectsInvalidSubstitution(t *testing.T) {
+	_, err := normalizeBinding(Binding{
+		Name:  "bad-substitution-surface",
+		Match: Match{Hosts: []string{"code.example.com"}},
+		Auth: Auth{
+			Type: "passthrough",
+			Substitutions: []Substitution{
+				{Credential: "token", Placeholder: "__token__", In: []string{"cookie"}},
+			},
+		},
+	})
+	require.ErrorContains(t, err, "unsupported target surface")
+
+	_, err = normalizeBinding(Binding{
+		Name:  "bad-substitution-placeholder",
+		Match: Match{Hosts: []string{"code.example.com"}},
+		Auth: Auth{
+			Type: "passthrough",
+			Substitutions: []Substitution{
+				{Credential: "token", Placeholder: " ", In: []string{"body"}},
+			},
+		},
+	})
+	require.ErrorContains(t, err, "requires placeholder")
+}
+
+func TestCredentialVaultPreservesSubstitutionPlaceholderWhitespace(t *testing.T) {
+	binding, err := normalizeBinding(Binding{
+		Name:  "literal-placeholder",
+		Match: Match{Hosts: []string{"code.example.com"}},
+		Auth: Auth{
+			Type: "passthrough",
+			Substitutions: []Substitution{
+				{Credential: "token", Placeholder: " __token__ ", In: []string{" Body ", "body"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, " __token__ ", binding.Auth.Substitutions[0].Placeholder)
+	require.Equal(t, []string{"body"}, binding.Auth.Substitutions[0].In)
+}
+
+func TestCredentialVaultRejectsDuplicateSubstitutionPlaceholderSurface(t *testing.T) {
+	_, err := normalizeBinding(Binding{
+		Name:  "duplicate-placeholder-surface",
+		Match: Match{Hosts: []string{"code.example.com"}},
+		Auth: Auth{
+			Type: "passthrough",
+			Substitutions: []Substitution{
+				{Credential: "primary", Placeholder: "__token__", In: []string{"body"}},
+				{Credential: "secondary", Placeholder: "__token__", In: []string{"query", "body"}},
+			},
+		},
+	})
+	require.ErrorContains(t, err, `duplicates placeholder "__token__" on body surface`)
+}
+
+func TestCredentialVaultRejectsPassthroughIgnoredFields(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		auth Auth
+		want string
+	}{
+		{
+			name: "credential",
+			auth: Auth{Type: "passthrough", Credential: "api-token"},
+			want: "does not accept credential",
+		},
+		{
+			name: "name",
+			auth: Auth{Type: "passthrough", Name: "X-Token"},
+			want: "does not accept name",
+		},
+		{
+			name: "headers",
+			auth: Auth{
+				Type:    "passthrough",
+				Headers: []CustomHeaderEntry{{Name: "X-Token", Credential: "api-token"}},
+			},
+			want: "does not accept headers",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := normalizeBinding(Binding{
+				Name:  "bad-passthrough",
+				Match: Match{Hosts: []string{"code.example.com"}},
+				Auth:  tc.auth,
+			})
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
 }
 
 func TestCredentialVaultRejectsNonFQDNBindingHosts(t *testing.T) {
@@ -187,6 +338,28 @@ func TestCredentialVaultPatchRejectsDeletingReferencedCredential(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, state.Credentials)
 	require.Empty(t, state.Bindings)
+}
+
+func TestCredentialVaultRejectsUnknownSubstitutionCredential(t *testing.T) {
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+
+	_, err := store.Create(CreateRequest{
+		Credentials: nil,
+		Bindings: []Binding{
+			{
+				Name:  "missing-substitution-credential",
+				Match: Match{Hosts: []string{"code.example.com"}},
+				Auth: Auth{
+					Type: "passthrough",
+					Substitutions: []Substitution{
+						{Credential: "missing", Placeholder: "__missing__", In: []string{"body"}},
+					},
+				},
+			},
+		},
+	}, pol)
+	require.ErrorContains(t, err, "references unknown credential")
 }
 
 func TestParseMitmproxyIgnoreHosts(t *testing.T) {

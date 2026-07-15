@@ -28,12 +28,14 @@ public static class IsolatedSessionsExtensions
         ExecutionHandlers? handlers = null,
         string? profile = null,
         bool? shareNet = null,
+        List<BindMount>? binds = null,
         CancellationToken cancellationToken = default)
     {
         var request = new CreateIsolatedSessionRequest(
             Workspace: new IsolatedWorkspaceSpec(Path: workspace, Mode: workspaceMode),
             Profile: profile,
-            ShareNet: shareNet
+            ShareNet: shareNet,
+            Binds: binds
         );
         var session = await service.CreateAsync(request, cancellationToken).ConfigureAwait(false);
         try

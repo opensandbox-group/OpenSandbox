@@ -53,7 +53,8 @@ At a high level:
 4. When the sandbox makes an HTTPS request, transparent MITM in the sidecar
    inspects the request metadata.
 5. If exactly one binding matches the request scheme, host, port, method, and
-   path, the sidecar injects the configured auth header.
+   path, the sidecar injects the configured auth header and scoped placeholder
+   substitutions.
 6. Secret values are redacted from vault responses and response headers.
 
 The active vault used by the MITM process is served over a local Unix domain
@@ -86,6 +87,9 @@ rendered into the outbound request:
 - `apiKey`: injects the credential value into the configured header name.
 - `customHeaders`: injects multiple configured headers, each backed by its own
   credential.
+- `passthrough`: does not inject an auth header. Use it with `substitutions`
+  when the upstream API requires a credential in a path, query string, or body
+  placeholder instead of a header.
 
 Simple examples:
 
@@ -126,6 +130,115 @@ auth={
 ```http
 X-Client-Id: <client-id>
 X-Client-Secret: <client-secret>
+```
+
+### Scoped Placeholder Substitutions
+
+Some upstream APIs require credentials in a request URL or body instead of a
+dedicated auth header. Credential Vault can handle those APIs without placing the
+real credential in the sandbox process. All auth types accept an optional
+`substitutions` list. Each substitution names a credential, a literal
+placeholder, and the request surfaces where replacement is allowed:
+
+```python
+auth={
+    "type": "passthrough",
+    "substitutions": [
+        {
+            "credential": "client-secret",
+            "placeholder": "__client_secret__",
+            "in": ["body", "query"],
+        }
+    ],
+}
+```
+
+Use `type="passthrough"` when the binding only performs substitutions and should
+not inject an auth header. You can also combine substitutions with `bearer`,
+`basic`, `apiKey`, or `customHeaders` when the same upstream request needs both
+header injection and placeholder replacement.
+
+Substitution is disabled by default and is exact, literal, and case-sensitive.
+Only the configured surfaces are rewritten:
+
+| Surface | Behavior |
+| --- | --- |
+| `path` | Replaces placeholders in the request path and URL-encodes the credential value. If the rewritten path contains ambiguous path segments, encoded separators, or traversal-like content, the sidecar rejects the request instead of forwarding a secret-bearing URL outside the matched scope. |
+| `query` | Replaces placeholders in the query string and URL-encodes the credential value. |
+| `header` | Replaces placeholders in the original request headers, excluding hop-by-hop and security-sensitive headers such as `Host`, `Content-Length`, and forwarding headers. Substitutions run before Credential Vault injects auth headers, so the sidecar does not rewrite the credential headers it creates. |
+| `body` | Replaces placeholders in UTF-8 request bodies. For `application/json`, the replacement is encoded as JSON string contents, so put the placeholder inside a quoted JSON string. For `application/x-www-form-urlencoded`, the replacement is form-encoded. Compressed and multipart bodies are skipped. |
+
+The sidecar applies all replacements for a surface against the original request
+text in one pass. Inserted credential values are not scanned again for later
+placeholders, which prevents one secret from accidentally rewriting another
+secret. When a body is rewritten, the sidecar updates `Content-Length` and
+removes `Transfer-Encoding` because the forwarded request now has a fixed-size
+buffered body.
+
+The placeholder, raw credential value, URL-encoded value, form-encoded value,
+and JSON-escaped values are added to the active redaction set. A binding with
+substitutions that matched the request but did not find any placeholder emits a
+substitution-miss log without exposing credential values.
+
+Example configuration:
+
+```python
+await sandbox.credential_vault.create(
+    credentials=[
+        Credential(name="tenant-id", source={"value": "tenant 42"}),
+        Credential(name="api-key", source={"value": "query secret+value"}),
+        Credential(name="client-secret", source={"value": 'body "secret" value'}),
+    ],
+    bindings=[
+        CredentialBinding(
+            name="token-request",
+            match={
+                "schemes": ["https"],
+                "hosts": ["api.example.com"],
+                "methods": ["POST"],
+                "paths": ["/tenants/__tenant_id__/token"],
+            },
+            auth={
+                "type": "passthrough",
+                "substitutions": [
+                    {
+                        "credential": "tenant-id",
+                        "placeholder": "__tenant_id__",
+                        "in": ["path"],
+                    },
+                    {
+                        "credential": "api-key",
+                        "placeholder": "__api_key__",
+                        "in": ["query"],
+                    },
+                    {
+                        "credential": "client-secret",
+                        "placeholder": "__client_secret__",
+                        "in": ["body"],
+                    },
+                ],
+            },
+        )
+    ],
+)
+```
+
+The sandbox can use placeholders instead of real secrets:
+
+```bash
+curl -X POST \
+  "https://api.example.com/tenants/__tenant_id__/token?api_key=__api_key__" \
+  -H "content-type: application/json" \
+  --data '{"client_secret":"__client_secret__"}'
+```
+
+The upstream receives the rewritten request:
+
+```http
+POST /tenants/tenant%2042/token?api_key=query%20secret%2Bvalue HTTP/1.1
+content-type: application/json
+
+{"client_secret":"body \"secret\" value"}
 ```
 
 ## Egress Sidecar Configuration

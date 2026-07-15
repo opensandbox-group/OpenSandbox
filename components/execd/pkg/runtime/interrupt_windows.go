@@ -32,7 +32,7 @@ func (c *Controller) Interrupt(sessionID string) error {
 	switch {
 	case c.getJupyterKernel(sessionID) != nil:
 		kernel := c.getJupyterKernel(sessionID)
-		log.Warning("Interrupting Jupyter kernel %s", kernel.kernelID)
+		log.Warn("Interrupting Jupyter kernel %s", kernel.kernelID)
 		return kernel.client.InterruptKernel(kernel.kernelID)
 	case c.getCommandKernel(sessionID) != nil:
 		// Guard against a stale PID after the command has finished: the
@@ -54,7 +54,7 @@ func (c *Controller) killPid(pid int) error {
 	if err != nil {
 		return err
 	}
-	log.Warning("Attempting to terminate process %d", pid)
+	log.Warn("Attempting to terminate process %d", pid)
 
 	if err := process.Kill(); err != nil {
 		return fmt.Errorf("failed to kill process %d: %w", pid, err)
@@ -70,7 +70,7 @@ func (c *Controller) killPid(pid int) error {
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		log.Warning("Process %d kill wait timed out", pid)
+		log.Warn("Process %d kill wait timed out", pid)
 	}
 
 	return nil

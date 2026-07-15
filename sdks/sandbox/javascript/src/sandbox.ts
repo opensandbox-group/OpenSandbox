@@ -33,7 +33,7 @@ import type { ExecdHealth } from "./services/execdHealth.js";
 import type { ExecdMetrics } from "./services/execdMetrics.js";
 import type { IsolationService, IsolationSession } from "./services/isolatedSessions.js";
 import type { CommandExecution } from "./models/execd.js";
-import type { IsolatedCapabilities } from "./models/isolated.js";
+import type { IsolatedCapabilities, IsolatedSessionSummary } from "./models/isolated.js";
 import type {
   CreateSandboxRequest,
   CredentialProxyConfig,
@@ -57,6 +57,9 @@ const unavailableIsolation: IsolationService = {
   },
   capabilities(): Promise<IsolatedCapabilities> {
     return Promise.resolve({ available: false, commit_supported: false, diff_supported: false });
+  },
+  list(): Promise<IsolatedSessionSummary[]> {
+    throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
   },
   runOnce(): Promise<CommandExecution> {
     throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");

@@ -43,4 +43,7 @@ public interface IIsolatedSessions
 
     Task<IsolatedCapabilities> CapabilitiesAsync(
         CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<IsolatedSessionSummary>> ListAsync(
+        CancellationToken cancellationToken = default);
 }

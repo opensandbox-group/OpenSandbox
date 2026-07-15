@@ -208,6 +208,9 @@ class AsyncEndpointCache:
         except BaseException as e:
             if not future.done():
                 future.set_exception(e)
+                # The owner raises the original exception directly instead of awaiting
+                # this future. Mark the exception as observed so asyncio does not log
+                # "Future exception was never retrieved" when there are no waiters.
                 future.exception()
             raise
         finally:

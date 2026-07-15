@@ -107,9 +107,8 @@ class Sandbox:
     result = await sandbox.commands.run("python script.py")
     print(result.logs.stdout[0].text)  # Output: Hello World
 
-    # Always clean up resources
-    await sandbox.kill()
-    await sandbox.close()
+    # Always terminate the remote sandbox and close local resources
+    await sandbox.destroy()
     ```
     """
 
@@ -392,6 +391,21 @@ class Sandbox:
             logger.warning(
                 f"Error closing resources for sandbox {self.id}: {e}", exc_info=True
             )
+
+    async def destroy(self) -> None:
+        """
+        Terminate the remote sandbox and close local resources.
+
+        Local resources are always closed, even if terminating the remote sandbox
+        fails. Any termination error is re-raised after local cleanup completes.
+
+        Raises:
+            SandboxException: if termination fails
+        """
+        try:
+            await self.kill()
+        finally:
+            await self.close()
 
     async def is_healthy(self) -> bool:
         """

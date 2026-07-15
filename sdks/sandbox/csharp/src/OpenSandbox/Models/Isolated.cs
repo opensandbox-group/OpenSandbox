@@ -26,14 +26,22 @@ public record EnvPassthroughSpec(
     [property: JsonPropertyName("keys")] List<string>? Keys = null
 );
 
+public record BindMount(
+    [property: JsonPropertyName("source")] string Source,
+    [property: JsonPropertyName("dest")] string? Dest = null,
+    [property: JsonPropertyName("readonly")] bool? ReadOnly = null
+);
+
 public record CreateIsolatedSessionRequest(
     [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec Workspace,
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
+    [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
     [property: JsonPropertyName("share_net")] bool? ShareNet = null,
     [property: JsonPropertyName("env_passthrough")] EnvPassthroughSpec? EnvPassthrough = null,
     [property: JsonPropertyName("uid")] int? Uid = null,
     [property: JsonPropertyName("gid")] int? Gid = null,
+    [property: JsonPropertyName("uid_mode")] string? UidMode = null,
     [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
 );
 
@@ -47,6 +55,18 @@ public record IsolatedSessionState(
     [property: JsonPropertyName("created_at")] DateTimeOffset? CreatedAt = null,
     [property: JsonPropertyName("last_run_at")] DateTimeOffset? LastRunAt = null,
     [property: JsonPropertyName("idle_remaining_seconds")] int? IdleRemainingSeconds = null
+);
+
+public record IsolatedSessionSummary(
+    [property: JsonPropertyName("session_id")] string SessionId,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("created_at")] DateTimeOffset? CreatedAt = null,
+    [property: JsonPropertyName("last_run_at")] DateTimeOffset? LastRunAt = null,
+    [property: JsonPropertyName("idle_remaining_seconds")] int? IdleRemainingSeconds = null
+);
+
+public record ListIsolatedSessionsResponse(
+    [property: JsonPropertyName("sessions")] List<IsolatedSessionSummary>? Sessions = null
 );
 
 public record IsolatedRunOpts(

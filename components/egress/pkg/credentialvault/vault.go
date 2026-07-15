@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -124,15 +125,22 @@ type Match struct {
 }
 
 type Auth struct {
-	Type       string              `json:"type"`
-	Credential string              `json:"credential,omitempty"`
-	Name       string              `json:"name,omitempty"`
-	Headers    []CustomHeaderEntry `json:"headers,omitempty"`
+	Type          string              `json:"type"`
+	Credential    string              `json:"credential,omitempty"`
+	Name          string              `json:"name,omitempty"`
+	Headers       []CustomHeaderEntry `json:"headers,omitempty"`
+	Substitutions []Substitution      `json:"substitutions,omitempty"`
 }
 
 type CustomHeaderEntry struct {
 	Name       string `json:"name"`
 	Credential string `json:"credential"`
+}
+
+type Substitution struct {
+	Credential  string   `json:"credential"`
+	Placeholder string   `json:"placeholder"`
+	In          []string `json:"in"`
 }
 
 type State struct {
@@ -176,14 +184,21 @@ type ActiveSnapshot struct {
 }
 
 type ActiveBinding struct {
-	Name    string            `json:"name"`
-	Match   Match             `json:"match"`
-	Headers []InjectionHeader `json:"headers"`
+	Name          string                  `json:"name"`
+	Match         Match                   `json:"match"`
+	Headers       []InjectionHeader       `json:"headers"`
+	Substitutions []InjectionSubstitution `json:"substitutions,omitempty"`
 }
 
 type InjectionHeader struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+type InjectionSubstitution struct {
+	Placeholder string   `json:"placeholder"`
+	Value       string   `json:"value"`
+	In          []string `json:"in"`
 }
 
 func NewStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *Store {
@@ -349,11 +364,17 @@ func (v *Store) ActiveSnapshotWithContext(ctx context.Context) (ActiveSnapshot, 
 		if err != nil {
 			return ActiveSnapshot{}, err
 		}
+		substitutions, substitutionValues, err := renderSubstitutions(ctx, b.Auth, v.credentials)
+		if err != nil {
+			return ActiveSnapshot{}, err
+		}
 		snapshot.Bindings = append(snapshot.Bindings, ActiveBinding{
-			Name:    b.Name,
-			Match:   b.Match,
-			Headers: headers,
+			Name:          b.Name,
+			Match:         b.Match,
+			Headers:       headers,
+			Substitutions: substitutions,
 		})
+		values = append(values, substitutionValues...)
 		for _, value := range values {
 			if value != "" {
 				redactions[value] = struct{}{}
@@ -363,7 +384,12 @@ func (v *Store) ActiveSnapshotWithContext(ctx context.Context) (ActiveSnapshot, 
 	for value := range redactions {
 		snapshot.Redactions = append(snapshot.Redactions, value)
 	}
-	sort.Strings(snapshot.Redactions)
+	sort.Slice(snapshot.Redactions, func(i, j int) bool {
+		if len(snapshot.Redactions[i]) != len(snapshot.Redactions[j]) {
+			return len(snapshot.Redactions[i]) > len(snapshot.Redactions[j])
+		}
+		return snapshot.Redactions[i] < snapshot.Redactions[j]
+	})
 	return snapshot, nil
 }
 
@@ -549,10 +575,20 @@ func normalizeAuth(a *Auth) error {
 				return fmt.Errorf("customHeaders entry %q requires credential", h.Name)
 			}
 		}
+	case "passthrough":
+		if strings.TrimSpace(a.Credential) != "" {
+			return fmt.Errorf("passthrough auth does not accept credential")
+		}
+		if strings.TrimSpace(a.Name) != "" {
+			return fmt.Errorf("passthrough auth does not accept name")
+		}
+		if len(a.Headers) != 0 {
+			return fmt.Errorf("passthrough auth does not accept headers")
+		}
 	default:
 		return fmt.Errorf("unsupported auth type %q", a.Type)
 	}
-	return nil
+	return normalizeSubstitutions(a.Substitutions)
 }
 
 func validateCredentialHeaderName(name string) error {
@@ -575,29 +611,34 @@ func validateBindingCredentialRefs(b Binding, credentials map[string]record) err
 }
 
 func credentialRefsForAuth(auth Auth) []string {
+	var out []string
 	if auth.Type == "customHeaders" {
-		out := make([]string, 0, len(auth.Headers))
 		for _, h := range auth.Headers {
 			out = append(out, h.Credential)
 		}
-		return out
+	} else if auth.Type != "passthrough" && auth.Credential != "" {
+		out = append(out, auth.Credential)
 	}
-	return []string{auth.Credential}
+	for _, substitution := range auth.Substitutions {
+		out = append(out, substitution.Credential)
+	}
+	return out
+}
+
+func resolveCredentialValue(ctx context.Context, name string, credentials map[string]record) (string, error) {
+	c, ok := credentials[name]
+	if !ok {
+		return "", fmt.Errorf("unknown credential %q", name)
+	}
+	return c.Source.Resolve(ctx)
 }
 
 func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[string]record) ([]InjectionHeader, []string, error) {
-	valueFor := func(name string) (string, error) {
-		c, ok := credentials[name]
-		if !ok {
-			return "", fmt.Errorf("unknown credential %q", name)
-		}
-		return c.Source.Resolve(ctx)
-	}
 	var headers []InjectionHeader
 	var redactions []string
 	switch auth.Type {
 	case "bearer":
-		value, err := valueFor(auth.Credential)
+		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -605,7 +646,7 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 		headers = append(headers, InjectionHeader{Name: "Authorization", Value: rendered})
 		redactions = append(redactions, value, rendered)
 	case "basic":
-		value, err := valueFor(auth.Credential)
+		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -613,7 +654,7 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 		headers = append(headers, InjectionHeader{Name: "Authorization", Value: rendered})
 		redactions = append(redactions, value, rendered)
 	case "apiKey":
-		value, err := valueFor(auth.Credential)
+		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -621,17 +662,123 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 		redactions = append(redactions, value)
 	case "customHeaders":
 		for _, h := range auth.Headers {
-			value, err := valueFor(h.Credential)
+			value, err := resolveCredentialValue(ctx, h.Credential, credentials)
 			if err != nil {
 				return nil, nil, err
 			}
 			headers = append(headers, InjectionHeader{Name: h.Name, Value: value})
 			redactions = append(redactions, value)
 		}
+	case "passthrough":
 	default:
 		return nil, nil, fmt.Errorf("unsupported auth type %q", auth.Type)
 	}
 	return headers, redactions, nil
+}
+
+func renderSubstitutions(ctx context.Context, auth Auth, credentials map[string]record) ([]InjectionSubstitution, []string, error) {
+	substitutions := make([]InjectionSubstitution, 0, len(auth.Substitutions))
+	redactions := make([]string, 0, len(auth.Substitutions)*6)
+	for _, substitution := range auth.Substitutions {
+		value, err := resolveCredentialValue(ctx, substitution.Credential, credentials)
+		if err != nil {
+			return nil, nil, err
+		}
+		substitutions = append(substitutions, InjectionSubstitution{
+			Placeholder: substitution.Placeholder,
+			Value:       value,
+			In:          append([]string(nil), substitution.In...),
+		})
+		redactions = append(redactions, substitution.Placeholder)
+		redactions = append(redactions, substitutionRedactionVariants(value)...)
+	}
+	return substitutions, redactions, nil
+}
+
+func substitutionRedactionVariants(value string) []string {
+	urlEncoded := strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+	formEncoded := url.QueryEscape(value)
+	jsonEncoded := value
+	if data, err := json.Marshal(value); err == nil && len(data) >= 2 {
+		jsonEncoded = string(data[1 : len(data)-1])
+	}
+	return []string{
+		value,
+		urlEncoded,
+		lowercasePercentEscapes(urlEncoded),
+		formEncoded,
+		lowercasePercentEscapes(formEncoded),
+		jsonEncoded,
+		jsonASCIIEncodedStringContent(value),
+	}
+}
+
+func lowercasePercentEscapes(value string) string {
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(value); i++ {
+		if value[i] == '%' && i+2 < len(value) && isHexDigit(value[i+1]) && isHexDigit(value[i+2]) {
+			b.WriteByte('%')
+			b.WriteByte(lowerHexByte(value[i+1]))
+			b.WriteByte(lowerHexByte(value[i+2]))
+			i += 2
+			changed = true
+			continue
+		}
+		b.WriteByte(value[i])
+	}
+	if !changed {
+		return value
+	}
+	return b.String()
+}
+
+func isHexDigit(b byte) bool {
+	return ('0' <= b && b <= '9') || ('a' <= b && b <= 'f') || ('A' <= b && b <= 'F')
+}
+
+func lowerHexByte(b byte) byte {
+	if 'A' <= b && b <= 'F' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+func jsonASCIIEncodedStringContent(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			switch {
+			case r < 0x20:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			case r < 0x80:
+				b.WriteRune(r)
+			case r <= 0xffff:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			default:
+				v := r - 0x10000
+				high := 0xd800 + (v >> 10)
+				low := 0xdc00 + (v & 0x3ff)
+				fmt.Fprintf(&b, `\u%04x\u%04x`, high, low)
+			}
+		}
+	}
+	return b.String()
 }
 
 func sanitizeAuth(auth Auth) AuthMetadata {
@@ -641,6 +788,49 @@ func sanitizeAuth(auth Auth) AuthMetadata {
 		meta.Name = auth.Name
 	}
 	return meta
+}
+
+func normalizeSubstitutions(substitutions []Substitution) error {
+	allowed := map[string]struct{}{
+		"path":   {},
+		"query":  {},
+		"header": {},
+		"body":   {},
+	}
+	seenPairs := make(map[[2]string]int)
+	for i := range substitutions {
+		substitution := &substitutions[i]
+		substitution.Credential = strings.TrimSpace(substitution.Credential)
+		if substitution.Credential == "" {
+			return fmt.Errorf("substitution %d requires credential", i)
+		}
+		if strings.TrimSpace(substitution.Placeholder) == "" {
+			return fmt.Errorf("substitution %d requires placeholder", i)
+		}
+		if len(substitution.In) == 0 {
+			return fmt.Errorf("substitution %d requires at least one target surface", i)
+		}
+		seen := make(map[string]struct{}, len(substitution.In))
+		normalized := make([]string, 0, len(substitution.In))
+		for _, surface := range substitution.In {
+			surface = strings.ToLower(strings.TrimSpace(surface))
+			if _, ok := allowed[surface]; !ok {
+				return fmt.Errorf("substitution %d has unsupported target surface %q", i, surface)
+			}
+			if _, duplicate := seen[surface]; duplicate {
+				continue
+			}
+			seen[surface] = struct{}{}
+			pair := [2]string{substitution.Placeholder, surface}
+			if previous, duplicate := seenPairs[pair]; duplicate {
+				return fmt.Errorf("substitution %d duplicates placeholder %q on %s surface from substitution %d", i, substitution.Placeholder, surface, previous)
+			}
+			seenPairs[pair] = i
+			normalized = append(normalized, surface)
+		}
+		substitution.In = normalized
+	}
+	return nil
 }
 
 func (v *Store) applyCredentialMutations(credentials map[string]record, mutations *CredentialMutationSet, revision int64) error {

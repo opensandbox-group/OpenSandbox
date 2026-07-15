@@ -17,6 +17,8 @@
 Synchronous isolated session service interface.
 """
 
+from __future__ import annotations
+
 import logging
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -25,11 +27,13 @@ from typing import Any, Protocol
 from opensandbox.models.execd import Execution
 from opensandbox.models.execd_sync import ExecutionHandlersSync
 from opensandbox.models.isolated import (
+    BindMount,
     CreateIsolatedSessionRequest,
     IsolatedCapabilities,
     IsolatedRunOpts,
     IsolatedSessionInfo,
     IsolatedSessionState,
+    IsolatedSessionSummary,
     IsolatedWorkspaceSpec,
 )
 
@@ -70,6 +74,8 @@ class IsolationServiceSync(Protocol):
 
     def capabilities(self) -> IsolatedCapabilities: ...
 
+    def list(self) -> list[IsolatedSessionSummary]: ...
+
     def run_once(
         self,
         code: str,
@@ -80,6 +86,7 @@ class IsolationServiceSync(Protocol):
         handlers: ExecutionHandlersSync | None = None,
         profile: str | None = None,
         share_net: bool | None = None,
+        binds: list[BindMount] | None = None,
     ) -> Execution:
         """Create a session, run *code*, and delete the session (auto-cleanup)."""
         ...
@@ -114,11 +121,13 @@ class IsolationServiceSyncMixin:
         handlers: ExecutionHandlersSync | None = None,
         profile: str | None = None,
         share_net: bool | None = None,
+        binds: list[BindMount] | None = None,
     ) -> Execution:
         request = CreateIsolatedSessionRequest(
             workspace=IsolatedWorkspaceSpec(path=workspace, mode=workspace_mode),
             profile=profile,
             share_net=share_net,
+            binds=binds,
         )
         session = self.create(request)
         try:
