@@ -17,14 +17,12 @@ After create succeeds or fails, the SDK fire-and-forget posts to `POST /v1/metri
   "sandboxId": "sbx_...",
   "image": "python:3.12",
   "createDurationMs": 1842,
-  "sdkLanguage": "python",
-  "sdkVersion": "0.1.14",
   "success": true
 }
 ```
 
 - `sandboxId` / `image` may be omitted when create fails early.
-- `sdkLanguage` is a free-form identifier (examples: `python`, `go`, `typescript`).
+- SDK language and version come from the HTTP `User-Agent` header (for example `OpenSandbox-Python-SDK/0.1.14`), not from body fields.
 
 The server accepts the event with `204` and, when `[otel]` is enabled, records an OTEL histogram. See [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
 

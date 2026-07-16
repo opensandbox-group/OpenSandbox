@@ -26,7 +26,6 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_SDK_LANGUAGE = "python"
 _DISABLE_METRICS_ENV = "OPENSANDBOX_DISABLE_METRICS"
 
 # Keep strong refs so fire-and-forget tasks are not GC'd mid-flight.
@@ -44,15 +43,6 @@ class _MetricsConnection(Protocol):
 
     @property
     def request_timeout(self) -> Any: ...
-
-
-def _sdk_version() -> str:
-    try:
-        from opensandbox import __version__
-
-        return __version__
-    except Exception:
-        return "0.0.0"
 
 
 def _env_metrics_disabled() -> bool:
@@ -73,8 +63,6 @@ def _build_payload(
     payload: dict[str, Any] = {
         "eventType": "sandbox.create",
         "createDurationMs": max(0, int(create_duration_ms)),
-        "sdkLanguage": _SDK_LANGUAGE,
-        "sdkVersion": _sdk_version(),
         "success": bool(success),
     }
     if sandbox_id:

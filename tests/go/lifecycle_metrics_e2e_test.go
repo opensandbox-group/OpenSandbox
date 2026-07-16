@@ -37,8 +37,6 @@ func TestLifecycleMetrics_EndpointAcceptsEvent(t *testing.T) {
 		"sandboxId":        "e2e-metrics-direct-go",
 		"image":            getSandboxImage(),
 		"createDurationMs": 42,
-		"sdkLanguage":      "go",
-		"sdkVersion":       "e2e",
 		"success":          true,
 	}
 	body, err := json.Marshal(payload)
@@ -47,6 +45,7 @@ func TestLifecycleMetrics_EndpointAcceptsEvent(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/e2e")
 	req.Header.Set(cfg.GetAuthHeader(), cfg.GetAPIKey())
 
 	resp, err := http.DefaultClient.Do(req)
@@ -59,8 +58,9 @@ func TestSandbox_CreateReportsLifecycleMetrics(t *testing.T) {
 	cfg := getConnectionConfig(t)
 
 	var (
-		mu       sync.Mutex
-		captured []map[string]any
+		mu        sync.Mutex
+		captured  []map[string]any
+		userAgent string
 	)
 	base := http.DefaultTransport
 	cfg.HTTPClient = &http.Client{
@@ -76,6 +76,7 @@ func TestSandbox_CreateReportsLifecycleMetrics(t *testing.T) {
 				if err := json.Unmarshal(raw, &event); err == nil {
 					mu.Lock()
 					captured = append(captured, event)
+					userAgent = req.Header.Get("User-Agent")
 					mu.Unlock()
 				}
 			}
@@ -117,10 +118,13 @@ func TestSandbox_CreateReportsLifecycleMetrics(t *testing.T) {
 	require.GreaterOrEqual(t, len(captured), 1)
 	event := captured[0]
 	require.Equal(t, "sandbox.create", event["eventType"])
-	require.Equal(t, "go", event["sdkLanguage"])
 	require.Equal(t, true, event["success"])
 	require.Equal(t, sb.ID(), event["sandboxId"])
-	require.NotEmpty(t, event["sdkVersion"])
+	_, hasLang := event["sdkLanguage"]
+	_, hasVer := event["sdkVersion"]
+	require.False(t, hasLang)
+	require.False(t, hasVer)
+	require.True(t, strings.HasPrefix(userAgent, "OpenSandbox-Go-SDK/"))
 	duration, ok := event["createDurationMs"].(float64)
 	require.True(t, ok)
 	require.Greater(t, duration, float64(0))

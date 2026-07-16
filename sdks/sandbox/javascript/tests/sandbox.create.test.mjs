@@ -485,10 +485,14 @@ test("Sandbox.create reports create metrics after ready", async () => {
   assert.match(metricsPosts[0].url, /\/v1\/metrics\/events$/);
   const body = JSON.parse(metricsPosts[0].init.body);
   assert.equal(body.eventType, "sandbox.create");
-  assert.equal(body.sdkLanguage, "typescript");
   assert.equal(body.success, true);
   assert.equal(body.sandboxId, "sandbox-test-id");
   assert.equal(body.image, "python:3.12");
+  assert.equal(body.sdkLanguage, undefined);
+  assert.equal(body.sdkVersion, undefined);
+  const headers = metricsPosts[0].init.headers || {};
+  const ua = headers["User-Agent"] || headers["user-agent"] || "";
+  assert.match(ua, /^OpenSandbox-JS-SDK\//);
 });
 
 test("Sandbox.create metrics failure does not change create error", async () => {

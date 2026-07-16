@@ -31,8 +31,6 @@ type sandboxCreateMetricsEvent struct {
 	SandboxID        string `json:"sandboxId,omitempty"`
 	Image            string `json:"image,omitempty"`
 	CreateDurationMs int64  `json:"createDurationMs"`
-	SDKLanguage      string `json:"sdkLanguage"`
-	SDKVersion       string `json:"sdkVersion"`
 	Success          bool   `json:"success"`
 }
 
@@ -55,8 +53,6 @@ func reportSandboxCreateMetric(cfg ConnectionConfig, sandboxID, image string, du
 		SandboxID:        sandboxID,
 		Image:            image,
 		CreateDurationMs: durationMs,
-		SDKLanguage:      "go",
-		SDKVersion:       Version,
 		Success:          success,
 	}
 	body, err := json.Marshal(payload)

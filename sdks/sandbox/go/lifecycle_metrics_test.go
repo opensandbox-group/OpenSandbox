@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,8 +39,11 @@ func TestReportSandboxCreateMetricPostsEvent(t *testing.T) {
 		if err := json.Unmarshal(body, &event); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if event.EventType != "sandbox.create" || event.SDKLanguage != "go" || !event.Success {
+		if event.EventType != "sandbox.create" || !event.Success {
 			t.Fatalf("unexpected event: %+v", event)
+		}
+		if gotUA := r.Header.Get("User-Agent"); !strings.HasPrefix(gotUA, "OpenSandbox-Go-SDK/") {
+			t.Fatalf("unexpected User-Agent: %q", gotUA)
 		}
 		got.Store(true)
 		w.WriteHeader(http.StatusNoContent)

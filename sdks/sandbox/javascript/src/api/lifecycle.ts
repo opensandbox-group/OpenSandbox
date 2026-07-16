@@ -35,6 +35,9 @@ export interface paths {
          *     (or after a failed creation attempt). Failures to report MUST NOT affect
          *     sandbox usability. The server accepts events even when OpenTelemetry
          *     export is disabled (noop recording).
+         *
+         *     SDK language and version are taken from the HTTP `User-Agent` header
+         *     (for example `OpenSandbox-Python-SDK/0.1.14`), not from the JSON body.
          */
         post: operations["reportMetricsEvent"];
         delete?: never;
@@ -769,6 +772,9 @@ export interface components {
         /**
          * @description SDK-reported metrics event. Phase 1 covers sandbox creation latency from
          *     the start of create until readiness succeeds or creation fails.
+         *
+         *     SDK language and package version are identified via the request
+         *     `User-Agent` header (for example `OpenSandbox-Go-SDK/0.1.0`), not body fields.
          */
         MetricsEvent: {
             /**
@@ -782,10 +788,6 @@ export interface components {
             image?: string;
             /** @description Wall-clock duration in milliseconds from create start to ready or failure */
             createDurationMs: number;
-            /** @description SDK language identifier (free-form; examples: python, go, typescript). Kept as a string so new SDK languages do not require a server upgrade. */
-            sdkLanguage: string;
-            /** @description SDK package version string */
-            sdkVersion: string;
             /** @description Whether create + readiness completed successfully */
             success: boolean;
         };
@@ -1561,8 +1563,6 @@ export interface operations {
                  *       "sandboxId": "sbx_01HZYEXAMPLE",
                  *       "image": "python:3.12",
                  *       "createDurationMs": 1842,
-                 *       "sdkLanguage": "python",
-                 *       "sdkVersion": "0.1.14",
                  *       "success": true
                  *     }
                  */

@@ -1010,19 +1010,6 @@ class MetricsEvent(BaseModel):
         ge=0,
         description="Wall-clock duration in milliseconds from create start to ready or failure",
     )
-    sdk_language: str = Field(
-        ...,
-        alias="sdkLanguage",
-        min_length=1,
-        max_length=32,
-        description="SDK language identifier (e.g. python, go, typescript)",
-    )
-    sdk_version: str = Field(
-        ...,
-        alias="sdkVersion",
-        min_length=1,
-        description="SDK package version string",
-    )
     success: bool = Field(
         ...,
         description="Whether create + readiness completed successfully",

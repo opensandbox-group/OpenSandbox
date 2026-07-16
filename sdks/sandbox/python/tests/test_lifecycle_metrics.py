@@ -37,10 +37,11 @@ def test_build_payload_omits_optional_fields():
     )
     assert payload["eventType"] == "sandbox.create"
     assert payload["createDurationMs"] == 12
-    assert payload["sdkLanguage"] == "python"
     assert payload["success"] is False
     assert "sandboxId" not in payload
     assert "image" not in payload
+    assert "sdkLanguage" not in payload
+    assert "sdkVersion" not in payload
 
 
 @pytest.mark.asyncio

@@ -37,8 +37,6 @@ test("lifecycle metrics endpoint accepts SDK-shaped events", async () => {
       sandboxId: "e2e-metrics-direct-js",
       image: getSandboxImage(),
       createDurationMs: 42,
-      sdkLanguage: "typescript",
-      sdkVersion: "e2e",
       success: true,
     }),
   });
@@ -86,10 +84,10 @@ test(
       expect(metricsPosts.length).toBeGreaterThanOrEqual(1);
       const event = metricsPosts[0].body;
       expect(event.eventType).toBe("sandbox.create");
-      expect(event.sdkLanguage).toBe("typescript");
       expect(event.success).toBe(true);
       expect(event.sandboxId).toBe(sandbox.id);
-      expect(typeof event.sdkVersion).toBe("string");
+      expect(event.sdkLanguage).toBeUndefined();
+      expect(event.sdkVersion).toBeUndefined();
       expect(event.createDurationMs).toBeGreaterThan(0);
       console.log(
         `sandbox.create metrics createDurationMs=${event.createDurationMs}ms sandboxId=${event.sandboxId}`

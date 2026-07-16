@@ -63,15 +63,16 @@ async def test_server_accepts_metrics_event():
         "sandboxId": "e2e-metrics-direct",
         "image": get_sandbox_image(),
         "createDurationMs": 42,
-        "sdkLanguage": "python",
-        "sdkVersion": "e2e",
         "success": True,
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             _metrics_url(),
             json=payload,
-            headers={"OPEN-SANDBOX-API-KEY": TEST_API_KEY},
+            headers={
+                "OPEN-SANDBOX-API-KEY": TEST_API_KEY,
+                "User-Agent": "OpenSandbox-Python-SDK/e2e",
+            },
         )
     assert response.status_code == 204, response.text
     assert response.content == b""
@@ -116,10 +117,10 @@ async def test_sandbox_create_reports_lifecycle_metrics():
     assert len(captured) >= 1
     event = captured[0]
     assert event["eventType"] == "sandbox.create"
-    assert event["sdkLanguage"] == "python"
     assert event["success"] is True
     assert event["sandboxId"] == sandbox.id
-    assert isinstance(event["sdkVersion"], str) and event["sdkVersion"]
+    assert "sdkLanguage" not in event
+    assert "sdkVersion" not in event
     assert isinstance(event["createDurationMs"], int)
     assert event["createDurationMs"] > 0
     logger.info(
@@ -212,9 +213,9 @@ def test_sandbox_sync_create_reports_lifecycle_metrics():
     assert len(captured) >= 1
     event = captured[0]
     assert event["eventType"] == "sandbox.create"
-    assert event["sdkLanguage"] == "python"
     assert event["success"] is True
     assert event["sandboxId"] == sandbox.id
+    assert "sdkLanguage" not in event
     assert event["createDurationMs"] > 0
     logger.info(
         "sandbox.create metrics (sync) createDurationMs=%s ms sandboxId=%s",

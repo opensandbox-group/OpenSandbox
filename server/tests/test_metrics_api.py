@@ -27,8 +27,6 @@ def _event_body(**overrides):
         "sandboxId": "sbx_test",
         "image": "python:3.12",
         "createDurationMs": 1234,
-        "sdkLanguage": "python",
-        "sdkVersion": "0.1.0",
         "success": True,
     }
     body.update(overrides)
@@ -51,13 +49,17 @@ class TestMetricsAuthentication:
 
 class TestReportMetricsEvent:
     def test_accepts_valid_event(self, client: TestClient, auth_headers: dict):
+        headers = {
+            **auth_headers,
+            "User-Agent": "OpenSandbox-Python-SDK/0.1.0",
+        }
         with patch(
             "opensandbox_server.api.metrics.record_sandbox_create_duration"
         ) as record:
             response = client.post(
                 "/v1/metrics/events",
                 json=_event_body(),
-                headers=auth_headers,
+                headers=headers,
             )
         assert response.status_code == 204
         assert response.content == b""
@@ -68,22 +70,46 @@ class TestReportMetricsEvent:
             success=True,
         )
 
-    def test_accepts_unknown_sdk_language(
+    def test_parses_language_from_user_agent(
         self, client: TestClient, auth_headers: dict
     ):
+        headers = {
+            **auth_headers,
+            "User-Agent": "OpenSandbox-Kotlin-SDK/1.2.3",
+        }
         with patch(
             "opensandbox_server.api.metrics.record_sandbox_create_duration"
         ) as record:
             response = client.post(
                 "/v1/metrics/events",
-                json=_event_body(sdkLanguage="kotlin"),
-                headers=auth_headers,
+                json=_event_body(),
+                headers=headers,
             )
         assert response.status_code == 204
         record.assert_called_once_with(
             create_duration_ms=1234,
             sdk_language="kotlin",
-            sdk_version="0.1.0",
+            sdk_version="1.2.3",
+            success=True,
+        )
+
+    def test_unknown_user_agent_falls_back(
+        self, client: TestClient, auth_headers: dict
+    ):
+        headers = {**auth_headers, "User-Agent": "curl/8.0"}
+        with patch(
+            "opensandbox_server.api.metrics.record_sandbox_create_duration"
+        ) as record:
+            response = client.post(
+                "/v1/metrics/events",
+                json=_event_body(),
+                headers=headers,
+            )
+        assert response.status_code == 204
+        record.assert_called_once_with(
+            create_duration_ms=1234,
+            sdk_language="unknown",
+            sdk_version="unknown",
             success=True,
         )
 
@@ -92,18 +118,22 @@ class TestReportMetricsEvent:
     ):
         body = _event_body(success=False)
         body.pop("sandboxId", None)
+        headers = {
+            **auth_headers,
+            "User-Agent": "OpenSandbox-Go-SDK/0.1.0",
+        }
         with patch(
             "opensandbox_server.api.metrics.record_sandbox_create_duration"
         ) as record:
             response = client.post(
                 "/v1/metrics/events",
                 json=body,
-                headers=auth_headers,
+                headers=headers,
             )
         assert response.status_code == 204
         record.assert_called_once_with(
             create_duration_ms=1234,
-            sdk_language="python",
+            sdk_language="go",
             sdk_version="0.1.0",
             success=False,
         )

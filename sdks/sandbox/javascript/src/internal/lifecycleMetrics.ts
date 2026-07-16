@@ -22,8 +22,6 @@ export interface SandboxCreateMetricsPayload {
   sandboxId?: string;
   image?: string;
   createDurationMs: number;
-  sdkLanguage: string;
-  sdkVersion: string;
   success: boolean;
 }
 
@@ -42,16 +40,10 @@ function metricsDisabled(connectionConfig: ConnectionConfig): boolean {
   return connectionConfig.disableMetrics || envMetricsDisabled();
 }
 
-function sdkVersionFromUserAgent(userAgent: string | undefined): string {
-  const match = /OpenSandbox-JS-SDK\/([^\s]+)/.exec(
-    userAgent ?? DEFAULT_USER_AGENT
-  );
-  return match?.[1] ?? "0.0.0";
-}
-
 /**
  * Best-effort fire-and-forget report of sandbox create latency.
  * Never throws and never awaits for callers.
+ * SDK identity is conveyed via the User-Agent header.
  */
 export function reportSandboxCreateMetric(
   connectionConfig: ConnectionConfig,
@@ -69,8 +61,6 @@ export function reportSandboxCreateMetric(
   const payload: SandboxCreateMetricsPayload = {
     eventType: "sandbox.create",
     createDurationMs: Math.max(0, Math.floor(opts.createDurationMs)),
-    sdkLanguage: "typescript",
-    sdkVersion: sdkVersionFromUserAgent(connectionConfig.userAgent),
     success: opts.success,
   };
   if (opts.sandboxId) {
@@ -90,6 +80,13 @@ export function reportSandboxCreateMetric(
     !headers["OPEN-SANDBOX-API-KEY"]
   ) {
     headers["OPEN-SANDBOX-API-KEY"] = connectionConfig.apiKey;
+  }
+  if (
+    !headers["User-Agent"] &&
+    !headers["user-agent"]
+  ) {
+    headers["User-Agent"] =
+      connectionConfig.userAgent || DEFAULT_USER_AGENT;
   }
 
   void connectionConfig

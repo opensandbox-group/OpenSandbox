@@ -61,6 +61,9 @@ paths:
         (or after a failed creation attempt). Failures to report MUST NOT affect
         sandbox usability. The server accepts events even when OpenTelemetry
         export is disabled (noop recording).
+
+        SDK language and version are taken from the HTTP `User-Agent` header
+        (for example `OpenSandbox-Python-SDK/0.1.14`), not from the JSON body.
       requestBody:
         required: true
         content:
@@ -72,8 +75,6 @@ paths:
               sandboxId: sbx_01HZYEXAMPLE
               image: python:3.12
               createDurationMs: 1842
-              sdkLanguage: python
-              sdkVersion: 0.1.14
               success: true
       responses:
         '204':
@@ -826,6 +827,9 @@ components:
       description: |
         SDK-reported metrics event. Phase 1 covers sandbox creation latency from
         the start of create until readiness succeeds or creation fails.
+
+        SDK language and package version are identified via the request
+        `User-Agent` header (for example `OpenSandbox-Go-SDK/0.1.0`), not body fields.
       properties:
         eventType:
           type: string
@@ -841,20 +845,10 @@ components:
           type: integer
           minimum: 0
           description: Wall-clock duration in milliseconds from create start to ready or failure
-        sdkLanguage:
-          type: string
-          minLength: 1
-          maxLength: 32
-          description: >
-            SDK language identifier (free-form; examples: python, go, typescript).
-            Kept as a string so new SDK languages do not require a server upgrade.
-        sdkVersion:
-          type: string
-          description: SDK package version string
         success:
           type: boolean
           description: Whether create + readiness completed successfully
-      required: [eventType, createDurationMs, sdkLanguage, sdkVersion, success]
+      required: [eventType, createDurationMs, success]
     ListSandboxesResponse:
       type: object
       properties:
