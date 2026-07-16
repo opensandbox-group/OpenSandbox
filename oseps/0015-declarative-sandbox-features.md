@@ -3,7 +3,7 @@ title: Declarative Sandbox Features
 authors:
   - "@GodBlf"
 creation-date: 2026-07-14
-last-updated: 2026-07-14
+last-updated: 2026-07-16
 status: draft
 ---
 
@@ -17,6 +17,7 @@ status: draft
 - [Requirements](#requirements)
 - [Proposal](#proposal)
   - [Public API](#public-api)
+  - [Feature Capability Negotiation](#feature-capability-negotiation)
   - [Administrator-Controlled Feature Registry](#administrator-controlled-feature-registry)
   - [Feature OCI Artifact Contract](#feature-oci-artifact-contract)
   - [Docker Provisioning](#docker-provisioning)
@@ -125,6 +126,9 @@ therefore must not be encoded in `extensions`.
   architecture.
 - Callers MUST NOT submit an OCI repository, tag, digest, URL, installer script,
   or registry credentials in the public feature request.
+- SDKs and the CLI MUST confirm lifecycle feature capability before sending a
+  non-empty `features` request. An older or incompatible server MUST be detected
+  before sandbox creation is attempted.
 - Every registry entry MUST be digest-pinned and MUST declare at least one
   supported platform.
 - Registry configuration MUST be validated when the server starts. A configured
@@ -287,6 +291,43 @@ and match `^[0-9A-Za-z](?:[0-9A-Za-z._+-]*[0-9A-Za-z])?$`. Ranges, wildcards,
 at most 32 features. Repeating a normalized feature name is invalid even when
 the two entries request different versions.
 
+### Feature Capability Negotiation
+
+Current pre-feature servers ignore unknown `CreateSandboxRequest` fields because
+their Pydantic model does not forbid extras. A new SDK therefore cannot safely
+assume that an older server will reject `features`: doing so could start the user
+entrypoint without the requested tools.
+
+Phase 1 adds an additive lifecycle `GET /v1/capabilities` endpoint. A server that
+implements this OSEP returns at least:
+
+```json
+{
+  "declarativeSandboxFeatures": {
+    "apiVersion": 1
+  }
+}
+```
+
+Additional capability fields may be added later. Clients ignore unknown fields,
+but MUST understand the advertised declarative-feature API version before using
+it. SDKs MUST call this endpoint, or use a result cached for the same resolved
+server base URL and authentication context, before the first create with a
+non-empty `features` list.
+
+A `404`, missing `declarativeSandboxFeatures`, unsupported `apiVersion`, invalid
+response, or transport failure means feature creation is unavailable. The SDK
+MUST raise an unsupported-server/capability error without sending the create
+request. It MUST NOT probe by sending a feature request, create and then delete
+an unverified sandbox, or downgrade the request into `extensions`. The CLI uses
+the same SDK guard. Callers using raw HTTP are responsible for performing the
+same handshake.
+
+Capability support and registry readiness are distinct. A feature-aware server
+advertises API version 1 even when no registry file is configured; a subsequent
+feature create then returns `FEATURE_REGISTRY_NOT_CONFIGURED`. This distinction
+lets clients tell an old server from an operator configuration error.
+
 ### Administrator-Controlled Feature Registry
 
 An operator enables features by configuring a server-side registry file path.
@@ -394,8 +435,11 @@ can be reused. The image has the following required layout:
   transitive feature requirements, or arbitrary host paths.
 - `install` is a self-contained executable used by Kubernetes feature init
   containers. It must not rely on a shell, libc, package manager, interpreter,
-  or binary from the sandbox image. It validates the mounted destination and
-  copies the payload atomically.
+  or binary from the sandbox image. It validates the mounted destination, copies
+  the payload atomically, and persists the validated activation document into
+  the shared activation-input directory for the final compiler. The Docker
+  server-side extractor performs the same persistence step without executing
+  `install`.
 
 An example activation document is:
 
@@ -475,12 +519,17 @@ extends the generated Pod spec without changing the public workload CRDs:
 2. Add one feature init container per requested feature, in request order. Each
    uses the registry's digest-pinned OCI image and invokes its self-contained
    installer.
-3. Mount the shared runtime-assets `emptyDir` into each feature init container
-   and place payloads under `features/<name>/<version>`. The main container sees
-   them at `/opt/opensandbox/features/<name>/<version>`.
+3. Mount the shared runtime-assets `emptyDir` into each feature init container.
+   Place payloads under `features/<name>/<version>` and copy each validated
+   `activation.json` to
+   `features/.resolved/activation-inputs/<request-index>-<name>.json`. The main
+   container sees the payload at
+   `/opt/opensandbox/features/<name>/<version>`. Both writes must complete before
+   that feature init container succeeds.
 4. Add a final activation-compiler init container from the pinned execd image.
-   It validates all activation documents against the request environment and
-   writes one ordered, shell-escaped activation file into the shared volume.
+   It reads the persisted activation inputs, validates them against the request
+   environment, verifies that their indexes exactly match the resolution plan,
+   and writes one ordered, shell-escaped activation file into the shared volume.
 5. Start the main container only after every init container succeeds. Its
    bootstrap sources the compiled activation file before execd and the user
    entrypoint.
@@ -638,9 +687,11 @@ workload readiness, and resolved-metadata persistence all succeed.
 
 Provisioning copies activation documents without executing them. A trusted
 activation compiler validates and merges them in request order into a generated
-file under `/opt/opensandbox/features/.resolved/`. Bootstrap sources that file
-before the existing execd launch and before dispatching the requested
-entrypoint.
+file under `/opt/opensandbox/features/.resolved/`. The uncompiled documents live
+under `.resolved/activation-inputs/` and use a zero-padded request index in each
+filename, so a missing, duplicated, or reordered input is detectable. Bootstrap
+sources only the compiled output before the existing execd launch and before
+dispatching the requested entrypoint.
 
 The following rules make activation deterministic:
 
@@ -725,6 +776,8 @@ Implementation proceeds only after this OSEP is approved:
 **Phase 1: contract, resolver, and providers**
 
 - Add the lifecycle OpenAPI request/response schemas and examples.
+- Add the lifecycle capability endpoint and advertise
+  `declarativeSandboxFeatures.apiVersion = 1`.
 - Add matching server Pydantic schemas and provider metadata codecs.
 - Add feature-registry configuration, startup validation, resolution, and OCI
   artifact validation.
@@ -738,6 +791,8 @@ Implementation proceeds only after this OSEP is approved:
 - Regenerate lifecycle clients from the OpenAPI source of truth.
 - Add aligned public feature request/convenience input and resolved response
   models to the Python, JavaScript, Kotlin, C#, and Go Sandbox SDKs.
+- Require all SDKs to negotiate lifecycle feature capability before sending a
+  non-empty feature request, with no create attempt on older servers.
 - Add cross-language serialization tests proving string convenience inputs
   produce structured wire JSON and resolved metadata is preserved.
 
@@ -774,6 +829,8 @@ Phase 1 must include focused tests at each ownership boundary.
   versions and rejects raw strings, extra fields, invalid names/versions, more
   than 32 entries, and duplicates.
 - Existing create payloads without `features` remain valid.
+- The capability endpoint advertises API version 1 independently of registry
+  configuration and remains forward-compatible with unknown capability fields.
 - Create, get, and list schemas serialize the same `resolvedFeatures` shape and
   preserve order.
 - Pool, snapshot, and Windows combinations return the documented explicit
@@ -803,6 +860,8 @@ Phase 1 must include focused tests at each ownership boundary.
 - Ordered path composition is identical in Docker and Kubernetes fixtures.
 - Bootstrap observes feature activation before both execd and the user
   entrypoint start.
+- Missing, duplicated, or reordered persisted activation inputs fail before the
+  main container starts.
 
 **Docker provider tests**
 
@@ -821,6 +880,8 @@ Phase 1 must include focused tests at each ownership boundary.
 - Both BatchSandbox template mode and agent-sandbox manifests contain ordered
   feature init containers, the shared `emptyDir` mounts, a final activation
   compiler, and a main container that cannot start first.
+- Every feature init container persists its validated activation document in the
+  indexed shared input path before the final compiler runs.
 - Generated feature images retain digest references after template merge.
 - Platform intersection becomes scheduling constraints; explicit mismatches and
   empty intersections fail before workload creation.
@@ -836,6 +897,8 @@ Phase 1 must include focused tests at each ownership boundary.
 - Python, JavaScript, Kotlin, C#, and Go SDK tests cover typed requests,
   `name@version` convenience parsing where offered, structured JSON output, and
   resolved response conversion.
+- Against a pre-feature server that ignores unknown request fields, every SDK
+  detects the missing capability and proves that no create request was sent.
 - CLI tests cover repeated `--feature`, parsing errors, exact SDK calls, and
   JSON/YAML rendering.
 - Docker and Kubernetes end-to-end tests create an offline minimal sandbox with
@@ -930,10 +993,12 @@ configuration error.
 
 Rollout order follows the implementation phases: server/OpenAPI/providers first,
 then regenerated clients and handwritten SDK alignment, then CLI/docs/examples
-and end-to-end coverage. New SDKs send `features` only when a caller requests
-them. They must not downgrade the request into `extensions` when connected to an
-older server; the older server's unsupported-field response is safer than
-silently creating a sandbox without requested tools.
+and end-to-end coverage. Phase 1 must deploy the capability endpoint before any
+feature-aware SDK or CLI release. New SDKs send `features` only when a caller
+requests them and only after capability negotiation succeeds. Because current
+pre-feature servers silently ignore unknown request fields, a missing or
+incompatible capability response is a client-side hard failure and no create
+request is sent. Clients must not downgrade the request into `extensions`.
 
 Registry defaults may change only for future creates. Existing sandboxes retain
 their payloads and persisted `resolvedFeatures` for their lifetime. Removing a
