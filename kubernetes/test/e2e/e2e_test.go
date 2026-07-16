@@ -1890,6 +1890,153 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
 			_, _ = utils.Run(cmd)
 		})
+
+		It("should copy files between a host-mounted directory and sandbox workspace using lifecycle hooks", func() {
+			if os.Getenv("OPEN_SANDBOX_E2E_HOST_COPY") != "true" {
+				Skip("set OPEN_SANDBOX_E2E_HOST_COPY=true to run the host-mounted copy lifecycle e2e")
+			}
+			if psa := utils.PodSecurityEnforce(); psa != "" && psa != "privileged" {
+				Skip("hostPath volumes require E2E_POD_SECURITY_ENFORCE=privileged or an empty value")
+			}
+
+			const poolName = "test-pool-host-copy"
+			const batchSandboxName = "test-bs-host-copy"
+			const testNamespace = "default"
+			hostCopyHostRoot := os.Getenv("OPEN_SANDBOX_E2E_HOST_COPY_HOST_PATH")
+			if hostCopyHostRoot == "" {
+				hostCopyHostRoot = "/tmp/opensandbox-host-copy"
+			}
+			hostCopyNodeRoot := os.Getenv("OPEN_SANDBOX_E2E_HOST_COPY_NODE_PATH")
+			if hostCopyNodeRoot == "" {
+				hostCopyNodeRoot = "/mnt/opensandbox-host-copy"
+			}
+			caseID := fmt.Sprintf("host-copy-%d", time.Now().UnixNano())
+			caseHostDir := filepath.Join(hostCopyHostRoot, caseID)
+			inputHostDir := filepath.Join(caseHostDir, "input")
+			outputHostDir := filepath.Join(caseHostDir, "output")
+			caseNodeDir := filepath.Join(hostCopyNodeRoot, caseID)
+
+			defer os.RemoveAll(caseHostDir)
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "batchsandbox", batchSandboxName, "-n", testNamespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("preparing input files in the host-mounted directory")
+			Expect(os.MkdirAll(filepath.Join(inputHostDir, "nested"), 0755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(inputHostDir, "seed.txt"), []byte("seed-from-host\n"), 0644)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(inputHostDir, "nested", "config.txt"), []byte("nested-config\n"), 0644)).To(Succeed())
+
+			By("creating a Pool that exposes host-mounted storage only to task-executor and shares workspace with sandbox")
+			poolYAML, err := renderTemplate("testdata/pool-with-host-copy.yaml", map[string]interface{}{
+				"PoolName":          poolName,
+				"Namespace":         testNamespace,
+				"TaskExecutorImage": utils.TaskExecutorImage,
+				"SandboxImage":      utils.SandboxImage,
+				"HostCopyNodePath":  caseNodeDir,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", "test-pool-host-copy.yaml")
+			Expect(os.WriteFile(poolFile, []byte(poolYAML), 0644)).To(Succeed())
+			defer os.Remove(poolFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Pool to be ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.total}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}, 2*time.Minute).Should(Succeed())
+
+			By("creating a BatchSandbox whose lifecycle hooks copy into and out of the workspace")
+			bsYAML, err := renderTemplate("testdata/batchsandbox-with-host-copy-lifecycle.yaml", map[string]interface{}{
+				"BatchSandboxName": batchSandboxName,
+				"Namespace":        testNamespace,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bsFile := filepath.Join("/tmp", "test-bs-host-copy.yaml")
+			Expect(os.WriteFile(bsFile, []byte(bsYAML), 0644)).To(Succeed())
+			defer os.Remove(bsFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the lifecycle task to run")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.status.taskRunning}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("verifying preStart copied host input into the sandbox workspace")
+			allocatedPod := getAllocatedPods(batchSandboxName, testNamespace, 1)[0]
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", allocatedPod, "-n", testNamespace,
+					"-c", "sandbox", "--", "cat", "/shared-workspace/seed.txt")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("seed-from-host\n"))
+
+				cmd = exec.Command("kubectl", "exec", allocatedPod, "-n", testNamespace,
+					"-c", "sandbox", "--", "cat", "/shared-workspace/nested/config.txt")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("nested-config\n"))
+
+				cmd = exec.Command("kubectl", "exec", allocatedPod, "-n", testNamespace,
+					"-c", "sandbox", "--", "cat", "/shared-workspace/prestart-marker")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("prestart-complete\n"))
+			}, 30*time.Second).Should(Succeed())
+
+			By("writing a file from the sandbox container")
+			cmd = exec.Command("kubectl", "exec", allocatedPod, "-n", testNamespace,
+				"-c", "sandbox", "--", "/bin/sh", "-c", "echo generated-by-sandbox > /shared-workspace/generated.txt")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("deleting the BatchSandbox to trigger postStop copy-out")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", batchSandboxName, "-n", testNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying postStop copied workspace files back to the host-mounted directory")
+			Eventually(func(g Gomega) {
+				seed, err := os.ReadFile(filepath.Join(outputHostDir, "seed.txt"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(string(seed)).To(Equal("seed-from-host\n"))
+
+				nested, err := os.ReadFile(filepath.Join(outputHostDir, "nested", "config.txt"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(string(nested)).To(Equal("nested-config\n"))
+
+				generated, err := os.ReadFile(filepath.Join(outputHostDir, "generated.txt"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(string(generated)).To(Equal("generated-by-sandbox\n"))
+
+				marker, err := os.ReadFile(filepath.Join(outputHostDir, "poststop-marker"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(string(marker)).To(Equal("poststop-complete\n"))
+			}, 30*time.Second).Should(Succeed())
+
+			By("cleaning up Pool")
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
 	})
 
 	Context("Pool Update", Label("Pool"), func() {
