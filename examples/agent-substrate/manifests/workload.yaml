@@ -1,0 +1,37 @@
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: sandbox-workerpool
+  namespace: ate-demo-sandbox
+  labels:
+    app.kubernetes.io/part-of: opensandbox-substrate-poc
+    opensandbox.io/poc: agent-substrate
+    workload: sandbox
+spec:
+  replicas: 2
+  sandboxClass: gvisor
+  sandboxConfigName: gvisor-default
+  ateomImage: replaced-by-prepare-manifests
+---
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: opensandbox-execd
+  namespace: ate-demo-sandbox
+  labels:
+    app.kubernetes.io/part-of: opensandbox-substrate-poc
+    opensandbox.io/poc: agent-substrate
+spec:
+  sandboxClass: gvisor
+  workerSelector:
+    matchLabels:
+      workload: sandbox
+  pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  containers:
+  - name: execd
+    image: replaced-by-prepare-manifests
+    command: ["/execd", "--port", "80"]
+  snapshotsConfig:
+    location: gs://ate-snapshots/ate-demo-sandbox/
+    onPause: Full
+    onCommit: Full

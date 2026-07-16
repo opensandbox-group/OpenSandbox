@@ -23,16 +23,19 @@ from opensandbox_server.config import AppConfig
 from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
 from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+from opensandbox_server.services.k8s.agent_substrate_provider import AgentSubstrateProvider
 from opensandbox_server.services.k8s.client import K8sClient
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_TYPE_BATCHSANDBOX = "batchsandbox"
 PROVIDER_TYPE_AGENT_SANDBOX = "agent-sandbox"
+PROVIDER_TYPE_AGENT_SUBSTRATE = "agent-substrate"
 
 _PROVIDER_REGISTRY: Dict[str, Type[WorkloadProvider]] = {
     PROVIDER_TYPE_BATCHSANDBOX: BatchSandboxProvider,
     PROVIDER_TYPE_AGENT_SANDBOX: AgentSandboxProvider,
+    PROVIDER_TYPE_AGENT_SUBSTRATE: AgentSubstrateProvider,
 }
 
 
@@ -63,7 +66,11 @@ def create_workload_provider(
     provider_class = _PROVIDER_REGISTRY[provider_type_lower]
     logger.info(f"Creating workload provider: {provider_class.__name__}")
 
-    if provider_type_lower in (PROVIDER_TYPE_BATCHSANDBOX, PROVIDER_TYPE_AGENT_SANDBOX):
+    if provider_type_lower in (
+        PROVIDER_TYPE_BATCHSANDBOX,
+        PROVIDER_TYPE_AGENT_SANDBOX,
+        PROVIDER_TYPE_AGENT_SUBSTRATE,
+    ):
         return provider_class(k8s_client, app_config=app_config)
 
     return provider_class(k8s_client)

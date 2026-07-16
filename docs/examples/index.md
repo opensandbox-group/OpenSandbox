@@ -47,6 +47,7 @@ Fundamental sandbox operations and SDK workflows.
 | [Code Interpreter](/examples/code-interpreter) | End-to-end Code Interpreter SDK workflow |
 | [AIO Sandbox](/examples/aio-sandbox) | All-in-One sandbox setup |
 | [Agent Sandbox](/examples/agent-sandbox) | Kubernetes agent-sandbox integration |
+| [Agent Substrate POC](/examples/agent-substrate) | Validate Actor lifecycle, atenet routing, suspend/resume, and execd |
 | [AKS + Kata](/examples/aks-kata) | AKS deployment with Kata VM isolation, ingress, egress, and Credential Vault |
 | [Windows](/examples/windows) | Windows sandbox via KVM/QEMU |
 | [RL Training](/examples/rl-training) | DQN CartPole reinforcement learning |

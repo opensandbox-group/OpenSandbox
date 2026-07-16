@@ -108,13 +108,16 @@ paths:
       tags: [Sandboxes]
       summary: Create a sandbox
       description: |
-        Creates a new sandbox from a container image or restores one from a
-        persistent sandbox snapshot with optional resource limits, environment
-        variables, and metadata.
+        Creates a new sandbox from a container image, restores one from a
+        persistent sandbox snapshot, or creates one from a provider-specific
+        administrator template selected through `extensions`.
 
         Exactly one startup source must be provided:
         - `image` to provision directly from a container image.
         - `snapshotId` to restore from a previously created snapshot.
+        - `extensions.poolRef` to use a pre-configured OpenSandbox pool.
+        - `extensions.agent-substrate.template` to use an administrator-registered
+          Agent Substrate ActorTemplate.
 
         When `image` is provided, `entrypoint` is required. When `snapshotId` is
         provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -201,6 +204,14 @@ paths:
                     cpu: "500m"
                     memory: "512Mi"
                   entrypoint: ["python", "/workspace/app.py"]
+              agent-substrate-template:
+                summary: Create an Actor from an administrator-registered ActorTemplate
+                value:
+                  timeout: 3600
+                  metadata:
+                    team: research
+                  extensions:
+                    agent-substrate.template: python
       responses:
         '202':
           description: |
@@ -1165,8 +1176,9 @@ components:
     CreateSandboxRequest:
       type: object
       description: |
-        Request to create a new sandbox from either a container image, a snapshot,
-        or a pre-configured pool (via `extensions.poolRef`).
+        Request to create a new sandbox from a container image, a snapshot, a
+        pre-configured pool, or an administrator-registered Agent Substrate
+        ActorTemplate.
 
         **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
         and `resourceLimits` is required.
@@ -1179,6 +1191,16 @@ components:
         a pre-configured pool. In this case `image`, `entrypoint`, and
         `resourceLimits` are all optional (defined by the Pool CRD template).
         `snapshotId` must not be provided together with `poolRef`.
+
+        **Agent Substrate template mode**: When
+        `extensions.agent-substrate.template` is set, its value is an opaque key
+        registered by the server administrator. The server maps that key to a
+        pre-existing ActorTemplate; clients cannot provide an inline template or
+        a direct Kubernetes namespace/name. `image`, `snapshotId`, `entrypoint`,
+        `resourceLimits`, `resourceRequests`, `env`, `platform`, `volumes`,
+        `networkPolicy`, `credentialProxy`, `secureAccess`, and `poolRef` must be
+        omitted because those settings are owned by the ActorTemplate or are not
+        supported by this provider.
 
         **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
       properties:
@@ -1220,8 +1242,9 @@ components:
           $ref: '#/components/schemas/ResourceLimits'
           description: |
             Runtime resource constraints (hard caps) for the sandbox instance.
-            Required when `extensions.poolRef` is not set.
-            Optional when using pool mode (resource limits are defined by the Pool CRD template).
+            Required in standard image/snapshot mode. Omit in pool mode or Agent
+            Substrate template mode because limits are defined by the selected
+            administrator resource.
             SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
 
         resourceRequests:
@@ -1336,6 +1359,7 @@ components:
 
             **Well-known keys**:
             - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24 hours inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit to disable. Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint via `validate_extensions` in server `src/extensions/validation.py`).
+            - `agent-substrate.template` (Agent Substrate provider): Required opaque key selecting one administrator-registered ActorTemplate. It is not a direct Kubernetes resource reference and cannot be combined with other startup sources or template-owned workload fields.
     ResourceLimits:
       type: object
       description: |

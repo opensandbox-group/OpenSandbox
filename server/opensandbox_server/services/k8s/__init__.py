@@ -23,6 +23,7 @@ from opensandbox_server.services.k8s.provider_factory import (
     list_available_providers,
     PROVIDER_TYPE_BATCHSANDBOX,
     PROVIDER_TYPE_AGENT_SANDBOX,
+    PROVIDER_TYPE_AGENT_SUBSTRATE,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "list_available_providers",
     "PROVIDER_TYPE_BATCHSANDBOX",
     "PROVIDER_TYPE_AGENT_SANDBOX",
+    "PROVIDER_TYPE_AGENT_SUBSTRATE",
 ]

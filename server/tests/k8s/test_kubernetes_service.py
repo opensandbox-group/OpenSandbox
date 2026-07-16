@@ -47,6 +47,7 @@ from opensandbox_server.config import (
     SecureAccessKey,
 )
 from opensandbox_server.api.schema import Endpoint
+from opensandbox_server.well_known_extensions import AGENT_SUBSTRATE_TEMPLATE_KEY
 
 class TestKubernetesSandboxServiceInit:
     
@@ -789,6 +790,54 @@ class TestKubernetesSandboxServiceCreate:
         # Should not raise AttributeError on None.auth
         response = await k8s_service.create_sandbox(pool_request)
         assert response.id is not None
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_agent_substrate_mode_skips_image_resolution(
+        self, k8s_service, mock_workload
+    ):
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        request = CreateSandboxRequest(
+            timeout=600,
+            extensions={AGENT_SUBSTRATE_TEMPLATE_KEY: "python"},
+        )
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "osb-test-id",
+            "uid": "actor-uid",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "AGENT_SUBSTRATE_RUNNING",
+            "message": "Actor is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.resolve_sandbox_image_from_request"
+        ) as resolve_image:
+            response = await k8s_service.create_sandbox(request)
+
+        assert response.status.state == "Running"
+        resolve_image.assert_not_called()
+        k8s_service.workload_provider.validate_create_request.assert_called_once_with(request)
+        assert k8s_service.workload_provider.create_workload.call_args.kwargs[
+            "extensions"
+        ] == {AGENT_SUBSTRATE_TEMPLATE_KEY: "python"}
+
+    def test_delete_sandbox_without_kubernetes_volumes_skips_pvc_cleanup(
+        self, k8s_service
+    ):
+        k8s_service.workload_provider.uses_kubernetes_managed_volumes.return_value = False
+
+        with patch.object(k8s_service, "_cleanup_managed_pvcs") as cleanup_pvcs:
+            k8s_service.delete_sandbox("sandbox-id")
+
+        k8s_service.workload_provider.delete_workload.assert_called_once_with(
+            sandbox_id="sandbox-id",
+            namespace=k8s_service.namespace,
+        )
+        cleanup_pvcs.assert_not_called()
 
 class TestWaitForSandboxReady:
     """_wait_for_sandbox_ready method tests"""

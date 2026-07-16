@@ -14,6 +14,10 @@
 
 """Well-known CreateSandboxRequest.extensions keys and workload storage keys."""
 
+from opensandbox_server.well_known_extensions import (
+    AGENT_SUBSTRATE_TEMPLATE_KEY as AGENT_SUBSTRATE_TEMPLATE_KEY,
+)
+
 # access.renew.extend.seconds extension key (annotation-based)
 ACCESS_RENEW_EXTEND_SECONDS_KEY = "access.renew.extend.seconds"
 ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY = "opensandbox.io/access-renew-extend-seconds"

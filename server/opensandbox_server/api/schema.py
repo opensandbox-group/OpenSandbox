@@ -24,6 +24,8 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, RootModel, model_validator
 
+from opensandbox_server.well_known_extensions import AGENT_SUBSTRATE_TEMPLATE_KEY
+
 
 # ============================================================================
 # Image Specification
@@ -492,9 +494,55 @@ class CreateSandboxRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_and_entrypoint(self) -> "CreateSandboxRequest":
+        extensions = self.extensions or {}
+        raw_actor_template = extensions.get(AGENT_SUBSTRATE_TEMPLATE_KEY)
+        has_actor_template_key = AGENT_SUBSTRATE_TEMPLATE_KEY in extensions
+        actor_template_key = str(raw_actor_template or "").strip()
+
         # When poolRef is set, image/snapshotId/entrypoint/resourceLimits are
         # all defined in the Pool CRD and not required from the caller.
-        has_pool_ref = bool((self.extensions or {}).get("poolRef", "").strip())
+        has_pool_ref = bool(extensions.get("poolRef", "").strip())
+
+        if has_actor_template_key and not actor_template_key:
+            raise ValueError(
+                f'extensions["{AGENT_SUBSTRATE_TEMPLATE_KEY}"] must be a non-empty '
+                "administrator-registered template key."
+            )
+
+        if actor_template_key:
+            if has_pool_ref:
+                raise ValueError(
+                    f'extensions["{AGENT_SUBSTRATE_TEMPLATE_KEY}"] cannot be used '
+                    "together with poolRef."
+                )
+
+            conflicting_fields = []
+            for field_name, value in (
+                ("image", self.image),
+                ("snapshotId", self.snapshot_id),
+                ("entrypoint", self.entrypoint),
+                ("resourceLimits", self.resource_limits),
+                ("resourceRequests", self.resource_requests),
+                ("env", self.env),
+                ("platform", self.platform),
+                ("volumes", self.volumes),
+                ("networkPolicy", self.network_policy),
+            ):
+                if value is not None:
+                    conflicting_fields.append(field_name)
+            if self.credential_proxy is not None:
+                conflicting_fields.append("credentialProxy")
+            if self.secure_access:
+                conflicting_fields.append("secureAccess")
+
+            if conflicting_fields:
+                fields = ", ".join(conflicting_fields)
+                raise ValueError(
+                    f'extensions["{AGENT_SUBSTRATE_TEMPLATE_KEY}"] cannot be used '
+                    f"with template-owned fields: {fields}."
+                )
+            return self
+
         if has_pool_ref:
             # Reject conflicting fields that would be ignored in pool mode
             if bool((self.snapshot_id or "").strip()):

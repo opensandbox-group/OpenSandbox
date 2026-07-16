@@ -15,17 +15,23 @@
 import pytest
 from unittest.mock import patch
 
-from opensandbox_server.config import AgentSandboxRuntimeConfig
+from opensandbox_server.config import (
+    AgentSandboxRuntimeConfig,
+    AgentSubstrateRuntimeConfig,
+    AgentSubstrateTemplateConfig,
+)
 from opensandbox_server.services.k8s.provider_factory import (
     register_provider,
     create_workload_provider,
     list_available_providers,
     PROVIDER_TYPE_BATCHSANDBOX,
     PROVIDER_TYPE_AGENT_SANDBOX,
+    PROVIDER_TYPE_AGENT_SUBSTRATE,
 )
 from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
 from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+from opensandbox_server.services.k8s.agent_substrate_provider import AgentSubstrateProvider
 
 class TestProviderFactory:
     
@@ -83,6 +89,37 @@ spec:
         assert isinstance(provider1, BatchSandboxProvider)
         assert isinstance(provider2, BatchSandboxProvider)
         assert isinstance(provider3, BatchSandboxProvider)
+
+    def test_create_agent_substrate_provider(
+        self,
+        mock_k8s_client,
+        k8s_app_config,
+    ):
+        k8s_app_config.kubernetes.workload_provider = PROVIDER_TYPE_AGENT_SUBSTRATE
+        k8s_app_config.agent_substrate = AgentSubstrateRuntimeConfig(
+            api_endpoint="api.ate-system.svc:443",
+            router_endpoint="http://atenet-router.ate-system.svc:80",
+            default_atespace="opensandbox",
+            templates=[
+                AgentSubstrateTemplateConfig(
+                    key="python",
+                    namespace="opensandbox-templates",
+                    name="python-execd",
+                )
+            ],
+        )
+
+        with patch(
+            "opensandbox_server.services.k8s.agent_substrate_provider.AgentSubstrateClient"
+        ):
+            provider = create_workload_provider(
+                PROVIDER_TYPE_AGENT_SUBSTRATE,
+                mock_k8s_client,
+                k8s_app_config,
+            )
+
+        assert isinstance(provider, AgentSubstrateProvider)
+        assert provider.k8s_client == mock_k8s_client
     
     def test_create_provider_with_none_type_uses_default(self, mock_k8s_client, k8s_app_config):
         provider = create_workload_provider(None, mock_k8s_client, k8s_app_config)
@@ -123,6 +160,7 @@ spec:
         assert isinstance(providers, list)
         assert PROVIDER_TYPE_BATCHSANDBOX in providers
         assert PROVIDER_TYPE_AGENT_SANDBOX in providers
+        assert PROVIDER_TYPE_AGENT_SUBSTRATE in providers
     
     def test_register_custom_provider(self, mock_k8s_client, isolated_registry):
         # Create a custom provider class

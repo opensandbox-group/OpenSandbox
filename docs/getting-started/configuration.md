@@ -52,6 +52,7 @@ If `server.api_key` is empty, the server runs without authentication. In non-int
 | `[server]` | Host, port, API key, and general server settings |
 | `[docker]` | Docker runtime: `network_mode`, `host_ip`, image registry |
 | `[kubernetes]` | Kubernetes runtime: `workload_provider`, `batchsandbox_template_file` |
+| `[agent_substrate]` | Agent Substrate POC: ateapi, atenet, Atespace, and registered ActorTemplates |
 | `[egress]` | Egress sidecar for `networkPolicy` enforcement |
 | `[ingress]` | Ingress gateway configuration |
 | `[secure_runtime]` | Secure container runtime (gVisor, Kata, Firecracker) |
@@ -60,6 +61,58 @@ If `server.api_key` is empty, the server runs without authentication. In non-int
 | `[agent_sandbox]` | Agent sandbox settings for Kubernetes |
 
 For the full configuration reference with all keys and defaults, see the [server configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
+
+## Agent Substrate POC
+
+The `agent-substrate` provider creates Substrate Actors through `ateapi` instead
+of creating a per-sandbox Kubernetes workload. An administrator must install
+Agent Substrate, create the Atespace, WorkerPool, SandboxConfig, and
+ActorTemplates, then register the allowed templates in OpenSandbox:
+
+```toml
+[runtime]
+type = "kubernetes"
+execd_image = "unused-for-agent-substrate"
+
+[kubernetes]
+workload_provider = "agent-substrate"
+namespace = "opensandbox-system"
+
+[agent_substrate]
+api_endpoint = "api.ate-system.svc:443"
+router_endpoint = "http://atenet-router.ate-system.svc:80"
+ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+server_name = "api.ate-system.svc"
+default_atespace = "opensandbox"
+rpc_timeout_seconds = 20
+
+# Set when ateapi requires Kubernetes ServiceAccount JWT authentication.
+# token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+[[agent_substrate.templates]]
+key = "python"
+namespace = "opensandbox-templates"
+name = "python-execd"
+logical_port = 44772
+actor_port = 80
+```
+
+Users select only the administrator-defined key:
+
+```bash
+curl -X POST http://localhost:8080/v1/sandboxes \
+  -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timeout": 3600,
+    "extensions": {"agent-substrate.template": "python"}
+  }'
+```
+
+The POC is single-replica and keeps metadata and expiration state in memory.
+Server restart recovery, durable TTL cleanup, and multi-tenancy are not yet
+implemented. Actor endpoints always route through atenet; direct Worker IPs are
+never returned.
 
 ## API Documentation
 

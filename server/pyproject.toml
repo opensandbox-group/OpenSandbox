@@ -55,6 +55,8 @@ dependencies = [
     "tomli; python_version < \"3.11\"",
     "uvicorn[standard]",
     "websockets>=14.0",
+    "grpcio>=1.75",
+    "protobuf>=6.31",
 ]
 
 [project.urls]
@@ -91,6 +93,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.14.8",
     "pyright>=1.1.0",
+    "grpcio-tools>=1.75",
 ]
 
 [tool.ruff]
@@ -100,6 +103,9 @@ src = ["opensandbox_server", "tests"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"opensandbox_server/services/k8s/agent_substrate_proto/*_pb2*.py" = ["E402", "F401"]
 
 [tool.pyright]
 typeCheckingMode = "standard"

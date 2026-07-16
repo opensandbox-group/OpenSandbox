@@ -22,6 +22,7 @@ from typing import Dict, List, Any, Optional
 
 from opensandbox_server.api.schema import Endpoint, ImageSpec, NetworkPolicy, PlatformSpec, Volume
 from opensandbox_server.config import EGRESS_MODE_DNS
+from opensandbox_server.well_known_extensions import AGENT_SUBSTRATE_TEMPLATE_KEY
 
 
 class WorkloadProvider(ABC):
@@ -233,6 +234,22 @@ class WorkloadProvider(ABC):
         this method to return True.
         """
         return False
+
+    def uses_kubernetes_managed_volumes(self) -> bool:
+        """Whether the service may create and clean up per-sandbox Kubernetes PVCs."""
+        return True
+
+    def validate_create_request(self, request: Any) -> None:
+        """Validate provider-specific create semantics before any side effects."""
+        template_key = (getattr(request, "extensions", None) or {}).get(
+            AGENT_SUBSTRATE_TEMPLATE_KEY, ""
+        )
+        if str(template_key).strip():
+            raise ValueError(
+                f'extensions["{AGENT_SUBSTRATE_TEMPLATE_KEY}"] is supported only '
+                "by the agent-substrate workload provider."
+            )
+
 
     def legacy_resource_name(self, sandbox_id: str) -> str:
         """
