@@ -3,7 +3,7 @@ title: Agent Substrate Workload Provider
 authors:
   - "@zhangryan"
 creation-date: 2026-07-14
-last-updated: 2026-07-15
+last-updated: 2026-07-16
 status: draft
 ---
 
@@ -351,26 +351,52 @@ are rejected rather than silently ignored.
 
 Initial compatibility target:
 
-| OpenSandbox field or feature | Baseline | Required behavior |
+The **initial support and ownership** column uses exactly one of six values.
+They differ by who owns the value and whether the initial integration handles
+it. This column is not a performance baseline or the default behavior of the
+existing providers.
+
+- `Required` — the caller must supply the value.
+- `Template-owned` — the selected ActorTemplate fixes the value, so the caller
+  must omit it. Applies to what runs in the Actor (image, command, environment,
+  resources, platform).
+- `Infrastructure-owned` — the capability works, but only when an administrator
+  preconfigures it outside the per-sandbox request, such as a Kubernetes
+  ServiceAccount or image pull secret. The caller still cannot pass it per
+  request.
+- `Provider-stored` — OpenSandbox keeps the value in its own workload record,
+  outside the Actor, because the reviewed Actor API does not carry it.
+- `Supported` — OpenSandbox maps the operation to an Actor lifecycle call.
+- `Unsupported` — the initial integration has no path for the feature.
+
+The **required OpenSandbox behavior** column is normative: it defines the exact
+validation, storage, mapping, or rejection the provider must perform. The three
+categories that reject a caller-provided value do so for different reasons:
+`Template-owned` because the template already supplies it, `Infrastructure-owned`
+because it must be preconfigured for the Worker infrastructure, and
+`Unsupported` because the feature does not exist yet.
+
+| OpenSandbox field or feature | Initial support and ownership | Required OpenSandbox behavior |
 |---|---|---|
 | `extensions["agent-substrate.template"]` | Required | Resolve the administrator-defined key to exactly one configured ActorTemplate; reject unknown keys. |
 | `image.uri` | Template-owned | Omit from the request; reject a per-request image because the ActorTemplate defines it. |
-| `image.auth` | Unsupported | Reject; template/Worker infrastructure owns image pull credentials. |
+| `image.auth` | Infrastructure-owned | Reject per-request credentials; administrators must preconfigure registry access for the Worker infrastructure. |
 | `entrypoint` | Template-owned | Omit from the request; reject a per-Actor override. |
 | `env` | Template-owned | Omit from the request; reject custom values. |
 | CPU/memory limits and requests | Template-owned | Omit from the request; the ActorTemplate and WorkerPool define the profile. |
 | `platform` | Template-owned | Omit from the request; the ActorTemplate selects its sandbox class and eligible Workers. |
-| `volumes` | Unsupported initially | Reject before OpenSandbox creates PVCs. |
-| `networkPolicy` and egress sidecar | Unsupported initially | Reject; requires a Substrate-native egress design. |
-| Credential Vault proxy | Unsupported initially | Reject because it depends on the egress sidecar path. |
-| user metadata | Provider record | Persist outside the Actor until upstream metadata supports it. |
-| expiration/renew | Process-local record and reaper in the POC | Best-effort only; durable and HA-safe behavior is deferred to production work. |
+| `volumes` | Unsupported | Reject before OpenSandbox creates PVCs. |
+| `networkPolicy` and egress sidecar | Unsupported | Reject; requires a Substrate-native egress design. |
+| Credential Vault proxy | Unsupported | Reject because it depends on the egress sidecar path. |
+| user metadata | Provider-stored | Persist outside the Actor until upstream metadata supports it. |
+| expiration/renew | Provider-stored | Store in the workload record; the POC reaper is best-effort, and durable, HA-safe behavior is deferred to production work. |
 | pause/resume | Supported | Map to suspend/resume. |
-| arbitrary endpoint port | Unsupported initially | Only explicit logical port mappings to Actor port 80 are accepted. |
-| secure access routes | Unsupported initially | Requires integration between OpenSandbox signing and atenet. |
+| arbitrary endpoint port | Unsupported | Only explicit logical port mappings to Actor port 80 are accepted. |
+| secure access routes | Unsupported | Requires integration between OpenSandbox signing and atenet. |
 
-The provider must never replace an unsupported value with a template default
-without telling the caller.
+`Unsupported` means unsupported by the initial integration, not permanently out
+of scope; later work may add some of these features. The provider must never
+replace an unsupported value with a template default without telling the caller.
 
 ### Notes/Constraints/Caveats
 
