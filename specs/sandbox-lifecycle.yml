@@ -843,8 +843,11 @@ components:
           description: Wall-clock duration in milliseconds from create start to ready or failure
         sdkLanguage:
           type: string
-          description: SDK language that reported the event
-          enum: [python, go, typescript]
+          minLength: 1
+          maxLength: 32
+          description: >
+            SDK language identifier (free-form; examples: python, go, typescript).
+            Kept as a string so new SDK languages do not require a server upgrade.
         sdkVersion:
           type: string
           description: SDK package version string

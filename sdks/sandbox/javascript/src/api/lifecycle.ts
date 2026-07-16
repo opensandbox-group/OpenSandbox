@@ -782,11 +782,8 @@ export interface components {
             image?: string;
             /** @description Wall-clock duration in milliseconds from create start to ready or failure */
             createDurationMs: number;
-            /**
-             * @description SDK language that reported the event
-             * @enum {string}
-             */
-            sdkLanguage: "python" | "go" | "typescript";
+            /** @description SDK language identifier (free-form; examples: python, go, typescript). Kept as a string so new SDK languages do not require a server upgrade. */
+            sdkLanguage: string;
             /** @description SDK package version string */
             sdkVersion: string;
             /** @description Whether create + readiness completed successfully */

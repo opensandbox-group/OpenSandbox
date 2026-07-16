@@ -37,10 +37,20 @@ def _event_body(**overrides):
 
 class TestMetricsAuthentication:
     def test_without_api_key_returns_401(self, client: TestClient):
-        response = client.post("/metrics/events", json=_event_body())
+        response = client.post("/v1/metrics/events", json=_event_body())
         assert response.status_code == 401
 
-    def test_v1_prefix_exists(self, client: TestClient, auth_headers: dict):
+    def test_unprefixed_path_is_not_mounted(self, client: TestClient, auth_headers: dict):
+        response = client.post(
+            "/metrics/events",
+            json=_event_body(),
+            headers=auth_headers,
+        )
+        assert response.status_code == 404
+
+
+class TestReportMetricsEvent:
+    def test_accepts_valid_event(self, client: TestClient, auth_headers: dict):
         with patch(
             "opensandbox_server.api.metrics.record_sandbox_create_duration"
         ) as record:
@@ -50,24 +60,29 @@ class TestMetricsAuthentication:
                 headers=auth_headers,
             )
         assert response.status_code == 204
-        record.assert_called_once()
-
-
-class TestReportMetricsEvent:
-    def test_accepts_valid_event(self, client: TestClient, auth_headers: dict):
-        with patch(
-            "opensandbox_server.api.metrics.record_sandbox_create_duration"
-        ) as record:
-            response = client.post(
-                "/metrics/events",
-                json=_event_body(),
-                headers=auth_headers,
-            )
-        assert response.status_code == 204
         assert response.content == b""
         record.assert_called_once_with(
             create_duration_ms=1234,
             sdk_language="python",
+            sdk_version="0.1.0",
+            success=True,
+        )
+
+    def test_accepts_unknown_sdk_language(
+        self, client: TestClient, auth_headers: dict
+    ):
+        with patch(
+            "opensandbox_server.api.metrics.record_sandbox_create_duration"
+        ) as record:
+            response = client.post(
+                "/v1/metrics/events",
+                json=_event_body(sdkLanguage="kotlin"),
+                headers=auth_headers,
+            )
+        assert response.status_code == 204
+        record.assert_called_once_with(
+            create_duration_ms=1234,
+            sdk_language="kotlin",
             sdk_version="0.1.0",
             success=True,
         )
@@ -81,7 +96,7 @@ class TestReportMetricsEvent:
             "opensandbox_server.api.metrics.record_sandbox_create_duration"
         ) as record:
             response = client.post(
-                "/metrics/events",
+                "/v1/metrics/events",
                 json=body,
                 headers=auth_headers,
             )
@@ -95,7 +110,7 @@ class TestReportMetricsEvent:
 
     def test_invalid_body_returns_422(self, client: TestClient, auth_headers: dict):
         response = client.post(
-            "/metrics/events",
+            "/v1/metrics/events",
             json={"eventType": "sandbox.create"},
             headers=auth_headers,
         )

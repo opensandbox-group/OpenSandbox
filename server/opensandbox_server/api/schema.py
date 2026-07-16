@@ -1010,10 +1010,12 @@ class MetricsEvent(BaseModel):
         ge=0,
         description="Wall-clock duration in milliseconds from create start to ready or failure",
     )
-    sdk_language: Literal["python", "go", "typescript"] = Field(
+    sdk_language: str = Field(
         ...,
         alias="sdkLanguage",
-        description="SDK language that reported the event",
+        min_length=1,
+        max_length=32,
+        description="SDK language identifier (e.g. python, go, typescript)",
     )
     sdk_version: str = Field(
         ...,

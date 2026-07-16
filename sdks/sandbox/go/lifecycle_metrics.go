@@ -19,8 +19,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
+
+const disableMetricsEnv = "OPENSANDBOX_DISABLE_METRICS"
 
 type sandboxCreateMetricsEvent struct {
 	EventType        string `json:"eventType"`
@@ -32,9 +36,20 @@ type sandboxCreateMetricsEvent struct {
 	Success          bool   `json:"success"`
 }
 
+func metricsDisabled(cfg ConnectionConfig) bool {
+	if cfg.DisableMetrics {
+		return true
+	}
+	return strings.TrimSpace(os.Getenv(disableMetricsEnv)) == "1"
+}
+
 // reportSandboxCreateMetric best-effort posts create latency to the lifecycle server.
 // Failures are ignored and the call never blocks CreateSandbox.
 func reportSandboxCreateMetric(cfg ConnectionConfig, sandboxID, image string, durationMs int64, success bool) {
+	if metricsDisabled(cfg) {
+		return
+	}
+
 	payload := sandboxCreateMetricsEvent{
 		EventType:        "sandbox.create",
 		SandboxID:        sandboxID,

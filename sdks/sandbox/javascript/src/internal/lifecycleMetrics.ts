@@ -15,19 +15,36 @@
 import { DEFAULT_USER_AGENT } from "../core/constants.js";
 import type { ConnectionConfig } from "../config/connection.js";
 
-export type SandboxCreateMetricsPayload = {
+const DISABLE_METRICS_ENV = "OPENSANDBOX_DISABLE_METRICS";
+
+export interface SandboxCreateMetricsPayload {
   eventType: "sandbox.create";
   sandboxId?: string;
   image?: string;
   createDurationMs: number;
-  sdkLanguage: "typescript";
+  sdkLanguage: string;
   sdkVersion: string;
   success: boolean;
-};
+}
+
+function readEnv(name: string): string | undefined {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    ?.process?.env;
+  const v = env?.[name];
+  return typeof v === "string" && v.length ? v : undefined;
+}
+
+function envMetricsDisabled(): boolean {
+  return readEnv(DISABLE_METRICS_ENV)?.trim() === "1";
+}
+
+function metricsDisabled(connectionConfig: ConnectionConfig): boolean {
+  return connectionConfig.disableMetrics || envMetricsDisabled();
+}
 
 function sdkVersionFromUserAgent(userAgent: string | undefined): string {
-  const match = (userAgent ?? DEFAULT_USER_AGENT).match(
-    /OpenSandbox-JS-SDK\/([^\s]+)/
+  const match = /OpenSandbox-JS-SDK\/([^\s]+)/.exec(
+    userAgent ?? DEFAULT_USER_AGENT
   );
   return match?.[1] ?? "0.0.0";
 }
@@ -45,6 +62,10 @@ export function reportSandboxCreateMetric(
     success: boolean;
   }
 ): void {
+  if (metricsDisabled(connectionConfig)) {
+    return;
+  }
+
   const payload: SandboxCreateMetricsPayload = {
     eventType: "sandbox.create",
     createDurationMs: Math.max(0, Math.floor(opts.createDurationMs)),

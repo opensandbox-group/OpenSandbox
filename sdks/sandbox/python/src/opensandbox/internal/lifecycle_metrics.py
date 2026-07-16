@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from typing import Any, Protocol
 
@@ -26,11 +27,16 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _SDK_LANGUAGE = "python"
+_DISABLE_METRICS_ENV = "OPENSANDBOX_DISABLE_METRICS"
+
+# Keep strong refs so fire-and-forget tasks are not GC'd mid-flight.
+_pending: set[asyncio.Task[Any]] = set()
 
 
 class _MetricsConnection(Protocol):
     headers: dict[str, str]
     user_agent: str
+    disable_metrics: bool
 
     def get_api_key(self) -> str: ...
 
@@ -47,6 +53,14 @@ def _sdk_version() -> str:
         return __version__
     except Exception:
         return "0.0.0"
+
+
+def _env_metrics_disabled() -> bool:
+    return os.getenv(_DISABLE_METRICS_ENV, "").strip() == "1"
+
+
+def _metrics_disabled(config: _MetricsConnection) -> bool:
+    return bool(config.disable_metrics) or _env_metrics_disabled()
 
 
 def _build_payload(
@@ -109,6 +123,9 @@ def report_sandbox_create_metric(
     success: bool,
 ) -> None:
     """Fire-and-forget create latency report. Never raises or blocks callers."""
+    if _metrics_disabled(config):
+        return
+
     payload = _build_payload(
         sandbox_id=sandbox_id,
         image=image,
@@ -134,4 +151,6 @@ def report_sandbox_create_metric(
         except Exception:
             logger.debug("Failed to report sandbox.create metrics", exc_info=True)
 
-    loop.create_task(_run())
+    task = loop.create_task(_run())
+    _pending.add(task)
+    task.add_done_callback(_pending.discard)

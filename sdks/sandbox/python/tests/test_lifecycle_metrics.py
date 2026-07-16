@@ -14,6 +14,7 @@
 
 """Tests for best-effort lifecycle metrics reporting."""
 
+import asyncio
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
@@ -62,8 +63,6 @@ async def test_report_does_not_raise_when_post_fails():
             success=True,
         )
         # Allow the scheduled task to run and finish.
-        import asyncio
-
         await asyncio.sleep(0.05)
 
 
@@ -98,3 +97,68 @@ def test_sync_report_swallows_errors_in_thread():
                 break
             time.sleep(0.02)
     assert done.called
+
+
+@pytest.mark.asyncio
+async def test_report_skipped_when_disable_metrics():
+    config = ConnectionConfig(
+        domain="127.0.0.1:9",
+        protocol="http",
+        disable_metrics=True,
+    )
+    with patch("opensandbox.internal.lifecycle_metrics._post_async") as post:
+        report_sandbox_create_metric(
+            config,
+            sandbox_id="sbx",
+            image="python:3.12",
+            create_duration_ms=100,
+            success=True,
+        )
+        await asyncio.sleep(0.05)
+    post.assert_not_called()
+
+
+def test_report_skipped_when_env_disables_metrics(monkeypatch):
+    monkeypatch.setenv("OPENSANDBOX_DISABLE_METRICS", "1")
+    config = ConnectionConfig(domain="127.0.0.1:9", protocol="http")
+    with patch("opensandbox.internal.lifecycle_metrics._post_sync") as post:
+        report_sandbox_create_metric(
+            config,
+            sandbox_id=None,
+            image="img",
+            create_duration_ms=1,
+            success=False,
+        )
+        import time
+
+        time.sleep(0.05)
+    post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_report_keeps_strong_task_ref():
+    config = ConnectionConfig(
+        domain="127.0.0.1:9",
+        protocol="http",
+        request_timeout=timedelta(milliseconds=50),
+    )
+    from opensandbox.internal import lifecycle_metrics as metrics_mod
+
+    started = asyncio.Event()
+
+    async def _slow_post(*_args, **_kwargs):
+        started.set()
+        await asyncio.sleep(0.05)
+
+    with patch.object(metrics_mod, "_post_async", side_effect=_slow_post):
+        report_sandbox_create_metric(
+            config,
+            sandbox_id="sbx",
+            image="img",
+            create_duration_ms=10,
+            success=True,
+        )
+        assert len(metrics_mod._pending) == 1
+        await started.wait()
+        await asyncio.sleep(0.08)
+    assert len(metrics_mod._pending) == 0

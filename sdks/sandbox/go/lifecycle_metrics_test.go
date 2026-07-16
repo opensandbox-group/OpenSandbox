@@ -67,3 +67,37 @@ func TestReportSandboxCreateMetricIgnoresFailure(t *testing.T) {
 	reportSandboxCreateMetric(cfg, "", "img", 1, false)
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestReportSandboxCreateMetricDisabledByConfig(t *testing.T) {
+	var got atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cfg := ConnectionConfig{Domain: server.URL, DisableMetrics: true}
+	reportSandboxCreateMetric(cfg, "sbx", "img", 1, true)
+	time.Sleep(100 * time.Millisecond)
+	if got.Load() {
+		t.Fatal("expected metrics POST to be skipped when DisableMetrics is set")
+	}
+}
+
+func TestReportSandboxCreateMetricDisabledByEnv(t *testing.T) {
+	t.Setenv("OPENSANDBOX_DISABLE_METRICS", "1")
+
+	var got atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cfg := ConnectionConfig{Domain: server.URL}
+	reportSandboxCreateMetric(cfg, "sbx", "img", 1, true)
+	time.Sleep(100 * time.Millisecond)
+	if got.Load() {
+		t.Fatal("expected metrics POST to be skipped when OPENSANDBOX_DISABLE_METRICS=1")
+	}
+}
