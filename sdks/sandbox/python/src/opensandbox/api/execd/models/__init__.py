@@ -65,7 +65,9 @@ from .server_stream_event_error import ServerStreamEventError
 from .server_stream_event_results import ServerStreamEventResults
 from .server_stream_event_type import ServerStreamEventType
 from .session_state import SessionState
+from .session_state_profile import SessionStateProfile
 from .session_state_status import SessionStateStatus
+from .session_state_uid_mode import SessionStateUidMode
 from .upload_file_body import UploadFileBody
 
 __all__ = (
@@ -118,6 +120,8 @@ __all__ = (
     "ServerStreamEventResults",
     "ServerStreamEventType",
     "SessionState",
+    "SessionStateProfile",
     "SessionStateStatus",
+    "SessionStateUidMode",
     "UploadFileBody",
 )

@@ -72,6 +72,16 @@ class IsolationServiceSync(Protocol):
         self, request: CreateIsolatedSessionRequest
     ) -> IsolationSessionSync: ...
 
+    def attach(self, session_id: str) -> IsolationSessionSync:
+        """Rebuild a session handle from an existing ``session_id``.
+
+        Synchronous counterpart of the async ``attach``. See the async
+        :class:`opensandbox.services.isolated.IsolationService.attach` for the
+        full contract (creation-parameter echo, older-execd tolerance,
+        not-found propagation).
+        """
+        ...
+
     def capabilities(self) -> IsolatedCapabilities: ...
 
     def list(self) -> list[IsolatedSessionSummary]: ...

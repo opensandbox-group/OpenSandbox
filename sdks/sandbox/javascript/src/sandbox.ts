@@ -55,6 +55,9 @@ const unavailableIsolation: IsolationService = {
   create(): Promise<IsolationSession> {
     throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
   },
+  attach(): Promise<IsolationSession> {
+    throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
+  },
   capabilities(): Promise<IsolatedCapabilities> {
     return Promise.resolve({ available: false, commit_supported: false, diff_supported: false });
   },

@@ -44,6 +44,17 @@ export interface CreateIsolatedSessionRequest {
 export interface IsolatedSessionInfo {
   session_id: string;
   created_at: string;
+  // Creation-parameter fields echoed by execd (may be absent on older builds).
+  profile?: "strict" | "balanced";
+  workspace?: IsolatedWorkspaceSpec;
+  extra_writable?: string[];
+  binds?: BindMount[];
+  share_net?: boolean;
+  env_passthrough?: EnvPassthroughSpec;
+  uid?: number;
+  gid?: number;
+  uid_mode?: "setpriv" | "userns";
+  idle_timeout_seconds?: number;
 }
 
 export interface IsolatedSessionState {
@@ -51,6 +62,20 @@ export interface IsolatedSessionState {
   created_at?: string;
   last_run_at?: string;
   idle_remaining_seconds?: number | null;
+  // Creation-parameter fields echoed by execd (may be absent on older builds).
+  // Mirrors IsolatedSessionInfo so callers of session.get() can recover the
+  // parameters the session was created with — useful for stateless clients
+  // (e.g. serverless workers) that only persist a session ID.
+  profile?: "strict" | "balanced";
+  workspace?: IsolatedWorkspaceSpec;
+  extra_writable?: string[];
+  binds?: BindMount[];
+  share_net?: boolean;
+  env_passthrough?: EnvPassthroughSpec;
+  uid?: number;
+  gid?: number;
+  uid_mode?: "setpriv" | "userns";
+  idle_timeout_seconds?: number;
 }
 
 export interface IsolatedRunOpts {

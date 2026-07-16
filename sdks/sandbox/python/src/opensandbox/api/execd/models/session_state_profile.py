@@ -1,4 +1,4 @@
-#!/bin/bash
+#
 # Copyright 2026 Alibaba Group Holding Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,7 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
 
-set -e
+from enum import Enum
 
-echo "Hello from OpenSandbox!" > /app/greeting.txt
+
+class SessionStateProfile(str, Enum):
+    BALANCED = "balanced"
+    STRICT = "strict"
+
+    def __str__(self) -> str:
+        return str(self.value)

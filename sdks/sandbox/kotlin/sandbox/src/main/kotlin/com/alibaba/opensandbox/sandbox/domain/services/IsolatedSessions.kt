@@ -46,6 +46,23 @@ interface IsolationSession {
 interface IsolationService {
     fun create(request: CreateIsolatedSessionRequest): IsolationSession
 
+    /**
+     * Rebuild an [IsolationSession] handle from an existing execd session id, without recreating
+     * the session. Intended for stateless callers (e.g. serverless workers restarted mid-flight)
+     * that only have the session id.
+     *
+     * The returned handle exposes `run`, `get`, `delete`, and `files` keyed by [sessionId]. The
+     * handle's [IsolationSession.info] is populated from what execd echoes back on the GET
+     * response; older execd builds may omit creation parameters, in which case those fields on
+     * [IsolatedSessionInfo] will be null / empty and only [IsolatedSessionInfo.sessionId] and
+     * [IsolatedSessionInfo.createdAt] are guaranteed. `run`, `get`, and `delete` on the returned
+     * handle only need the session id and are unaffected by missing echo fields.
+     *
+     * @throws com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException with
+     *   `statusCode = 404` if the session does not exist on execd.
+     */
+    fun attach(sessionId: String): IsolationSession
+
     fun capabilities(): IsolatedCapabilities
 
     fun list(): List<IsolatedSessionSummary>
