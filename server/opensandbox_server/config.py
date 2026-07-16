@@ -664,6 +664,103 @@ class AgentSandboxRuntimeConfig(BaseModel):
     )
 
 
+class AgentSubstrateTemplateConfig(BaseModel):
+    """Administrator-registered Agent Substrate ActorTemplate."""
+
+    key: str = Field(
+        ...,
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        description="Opaque key users reference through extensions['agent-substrate.template'].",
+    )
+    namespace: str = Field(
+        ...,
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        description="Kubernetes namespace containing the ActorTemplate.",
+    )
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=253,
+        pattern=r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+        description="ActorTemplate resource name.",
+    )
+    logical_port: int = Field(
+        default=44772,
+        ge=1,
+        le=65535,
+        description="OpenSandbox port accepted by get_endpoint.",
+    )
+    actor_port: Literal[80] = Field(
+        default=80,
+        description="Physical Actor port routed by atenet in the pinned Substrate revision.",
+    )
+
+
+class AgentSubstrateRuntimeConfig(BaseModel):
+    """Agent Substrate gRPC workload provider configuration (OSEP-0017)."""
+
+    upstream_revision: Literal["c1ab0958f85202faf9f87ea66cd98903a9de763b"] = Field(
+        default="c1ab0958f85202faf9f87ea66cd98903a9de763b",
+        description="Pinned Agent Substrate main commit used for generated protobufs.",
+    )
+    api_endpoint: str = Field(
+        ...,
+        min_length=1,
+        description="Agent Substrate ateapi gRPC target, for example api.ate-system.svc:443.",
+    )
+    router_endpoint: str = Field(
+        ...,
+        min_length=1,
+        description="atenet HTTP router endpoint returned for Actor access.",
+    )
+    ca_file: str = Field(
+        default="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+        min_length=1,
+        description="PEM CA bundle used to verify the ateapi server certificate.",
+    )
+    server_name: str = Field(
+        default="api.ate-system.svc",
+        min_length=1,
+        description="TLS server name for ateapi certificate verification.",
+    )
+    token_file: Optional[str] = Field(
+        default=None,
+        description="Optional rotating Kubernetes ServiceAccount bearer token file.",
+    )
+    default_atespace: str = Field(
+        ...,
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        description="Pre-created Atespace used by the single-tenant POC.",
+    )
+    rpc_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        description="Deadline applied to each ateapi RPC.",
+    )
+    templates: list[AgentSubstrateTemplateConfig] = Field(
+        ...,
+        min_length=1,
+        description="Administrator-owned catalog of user-selectable ActorTemplates.",
+    )
+
+    @model_validator(mode="after")
+    def validate_template_keys(self) -> "AgentSubstrateRuntimeConfig":
+        keys = [template.key for template in self.templates]
+        duplicates = sorted({key for key in keys if keys.count(key) > 1})
+        if duplicates:
+            raise ValueError(
+                "agent_substrate template keys must be unique; duplicates: "
+                + ", ".join(duplicates)
+            )
+        return self
+
+
 class StorageConfig(BaseModel):
     """Volume and storage configuration for sandbox mounts."""
 
@@ -949,6 +1046,7 @@ class AppConfig(BaseModel):
     runtime: RuntimeConfig = Field(..., description="Sandbox runtime configuration.")
     kubernetes: Optional[KubernetesRuntimeConfig] = None
     agent_sandbox: Optional["AgentSandboxRuntimeConfig"] = None
+    agent_substrate: Optional["AgentSubstrateRuntimeConfig"] = None
     ingress: Optional[IngressConfig] = None
     docker: DockerConfig = Field(default_factory=DockerConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
@@ -968,6 +1066,8 @@ class AppConfig(BaseModel):
                 raise ValueError("Kubernetes block must be omitted when runtime.type = 'docker'.")
             if self.agent_sandbox is not None:
                 raise ValueError("agent_sandbox block must be omitted when runtime.type = 'docker'.")
+            if self.agent_substrate is not None:
+                raise ValueError("agent_substrate block must be omitted when runtime.type = 'docker'.")
             if self.ingress is not None and self.ingress.mode != INGRESS_MODE_DIRECT:
                 raise ValueError("ingress.mode must be 'direct' when runtime.type = 'docker'.")
             if self.secure_runtime is not None and self.secure_runtime.type == "firecracker":
@@ -982,6 +1082,17 @@ class AppConfig(BaseModel):
             elif self.agent_sandbox is not None:
                 raise ValueError(
                     "agent_sandbox block requires kubernetes.workload_provider = 'agent-sandbox'."
+                )
+            if provider_type == "agent-substrate":
+                if self.agent_substrate is None:
+                    raise ValueError(
+                        "agent_substrate block is required when "
+                        "kubernetes.workload_provider = 'agent-substrate'."
+                    )
+            elif self.agent_substrate is not None:
+                raise ValueError(
+                    "agent_substrate block requires "
+                    "kubernetes.workload_provider = 'agent-substrate'."
                 )
         else:
             raise ValueError(f"Unsupported runtime type '{self.runtime.type}'.")
@@ -1094,6 +1205,9 @@ __all__ = [
     "StorageConfig",
     "StoreConfig",
     "KubernetesRuntimeConfig",
+    "AgentSandboxRuntimeConfig",
+    "AgentSubstrateRuntimeConfig",
+    "AgentSubstrateTemplateConfig",
     "EgressConfig",
     "EGRESS_MODE_DNS",
     "EGRESS_MODE_DNS_NFT",

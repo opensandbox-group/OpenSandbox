@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensandbox-config
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/part-of: opensandbox-substrate-poc
+    opensandbox.io/poc: agent-substrate
+data:
+  config.toml: |
+    [server]
+    host = "0.0.0.0"
+    port = 8080
+
+    [runtime]
+    type = "kubernetes"
+    execd_image = "unused-for-agent-substrate"
+
+    [kubernetes]
+    namespace = "opensandbox-system"
+    workload_provider = "agent-substrate"
+    informer_enabled = false
+
+    [agent_substrate]
+    upstream_revision = "c1ab0958f85202faf9f87ea66cd98903a9de763b"
+    api_endpoint = "api.ate-system.svc:443"
+    router_endpoint = "http://atenet-router.ate-system.svc:80"
+    ca_file = "/etc/agent-substrate/ca.crt"
+    server_name = "api.ate-system.svc"
+    token_file = "/var/run/secrets/agent-substrate/token"
+    default_atespace = "opensandbox"
+    rpc_timeout_seconds = 20
+
+    [[agent_substrate.templates]]
+    key = "execd"
+    namespace = "ate-demo-sandbox"
+    name = "opensandbox-execd"
+    logical_port = 44772
+    actor_port = 80
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opensandbox-server
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/part-of: opensandbox-substrate-poc
+    opensandbox.io/poc: agent-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensandbox-server
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/name: opensandbox-server
+    app.kubernetes.io/part-of: opensandbox-substrate-poc
+    opensandbox.io/poc: agent-substrate
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opensandbox-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opensandbox-server
+        app.kubernetes.io/part-of: opensandbox-substrate-poc
+        opensandbox.io/poc: agent-substrate
+    spec:
+      serviceAccountName: opensandbox-server
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: server
+        image: replaced-by-prepare-manifests
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: OPENSANDBOX_SERVER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: opensandbox-api-key
+              key: api-key
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 3
+          timeoutSeconds: 2
+          failureThreshold: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/opensandbox
+          readOnly: true
+        - name: agent-substrate-ca
+          mountPath: /etc/agent-substrate
+          readOnly: true
+        - name: agent-substrate-token
+          mountPath: /var/run/secrets/agent-substrate
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: opensandbox-config
+      - name: agent-substrate-ca
+        configMap:
+          name: agent-substrate-ca
+      - name: agent-substrate-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-server
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/name: opensandbox-server
+    app.kubernetes.io/part-of: opensandbox-substrate-poc
+    opensandbox.io/poc: agent-substrate
+spec:
+  selector:
+    app.kubernetes.io/name: opensandbox-server
+  ports:
+  - name: http
+    port: 80
+    targetPort: http

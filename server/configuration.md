@@ -122,7 +122,7 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 |-----|------|---------|-------------|
 | `kubeconfig_path` | string \| omitted | `null` | Path to kubeconfig (expandable, e.g. `~/.kube/config`). In-cluster configs often leave this unset and rely on in-cluster credentials. |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
-| `workload_provider` | string \| omitted | `null` | One of: **`batchsandbox`**, **`agent-sandbox`**. If omitted, the **first registered** provider is used (currently **`batchsandbox`**). |
+| `workload_provider` | string \| omitted | `null` | One of: **`batchsandbox`**, **`agent-sandbox`**, **`agent-substrate`**. If omitted, the **first registered** provider is used (currently **`batchsandbox`**). |
 | `batchsandbox_template_file` | string \| omitted | `null` | Path to **BatchSandbox** CR YAML template when `workload_provider = "batchsandbox"`. |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | Image pull policy for the BatchSandbox main container. Values: **`Always`**, **`IfNotPresent`**, **`Never`**. |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max time to wait for a new sandbox to become ready (e.g. IP assigned), in seconds. |
@@ -137,7 +137,7 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 | `write_burst` | integer | `0` | Burst for write limiter. |
 | `execd_init_resources` | table \| omitted | `null` | Optional resource requests/limits for the **execd init** container. |
 
-### BatchSandbox vs agent-sandbox
+### Workload providers
 
 Kubernetes workloads are created by a **workload provider**. There is **no** `[batchsandbox]` section in TOML — BatchSandbox is configured entirely under **`[kubernetes]`**, plus shared sections like `[egress]`, `[ingress]`, `[storage]`, `[secure_runtime]`.
 
@@ -149,6 +149,10 @@ Kubernetes workloads are created by a **workload provider**. There is **no** `[b
 | Extra TOML table | None | **`[agent_sandbox]`** is required (see below) |
 
 **BatchSandbox-only config keys in `config.py`:** `batchsandbox_template_file` and `image_pull_policy` on `KubernetesRuntimeConfig`. Everything else in the `[kubernetes]` table (namespace, kubeconfig, informer, API QPS, `sandbox_create_*`, `execd_init_resources`, …) applies to **whichever** provider you select.
+
+`agent-substrate` is an experimental POC provider. It uses the `[agent_substrate]`
+table below and calls Agent Substrate's gRPC API for Actor lifecycle operations.
+It does not create a Kubernetes custom resource per sandbox.
 
 ### `kubernetes.execd_init_resources`
 
@@ -168,6 +172,41 @@ Used with the **kubernetes-sigs/agent-sandbox** Sandbox CRD provider.
 | `template_file` | string \| omitted | `null` | Path to **Sandbox CR** YAML template. |
 | `shutdown_policy` | string | `"Delete"` | **`Delete`** or **`Retain`** when the sandbox expires. |
 | `ingress_enabled` | boolean | `true` | Whether ingress routing to agent-sandbox pods is expected. |
+
+---
+
+## `[agent_substrate]` — only with `kubernetes.workload_provider = "agent-substrate"`
+
+Experimental single-tenant POC integration with
+[Agent Substrate](https://github.com/agent-substrate/substrate), pinned to commit
+`c1ab0958f85202faf9f87ea66cd98903a9de763b`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `upstream_revision` | string | pinned SHA | Must match the generated protobuf revision. |
+| `api_endpoint` | string | required | TLS-enabled `ateapi` gRPC target. |
+| `router_endpoint` | string | required | atenet HTTP endpoint returned to clients. |
+| `ca_file` | string | service-account CA path | PEM roots used to verify `ateapi`. |
+| `server_name` | string | `"api.ate-system.svc"` | TLS certificate server name. |
+| `token_file` | string \| omitted | `null` | Optional rotating ServiceAccount bearer token file for JWT-mode `ateapi`. |
+| `default_atespace` | string | required | Administrator-created Atespace used by this single-tenant POC. |
+| `rpc_timeout_seconds` | float | `20` | Per-RPC deadline. |
+| `templates` | array of tables | required | Non-empty administrator-owned ActorTemplate catalog. |
+
+Each `[[agent_substrate.templates]]` entry has:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `key` | string | required | Opaque value users pass as `extensions["agent-substrate.template"]`. |
+| `namespace` | string | required | Namespace of the pre-existing ActorTemplate. |
+| `name` | string | required | Name of the pre-existing ActorTemplate. |
+| `logical_port` | integer | `44772` | OpenSandbox endpoint port accepted for this template. |
+| `actor_port` | integer | `80` | Fixed to 80 by the pinned atenet implementation. |
+
+The user request must omit image, entrypoint, resources, environment, platform,
+volumes, network policy, credential proxy, and secure access fields because the
+ActorTemplate owns those settings. This POC stores metadata and expiration in
+memory and does not recover them after server restart.
 
 ---
 

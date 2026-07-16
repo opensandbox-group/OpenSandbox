@@ -120,6 +120,7 @@ from opensandbox_server.services.validators import (
     ensure_platform_valid,
     ensure_timeout_within_limit,
 )
+from opensandbox_server.well_known_extensions import AGENT_SUBSTRATE_TEMPLATE_KEY
 logger = logging.getLogger(__name__)
 
 class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVolumesMixin, DockerNetworkingMixin, DockerContainerOpsMixin, OSSFSMixin, SandboxService, ExtensionService):
@@ -613,6 +614,17 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         Raises:
             HTTPException: If sandbox creation fails
         """
+        if (request.extensions or {}).get(AGENT_SUBSTRATE_TEMPLATE_KEY, "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f'extensions["{AGENT_SUBSTRATE_TEMPLATE_KEY}"] is supported '
+                        "only by the agent-substrate workload provider."
+                    ),
+                },
+            )
         if (request.extensions or {}).get("poolRef", "").strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

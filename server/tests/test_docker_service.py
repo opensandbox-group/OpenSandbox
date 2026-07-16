@@ -39,6 +39,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_EGRESS_TOKEN,
 )
+from opensandbox_server.well_known_extensions import AGENT_SUBSTRATE_TEMPLATE_KEY
 from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_EXPIRES_AT_LABEL,
@@ -355,6 +356,27 @@ async def test_create_sandbox_rejects_pool_ref_on_docker(mock_docker):
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == "SANDBOX::UNSUPPORTED_POOL_REF"
+    mock_client.containers.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_rejects_agent_substrate_template_on_docker(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        extensions={AGENT_SUBSTRATE_TEMPLATE_KEY: "python"},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await service.create_sandbox(request)
+
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+    assert "agent-substrate workload provider" in exc.value.detail["message"]
     mock_client.containers.create.assert_not_called()
 
 @pytest.mark.asyncio

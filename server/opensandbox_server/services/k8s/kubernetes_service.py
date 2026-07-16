@@ -34,6 +34,7 @@ from opensandbox_server.extensions import (
     extract_extensions_from_mapping,
 )
 from opensandbox_server.extensions.keys import ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY
+from opensandbox_server.well_known_extensions import AGENT_SUBSTRATE_TEMPLATE_KEY
 from opensandbox_server.api.schema import (
     CreateSandboxRequest,
     CreateSandboxResponse,
@@ -732,8 +733,13 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         """
         pool_ref = (request.extensions or {}).get("poolRef", "").strip()
         has_pool_ref = bool(pool_ref)
+        has_agent_substrate_template = bool(
+            (request.extensions or {}).get(AGENT_SUBSTRATE_TEMPLATE_KEY, "").strip()
+        )
 
-        if not has_pool_ref:
+        self.workload_provider.validate_create_request(request)
+
+        if not has_pool_ref and not has_agent_substrate_template:
             request = resolve_sandbox_image_from_request(request)
             ensure_entrypoint(request.entrypoint or [])
         ensure_metadata_labels(request.metadata)
@@ -1108,14 +1114,18 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             # Workload not found (404) still triggers managed-PVC cleanup so a
             # retry can sweep orphans; other errors leave the workload in place,
             # so we must not delete its PVCs.
-            if e.status_code == status.HTTP_404_NOT_FOUND:
+            if (
+                e.status_code == status.HTTP_404_NOT_FOUND
+                and self.workload_provider.uses_kubernetes_managed_volumes()
+            ):
                 self._cleanup_managed_pvcs(sandbox_id)
             raise
         except Exception as e:
             logger.error(f"Error deleting sandbox {sandbox_id}: {e}")
             raise _build_k8s_api_error("delete sandbox", e) from e
 
-        self._cleanup_managed_pvcs(sandbox_id)
+        if self.workload_provider.uses_kubernetes_managed_volumes():
+            self._cleanup_managed_pvcs(sandbox_id)
 
     def _cleanup_managed_pvcs(self, sandbox_id: str) -> None:
         """

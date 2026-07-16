@@ -19,6 +19,8 @@ from pydantic import ValidationError
 
 from opensandbox_server import config as config_module
 from opensandbox_server.config import (
+    AgentSubstrateRuntimeConfig,
+    AgentSubstrateTemplateConfig,
     AppConfig,
     LogConfig,
     RenewIntentRedisConfig,
@@ -28,6 +30,7 @@ from opensandbox_server.config import (
     GatewayConfig,
     GatewayRouteModeConfig,
     IngressConfig,
+    KubernetesRuntimeConfig,
     RuntimeConfig,
     SecureAccessConfig,
     SecureAccessKey,
@@ -35,6 +38,67 @@ from opensandbox_server.config import (
     StoreConfig,
     StorageConfig,
 )
+
+
+def _agent_substrate_runtime_config() -> AgentSubstrateRuntimeConfig:
+    return AgentSubstrateRuntimeConfig(
+        api_endpoint="api.ate-system.svc:443",
+        router_endpoint="http://atenet-router.ate-system.svc:80",
+        default_atespace="opensandbox",
+        templates=[
+            AgentSubstrateTemplateConfig(
+                key="python",
+                namespace="opensandbox-templates",
+                name="python-execd",
+            )
+        ],
+    )
+
+
+def test_agent_substrate_config_accepts_pinned_template_catalog():
+    config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="unused-for-agent-substrate"),
+        kubernetes=KubernetesRuntimeConfig(workload_provider="agent-substrate"),
+        agent_substrate=_agent_substrate_runtime_config(),
+    )
+
+    assert config.agent_substrate is not None
+    assert config.agent_substrate.templates[0].key == "python"
+    assert config.agent_substrate.upstream_revision == (
+        "c1ab0958f85202faf9f87ea66cd98903a9de763b"
+    )
+
+
+def test_agent_substrate_config_rejects_duplicate_template_keys():
+    with pytest.raises(ValidationError, match="template keys must be unique"):
+        AgentSubstrateRuntimeConfig(
+            api_endpoint="api.ate-system.svc:443",
+            router_endpoint="http://atenet-router.ate-system.svc:80",
+            default_atespace="opensandbox",
+            templates=[
+                AgentSubstrateTemplateConfig(
+                    key="python",
+                    namespace="templates-a",
+                    name="python-a",
+                ),
+                AgentSubstrateTemplateConfig(
+                    key="python",
+                    namespace="templates-b",
+                    name="python-b",
+                ),
+            ],
+        )
+
+
+def test_agent_substrate_provider_requires_config_block():
+    with pytest.raises(ValidationError, match="agent_substrate block is required"):
+        AppConfig(
+            runtime=RuntimeConfig(
+                type="kubernetes",
+                execd_image="unused-for-agent-substrate",
+            ),
+            kubernetes=KubernetesRuntimeConfig(workload_provider="agent-substrate"),
+        )
 
 
 def _reset_config(monkeypatch):

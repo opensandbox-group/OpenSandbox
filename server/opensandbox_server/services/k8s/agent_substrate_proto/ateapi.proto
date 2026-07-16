@@ -1,0 +1,387 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// TODO: Here and everywhere, s/Session/Actor to align with the glossary.
+
+syntax = "proto3";
+
+package ateapi;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/agent-substrate/substrate/pkg/proto/ateapipb";
+
+// Control is the primary RPC interface for Agentic Substrate.
+service Control {
+  // Get an Actor.
+  rpc GetActor(GetActorRequest) returns (Actor) {}
+
+  // Create a new Actor deriving from a given ActorTemplate.
+  rpc CreateActor(CreateActorRequest) returns (Actor) {}
+
+  // Update mutable fields on an existing Actor.
+  rpc UpdateActor(UpdateActorRequest) returns (UpdateActorResponse) {}
+
+  // Suspend a given actor to a new snapshot.
+  rpc SuspendActor(SuspendActorRequest) returns (SuspendActorResponse) {}
+
+  // Pause a given actor and keep its snapshots on node VM.
+  rpc PauseActor(PauseActorRequest) returns (PauseActorResponse) {}
+
+  // Resume an actor from its latest snapshot.
+  rpc ResumeActor(ResumeActorRequest) returns (ResumeActorResponse) {}
+
+  // Delete an actor. Only suspended actors can be deleted.
+  rpc DeleteActor(DeleteActorRequest) returns (Actor) {}
+
+  // List all workers currently reflected in redis.
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse) {}
+
+  // List all actors currently reflected in redis.
+  rpc ListActors(ListActorsRequest) returns (ListActorsResponse) {}
+
+  // Create a new Atespace. Substrate-native, stored in Redis.
+  rpc CreateAtespace(CreateAtespaceRequest) returns (Atespace) {}
+
+  // Get an Atespace by name.
+  rpc GetAtespace(GetAtespaceRequest) returns (Atespace) {}
+
+  // List all Atespaces.
+  rpc ListAtespaces(ListAtespacesRequest) returns (ListAtespacesResponse) {}
+
+  // Delete an empty Atespace. Rejects (FailedPrecondition) if any actors remain.
+  rpc DeleteAtespace(DeleteAtespaceRequest) returns (Atespace) {}
+
+  // Debugging: drop all data from the ate database.
+  rpc DebugClear(DebugClearRequest) returns (DebugClearResponse) {}
+}
+
+message ExternalSnapshotInfo {
+  string snapshot_uri_prefix = 1;
+}
+
+message LocalSnapshotInfo {
+  string snapshot_prefix = 1;
+  // Node VMs that have local snapshots for this actor, while it's PAUSED.
+  repeated string node_vms_with_local_snapshots = 2;
+}
+
+message SnapshotInfo {
+  oneof data {
+    ExternalSnapshotInfo external = 2;
+    LocalSnapshotInfo local = 3;
+  }
+
+  reserved 1;
+  reserved "type";
+}
+
+// Selector matches worker pools by label.
+// Only equality-based matching is supported.
+message Selector {
+  map<string, string> match_labels = 1;
+}
+
+// ResourceMetadata holds the common fields carried by every Substrate resource.
+message ResourceMetadata {
+  // atespace is the namespace the resource belongs to. Empty for global-scoped
+  // resources. Caller-specified at creation and immutable thereafter.
+  string atespace = 1;
+
+  // name is the resource's name, unique within its atespace (or globally, for
+  // global-scoped resources). Caller-specified at creation and immutable thereafter.
+  string name = 2;
+
+  // uid is a server-assigned, globally unique identifier for this resource.
+  // Immutable throughout the lifecycle of the resource.
+  string uid = 3;
+
+  // version is increased on every mutation.
+  int64 version = 4;
+
+  // create_time is the time the resource was created.
+  google.protobuf.Timestamp create_time = 5;
+
+  // update_time is the time the resource was last updated.
+  google.protobuf.Timestamp update_time = 6;
+}
+
+message Actor {
+  // Common resource metadata: atespace, name, uid, version, timestamps.
+  ResourceMetadata metadata = 1;
+
+  string actor_template_namespace = 2;
+  string actor_template_name = 3;
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_RESUMING = 1;
+    STATUS_RUNNING = 2;
+    STATUS_SUSPENDING = 3;
+    STATUS_SUSPENDED = 4;
+    STATUS_PAUSING = 5;
+    STATUS_PAUSED = 6;
+    STATUS_CRASHED = 7;
+  }
+  Status status = 4;
+
+  string ateom_pod_namespace = 5;
+  string ateom_pod_name = 6;
+  string ateom_pod_ip = 7;
+
+  string in_progress_snapshot = 8;
+  string ateom_pod_uid = 9;
+  SnapshotInfo latest_snapshot_info = 10;
+
+  // worker_selector is the per-actor placement constraint. The scheduler
+  // evaluates the AND of this selector and the template's workerSelector to
+  // find eligible pools. Set at CreateActor; may be updated at any time via
+  // UpdateActor. Changes take effect on the next ResumeActor call.
+  Selector worker_selector = 11;
+
+  // worker_pool_name is the name of the WorkerPool that owns the currently
+  // assigned worker, in the same namespace as ateom_pod_namespace (pool and
+  // pod namespaces always match). Set by the scheduler at assignment time
+  // and cleared when the worker is freed. Needed to release the worker on
+  // suspend/pause since eligibility is no longer a single fixed pool
+  // reference on the ActorTemplate.
+  string worker_pool_name = 12;
+}
+
+// Atespace is the isolation boundary an Actor is created into. Global-scoped:
+// metadata.atespace is always empty; the atespace's identity is metadata.name.
+message Atespace {
+  // Common resource metadata: name, uid, version, timestamps.
+  ResourceMetadata metadata = 1;
+}
+
+// ObjectRef references a Substrate resource by its (atespace, name) identity.
+message ObjectRef {
+  // The atespace where the resource lives. Empty if the resource is global-scoped.
+  string atespace = 1;
+  // The name of the resource. Required. Unique within an atespace, or globally
+  // unique if the resource is global-scoped.
+  string name = 2;
+}
+
+message CreateAtespaceRequest {
+  // The atespace to create.
+  Atespace atespace = 1;
+}
+
+message GetAtespaceRequest {
+  ObjectRef atespace = 1;
+}
+
+message ListAtespacesRequest {}
+message ListAtespacesResponse {
+  repeated Atespace atespaces = 1;
+}
+
+message DeleteAtespaceRequest {
+  ObjectRef atespace = 1;
+}
+
+message GetActorRequest {
+  ObjectRef actor = 1;
+}
+
+// Request to create a new Actor.
+message CreateActorRequest {
+  // The actor to create.
+  Actor actor = 1;
+}
+
+// Request to update mutable fields on an existing Actor.
+// May be called regardless of the actor's current status.
+// Changes take effect on the next ResumeActor call.
+message UpdateActorRequest {
+  ObjectRef actor = 1;
+
+  // worker_selector replaces the actor's current placement constraint.
+  // Takes effect on the next ResumeActor call.
+  Selector worker_selector = 2;
+}
+
+message UpdateActorResponse {
+  Actor actor = 1;
+}
+
+message SuspendActorRequest {
+  ObjectRef actor = 1;
+}
+
+message SuspendActorResponse {
+  Actor actor = 1;
+}
+
+message PauseActorRequest {
+  ObjectRef actor = 1;
+}
+
+message PauseActorResponse {
+  Actor actor = 1;
+}
+
+message ResumeActorRequest {
+  ObjectRef actor = 1;
+
+  // If true, skip golden snapshot and boot the workload from scratch.
+  bool boot = 2;
+}
+
+message ResumeActorResponse {
+  Actor actor = 1;
+}
+
+message DeleteActorRequest {
+  ObjectRef actor = 1;
+}
+
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+  repeated Worker workers = 1;
+}
+
+// Request to list actors with pagination.
+// This operation provides "soft" guarantees: actors may be missed or duplicated
+// if the system state changes during pagination.
+message ListActorsRequest {
+  // The maximum number of actors to return. The server may enforce a hard limit
+  // (e.g., 1000) regardless of the requested size.
+  int32 page_size = 1;
+
+  // An opaque pagination token obtained from a previous ListActorsResponse.
+  // Empty for the first request.
+  string page_token = 2;
+
+  // If set, list only actors in this atespace (scoped SCAN actor:<atespace>:*).
+  string atespace = 3;
+}
+
+// Response for a ListActors operation.
+message ListActorsResponse {
+  // The page of actors. This list may be empty even if there are more results.
+  repeated Actor actors = 1;
+
+  // An opaque token to retrieve the next page of results.
+  // If empty, there are no more results. Clients must loop until this is empty.
+  string next_page_token = 2;
+}
+
+message Worker {
+  string worker_namespace = 1;
+  string worker_pool = 2;
+  string worker_pod = 3;
+
+  Assignment assignment = 4;
+
+  string ip = 5;
+  int64 version = 6;
+  string worker_pod_uid = 7;
+  string node_name = 8;
+  string sandbox_class = 9;
+  map<string, string> labels = 10;
+}
+
+message Assignment {
+  KubeNamespacedObjectRef actor_template = 1;
+  ObjectRef actor = 2;
+}
+
+message KubeNamespacedObjectRef {
+  string namespace = 1;
+  string name = 2;
+}
+
+message DebugClearRequest {}
+
+message DebugClearResponse {}
+
+// SessionIdentity allows substrate workloads to exchange their
+// infrastructure-level credentials (k8s service account token, etc.) for a
+// substrate session-level credential.  A given substrate session might migrate
+// between many different physical workers over the course of its lifecycle,
+// whereas the session credential's identity will be stable for the life of the
+// session.
+//
+// This service requires authentication. You can authenticate with a Kubernetes
+// service account token in an `Authorization: Bearer` header, or you can
+// authenticate with a Kubernetes service account certificate as an mTLS
+// certificate. (Kubernetes service account certificates do not currently exist
+// upstream, but we will provide a polyfill based on Pod Certificates).
+//
+// The broker will check that the service credentials you authenticated with
+// belong to a Pod that is currently mapped to the requested session in the
+// session database.
+service SessionIdentity {
+  // Request a Session Identity JWT.
+  //
+  // To call this RPC, you must be authenticated as the Kubernetes Pod that is
+  // currently running the requested session.
+  rpc MintJWT(MintJWTRequest) returns (MintJWTResponse);
+
+  // Request a Session Identity Certificate. To call this RPC, you must have
+  // authenticated with a client certificate, not a bearer token.
+  rpc MintCert(MintCertRequest) returns (MintCertResponse);
+}
+
+message MintJWTRequest {
+  repeated string audience = 1;
+
+  string app_id = 2;
+  string user_id = 3;
+  string session_id = 4;
+}
+
+message MintJWTResponse {
+  // Session JWT.  An OIDC Discovery-compatible JWT
+  //
+  // Claims:
+  //
+  // * iss: Issuer - a valid URL where a relying party can fetch the OIDC
+  //   discovery documents.
+  // * sub: Subject - a string expressing the identity carried in the
+  // credential. Format
+  //   `app/${appid}/user/${userid}/session/${sessionid}`.
+  // * aud: Audience - a string identifying the service this token will be used
+  //   to authenticate to.
+  // * nbf: Not Before - a numeric unix timestamp
+  // * exp: Expiration - a numeric unix timestamp
+  // * iat: Issued At - a numeric unix timestamp
+  // * `ate.dev`: Ate/Substrate Extension - JSON object
+  //   * appID: (string) The Substrate App ID
+  //   * userID: (string) The Substrate User ID
+  //   * sessionID: (string) The Substrate Session ID
+  string session_jwt = 1;
+}
+
+message MintCertRequest {
+  string app_id = 1;
+  string user_id = 2;
+  string session_id = 3;
+
+  // Request contains DER encoded bytes of a x509 certificate signing request.
+  // The signer will ignore the contents of the CSR except to extract the
+  // subject public key.
+  bytes certificate_signing_request = 4;
+}
+
+message MintCertResponse {
+  // Response contains a list of DER encoded certificates. The first entry is the
+  // leaf certificate, and any remaining entries are intermediates in
+  // leaf-to-root order.
+  repeated bytes session_certificates = 1;
+}

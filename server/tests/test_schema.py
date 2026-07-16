@@ -33,6 +33,7 @@ from opensandbox_server.api.schema import (
     SnapshotStatus,
     Volume,
 )
+from opensandbox_server.extensions.keys import AGENT_SUBSTRATE_TEMPLATE_KEY
 
 
 
@@ -709,4 +710,52 @@ class TestCreateSandboxRequestPoolMode:
         with pytest.raises(ValidationError):
             CreateSandboxRequest(
                 extensions={"poolRef": "   "},
+            )
+
+
+class TestCreateSandboxRequestAgentSubstrateMode:
+    def test_accepts_registered_template_key_without_image_fields(self):
+        request = CreateSandboxRequest(
+            timeout=600,
+            metadata={"team": "research"},
+            extensions={AGENT_SUBSTRATE_TEMPLATE_KEY: "python"},
+        )
+
+        assert request.image is None
+        assert request.entrypoint is None
+        assert request.resource_limits is None
+        assert request.extensions == {AGENT_SUBSTRATE_TEMPLATE_KEY: "python"}
+
+    def test_rejects_blank_template_key(self):
+        with pytest.raises(ValidationError, match="must be a non-empty"):
+            CreateSandboxRequest(
+                extensions={AGENT_SUBSTRATE_TEMPLATE_KEY: "   "},
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("image", {"uri": "python:3.11"}),
+            ("entrypoint", ["python"]),
+            ("resourceLimits", {"cpu": "1"}),
+            ("env", {"KEY": "value"}),
+            ("platform", {"os": "linux", "arch": "amd64"}),
+        ],
+    )
+    def test_rejects_template_owned_fields(self, field, value):
+        with pytest.raises(ValidationError, match="template-owned fields"):
+            CreateSandboxRequest(
+                **{
+                    field: value,
+                    "extensions": {AGENT_SUBSTRATE_TEMPLATE_KEY: "python"},
+                }
+            )
+
+    def test_rejects_pool_ref(self):
+        with pytest.raises(ValidationError, match="cannot be used together with poolRef"):
+            CreateSandboxRequest(
+                extensions={
+                    AGENT_SUBSTRATE_TEMPLATE_KEY: "python",
+                    "poolRef": "my-pool",
+                },
             )
