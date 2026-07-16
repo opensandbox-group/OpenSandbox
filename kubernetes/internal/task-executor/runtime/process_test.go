@@ -568,6 +568,51 @@ func TestProcessExecutor_LifecycleExecModeLocal(t *testing.T) {
 	assert.Contains(t, string(data), "local-hook")
 }
 
+func TestProcessExecutor_LifecycleHookDefaultExecModeIsLocalInSidecarMode(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not found")
+	}
+
+	dataDir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:           dataDir,
+		EnableSidecarMode: true,
+		MainContainerName: "sandbox",
+	}
+	executor, err := NewProcessExecutor(cfg)
+	assert.Nil(t, err)
+	ctx := context.Background()
+
+	markerFile := filepath.Join(dataDir, "default-local-hook-marker")
+	task := &types.Task{
+		Name: "hook-default-local-test",
+		Process: &api.Process{
+			Command:  []string{"echo", "main"},
+			ExecMode: api.ExecModeLocal,
+			Lifecycle: &api.ProcessLifecycle{
+				PreStart: &api.LifecycleHandler{
+					Exec: &api.ExecAction{
+						Command: []string{"/bin/sh", "-c", "echo local-default > " + markerFile},
+					},
+				},
+			},
+		},
+	}
+
+	taskDir, err := utils.SafeJoin(dataDir, task.Name)
+	assert.Nil(t, err)
+	os.MkdirAll(taskDir, 0755)
+
+	if err := executor.Start(ctx, task); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	data, err := os.ReadFile(markerFile)
+	assert.Nil(t, err)
+	assert.Contains(t, string(data), "local-default")
+}
+
 func TestProcessExecutor_NoTimeout(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not found")

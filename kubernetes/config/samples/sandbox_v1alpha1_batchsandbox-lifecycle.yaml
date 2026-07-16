@@ -31,30 +31,30 @@ spec:
         env:
         - name: TASK_NAME
           value: lifecycle-task
-      lifecycle:
-        # preStart hook runs before the main task process starts.
-        # Useful for preparing the environment, checking dependencies, warming up data, etc.
-        preStart:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - |
-              echo "[preStart] Starting environment preparation..."
-              mkdir -p /tmp/workdir
-              echo "$(date): Task starting" > /tmp/workdir/prestart-marker
-              echo "[preStart] Environment ready!"
-            timeoutSeconds: 30
-        # postStop hook runs after the main task process exits.
-        # Useful for cleaning up resources, uploading logs, sending notifications, etc.
-        postStop:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - |
-              echo "[postStop] Starting cleanup..."
-              echo "$(date): Task finished" >> /tmp/workdir/poststop-marker
-              echo "Task logs:" && cat /tmp/workdir/*
-              echo "[postStop] Cleanup complete!"
-            timeoutSeconds: 30
+        lifecycle:
+          # preStart hook runs before the main task process starts.
+          # Useful for preparing the environment, checking dependencies, warming up data, etc.
+          preStart:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                echo "[preStart] Starting environment preparation..."
+                mkdir -p /tmp/workdir
+                echo "$(date): Task starting" > /tmp/workdir/prestart-marker
+                echo "[preStart] Environment ready!"
+              timeoutSeconds: 30
+          # postStop hook runs after the main task process exits.
+          # Useful for cleaning up resources, uploading logs, sending notifications, etc.
+          postStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                echo "[postStop] Starting cleanup..."
+                echo "$(date): Task finished" >> /tmp/workdir/poststop-marker
+                echo "Task logs:" && cat /tmp/workdir/*
+                echo "[postStop] Cleanup complete!"
+              timeoutSeconds: 30

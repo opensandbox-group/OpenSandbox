@@ -33,10 +33,16 @@ import (
 type fakeExecutor struct {
 	inspect map[string]*types.Status
 	starts  int
+	stops   int
+	stopErr error
+	stopCh  chan string
 }
 
 func newFakeExecutor() *fakeExecutor {
-	return &fakeExecutor{inspect: make(map[string]*types.Status)}
+	return &fakeExecutor{
+		inspect: make(map[string]*types.Status),
+		stopCh:  make(chan string, 10),
+	}
 }
 
 func (f *fakeExecutor) Start(_ context.Context, task *types.Task) error {
@@ -63,8 +69,12 @@ func (f *fakeExecutor) Inspect(_ context.Context, task *types.Task) (*types.Stat
 	}, nil
 }
 
-func (f *fakeExecutor) Stop(_ context.Context, _ *types.Task) error {
-	return nil
+func (f *fakeExecutor) Stop(_ context.Context, task *types.Task) error {
+	f.stops++
+	if task != nil {
+		f.stopCh <- task.Name
+	}
+	return f.stopErr
 }
 
 func setupTestManager(t *testing.T) (TaskManager, *config.Config) {
@@ -528,6 +538,312 @@ func TestTaskManager_SyncKeepsRecoveredSucceededTask(t *testing.T) {
 	require.Len(t, tasks, 1)
 	assert.Equal(t, 0, exec.starts, "sync should not recreate tasks that were already completed before recovery")
 	assert.Equal(t, types.TaskStateSucceeded, tasks[0].Status.State)
+}
+
+func TestTaskManager_RecoverPreservesPersistedFailedStartStatus(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		DataDir:           t.TempDir(),
+		EnableSidecarMode: false,
+		ReconcileInterval: time.Hour,
+	}
+	taskStore, err := store.NewFileStore(cfg.DataDir)
+	require.NoError(t, err)
+
+	finishedAt := time.Now()
+	persisted := &types.Task{
+		Name: "prestart-failed-task",
+		Process: &api.Process{
+			Command: []string{"echo", "should-not-run"},
+		},
+		Status: types.Status{
+			State: types.TaskStateFailed,
+			SubStatuses: []types.SubStatus{{
+				Reason:     types.ReasonPreStartHookFailed,
+				Message:    "preStart hook failed",
+				ExitCode:   1,
+				FinishedAt: &finishedAt,
+			}},
+		},
+	}
+	require.NoError(t, taskStore.Create(ctx, persisted))
+
+	exec := newFakeExecutor()
+	exec.inspect[persisted.Name] = &types.Status{
+		State: types.TaskStatePending,
+		SubStatuses: []types.SubStatus{{
+			Reason: "Pending",
+		}},
+	}
+	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+
+	mgr := mgrIface.(*taskManager)
+	require.NoError(t, mgr.recoverTasks(ctx))
+
+	got, err := mgr.Get(ctx, persisted.Name)
+	require.NoError(t, err)
+	assert.Equal(t, types.TaskStateFailed, got.Status.State)
+	require.NotEmpty(t, got.Status.SubStatuses)
+	assert.Equal(t, types.ReasonPreStartHookFailed, got.Status.SubStatuses[0].Reason)
+}
+
+func TestTaskManager_DeleteTerminalTaskRunsPostStopBeforeFinalizing(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		DataDir:           t.TempDir(),
+		EnableSidecarMode: false,
+		ReconcileInterval: time.Hour,
+	}
+	taskStore, err := store.NewFileStore(cfg.DataDir)
+	require.NoError(t, err)
+
+	now := time.Now()
+	persisted := &types.Task{
+		Name:              "terminal-with-poststop",
+		DeletionTimestamp: &now,
+		Process: &api.Process{
+			Command: []string{"echo", "done"},
+			Lifecycle: &api.ProcessLifecycle{
+				PostStop: &api.LifecycleHandler{
+					Exec: &api.ExecAction{
+						Command: []string{"true"},
+					},
+				},
+			},
+		},
+		Status: types.Status{
+			State: types.TaskStateSucceeded,
+			SubStatuses: []types.SubStatus{{
+				Reason:     "Completed",
+				ExitCode:   0,
+				FinishedAt: &now,
+			}},
+		},
+	}
+	require.NoError(t, taskStore.Create(ctx, persisted))
+
+	exec := newFakeExecutor()
+	exec.inspect[persisted.Name] = &types.Status{
+		State: types.TaskStateSucceeded,
+		SubStatuses: []types.SubStatus{{
+			Reason:     "Completed",
+			ExitCode:   0,
+			FinishedAt: &now,
+		}},
+	}
+	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+
+	mgr := mgrIface.(*taskManager)
+	require.NoError(t, mgr.recoverTasks(ctx))
+
+	mgr.reconcileTasks(ctx)
+	select {
+	case name := <-exec.stopCh:
+		assert.Equal(t, persisted.Name, name)
+	case <-time.After(time.Second):
+		t.Fatal("expected postStop to run before terminal task deletion")
+	}
+
+	require.Eventually(t, func() bool {
+		mgr.reconcileTasks(ctx)
+		_, err = mgr.Get(ctx, persisted.Name)
+		return err != nil
+	}, time.Second, 10*time.Millisecond, "task should be finalized after postStop succeeds")
+	assert.Equal(t, 1, exec.stops, "postStop should only run once")
+}
+
+func TestTaskManager_StopFailureReplacesVisibleSubStatus(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		DataDir:           t.TempDir(),
+		EnableSidecarMode: false,
+		ReconcileInterval: time.Hour,
+	}
+	taskStore, err := store.NewFileStore(cfg.DataDir)
+	require.NoError(t, err)
+
+	startedAt := time.Now().Add(-time.Minute)
+	persisted := &types.Task{
+		Name: "timeout-poststop-fails",
+		Process: &api.Process{
+			Command: []string{"sleep", "30"},
+			Lifecycle: &api.ProcessLifecycle{
+				PostStop: &api.LifecycleHandler{
+					Exec: &api.ExecAction{
+						Command: []string{"false"},
+					},
+				},
+			},
+		},
+		Status: types.Status{
+			State: types.TaskStateTimeout,
+			SubStatuses: []types.SubStatus{{
+				Reason:    "TaskTimeout",
+				Message:   "Task exceeded timeout",
+				StartedAt: &startedAt,
+			}},
+		},
+	}
+	require.NoError(t, taskStore.Create(ctx, persisted))
+
+	exec := newFakeExecutor()
+	exec.stopErr = &types.StopError{
+		Reason:  types.ReasonPostStopHookFailed,
+		Message: "postStop hook failed: copy failed",
+	}
+	exec.inspect[persisted.Name] = &persisted.Status
+	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+
+	mgr := mgrIface.(*taskManager)
+	require.NoError(t, mgr.recoverTasks(ctx))
+
+	mgr.reconcileTasks(ctx)
+	select {
+	case <-exec.stopCh:
+	case <-time.After(time.Second):
+		t.Fatal("expected timeout task to be stopped")
+	}
+
+	require.Eventually(t, func() bool {
+		got, err := mgr.Get(ctx, persisted.Name)
+		if err != nil || got.Status.State != types.TaskStateFailed || len(got.Status.SubStatuses) == 0 {
+			return false
+		}
+		return got.Status.SubStatuses[0].Reason == types.ReasonPostStopHookFailed
+	}, time.Second, 10*time.Millisecond)
+
+	got, err := mgr.Get(ctx, persisted.Name)
+	require.NoError(t, err)
+	require.NotEmpty(t, got.Status.SubStatuses)
+	assert.Equal(t, 137, got.Status.SubStatuses[0].ExitCode)
+}
+
+func TestTaskManager_RecoverPreservesPostStopCompletionMarker(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		DataDir:           t.TempDir(),
+		EnableSidecarMode: false,
+		ReconcileInterval: time.Hour,
+	}
+	taskStore, err := store.NewFileStore(cfg.DataDir)
+	require.NoError(t, err)
+
+	now := time.Now()
+	persisted := &types.Task{
+		Name:              "poststop-completed-task",
+		DeletionTimestamp: &now,
+		Process: &api.Process{
+			Command: []string{"echo", "done"},
+			Lifecycle: &api.ProcessLifecycle{
+				PostStop: &api.LifecycleHandler{
+					Exec: &api.ExecAction{
+						Command: []string{"true"},
+					},
+				},
+			},
+		},
+		Status: types.Status{
+			State: types.TaskStateSucceeded,
+			SubStatuses: []types.SubStatus{
+				{
+					Reason:     "Completed",
+					ExitCode:   0,
+					FinishedAt: &now,
+				},
+				{
+					Reason:     reasonPostStopHookCompleted,
+					FinishedAt: &now,
+				},
+			},
+		},
+	}
+	require.NoError(t, taskStore.Create(ctx, persisted))
+
+	exec := newFakeExecutor()
+	exec.inspect[persisted.Name] = &types.Status{
+		State: types.TaskStateSucceeded,
+		SubStatuses: []types.SubStatus{{
+			Reason:     "Completed",
+			ExitCode:   0,
+			FinishedAt: &now,
+		}},
+	}
+	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+
+	mgr := mgrIface.(*taskManager)
+	require.NoError(t, mgr.recoverTasks(ctx))
+
+	got, err := mgr.Get(ctx, persisted.Name)
+	require.NoError(t, err)
+	assert.True(t, postStopFinished(got), "recovery should preserve persisted postStop completion marker")
+
+	mgr.reconcileTasks(ctx)
+	_, err = mgr.Get(ctx, persisted.Name)
+	assert.Error(t, err, "task should be finalized without rerunning postStop")
+	assert.Equal(t, 0, exec.stops, "postStop should not run again after recovery")
+}
+
+func TestTaskManager_ReconcilePreservesPostStopFailureStatus(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		DataDir:           t.TempDir(),
+		EnableSidecarMode: false,
+		ReconcileInterval: time.Hour,
+	}
+	taskStore, err := store.NewFileStore(cfg.DataDir)
+	require.NoError(t, err)
+
+	now := time.Now()
+	persisted := &types.Task{
+		Name: "poststop-failed-visible",
+		Process: &api.Process{
+			Command: []string{"sleep", "30"},
+			Lifecycle: &api.ProcessLifecycle{
+				PostStop: &api.LifecycleHandler{
+					Exec: &api.ExecAction{
+						Command: []string{"false"},
+					},
+				},
+			},
+		},
+		Status: types.Status{
+			State: types.TaskStateFailed,
+			SubStatuses: []types.SubStatus{{
+				Reason:     types.ReasonPostStopHookFailed,
+				Message:    "postStop hook failed: copy failed",
+				ExitCode:   1,
+				FinishedAt: &now,
+			}},
+		},
+	}
+	require.NoError(t, taskStore.Create(ctx, persisted))
+
+	exec := newFakeExecutor()
+	exec.inspect[persisted.Name] = &types.Status{
+		State: types.TaskStateFailed,
+		SubStatuses: []types.SubStatus{{
+			Reason:     "ProcessCrashed",
+			Message:    "process exited",
+			ExitCode:   137,
+			FinishedAt: &now,
+		}},
+	}
+	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+
+	mgr := mgrIface.(*taskManager)
+	require.NoError(t, mgr.recoverTasks(ctx))
+	mgr.reconcileTasks(ctx)
+
+	got, err := mgr.Get(ctx, persisted.Name)
+	require.NoError(t, err)
+	require.NotEmpty(t, got.Status.SubStatuses)
+	assert.Equal(t, types.ReasonPostStopHookFailed, got.Status.SubStatuses[0].Reason)
+	assert.Contains(t, got.Status.SubStatuses[0].Message, "copy failed")
 }
 
 func TestTaskManager_Sync(t *testing.T) {

@@ -32,6 +32,8 @@ import (
 
 const (
 	maxConcurrentTasks = 1
+
+	reasonPostStopHookCompleted = "PostStopHookCompleted"
 )
 
 type taskManager struct {
@@ -369,6 +371,9 @@ func (m *taskManager) recoverTasks(ctx context.Context) error {
 			klog.ErrorS(err, "failed to inspect task during recovery", "name", task.Name)
 			continue
 		}
+		if shouldPreservePersistedStatus(task.Status, *status) {
+			status = &task.Status
+		}
 
 		if shouldDropRecoveredTask(task, persistedState, status.State) {
 			klog.InfoS("dropping recovered task with lost active runtime state",
@@ -441,12 +446,11 @@ func (m *taskManager) reconcileTasks(ctx context.Context) {
 		}
 		state := status.State
 
-		// If the task is already in a terminal state (e.g., preStart hook failure set it
-		// to Failed) but Inspect returns non-terminal (e.g., Pending because no process
-		// was ever started), preserve the existing terminal state. Without this, the
-		// reconcile loop would overwrite the Failed status with Pending and prevent
-		// deletion of tasks that failed before the process launched.
-		if isTerminalState(task.Status.State) && !isTerminalState(state) {
+		// Preserve terminal status that carries scheduler-visible failure details
+		// or postStop completion markers. Inspect only reflects process state, so
+		// blindly replacing persisted status can hide lifecycle failures or rerun
+		// postStop after recovery.
+		if shouldPreservePersistedStatus(task.Status, *status) {
 			state = task.Status.State
 			status = &task.Status
 		}
@@ -458,6 +462,9 @@ func (m *taskManager) reconcileTasks(ctx context.Context) {
 			if !isTerminalState(state) {
 				shouldStop = true
 				stopReason = "deletion requested"
+			} else if postStopRequiredBeforeDelete(task) {
+				shouldStop = true
+				stopReason = "terminal task deletion requested"
 			}
 		} else if state == types.TaskStateTimeout && !m.stopping[name] {
 			shouldStop = true
@@ -468,14 +475,14 @@ func (m *taskManager) reconcileTasks(ctx context.Context) {
 			klog.InfoS("stopping task", "name", name, "reason", stopReason, "current_state", state)
 			m.stopping[name] = true
 
-			go func(t *types.Task, taskName string) {
+			go func(t *types.Task, taskName, reason string) {
 				defer func() {
 					m.mu.Lock()
 					delete(m.stopping, taskName)
 					m.mu.Unlock()
 				}()
 
-				klog.V(1).InfoS("task stop initiated", "name", taskName, "reason", stopReason)
+				klog.V(1).InfoS("task stop initiated", "name", taskName, "reason", reason)
 				if err := m.executor.Stop(ctx, t); err != nil {
 					klog.ErrorS(err, "failed to stop task", "name", taskName)
 					// Extract structured reason from StopError and annotate task status
@@ -487,23 +494,38 @@ func (m *taskManager) reconcileTasks(ctx context.Context) {
 					m.mu.Lock()
 					if existingTask, ok := m.tasks[taskName]; ok {
 						now := time.Now()
+						exitCode := stopFailureExitCode(existingTask.Status)
 						existingTask.Status.State = types.TaskStateFailed
-						existingTask.Status.SubStatuses = append(existingTask.Status.SubStatuses, types.SubStatus{
+						existingTask.Status.SubStatuses = []types.SubStatus{{
 							Reason:     reason,
 							Message:    err.Error(),
+							ExitCode:   exitCode,
 							FinishedAt: &now,
-						})
+						}}
 						if updateErr := m.store.Update(ctx, existingTask); updateErr != nil {
 							klog.ErrorS(updateErr, "failed to persist stop error status", "name", taskName)
 						}
 					}
 					m.mu.Unlock()
+				} else if hasPostStopHook(t) {
+					m.mu.Lock()
+					if existingTask, ok := m.tasks[taskName]; ok && !postStopFinished(existingTask) {
+						now := time.Now()
+						existingTask.Status.SubStatuses = append(existingTask.Status.SubStatuses, types.SubStatus{
+							Reason:     reasonPostStopHookCompleted,
+							FinishedAt: &now,
+						})
+						if updateErr := m.store.Update(ctx, existingTask); updateErr != nil {
+							klog.ErrorS(updateErr, "failed to persist postStop completion status", "name", taskName)
+						}
+					}
+					m.mu.Unlock()
 				}
 				klog.InfoS("task stopped", "name", taskName)
-			}(task, name)
+			}(task, name, stopReason)
 		}
 
-		if task.DeletionTimestamp != nil && isTerminalState(state) && !m.stopping[name] {
+		if task.DeletionTimestamp != nil && isTerminalState(state) && !m.stopping[name] && !postStopRequiredBeforeDelete(task) {
 			klog.InfoS("task terminated, finalizing deletion", "name", name)
 			tasksToDelete = append(tasksToDelete, name)
 		}
@@ -544,4 +566,52 @@ func isTerminalState(state types.TaskState) bool {
 	return state == types.TaskStateSucceeded ||
 		state == types.TaskStateFailed ||
 		state == types.TaskStateNotFound
+}
+
+func hasPostStopHook(task *types.Task) bool {
+	return task != nil &&
+		task.Process != nil &&
+		task.Process.Lifecycle != nil &&
+		task.Process.Lifecycle.PostStop != nil
+}
+
+func postStopRequiredBeforeDelete(task *types.Task) bool {
+	return hasPostStopHook(task) && !postStopFinished(task)
+}
+
+func postStopFinished(task *types.Task) bool {
+	if task == nil {
+		return false
+	}
+	return statusHasPostStopFinished(task.Status)
+}
+
+func statusHasPostStopFinished(status types.Status) bool {
+	for _, subStatus := range status.SubStatuses {
+		switch subStatus.Reason {
+		case reasonPostStopHookCompleted, types.ReasonPostStopHookFailed:
+			return true
+		}
+	}
+	return false
+}
+
+func shouldPreservePersistedStatus(persisted, recovered types.Status) bool {
+	if !isTerminalState(persisted.State) {
+		return false
+	}
+	if !isTerminalState(recovered.State) {
+		return true
+	}
+	return statusHasPostStopFinished(persisted)
+}
+
+func stopFailureExitCode(status types.Status) int {
+	if status.State == types.TaskStateTimeout {
+		return 137
+	}
+	if len(status.SubStatuses) > 0 && status.SubStatuses[0].ExitCode != 0 {
+		return status.SubStatuses[0].ExitCode
+	}
+	return 1
 }

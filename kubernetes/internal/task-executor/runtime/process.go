@@ -454,11 +454,10 @@ func (e *processExecutor) execLifecycleHook(ctx context.Context, task *types.Tas
 		defer cancel()
 	}
 
-	// Determine execution mode
-	useNsenter := e.config.EnableSidecarMode
-	if hook.ExecMode == api.ExecModeLocal {
-		useNsenter = false
-	} else if hook.ExecMode == api.ExecModeRemote {
+	// Lifecycle hooks default to Local so executor-only mounts remain usable
+	// even when the main process runs in sidecar mode.
+	useNsenter := false
+	if hook.ExecMode == api.ExecModeRemote {
 		useNsenter = true
 	}
 
