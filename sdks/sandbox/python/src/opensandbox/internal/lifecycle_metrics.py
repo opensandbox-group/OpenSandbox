@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import threading
+from datetime import timedelta
 from typing import Any, Protocol
 
 import httpx
@@ -42,7 +43,7 @@ class _MetricsConnection(Protocol):
     def get_base_url(self) -> str: ...
 
     @property
-    def request_timeout(self) -> Any: ...
+    def request_timeout(self) -> timedelta | float | int: ...
 
 
 def _env_metrics_disabled() -> bool:
@@ -84,9 +85,8 @@ def _headers(config: _MetricsConnection) -> dict[str, str]:
 
 def _timeout_seconds(config: _MetricsConnection) -> float:
     timeout = config.request_timeout
-    total = getattr(timeout, "total_seconds", None)
-    if callable(total):
-        return float(total())
+    if isinstance(timeout, timedelta):
+        return timeout.total_seconds()
     return float(timeout)
 
 
