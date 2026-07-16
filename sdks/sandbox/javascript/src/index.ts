@@ -74,6 +74,17 @@ export type {
   Volume,
 } from "./models/sandboxes.js";
 
+export type {
+  ExtensionCapabilities,
+  ExtensionCapability,
+  ExtensionCondition,
+  ExtensionConditionStatus,
+  ExtensionResource,
+  ExtensionResourceMetadata,
+  ExtensionResourceReference,
+  ExtensionResourceState,
+} from "./models/extensions.js";
+
 export type { Sandboxes } from "./services/sandboxes.js";
 export type { CredentialVault, Egress } from "./services/egress.js";
 

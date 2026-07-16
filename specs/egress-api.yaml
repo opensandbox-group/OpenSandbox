@@ -18,8 +18,12 @@ info:
 
     1. Use the Sandbox Lifecycle API to resolve the sandbox endpoint for the egress
        service port.
-    2. Send requests directly to that endpoint's `/policy` or
-       `/credential-vault` route.
+     2. Send requests directly to that endpoint's `/policy`, `/capabilities`,
+       `/extensions`, or `/credential-vault` route.
+
+     The versioned extension routes are an experimental API/SDK proof of concept.
+     They define capability discovery and atomic resource replacement; support for
+     a resource remains implementation-dependent and is reported by `/capabilities`.
 
     ## Authentication
 
@@ -32,9 +36,87 @@ servers:
 tags:
   - name: Policy
     description: Inspect and mutate sandbox egress policy at runtime
+  - name: Extensions
+    description: Discover and atomically replace versioned egress extension resources
   - name: CredentialVault
     description: Manage sandbox-local Credential Vault bindings at runtime
 paths:
+  /capabilities:
+    get:
+      tags: [Extensions]
+      summary: Get egress extension capabilities
+      operationId: getExtensionCapabilities
+      description: |
+        Returns the exact extension resource versions and operations supported by
+        this egress implementation. Discovery is advisory; mutation responses are
+        authoritative if capabilities change between requests.
+      responses:
+        '200':
+          description: Extension capabilities returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtensionCapabilitiesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /extensions:
+    get:
+      tags: [Extensions]
+      summary: Get effective egress extension resources
+      operationId: getExtensionResources
+      description: |
+        Returns the complete effective extension resource set, its revision, and
+        implementation conditions. Unknown fields inside resource `metadata` and
+        `spec` are preserved.
+      responses:
+        '200':
+          description: Extension resource state returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtensionResourceState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ExtensionApplyFailed'
+    put:
+      tags: [Extensions]
+      summary: Replace egress extension resources
+      operationId: replaceExtensionResources
+      description: |
+        Atomically replace the complete egress extension resource set. The
+        optional `expectedRevision` provides optimistic concurrency. An empty
+        `resources` list clears extensions without changing the core `/policy`.
+
+        The previous acknowledged revision remains active when validation or
+        application fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtensionResourceSetRequest'
+      responses:
+        '200':
+          description: Extension resources replaced and acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtensionResourceState'
+        '400':
+          $ref: '#/components/responses/InvalidExtension'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/ExtensionConflict'
+        '412':
+          $ref: '#/components/responses/ExtensionCapabilityUnavailable'
+        '422':
+          $ref: '#/components/responses/UnsupportedExtension'
+        '500':
+          $ref: '#/components/responses/ExtensionApplyFailed'
   /policy:
     get:
       tags: [Policy]
@@ -345,7 +427,183 @@ components:
         text/plain:
           schema:
             type: string
+    InvalidExtension:
+      description: An extension envelope or registered resource schema was invalid.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ExtensionErrorResponse'
+    UnsupportedExtension:
+      description: The exact extension apiVersion and kind are not recognized.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ExtensionErrorResponse'
+    ExtensionCapabilityUnavailable:
+      description: A known extension is unavailable for the active egress implementation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ExtensionErrorResponse'
+    ExtensionConflict:
+      description: Extension resources conflict or the expected revision is stale.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ExtensionErrorResponse'
+    ExtensionApplyFailed:
+      description: Extension resources were valid but could not be applied.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ExtensionErrorResponse'
   schemas:
+    ExtensionCapabilitiesResponse:
+      type: object
+      required: [protocolVersion, resources]
+      properties:
+        protocolVersion:
+          type: string
+          description: Version of the extension discovery and mutation protocol.
+          example: extensions.opensandbox.io/v1alpha1
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtensionCapability'
+      additionalProperties: false
+    ExtensionCapability:
+      type: object
+      required: [apiVersion, kind, available, operations]
+      properties:
+        apiVersion:
+          type: string
+          description: Exact API group and version supported by this implementation.
+          example: gateway.networking.k8s.io/v1
+        kind:
+          type: string
+          example: HTTPRoute
+        available:
+          type: boolean
+        operations:
+          type: array
+          description: Supported operations. Initial values are read and replace.
+          items:
+            type: string
+        features:
+          type: array
+          description: Optional qualified feature names within this resource schema.
+          items:
+            type: string
+        reason:
+          type: string
+          description: Human-readable reason when a known resource is unavailable.
+      additionalProperties: false
+    ExtensionResource:
+      type: object
+      required: [apiVersion, kind, metadata, spec]
+      properties:
+        apiVersion:
+          type: string
+          description: Qualified API group and version identifying the resource schema.
+          example: gateway.networking.k8s.io/v1
+        kind:
+          type: string
+          description: Resource schema kind.
+          example: HTTPRoute
+        metadata:
+          $ref: '#/components/schemas/ExtensionResourceMetadata'
+        spec:
+          type: object
+          description: Extension-defined configuration validated by the registered schema.
+          additionalProperties: true
+      additionalProperties: false
+    ExtensionResourceMetadata:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        namespace:
+          type: string
+      additionalProperties: true
+    ExtensionResourceSetRequest:
+      type: object
+      required: [resources]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 0
+          description: Optional optimistic concurrency guard.
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtensionResource'
+      additionalProperties: false
+    ExtensionResourceState:
+      type: object
+      required: [revision, resources, conditions]
+      properties:
+        revision:
+          type: integer
+          minimum: 0
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtensionResource'
+        conditions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtensionCondition'
+      additionalProperties: false
+    ExtensionCondition:
+      type: object
+      required: [type, status, reason, observedRevision]
+      properties:
+        type:
+          type: string
+          description: Condition type such as Accepted or Programmed.
+        status:
+          type: string
+          enum: ['True', 'False', 'Unknown']
+        reason:
+          type: string
+        message:
+          type: string
+        observedRevision:
+          type: integer
+          minimum: 0
+        resource:
+          $ref: '#/components/schemas/ExtensionResourceReference'
+      additionalProperties: false
+    ExtensionResourceReference:
+      type: object
+      required: [apiVersion, kind, name]
+      properties:
+        apiVersion:
+          type: string
+        kind:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+      additionalProperties: false
+    ExtensionErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable error code. SDKs must preserve codes they do not recognize.
+          example: CAPABILITY_UNAVAILABLE
+        message:
+          type: string
+        resource:
+          $ref: '#/components/schemas/ExtensionResourceReference'
+        fieldPath:
+          type: string
+          description: JSON path identifying the invalid field when available.
+      additionalProperties: false
     PolicyStatusResponse:
       type: object
       properties:

@@ -34,6 +34,11 @@ import type { ExecdMetrics } from "./services/execdMetrics.js";
 import type { IsolationService, IsolationSession } from "./services/isolatedSessions.js";
 import type { IsolatedCapabilities } from "./models/isolated.js";
 import type {
+  ExtensionCapabilities,
+  ExtensionResource,
+  ExtensionResourceState,
+} from "./models/extensions.js";
+import type {
   CreateSandboxRequest,
   CredentialProxyConfig,
   Endpoint,
@@ -111,8 +116,8 @@ export interface SandboxCreateOptions {
    * Container image uri, e.g. `python:3.11`
    */
   image?:
-    | string
-    | { uri: string; auth?: { username: string; password: string } };
+  | string
+  | { uri: string; auth?: { username: string; password: string } };
   /**
    * Snapshot identifier to restore from.
    * Mutually exclusive with `image`.
@@ -385,9 +390,9 @@ export class Sandbox {
       metadata: opts.metadata ?? {},
       networkPolicy: opts.networkPolicy
         ? {
-            ...opts.networkPolicy,
-            defaultAction: opts.networkPolicy.defaultAction ?? "deny",
-          }
+          ...opts.networkPolicy,
+          defaultAction: opts.networkPolicy.defaultAction ?? "deny",
+        }
         : undefined,
       credentialProxy: opts.credentialProxy,
       volumes: opts.volumes,
@@ -649,6 +654,37 @@ export class Sandbox {
 
   async patchMetadata(patch: SandboxMetadataPatch): Promise<SandboxInfo> {
     return await this.sandboxes.patchSandboxMetadata(this.id, patch);
+  }
+
+  async getEgressCapabilities(): Promise<ExtensionCapabilities> {
+    const getCapabilities = Sandbox._priv.get(this)!.egress.getCapabilities;
+    if (!getCapabilities) {
+      throw new Error("Egress extensions are not available: the adapter does not support capability discovery");
+    }
+    return await getCapabilities.call(Sandbox._priv.get(this)!.egress);
+  }
+
+  async getEgressExtensions(): Promise<ExtensionResourceState> {
+    const getExtensions = Sandbox._priv.get(this)!.egress.getExtensions;
+    if (!getExtensions) {
+      throw new Error("Egress extensions are not available: the adapter does not support extension reads");
+    }
+    return await getExtensions.call(Sandbox._priv.get(this)!.egress);
+  }
+
+  async replaceEgressExtensions(
+    resources: ExtensionResource[],
+    expectedRevision?: number,
+  ): Promise<ExtensionResourceState> {
+    const replaceExtensions = Sandbox._priv.get(this)!.egress.replaceExtensions;
+    if (!replaceExtensions) {
+      throw new Error("Egress extensions are not available: the adapter does not support extension replacement");
+    }
+    return await replaceExtensions.call(
+      Sandbox._priv.get(this)!.egress,
+      resources,
+      expectedRevision,
+    );
   }
 
   async getEgressPolicy(): Promise<NetworkPolicy> {

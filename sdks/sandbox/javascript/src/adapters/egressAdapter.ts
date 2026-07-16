@@ -27,8 +27,24 @@ import type {
   NetworkPolicy,
   NetworkRule,
 } from "../models/sandboxes.js";
+import type {
+  ExtensionCapabilities,
+  ExtensionCapability,
+  ExtensionCondition,
+  ExtensionResource,
+  ExtensionResourceReference,
+  ExtensionResourceState,
+} from "../models/extensions.js";
 import type { CredentialVault, Egress } from "../services/egress.js";
 
+type ApiGetExtensionCapabilitiesOk =
+  EgressPaths["/capabilities"]["get"]["responses"][200]["content"]["application/json"];
+type ApiGetExtensionResourcesOk =
+  EgressPaths["/extensions"]["get"]["responses"][200]["content"]["application/json"];
+type ApiReplaceExtensionResourcesRequest =
+  EgressPaths["/extensions"]["put"]["requestBody"]["content"]["application/json"];
+type ApiReplaceExtensionResourcesOk =
+  EgressPaths["/extensions"]["put"]["responses"][200]["content"]["application/json"];
 type ApiGetPolicyOk =
   EgressPaths["/policy"]["get"]["responses"][200]["content"]["application/json"];
 type ApiPatchRulesRequest =
@@ -101,6 +117,117 @@ function optionalStringArray(value: unknown, context: string): string[] | undefi
 function optionalNumberArray(value: unknown, context: string): number[] | undefined {
   if (value == null) return undefined;
   return expectArray(value, context, expectNumber);
+}
+
+function optionalString(value: unknown, context: string): string | undefined {
+  if (value == null) return undefined;
+  return expectString(value, context);
+}
+
+function sanitizeExtensionCapability(value: unknown, context: string): ExtensionCapability {
+  const raw = expectObject(value, context);
+  const capability: ExtensionCapability = {
+    apiVersion: expectString(raw.apiVersion, `${context}.apiVersion`),
+    kind: expectString(raw.kind, `${context}.kind`),
+    available: (() => {
+      if (typeof raw.available !== "boolean") {
+        throw new Error(`${context}.available: expected boolean`);
+      }
+      return raw.available;
+    })(),
+    operations: expectArray(raw.operations, `${context}.operations`, expectString),
+  };
+  const features = optionalStringArray(raw.features, `${context}.features`);
+  if (features) capability.features = features;
+  const reason = optionalString(raw.reason, `${context}.reason`);
+  if (reason !== undefined) capability.reason = reason;
+  return capability;
+}
+
+function sanitizeExtensionCapabilities(value: unknown): ExtensionCapabilities {
+  const raw = expectObject(value, "Get extension capabilities response");
+  return {
+    protocolVersion: expectString(
+      raw.protocolVersion,
+      "Get extension capabilities response.protocolVersion",
+    ),
+    resources: expectArray(
+      raw.resources,
+      "Get extension capabilities response.resources",
+      sanitizeExtensionCapability,
+    ),
+  };
+}
+
+function sanitizeExtensionResource(value: unknown, context: string): ExtensionResource {
+  const raw = expectObject(value, context);
+  const metadata = expectObject(raw.metadata, `${context}.metadata`);
+  const spec = expectObject(raw.spec, `${context}.spec`);
+  const namespace = optionalString(metadata.namespace, `${context}.metadata.namespace`);
+  return {
+    apiVersion: expectString(raw.apiVersion, `${context}.apiVersion`),
+    kind: expectString(raw.kind, `${context}.kind`),
+    metadata: {
+      ...metadata,
+      name: expectString(metadata.name, `${context}.metadata.name`),
+      ...(namespace === undefined ? {} : { namespace }),
+    },
+    spec: { ...spec },
+  };
+}
+
+function sanitizeExtensionResourceReference(
+  value: unknown,
+  context: string,
+): ExtensionResourceReference {
+  const raw = expectObject(value, context);
+  const namespace = optionalString(raw.namespace, `${context}.namespace`);
+  return {
+    apiVersion: expectString(raw.apiVersion, `${context}.apiVersion`),
+    kind: expectString(raw.kind, `${context}.kind`),
+    name: expectString(raw.name, `${context}.name`),
+    ...(namespace === undefined ? {} : { namespace }),
+  };
+}
+
+function sanitizeExtensionCondition(value: unknown, context: string): ExtensionCondition {
+  const raw = expectObject(value, context);
+  const status = expectString(raw.status, `${context}.status`);
+  if (status !== "True" && status !== "False" && status !== "Unknown") {
+    throw new Error(`${context}.status: expected "True", "False", or "Unknown"`);
+  }
+  const condition: ExtensionCondition = {
+    type: expectString(raw.type, `${context}.type`),
+    status,
+    reason: expectString(raw.reason, `${context}.reason`),
+    observedRevision: expectNumber(raw.observedRevision, `${context}.observedRevision`),
+  };
+  const message = optionalString(raw.message, `${context}.message`);
+  if (message !== undefined) condition.message = message;
+  if (raw.resource != null) {
+    condition.resource = sanitizeExtensionResourceReference(
+      raw.resource,
+      `${context}.resource`,
+    );
+  }
+  return condition;
+}
+
+function sanitizeExtensionResourceState(value: unknown, operation: string): ExtensionResourceState {
+  const raw = expectObject(value, `${operation} response`);
+  return {
+    revision: expectNumber(raw.revision, `${operation} response.revision`),
+    resources: expectArray(
+      raw.resources,
+      `${operation} response.resources`,
+      sanitizeExtensionResource,
+    ),
+    conditions: expectArray(
+      raw.conditions,
+      `${operation} response.conditions`,
+      sanitizeExtensionCondition,
+    ),
+  };
 }
 
 function sanitizeCredentialMatch(
@@ -393,6 +520,37 @@ export class EgressAdapter implements Egress, CredentialVault {
       "Get credential vault binding",
     );
     return sanitizeCredentialBindingMetadata(payload, "Get credential vault binding response");
+  }
+
+  async getCapabilities(): Promise<ExtensionCapabilities> {
+    const { data, error, response } = await this.client.GET("/capabilities");
+    throwOnOpenApiFetchError({ error, response }, "Get egress extension capabilities failed");
+    return sanitizeExtensionCapabilities(data as ApiGetExtensionCapabilitiesOk | undefined);
+  }
+
+  async getExtensions(): Promise<ExtensionResourceState> {
+    const { data, error, response } = await this.client.GET("/extensions");
+    throwOnOpenApiFetchError({ error, response }, "Get egress extension resources failed");
+    return sanitizeExtensionResourceState(
+      data as ApiGetExtensionResourcesOk | undefined,
+      "Get egress extension resources",
+    );
+  }
+
+  async replaceExtensions(
+    resources: ExtensionResource[],
+    expectedRevision?: number,
+  ): Promise<ExtensionResourceState> {
+    const body: ApiReplaceExtensionResourcesRequest = {
+      resources,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    };
+    const { data, error, response } = await this.client.PUT("/extensions", { body });
+    throwOnOpenApiFetchError({ error, response }, "Replace egress extension resources failed");
+    return sanitizeExtensionResourceState(
+      data as ApiReplaceExtensionResourcesOk | undefined,
+      "Replace egress extension resources",
+    );
   }
 
   async getPolicy(): Promise<NetworkPolicy> {

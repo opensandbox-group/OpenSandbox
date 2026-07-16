@@ -78,6 +78,7 @@ Optional advanced features:
 - DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (enable), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC`
 - Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
 - Metrics: `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (extra key=value attributes for OTLP metrics and structured log fields)
+- Extension API storage POC: `OPENSANDBOX_EGRESS_EXTENSIONS_POC=true`
 
 ### Always-Rules Files
 
@@ -130,6 +131,9 @@ See also [Credential Vault](/guides/credential-vault) and [Network Isolation](/a
 | `PUT` | `/policy` | Alias for `POST` |
 | `PATCH` | `/policy` | Merge/append rules (body is JSON array of egress rules) |
 | `DELETE` | `/policy` | Remove specific targets (body is JSON string array, e.g. `["*.example.com"]`) |
+| `GET` | `/capabilities` | Discover exact extension resource versions and operations |
+| `GET` | `/extensions` | Read the revisioned effective extension resource set |
+| `PUT` | `/extensions` | Atomically replace the complete extension resource set |
 | `GET/POST/PATCH/DELETE` | `/credential-vault` | Manage the credential vault (create, update, delete) |
 | `GET` | `/credential-vault/credentials` | List credential metadata |
 | `GET` | `/credential-vault/credentials/{name}` | Get single credential metadata |
@@ -147,6 +151,35 @@ curl -XPOST http://127.0.0.1:18080/policy \
 # Remove specific targets
 curl -XDELETE http://127.0.0.1:18080/policy \
   -d '["*.example.com"]'
+```
+
+### Experimental: Extension API Storage POC
+
+::: warning Storage Only
+`OPENSANDBOX_EGRESS_EXTENSIONS_POC=true` enables an in-memory API proof of concept. It validates resource envelopes, preserves unknown `metadata` and `spec` fields, enforces optimistic concurrency, and atomically publishes revisions. It does not translate resources to Envoy or enforce them. Successful POC writes therefore report `Programmed: Unknown` with reason `PocStored`.
+:::
+
+Without the flag, discovery remains available but Gateway API capabilities report `available: false`, and `PUT /extensions` returns `CAPABILITY_UNAVAILABLE`.
+
+See [Egress Extension API POC](/examples/egress-extension-poc) for a complete Kubernetes build, deployment, verification, and cleanup walkthrough.
+
+```bash
+export OPENSANDBOX_EGRESS_EXTENSIONS_POC=true
+
+curl http://127.0.0.1:18080/capabilities
+
+curl -XPUT http://127.0.0.1:18080/extensions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "resources": [{
+      "apiVersion": "gateway.networking.k8s.io/v1",
+      "kind": "HTTPRoute",
+      "metadata": {"name": "api-example"},
+      "spec": {"hostnames": ["api.example.com"]}
+    }]
+  }'
+
+curl http://127.0.0.1:18080/extensions
 ```
 
 ### Experimental: Transparent MITM (mitmproxy)

@@ -9,7 +9,7 @@ import {
   Sandbox,
 } from "../dist/index.js";
 
-function createAdapterFactory({ includeCredentialVault = true } = {}) {
+function createAdapterFactory({ includeCredentialVault = true, includeExtensions = true } = {}) {
   const recordedRequests = [];
   const endpointCalls = [];
   const egressStackCalls = [];
@@ -20,8 +20,8 @@ function createAdapterFactory({ includeCredentialVault = true } = {}) {
         egress: [{ action: "allow", target: "pypi.org" }],
       };
     },
-    async patchRules() {},
-    async deleteRules() {},
+    async patchRules() { },
+    async deleteRules() { },
   };
   const credentialVaultService = {
     async create() {
@@ -33,7 +33,7 @@ function createAdapterFactory({ includeCredentialVault = true } = {}) {
     async patch() {
       return { revision: 2, credentials: [], bindings: [] };
     },
-    async delete() {},
+    async delete() { },
     async listCredentials() {
       return [];
     },
@@ -47,9 +47,31 @@ function createAdapterFactory({ includeCredentialVault = true } = {}) {
       return { name, revision: 1 };
     },
   };
-  const egressService = includeCredentialVault
-    ? { ...policyOnlyEgressService, ...credentialVaultService }
-    : policyOnlyEgressService;
+  const extensionResource = {
+    apiVersion: "gateway.networking.k8s.io/v1",
+    kind: "HTTPRoute",
+    metadata: { name: "api-example" },
+    spec: { hostnames: ["api.example.com"] },
+  };
+  const extensionService = {
+    async getCapabilities() {
+      return {
+        protocolVersion: "extensions.opensandbox.io/v1alpha1",
+        resources: [],
+      };
+    },
+    async getExtensions() {
+      return { revision: 1, resources: [extensionResource], conditions: [] };
+    },
+    async replaceExtensions(resources) {
+      return { revision: 2, resources, conditions: [] };
+    },
+  };
+  const egressService = {
+    ...policyOnlyEgressService,
+    ...(includeExtensions ? extensionService : {}),
+    ...(includeCredentialVault ? credentialVaultService : {}),
+  };
   const sandboxes = {
     async createSandbox(req) {
       recordedRequests.push(req);
@@ -61,9 +83,9 @@ function createAdapterFactory({ includeCredentialVault = true } = {}) {
     async listSandboxes() {
       throw new Error("not implemented");
     },
-    async deleteSandbox() {},
-    async pauseSandbox() {},
-    async resumeSandbox() {},
+    async deleteSandbox() { },
+    async pauseSandbox() { },
+    async resumeSandbox() { },
     async renewSandboxExpiration() {
       throw new Error("not implemented");
     },
@@ -267,6 +289,9 @@ test("Sandbox creates and reuses egress service during sandbox lifecycle", async
 
   await sandbox.getEgressPolicy();
   await sandbox.patchEgressRules([{ action: "allow", target: "www.github.com" }]);
+  const capabilities = await sandbox.getEgressCapabilities();
+  const extensions = await sandbox.getEgressExtensions();
+  const replaced = await sandbox.replaceEgressExtensions(extensions.resources, extensions.revision);
   const vaultState = await sandbox.credentialVault.get();
 
   assert.deepEqual(endpointCalls, [DEFAULT_EXECD_PORT, DEFAULT_EGRESS_PORT]);
@@ -274,6 +299,24 @@ test("Sandbox creates and reuses egress service during sandbox lifecycle", async
   assert.equal(egressStackCalls[0].egressBaseUrl, `http://127.0.0.1:${DEFAULT_EGRESS_PORT}`);
   assert.deepEqual(egressStackCalls[0].endpointHeaders, { "x-port": String(DEFAULT_EGRESS_PORT) });
   assert.deepEqual(vaultState, { revision: 1, credentials: [], bindings: [] });
+  assert.equal(capabilities.protocolVersion, "extensions.opensandbox.io/v1alpha1");
+  assert.equal(extensions.revision, 1);
+  assert.equal(replaced.revision, 2);
+});
+
+test("Sandbox keeps extension methods compatible with older custom egress adapters", async () => {
+  const { adapterFactory } = createAdapterFactory({ includeExtensions: false });
+  const sandbox = await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    skipHealthCheck: true,
+  });
+
+  await assert.rejects(
+    () => sandbox.getEgressCapabilities(),
+    /adapter does not support capability discovery/,
+  );
 });
 
 test("Sandbox.create accepts custom egress adapters without Credential Vault methods", async () => {
