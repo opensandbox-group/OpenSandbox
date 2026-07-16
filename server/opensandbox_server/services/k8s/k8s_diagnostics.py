@@ -57,7 +57,7 @@ class K8sDiagnosticsMixin:
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
             pods = self.k8s_client.list_pods(
-                namespace=self.namespace,
+                namespace=self._resolve_namespace(),
                 label_selector=label_selector,
             )
         except Exception as exc:
@@ -94,7 +94,7 @@ class K8sDiagnosticsMixin:
 
         kwargs: dict = {
             "name": pod_name,
-            "namespace": self.namespace,
+            "namespace": pod.metadata.namespace,
             "container": target_container,
             "tail_lines": tail,
             "timestamps": True,
@@ -241,7 +241,7 @@ class K8sDiagnosticsMixin:
         core_v1 = self.k8s_client.get_core_v1_api()
 
         events_resp = core_v1.list_namespaced_event(
-            namespace=self.namespace,
+            namespace=pod.metadata.namespace,
             field_selector=f"involvedObject.name={pod_name}",
             limit=limit,
         )

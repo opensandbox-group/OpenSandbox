@@ -59,6 +59,9 @@ controller:
     registryInsecure: false
     # -- Secret name used by commit Jobs to push snapshot images.
     snapshotPushSecret: ""
+    # -- Secret name for pulling the image-committer image in commit Jobs.
+    # Required when imageCommitterImage is stored in a private registry.
+    imageCommitterPullSecret: ""
     # -- Secret name injected into resumed sandboxes for pulling snapshot images.
     resumePullSecret: ""
 

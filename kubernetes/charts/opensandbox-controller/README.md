@@ -80,6 +80,7 @@ kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 | `controller.snapshot.registry` | OCI registry prefix used for snapshot images | `""` |
 | `controller.snapshot.registryInsecure` | Use insecure registry mode for snapshot pushes | `false` |
 | `controller.snapshot.snapshotPushSecret` | Secret name used by commit Jobs to push snapshots | `""` |
+| `controller.snapshot.imageCommitterPullSecret` | Secret name for pulling the image-committer image in commit Jobs (needed when it's in a private registry) | `""` |
 | `controller.snapshot.resumePullSecret` | Secret name injected into resumed sandboxes for image pulls | `""` |
 | `controller.leaderElection.enabled` | Enable leader election | `true` |
 | `controller.nodeSelector` | Node labels for pod assignment | `{}` |
@@ -169,6 +170,7 @@ controller:
     registry: my-registry/snapshots
     registryInsecure: false
     snapshotPushSecret: registry-snapshot-push-secret
+    imageCommitterPullSecret: registry-image-committer-pull-secret
     resumePullSecret: registry-pull-secret
 ```
 
@@ -179,6 +181,7 @@ These values render directly to the controller flags:
 - `--snapshot-registry`
 - `--snapshot-registry-insecure`
 - `--snapshot-push-secret`
+- `--image-committer-pull-secret`
 - `--resume-pull-secret`
 
 ### Node Affinity
