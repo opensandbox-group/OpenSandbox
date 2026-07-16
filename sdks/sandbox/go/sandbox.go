@@ -193,8 +193,8 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 			reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), false)
 			return nil, err
 		}
-		reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), true)
 	}
+	reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), true)
 
 	return sb, nil
 }

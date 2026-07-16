@@ -474,13 +474,14 @@ export class Sandbox {
             DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS,
           healthCheck: opts.healthCheck,
         });
-        reportSandboxCreateMetric(connectionConfig, {
-          sandboxId,
-          image: startupSource,
-          createDurationMs: Date.now() - createStarted,
-          success: true,
-        });
       }
+
+      reportSandboxCreateMetric(connectionConfig, {
+        sandboxId,
+        image: startupSource,
+        createDurationMs: Date.now() - createStarted,
+        success: true,
+      });
 
       return sbx;
     } catch (err) {
