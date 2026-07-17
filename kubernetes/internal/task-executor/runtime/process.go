@@ -38,6 +38,10 @@ const (
 	PidFile    = "pid"
 	StdoutFile = "stdout.log"
 	StderrFile = "stderr.log"
+
+	lifecycleHookOutputHeadBytes = 8 * 1024
+	lifecycleHookOutputTailBytes = 8 * 1024
+	lifecycleHookOutputMarker    = "\n... output truncated; showing first 8 KiB and last 8 KiB ...\n"
 )
 
 // processExecutor handles both Host and Sidecar modes as they share the same
@@ -490,16 +494,23 @@ func (e *processExecutor) execLifecycleHook(ctx context.Context, task *types.Tas
 
 	// Create a new process group so that on timeout cancellation we can kill
 	// the entire tree (shell + children like sleep). Without this,
-	// CombinedOutput blocks waiting for orphaned child I/O pipes to close.
+	// Run blocks waiting for orphaned child I/O pipes to close.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 3 * time.Second
 
-	output, err := cmd.CombinedOutput()
+	output := utils.NewHeadTailBuffer(
+		lifecycleHookOutputHeadBytes,
+		lifecycleHookOutputTailBytes,
+		lifecycleHookOutputMarker,
+	)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	capturedOutput := strings.TrimSpace(output.String())
 	if err != nil {
-		stderr := strings.TrimSpace(string(output))
 		// When a per-hook timeout is configured and the hook context has been
 		// canceled (either DeadlineExceeded or Canceled propagated from the
 		// timeout), treat it as a timeout error.  We avoid comparing with
@@ -507,12 +518,12 @@ func (e *processExecutor) execLifecycleHook(ctx context.Context, task *types.Tas
 		// wrap or race with the context error after cmd.Cancel fires.
 		if hook.TimeoutSeconds != nil && *hook.TimeoutSeconds > 0 && hookCtx.Err() != nil {
 			return fmt.Errorf("lifecycle hook timed out after %ds: %w; output: %s",
-				*hook.TimeoutSeconds, context.DeadlineExceeded, stderr)
+				*hook.TimeoutSeconds, context.DeadlineExceeded, capturedOutput)
 		}
-		return fmt.Errorf("lifecycle hook failed: %w; output: %s", err, stderr)
+		return fmt.Errorf("lifecycle hook failed: %w; output: %s", err, capturedOutput)
 	}
 
-	klog.InfoS("Lifecycle hook executed successfully", "task", task.Name, "output", strings.TrimSpace(string(output)))
+	klog.InfoS("Lifecycle hook executed successfully", "task", task.Name, "output", capturedOutput)
 	return nil
 }
 

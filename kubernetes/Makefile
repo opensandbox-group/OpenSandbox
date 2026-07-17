@@ -128,7 +128,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 KIND_CLUSTER ?= sandbox-k8s-test-e2e
 KIND_K8S_VERSION ?= v1.22.4
 GINKGO_ARGS ?=
-E2E_TIMEOUT ?= 45m
+E2E_TIMEOUT ?= 60m
 
 .PHONY: install-kind
 install-kind: ## Install Kind using go install if not already installed

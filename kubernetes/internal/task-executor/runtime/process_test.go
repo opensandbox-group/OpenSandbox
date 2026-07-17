@@ -726,6 +726,38 @@ func TestProcessExecutor_LifecycleHookStderrCaptured(t *testing.T) {
 		"stderr from failed hook should be included in error message")
 }
 
+func TestProcessExecutor_LifecycleHookOutputIsBounded(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not found")
+	}
+
+	executor, _ := setupTestExecutor(t)
+	pExecutor := executor.(*processExecutor)
+
+	script := `
+		printf 'BEGIN_MARKER\n'
+		i=0
+		while [ "$i" -lt 9000 ]; do printf 'a'; i=$((i + 1)); done
+		printf '\nMIDDLE_MARKER\n'
+		i=0
+		while [ "$i" -lt 9000 ]; do printf 'z'; i=$((i + 1)); done
+		printf '\nEND_MARKER\n' >&2
+		exit 1
+	`
+	task := &types.Task{Name: "hook-large-output-test"}
+	hook := &api.LifecycleHandler{
+		Exec: &api.ExecAction{Command: []string{"/bin/sh", "-c", script}},
+	}
+
+	err := pExecutor.execLifecycleHook(context.Background(), task, hook)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "BEGIN_MARKER")
+	assert.Contains(t, err.Error(), "END_MARKER")
+	assert.NotContains(t, err.Error(), "MIDDLE_MARKER")
+	assert.Contains(t, err.Error(), "output truncated; showing first 8 KiB and last 8 KiB")
+	assert.LessOrEqual(t, len(err.Error()), 17*1024)
+}
+
 func TestProcessExecutor_LifecycleHookTimeoutZero_NoDeadline(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not found")
