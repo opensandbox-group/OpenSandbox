@@ -270,8 +270,8 @@ type ProcessTask struct {
 	// ExecMode controls where the process runs.
 	// Local: inside task-executor container.
 	// Remote: inside main container (via nsenter).
+	// If omitted, execution follows the task-executor sidecar mode configuration.
 	// +optional
-	// +kubebuilder:default=Local
 	ExecMode ExecMode `json:"execMode,omitempty"`
 	// Lifecycle defines actions to be executed before and after the main process.
 	// +optional
@@ -294,6 +294,7 @@ type LifecycleHandler struct {
 	// +optional
 	Exec *ExecAction `json:"exec,omitempty"`
 	// ExecMode controls where the action runs.
+	// If omitted, lifecycle hooks run in the task-executor container.
 	// +optional
 	// +kubebuilder:default=Local
 	ExecMode ExecMode `json:"execMode,omitempty"`

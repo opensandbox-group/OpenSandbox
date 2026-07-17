@@ -53,7 +53,8 @@ type Process struct {
 	WorkingDir string `json:"workingDir,omitempty"`
 	// TimeoutSeconds process timeout seconds.
 	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
-	// ExecMode controls where the process runs.
+	// ExecMode controls where the process runs. If empty, execution follows the
+	// task-executor sidecar mode configuration.
 	ExecMode ExecMode `json:"execMode,omitempty"`
 	// Lifecycle defines actions to be executed before and after the main process.
 	Lifecycle *ProcessLifecycle `json:"lifecycle,omitempty"`
@@ -67,8 +68,10 @@ type ProcessLifecycle struct {
 
 // LifecycleHandler defines a lifecycle action.
 type LifecycleHandler struct {
-	Exec     *ExecAction `json:"exec,omitempty"`
-	ExecMode ExecMode    `json:"execMode,omitempty"`
+	Exec *ExecAction `json:"exec,omitempty"`
+	// ExecMode controls where the hook runs. If empty, the hook runs locally in
+	// the task-executor container.
+	ExecMode ExecMode `json:"execMode,omitempty"`
 	// TimeoutSeconds is the maximum number of seconds the hook may run.
 	// If the hook does not complete within this time, it is killed and the
 	// enclosing operation (Start or Stop) is treated as failed.

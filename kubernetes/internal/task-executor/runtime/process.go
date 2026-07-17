@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,6 +54,18 @@ type processExecutor struct {
 
 func NewProcessExecutor(config *config.Config) (Executor, error) {
 	return &processExecutor{rootDir: config.DataDir, config: config}, nil
+}
+
+func (e *processExecutor) useNsenterForProcess(process *api.Process) bool {
+	if process != nil {
+		switch process.ExecMode {
+		case api.ExecModeLocal:
+			return false
+		case api.ExecModeRemote:
+			return true
+		}
+	}
+	return e.config != nil && e.config.EnableSidecarMode
 }
 
 func (e *processExecutor) Start(ctx context.Context, task *types.Task) error {
@@ -95,15 +108,7 @@ func (e *processExecutor) Start(ctx context.Context, task *types.Task) error {
 
 	var cmd *exec.Cmd
 
-	// Determine if we should use nsenter based on ExecMode or global config
-	useNsenter := e.config.EnableSidecarMode
-	if task.Process != nil && task.Process.ExecMode == api.ExecModeLocal {
-		useNsenter = false
-	} else if task.Process != nil && task.Process.ExecMode == api.ExecModeRemote {
-		useNsenter = true
-	}
-
-	if useNsenter {
+	if e.useNsenterForProcess(task.Process) {
 		targetPID, err := e.findPidByEnvVar("SANDBOX_MAIN_CONTAINER", e.config.MainContainerName)
 		if err != nil {
 			return fmt.Errorf("failed to resolve target PID: %w", err)
@@ -353,6 +358,14 @@ func (e *processExecutor) stopMainProcess(ctx context.Context, task *types.Task)
 	if err != nil {
 		return fmt.Errorf("invalid task name: %w", err)
 	}
+	exitPath := filepath.Join(taskDir, ExitFile)
+	if _, err := os.ReadFile(exitPath); err == nil {
+		klog.V(1).InfoS("Skipping process signal because task already exited", "name", task.Name)
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to inspect exit marker: %w", err)
+	}
+
 	pidPath := filepath.Join(taskDir, PidFile)
 	pidData, err := os.ReadFile(pidPath)
 	if err != nil {
@@ -368,7 +381,7 @@ func (e *processExecutor) stopMainProcess(ctx context.Context, task *types.Task)
 	pgid := -pid
 
 	targetPID := 0
-	if e.config.EnableSidecarMode {
+	if e.useNsenterForProcess(task.Process) {
 		children, err := getChildrenPIDs(pid)
 		if err == nil && len(children) > 0 {
 			targetPID = children[0]

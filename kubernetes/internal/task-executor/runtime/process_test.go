@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -43,6 +44,30 @@ func setupTestExecutor(t *testing.T) (Executor, string) {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
 	return executor, dataDir
+}
+
+func TestProcessExecutor_UseNsenterForProcess(t *testing.T) {
+	tests := []struct {
+		name              string
+		enableSidecarMode bool
+		execMode          api.ExecMode
+		want              bool
+	}{
+		{name: "local config with default mode", want: false},
+		{name: "sidecar config with default mode", enableSidecarMode: true, want: true},
+		{name: "local config overridden by Local", execMode: api.ExecModeLocal, want: false},
+		{name: "sidecar config overridden by Local", enableSidecarMode: true, execMode: api.ExecModeLocal, want: false},
+		{name: "local config overridden by Remote", execMode: api.ExecModeRemote, want: true},
+		{name: "sidecar config overridden by Remote", enableSidecarMode: true, execMode: api.ExecModeRemote, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &processExecutor{config: &config.Config{EnableSidecarMode: tt.enableSidecarMode}}
+			process := &api.Process{ExecMode: tt.execMode}
+			assert.Equal(t, tt.want, executor.useNsenterForProcess(process))
+		})
+	}
 }
 
 func TestProcessExecutor_Lifecycle(t *testing.T) {
@@ -518,6 +543,67 @@ func TestProcessExecutor_PostStopHook(t *testing.T) {
 	data, err := os.ReadFile(markerFile)
 	assert.Nil(t, err, "postStop hook should have created marker file")
 	assert.Contains(t, string(data), "poststop-executed")
+}
+
+func TestProcessExecutor_StopSkipsStalePIDWhenExitMarkerExists(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep not found")
+	}
+
+	executor, _ := setupTestExecutor(t)
+	pExecutor := executor.(*processExecutor)
+
+	unrelated := exec.Command("sleep", "30")
+	if err := unrelated.Start(); err != nil {
+		t.Fatalf("failed to start unrelated process: %v", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- unrelated.Wait()
+	}()
+	unrelatedExited := false
+	defer func() {
+		if unrelatedExited {
+			return
+		}
+		_ = unrelated.Process.Kill()
+		<-waitCh
+	}()
+
+	markerFile := filepath.Join(pExecutor.rootDir, "poststop-after-exit-marker")
+	task := &types.Task{
+		Name: "terminal-task-with-stale-pid",
+		Process: &api.Process{
+			Lifecycle: &api.ProcessLifecycle{
+				PostStop: &api.LifecycleHandler{
+					Exec: &api.ExecAction{
+						Command: []string{"/bin/sh", "-c", "echo poststop-executed > " + markerFile},
+					},
+				},
+			},
+		},
+	}
+	taskDir, err := utils.SafeJoin(pExecutor.rootDir, task.Name)
+	assert.NoError(t, err)
+	assert.NoError(t, os.MkdirAll(taskDir, 0755))
+	assert.NoError(t, os.WriteFile(filepath.Join(taskDir, ExitFile), []byte("0"), 0644))
+	assert.NoError(t, os.WriteFile(
+		filepath.Join(taskDir, PidFile),
+		[]byte(strconv.Itoa(unrelated.Process.Pid)),
+		0644,
+	))
+
+	assert.NoError(t, pExecutor.Stop(context.Background(), task))
+	data, err := os.ReadFile(markerFile)
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), "poststop-executed")
+
+	select {
+	case waitErr := <-waitCh:
+		unrelatedExited = true
+		t.Errorf("unrelated process referenced by stale PID was terminated: %v", waitErr)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 func TestProcessExecutor_LifecycleExecModeLocal(t *testing.T) {
