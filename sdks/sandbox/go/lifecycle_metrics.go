@@ -26,12 +26,12 @@ import (
 
 const disableMetricsEnv = "OPENSANDBOX_DISABLE_METRICS"
 
-type sandboxCreateMetricsEvent struct {
-	EventType        string `json:"eventType"`
-	SandboxID        string `json:"sandboxId,omitempty"`
-	Image            string `json:"image,omitempty"`
-	CreateDurationMs int64  `json:"createDurationMs"`
-	Success          bool   `json:"success"`
+type sandboxLifecycleMetricsEvent struct {
+	EventType  string `json:"eventType"`
+	SandboxID  string `json:"sandboxId,omitempty"`
+	Image      string `json:"image,omitempty"`
+	DurationMs int64  `json:"durationMs"`
+	Success    bool   `json:"success"`
 }
 
 func metricsDisabled(cfg ConnectionConfig) bool {
@@ -41,19 +41,19 @@ func metricsDisabled(cfg ConnectionConfig) bool {
 	return strings.TrimSpace(os.Getenv(disableMetricsEnv)) == "1"
 }
 
-// reportSandboxCreateMetric best-effort posts create latency to the lifecycle server.
-// Failures are ignored and the call never blocks CreateSandbox.
-func reportSandboxCreateMetric(cfg ConnectionConfig, sandboxID, image string, durationMs int64, success bool) {
+// reportSandboxLifecycleMetric best-effort posts lifecycle operation latency to
+// the lifecycle server. Failures are ignored and the call never blocks callers.
+func reportSandboxLifecycleMetric(cfg ConnectionConfig, eventType, sandboxID, image string, durationMs int64, success bool) {
 	if metricsDisabled(cfg) {
 		return
 	}
 
-	payload := sandboxCreateMetricsEvent{
-		EventType:        "sandbox.create",
-		SandboxID:        sandboxID,
-		Image:            image,
-		CreateDurationMs: durationMs,
-		Success:          success,
+	payload := sandboxLifecycleMetricsEvent{
+		EventType:  eventType,
+		SandboxID:  sandboxID,
+		Image:      image,
+		DurationMs: durationMs,
+		Success:    success,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

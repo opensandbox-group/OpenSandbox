@@ -16,6 +16,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 import opensandbox_server.integrations.otel.metrics as otel_metrics
@@ -26,7 +27,7 @@ def _event_body(**overrides):
         "eventType": "sandbox.create",
         "sandboxId": "sbx_test",
         "image": "python:3.12",
-        "createDurationMs": 1234,
+        "durationMs": 1234,
         "success": True,
     }
     body.update(overrides)
@@ -54,7 +55,7 @@ class TestReportMetricsEvent:
             "User-Agent": "OpenSandbox-Python-SDK/0.1.0",
         }
         with patch(
-            "opensandbox_server.api.metrics.record_sandbox_create_duration"
+            "opensandbox_server.api.metrics.record_sandbox_lifecycle_duration"
         ) as record:
             response = client.post(
                 "/v1/metrics/events",
@@ -64,7 +65,8 @@ class TestReportMetricsEvent:
         assert response.status_code == 204
         assert response.content == b""
         record.assert_called_once_with(
-            create_duration_ms=1234,
+            event_type="sandbox.create",
+            duration_ms=1234,
             sdk_language="python",
             sdk_version="0.1.0",
             success=True,
@@ -78,7 +80,7 @@ class TestReportMetricsEvent:
             "User-Agent": "OpenSandbox-Kotlin-SDK/1.2.3",
         }
         with patch(
-            "opensandbox_server.api.metrics.record_sandbox_create_duration"
+            "opensandbox_server.api.metrics.record_sandbox_lifecycle_duration"
         ) as record:
             response = client.post(
                 "/v1/metrics/events",
@@ -87,7 +89,8 @@ class TestReportMetricsEvent:
             )
         assert response.status_code == 204
         record.assert_called_once_with(
-            create_duration_ms=1234,
+            event_type="sandbox.create",
+            duration_ms=1234,
             sdk_language="kotlin",
             sdk_version="1.2.3",
             success=True,
@@ -98,7 +101,7 @@ class TestReportMetricsEvent:
     ):
         headers = {**auth_headers, "User-Agent": "curl/8.0"}
         with patch(
-            "opensandbox_server.api.metrics.record_sandbox_create_duration"
+            "opensandbox_server.api.metrics.record_sandbox_lifecycle_duration"
         ) as record:
             response = client.post(
                 "/v1/metrics/events",
@@ -107,7 +110,8 @@ class TestReportMetricsEvent:
             )
         assert response.status_code == 204
         record.assert_called_once_with(
-            create_duration_ms=1234,
+            event_type="sandbox.create",
+            duration_ms=1234,
             sdk_language="unknown",
             sdk_version="unknown",
             success=True,
@@ -123,7 +127,7 @@ class TestReportMetricsEvent:
             "User-Agent": "OpenSandbox-Go-SDK/0.1.0",
         }
         with patch(
-            "opensandbox_server.api.metrics.record_sandbox_create_duration"
+            "opensandbox_server.api.metrics.record_sandbox_lifecycle_duration"
         ) as record:
             response = client.post(
                 "/v1/metrics/events",
@@ -132,16 +136,61 @@ class TestReportMetricsEvent:
             )
         assert response.status_code == 204
         record.assert_called_once_with(
-            create_duration_ms=1234,
+            event_type="sandbox.create",
+            duration_ms=1234,
             sdk_language="go",
             sdk_version="0.1.0",
             success=False,
         )
 
-    def test_invalid_body_returns_422(self, client: TestClient, auth_headers: dict):
+    @pytest.mark.parametrize(
+        "event_type",
+        ["sandbox.resume", "sandbox.pause", "sandbox.kill"],
+    )
+    def test_accepts_lifecycle_events(
+        self, client: TestClient, auth_headers: dict, event_type: str
+    ):
+        headers = {
+            **auth_headers,
+            "User-Agent": "OpenSandbox-Python-SDK/0.1.0",
+        }
+        body = _event_body(eventType=event_type, durationMs=456)
+        body.pop("image")
+        with patch(
+            "opensandbox_server.api.metrics.record_sandbox_lifecycle_duration"
+        ) as record:
+            response = client.post(
+                "/v1/metrics/events",
+                json=body,
+                headers=headers,
+            )
+        assert response.status_code == 204
+        record.assert_called_once_with(
+            event_type=event_type,
+            duration_ms=456,
+            sdk_language="python",
+            sdk_version="0.1.0",
+            success=True,
+        )
+
+    def test_missing_duration_returns_422(
+        self, client: TestClient, auth_headers: dict
+    ):
+        body = _event_body()
+        body.pop("durationMs")
         response = client.post(
             "/v1/metrics/events",
-            json={"eventType": "sandbox.create"},
+            json=body,
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+    def test_unknown_event_type_returns_422(
+        self, client: TestClient, auth_headers: dict
+    ):
+        response = client.post(
+            "/v1/metrics/events",
+            json=_event_body(eventType="sandbox.unknown"),
             headers=auth_headers,
         )
         assert response.status_code == 422
@@ -149,11 +198,28 @@ class TestReportMetricsEvent:
     def test_record_helper_swallows_errors(self):
         mock_hist = MagicMock()
         mock_hist.record.side_effect = RuntimeError("boom")
-        with patch.object(otel_metrics, "_create_duration_histogram", mock_hist):
-            otel_metrics.record_sandbox_create_duration(
-                create_duration_ms=1,
+        with patch.object(
+            otel_metrics, "_duration_histograms", {"sandbox.create": mock_hist}
+        ):
+            otel_metrics.record_sandbox_lifecycle_duration(
+                event_type="sandbox.create",
+                duration_ms=1,
                 sdk_language="python",
                 sdk_version="0.0.0",
                 success=False,
             )
         mock_hist.record.assert_called_once()
+
+    def test_record_helper_ignores_unknown_event_type(self):
+        mock_hist = MagicMock()
+        with patch.object(
+            otel_metrics, "_duration_histograms", {"sandbox.create": mock_hist}
+        ):
+            otel_metrics.record_sandbox_lifecycle_duration(
+                event_type="sandbox.other",
+                duration_ms=1,
+                sdk_language="python",
+                sdk_version="0.0.0",
+                success=True,
+            )
+        mock_hist.record.assert_not_called()

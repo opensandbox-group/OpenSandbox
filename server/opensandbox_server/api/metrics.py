@@ -23,7 +23,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, Response, status
 
 from opensandbox_server.api.schema import MetricsEvent
-from opensandbox_server.integrations.otel import record_sandbox_create_duration
+from opensandbox_server.integrations.otel import record_sandbox_lifecycle_duration
 
 logger = logging.getLogger(__name__)
 
@@ -62,22 +62,23 @@ def report_metrics_event(
 ) -> Response:
     """Accept best-effort SDK metrics and record to OTEL (noop when disabled)."""
     _ = x_request_id
-    if event.event_type == "sandbox.create":
-        sdk_language, sdk_version = parse_sdk_user_agent(user_agent)
-        record_sandbox_create_duration(
-            create_duration_ms=event.create_duration_ms,
-            sdk_language=sdk_language,
-            sdk_version=sdk_version,
-            success=event.success,
-        )
-        logger.debug(
-            "Accepted sandbox.create metrics event sandbox_id=%s image=%s "
-            "duration_ms=%s sdk=%s/%s success=%s",
-            event.sandbox_id,
-            event.image,
-            event.create_duration_ms,
-            sdk_language,
-            sdk_version,
-            event.success,
-        )
+    sdk_language, sdk_version = parse_sdk_user_agent(user_agent)
+    record_sandbox_lifecycle_duration(
+        event_type=event.event_type,
+        duration_ms=event.duration_ms,
+        sdk_language=sdk_language,
+        sdk_version=sdk_version,
+        success=event.success,
+    )
+    logger.debug(
+        "Accepted %s metrics event sandbox_id=%s image=%s "
+        "duration_ms=%s sdk=%s/%s success=%s",
+        event.event_type,
+        event.sandbox_id,
+        event.image,
+        event.duration_ms,
+        sdk_language,
+        sdk_version,
+        event.success,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -24,24 +24,65 @@ import pytest
 from opensandbox.config import ConnectionConfig
 from opensandbox.internal.lifecycle_metrics import (
     _build_payload,
-    report_sandbox_create_metric,
+    report_sandbox_lifecycle_metric,
 )
 
 
 def test_build_payload_omits_optional_fields():
     payload = _build_payload(
+        event_type="sandbox.create",
         sandbox_id=None,
         image=None,
-        create_duration_ms=12,
+        duration_ms=12,
         success=False,
     )
     assert payload["eventType"] == "sandbox.create"
-    assert payload["createDurationMs"] == 12
+    assert payload["durationMs"] == 12
     assert payload["success"] is False
     assert "sandboxId" not in payload
     assert "image" not in payload
     assert "sdkLanguage" not in payload
     assert "sdkVersion" not in payload
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["sandbox.create", "sandbox.resume", "sandbox.pause", "sandbox.kill"],
+)
+def test_build_payload_uses_duration_ms_for_all_events(event_type):
+    payload = _build_payload(
+        event_type=event_type,
+        sandbox_id="sbx",
+        image=None,
+        duration_ms=34,
+        success=True,
+    )
+    assert payload["eventType"] == event_type
+    assert payload["durationMs"] == 34
+    assert payload["sandboxId"] == "sbx"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_report_posts_expected_payload():
+    config = ConnectionConfig(
+        domain="127.0.0.1:9",
+        protocol="http",
+        request_timeout=timedelta(milliseconds=50),
+    )
+    with patch("opensandbox.internal.lifecycle_metrics._post_async") as post:
+        report_sandbox_lifecycle_metric(
+            config,
+            event_type="sandbox.pause",
+            sandbox_id="sbx",
+            duration_ms=42,
+            success=True,
+        )
+        await asyncio.sleep(0.05)
+    post.assert_called_once()
+    payload = post.call_args.args[1]
+    assert payload["eventType"] == "sandbox.pause"
+    assert payload["durationMs"] == 42
+    assert payload["success"] is True
 
 
 @pytest.mark.asyncio
@@ -56,11 +97,12 @@ async def test_report_does_not_raise_when_post_fails():
         "opensandbox.internal.lifecycle_metrics._post_async",
         side_effect=httpx.ConnectError("boom"),
     ):
-        report_sandbox_create_metric(
+        report_sandbox_lifecycle_metric(
             config,
+            event_type="sandbox.create",
             sandbox_id="sbx",
             image="python:3.12",
-            create_duration_ms=100,
+            duration_ms=100,
             success=True,
         )
         # Allow the scheduled task to run and finish.
@@ -84,11 +126,12 @@ def test_sync_report_swallows_errors_in_thread():
         side_effect=_boom,
     ):
         # No running loop → thread path.
-        report_sandbox_create_metric(
+        report_sandbox_lifecycle_metric(
             config,
+            event_type="sandbox.create",
             sandbox_id=None,
             image="img",
-            create_duration_ms=1,
+            duration_ms=1,
             success=False,
         )
         import time
@@ -108,11 +151,11 @@ async def test_report_skipped_when_disable_metrics():
         disable_metrics=True,
     )
     with patch("opensandbox.internal.lifecycle_metrics._post_async") as post:
-        report_sandbox_create_metric(
+        report_sandbox_lifecycle_metric(
             config,
+            event_type="sandbox.kill",
             sandbox_id="sbx",
-            image="python:3.12",
-            create_duration_ms=100,
+            duration_ms=1,
             success=True,
         )
         await asyncio.sleep(0.05)
@@ -123,11 +166,12 @@ def test_report_skipped_when_env_disables_metrics(monkeypatch):
     monkeypatch.setenv("OPENSANDBOX_DISABLE_METRICS", "1")
     config = ConnectionConfig(domain="127.0.0.1:9", protocol="http")
     with patch("opensandbox.internal.lifecycle_metrics._post_sync") as post:
-        report_sandbox_create_metric(
+        report_sandbox_lifecycle_metric(
             config,
+            event_type="sandbox.create",
             sandbox_id=None,
             image="img",
-            create_duration_ms=1,
+            duration_ms=1,
             success=False,
         )
         import time
@@ -152,11 +196,12 @@ async def test_async_report_keeps_strong_task_ref():
         await asyncio.sleep(0.05)
 
     with patch.object(metrics_mod, "_post_async", side_effect=_slow_post):
-        report_sandbox_create_metric(
+        report_sandbox_lifecycle_metric(
             config,
+            event_type="sandbox.create",
             sandbox_id="sbx",
             image="img",
-            create_duration_ms=10,
+            duration_ms=10,
             success=True,
         )
         assert len(metrics_mod._pending) == 1

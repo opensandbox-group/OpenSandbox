@@ -33,7 +33,7 @@ from opensandbox.exceptions import (
     SandboxInternalException,
     SandboxReadyTimeoutException,
 )
-from opensandbox.internal.lifecycle_metrics import report_sandbox_create_metric
+from opensandbox.internal.lifecycle_metrics import report_sandbox_lifecycle_metric
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
@@ -355,7 +355,13 @@ class Sandbox:
         """
         logger.info(f"Pausing sandbox: {self.id}")
         self._sandbox_service.invalidate_endpoint_cache(self.id)
-        await self._sandbox_service.pause_sandbox(self.id)
+        started = time.monotonic()
+        try:
+            await self._sandbox_service.pause_sandbox(self.id)
+        except BaseException:
+            self._report_lifecycle_metric("sandbox.pause", started, success=False)
+            raise
+        self._report_lifecycle_metric("sandbox.pause", started, success=True)
 
     async def kill(self) -> None:
         """
@@ -371,7 +377,24 @@ class Sandbox:
         """
         logger.info(f"Killing sandbox: {self.id}")
         self._sandbox_service.invalidate_endpoint_cache(self.id)
-        await self._sandbox_service.kill_sandbox(self.id)
+        started = time.monotonic()
+        try:
+            await self._sandbox_service.kill_sandbox(self.id)
+        except BaseException:
+            self._report_lifecycle_metric("sandbox.kill", started, success=False)
+            raise
+        self._report_lifecycle_metric("sandbox.kill", started, success=True)
+
+    def _report_lifecycle_metric(
+        self, event_type: str, started: float, *, success: bool
+    ) -> None:
+        report_sandbox_lifecycle_metric(
+            self._connection_config,
+            event_type=event_type,
+            sandbox_id=self.id,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            success=success,
+        )
 
     async def close(self) -> None:
         """
@@ -634,21 +657,23 @@ class Sandbox:
                     f"Sandbox {sandbox.id} created (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
-            report_sandbox_create_metric(
+            report_sandbox_lifecycle_metric(
                 config,
+                event_type="sandbox.create",
                 sandbox_id=sandbox.id,
                 image=startup_source,
-                create_duration_ms=int((time.monotonic() - create_started) * 1000),
+                duration_ms=int((time.monotonic() - create_started) * 1000),
                 success=True,
             )
 
             return sandbox
         except BaseException as e:
-            report_sandbox_create_metric(
+            report_sandbox_lifecycle_metric(
                 config,
+                event_type="sandbox.create",
                 sandbox_id=sandbox_id,
                 image=startup_source,
-                create_duration_ms=int((time.monotonic() - create_started) * 1000),
+                duration_ms=int((time.monotonic() - create_started) * 1000),
                 success=False,
             )
             if sandbox_id and sandbox_service:
@@ -790,6 +815,7 @@ class Sandbox:
 
         logger.info(f"Resuming sandbox: {sandbox_id}")
         factory = AdapterFactory(config)
+        resume_started = time.monotonic()
 
         try:
             sandbox_service = factory.create_sandbox_service()
@@ -825,8 +851,23 @@ class Sandbox:
                     f"Resumed sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
+            report_sandbox_lifecycle_metric(
+                config,
+                event_type="sandbox.resume",
+                sandbox_id=sandbox_id,
+                duration_ms=int((time.monotonic() - resume_started) * 1000),
+                success=True,
+            )
+
             return sandbox
         except Exception as e:
+            report_sandbox_lifecycle_metric(
+                config,
+                event_type="sandbox.resume",
+                sandbox_id=sandbox_id,
+                duration_ms=int((time.monotonic() - resume_started) * 1000),
+                success=False,
+            )
             await config.close_transport_if_owned()
             if isinstance(e, SandboxException):
                 raise
