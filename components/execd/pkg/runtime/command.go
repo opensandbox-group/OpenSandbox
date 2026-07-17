@@ -259,6 +259,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 // runBackgroundCommand executes shell commands in detached mode.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
 	session := c.newContextID()
+	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
 	if err != nil {
@@ -322,13 +323,15 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		kernel.running = false
 		c.storeCommandKernel(session, kernel)
 		c.markCommandFinished(session, 255, err.Error())
-		request.Hooks.OnExecuteInit(session)
 		return fmt.Errorf("failed to start commands: %w", err)
 	}
 
+	// Register the kernel synchronously so that GetCommandStatus callers
+	// can find the session immediately after Execute returns. Previously
+	// this happened inside the goroutine, creating a race where the HTTP
+	// handler could return before the kernel was stored.
 	kernel.pid = cmd.Process.Pid
 	c.storeCommandKernel(session, kernel)
-	request.Hooks.OnExecuteInit(session)
 
 	safego.Go(func() {
 		defer pipe.Close()

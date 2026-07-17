@@ -51,7 +51,6 @@ func (c *CodeInterpretingController) RunCommand() {
 	}
 
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
-	defer cancel()
 	execStart := time.Now()
 	var recordOnce sync.Once
 	recordExecution := func(result string) {
@@ -66,7 +65,8 @@ func (c *CodeInterpretingController) RunCommand() {
 	}
 
 	runCodeRequest := c.buildExecuteCommandRequest(request)
-	eventsHandler := c.setServerEventsHandler(ctx)
+	eventsHandler, stopSSE := c.setServerEventsHandler(ctx)
+
 	// completeCh is closed when OnExecuteComplete or OnExecuteError fires,
 	// meaning the final SSE event has been written and flushed. Match the
 	// completion semantics used by RunCode/RunInSession so chunked HTTP/1.1
@@ -91,6 +91,12 @@ func (c *CodeInterpretingController) RunCommand() {
 		signalComplete()
 	}
 	runCodeRequest.Hooks = eventsHandler
+
+	// Cancel the context first (signals the ping goroutine to stop), then
+	// wait for it to fully exit before the handler returns. This prevents
+	// the ping goroutine from writing to the response after Go's net/http
+	// closes the response writer.
+	defer func() { cancel(); stopSSE() }()
 
 	// SSE headers are committed lazily on the first event write
 	// (see writeSingleEvent), so a synchronous error from Execute below can

@@ -15,9 +15,12 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+
+	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
 type HTTPProxy struct{}
@@ -54,6 +57,20 @@ func (hp *HTTPProxy) newReverseProxy(targetHost string) (*httputil.ReverseProxy,
 	proxy.ModifyResponse = func(response *http.Response) error {
 		response.Header.Add(ReverseProxyServerPowerBy, "OpenSandbox-ingress")
 		return nil
+	}
+	// Custom error handler: log the upstream error and return 502 only
+	// when the response headers have not yet been committed. If the
+	// response is already streaming (e.g. SSE), writing an error body
+	// would corrupt the stream, so we silently let the connection close.
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		Logger.With(
+			slogger.Field{Key: "error", Value: fmt.Sprintf("%v", err)},
+			slogger.Field{Key: "uri", Value: req.RequestURI},
+			slogger.Field{Key: "method", Value: req.Method},
+		).Errorf("ingress: reverse proxy upstream error")
+
+		// Attempt to set 502; this is a no-op if headers are already sent.
+		rw.WriteHeader(http.StatusBadGateway)
 	}
 	return proxy, nil
 }
