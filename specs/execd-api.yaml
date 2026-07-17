@@ -1169,6 +1169,11 @@ paths:
   /v1/isolated/session/{sessionId}:
     get:
       summary: Get isolated session state
+      description: >-
+        Returns runtime status plus the creation parameters of the session.
+        A stateless client that only has a session ID (e.g. after a restart)
+        can call this endpoint to rebuild a session handle without needing
+        to have retained the original create request.
       operationId: getIsolatedSession
       tags:
         - IsolatedExecution
@@ -2190,6 +2195,16 @@ components:
 
     SessionState:
       type: object
+      description: >-
+        State of an isolated session. Runtime status fields (status,
+        created_at, last_run_at, idle_remaining_seconds) are always present.
+        Creation-parameter fields (profile, workspace, binds, share_net,
+        env_passthrough, uid, gid, uid_mode, extra_writable,
+        idle_timeout_seconds) echo the parameters used to create the session
+        and let a stateless client rebuild a session handle from just a
+        session ID (e.g. after a client restart or in serverless workers).
+        Older execd builds may omit the creation-parameter fields; clients
+        must tolerate them being absent.
       properties:
         status:
           type: string
@@ -2203,6 +2218,35 @@ components:
         idle_remaining_seconds:
           type: integer
           nullable: true
+        profile:
+          type: string
+          enum: ["strict", "balanced"]
+          description: Profile the session was created with.
+        workspace:
+          $ref: "#/components/schemas/IsolatedWorkspaceSpec"
+        extra_writable:
+          type: array
+          items:
+            type: string
+        binds:
+          type: array
+          items:
+            $ref: "#/components/schemas/BindMount"
+        share_net:
+          type: boolean
+        env_passthrough:
+          $ref: "#/components/schemas/EnvPassthroughSpec"
+        uid:
+          type: integer
+          format: uint32
+        gid:
+          type: integer
+          format: uint32
+        uid_mode:
+          type: string
+          enum: ["setpriv", "userns"]
+        idle_timeout_seconds:
+          type: integer
 
     IsolatedSessionSummary:
       type: object

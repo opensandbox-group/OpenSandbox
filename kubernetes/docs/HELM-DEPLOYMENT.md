@@ -127,6 +127,7 @@ controller:
   snapshot:
     registry: myregistry.example.com/opensandbox/snapshots
     snapshotPushSecret: registry-snapshot-push-secret
+    imageCommitterPullSecret: registry-image-committer-pull-secret
     resumePullSecret: registry-pull-secret
 
 imagePullSecrets:
@@ -184,6 +185,7 @@ helm install opensandbox-controller ./charts/opensandbox-controller \
 helm install opensandbox-controller ./charts/opensandbox-controller \
   --set controller.snapshot.registry=myregistry.example.com/opensandbox/snapshots \
   --set controller.snapshot.snapshotPushSecret=registry-snapshot-push-secret \
+  --set controller.snapshot.imageCommitterPullSecret=registry-image-committer-pull-secret \
   --set controller.snapshot.resumePullSecret=registry-pull-secret \
   --namespace opensandbox-system
 ```

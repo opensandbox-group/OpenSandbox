@@ -406,6 +406,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry)  | SDK-created per instance     | -                      |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
+| `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
 
 ```python
 from datetime import timedelta

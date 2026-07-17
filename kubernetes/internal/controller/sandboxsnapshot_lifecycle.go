@@ -312,6 +312,13 @@ func (r *SandboxSnapshotReconciler) containerdSocketPath() string {
 	return ContainerdSocketPath
 }
 
+func (r *SandboxSnapshotReconciler) imageCommitterPullSecrets() []corev1.LocalObjectReference {
+	if r.ImageCommitterPullSecret == "" {
+		return nil
+	}
+	return []corev1.LocalObjectReference{{Name: r.ImageCommitterPullSecret}}
+}
+
 func commitJobSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsUser:                ptrToInt64(0),
@@ -380,7 +387,8 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 			ActiveDeadlineSeconds:   ptrToInt64(int64(r.getCommitJobTimeout().Seconds())),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					RestartPolicy:    corev1.RestartPolicyNever,
+					ImagePullSecrets: r.imageCommitterPullSecrets(),
 					Containers: []corev1.Container{
 						{
 							Name:            CommitJobContainerName,
@@ -448,7 +456,8 @@ func (r *SandboxSnapshotReconciler) buildUnpauseJob(snapshot *sandboxv1alpha1.Sa
 			ActiveDeadlineSeconds:   ptrToInt64(int64(r.getCommitJobTimeout().Seconds())),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					RestartPolicy:    corev1.RestartPolicyNever,
+					ImagePullSecrets: r.imageCommitterPullSecrets(),
 					Containers: []corev1.Container{
 						{
 							Name:            CommitJobContainerName,

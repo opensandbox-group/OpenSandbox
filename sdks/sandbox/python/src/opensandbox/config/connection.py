@@ -97,6 +97,13 @@ class ConnectionConfig(BaseModel):
         default=False,
         description="Disable endpoint caching entirely.",
     )
+    disable_metrics: bool = Field(
+        default=False,
+        description=(
+            "Disable SDK telemetry (sandbox.create latency reports). "
+            "Also honored via OPENSANDBOX_DISABLE_METRICS=1."
+        ),
+    )
 
     # Environment variable names
     _ENV_API_KEY = "OPEN_SANDBOX_API_KEY"

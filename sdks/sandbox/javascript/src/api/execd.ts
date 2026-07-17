@@ -639,7 +639,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get isolated session state */
+        /**
+         * Get isolated session state
+         * @description Returns runtime status plus the creation parameters of the session. A stateless client that only has a session ID (e.g. after a restart) can call this endpoint to rebuild a session handle without needing to have retained the original create request.
+         */
         get: operations["getIsolatedSession"];
         put?: never;
         post?: never;
@@ -1316,6 +1319,7 @@ export interface components {
             };
             timeout_seconds?: number;
         };
+        /** @description State of an isolated session. Runtime status fields (status, created_at, last_run_at, idle_remaining_seconds) are always present. Creation-parameter fields (profile, workspace, binds, share_net, env_passthrough, uid, gid, uid_mode, extra_writable, idle_timeout_seconds) echo the parameters used to create the session and let a stateless client rebuild a session handle from just a session ID (e.g. after a client restart or in serverless workers). Older execd builds may omit the creation-parameter fields; clients must tolerate them being absent. */
         SessionState: {
             /** @enum {string} */
             status?: "active" | "dead" | "destroyed";
@@ -1324,6 +1328,23 @@ export interface components {
             /** Format: date-time */
             last_run_at?: string;
             idle_remaining_seconds?: number | null;
+            /**
+             * @description Profile the session was created with.
+             * @enum {string}
+             */
+            profile?: "strict" | "balanced";
+            workspace?: components["schemas"]["IsolatedWorkspaceSpec"];
+            extra_writable?: string[];
+            binds?: components["schemas"]["BindMount"][];
+            share_net?: boolean;
+            env_passthrough?: components["schemas"]["EnvPassthroughSpec"];
+            /** Format: uint32 */
+            uid?: number;
+            /** Format: uint32 */
+            gid?: number;
+            /** @enum {string} */
+            uid_mode?: "setpriv" | "userns";
+            idle_timeout_seconds?: number;
         };
         IsolatedSessionSummary: {
             /** Format: uuid */

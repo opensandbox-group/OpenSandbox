@@ -77,6 +77,61 @@ func TestIsolationSessionLifecycle(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestIsolationAttachRoundtrip covers the stateless-recovery flow: a
+// client that only kept the sessionId calls IsolationAttach and then
+// exercises run/get/delete through the newly-built handle. Also verifies
+// that the creation-parameter echoes are populated after attach.
+func TestIsolationAttachRoundtrip(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	created, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	})
+	require.NoError(t, err)
+	sessionID := created.SessionID()
+
+	// Write some state through the original handle so we can prove the
+	// attached handle really targets the same bwrap session.
+	_, err = created.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: "echo attached-state > /tmp/attach-marker.txt",
+	}, nil)
+	require.NoError(t, err)
+
+	// Simulate a stateless client that only kept the sessionID.
+	attached, err := sb.IsolationAttach(ctx, sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, sessionID, attached.SessionID())
+
+	// Creation-parameter echoes should be populated by GET.
+	info := attached.Info()
+	require.NotNil(t, info)
+	require.NotNil(t, info.Workspace)
+	assert.Equal(t, "/tmp", info.Workspace.Path)
+	assert.Equal(t, "rw", info.Workspace.Mode)
+
+	// Handle works end-to-end via sessionID alone.
+	state, err := attached.Get(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "active", state.Status)
+
+	exec, err := attached.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: "cat /tmp/attach-marker.txt",
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), "attached-state")
+
+	require.NoError(t, attached.Delete(ctx))
+}
+
+// TestIsolationAttachNotFound verifies attach with an unknown sessionID
+// surfaces the same error shape used by IsolatedGet on 404.
+func TestIsolationAttachNotFound(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	_, err := sb.IsolationAttach(ctx, "00000000-0000-0000-0000-000000000000")
+	require.Error(t, err)
+}
+
 func TestIsolationListSessions(t *testing.T) {
 	ctx, sb := createIsolatedTestSandbox(t)
 

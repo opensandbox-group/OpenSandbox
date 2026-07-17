@@ -47,14 +47,36 @@ public record CreateIsolatedSessionRequest(
 
 public record IsolatedSessionInfo(
     [property: JsonPropertyName("session_id")] string SessionId,
-    [property: JsonPropertyName("created_at")] DateTimeOffset? CreatedAt = null
+    [property: JsonPropertyName("created_at")] DateTimeOffset? CreatedAt = null,
+    // Creation-parameter fields echoed by execd (may be absent on older builds).
+    [property: JsonPropertyName("profile")] string? Profile = null,
+    [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
+    [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
+    [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
+    [property: JsonPropertyName("share_net")] bool? ShareNet = null,
+    [property: JsonPropertyName("env_passthrough")] EnvPassthroughSpec? EnvPassthrough = null,
+    [property: JsonPropertyName("uid")] long? Uid = null,
+    [property: JsonPropertyName("gid")] long? Gid = null,
+    [property: JsonPropertyName("uid_mode")] string? UidMode = null,
+    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
 );
 
 public record IsolatedSessionState(
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("created_at")] DateTimeOffset? CreatedAt = null,
     [property: JsonPropertyName("last_run_at")] DateTimeOffset? LastRunAt = null,
-    [property: JsonPropertyName("idle_remaining_seconds")] int? IdleRemainingSeconds = null
+    [property: JsonPropertyName("idle_remaining_seconds")] int? IdleRemainingSeconds = null,
+    // Creation-parameter fields echoed by execd (may be absent on older builds).
+    [property: JsonPropertyName("profile")] string? Profile = null,
+    [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
+    [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
+    [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
+    [property: JsonPropertyName("share_net")] bool? ShareNet = null,
+    [property: JsonPropertyName("env_passthrough")] EnvPassthroughSpec? EnvPassthrough = null,
+    [property: JsonPropertyName("uid")] long? Uid = null,
+    [property: JsonPropertyName("gid")] long? Gid = null,
+    [property: JsonPropertyName("uid_mode")] string? UidMode = null,
+    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
 );
 
 public record IsolatedSessionSummary(

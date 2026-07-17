@@ -74,6 +74,24 @@ class IsolationService(Protocol):
         self, request: CreateIsolatedSessionRequest
     ) -> IsolationSession: ...
 
+    async def attach(self, session_id: str) -> IsolationSession:
+        """Rebuild a session handle from an existing ``session_id``.
+
+        Fetches the current session state from execd and returns the same
+        handle type as :meth:`create`. Useful for stateless callers (e.g.
+        serverless workers restarted mid-flight) that only have a session ID.
+
+        When the execd side echoes the creation-parameter fields (``profile``,
+        ``workspace``, ``binds`` etc.), they populate ``handle.info``. Older
+        execd builds omit these fields; ``handle.info`` then only carries the
+        session ID (creation-parameter fields are ``None``) but ``run``/``get``/
+        ``delete``/``files`` still work because they only need the session ID.
+
+        Raises the SDK's standard not-found error when the session does not
+        exist on execd.
+        """
+        ...
+
     async def capabilities(self) -> IsolatedCapabilities: ...
 
     async def list(self) -> list[IsolatedSessionSummary]: ...

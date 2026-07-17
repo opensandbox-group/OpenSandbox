@@ -25,6 +25,10 @@ import httpx
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.response_handler import extract_request_id
+from opensandbox.adapters.isolated_adapter import (
+    _build_attach_info,
+    _build_session_state,
+)
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import Execution
@@ -205,6 +209,23 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
+    def attach(self, session_id: str) -> IsolationSessionHandleSync:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        try:
+            url = self._get_url(self.SESSION_PATH.format(session_id=session_id))
+            response = self._httpx_client.get(url)
+            if response.status_code != 200:
+                raise SandboxApiException(
+                    message=f"attach isolated session failed. Status: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
+            info = _build_attach_info(session_id, response.json())
+            return IsolationSessionHandleSync(info, self)
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
     def _get(self, session_id: str) -> IsolatedSessionState:
         if not (session_id and session_id.strip()):
             raise InvalidArgumentException("session_id cannot be empty")
@@ -217,7 +238,7 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
-            return IsolatedSessionState(**response.json())
+            return _build_session_state(response.json())
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 

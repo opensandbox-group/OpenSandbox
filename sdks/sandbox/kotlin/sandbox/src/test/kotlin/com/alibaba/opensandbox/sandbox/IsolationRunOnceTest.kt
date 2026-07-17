@@ -52,6 +52,8 @@ class IsolationRunOnceTest {
         return object : IsolationService {
             override fun create(request: CreateIsolatedSessionRequest): IsolationSession = session
 
+            override fun attach(sessionId: String): IsolationSession = session
+
             override fun capabilities(): IsolatedCapabilities = IsolatedCapabilities()
 
             override fun list(): List<IsolatedSessionSummary> = emptyList()

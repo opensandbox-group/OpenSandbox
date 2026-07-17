@@ -83,6 +83,10 @@ type ConnectionConfig struct {
 
 	// EndpointCacheDisabled disables endpoint caching entirely.
 	EndpointCacheDisabled bool
+
+	// DisableMetrics skips SDK telemetry (sandbox.create latency reports).
+	// Also honored via OPENSANDBOX_DISABLE_METRICS=1.
+	DisableMetrics bool
 }
 
 // RewriteEndpointURL applies EndpointHostRewrite rules to an endpoint URL

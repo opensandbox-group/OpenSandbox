@@ -22,6 +22,7 @@ import {
   DEFAULT_TIMEOUT_SECONDS,
 } from "./core/constants.js";
 import { ConnectionConfig, type ConnectionConfigOptions } from "./config/connection.js";
+import { reportSandboxCreateMetric } from "./internal/lifecycleMetrics.js";
 import type { SandboxFiles } from "./services/filesystem.js";
 import type { CredentialVault, Egress } from "./services/egress.js";
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
@@ -53,6 +54,9 @@ const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
 
 const unavailableIsolation: IsolationService = {
   create(): Promise<IsolationSession> {
+    throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
+  },
+  attach(): Promise<IsolationSession> {
     throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
   },
   capabilities(): Promise<IsolatedCapabilities> {
@@ -409,6 +413,11 @@ export class Sandbox {
     }
 
     let sandboxId: SandboxId | undefined;
+    const startupSource =
+      typeof opts.image === "string"
+        ? opts.image
+        : opts.image?.uri ?? opts.snapshotId;
+    const createStarted = Date.now();
     try {
       const created = await sandboxes.createSandbox(req);
       sandboxId = created.id as SandboxId;
@@ -467,8 +476,21 @@ export class Sandbox {
         });
       }
 
+      reportSandboxCreateMetric(connectionConfig, {
+        sandboxId,
+        image: startupSource,
+        createDurationMs: Date.now() - createStarted,
+        success: true,
+      });
+
       return sbx;
     } catch (err) {
+      reportSandboxCreateMetric(connectionConfig, {
+        sandboxId,
+        image: startupSource,
+        createDurationMs: Date.now() - createStarted,
+        success: false,
+      });
       if (sandboxId) {
         try {
           await sandboxes.deleteSandbox(sandboxId);

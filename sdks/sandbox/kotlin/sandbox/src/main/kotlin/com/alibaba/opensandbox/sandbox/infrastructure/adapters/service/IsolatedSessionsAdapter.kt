@@ -22,12 +22,15 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.EnvPassthroughSpec
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionState
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionSummary
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
@@ -93,6 +96,17 @@ private data class IsolatedSessionStateResponse(
     val created_at: String? = null,
     val last_run_at: String? = null,
     val idle_remaining_seconds: Int? = null,
+    // Creation-parameter echo fields. Older execd builds omit them.
+    val profile: String? = null,
+    val workspace: IsolatedWorkspaceBody? = null,
+    val extra_writable: List<String>? = null,
+    val binds: List<BindMountBody>? = null,
+    val share_net: Boolean? = null,
+    val env_passthrough: EnvPassthroughBody? = null,
+    val uid: Long? = null,
+    val gid: Long? = null,
+    val uid_mode: String? = null,
+    val idle_timeout_seconds: Int? = null,
 )
 
 @Serializable
@@ -194,6 +208,55 @@ internal class IsolatedSessionsAdapter(
         }
     }
 
+    override fun attach(sessionId: String): IsolationSession {
+        require(sessionId.isNotBlank()) { "sessionId cannot be empty" }
+        try {
+            val httpRequest =
+                Request.Builder()
+                    .url("$execdBaseUrl/v1/isolated/session/$sessionId")
+                    .get()
+                    .headers(execdEndpoint.headers.toHeaders())
+                    .build()
+
+            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+                ensureSuccess(response, "attach isolated session")
+                val resp =
+                    json.decodeFromString(
+                        IsolatedSessionStateResponse.serializer(),
+                        response.body!!.string(),
+                    )
+                val info =
+                    IsolatedSessionInfo(
+                        sessionId = sessionId,
+                        createdAt = resp.created_at?.let { parseDateTime(it) },
+                        profile = resp.profile,
+                        workspace =
+                            resp.workspace?.let {
+                                IsolatedWorkspaceSpec(path = it.path, mode = it.mode)
+                            },
+                        extraWritable = resp.extra_writable,
+                        binds =
+                            resp.binds?.map { BindMount(it.source, it.dest, it.readonly) },
+                        shareNet = resp.share_net,
+                        envPassthrough =
+                            resp.env_passthrough?.let {
+                                EnvPassthroughSpec(
+                                    mode = it.mode ?: "deny",
+                                    keys = it.keys ?: emptyList(),
+                                )
+                            },
+                        uid = resp.uid,
+                        gid = resp.gid,
+                        uidMode = resp.uid_mode,
+                        idleTimeoutSeconds = resp.idle_timeout_seconds,
+                    )
+                return IsolationSessionHandle(info, this)
+            }
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
     internal fun getInternal(sessionId: String): IsolatedSessionState {
         require(sessionId.isNotBlank()) { "sessionId cannot be empty" }
         try {
@@ -216,6 +279,26 @@ internal class IsolatedSessionsAdapter(
                     createdAt = resp.created_at?.let { parseDateTime(it) },
                     lastRunAt = resp.last_run_at?.let { parseDateTime(it) },
                     idleRemainingSeconds = resp.idle_remaining_seconds,
+                    profile = resp.profile,
+                    workspace =
+                        resp.workspace?.let {
+                            IsolatedWorkspaceSpec(path = it.path, mode = it.mode)
+                        },
+                    extraWritable = resp.extra_writable,
+                    binds =
+                        resp.binds?.map { BindMount(it.source, it.dest, it.readonly) },
+                    shareNet = resp.share_net,
+                    envPassthrough =
+                        resp.env_passthrough?.let {
+                            EnvPassthroughSpec(
+                                mode = it.mode ?: "deny",
+                                keys = it.keys ?: emptyList(),
+                            )
+                        },
+                    uid = resp.uid,
+                    gid = resp.gid,
+                    uidMode = resp.uid_mode,
+                    idleTimeoutSeconds = resp.idle_timeout_seconds,
                 )
             }
         } catch (e: Exception) {

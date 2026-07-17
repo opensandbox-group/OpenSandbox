@@ -15,6 +15,7 @@
 import { createExecdClient } from "../openapi/execdClient.js";
 import { IsolatedFilesystemAdapter } from "./isolatedFilesystemAdapter.js";
 import { parseJsonEventStream } from "./sse.js";
+import type { components as ExecdComponents } from "../api/execd.js";
 import type { CommandExecution, ServerStreamEvent } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
@@ -33,6 +34,8 @@ import type {
   IsolatedSessionSummary,
   ListIsolatedSessionsResponse,
 } from "../models/isolated.js";
+
+type SessionStateWire = ExecdComponents["schemas"]["SessionState"];
 
 function joinUrl(baseUrl: string, pathname: string): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -144,6 +147,35 @@ export class IsolatedSessionsAdapter implements IsolationService {
       "/v1/isolated/session",
       request,
     );
+    return new IsolationSessionHandle(info, this);
+  }
+
+  async attach(sessionId: string): Promise<IsolationSessionHandle> {
+    assertNonBlank(sessionId, "sessionId");
+    const state = await this.jsonRequest<SessionStateWire>(
+      "GET",
+      `/v1/isolated/session/${encodeURIComponent(sessionId)}`,
+    );
+    // Build an IsolatedSessionInfo from the SessionState response.
+    // Creation-parameter echo fields are optional; older execd builds omit
+    // them. Unknown/absent fields become `undefined` so the handle is still
+    // usable via sessionId for run/get/delete/files.
+    const info: IsolatedSessionInfo = {
+      session_id: sessionId,
+      created_at: state.created_at ?? "",
+    };
+    if (state.profile !== undefined) info.profile = state.profile;
+    if (state.workspace !== undefined) info.workspace = state.workspace;
+    if (state.extra_writable !== undefined) info.extra_writable = state.extra_writable;
+    if (state.binds !== undefined) info.binds = state.binds;
+    if (state.share_net !== undefined) info.share_net = state.share_net;
+    if (state.env_passthrough !== undefined) info.env_passthrough = state.env_passthrough;
+    if (state.uid !== undefined) info.uid = state.uid;
+    if (state.gid !== undefined) info.gid = state.gid;
+    if (state.uid_mode !== undefined) info.uid_mode = state.uid_mode;
+    if (state.idle_timeout_seconds !== undefined) {
+      info.idle_timeout_seconds = state.idle_timeout_seconds;
+    }
     return new IsolationSessionHandle(info, this);
   }
 

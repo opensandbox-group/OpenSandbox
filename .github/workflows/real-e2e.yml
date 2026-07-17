@@ -33,7 +33,6 @@ jobs:
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
@@ -42,10 +41,11 @@ jobs:
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
@@ -133,7 +133,6 @@ jobs:
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
@@ -142,10 +141,11 @@ jobs:
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
@@ -253,8 +253,6 @@ jobs:
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
-      NODE_VERSION: "20.19.0"
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
@@ -263,28 +261,18 @@ jobs:
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
       - name: Set up Node.js
-        run: |
-          NODE_DIR="/home/admin/.local/node-v${NODE_VERSION}-linux-x64"
-          if [ -x "${NODE_DIR}/bin/node" ]; then
-            echo "Node.js ${NODE_VERSION} already cached"
-          else
-            echo "Downloading Node.js ${NODE_VERSION}..."
-            mkdir -p /home/admin/.local
-            curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
-              | tar -xJ -C /home/admin/.local/
-          fi
-          echo "${NODE_DIR}/bin" >> "$GITHUB_PATH"
-          export PATH="${NODE_DIR}/bin:${PATH}"
-          node --version
-          npm --version
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20.19.0"
 
       - name: Clean up previous E2E resources
         run: |
@@ -357,7 +345,6 @@ jobs:
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
@@ -366,17 +353,19 @@ jobs:
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
+      - name: Configure .NET install directory
+        run: echo "DOTNET_INSTALL_DIR=${RUNNER_TEMP}/dotnet" >> "$GITHUB_ENV"
+
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v5
-        env:
-          DOTNET_INSTALL_DIR: /home/admin/.local/dotnet
         with:
           dotnet-version: "10.0.x"
 
@@ -450,22 +439,24 @@ jobs:
     if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
-      HOME: /home/admin/actions-runner
-      GOCACHE: /home/admin/actions-runner/_temp/go-build
-      GOMODCACHE: /home/admin/actions-runner/_temp/go-mod-cache
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Configure Go cache
+        run: |
+          echo "GOCACHE=${RUNNER_TEMP}/go-build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=${RUNNER_TEMP}/go-mod-cache" >> "$GITHUB_ENV"
+
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 

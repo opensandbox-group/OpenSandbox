@@ -155,6 +155,17 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 		return "", err
 	}
 
+	// Normalize empty/omitted fields to the effective config execd will
+	// actually apply. GetIsolatedSession echoes s.opts on attach so a
+	// stateless client can rebuild a handle from just the sessionId;
+	// echoing the raw create request (with empty strings for unset
+	// fields) would surface "unknown" for a session that is in fact
+	// running with a concrete profile/mode. Applying the same defaults
+	// here as (*isolatedSession).start would apply keeps the echo
+	// aligned with the effective config without changing runtime
+	// behavior.
+	normalizeIsolatedOptions(opts)
+
 	if err := os.MkdirAll(opts.WorkspacePath, 0o755); err != nil {
 		return "", fmt.Errorf("create workspace: %w", err)
 	}
@@ -204,6 +215,19 @@ func (r *IsolatedRunner) GetIsolatedSession(id string) (*IsolatedSessionState, e
 		Status:    status,
 		CreatedAt: s.createdAt,
 		LastRunAt: s.lastRunAt,
+
+		Profile:            s.opts.Profile,
+		WorkspacePath:      s.opts.WorkspacePath,
+		WorkspaceMode:      s.opts.WorkspaceMode,
+		ExtraWritable:      s.opts.ExtraWritable,
+		Binds:              s.opts.Binds,
+		ShareNet:           s.opts.ShareNet,
+		EnvPassthroughMode: s.opts.EnvPassthroughMode,
+		EnvPassthroughKeys: s.opts.EnvPassthroughKeys,
+		Uid:                s.opts.Uid,
+		Gid:                s.opts.Gid,
+		UidMode:            s.opts.UidMode,
+		IdleTimeoutSeconds: s.opts.IdleTimeoutSeconds,
 	}
 
 	if s.opts.IdleTimeoutSeconds > 0 {
@@ -224,11 +248,30 @@ const (
 )
 
 // IsolatedSessionState is returned by GetIsolatedSession.
+//
+// Runtime status fields are always populated. Creation-parameter fields
+// echo the parameters used to create the session so a stateless client can
+// rebuild a session handle from just a sessionId.
 type IsolatedSessionState struct {
 	Status               string
 	CreatedAt            time.Time
 	LastRunAt            time.Time
 	IdleRemainingSeconds *int
+
+	// Creation-parameter echoes. Populated for sessions the current execd
+	// process created; snapshot of the *IsolatedSessionOptions at GET time.
+	Profile            string
+	WorkspacePath      string
+	WorkspaceMode      string
+	ExtraWritable      []string
+	Binds              []isolation.BindMount
+	ShareNet           *bool
+	EnvPassthroughMode string
+	EnvPassthroughKeys []string
+	Uid                *uint32
+	Gid                *uint32
+	UidMode            string
+	IdleTimeoutSeconds int
 }
 
 // IsolatedSessionSummary describes a single session in a list response.
@@ -615,4 +658,44 @@ func resolveSymlinks(p string) string {
 // shellescape wraps s in single quotes, escaping embedded single quotes.
 func shellescape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// normalizeIsolatedOptions fills in the effective values for fields that
+// (*isolatedSession).start would otherwise substitute silently, so that
+// GetIsolatedSession echoes back the configuration execd is actually
+// running with. Only empty/omitted string fields are rewritten; explicit
+// values (including unknown enum strings) are left untouched so that
+// start() surfaces them as errors as before.
+//
+// Kept in sync with the switch statements in (*isolatedSession).start.
+func normalizeIsolatedOptions(opts *IsolatedSessionOptions) {
+	if opts == nil {
+		return
+	}
+	if opts.Profile == "" {
+		opts.Profile = string(isolation.ProfileStrict)
+	}
+	// start() treats any non-rw/non-ro string as overlay, but only "" is
+	// really "unset" from the caller's perspective. Unknown enum values
+	// are left in place so a future normalize→start mismatch is loud.
+	if opts.WorkspaceMode == "" {
+		opts.WorkspaceMode = string(isolation.WorkspaceOverlay)
+	}
+	if opts.EnvPassthroughMode == "" {
+		// The pre-normalization behavior of start() was: on empty mode,
+		// forward EnvSpec{Mode: deny} to bwrap WITHOUT the caller's Keys,
+		// which bwrapEnvSegment then treats as "apply the built-in secret
+		// blacklist" (see bwrapEnvSegment case EnvModeDeny with len(Keys)==0).
+		//
+		// If we normalize mode to "deny" while leaving Keys populated, bwrap
+		// would instead unset only those caller-supplied keys and skip the
+		// blacklist — a silent security regression for callers that supplied
+		// keys without mode. Clear Keys here to preserve the effective
+		// behavior (built-in blacklist wins on omitted mode).
+		opts.EnvPassthroughMode = string(isolation.EnvModeDeny)
+		opts.EnvPassthroughKeys = nil
+	}
+	if opts.UidMode == "" {
+		opts.UidMode = string(isolation.UidModeSetpriv)
+	}
 }

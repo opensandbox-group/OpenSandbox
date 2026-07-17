@@ -76,6 +76,9 @@ spec:
         {{- if .Values.controller.snapshot.snapshotPushSecret }}
         - --snapshot-push-secret={{ .Values.controller.snapshot.snapshotPushSecret }}
         {{- end }}
+        {{- if .Values.controller.snapshot.imageCommitterPullSecret }}
+        - --image-committer-pull-secret={{ .Values.controller.snapshot.imageCommitterPullSecret }}
+        {{- end }}
         {{- if .Values.controller.snapshot.resumePullSecret }}
         - --resume-pull-secret={{ .Values.controller.snapshot.resumePullSecret }}
         {{- end }}

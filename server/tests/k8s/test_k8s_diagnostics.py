@@ -27,12 +27,16 @@ from opensandbox_server.services.k8s.k8s_diagnostics import (
 
 
 class _DiagnosticsService(K8sDiagnosticsMixin):
-    def __init__(self, pods):
+    def __init__(self, pods, resolved_namespace: str | None = None):
         self.namespace = "sandbox-system"
+        self.resolved_namespace = resolved_namespace or self.namespace
         self.k8s_client = MagicMock()
         self.k8s_client.list_pods.return_value = pods
         self.core_v1 = MagicMock()
         self.k8s_client.get_core_v1_api.return_value = self.core_v1
+
+    def _resolve_namespace(self) -> str:
+        return self.resolved_namespace
 
 
 def _status(
@@ -56,11 +60,16 @@ def _status(
     )
 
 
-def _pod(container_statuses=None, init_container_statuses=None, conditions=None):
+def _pod(
+    container_statuses=None,
+    init_container_statuses=None,
+    conditions=None,
+    namespace="sandbox-system",
+):
     return SimpleNamespace(
         metadata=SimpleNamespace(
             name="pod-1",
-            namespace="sandbox-system",
+            namespace=namespace,
             labels={SANDBOX_ID_LABEL: "sbx-1", "app": "opensandbox"},
         ),
         spec=SimpleNamespace(
@@ -116,6 +125,17 @@ def test_find_pod_uses_label_selector_and_maps_errors() -> None:
     assert api_error.value.status_code == 500
 
 
+def test_find_pod_uses_resolved_tenant_namespace() -> None:
+    service = _DiagnosticsService([_pod(namespace="tenant-a")], resolved_namespace="tenant-a")
+
+    service._find_pod_for_sandbox("sbx-1")
+
+    service.k8s_client.list_pods.assert_called_once_with(
+        namespace="tenant-a",
+        label_selector=f"{SANDBOX_ID_LABEL}=sbx-1",
+    )
+
+
 def test_get_sandbox_logs_passes_tail_and_since() -> None:
     service = _DiagnosticsService([_pod()])
     service.core_v1.read_namespaced_pod_log.return_value = "log line"
@@ -130,6 +150,21 @@ def test_get_sandbox_logs_passes_tail_and_since() -> None:
         tail_lines=10,
         timestamps=True,
         since_seconds=3600,
+    )
+
+
+def test_get_sandbox_logs_uses_found_pod_namespace() -> None:
+    service = _DiagnosticsService([_pod(namespace="tenant-a")], resolved_namespace="tenant-a")
+    service.core_v1.read_namespaced_pod_log.return_value = "tenant log"
+
+    assert service.get_sandbox_logs("sbx-1") == "tenant log"
+
+    service.core_v1.read_namespaced_pod_log.assert_called_once_with(
+        name="pod-1",
+        namespace="tenant-a",
+        container="main",
+        tail_lines=100,
+        timestamps=True,
     )
 
 
@@ -317,3 +352,16 @@ def test_get_sandbox_events_formats_events_and_empty_result() -> None:
 
     service.core_v1.list_namespaced_event.return_value = SimpleNamespace(items=[])
     assert service.get_sandbox_events("sbx-1") == "(no events)"
+
+
+def test_get_sandbox_events_uses_found_pod_namespace() -> None:
+    service = _DiagnosticsService([_pod(namespace="tenant-a")], resolved_namespace="tenant-a")
+    service.core_v1.list_namespaced_event.return_value = SimpleNamespace(items=[])
+
+    assert service.get_sandbox_events("sbx-1") == "(no events)"
+
+    service.core_v1.list_namespaced_event.assert_called_once_with(
+        namespace="tenant-a",
+        field_selector="involvedObject.name=pod-1",
+        limit=50,
+    )
