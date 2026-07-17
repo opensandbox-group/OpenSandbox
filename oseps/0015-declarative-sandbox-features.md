@@ -3,7 +3,7 @@ title: Declarative Sandbox Features
 authors:
   - "@GodBlf"
 creation-date: 2026-07-14
-last-updated: 2026-07-16
+last-updated: 2026-07-17
 status: draft
 ---
 
@@ -129,6 +129,9 @@ therefore must not be encoded in `extensions`.
 - SDKs and the CLI MUST confirm lifecycle feature capability before sending a
   non-empty `features` request. An older or incompatible server MUST be detected
   before sandbox creation is attempted.
+- The lifecycle feature capability MUST be a fleet-wide readiness assertion for
+  every backend behind the advertised base URL. It MUST remain disabled during
+  a mixed-version rollout or rollback.
 - Every registry entry MUST be digest-pinned and MUST declare at least one
   supported platform.
 - Registry configuration MUST be validated when the server starts. A configured
@@ -142,6 +145,9 @@ therefore must not be encoded in `extensions`.
   required supply-chain fetch.
 - Feature activation MUST complete before execd and the user entrypoint start.
 - Features MUST install and activate in request order.
+- A feature-supplied Kubernetes installer MUST write only to its own staging
+  volume. It MUST NOT receive a writable mount containing execd, bootstrap,
+  another feature's staging output, or final activation inputs.
 - Unknown names, unknown versions, duplicate names, incompatible platforms, and
   activation environment conflicts MUST fail creation explicitly.
 - A provisioning failure MUST clean up a partially created Docker container or
@@ -311,9 +317,9 @@ implements this OSEP returns at least:
 
 Additional capability fields may be added later. Clients ignore unknown fields,
 but MUST understand the advertised declarative-feature API version before using
-it. SDKs MUST call this endpoint, or use a result cached for the same resolved
-server base URL and authentication context, before the first create with a
-non-empty `features` list.
+it. SDKs MUST call this endpoint immediately before every create with a
+non-empty `features` list. They MUST NOT reuse a cached positive result for a
+later create.
 
 A `404`, missing `declarativeSandboxFeatures`, unsupported `apiVersion`, invalid
 response, or transport failure means feature creation is unavailable. The SDK
@@ -322,6 +328,22 @@ request. It MUST NOT probe by sending a feature request, create and then delete
 an unverified sandbox, or downgrade the request into `extensions`. The CLI uses
 the same SDK guard. Callers using raw HTTP are responsible for performing the
 same handshake.
+
+The response is a deployment-level readiness assertion, not evidence about only
+the backend that served the GET. An operator MUST NOT advertise
+`declarativeSandboxFeatures` at a load-balanced base URL until every backend
+that can receive the subsequent create request implements API version 1. During
+Phase 1 rollout, feature capability remains disabled while old instances are
+drained; it is enabled only after the fleet reaches that compatibility floor.
+This fleet gate closes the GET/create race in which the two requests reach
+different versions.
+
+Rollback reverses that sequence: revoke the fleet capability first, wait for
+in-flight capability checks and feature creates to drain, and only then admit an
+older backend. The server deployment and ingress/gateway configuration MUST make
+this gate atomic from the client's base-URL perspective. Per-instance capability
+advertising in a mixed fleet is non-conformant, even if the SDK performs a fresh
+GET before each create.
 
 Capability support and registry readiness are distinct. A feature-aware server
 advertises API version 1 even when no registry file is configured; a subsequent
@@ -435,11 +457,11 @@ can be reused. The image has the following required layout:
   transitive feature requirements, or arbitrary host paths.
 - `install` is a self-contained executable used by Kubernetes feature init
   containers. It must not rely on a shell, libc, package manager, interpreter,
-  or binary from the sandbox image. It validates the mounted destination, copies
-  the payload atomically, and persists the validated activation document into
-  the shared activation-input directory for the final compiler. The Docker
-  server-side extractor performs the same persistence step without executing
-  `install`.
+  or binary from the sandbox image. It copies the payload, metadata, and
+  activation document into the feature's dedicated staging volume. It never
+  writes the shared runtime-assets volume or a final feature path. The Docker
+  server-side extractor does not execute `install`; trusted server code performs
+  validation and final placement directly.
 
 An example activation document is:
 
@@ -461,12 +483,13 @@ An example activation document is:
 }
 ```
 
-Installers and server-side extractors MUST reject archive path traversal,
-absolute payload paths, writes outside the assigned feature root, and special
-device nodes. Payload modes and symlinks are preserved only when their resolved
-targets remain inside the feature root. Installation uses a temporary sibling
-directory followed by an atomic rename so a failed feature never appears
-complete.
+The feature-supplied installer is not trusted to validate restrictions on its
+own output. A trusted OpenSandbox extractor or merger MUST reject archive path
+traversal, absolute payload paths, writes outside the assigned feature root, and
+special device nodes before moving staged content into runtime assets. Payload
+modes and symlinks are preserved only when their resolved targets remain inside
+the feature root. Final installation uses a temporary sibling directory followed
+by an atomic rename so a failed feature never appears complete.
 
 Version 1 has no feature-to-feature dependency metadata and no install hook
 beyond deterministic payload placement. If feature B requires feature A, the
@@ -515,17 +538,19 @@ init container to copy execd and `bootstrap.sh` into a shared `emptyDir`, which
 the main sandbox container mounts at `/opt/opensandbox`. Feature provisioning
 extends the generated Pod spec without changing the public workload CRDs:
 
-1. Keep the existing `execd-installer` init container.
-2. Add one feature init container per requested feature, in request order. Each
-   uses the registry's digest-pinned OCI image and invokes its self-contained
-   installer.
-3. Mount the shared runtime-assets `emptyDir` into each feature init container.
-   Place payloads under `features/<name>/<version>` and copy each validated
-   `activation.json` to
-   `features/.resolved/activation-inputs/<request-index>-<name>.json`. The main
-   container sees the payload at
-   `/opt/opensandbox/features/<name>/<version>`. Both writes must complete before
-   that feature init container succeeds.
+1. Keep the existing `execd-installer` init container. Only trusted OpenSandbox
+   init containers and the main container mount the runtime-assets `emptyDir`.
+2. Allocate one dedicated staging `emptyDir` per requested feature and add one
+   feature init container in request order. Each uses the registry's
+   digest-pinned OCI image, mounts only its own staging volume as writable, and
+   invokes its self-contained installer. It cannot mount runtime assets or
+   another feature's staging volume.
+3. Add a trusted `feature-merger` init container from the pinned execd image.
+   It mounts every feature staging volume read-only and runtime assets writable.
+   In request order it validates metadata, paths, types, modes, symlinks, and the
+   activation document, then atomically installs payloads under
+   `features/<name>/<version>` and activation inputs under
+   `features/.resolved/activation-inputs/<request-index>-<name>.json`.
 4. Add a final activation-compiler init container from the pinned execd image.
    It reads the persisted activation inputs, validates them against the request
    environment, verifies that their indexes exactly match the resolution plan,
@@ -539,6 +564,9 @@ Pod retains `automountServiceAccountToken: false`; feature init containers do
 not receive API credentials and do not need network access after kubelet pulls
 their OCI image. Implementations SHOULD apply the existing restricted
 init-container security defaults and grant no additional Linux capabilities.
+The final merged Pod spec MUST prove that feature-supplied containers have no
+mount path or volume reference that aliases runtime assets or another staging
+volume.
 
 When `platform` is explicit, all selected features must contain that platform.
 When it is omitted, the resolver computes the intersection of platforms across
@@ -558,8 +586,10 @@ downloaded once per node according to normal kubelet/runtime cache policy.
 The provider must validate the final merged Pod template. Operator templates
 may add unrelated init containers, but they may not remove or reorder generated
 feature init containers, replace their digest-pinned images, or shadow the
-feature volume mount. Init failure, scheduling failure, metadata-patch failure,
-or readiness timeout uses the existing workload deletion and PVC cleanup path.
+isolated staging or runtime-assets mounts. They also may not replace the trusted
+merger/compiler images or make a staging mount writable in those containers.
+Init failure, scheduling failure, metadata-patch failure, or readiness timeout
+uses the existing workload deletion and PVC cleanup path.
 
 ### Compatibility Matrix
 
@@ -583,12 +613,13 @@ snapshot, and pool flows. An empty array is equivalent to omission.
 
 ### Security Boundary
 
-Feature OCI artifacts are trusted supply code. Their executables eventually run
-inside the sandbox, their activation can affect the environment inherited by
-execd and the user process, and their Kubernetes installer runs before the main
-container. Version 1 controls this risk with an administrator allowlist,
-digest-pinned indexes and manifests, platform/metadata verification, constrained
-installation roots, and explicit operator registry credentials.
+Feature OCI artifacts are approved supply code, but provisioning does not assume
+their installer is correct. Their executables eventually run inside the sandbox
+and their activation can affect the environment inherited by execd and the user
+process. Version 1 controls this risk with an administrator allowlist,
+digest-pinned indexes and manifests, platform/metadata verification, isolated
+installer staging, trusted final merging, constrained installation roots, and
+explicit operator registry credentials.
 
 This mechanism does not make a sandbox more isolated and must not be presented
 as a security profile. A malicious or compromised allowlisted feature can still
@@ -648,6 +679,8 @@ separate proposal and implementation.
 | Archive traversal or symlink escape writes outside feature root | Strict path validation, reject special devices, install into a temporary root, then atomically rename |
 | Concurrent Docker pulls corrupt cache | Digest/platform cache key, per-key locking, validation, and atomic ready marker |
 | Feature environments conflict | Declarative activation format and deterministic pre-start conflict validation |
+| Mixed server versions race capability GET against create | Fleet-wide capability gate; disable during rollout/rollback; no positive SDK caching |
+| Feature installer overwrites execd, bootstrap, or another feature | Per-feature staging volumes only; trusted merger owns the runtime-assets mount and final paths |
 | Kubernetes template overrides generated security/provisioning fields | Validate the final merged Pod spec before API submission |
 | Feature init fails after workload creation | Surface init status, delete the workload, and use existing managed-PVC cleanup safeguards |
 | Large feature sets increase startup latency and metadata size | Maximum 32 requests, compact persisted JSON, layer caching, and documented operational metrics |
@@ -778,13 +811,16 @@ Implementation proceeds only after this OSEP is approved:
 - Add the lifecycle OpenAPI request/response schemas and examples.
 - Add the lifecycle capability endpoint and advertise
   `declarativeSandboxFeatures.apiVersion = 1`.
+- Add the fleet-wide feature capability gate and document rollout/drain
+  integration for the supported deployment paths.
 - Add matching server Pydantic schemas and provider metadata codecs.
 - Add feature-registry configuration, startup validation, resolution, and OCI
   artifact validation.
 - Implement Docker extraction/cache/pre-start injection and cleanup.
-- Implement ordered Kubernetes feature init containers, shared `emptyDir`,
-  activation compilation, scheduling constraints, persistence, and cleanup for
-  every existing non-pool workload provider.
+- Implement ordered Kubernetes feature init containers with isolated staging
+  volumes, a trusted merger into runtime assets, activation compilation,
+  scheduling constraints, persistence, and cleanup for every existing non-pool
+  workload provider.
 
 **Phase 2: generated clients and Sandbox SDK alignment**
 
@@ -831,6 +867,9 @@ Phase 1 must include focused tests at each ownership boundary.
 - Existing create payloads without `features` remain valid.
 - The capability endpoint advertises API version 1 independently of registry
   configuration and remains forward-compatible with unknown capability fields.
+- Mixed-version rollout tests prove capability remains absent until every
+  backend behind the base URL is compatible; rollback tests revoke it and drain
+  in-flight work before an older backend becomes eligible.
 - Create, get, and list schemas serialize the same `resolvedFeatures` shape and
   preserve order.
 - Pool, snapshot, and Windows combinations return the documented explicit
@@ -878,10 +917,14 @@ Phase 1 must include focused tests at each ownership boundary.
 **Kubernetes provider tests**
 
 - Both BatchSandbox template mode and agent-sandbox manifests contain ordered
-  feature init containers, the shared `emptyDir` mounts, a final activation
-  compiler, and a main container that cannot start first.
-- Every feature init container persists its validated activation document in the
-  indexed shared input path before the final compiler runs.
+  feature init containers with per-feature staging volumes, a trusted merger,
+  a final activation compiler, and a main container that cannot start first.
+- Feature-supplied containers mount only their own staging volume; malicious or
+  buggy writes cannot alter execd, bootstrap, another feature's output, runtime
+  assets, or final activation inputs.
+- The trusted merger mounts staging read-only, rejects escaping or malformed
+  output, and persists each validated activation document in the indexed shared
+  input path before the final compiler runs.
 - Generated feature images retain digest references after template merge.
 - Platform intersection becomes scheduling constraints; explicit mismatches and
   empty intersections fail before workload creation.
@@ -899,6 +942,9 @@ Phase 1 must include focused tests at each ownership boundary.
   resolved response conversion.
 - Against a pre-feature server that ignores unknown request fields, every SDK
   detects the missing capability and proves that no create request was sent.
+- Load-balanced mixed-version tests route capability and create to different
+  candidate instances and prove the fleet gate prevents feature capability from
+  being advertised until both are compatible.
 - CLI tests cover repeated `--feature`, parsing errors, exact SDK calls, and
   JSON/YAML rendering.
 - Docker and Kubernetes end-to-end tests create an offline minimal sandbox with
@@ -993,12 +1039,15 @@ configuration error.
 
 Rollout order follows the implementation phases: server/OpenAPI/providers first,
 then regenerated clients and handwritten SDK alignment, then CLI/docs/examples
-and end-to-end coverage. Phase 1 must deploy the capability endpoint before any
-feature-aware SDK or CLI release. New SDKs send `features` only when a caller
-requests them and only after capability negotiation succeeds. Because current
-pre-feature servers silently ignore unknown request fields, a missing or
-incompatible capability response is a client-side hard failure and no create
-request is sent. Clients must not downgrade the request into `extensions`.
+and end-to-end coverage. Phase 1 must deploy compatible feature handling to every
+backend behind a base URL while the fleet capability remains disabled. After old
+instances are drained, the operator enables the deployment-level capability;
+only then may a feature-aware SDK or CLI be released against that endpoint. New
+SDKs perform a fresh capability check for every non-empty feature create and do
+not cache a positive result. Because current pre-feature servers silently ignore
+unknown request fields, a missing or incompatible capability response is a
+client-side hard failure and no create request is sent. Clients must not
+downgrade the request into `extensions`.
 
 Registry defaults may change only for future creates. Existing sandboxes retain
 their payloads and persisted `resolvedFeatures` for their lifetime. Removing a
@@ -1006,10 +1055,13 @@ registry version does not rewrite or invalidate a running sandbox, though it
 prevents new resolution of that version. Operators should retain old digests in
 their OCI registry until no supported workflow needs to recreate them.
 
-Rollback consists of stopping new feature requests or removing the configured
-registry path and rolling back the server. Existing sandboxes continue to run
-because their payload is already local and activation occurs inside their
-lifecycle. There is no data migration and no dynamic uninstall operation.
+Rollback first revokes feature capability for the whole base URL, then waits for
+in-flight capability checks and feature creates to drain before any older server
+is admitted. Removing the registry path alone is not a compatibility gate; a
+feature-aware fleet without a registry remains capable but returns
+`FEATURE_REGISTRY_NOT_CONFIGURED`. Existing sandboxes continue to run because
+their payload is already local and activation occurs inside their lifecycle.
+There is no data migration and no dynamic uninstall operation.
 
 OSEP approval authorizes implementation planning; it does not mean the feature
 is implemented. GitHub issue #1289 remains open until this proposal is approved

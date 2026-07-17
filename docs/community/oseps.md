@@ -27,7 +27,7 @@ See the [OSEP contributing guide](https://github.com/opensandbox-group/OpenSandb
 | [OSEP-0012](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0012-credential-vault.md) | Credential Vault and Credential Proxy | implemented | 2026-06-23 |
 | [OSEP-0013](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0013-isolated-execution-api.md) | Isolated Execution API | implementing | 2026-06-23 |
 | [OSEP-0014](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0014-multi-tenancy.md) | Multi-Tenancy Support for Kubernetes Runtime | draft | 2026-05-07 |
-| [OSEP-0015](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0015-declarative-sandbox-features.md) | Declarative Sandbox Features | draft | 2026-07-16 |
+| [OSEP-0015](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0015-declarative-sandbox-features.md) | Declarative Sandbox Features | draft | 2026-07-17 |
 
 ## Status Definitions
 
