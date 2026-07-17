@@ -231,6 +231,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
 | `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
+| `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
 ```ts
 import { ConnectionConfig } from "@alibaba-group/opensandbox";

@@ -67,9 +67,11 @@ def _build_tenant_provider(config) -> TenantProvider | None:
 tenant_provider: TenantProvider | None = _build_tenant_provider(app_config)
 
 from opensandbox_server.api.devops import router as devops_router  # noqa: E402
+from opensandbox_server.api.metrics import router as metrics_router  # noqa: E402
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
 from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
+from opensandbox_server.integrations.otel import setup_otel_metrics, shutdown_otel_metrics  # noqa: E402
 from opensandbox_server.integrations.renew_intent.proxy_renew import ProxyRenewCoordinator  # noqa: E402
 from opensandbox_server.middleware.auth import AuthMiddleware  # noqa: E402
 from opensandbox_server.middleware.request_id import RequestIdMiddleware  # noqa: E402
@@ -140,11 +142,14 @@ async def lifespan(app: FastAPI):
         app.state.renew_intent_consumer,
     )
 
+    setup_otel_metrics(app_config.otel)
+
     yield
 
     consumer = getattr(app.state, "renew_intent_consumer", None)
     if consumer is not None:
         await consumer.stop()
+    shutdown_otel_metrics()
     snapshot_service.close()
     if tenant_provider is not None:
         tenant_provider.close()
@@ -181,7 +186,7 @@ app.add_middleware(
 app.add_middleware(RequestIdMiddleware)
 
 # Include API routes at root and versioned prefix.
-# IMPORTANT: devops_router and pool_router MUST be registered before proxy_router
+# IMPORTANT: non-proxy routers MUST be registered before proxy_router
 # because proxy_router contains catch-all routes that would swallow diagnostics paths.
 app.include_router(router)
 app.include_router(devops_router)
@@ -190,6 +195,7 @@ app.include_router(proxy_router)
 app.include_router(router, prefix="/v1")
 app.include_router(devops_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
+app.include_router(metrics_router, prefix="/v1")
 app.include_router(proxy_router, prefix="/v1")
 
 DEFAULT_ERROR_CODE = "GENERAL::UNKNOWN_ERROR"

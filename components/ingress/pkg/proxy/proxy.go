@@ -58,6 +58,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		if rcv := recover(); rcv != nil {
+			// httputil.ReverseProxy panics with http.ErrAbortHandler when
+			// the upstream connection drops while copying the response body
+			// (e.g. SSE stream interrupted). Re-panic to let Go's net/http
+			// handle it: it silently closes the connection without writing
+			// anything. Catching it here and calling http.Error() would
+			// leak the panic text ("net/http: abort Handler") into the
+			// already-committed response stream.
+			if err, ok := rcv.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				panic(http.ErrAbortHandler)
+			}
+
 			panicErr := fmt.Sprintf("%v", rcv)
 			if err, ok := rcv.(error); ok {
 				panicErr = err.Error()
@@ -68,8 +79,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				slogger.Field{Key: "host", Value: r.Host},
 				slogger.Field{Key: "method", Value: r.Method},
 			).Errorf("ingress: proxy causes panic")
-			sw.WriteHeader(http.StatusBadGateway)
-			http.Error(sw, panicErr, http.StatusBadGateway)
+
+			// Only write an error response if headers haven't been
+			// committed yet. Writing to an already-committed stream
+			// (e.g. an active SSE connection) would corrupt it.
+			if !sw.written {
+				http.Error(sw, panicErr, http.StatusBadGateway)
+			}
 		}
 		telemetry.RecordHTTPRequest(r.Method, sw.statusCode, proxyType, float64(time.Since(start))/float64(time.Millisecond))
 	}()

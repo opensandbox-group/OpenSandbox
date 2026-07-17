@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/internal/safego"
@@ -54,8 +55,21 @@ func (c *basicController) setupSSEResponse() {
 }
 
 // setServerEventsHandler adapts runtime callbacks to SSE events.
-func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context) runtime.ExecuteResultHook {
-	return runtime.ExecuteResultHook{
+//
+// It returns the hooks and a cleanup function. The cleanup function blocks
+// until the background ping goroutine has fully stopped. Callers MUST invoke
+// the cleanup function before their handler returns so that no goroutine
+// races against the response-writer close that Go's net/http performs once
+// the handler exits.
+//
+// Typical usage:
+//
+//	hooks, stopSSE := c.setServerEventsHandler(ctx)
+//	defer func() { cancel(); stopSSE() }()
+func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context) (runtime.ExecuteResultHook, func()) {
+	var pingWg sync.WaitGroup
+
+	hooks := runtime.ExecuteResultHook{
 		OnExecuteInit: func(session string) {
 			event := model.ServerStreamEvent{
 				Type:      model.StreamEventTypeInit,
@@ -65,7 +79,11 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 			payload := event.ToJSON()
 			c.writeSingleEvent("OnExecuteInit", payload, true, event.Summary())
 
-			safego.Go(func() { c.ping(ctx) })
+			pingWg.Add(1)
+			safego.Go(func() {
+				defer pingWg.Done()
+				c.ping(ctx)
+			})
 		},
 		OnExecuteResult: func(result map[string]any, count int) {
 			var mutated map[string]any
@@ -158,6 +176,12 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 			c.writeSingleEvent("OnExecuteStderr", payload, true, event.Summary())
 		},
 	}
+
+	stopSSE := func() {
+		pingWg.Wait()
+	}
+
+	return hooks, stopSSE
 }
 
 // writeSingleEvent serializes one SSE frame.

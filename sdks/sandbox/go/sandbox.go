@@ -131,6 +131,11 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 	}
 
 	lc := config.lifecycleClient()
+	startupSource := opts.Image
+	if startupSource == "" {
+		startupSource = opts.SnapshotID
+	}
+	started := time.Now()
 
 	req := CreateSandboxRequest{
 		Image:            nil,
@@ -154,6 +159,7 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 
 	created, err := lc.CreateSandbox(ctx, req)
 	if err != nil {
+		reportSandboxCreateMetric(config, "", startupSource, time.Since(started).Milliseconds(), false)
 		return nil, fmt.Errorf("opensandbox: create sandbox: %w", err)
 	}
 
@@ -166,11 +172,13 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 	if err := sb.waitForRunning(ctx, opts.ReadyTimeout); err != nil {
 		// Best-effort cleanup
 		_ = lc.DeleteSandbox(context.Background(), created.ID)
+		reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), false)
 		return nil, err
 	}
 
 	if err := sb.resolveExecd(ctx); err != nil {
 		_ = lc.DeleteSandbox(context.Background(), created.ID)
+		reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), false)
 		return nil, fmt.Errorf("opensandbox: resolve execd: %w", err)
 	}
 
@@ -182,9 +190,11 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 		}
 		if err := sb.WaitUntilReady(ctx, readyOpts); err != nil {
 			_ = lc.DeleteSandbox(context.Background(), created.ID)
+			reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), false)
 			return nil, err
 		}
 	}
+	reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), true)
 
 	return sb, nil
 }

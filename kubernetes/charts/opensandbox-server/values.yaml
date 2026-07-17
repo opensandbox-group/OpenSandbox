@@ -100,6 +100,10 @@ server:
     priorityClassName: ""
     # -- Topology spread constraints for the ingress gateway pod.
     topologySpreadConstraints: []
+    # -- Tolerations for the ingress gateway pod.
+    tolerations: []
+    # -- Affinity for the ingress gateway pod.
+    affinity: {}
 
 # -- Server config (TOML). Mounted at /etc/opensandbox/config.toml.
 configToml: |

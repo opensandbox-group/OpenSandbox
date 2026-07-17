@@ -94,6 +94,7 @@ export default defineConfig({
             { text: "Secure Container", link: "/guides/secure-container" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
+            { text: "SDK Telemetry", link: "/guides/sdk-telemetry" },
           ],
         },
       ],

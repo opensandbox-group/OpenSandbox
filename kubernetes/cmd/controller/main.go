@@ -220,6 +220,9 @@ func main() {
 	var snapshotPushSecret string
 	flag.StringVar(&snapshotPushSecret, "snapshot-push-secret", "", "K8s Secret name for pushing snapshots to registry.")
 
+	var imageCommitterPullSecret string
+	flag.StringVar(&imageCommitterPullSecret, "image-committer-pull-secret", "", "K8s Secret name for pulling the image-committer image in commit Jobs. Required when imageCommitterImage is in a private registry.")
+
 	var resumePullSecret string
 	flag.StringVar(&resumePullSecret, "resume-pull-secret", "", "K8s Secret name for pulling snapshot images during resume.")
 
@@ -461,6 +464,7 @@ func main() {
 		SnapshotRegistry:         snapshotRegistry,
 		SnapshotRegistryInsecure: snapshotRegistryInsecure,
 		SnapshotPushSecret:       snapshotPushSecret,
+		ImageCommitterPullSecret: imageCommitterPullSecret,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SandboxSnapshot")
 		os.Exit(1)

@@ -418,6 +418,10 @@ client := opensandbox.NewExecdClient(url, token,
 SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by default (RSA >= 2048, EC >= 224, DSA P >= 2048/Q >= 224, hash >= 224). If you must interoperate with legacy endpoints, set `AllowWeakServerCertKeyLengths: true` in `TransportConfig`.
 :::
 
+::: tip SDK Telemetry
+`CreateSandbox` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfig.DisableMetrics` or `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/guides/sdk-telemetry).
+:::
+
 ## Error Handling
 
 Non-2xx responses are returned as `*opensandbox.APIError`:

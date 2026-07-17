@@ -184,7 +184,7 @@ func TestBuildArgv_EnvPassthrough(t *testing.T) {
 		}
 	})
 
-	t.Run("empty_mode_no_env_args", func(t *testing.T) {
+	t.Run("empty_mode_strips_execd_config_env", func(t *testing.T) {
 		opts := basicWrapOpts()
 		opts.EnvPassthrough = EnvSpec{} // empty mode
 		argv, err := buildArgv(opts, "")
@@ -192,9 +192,61 @@ func TestBuildArgv_EnvPassthrough(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := strings.Join(argv, " ")
-		if strings.Contains(s, "--clearenv") || strings.Contains(s, "--unsetenv") {
-			t.Error("should not have env args for empty mode")
+		// Default mode must always strip execd's own configuration env,
+		// but must not emit --clearenv (user business env is untouched).
+		if strings.Contains(s, "--clearenv") {
+			t.Error("empty mode must not use --clearenv")
 		}
+		for _, k := range execdConfigEnvBlacklist {
+			if !strings.Contains(s, "--unsetenv "+k) {
+				t.Errorf("empty mode must --unsetenv %s, argv:\n  %s", k, s)
+			}
+		}
+	})
+}
+
+func TestBuildArgv_ExecdConfigEnvAlwaysStripped(t *testing.T) {
+	tests := []struct {
+		name string
+		spec EnvSpec
+	}{
+		{"empty_mode", EnvSpec{}},
+		{"deny_empty_keys", EnvSpec{Mode: EnvModeDeny}},
+		{"deny_with_keys", EnvSpec{Mode: EnvModeDeny, Keys: []string{"FOO"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := basicWrapOpts()
+			opts.EnvPassthrough = tt.spec
+			argv, err := buildArgv(opts, "")
+			require.NoError(t, err)
+			s := strings.Join(argv, " ")
+			for _, k := range execdConfigEnvBlacklist {
+				assert.Contains(t, s, "--unsetenv "+k,
+					"%s: execd config env %s must be unset", tt.name, k)
+			}
+		})
+	}
+
+	t.Run("allow_mode_uses_clearenv_and_refuses_reinjection", func(t *testing.T) {
+		// Even if the caller explicitly allow-lists an execd config env,
+		// we must not re-inject it via --setenv.
+		t.Setenv("EXECD_ACCESS_TOKEN", "supersecret")
+		t.Setenv("JUPYTER_TOKEN", "jt")
+
+		opts := basicWrapOpts()
+		opts.EnvPassthrough = EnvSpec{
+			Mode: EnvModeAllow,
+			Keys: []string{"EXECD_ACCESS_TOKEN", "JUPYTER_TOKEN", "PATH"},
+		}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.Contains(t, s, "--clearenv")
+		assert.NotContains(t, s, "supersecret",
+			"allow mode must not re-inject execd config env value")
+		assert.NotContains(t, s, "--setenv EXECD_ACCESS_TOKEN")
+		assert.NotContains(t, s, "--setenv JUPYTER_TOKEN")
 	})
 }
 

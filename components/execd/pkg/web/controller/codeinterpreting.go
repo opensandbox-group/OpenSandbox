@@ -130,7 +130,6 @@ func (c *CodeInterpretingController) RunCode() {
 	}
 
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
-	defer cancel()
 	execStart := time.Now()
 	var recordOnce sync.Once
 	recordExecution := func(result string) {
@@ -144,7 +143,8 @@ func (c *CodeInterpretingController) RunCode() {
 		})
 	}
 	runCodeRequest := c.buildExecuteCodeRequest(request)
-	eventsHandler := c.setServerEventsHandler(ctx)
+	eventsHandler, stopSSE := c.setServerEventsHandler(ctx)
+	defer func() { cancel(); stopSSE() }()
 
 	// completeCh is closed when OnExecuteComplete fires, meaning the final SSE
 	// event has been written and flushed. We only wait for this callback as a
@@ -362,7 +362,6 @@ func (c *CodeInterpretingController) RunInSession() {
 		Timeout:  timeout,
 	}
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
-	defer cancel()
 	execStart := time.Now()
 	var recordOnce sync.Once
 	recordExecution := func(result string) {
@@ -386,7 +385,12 @@ func (c *CodeInterpretingController) RunInSession() {
 			close(completeCh)
 		})
 	}
-	hooks := c.setServerEventsHandler(ctx)
+	hooks, stopSSE := c.setServerEventsHandler(ctx)
+	// Cancel the context first (signals the ping goroutine to stop), then
+	// wait for it to fully exit before the handler returns. This prevents
+	// the ping goroutine from writing to the response after Go's net/http
+	// closes the response writer.
+	defer func() { cancel(); stopSSE() }()
 	origComplete := hooks.OnExecuteComplete
 	hooks.OnExecuteComplete = func(executionTime time.Duration) {
 		origComplete(executionTime)

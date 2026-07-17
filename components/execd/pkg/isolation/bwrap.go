@@ -219,6 +219,24 @@ func bwrapWorkspaceSegment(opts WrapOptions) ([]string, error) {
 	}
 }
 
+// execdConfigEnvBlacklist enumerates execd's own configuration env vars.
+// They are always stripped so execd's credentials never leak into the sandbox.
+var execdConfigEnvBlacklist = []string{
+	"EXECD_ACCESS_TOKEN",
+	"JUPYTER_HOST",
+	"JUPYTER_TOKEN",
+	"EXECD_ISOLATION_CONFIG",
+	"EXECD_ENVS",
+}
+
+func unsetExecdConfigEnv() []string {
+	argv := make([]string, 0, 2*len(execdConfigEnvBlacklist))
+	for _, key := range execdConfigEnvBlacklist {
+		argv = append(argv, "--unsetenv", key)
+	}
+	return argv
+}
+
 // unsetBlacklistedEnv returns --unsetenv args for all env vars matching strictEnvBlacklist.
 func unsetBlacklistedEnv() []string {
 	var argv []string
@@ -233,15 +251,17 @@ func unsetBlacklistedEnv() []string {
 	return argv
 }
 
-// bwrapEnvSegment returns environment passthrough args.
+// bwrapEnvSegment returns environment passthrough args. execd's own config
+// env (execdConfigEnvBlacklist) is always stripped, regardless of mode.
 func bwrapEnvSegment(spec EnvSpec) []string {
 	if spec.Mode == "" {
-		return unsetBlacklistedEnv()
+		argv := unsetExecdConfigEnv()
+		return append(argv, unsetBlacklistedEnv()...)
 	}
 
 	switch spec.Mode {
 	case EnvModeDeny:
-		var argv []string
+		argv := unsetExecdConfigEnv()
 		for _, key := range spec.Keys {
 			argv = append(argv, "--unsetenv", key)
 		}
@@ -251,9 +271,17 @@ func bwrapEnvSegment(spec EnvSpec) []string {
 		return argv
 
 	case EnvModeAllow:
-		// Clear environment, inject only allow-listed keys.
+		// --clearenv wipes everything; refuse to re-inject execd config env
+		// even if the caller allow-lists it.
 		argv := []string{"--clearenv"}
+		blacklist := make(map[string]struct{}, len(execdConfigEnvBlacklist))
+		for _, k := range execdConfigEnvBlacklist {
+			blacklist[k] = struct{}{}
+		}
 		for _, key := range spec.Keys {
+			if _, blocked := blacklist[key]; blocked {
+				continue
+			}
 			if val, ok := os.LookupEnv(key); ok {
 				argv = append(argv, "--setenv", key, val)
 			}

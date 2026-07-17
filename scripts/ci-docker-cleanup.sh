@@ -31,7 +31,8 @@ if [ -n "${containers}" ]; then
   echo "${containers}" | xargs -r docker rm -f || true
 fi
 
-timeout 30s rm -rf "${HOME:-/home/admin}/.docker/buildx/activity"/* || true
+: "${HOME:?HOME must be set for Docker cleanup}"
+timeout 30s rm -rf "${HOME}/.docker/buildx/activity"/* || true
 
 echo "Disk usage after Docker cleanup:"
 df -h /
