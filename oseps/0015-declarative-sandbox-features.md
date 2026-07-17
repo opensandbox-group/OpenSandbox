@@ -108,7 +108,8 @@ therefore must not be encoded in `extensions`.
 - Transitive feature dependency declaration or dependency solving.
 - Adding, removing, or upgrading a feature after sandbox creation.
 - Pool-backed creation through `extensions.poolRef`.
-- Snapshot restore or including feature state in a snapshot contract.
+- Snapshot creation from a feature-enabled sandbox, snapshot restore with
+  `features`, or including feature state in a snapshot contract.
 - Windows feature images or activation.
 - Tool denial, command-name filtering, `PATH` hiding, or a `deny_tools` API.
 - Treating a feature as a sandbox isolation or privilege boundary.
@@ -156,6 +157,9 @@ therefore must not be encoded in `extensions`.
   all current Kubernetes workload providers.
 - Version 1 MUST reject pool mode, snapshot restore, and Windows when `features`
   is non-empty.
+- Version 1 MUST reject snapshot creation when the source sandbox has non-empty
+  persisted `resolvedFeatures`. The check MUST occur before any filesystem
+  commit, snapshot CR, or other provider side effect.
 
 ## Proposal
 
@@ -598,6 +602,7 @@ uses the existing workload deletion and PVC cleanup path.
 | Linux image-based standard creation | Yes | Yes | Supported |
 | `extensions.poolRef` / pool mode | No | No | Reject non-empty `features` |
 | Snapshot restore | No | No | Reject non-empty `features` |
+| Snapshot creation from feature-enabled sandbox | No | No | Reject when persisted `resolvedFeatures` is non-empty |
 | Windows | No | No | Reject non-empty `features` |
 | Add/remove/upgrade after create | No | No | No API; immutable for sandbox lifetime |
 | Caller-supplied OCI artifact | No | No | Rejected by schema and resolver |
@@ -609,7 +614,12 @@ effects whenever possible. The server never drops `features` and proceeds with
 an unmodified sandbox.
 
 Requests that omit `features` retain current behavior on Linux, Windows, image,
-snapshot, and pool flows. An empty array is equivalent to omission.
+pool, and snapshot restore flows for snapshots that do not contain managed
+feature state. An empty array is equivalent to omission. Snapshot creation is
+the sole additional guard: a feature-enabled source is rejected even though the
+snapshot request itself has no `features` field, because current providers may
+capture the injected payload and compiled activation without a corresponding
+snapshot-level `resolvedFeatures` contract.
 
 ### Security Boundary
 
@@ -663,6 +673,9 @@ separate proposal and implementation.
   latency. Version 1 does not add separate feature quotas.
 - The feature root is immutable by lifecycle API contract, but it is not
   necessarily read-only inside every sandbox. Runtime hardening is separate.
+- Feature-enabled sandboxes cannot be snapshotted in version 1. Persisting and
+  restoring their payload plus immutable resolution requires a later extension
+  to the snapshot contract.
 - Registry reload, garbage collection, signature policy, and catalog discovery
   are deliberately deferred. Static startup loading keeps the first trust and
   consistency model reviewable.
@@ -786,6 +799,7 @@ implementation introduces stable machine-readable reasons such as:
 | Unknown name | 400 | `FEATURE_NOT_FOUND` |
 | Unknown exact version | 400 | `FEATURE_VERSION_NOT_FOUND` |
 | Unsupported pool/snapshot/Windows combination | 400 | `FEATURES_UNSUPPORTED_FOR_CREATION_MODE` |
+| Snapshot requested for feature-enabled sandbox | 400 | `FEATURE_SNAPSHOT_UNSUPPORTED` |
 | No compatible platform | 400 | `FEATURE_PLATFORM_UNSUPPORTED` |
 | Activation collision | 400 | `FEATURE_ACTIVATION_CONFLICT` |
 | Approved OCI registry unavailable | 503 | `FEATURE_IMAGE_UNAVAILABLE` |
@@ -817,6 +831,8 @@ Implementation proceeds only after this OSEP is approved:
 - Add feature-registry configuration, startup validation, resolution, and OCI
   artifact validation.
 - Implement Docker extraction/cache/pre-start injection and cleanup.
+- Reject snapshot creation from a source with persisted resolved features before
+  invoking Docker commit or creating a Kubernetes snapshot resource.
 - Implement ordered Kubernetes feature init containers with isolated staging
   volumes, a trusted merger into runtime assets, activation compilation,
   scheduling constraints, persistence, and cleanup for every existing non-pool
@@ -874,6 +890,8 @@ Phase 1 must include focused tests at each ownership boundary.
   preserve order.
 - Pool, snapshot, and Windows combinations return the documented explicit
   error rather than dropping the field.
+- Snapshot creation schema/service tests reject a source with non-empty
+  `resolvedFeatures` before calling any provider snapshot operation.
 
 **Registry and resolver unit tests**
 
@@ -913,6 +931,8 @@ Phase 1 must include focused tests at each ownership boundary.
   partial sandbox and preserve existing sidecar/managed-volume cleanup.
 - Create followed by get returns byte-equivalent resolved feature metadata from
   the Docker label even after registry defaults change.
+- Snapshot creation from a feature-enabled Docker sandbox returns
+  `FEATURE_SNAPSHOT_UNSUPPORTED` and never invokes image commit.
 
 **Kubernetes provider tests**
 
@@ -934,6 +954,8 @@ Phase 1 must include focused tests at each ownership boundary.
   timeout delete the workload and follow existing managed-PVC cleanup rules.
 - Create followed by get returns the persisted annotation rather than resolving
   the current registry.
+- Snapshot creation from a feature-enabled Kubernetes sandbox fails before a
+  snapshot CR or commit workload is created.
 
 **Phase 2 and Phase 3 tests**
 
@@ -1054,6 +1076,13 @@ their payloads and persisted `resolvedFeatures` for their lifetime. Removing a
 registry version does not rewrite or invalidate a running sandbox, though it
 prevents new resolution of that version. Operators should retain old digests in
 their OCI registry until no supported workflow needs to recreate them.
+
+After upgrading to a feature-aware server, snapshot requests for existing
+feature-enabled sandboxes begin returning `FEATURE_SNAPSHOT_UNSUPPORTED`. This
+is intentional protection against metadata drift, not a transient provider
+failure. Users who need a reusable environment must pin the feature request and
+create a new image-based sandbox; feature-aware snapshots require a future OSEP
+extension.
 
 Rollback first revokes feature capability for the whole base URL, then waits for
 in-flight capability checks and feature creates to drain before any older server
