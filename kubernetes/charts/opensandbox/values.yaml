@@ -25,7 +25,7 @@ opensandbox-server:
     replicaCount: 2
 
 # Global values (passed to both sub-charts)
-global:
+global: {}
   # Example: shared image pull secrets
   # imagePullSecrets:
   #   - name: my-registry-secret
