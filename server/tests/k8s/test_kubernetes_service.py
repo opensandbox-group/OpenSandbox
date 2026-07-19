@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -131,6 +133,45 @@ class TestKubernetesSandboxServiceCreate:
         assert response.id is not None
         assert response.status.state == "Running"
         k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_routes_long_metadata_value_to_annotation(
+        self, k8s_service, create_sandbox_request, mock_workload
+    ):
+        long_job_id = (
+            "uni-agent-terminalbench-qwen35-fullnode-split-pt-"
+            "7781f9828ce144f5b041abd33ea419cc"
+        )
+        create_sandbox_request.metadata = {
+            "team": "training",
+            "job_id": long_job_id,
+        }
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = (
+            "10.244.0.5:8080"
+        )
+        k8s_service.workload_provider.get_expiration.return_value = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        )
+
+        await k8s_service.create_sandbox(create_sandbox_request)
+
+        kwargs = k8s_service.workload_provider.create_workload.call_args.kwargs
+        assert kwargs["labels"]["team"] == "training"
+        assert "job_id" not in kwargs["labels"]
+        assert json.loads(
+            kwargs["annotations"]["opensandbox.io/user-metadata"]
+        ) == {"job_id": long_job_id}
 
     @pytest.mark.asyncio
     async def test_create_sandbox_response_restores_extensions_from_workload(

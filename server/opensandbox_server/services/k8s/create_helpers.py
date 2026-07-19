@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,9 +29,13 @@ from opensandbox_server.services.constants import (
     SANDBOX_ID_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_SNAPSHOT_ID_LABEL,
+    SANDBOX_USER_METADATA_ANNOTATION,
 )
 from opensandbox_server.services.helpers import split_egress_env
-from opensandbox_server.services.validators import calculate_expiration_or_raise
+from opensandbox_server.services.validators import (
+    calculate_expiration_or_raise,
+    split_metadata_labels_annotations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +73,19 @@ def _build_create_workload_context(
         labels[SANDBOX_MANUAL_CLEANUP_LABEL] = "true"
     if request.snapshot_id:
         labels[SANDBOX_SNAPSHOT_ID_LABEL] = request.snapshot_id
-    if request.metadata:
-        labels.update(request.metadata)
+    metadata_labels, metadata_annotations = split_metadata_labels_annotations(
+        request.metadata
+    )
+    labels.update(metadata_labels)
 
     annotations: Dict[str, str] = {}
+    if metadata_annotations:
+        annotations[SANDBOX_USER_METADATA_ANNOTATION] = json.dumps(
+            metadata_annotations,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     secure_access_token = None
     if request.secure_access:
         secure_access_token = secure_access_token_factory()

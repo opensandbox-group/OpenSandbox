@@ -85,10 +85,10 @@ from opensandbox_server.services.validators import (
     ensure_egress_configured,
     ensure_egress_runtime_compatible,
     ensure_future_expiration,
-    ensure_metadata_labels,
     ensure_platform_valid,
     ensure_timeout_within_limit,
     ensure_volumes_valid,
+    split_metadata_labels_annotations,
 )
 from opensandbox_server.services.k8s.client import (
     K8sClient,
@@ -736,7 +736,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         if not has_pool_ref:
             request = resolve_sandbox_image_from_request(request)
             ensure_entrypoint(request.entrypoint or [])
-        ensure_metadata_labels(request.metadata)
+        split_metadata_labels_annotations(request.metadata)
         ensure_platform_valid(request.platform)
         ensure_timeout_within_limit(
             request.timeout,

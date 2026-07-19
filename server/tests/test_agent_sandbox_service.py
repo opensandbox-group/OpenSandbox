@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -28,7 +29,11 @@ from opensandbox_server.config import (
     AgentSandboxRuntimeConfig,
 )
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
-from opensandbox_server.services.constants import SANDBOX_SNAPSHOT_ID_LABEL, SandboxErrorCodes
+from opensandbox_server.services.constants import (
+    SANDBOX_SNAPSHOT_ID_LABEL,
+    SANDBOX_USER_METADATA_ANNOTATION,
+    SandboxErrorCodes,
+)
 
 @pytest.fixture
 def agent_sandbox_runtime_config():
@@ -170,6 +175,11 @@ class TestAgentSandboxServiceBuildSandbox:
                     "opensandbox.io.evil/key": "public",
                     "team": "platform",
                 },
+                "annotations": {
+                    SANDBOX_USER_METADATA_ANNOTATION: json.dumps(
+                        {"job_id": "job-" + "x" * 80}
+                    )
+                },
                 "creationTimestamp": "2025-12-31T09:00:00Z",
             },
             "spec": {
@@ -192,7 +202,11 @@ class TestAgentSandboxServiceBuildSandbox:
         assert sandbox.id == "sandbox-id"
         assert sandbox.image.uri == "python:3.11"
         assert sandbox.entrypoint == ["/bin/bash"]
-        assert sandbox.metadata == {"opensandbox.io.evil/key": "public", "team": "platform"}
+        assert sandbox.metadata == {
+            "opensandbox.io.evil/key": "public",
+            "team": "platform",
+            "job_id": "job-" + "x" * 80,
+        }
         assert isinstance(sandbox.status, SandboxStatus)
         assert sandbox.status.state == "Running"
 

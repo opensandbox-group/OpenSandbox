@@ -97,15 +97,21 @@ def _is_valid_label_value(value: str) -> bool:
     return bool(LABEL_VALUE_RE.match(value))
 
 
-def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
-    """
-    Validate metadata keys/values against Kubernetes label rules.
+def split_metadata_labels_annotations(
+    metadata: Optional[Dict[str, str]],
+) -> tuple[Dict[str, str], Dict[str, str]]:
+    """Split user metadata without losing label-incompatible values.
 
-    Raises:
-        HTTPException: When a key/value is invalid.
+    Kubernetes annotations use the same key syntax as labels but allow
+    arbitrary string values. Invalid or reserved keys remain request errors;
+    only values that cannot be represented as labels are moved to annotations.
+    Docker callers use this helper for key validation while retaining the
+    original metadata as container labels.
     """
     if not metadata:
-        return
+        return {}, {}
+    labels: Dict[str, str] = {}
+    annotations: Dict[str, str] = {}
     for key, value in metadata.items():
         if key.startswith(RESERVED_LABEL_PREFIX):
             raise HTTPException(
@@ -113,8 +119,9 @@ def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
                 detail={
                     "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
                     "message": (
-                        f"Metadata key '{key}' uses the reserved prefix '{RESERVED_LABEL_PREFIX}'. "
-                        "Keys under this prefix are managed by the system and cannot be set via metadata."
+                        f"Metadata key '{key}' uses the reserved prefix "
+                        f"'{RESERVED_LABEL_PREFIX}'. Keys under this prefix are "
+                        "managed by the system and cannot be set via metadata."
                     ),
                 },
             )
@@ -126,14 +133,28 @@ def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
                     "message": f"Metadata key '{key}' is invalid: must be either a name or a DNS-subdomain prefix and name separated by /, where the name is up to 63 characters and matches [A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?, and the optional prefix is a valid DNS subdomain up to 253 characters.",
                 },
             )
-        if not _is_valid_label_value(value):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
-                    "message": f"Metadata value '{value}' is invalid: must be 63 characters or less, start/end with an alphanumeric character, and contain only alphanumeric, '-', '_', or '.' characters.",
-                },
-            )
+        target = labels if _is_valid_label_value(value) else annotations
+        target[key] = value
+    return labels, annotations
+
+
+def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
+    """
+    Validate metadata keys/values against Kubernetes label rules.
+
+    Raises:
+        HTTPException: When a key/value is invalid.
+    """
+    _, annotations = split_metadata_labels_annotations(metadata)
+    if annotations:
+        value = next(iter(annotations.values()))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
+                "message": f"Metadata value '{value}' is invalid: must be 63 characters or less, start/end with an alphanumeric character, and contain only alphanumeric, '-', '_', or '.' characters.",
+            },
+        )
 
 
 def ensure_future_expiration(expires_at: datetime) -> datetime:
@@ -767,6 +788,7 @@ __all__ = [
     "ensure_valid_port",
     "ensure_platform_valid",
     "ensure_metadata_labels",
+    "split_metadata_labels_annotations",
     "ensure_egress_configured",
     "ensure_credential_proxy_configured",
     "ensure_valid_volume_name",

@@ -29,6 +29,7 @@ from opensandbox_server.services.validators import (
     ensure_valid_sub_path,
     ensure_valid_volume_name,
     ensure_volumes_valid,
+    split_metadata_labels_annotations,
 )
 
 def test_ensure_platform_valid_accepts_windows_amd64():
@@ -107,6 +108,29 @@ def test_ensure_metadata_labels_rejects_value_too_long():
         assert ensure_metadata_labels({"app": long_value}) is None
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
+
+
+def test_split_metadata_labels_annotations_preserves_long_job_id():
+    long_job_id = (
+        "uni-agent-terminalbench-qwen35-fullnode-split-pt-"
+        "7781f9828ce144f5b041abd33ea419cc"
+    )
+
+    labels, annotations = split_metadata_labels_annotations(
+        {"team": "training", "job_id": long_job_id}
+    )
+
+    assert labels == {"team": "training"}
+    assert annotations == {"job_id": long_job_id}
+
+
+def test_split_metadata_labels_annotations_rejects_invalid_key():
+    with pytest.raises(HTTPException) as exc_info:
+        split_metadata_labels_annotations({"invalid key": "value"})
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
+
 
 def test_ensure_metadata_labels_rejects_key_with_empty_prefix():
     """Key with an empty prefix (starts with '/') should be rejected."""

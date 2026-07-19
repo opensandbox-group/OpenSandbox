@@ -116,9 +116,9 @@ from opensandbox_server.services.validators import (
     calculate_expiration_or_raise,
     ensure_entrypoint,
     ensure_future_expiration,
-    ensure_metadata_labels,
     ensure_platform_valid,
     ensure_timeout_within_limit,
+    split_metadata_labels_annotations,
 )
 logger = logging.getLogger(__name__)
 
@@ -623,7 +623,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             )
         request = resolve_sandbox_image_from_request(request)
         ensure_entrypoint(request.entrypoint or [])
-        ensure_metadata_labels(request.metadata)
+        # Docker/Podman label values are not constrained by Kubernetes' 63
+        # character limit. Validate metadata keys and reserved namespaces while
+        # retaining the original values losslessly.
+        split_metadata_labels_annotations(request.metadata)
         ensure_platform_valid(request.platform)
         ensure_timeout_within_limit(
             request.timeout,

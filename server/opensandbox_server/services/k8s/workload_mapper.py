@@ -14,11 +14,16 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from opensandbox_server.api.schema import ImageSpec, PlatformSpec, Sandbox, SandboxStatus
 from opensandbox_server.extensions import extract_extensions_from_mapping
-from opensandbox_server.services.constants import SANDBOX_ID_LABEL, SANDBOX_SNAPSHOT_ID_LABEL
+from opensandbox_server.services.constants import (
+    SANDBOX_ID_LABEL,
+    SANDBOX_SNAPSHOT_ID_LABEL,
+    SANDBOX_USER_METADATA_ANNOTATION,
+)
 
 
 def _is_opensandbox_label(label_key: str) -> bool:
@@ -47,6 +52,20 @@ def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandb
     user_metadata = {
         k: v for k, v in labels.items() if not _is_opensandbox_label(k)
     }
+    encoded_metadata = annotations.get(SANDBOX_USER_METADATA_ANNOTATION)
+    if isinstance(encoded_metadata, str):
+        try:
+            annotation_metadata = json.loads(encoded_metadata)
+        except (TypeError, ValueError):
+            annotation_metadata = None
+        if isinstance(annotation_metadata, dict):
+            user_metadata.update(
+                {
+                    str(key): str(value)
+                    for key, value in annotation_metadata.items()
+                    if isinstance(value, str)
+                }
+            )
 
     image_uri = ""
     entrypoint = []

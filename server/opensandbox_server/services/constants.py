@@ -34,6 +34,7 @@ OPEN_SANDBOX_EGRESS_AUTH_HEADER = "OPENSANDBOX-EGRESS-AUTH"
 SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY = "opensandbox.io/egress-auth-token"
 OPEN_SANDBOX_SECURE_ACCESS_HEADER = "OpenSandbox-Secure-Access"
 SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY = "opensandbox.io/secure-access-token"
+SANDBOX_USER_METADATA_ANNOTATION = "opensandbox.io/user-metadata"
 
 # Environment variable name for passing network policy to egress sidecar
 EGRESS_RULES_ENV = "OPENSANDBOX_EGRESS_RULES"
