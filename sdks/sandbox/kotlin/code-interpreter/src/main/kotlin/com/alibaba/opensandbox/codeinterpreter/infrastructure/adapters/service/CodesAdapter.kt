@@ -31,9 +31,11 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -48,6 +50,14 @@ class CodesAdapter(
     companion object {
         private const val RUN_CODE_PATH = "/code"
     }
+
+    private val jsonParser =
+        Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+            encodeDefaults = true
+            coerceInputValues = true
+        }
 
     private val logger = LoggerFactory.getLogger(CodesAdapter::class.java)
     private val baseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
