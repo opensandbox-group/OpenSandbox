@@ -164,6 +164,7 @@ requires-dist = [
     { name = "attrs", specifier = ">=21.3.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
     { name = "pydantic", specifier = ">=2.4.2,<3.0" },
+    { name = "pyjwt", marker = "extra == 'pool-redis'", specifier = ">=2.13.0" },
     { name = "python-dateutil", specifier = ">=2.8.2,<3.0" },
     { name = "redis", marker = "extra == 'pool-redis'", specifier = ">=5.0,<6.0" },
 ]

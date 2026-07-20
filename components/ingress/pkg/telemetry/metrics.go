@@ -30,9 +30,6 @@ var (
 
 	routingResolutions        metric.Int64Counter
 	routingResolutionDuration metric.Float64Histogram
-
-	proxyHTTPTotal      metric.Int64Counter
-	proxyWebSocketTotal metric.Int64Counter
 )
 
 func registerIngressMetrics() error {
@@ -68,22 +65,6 @@ func registerIngressMetrics() error {
 		"ingress.routing.resolution.duration",
 		metric.WithDescription("Routing resolution duration"),
 		metric.WithUnit("ms"),
-	)
-	if err != nil {
-		return err
-	}
-
-	proxyHTTPTotal, err = meter.Int64Counter(
-		"ingress.proxy.http.requests_total",
-		metric.WithDescription("HTTP proxy request count"),
-	)
-	if err != nil {
-		return err
-	}
-
-	proxyWebSocketTotal, err = meter.Int64Counter(
-		"ingress.proxy.websocket.connections_total",
-		metric.WithDescription("WebSocket proxy connection count"),
 	)
 	if err != nil {
 		return err
@@ -131,8 +112,8 @@ func RecordHTTPRequest(method string, statusCode int, proxyType string, duration
 		return
 	}
 	attrs := metric.WithAttributes(
-		attribute.String("http.method", method),
-		attribute.Int("http.status_code", statusCode),
+		attribute.String("http_method", method),
+		attribute.Int("http_status_code", statusCode),
 		attribute.String("proxy_type", proxyType),
 	)
 	httpRequestCount.Add(context.Background(), 1, attrs)
@@ -143,21 +124,7 @@ func RecordRouting(result string, durationMs float64) {
 	if routingResolutions == nil {
 		return
 	}
-	attrs := metric.WithAttributes(attribute.String("routing.result", result))
+	attrs := metric.WithAttributes(attribute.String("routing_result", result))
 	routingResolutions.Add(context.Background(), 1, attrs)
 	routingResolutionDuration.Record(context.Background(), durationMs, attrs)
-}
-
-func RecordProxyHTTP() {
-	if proxyHTTPTotal == nil {
-		return
-	}
-	proxyHTTPTotal.Add(context.Background(), 1)
-}
-
-func RecordProxyWebSocket() {
-	if proxyWebSocketTotal == nil {
-		return
-	}
-	proxyWebSocketTotal.Add(context.Background(), 1)
 }

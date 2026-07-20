@@ -22,6 +22,61 @@ namespace OpenSandbox.Tests;
 public class ModelsTests
 {
     [Fact]
+    public void IsolatedCapabilities_ShouldDeserializeModeAvailability()
+    {
+        const string json = """
+        {
+          "available": true,
+          "setpriv_available": false,
+          "userns_available": true,
+          "commit_supported": false,
+          "diff_supported": false
+        }
+        """;
+
+        var capabilities = JsonSerializer.Deserialize<IsolatedCapabilities>(json);
+
+        capabilities.Should().NotBeNull();
+        capabilities!.SetprivAvailable.Should().BeFalse();
+        capabilities.UsernsAvailable.Should().BeTrue();
+    }
+
+    [Fact]
+    public void IsolatedCapabilities_ShouldPreserveExistingPositionalArguments()
+    {
+        var capabilities = new IsolatedCapabilities(true, null, null, null, true, true);
+
+        capabilities.CommitSupported.Should().BeTrue();
+        capabilities.DiffSupported.Should().BeTrue();
+        capabilities.SetprivAvailable.Should().BeFalse();
+        capabilities.UsernsAvailable.Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsolatedCapabilities_ShouldPreserveExistingSixValueDeconstruction()
+    {
+        var capabilities = new IsolatedCapabilities(
+            true,
+            "bwrap",
+            "0.11.0",
+            "available",
+            true,
+            false,
+            true,
+            true
+        );
+
+        var (available, isolator, version, message, commitSupported, diffSupported) = capabilities;
+
+        available.Should().BeTrue();
+        isolator.Should().Be("bwrap");
+        version.Should().Be("0.11.0");
+        message.Should().Be("available");
+        commitSupported.Should().BeTrue();
+        diffSupported.Should().BeFalse();
+    }
+
+    [Fact]
     public void Execution_ShouldInitializeWithEmptyCollections()
     {
         // Arrange & Act
@@ -367,6 +422,29 @@ public class ModelsTests
         options.Uid.Should().Be(1000);
         options.Gid.Should().Be(1000);
         options.Envs.Should().ContainKey("APP_ENV");
+    }
+
+    [Fact]
+    public void CreateIsolatedSessionRequest_ShouldRoundTripUidAboveInt32Max()
+    {
+        // Spec declares uid/gid as uint32; values above Int32.MaxValue must not fail.
+        const long uidAboveInt32 = 3_000_000_000L;
+        const long gidAboveInt32 = 4_000_000_000L;
+        var request = new CreateIsolatedSessionRequest(
+            Workspace: new IsolatedWorkspaceSpec("/workspace"),
+            Uid: uidAboveInt32,
+            Gid: gidAboveInt32
+        );
+
+        var json = JsonSerializer.Serialize(request);
+        var restored = JsonSerializer.Deserialize<CreateIsolatedSessionRequest>(json);
+
+        restored.Should().NotBeNull();
+        restored!.Uid.Should().Be(uidAboveInt32);
+        restored.Gid.Should().Be(gidAboveInt32);
+        using var doc = JsonDocument.Parse(json);
+        doc.RootElement.GetProperty("uid").GetInt64().Should().Be(uidAboveInt32);
+        doc.RootElement.GetProperty("gid").GetInt64().Should().Be(gidAboveInt32);
     }
 
     [Fact]

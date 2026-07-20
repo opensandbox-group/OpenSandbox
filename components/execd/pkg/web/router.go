@@ -95,6 +95,7 @@ func NewRouter(accessToken string) *gin.Engine {
 	isolated := r.Group("/v1/isolated")
 	{
 		isolated.POST("/session", withIsolated(func(c *controller.IsolatedSessionController) { c.Create() }))
+		isolated.GET("/sessions", withIsolated(func(c *controller.IsolatedSessionController) { c.List() }))
 		isolated.GET("/session/:sessionId", withIsolated(func(c *controller.IsolatedSessionController) { c.Get() }))
 		isolated.POST("/session/:sessionId/run", withIsolated(func(c *controller.IsolatedSessionController) { c.Run() }))
 		isolated.DELETE("/session/:sessionId", withIsolated(func(c *controller.IsolatedSessionController) { c.Delete() }))

@@ -40,7 +40,11 @@ on:
       - 'k8s/image-committer/**'
 
 jobs:
+  release-preflight:
+    uses: ./.github/workflows/release-preflight.yml
+
   publish:
+    needs: release-preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

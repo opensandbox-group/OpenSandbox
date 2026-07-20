@@ -367,8 +367,3 @@ func waitForLine(ch <-chan string, target string, timeout time.Duration) bool {
 		}
 	}
 }
-
-// discardAll drains r until EOF.
-func discardAll(r io.Reader) {
-	_, _ = io.Copy(io.Discard, r)
-}

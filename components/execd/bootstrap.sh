@@ -126,6 +126,101 @@ trust_mitm_ca_nss() {
 	return 0
 }
 
+# Import the mitm CA into every JDK trust store found on the system so that Java
+# tooling (Maven, Gradle, HttpClient) trusts the credential-proxy MITM cert.
+# Best-effort: missing keytool or import failure only warns, never blocks.
+_jdk_import_ca() {
+	jh="$1"
+	cert="$2"
+	kt="$jh/bin/keytool"
+	[ -x "$kt" ] || return 0
+
+	alias_name="opensandbox-mitmproxy"
+
+	# Locate the cacerts keystore — JDK 9+ supports -cacerts flag,
+	# JDK 8 and some vendors require an explicit -keystore path.
+	ks=""
+	if [ -f "$jh/lib/security/cacerts" ]; then
+		ks="$jh/lib/security/cacerts"
+	elif [ -f "$jh/jre/lib/security/cacerts" ]; then
+		ks="$jh/jre/lib/security/cacerts"
+	else
+		return 0
+	fi
+
+	# Remove stale alias first so a regenerated CA cert is always picked up.
+	if "$kt" -list -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1; then
+		_sudo "$kt" -delete -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1
+	fi
+
+	if _sudo "$kt" -importcert -noprompt -trustcacerts \
+		-alias "$alias_name" \
+		-file "$cert" \
+		-keystore "$ks" \
+		-storepass changeit >/dev/null 2>&1; then
+		echo "imported mitm CA into JDK trust store at $ks"
+	else
+		echo "warning: failed to import mitm CA into $ks" >&2
+	fi
+}
+
+_SEEN_JDKS=""
+_try_jdk() {
+	candidate="$1"
+	cert="$2"
+	[ -d "$candidate" ] || return 0
+	# Resolve to real path for dedup (POSIX: cd + pwd -P).
+	real="$(cd "$candidate" 2>/dev/null && pwd -P)" || return 0
+	case " $_SEEN_JDKS " in
+	*" $real "*) return 0 ;;
+	esac
+	_SEEN_JDKS="$_SEEN_JDKS $real"
+	_jdk_import_ca "$real" "$cert"
+}
+
+trust_mitm_ca_jdk() {
+	cert="$1"
+	[ -f "$cert" ] || return 0
+	_SEEN_JDKS=""
+
+	# 1) $JAVA_HOME if set.
+	if [ -n "${JAVA_HOME:-}" ]; then
+		_try_jdk "$JAVA_HOME" "$cert"
+	fi
+
+	# 2) Scan well-known JDK directories.
+	for search_dir in /usr/lib/jvm /usr/java /opt/java; do
+		if [ -d "$search_dir" ]; then
+			for d in "$search_dir"/*/; do
+				[ -d "$d" ] && _try_jdk "${d%/}" "$cert"
+			done
+		fi
+	done
+	# Standalone tarball installs (e.g. /opt/jdk, /opt/jdk-21).
+	for d in /opt/jdk*; do
+		[ -d "$d" ] && _try_jdk "$d" "$cert"
+	done
+
+	# 3) Fallback: resolve `java` on PATH to its JAVA_HOME.
+	if command -v java >/dev/null 2>&1; then
+		java_bin="$(command -v java)"
+		# Follow symlinks (POSIX-portable loop).
+		while [ -L "$java_bin" ]; do
+			link_target="$(ls -l "$java_bin" 2>/dev/null | sed 's/.* -> //')"
+			case "$link_target" in
+			/*) java_bin="$link_target" ;;
+			*) java_bin="$(dirname "$java_bin")/$link_target" ;;
+			esac
+		done
+		# java_bin is now e.g. /usr/lib/jvm/java-17/bin/java → JAVA_HOME = grandparent
+		jh_candidate="$(dirname "$(dirname "$java_bin")")"
+		_try_jdk "$jh_candidate" "$cert"
+	fi
+
+	_SEEN_JDKS=""
+	return 0
+}
+
 MITM_CA="/opt/opensandbox/mitmproxy-ca-cert.pem"
 if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	i=0
@@ -147,6 +242,7 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 
 	if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
 		trust_mitm_ca_nss "$MITM_CA" || true
+		trust_mitm_ca_jdk "$MITM_CA" || true
 		export NODE_EXTRA_CA_CERTS="$MITM_CA"  # additive — Node appends to built-in roots
 
 		# REQUESTS_CA_BUNDLE and SSL_CERT_FILE replace the default bundle,

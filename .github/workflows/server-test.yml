@@ -3,18 +3,24 @@ name: Server Tests
 on:
   pull_request:
     branches: [ main ]
-    paths:
-      - 'server/**'
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: server
+
   test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +62,8 @@ jobs:
           path: server/reports/coverage.xml
 
   docker-smoke:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     strategy:
       matrix:
         network: [host, bridge]
@@ -117,3 +125,26 @@ jobs:
         if: always()
         run: |
           cat server/app.log
+
+  required:
+    name: Server CI
+    if: always()
+    needs: [changes, test, docker-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          DOCKER_SMOKE_RESULT: ${{ needs.docker-smoke.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$TEST_RESULT" == "success" && "$DOCKER_SMOKE_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$DOCKER_SMOKE_RESULT" == "skipped" ]]
+          fi

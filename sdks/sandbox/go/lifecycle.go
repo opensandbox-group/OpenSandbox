@@ -104,6 +104,9 @@ func (c *LifecycleClient) ListSnapshots(ctx context.Context, opts ListSnapshotsO
 	if opts.SandboxID != "" {
 		params.Set("sandboxId", opts.SandboxID)
 	}
+	if opts.Name != "" {
+		params.Set("name", opts.Name)
+	}
 	for _, s := range opts.States {
 		params.Add("state", string(s))
 	}

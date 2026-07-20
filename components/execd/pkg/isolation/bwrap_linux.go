@@ -59,46 +59,71 @@ func findBwrap() string {
 	return ""
 }
 
+// bwrapIsSetuid reports whether the resolved bwrap binary has the setuid bit
+// set. The setuid build of bubblewrap does not support --disable-userns, so
+// buildArgv must skip that flag in userns mode. Detected once at startup.
+var bwrapIsSetuid bool
+
+// isSetuidBinary reports whether the file at path has the setuid bit set.
+func isSetuidBinary(path string) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeSetuid != 0
+}
+
+func currentProcessIDs() (uint32, uint32) {
+	return uint32(os.Getuid()), uint32(os.Getgid())
+}
+
 // bwrapImpl is the Linux bwrap Isolator.
-type bwrapImpl struct{}
+type bwrapImpl struct {
+	probe ProbeResult
+}
 
 // NewBwrap returns a bwrap Isolator for Linux, configured by cfg.
 func NewBwrap(cfg Config) Isolator {
+	probe := Probe(ProbeConfig{
+		UpperRoot:     cfg.UpperRoot,
+		UpperMaxBytes: cfg.UpperMaxBytes,
+	})
+	return NewBwrapWithProbe(cfg, probe)
+}
+
+// NewBwrapWithProbe returns a bwrap Isolator using an existing startup probe.
+// It avoids repeating namespace smoke tests when the caller already probed.
+func NewBwrapWithProbe(cfg Config, probe ProbeResult) Isolator {
 	bwrapPath = findBwrap()
+	bwrapIsSetuid = isSetuidBinary(bwrapPath)
 
 	// Pre-generate seccomp BPF once at startup.
 	if bpf, err := generateSeccompDenyBPF(cfg.Seccomp); err != nil {
-		log.Warning("seccomp: failed to generate BPF: %v", err)
+		log.Warn("seccomp: failed to generate BPF: %v", err)
 	} else {
 		seccompBPF = bpf
 	}
 
-	return &bwrapImpl{}
+	return &bwrapImpl{probe: probe}
 }
 
 func (b *bwrapImpl) Name() string { return "bwrap" }
 
 func (b *bwrapImpl) Available() bool {
-	if bwrapPath == "" {
-		bwrapPath = findBwrap()
-	}
-	return bwrapPath != ""
+	return b.probe.Available
 }
 
 func (b *bwrapImpl) Capabilities() Capabilities {
-	if bwrapPath == "" {
-		bwrapPath = findBwrap()
-	}
-
-	version, err := probeBwrapVersion()
-	if err != nil {
-		version = ""
-	}
-
 	return Capabilities{
-		Available:              bwrapPath != "",
-		Isolator:               "bwrap",
-		Version:                version,
+		Available:              b.probe.Available,
+		Isolator:               b.probe.Isolator,
+		Version:                b.probe.Version,
+		SetprivAvailable:       b.probe.SetprivAvailable,
+		SetprivSwitchAvailable: b.probe.SetprivSwitchAvailable,
+		UsernsAvailable:        b.probe.UsernsAvailable,
 		Profiles:               []Profile{ProfileStrict, ProfileBalanced},
 		ShareNetOverridable:    true,
 		CommitSupported:        false, // Phase 2

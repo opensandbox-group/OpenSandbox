@@ -231,6 +231,11 @@ spec:
                 description: TaskFailed is the number of Failed task
                 format: int32
                 type: integer
+              taskLastErrorMessage:
+                description: |-
+                  TaskLastErrorMessage holds the most recent error message from a failed task.
+                  This includes lifecycle hook failures (e.g., ossfs mount timeout or error output).
+                type: string
               taskPending:
                 description: TaskPending is the number of Pending task which is unassigned
                 format: int32

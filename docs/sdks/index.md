@@ -27,7 +27,7 @@ Higher-level SDKs for multi-language code execution inside sandboxes. Built on t
 |----------|---------|---------|
 | [Python](/sdks/code-interpreter/python) | `opensandbox-code-interpreter` | `pip install opensandbox-code-interpreter` |
 | [JavaScript/TypeScript](/sdks/code-interpreter/javascript) | `@alibaba-group/opensandbox-code-interpreter` | `npm install @alibaba-group/opensandbox-code-interpreter` |
-| [Kotlin/Java](/sdks/code-interpreter/kotlin) | `com.alibaba.opensandbox:code-interpreter` | Gradle/Maven |
+| [Kotlin/Java](/sdks/code-interpreter/kotlin) | `com.alibaba.opensandbox:code-interpreter` | Gradle/Maven via `sandbox-bom` |
 | [C#/.NET](/sdks/code-interpreter/csharp) | `Alibaba.OpenSandbox.CodeInterpreter` | `dotnet add package` |
 
 ## MCP Server

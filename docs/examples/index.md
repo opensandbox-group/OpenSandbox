@@ -50,7 +50,6 @@ Fundamental sandbox operations and SDK workflows.
 | [AKS + Kata](/examples/aks-kata) | AKS deployment with Kata VM isolation, ingress, egress, and Credential Vault |
 | [Egress Extension API POC](/examples/egress-extension-poc) | Deploy and verify the versioned egress extension API transaction model |
 | [Windows](/examples/windows) | Windows sandbox via KVM/QEMU |
-| [RL Training](/examples/rl-training) | DQN CartPole reinforcement learning |
 | [Harbor Evaluation](/examples/harbor-evaluation) | Run a Harbor agent evaluation, one sandbox per trial |
 
 ## Storage

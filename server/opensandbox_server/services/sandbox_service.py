@@ -46,6 +46,9 @@ class SandboxService(ABC):
     Implementations should handle creating, managing, and destroying sandboxes.
     """
 
+    def set_tenant_provider(self, provider: object) -> None:
+        """Inject tenant provider (no-op for non-K8s implementations)."""
+
     @staticmethod
     def generate_sandbox_id() -> str:
         """

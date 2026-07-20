@@ -26,6 +26,7 @@ dokka = "1.9.10"
 openapi-generator = "7.17.0"
 jackson = "2.18.2"
 junit-platform = "1.13.4"
+shadow = "9.2.2"
 
 
 [libraries]
@@ -65,6 +66,7 @@ spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
 mavenPublish = { id = "com.vanniktech.maven.publish", version.ref = "maven-publish" }
 dokka = { id = "org.jetbrains.dokka", version.ref = "dokka" }
 openapi-generator = { id = "org.openapi.generator", version.ref = "openapi-generator" }
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
 
 [bundles]
 serialization = ["kotlinx-serialization-json"]

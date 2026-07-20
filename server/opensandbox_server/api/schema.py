@@ -458,7 +458,8 @@ class CreateSandboxRequest(BaseModel):
         alias="networkPolicy",
         description=(
             "Optional outbound network policy. Shape matches the egress sidecar /policy endpoint. "
-            "Empty/omitted means allow-all until updated."
+            "Empty/omitted means allow-all until updated. Not supported together with "
+            "extensions.poolRef because pooled pods are pre-created."
         ),
     )
     credential_proxy: Optional[CredentialProxyConfig] = Field(
@@ -499,8 +500,6 @@ class CreateSandboxRequest(BaseModel):
             # Reject conflicting fields that would be ignored in pool mode
             if bool((self.snapshot_id or "").strip()):
                 raise ValueError("snapshotId cannot be used together with poolRef.")
-            if self.credential_proxy and self.credential_proxy.enabled:
-                raise ValueError("credentialProxy.enabled cannot be used together with poolRef.")
             # Normalize blank snapshotId so downstream code won't see
             # a truthy whitespace string (e.g. "   ") as a real value.
             if self.snapshot_id is not None and not self.snapshot_id.strip():
@@ -685,6 +684,10 @@ class SnapshotFilter(BaseModel):
         None,
         alias="sandboxId",
         description="Filter snapshots by source sandbox identifier",
+    )
+    name: Optional[str] = Field(
+        None,
+        description="Filter snapshots by exact snapshot name",
     )
     state: Optional[List[str]] = Field(
         None,
@@ -979,3 +982,41 @@ class ListPoolsResponse(BaseModel):
     Collection of pools.
     """
     items: List[PoolResponse] = Field(..., description="List of pools.")
+
+
+# ============================================================================
+# Metrics
+# ============================================================================
+
+class MetricsEvent(BaseModel):
+    """
+    SDK-reported metrics event (Phase 1: sandbox creation latency).
+    """
+
+    event_type: Literal["sandbox.create"] = Field(
+        ...,
+        alias="eventType",
+        description="Metric event type",
+    )
+    sandbox_id: Optional[str] = Field(
+        default=None,
+        alias="sandboxId",
+        description="Sandbox identifier when available",
+    )
+    image: Optional[str] = Field(
+        default=None,
+        description="Container image URI or snapshot startup source label",
+    )
+    create_duration_ms: int = Field(
+        ...,
+        alias="createDurationMs",
+        ge=0,
+        description="Wall-clock duration in milliseconds from create start to ready or failure",
+    )
+    success: bool = Field(
+        ...,
+        description="Whether create + readiness completed successfully",
+    )
+
+    class Config:
+        populate_by_name = True

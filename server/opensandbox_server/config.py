@@ -140,6 +140,33 @@ class RenewIntentRedisConfig(BaseModel):
         return self
 
 
+class OtelConfig(BaseModel):
+    """Optional OpenTelemetry export for ingested SDK metrics."""
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable OTLP metrics export. When false, SDK events are accepted but recorded as noop."
+        ),
+    )
+    endpoint: Optional[str] = Field(
+        default=None,
+        description=(
+            "OTLP HTTP metrics endpoint. When omitted, OpenTelemetry uses "
+            "OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_METRICS_ENDPOINT."
+        ),
+    )
+    service_name: str = Field(
+        default="opensandbox-server",
+        description="service.name resource attribute for exported metrics.",
+    )
+    export_interval_millis: int = Field(
+        default=60000,
+        ge=1000,
+        description="Periodic export interval in milliseconds.",
+    )
+
+
 class RenewIntentConfig(BaseModel):
     """🧪 [EXPERIMENTAL] Renew sandbox expiration when access is observed (proxy and/or Redis queue)."""
 
@@ -591,10 +618,6 @@ class KubernetesRuntimeConfig(BaseModel):
         default=None,
         description="Namespace used for sandbox workloads.",
     )
-    service_account: Optional[str] = Field(
-        default=None,
-        description="Service account bound to sandbox workloads.",
-    )
     workload_provider: Optional[str] = Field(
         default=None,
         description="Workload provider type. If not specified, uses the first registered provider.",
@@ -897,6 +920,43 @@ class StoreConfig(BaseModel):
     )
 
 
+class TenantsConfig(BaseModel):
+    """Multi-tenant provider configuration."""
+
+    provider: Literal["file", "http"] = Field(
+        default="file",
+        description="Tenant provider type: 'file' (tenants.toml) or 'http' (remote endpoint).",
+    )
+    endpoint: Optional[str] = Field(
+        default=None,
+        description="HTTP tenant provider endpoint URL. Required when provider='http'.",
+    )
+    max_stale_seconds: float = Field(
+        default=300.0,
+        ge=0,
+        description="Maximum seconds to serve stale cache when HTTP endpoint is unreachable.",
+    )
+    timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="HTTP request timeout in seconds.",
+    )
+    auth_header: Optional[str] = Field(
+        default=None,
+        description="Optional header name for provider-level authentication to HTTP endpoint.",
+    )
+    auth_token: Optional[str] = Field(
+        default=None,
+        description="Optional token value for provider-level authentication to HTTP endpoint.",
+    )
+
+    @model_validator(mode="after")
+    def require_endpoint_for_http(self) -> "TenantsConfig":
+        if self.provider == "http" and not self.endpoint:
+            raise ValueError("[tenants] endpoint must be set when provider='http'.")
+        return self
+
+
 class AppConfig(BaseModel):
     """Root application configuration model."""
 
@@ -905,9 +965,17 @@ class AppConfig(BaseModel):
         default_factory=LogConfig,
         description="Logging configuration (level, file output, rotation).",
     )
+    tenants: Optional[TenantsConfig] = Field(
+        default=None,
+        description="Multi-tenant configuration. When present, enables multi-tenant mode.",
+    )
     renew_intent: RenewIntentConfig = Field(
         default_factory=RenewIntentConfig,
         description="Auto-renew sandbox expiration when reverse-proxy access is observed.",
+    )
+    otel: OtelConfig = Field(
+        default_factory=OtelConfig,
+        description="OpenTelemetry export for SDK metrics ingestion (Phase 1: create latency).",
     )
     runtime: RuntimeConfig = Field(..., description="Sandbox runtime configuration.")
     kubernetes: Optional[KubernetesRuntimeConfig] = None

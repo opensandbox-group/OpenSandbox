@@ -234,6 +234,7 @@ type ListSnapshotsResponse struct {
 
 type ListSnapshotsOptions struct {
 	SandboxID string
+	Name      string
 	States    []SnapshotState
 	Page      int
 	PageSize  int
@@ -310,16 +311,35 @@ const (
 // applies.
 type CredentialMatch struct {
 	Schemes []CredentialScheme `json:"schemes,omitempty"`
-	Ports   []int              `json:"ports,omitempty"`
-	Hosts   []string           `json:"hosts"`
-	Methods []string           `json:"methods,omitempty"`
-	Paths   []string           `json:"paths,omitempty"`
+	// Deprecated: Ports is ignored; port is derived from Schemes (https→443, http→80).
+	Ports   []int    `json:"ports,omitempty"`
+	Hosts   []string `json:"hosts"`
+	Methods []string `json:"methods,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
 }
 
 // CustomHeaderEntry describes one custom header injection rule.
 type CustomHeaderEntry struct {
 	Name       string `json:"name"`
 	Credential string `json:"credential"`
+}
+
+// CredentialSubstitutionSurface is a request surface where a Credential Vault
+// placeholder may be replaced.
+type CredentialSubstitutionSurface string
+
+const (
+	CredentialSubstitutionPath   CredentialSubstitutionSurface = "path"
+	CredentialSubstitutionQuery  CredentialSubstitutionSurface = "query"
+	CredentialSubstitutionHeader CredentialSubstitutionSurface = "header"
+	CredentialSubstitutionBody   CredentialSubstitutionSurface = "body"
+)
+
+// CredentialSubstitution describes one scoped literal placeholder replacement.
+type CredentialSubstitution struct {
+	Credential  string                          `json:"credential"`
+	Placeholder string                          `json:"placeholder"`
+	In          []CredentialSubstitutionSurface `json:"in"`
 }
 
 // CredentialAuthType is the Credential Vault auth discriminator.
@@ -330,15 +350,17 @@ const (
 	CredentialAuthBasic         CredentialAuthType = "basic"
 	CredentialAuthAPIKey        CredentialAuthType = "apiKey"
 	CredentialAuthCustomHeaders CredentialAuthType = "customHeaders"
+	CredentialAuthPassthrough   CredentialAuthType = "passthrough"
 )
 
 // CredentialAuth configures how a binding injects credential material into
 // matching outbound requests.
 type CredentialAuth struct {
-	Type       CredentialAuthType  `json:"type"`
-	Credential string              `json:"credential,omitempty"`
-	Name       string              `json:"name,omitempty"`
-	Headers    []CustomHeaderEntry `json:"headers,omitempty"`
+	Type          CredentialAuthType       `json:"type"`
+	Credential    string                   `json:"credential,omitempty"`
+	Name          string                   `json:"name,omitempty"`
+	Headers       []CustomHeaderEntry      `json:"headers,omitempty"`
+	Substitutions []CredentialSubstitution `json:"substitutions,omitempty"`
 }
 
 // CredentialBinding is a sandbox-local Credential Vault binding create/update

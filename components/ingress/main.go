@@ -103,10 +103,11 @@ func main() {
 
 	// Create reverse proxy with sandbox provider
 	reverseProxy := proxy.NewProxy(ctx, sandboxProvider, proxy.Mode(flag.Mode), renewPublisher, secure)
-	http.Handle("/", reverseProxy)
-	http.HandleFunc("/status.ok", proxy.Healthz)
+	mux := http.NewServeMux()
+	mux.Handle("/", reverseProxy)
+	mux.HandleFunc("/status.ok", proxy.Healthz)
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), nil); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), mux); err != nil {
 		log.Panicf("Error starting http server: %v", err)
 	}
 

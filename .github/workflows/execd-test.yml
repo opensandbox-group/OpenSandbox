@@ -3,19 +3,24 @@ name: Execd Tests
 on:
   pull_request:
     branches: [ main ]
-    paths:
-      - 'components/execd/**'
-      - 'components/internal/**'
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: execd
+
   test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -69,6 +74,8 @@ jobs:
           echo "*Coverage targets: Core packages >80%, API layer >70%*" >> $GITHUB_STEP_SUMMARY
 
   smoke:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -131,6 +138,8 @@ jobs:
           cat components/execd/execd.log || true
 
   bwrap-smoke:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -155,3 +164,27 @@ jobs:
       - name: Run bwrap integration tests
         working-directory: components/execd
         run: sudo -E env "PATH=$PATH" go test -tags="linux,bwrap" -v -count=1 -timeout=5m ./pkg/runtime/bwrap_test/
+
+  required:
+    name: Execd CI
+    if: always()
+    needs: [changes, test, smoke, bwrap-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          BWRAP_SMOKE_RESULT: ${{ needs.bwrap-smoke.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$TEST_RESULT" == "success" && "$SMOKE_RESULT" == "success" && "$BWRAP_SMOKE_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$SMOKE_RESULT" == "skipped" && "$BWRAP_SMOKE_RESULT" == "skipped" ]]
+          fi

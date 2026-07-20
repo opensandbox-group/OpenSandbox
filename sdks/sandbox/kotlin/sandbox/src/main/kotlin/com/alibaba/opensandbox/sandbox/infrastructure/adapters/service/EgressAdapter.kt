@@ -32,6 +32,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialListRes
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMatch
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMetadata
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMutationSet
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialSubstitution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultCreateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultPatchRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultState
@@ -331,7 +332,6 @@ internal class EgressAdapter(
     private fun CredentialMatch.toJsonObject(): JsonObject =
         buildJsonObject {
             schemes?.let { put("schemes", it.map { scheme -> scheme.wireName() }.toStringJsonArray()) }
-            ports?.let { put("ports", JsonArray(it.map { port -> JsonPrimitive(port) })) }
             put("hosts", hosts.toStringJsonArray())
             methods?.let { put("methods", it.toStringJsonArray()) }
             paths?.let { put("paths", it.toStringJsonArray()) }
@@ -351,6 +351,10 @@ internal class EgressAdapter(
                 CredentialAuth.Type.CUSTOM_HEADERS -> {
                     put("headers", JsonArray(headers.orEmpty().map { it.toJsonObject() }))
                 }
+                CredentialAuth.Type.PASSTHROUGH -> Unit
+            }
+            substitutions.takeUnless { it.isNullOrEmpty() }?.let {
+                put("substitutions", JsonArray(it.map { substitution -> substitution.toJsonObject() }))
             }
         }
 
@@ -358,6 +362,13 @@ internal class EgressAdapter(
         buildJsonObject {
             put("name", JsonPrimitive(name))
             put("credential", JsonPrimitive(credential))
+        }
+
+    private fun CredentialSubstitution.toJsonObject(): JsonObject =
+        buildJsonObject {
+            put("credential", JsonPrimitive(credential))
+            put("placeholder", JsonPrimitive(placeholder))
+            put("in", surfaces.map { it.wireName() }.toStringJsonArray())
         }
 
     private fun List<String>.toStringJsonArray(): JsonArray = JsonArray(map { JsonPrimitive(it) })
@@ -374,6 +385,15 @@ internal class EgressAdapter(
             CredentialAuth.Type.BASIC -> "basic"
             CredentialAuth.Type.API_KEY -> "apiKey"
             CredentialAuth.Type.CUSTOM_HEADERS -> "customHeaders"
+            CredentialAuth.Type.PASSTHROUGH -> "passthrough"
+        }
+
+    private fun CredentialSubstitution.Surface.wireName(): String =
+        when (this) {
+            CredentialSubstitution.Surface.PATH -> "path"
+            CredentialSubstitution.Surface.QUERY -> "query"
+            CredentialSubstitution.Surface.HEADER -> "header"
+            CredentialSubstitution.Surface.BODY -> "body"
         }
 
     private fun String.toCredentialVaultState(): CredentialVaultState {
@@ -426,7 +446,6 @@ internal class EgressAdapter(
         optionalStringArray("schemes")?.let { schemes ->
             builder.schemes(schemes.map { it.toCredentialMatchScheme() })
         }
-        optionalIntArray("ports")?.let { builder.ports(it) }
         optionalStringArray("methods")?.let { builder.methods(it) }
         optionalStringArray("paths")?.let { builder.paths(it) }
         return builder.build()

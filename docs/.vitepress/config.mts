@@ -92,8 +92,10 @@ export default defineConfig({
           items: [
             { text: "Credential Vault", link: "/guides/credential-vault" },
             { text: "Secure Container", link: "/guides/secure-container" },
+            { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
+            { text: "SDK Telemetry", link: "/guides/sdk-telemetry" },
           ],
         },
       ],
@@ -210,7 +212,8 @@ export default defineConfig({
               link: "/examples/egress-extension-poc",
             },
             { text: "Windows", link: "/examples/windows" },
-            { text: "RL Training", link: "/examples/rl-training" },
+            { text: "AKS Kata", link: "/examples/aks-kata" },
+            { text: "Harbor Evaluation", link: "/examples/harbor-evaluation" },
           ],
         },
         {

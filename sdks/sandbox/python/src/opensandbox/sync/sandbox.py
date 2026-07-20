@@ -31,6 +31,7 @@ from opensandbox.exceptions import (
     SandboxInternalException,
     SandboxReadyTimeoutException,
 )
+from opensandbox.internal.lifecycle_metrics import report_sandbox_create_metric
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
@@ -83,8 +84,8 @@ class SandboxSync:
 
     - **Blocking**: Do not call these methods directly from an asyncio event loop thread.
       If you need non-blocking behavior, prefer the async :class:`~opensandbox.sandbox.Sandbox`.
-    - **Resource cleanup**: :meth:`close` closes *local* HTTP resources only. It does **not**
-      terminate the remote sandbox instance. Call :meth:`kill` to stop the remote sandbox.
+    - **Resource cleanup**: :meth:`destroy` terminates the remote sandbox and closes local
+      HTTP resources. Use :meth:`close` alone when the sandbox should remain available.
 
     Usage Example:
 
@@ -105,9 +106,8 @@ class SandboxSync:
     sandbox.files.write_file("script.py", "print('Hello World')")
     result = sandbox.commands.run("python script.py")
 
-    # Always clean up resources
-    sandbox.kill()   # terminate remote sandbox
-    sandbox.close()  # close local HTTP resources
+    # Always terminate the remote sandbox and close local resources
+    sandbox.destroy()
 
     # Or use a context manager for automatic close():
     with SandboxSync.create("python:3.11") as sandbox:
@@ -144,9 +144,10 @@ class SandboxSync:
         self._metrics_service = metrics_service
         self._egress_service = egress_service
         self._connection_config = connection_config
-        self._diagnostics_service = diagnostics_service or AdapterFactorySync(
-            connection_config
-        ).create_diagnostics_service()
+        self._diagnostics_service = (
+            diagnostics_service
+            or AdapterFactorySync(connection_config).create_diagnostics_service()
+        )
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
 
@@ -154,9 +155,7 @@ class SandboxSync:
     def isolation(self) -> IsolationServiceSync:
         """Provides access to namespace-isolated session operations (OSEP-0013)."""
         if self._isolated_service is None:
-            raise SandboxInternalException(
-                "isolated service not initialized"
-            )
+            raise SandboxInternalException("isolated service not initialized")
         return self._isolated_service
 
     @property
@@ -300,9 +299,7 @@ class SandboxSync:
         # Use timezone-aware UTC datetime to avoid cross-timezone ambiguity.
         new_expiration = datetime.now(timezone.utc) + timeout
         logger.info(
-            "Renewing sandbox %s timeout, estimated expiration: %s",
-            self.id,
-            new_expiration,
+            f"Renewing sandbox {self.id} timeout, estimated expiration: {new_expiration}"
         )
         return self._sandbox_service.renew_sandbox_expiration(self.id, new_expiration)
 
@@ -360,7 +357,7 @@ class SandboxSync:
         Raises:
             SandboxException: if pause operation fails
         """
-        logger.info("Pausing sandbox: %s", self.id)
+        logger.info(f"Pausing sandbox: {self.id}")
         self._sandbox_service.invalidate_endpoint_cache(self.id)
         self._sandbox_service.pause_sandbox(self.id)
 
@@ -376,7 +373,7 @@ class SandboxSync:
         Raises:
             SandboxException: if termination fails
         """
-        logger.info("Killing sandbox: %s", self.id)
+        logger.info(f"Killing sandbox: {self.id}")
         self._sandbox_service.invalidate_endpoint_cache(self.id)
         self._sandbox_service.kill_sandbox(self.id)
 
@@ -393,9 +390,26 @@ class SandboxSync:
         """
         try:
             self._connection_config.close_transport_if_owned()
-            logger.debug("Closed resources for sandbox %s", self.id)
+            logger.debug(f"Closed resources for sandbox {self.id}")
         except Exception as e:
-            logger.warning("Error closing resources for sandbox %s: %s", self.id, e, exc_info=True)
+            logger.warning(
+                f"Error closing resources for sandbox {self.id}: {e}", exc_info=True
+            )
+
+    def destroy(self) -> None:
+        """
+        Terminate the remote sandbox and close local resources.
+
+        Local resources are always closed, even if terminating the remote sandbox
+        fails. Any termination error is re-raised after local cleanup completes.
+
+        Raises:
+            SandboxException: if termination fails
+        """
+        try:
+            self.kill()
+        finally:
+            self.close()
 
     def is_healthy(self) -> bool:
         """
@@ -424,9 +438,7 @@ class SandboxSync:
             SandboxException: if health check fails
         """
         logger.info(
-            "Waiting for sandbox %s to pass health check (timeout: %ss)",
-            self.id,
-            timeout.total_seconds(),
+            f"Waiting for sandbox {self.id} to pass health check (timeout: {timeout.total_seconds()}s)"
         )
 
         deadline = time.time() + timeout.total_seconds()
@@ -435,13 +447,11 @@ class SandboxSync:
 
         while time.time() < deadline:
             attempt += 1
-            logger.debug("Health check attempt #%s for sandbox %s", attempt, self.id)
+            logger.debug(f"Health check attempt #{attempt} for sandbox {self.id}")
             try:
                 if self.is_healthy():
                     logger.info(
-                        "Sandbox %s passed health check after %s attempts",
-                        self.id,
-                        attempt,
+                        f"Sandbox {self.id} passed health check after {attempt} attempts"
                     )
                     return
                 last_exception = None
@@ -535,7 +545,9 @@ class SandboxSync:
                 "Exactly one of image or snapshot_id must be specified"
             )
 
-        config = (connection_config or ConnectionConfigSync()).with_transport_if_missing()
+        config = (
+            connection_config or ConnectionConfigSync()
+        ).with_transport_if_missing()
         entrypoint = entrypoint or ["tail", "-f", "/dev/null"]
         env = env or {}
         metadata = metadata or {}
@@ -546,15 +558,16 @@ class SandboxSync:
             image = SandboxImageSpec(image=image)
 
         startup_source = image.image if image is not None else snapshot_id
-        timeout_log = "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
+        timeout_log = (
+            "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
+        )
         logger.info(
-            "Creating sandbox with startup source: %s (timeout: %s)",
-            startup_source,
-            timeout_log,
+            f"Creating sandbox with startup source: {startup_source} (timeout: {timeout_log})"
         )
         factory = AdapterFactorySync(config)
         sandbox_id: str | None = None
         sandbox_service: SandboxesSync | None = None
+        create_started = time.monotonic()
 
         try:
             sandbox_service = factory.create_sandbox_service()
@@ -591,27 +604,42 @@ class SandboxSync:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
-                isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
 
             if not skip_health_check:
                 sandbox.check_ready(ready_timeout, health_check_polling_interval)
-                logger.info("Sandbox %s is ready", sandbox.id)
+                logger.info(f"Sandbox {sandbox.id} is ready")
             else:
                 logger.info(
-                    "Sandbox %s created (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox.id,
+                    f"Sandbox {sandbox.id} created (skip_health_check=true, sandbox may not be ready yet)"
                 )
+
+            report_sandbox_create_metric(
+                config,
+                sandbox_id=sandbox.id,
+                image=startup_source,
+                create_duration_ms=int((time.monotonic() - create_started) * 1000),
+                success=True,
+            )
 
             return sandbox
         except Exception as e:
+            report_sandbox_create_metric(
+                config,
+                sandbox_id=sandbox_id,
+                image=startup_source,
+                create_duration_ms=int((time.monotonic() - create_started) * 1000),
+                success=False,
+            )
             if sandbox_id and sandbox_service:
                 try:
                     logger.warning(
-                        "Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: %s",
-                        sandbox_id,
+                        f"Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {sandbox_id}"
                     )
                     sandbox_service.kill_sandbox(sandbox_id)
                 except Exception:
@@ -619,7 +647,9 @@ class SandboxSync:
             config.close_transport_if_owned()
             if isinstance(e, SandboxException):
                 raise
-            raise SandboxInternalException(f"Internal exception when creating sandbox: {e}") from e
+            raise SandboxInternalException(
+                f"Internal exception when creating sandbox: {e}"
+            ) from e
 
     @classmethod
     def connect(
@@ -654,8 +684,10 @@ class SandboxSync:
         # Accept any string identifier.
         sandbox_id = str(sandbox_id)
 
-        config = (connection_config or ConnectionConfigSync()).with_transport_if_missing()
-        logger.info("Connecting to sandbox: %s", sandbox_id)
+        config = (
+            connection_config or ConnectionConfigSync()
+        ).with_transport_if_missing()
+        logger.info(f"Connecting to sandbox: {sandbox_id}")
         factory = AdapterFactorySync(config)
 
         try:
@@ -676,7 +708,9 @@ class SandboxSync:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
-                isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
@@ -685,11 +719,10 @@ class SandboxSync:
                 sandbox.check_ready(connect_timeout, health_check_polling_interval)
             else:
                 logger.info(
-                    "Connected to sandbox %s (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox_id,
+                    f"Connected to sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
-            logger.info("Connected to sandbox %s", sandbox_id)
+            logger.info(f"Connected to sandbox {sandbox_id}")
             return sandbox
         except Exception as e:
             config.close_transport_if_owned()
@@ -699,13 +732,13 @@ class SandboxSync:
 
     @classmethod
     def resume(
-            cls,
-            sandbox_id: str,
-            connection_config: ConnectionConfigSync | None = None,
-            health_check: Callable[["SandboxSync"], bool] | None = None,
-            resume_timeout: timedelta = timedelta(seconds=30),
-            health_check_polling_interval: timedelta = timedelta(milliseconds=200),
-            skip_health_check: bool = False,
+        cls,
+        sandbox_id: str,
+        connection_config: ConnectionConfigSync | None = None,
+        health_check: Callable[["SandboxSync"], bool] | None = None,
+        resume_timeout: timedelta = timedelta(seconds=30),
+        health_check_polling_interval: timedelta = timedelta(milliseconds=200),
+        skip_health_check: bool = False,
     ) -> "SandboxSync":
         """
         Resume a paused sandbox by ID and return a new, usable SandboxSync instance.
@@ -728,9 +761,11 @@ class SandboxSync:
         # Accept any string identifier.
         sandbox_id = str(sandbox_id)
 
-        config = (connection_config or ConnectionConfigSync()).with_transport_if_missing()
+        config = (
+            connection_config or ConnectionConfigSync()
+        ).with_transport_if_missing()
 
-        logger.info("Resuming sandbox: %s", sandbox_id)
+        logger.info(f"Resuming sandbox: {sandbox_id}")
         factory = AdapterFactorySync(config)
 
         try:
@@ -753,7 +788,9 @@ class SandboxSync:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
-                isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
@@ -762,8 +799,7 @@ class SandboxSync:
                 sandbox.check_ready(resume_timeout, health_check_polling_interval)
             else:
                 logger.info(
-                    "Resumed sandbox %s (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox_id,
+                    f"Resumed sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
             return sandbox
@@ -772,7 +808,6 @@ class SandboxSync:
             if isinstance(e, SandboxException):
                 raise
             raise SandboxInternalException(f"Failed to resume sandbox: {e}") from e
-
 
     def __enter__(self) -> "SandboxSync":
         """Sync context manager entry."""

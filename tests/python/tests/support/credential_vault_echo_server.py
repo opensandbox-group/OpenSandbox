@@ -21,6 +21,7 @@ import json
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 EXPECTED_HEADERS: dict[str, dict[str, str]] = {
     "/bearer": {
@@ -49,11 +50,41 @@ class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
     server_version = "OpenSandboxCredentialVaultE2E/1.0"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-        if self.path == "/healthz":
+        parsed = urlsplit(self.path)
+        route = parsed.path
+        if route == "/healthz":
             self._write_json(HTTPStatus.OK, {"status": "ok"})
             return
 
-        expected = EXPECTED_HEADERS.get(self.path)
+        if route == "/query-substitution":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            ok = query.get("api_key") == ["vault-query-secret"]
+            self._write_json(
+                HTTPStatus.OK if ok else HTTPStatus.UNAUTHORIZED,
+                {
+                    "ok": ok,
+                    "case": "query-substitution",
+                    "query": query,
+                    "missingOrInvalid": [] if ok else ["api_key"],
+                },
+            )
+            return
+
+        if route == "/tenant/vault-path-secret/resource":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            ok = query.get("tenant") == ["__path_secret__"]
+            self._write_json(
+                HTTPStatus.OK if ok else HTTPStatus.UNAUTHORIZED,
+                {
+                    "ok": ok,
+                    "case": "path-substitution",
+                    "queryStillPlaceholder": ok,
+                    "missingOrInvalid": [] if ok else ["tenant"],
+                },
+            )
+            return
+
+        expected = EXPECTED_HEADERS.get(route)
         if expected is None:
             self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown path"})
             return
@@ -68,9 +99,34 @@ class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
             HTTPStatus.UNAUTHORIZED if mismatches else HTTPStatus.OK,
             {
                 "ok": not mismatches,
-                "case": self.path.lstrip("/"),
+                "case": route.lstrip("/"),
                 "validatedHeaders": sorted(expected),
                 "missingOrInvalid": mismatches,
+            },
+        )
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        parsed = urlsplit(self.path)
+        if parsed.path != "/body-substitution":
+            self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown path"})
+            return
+
+        length = int(self.headers.get("content-length", "0") or "0")
+        raw_body = self.rfile.read(length)
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._write_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid json"})
+            return
+
+        ok = body.get("client_secret") == "vault-body-secret"
+        self._write_json(
+            HTTPStatus.OK if ok else HTTPStatus.UNAUTHORIZED,
+            {
+                "ok": ok,
+                "case": "body-substitution",
+                "missingOrInvalid": [] if ok else ["client_secret"],
+                "body": body,
             },
         )
 

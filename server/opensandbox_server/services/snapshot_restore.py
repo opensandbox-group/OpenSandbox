@@ -23,6 +23,7 @@ from fastapi import HTTPException, status
 from opensandbox_server.api.schema import CreateSandboxRequest, ImageSpec
 from opensandbox_server.repositories.snapshots.factory import create_snapshot_repository
 from opensandbox_server.services.snapshot_models import SnapshotState
+from opensandbox_server.tenants.context import get_current_tenant
 
 DEFAULT_SNAPSHOT_RESTORE_ENTRYPOINT = ["tail", "-f", "/dev/null"]
 
@@ -52,6 +53,16 @@ def resolve_sandbox_image_from_request(request: CreateSandboxRequest) -> CreateS
     snapshot_repository = create_snapshot_repository()
     snapshot = snapshot_repository.get(snapshot_id)
     if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "SNAPSHOT::NOT_FOUND",
+                "message": f"Snapshot {snapshot_id} not found",
+            },
+        )
+
+    tenant = get_current_tenant()
+    if tenant is not None and (snapshot.namespace is None or snapshot.namespace != tenant.namespace):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={

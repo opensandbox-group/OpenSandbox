@@ -100,12 +100,6 @@ type KernelInterruptRequest struct {
 	Restart bool `json:"restart,omitempty"`
 }
 
-// KernelShutdownRequest request to close a kernel
-type KernelShutdownRequest struct {
-	// Restart representswhether torestart kernel after shutdown
-	Restart bool `json:"restart"`
-}
-
 // KernelStatus represents the status of the kernel
 type KernelStatus string
 

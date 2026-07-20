@@ -177,6 +177,12 @@ internal sealed class SandboxesAdapter : ISandboxes
             queryParts.Add($"sandboxId={Uri.EscapeDataString(sandboxId)}");
         }
 
+        var name = @params?.Name;
+        if (name != null)
+        {
+            queryParts.Add($"name={Uri.EscapeDataString(name)}");
+        }
+
         if (@params?.States != null && @params.States.Count > 0)
         {
             queryParts.AddRange(@params.States.Select(state => $"state={Uri.EscapeDataString(state)}"));

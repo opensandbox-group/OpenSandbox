@@ -23,7 +23,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - **Image Support**: Create sandboxes from public or private registries, including registry auth
 - **Timeout Management**: Optional `timeout` on creation (omit or set to `null` to disable automatic expiration) with explicit renewal via API
 - **Endpoint Access**: Retrieve public access endpoints for services running inside sandboxes, including required headers when secured access is enabled
-- **Snapshot Management**: Create snapshots from sandboxes, list snapshots, and delete snapshots
+- **Snapshot Management**: Create snapshots from sandboxes, list snapshots with source/name filters, and delete snapshots
 
 **Main Endpoints (base path `/v1`):**
 - `POST /sandboxes` - Create a sandbox from an image or snapshot with timeout and resource limits
@@ -31,7 +31,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `GET /sandboxes/{sandboxId}` - Get full sandbox details (including startup source and entrypoint)
 - `DELETE /sandboxes/{sandboxId}` - Delete a sandbox
 - `POST /sandboxes/{sandboxId}/snapshots` - Create a snapshot from a sandbox
-- `GET /snapshots` - List snapshots with optional sandbox filtering and pagination
+- `GET /snapshots` - List snapshots with optional source sandbox, exact name, and state filtering plus pagination
 - `GET /snapshots/{snapshotId}` - Get snapshot state and metadata
 - `DELETE /snapshots/{snapshotId}` - Delete a snapshot
 - `POST /sandboxes/{sandboxId}/pause` - Pause a sandbox (asynchronous)

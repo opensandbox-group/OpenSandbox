@@ -145,34 +145,37 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	devNull, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0) // best-effort, ignore error
 	cmd.Stdin = devNull
 
+	// Start the process synchronously so that the command kernel can be
+	// registered before Execute returns. This lets GetCommandStatus
+	// callers find the session immediately.
+	err = cmd.Start()
+	if err != nil {
+		log.Error("CommandExecError: error starting commands: %v", err)
+		pipe.Close() // best-effort
+		cancel()
+		return fmt.Errorf("failed to start commands: %w", err)
+	}
+
+	kernel := &commandKernel{
+		pid:          cmd.Process.Pid,
+		content:      request.Code,
+		stdoutPath:   stdoutPath,
+		stderrPath:   stderrPath,
+		startedAt:    startAt,
+		running:      true,
+		isBackground: true,
+	}
+	c.storeCommandKernel(session, kernel)
+
 	safego.Go(func() {
-		err := cmd.Start()
-		if err != nil {
-			log.Error("CommandExecError: error starting commands: %v", err)
-			pipe.Close() // best-effort
-			cancel()
-			return
+		<-ctx.Done()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill() // best-effort
 		}
+	})
 
-		kernel := &commandKernel{
-			pid:          cmd.Process.Pid,
-			content:      request.Code,
-			stdoutPath:   stdoutPath,
-			stderrPath:   stderrPath,
-			startedAt:    startAt,
-			running:      true,
-			isBackground: true,
-		}
-		c.storeCommandKernel(session, kernel)
-
-		safego.Go(func() {
-			<-ctx.Done()
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill() // best-effort
-			}
-		})
-
-		err = cmd.Wait()
+	safego.Go(func() {
+		err := cmd.Wait()
 		cancel()
 		pipe.Close()    // best-effort
 		devNull.Close() // best-effort

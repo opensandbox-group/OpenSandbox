@@ -17,3 +17,7 @@ package runtime
 import "errors"
 
 var ErrContextNotFound = errors.New("context not found")
+
+// ErrUidModeUnavailable indicates that the requested isolation uid mode did
+// not pass the startup capability probe in the current environment.
+var ErrUidModeUnavailable = errors.New("requested uid mode is unavailable")

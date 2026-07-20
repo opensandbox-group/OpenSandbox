@@ -35,7 +35,7 @@ If the client reports:
 opensandbox.exceptions.sandbox.SandboxReadyTimeoutException: Sandbox health check timed out after 30.0s (2 attempts). Health check returned false continuously
 ```
 
-when the server runs on a cloud VM (e.g. [Alibaba Cloud ECS](https://github.com/alibaba/OpenSandbox/issues/297)), the client is likely trying to reach the sandbox at an address it cannot access. The server may be returning a bind address such as `127.0.0.1` or an internal LAN IP in the endpoint URL, so the health check from the client side fails.
+when the server runs on a cloud VM (e.g. [Alibaba Cloud ECS](https://github.com/opensandbox-group/OpenSandbox/issues/297)), the client is likely trying to reach the sandbox at an address it cannot access. The server may be returning a bind address such as `127.0.0.1` or an internal LAN IP in the endpoint URL, so the health check from the client side fails.
 
 **Solution:** Set the bound public IP so that the server returns a reachable address in the sandbox endpoint API. In your config (e.g. `~/.sandbox.toml`), under `[server]`, set `eip` to the VM’s public IP (or the hostname that clients use to reach the server):
 

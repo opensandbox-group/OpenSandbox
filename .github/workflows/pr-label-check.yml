@@ -47,7 +47,8 @@ jobs:
               if (dirs.has("kubernetes")) s.push("component/k8s");
               if (dirs.has("server")) s.push("component/server");
 
-              // SDK — layout: sdks/{sandbox,code-interpreter,mcp}/{go,python,...}
+              // SDK — layout: sdks/{sandbox,code-interpreter,mcp}/{go,python,...};
+              // Kotlin code-interpreter lives under sdks/sandbox/kotlin/code-interpreter.
               if (dirs.has("sdks")) {
                 s.push("sdks");
                 const langMap = {

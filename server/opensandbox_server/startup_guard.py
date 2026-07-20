@@ -87,7 +87,7 @@ def api_key_confirm(
                 "SECURITY WARNING: server.api_key is empty; API authentication is disabled. "
                 "Type 'YES' to continue startup without API key. "
                 "Strongly recommend setting server.api_key. "
-                "See: https://github.com/alibaba/OpenSandbox/issues/750 "
+                "See: https://github.com/opensandbox-group/OpenSandbox/issues/750 "
                 ": "
                 f"{ANSI_RESET}",
                 input_func,
@@ -97,7 +97,7 @@ def api_key_confirm(
             raise RuntimeError(
                 "Startup aborted: confirmation timed out waiting for YES. "
                 "Strongly recommend setting server.api_key. "
-                "See: https://github.com/alibaba/OpenSandbox/issues/750"
+                "See: https://github.com/opensandbox-group/OpenSandbox/issues/750"
             ) from exc
         if confirmation == ALLOW_NO_API_KEY_CONFIRMATION:
             logger.warning(
@@ -107,12 +107,12 @@ def api_key_confirm(
         raise RuntimeError(
             "Startup aborted: missing explicit confirmation for empty server.api_key. "
             "Strongly recommend setting server.api_key. "
-            "See: https://github.com/alibaba/OpenSandbox/issues/750"
+            "See: https://github.com/opensandbox-group/OpenSandbox/issues/750"
         )
 
     raise RuntimeError(
         "Startup blocked: server.api_key is empty in non-interactive mode. "
         f"Set {INSECURE_SERVER_ENV_VAR}={ALLOW_NO_API_KEY_CONFIRMATION} to acknowledge the risk. "
         "Strongly recommend setting server.api_key. "
-        "See: https://github.com/alibaba/OpenSandbox/issues/750"
+        "See: https://github.com/opensandbox-group/OpenSandbox/issues/750"
     )

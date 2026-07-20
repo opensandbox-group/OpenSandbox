@@ -29,10 +29,10 @@ keywords:
   - ingress
   - gateway
 
-home: https://github.com/alibaba/OpenSandbox
+home: https://github.com/opensandbox-group/OpenSandbox
 sources:
-  - https://github.com/alibaba/OpenSandbox/tree/main/server
-  - https://github.com/alibaba/OpenSandbox/tree/main/components/ingress
+  - https://github.com/opensandbox-group/OpenSandbox/tree/main/server
+  - https://github.com/opensandbox-group/OpenSandbox/tree/main/components/ingress
 
 maintainers:
   - name: OpenSandbox Team

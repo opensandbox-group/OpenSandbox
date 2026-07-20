@@ -61,6 +61,7 @@ const batchSandboxFirstPodIndex = 0
 
 type taskScheduleResult struct {
 	Running, Failed, Succeed, Unknown, Pending int32
+	LastErrorMessage                           string
 }
 
 // BatchSandboxReconciler reconciles a BatchSandbox object
@@ -218,6 +219,9 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			runtimeView.status.TaskSucceed = ts.Succeed
 			runtimeView.status.TaskUnknown = ts.Unknown
 			runtimeView.status.TaskPending = ts.Pending
+			if ts.LastErrorMessage != "" {
+				runtimeView.status.TaskLastErrorMessage = ts.LastErrorMessage
+			}
 		}
 	}
 
@@ -421,6 +425,7 @@ func (r *BatchSandboxReconciler) scheduleTasks(ctx context.Context, tSch tasksch
 	var (
 		running, failed, succeed, unknown int32
 		pending                           int32
+		lastErrorMessage                  string
 	)
 	for i := range len(tasks) {
 		task := tasks[i]
@@ -438,6 +443,10 @@ func (r *BatchSandboxReconciler) scheduleTasks(ctx context.Context, tSch tasksch
 				succeed++
 			case taskscheduler.FailedTaskState:
 				failed++
+				// Capture the most recent error message to surface in status.
+				if msg := task.GetTerminatedMessage(); msg != "" {
+					lastErrorMessage = msg
+				}
 			case taskscheduler.UnknownTaskState:
 				unknown++
 			}
@@ -451,11 +460,12 @@ func (r *BatchSandboxReconciler) scheduleTasks(ctx context.Context, tSch tasksch
 		log.Info("successfully released Pods", "count", len(toReleasedPods))
 	}
 	return &taskScheduleResult{
-		Running: running,
-		Failed:  failed,
-		Succeed: succeed,
-		Unknown: unknown,
-		Pending: pending,
+		Running:          running,
+		Failed:           failed,
+		Succeed:          succeed,
+		Unknown:          unknown,
+		Pending:          pending,
+		LastErrorMessage: lastErrorMessage,
 	}, nil
 }
 

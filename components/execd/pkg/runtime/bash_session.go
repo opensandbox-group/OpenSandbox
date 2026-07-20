@@ -468,7 +468,7 @@ func (s *bashSession) close() error {
 
 	if pid != 0 {
 		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-			log.Warning("kill session process group %d: %v (process may have already exited)", pid, err)
+			log.Warn("kill session process group %d: %v (process may have already exited)", pid, err)
 		}
 	}
 	return nil

@@ -16,11 +16,13 @@ import type { CommandExecution } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import type { SandboxFiles } from "./filesystem.js";
 import type {
+  BindMount,
   CreateIsolatedSessionRequest,
   IsolatedCapabilities,
   IsolatedRunOpts,
   IsolatedSessionInfo,
   IsolatedSessionState,
+  IsolatedSessionSummary,
 } from "../models/isolated.js";
 
 export interface IsolationSession {
@@ -37,7 +39,50 @@ export interface IsolationSession {
   delete(): Promise<void>;
 }
 
+export interface RunOnceOpts {
+  workspaceMode?: "rw" | "overlay" | "ro";
+  runOpts?: IsolatedRunOpts;
+  handlers?: ExecutionHandlers;
+  profile?: "strict" | "balanced";
+  shareNet?: boolean;
+  binds?: BindMount[];
+  signal?: AbortSignal;
+}
+
 export interface IsolationService {
   create(request: CreateIsolatedSessionRequest): Promise<IsolationSession>;
+  /**
+   * Rebuild a session handle for an already-existing isolated session by id.
+   *
+   * Useful for stateless callers (e.g. a serverless worker restarted
+   * mid-flight) that only retain the session id. Issues a GET against
+   * `/v1/isolated/session/{id}` and echoes any creation parameters the
+   * execd side returns into `handle.info`. Older execd builds may omit the
+   * creation-parameter fields; those info fields will be undefined but
+   * `run`, `get`, `delete`, and `files` still work because they only need
+   * the session id.
+   *
+   * A missing session (404) is surfaced as the SDK's standard request
+   * failure error, matching what `session.get()` does today.
+   */
+  attach(sessionId: string): Promise<IsolationSession>;
   capabilities(): Promise<IsolatedCapabilities>;
+  list(): Promise<IsolatedSessionSummary[]>;
+  /**
+   * Create a session, run `code`, and delete the session (auto-cleanup).
+   * Cleanup is best-effort and never masks the original error.
+   */
+  runOnce(
+    code: string,
+    workspace: string,
+    opts?: RunOnceOpts,
+  ): Promise<CommandExecution>;
+  /**
+   * Create a session, invoke `fn`, and delete the session on exit
+   * regardless of whether `fn` throws.
+   */
+  withSession<T>(
+    request: CreateIsolatedSessionRequest,
+    fn: (session: IsolationSession) => Promise<T>,
+  ): Promise<T>;
 }

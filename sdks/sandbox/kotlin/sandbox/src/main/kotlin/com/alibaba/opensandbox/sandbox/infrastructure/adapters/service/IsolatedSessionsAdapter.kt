@@ -22,11 +22,15 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.EnvPassthroughSpec
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionState
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionSummary
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
@@ -51,15 +55,24 @@ private data class IsolatedCreateBody(
     val workspace: IsolatedWorkspaceBody,
     val profile: String? = null,
     val extra_writable: List<String>? = null,
+    val binds: List<BindMountBody>? = null,
     val share_net: Boolean? = null,
     val env_passthrough: EnvPassthroughBody? = null,
-    val uid: Int? = null,
-    val gid: Int? = null,
+    val uid: Long? = null,
+    val gid: Long? = null,
+    val uid_mode: String? = null,
     val idle_timeout_seconds: Int? = null,
 )
 
 @Serializable
 private data class IsolatedWorkspaceBody(val path: String, val mode: String? = null)
+
+@Serializable
+private data class BindMountBody(
+    val source: String,
+    val dest: String? = null,
+    val readonly: Boolean? = null,
+)
 
 @Serializable
 private data class EnvPassthroughBody(val mode: String? = null, val keys: List<String>? = null)
@@ -83,6 +96,31 @@ private data class IsolatedSessionStateResponse(
     val created_at: String? = null,
     val last_run_at: String? = null,
     val idle_remaining_seconds: Int? = null,
+    // Creation-parameter echo fields. Older execd builds omit them.
+    val profile: String? = null,
+    val workspace: IsolatedWorkspaceBody? = null,
+    val extra_writable: List<String>? = null,
+    val binds: List<BindMountBody>? = null,
+    val share_net: Boolean? = null,
+    val env_passthrough: EnvPassthroughBody? = null,
+    val uid: Long? = null,
+    val gid: Long? = null,
+    val uid_mode: String? = null,
+    val idle_timeout_seconds: Int? = null,
+)
+
+@Serializable
+private data class IsolatedSessionSummaryResponse(
+    val session_id: String,
+    val status: String,
+    val created_at: String? = null,
+    val last_run_at: String? = null,
+    val idle_remaining_seconds: Int? = null,
+)
+
+@Serializable
+private data class ListIsolatedSessionsResponse(
+    val sessions: List<IsolatedSessionSummaryResponse> = emptyList(),
 )
 
 @Serializable
@@ -91,6 +129,8 @@ private data class IsolatedCapabilitiesResponse(
     val isolator: String? = null,
     val version: String? = null,
     val message: String? = null,
+    val setpriv_available: Boolean = false,
+    val userns_available: Boolean = false,
     val commit_supported: Boolean = false,
     val diff_supported: Boolean = false,
 )
@@ -130,11 +170,14 @@ internal class IsolatedSessionsAdapter(
                         IsolatedWorkspaceBody(request.workspace.path, request.workspace.mode),
                     profile = request.profile,
                     extra_writable = request.extraWritable,
+                    binds =
+                        request.binds?.map { BindMountBody(it.source, it.dest, it.readonly) },
                     share_net = request.shareNet,
                     env_passthrough =
                         request.envPassthrough?.let { EnvPassthroughBody(it.mode, it.keys) },
                     uid = request.uid,
                     gid = request.gid,
+                    uid_mode = request.uidMode,
                     idle_timeout_seconds = request.idleTimeoutSeconds,
                 )
             val httpRequest =
@@ -167,6 +210,55 @@ internal class IsolatedSessionsAdapter(
         }
     }
 
+    override fun attach(sessionId: String): IsolationSession {
+        require(sessionId.isNotBlank()) { "sessionId cannot be empty" }
+        try {
+            val httpRequest =
+                Request.Builder()
+                    .url("$execdBaseUrl/v1/isolated/session/$sessionId")
+                    .get()
+                    .headers(execdEndpoint.headers.toHeaders())
+                    .build()
+
+            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+                ensureSuccess(response, "attach isolated session")
+                val resp =
+                    json.decodeFromString(
+                        IsolatedSessionStateResponse.serializer(),
+                        response.body!!.string(),
+                    )
+                val info =
+                    IsolatedSessionInfo(
+                        sessionId = sessionId,
+                        createdAt = resp.created_at?.let { parseDateTime(it) },
+                        profile = resp.profile,
+                        workspace =
+                            resp.workspace?.let {
+                                IsolatedWorkspaceSpec(path = it.path, mode = it.mode)
+                            },
+                        extraWritable = resp.extra_writable,
+                        binds =
+                            resp.binds?.map { BindMount(it.source, it.dest, it.readonly) },
+                        shareNet = resp.share_net,
+                        envPassthrough =
+                            resp.env_passthrough?.let {
+                                EnvPassthroughSpec(
+                                    mode = it.mode ?: "deny",
+                                    keys = it.keys ?: emptyList(),
+                                )
+                            },
+                        uid = resp.uid,
+                        gid = resp.gid,
+                        uidMode = resp.uid_mode,
+                        idleTimeoutSeconds = resp.idle_timeout_seconds,
+                    )
+                return IsolationSessionHandle(info, this)
+            }
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
     internal fun getInternal(sessionId: String): IsolatedSessionState {
         require(sessionId.isNotBlank()) { "sessionId cannot be empty" }
         try {
@@ -189,6 +281,26 @@ internal class IsolatedSessionsAdapter(
                     createdAt = resp.created_at?.let { parseDateTime(it) },
                     lastRunAt = resp.last_run_at?.let { parseDateTime(it) },
                     idleRemainingSeconds = resp.idle_remaining_seconds,
+                    profile = resp.profile,
+                    workspace =
+                        resp.workspace?.let {
+                            IsolatedWorkspaceSpec(path = it.path, mode = it.mode)
+                        },
+                    extraWritable = resp.extra_writable,
+                    binds =
+                        resp.binds?.map { BindMount(it.source, it.dest, it.readonly) },
+                    shareNet = resp.share_net,
+                    envPassthrough =
+                        resp.env_passthrough?.let {
+                            EnvPassthroughSpec(
+                                mode = it.mode ?: "deny",
+                                keys = it.keys ?: emptyList(),
+                            )
+                        },
+                    uid = resp.uid,
+                    gid = resp.gid,
+                    uidMode = resp.uid_mode,
+                    idleTimeoutSeconds = resp.idle_timeout_seconds,
                 )
             }
         } catch (e: Exception) {
@@ -284,9 +396,42 @@ internal class IsolatedSessionsAdapter(
                     isolator = resp.isolator,
                     version = resp.version,
                     message = resp.message,
+                    setprivAvailable = resp.setpriv_available,
+                    usernsAvailable = resp.userns_available,
                     commitSupported = resp.commit_supported,
                     diffSupported = resp.diff_supported,
                 )
+            }
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
+    override fun list(): List<IsolatedSessionSummary> {
+        try {
+            val httpRequest =
+                Request.Builder()
+                    .url("$execdBaseUrl/v1/isolated/sessions")
+                    .get()
+                    .headers(execdEndpoint.headers.toHeaders())
+                    .build()
+
+            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+                ensureSuccess(response, "list isolated sessions")
+                val resp =
+                    json.decodeFromString(
+                        ListIsolatedSessionsResponse.serializer(),
+                        response.body!!.string(),
+                    )
+                return resp.sessions.map { summary ->
+                    IsolatedSessionSummary(
+                        sessionId = summary.session_id,
+                        status = summary.status,
+                        createdAt = summary.created_at?.let { parseDateTime(it) },
+                        lastRunAt = summary.last_run_at?.let { parseDateTime(it) },
+                        idleRemainingSeconds = summary.idle_remaining_seconds,
+                    )
+                }
             }
         } catch (e: Exception) {
             throw e.toSandboxException()

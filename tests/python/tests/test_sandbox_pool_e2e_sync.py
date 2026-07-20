@@ -31,6 +31,7 @@ from opensandbox import SandboxManagerSync, SandboxSync
 from opensandbox.config import ConnectionConfigSync
 from opensandbox.exceptions import (
     PoolAcquireFailedException,
+    PoolDestroyedException,
     PoolEmptyException,
     PoolNotRunningException,
 )
@@ -39,8 +40,11 @@ from opensandbox.pool import (
     AcquirePolicy,
     InMemoryPoolStateStore,
     PoolCreationSpec,
+    PoolDestroyOptions,
+    PoolDestroyState,
     PoolState,
     PoolStateStore,
+    SandboxPoolManagerSync,
     SandboxPoolSync,
 )
 from opensandbox.pool_redis import RedisPoolStateStore
@@ -114,6 +118,27 @@ class TestSandboxPoolSingleNodeE2ESync:
         direct = self.pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
         self.borrowed.append(direct)
         assert direct.is_healthy()
+
+    @pytest.mark.timeout(240)
+    def test_destroy_drains_idle_writes_tombstone_and_blocks_acquire(self) -> None:
+        _eventually("pool has warm idle before destroy", lambda: self.pool.snapshot().idle_count >= 1)
+
+        manager = SandboxPoolManagerSync(
+            state_store=self.store,
+            connection_config=create_connection_config_sync(),
+            owner_id=f"destroyer-{self.tag}",
+        )
+        result = manager.destroy(
+            self.pool_name,
+            PoolDestroyOptions(drain_timeout=timedelta(seconds=30)),
+        )
+
+        assert result.state == PoolDestroyState.DESTROYED
+        assert result.drained_idle_count >= 1
+        assert result.persistent_state_cleared
+        assert self.store.get_destroy_state(self.pool_name) == PoolDestroyState.DESTROYED
+        with pytest.raises(PoolDestroyedException):
+            self.pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
 
     @pytest.mark.timeout(240)
     def test_stale_idle_fallback_shutdown_restart_and_snapshot(self) -> None:
@@ -715,6 +740,64 @@ class TestSandboxPoolRedisDistributedE2ESync:
             lambda: _count_tagged_sandboxes(self.manager, self.tag) == 1,
             timeout=timedelta(seconds=60),
         )
+
+    @pytest.mark.timeout(420)
+    def test_redis_destroy_tombstone_blocks_all_nodes_and_direct_create(self) -> None:
+        pool_name = f"redis-destroy-{self.tag}"
+        store_a = RedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = RedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 1)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 1)
+        self.pools.extend([pool_a, pool_b])
+
+        pool_a.start()
+        pool_b.start()
+        _eventually("Redis destroy pool warms", lambda: pool_a.snapshot().idle_count >= 1)
+
+        pool_manager = SandboxPoolManagerSync(
+            state_store=store_b,
+            connection_config=create_connection_config_sync(),
+            owner_id=f"destroyer-{self.tag}",
+        )
+        result = pool_manager.destroy(
+            pool_name,
+            PoolDestroyOptions(drain_timeout=timedelta(seconds=60)),
+        )
+
+        assert result.state == PoolDestroyState.DESTROYED
+        assert store_a.get_destroy_state(pool_name) == PoolDestroyState.DESTROYED
+        with pytest.raises(PoolDestroyedException):
+            pool_a.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+        with pytest.raises(PoolDestroyedException):
+            pool_b.resize(1)
+
+    @pytest.mark.timeout(60)
+    def test_redis_begin_destroy_fence_blocks_start_and_direct_create(self) -> None:
+        pool_name = f"redis-destroying-fence-{self.tag}"
+        store = RedisPoolStateStore(self.redis, self.key_prefix)
+        store.begin_destroy(pool_name, f"destroyer-{self.tag}")
+        assert store.get_destroy_state(pool_name) == PoolDestroyState.DESTROYING
+
+        pool = _create_pool(pool_name, f"owner-{self.tag}", store, self.tag, 0)
+        self.pools.append(pool)
+
+        with pytest.raises(PoolDestroyedException):
+            pool.start()
+
+        running_pool_name = f"redis-destroying-running-{self.tag}"
+        running_store = RedisPoolStateStore(self.redis, self.key_prefix)
+        running_pool = _create_pool(
+            running_pool_name,
+            f"owner-running-{self.tag}",
+            running_store,
+            self.tag,
+            0,
+        )
+        self.pools.append(running_pool)
+        running_pool.start()
+        running_store.begin_destroy(running_pool_name, f"destroyer-{self.tag}")
+        with pytest.raises(PoolDestroyedException):
+            running_pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
 
 
 def _create_pool(

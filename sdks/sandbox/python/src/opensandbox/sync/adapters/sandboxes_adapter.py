@@ -120,8 +120,7 @@ class SandboxesAdapterSync(SandboxesSync):
         resource_requests: dict[str, str] | None = None,
     ) -> SandboxCreateResponse:
         logger.info(
-            "Creating sandbox with startup source: %s",
-            spec.image if spec is not None else snapshot_id,
+            f"Creating sandbox with startup source: {spec.image if spec is not None else snapshot_id}"
         )
         try:
             from opensandbox.api.lifecycle.api.sandboxes import post_sandboxes
@@ -145,16 +144,18 @@ class SandboxesAdapterSync(SandboxesSync):
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
             )
-            response_obj = post_sandboxes.sync_detailed(client=self._get_client(), body=create_request)
+            response_obj = post_sandboxes.sync_detailed(
+                client=self._get_client(), body=create_request
+            )
             handle_api_error(response_obj, "Create sandbox")
 
-            parsed = require_parsed(response_obj, ApiCreateSandboxResponse, "Create sandbox")
+            parsed = require_parsed(
+                response_obj, ApiCreateSandboxResponse, "Create sandbox"
+            )
             return SandboxModelConverter.to_sandbox_create_response(parsed)
         except Exception as e:
-            logger.error(
-                "Failed to create sandbox with startup source: %s",
-                spec.image if spec is not None else snapshot_id,
-                exc_info=e,
+            logger.warning(
+                f"Failed to create sandbox with startup source {spec.image if spec is not None else snapshot_id}: {e}"
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -168,10 +169,12 @@ class SandboxesAdapterSync(SandboxesSync):
                 sandbox_id=sandbox_id,
             )
             handle_api_error(response_obj, f"Get sandbox {sandbox_id}")
-            parsed = require_parsed(response_obj, ApiSandbox, f"Get sandbox {sandbox_id}")
+            parsed = require_parsed(
+                response_obj, ApiSandbox, f"Get sandbox {sandbox_id}"
+            )
             return SandboxModelConverter.to_sandbox_info(parsed)
         except Exception as e:
-            logger.error("Failed to get sandbox info: %s", sandbox_id, exc_info=e)
+            logger.warning(f"Failed to get sandbox info {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_sandboxes(self, filter: SandboxFilter) -> PagedSandboxInfos:
@@ -201,13 +204,17 @@ class SandboxesAdapterSync(SandboxesSync):
                 state=filter.states if filter.states else API_UNSET,
                 metadata=metadata,
                 page=filter.page if filter.page is not None else API_UNSET,
-                page_size=filter.page_size if filter.page_size is not None else API_UNSET,
+                page_size=filter.page_size
+                if filter.page_size is not None
+                else API_UNSET,
             )
             handle_api_error(response_obj, "List sandboxes")
-            parsed = require_parsed(response_obj, ApiListSandboxesResponse, "List sandboxes")
+            parsed = require_parsed(
+                response_obj, ApiListSandboxesResponse, "List sandboxes"
+            )
             return SandboxModelConverter.to_paged_sandbox_infos(parsed)
         except Exception as e:
-            logger.error("Failed to list sandboxes", exc_info=e)
+            logger.warning(f"Failed to list sandboxes: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def patch_sandbox_metadata(
@@ -233,7 +240,7 @@ class SandboxesAdapterSync(SandboxesSync):
             )
             return SandboxModelConverter.to_sandbox_info(parsed)
         except Exception as e:
-            logger.error("Failed to patch sandbox %s metadata", sandbox_id, exc_info=e)
+            logger.warning(f"Failed to patch sandbox {sandbox_id} metadata: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_sandbox_endpoint(
@@ -243,7 +250,9 @@ class SandboxesAdapterSync(SandboxesSync):
             key = (sandbox_id, port, use_server_proxy)
             return self._endpoint_cache.get_or_fetch(
                 key,
-                lambda: self._fetch_sandbox_endpoint(sandbox_id, port, use_server_proxy),
+                lambda: self._fetch_sandbox_endpoint(
+                    sandbox_id, port, use_server_proxy
+                ),
             )
         return self._fetch_sandbox_endpoint(sandbox_id, port, use_server_proxy)
 
@@ -262,11 +271,15 @@ class SandboxesAdapterSync(SandboxesSync):
                 client=self._get_client(),
                 use_server_proxy=use_server_proxy,
             )
-            handle_api_error(response_obj, f"Get endpoint for sandbox {sandbox_id} port {port}")
+            handle_api_error(
+                response_obj, f"Get endpoint for sandbox {sandbox_id} port {port}"
+            )
             parsed = require_parsed(response_obj, ApiEndpoint, "Get endpoint")
             return SandboxModelConverter.to_sandbox_endpoint(parsed)
         except Exception as e:
-            logger.error("Failed to retrieve sandbox endpoint for sandbox %s", sandbox_id, exc_info=e)
+            logger.warning(
+                f"Failed to retrieve sandbox endpoint for sandbox {sandbox_id}: {e}"
+            )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def invalidate_endpoint_cache(self, sandbox_id: str) -> None:
@@ -275,7 +288,10 @@ class SandboxesAdapterSync(SandboxesSync):
             self._endpoint_cache.invalidate(sandbox_id)
 
     def get_signed_sandbox_endpoint(
-        self, sandbox_id: str, port: int, expires: int,
+        self,
+        sandbox_id: str,
+        port: int,
+        expires: int,
         use_server_proxy: bool = False,
     ) -> SandboxEndpoint:
         try:
@@ -291,11 +307,17 @@ class SandboxesAdapterSync(SandboxesSync):
                 use_server_proxy=use_server_proxy,
                 expires=str(expires),
             )
-            handle_api_error(response_obj, f"Get signed endpoint for sandbox {sandbox_id} port {port}")
+            handle_api_error(
+                response_obj,
+                f"Get signed endpoint for sandbox {sandbox_id} port {port}",
+            )
             parsed = require_parsed(response_obj, ApiEndpoint, "Get signed endpoint")
             return SandboxModelConverter.to_sandbox_endpoint(parsed)
         except Exception as e:
-            logger.error("Failed to retrieve signed sandbox endpoint for sandbox %s", sandbox_id, exc_info=e)
+            logger.debug(
+                f"Failed to retrieve signed sandbox endpoint for sandbox {sandbox_id}",
+                exc_info=e,
+            )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def pause_sandbox(self, sandbox_id: str) -> None:
@@ -309,7 +331,7 @@ class SandboxesAdapterSync(SandboxesSync):
             )
             handle_api_error(response_obj, f"Pause sandbox {sandbox_id}")
         except Exception as e:
-            logger.error("Failed to pause sandbox: %s", sandbox_id, exc_info=e)
+            logger.warning(f"Failed to pause sandbox {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def resume_sandbox(self, sandbox_id: str) -> None:
@@ -323,7 +345,7 @@ class SandboxesAdapterSync(SandboxesSync):
             )
             handle_api_error(response_obj, f"Resume sandbox {sandbox_id}")
         except Exception as e:
-            logger.error("Failed to resume sandbox: %s", sandbox_id, exc_info=e)
+            logger.warning(f"Failed to resume sandbox {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def renew_sandbox_expiration(
@@ -337,7 +359,9 @@ class SandboxesAdapterSync(SandboxesSync):
                 RenewSandboxExpirationResponse,
             )
 
-            renew_request = SandboxModelConverter.to_api_renew_request(new_expiration_time)
+            renew_request = SandboxModelConverter.to_api_renew_request(
+                new_expiration_time
+            )
             response_obj = post_sandboxes_sandbox_id_renew_expiration.sync_detailed(
                 client=self._get_client(),
                 sandbox_id=sandbox_id,
@@ -351,7 +375,7 @@ class SandboxesAdapterSync(SandboxesSync):
             )
             return SandboxModelConverter.to_sandbox_renew_response(parsed)
         except Exception as e:
-            logger.error("Failed to renew sandbox %s expiration", sandbox_id, exc_info=e)
+            logger.debug(f"Failed to renew sandbox {sandbox_id} expiration", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def kill_sandbox(self, sandbox_id: str) -> None:
@@ -365,7 +389,7 @@ class SandboxesAdapterSync(SandboxesSync):
             )
             handle_api_error(response_obj, f"Kill sandbox {sandbox_id}")
         except Exception as e:
-            logger.error("Failed to kill sandbox: %s", sandbox_id, exc_info=e)
+            logger.warning(f"Failed to kill sandbox {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def create_snapshot(
@@ -386,7 +410,7 @@ class SandboxesAdapterSync(SandboxesSync):
             parsed = require_parsed(response_obj, ApiSnapshot, "Create snapshot")
             return SandboxModelConverter.to_snapshot_info(parsed)
         except Exception as e:
-            logger.error("Failed to create snapshot for sandbox %s", sandbox_id, exc_info=e)
+            logger.warning(f"Failed to create snapshot for sandbox {sandbox_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_snapshot(self, snapshot_id: str) -> SnapshotInfo:
@@ -401,10 +425,12 @@ class SandboxesAdapterSync(SandboxesSync):
                 snapshot_id=snapshot_id,
             )
             handle_api_error(response_obj, f"Get snapshot {snapshot_id}")
-            parsed = require_parsed(response_obj, ApiSnapshot, f"Get snapshot {snapshot_id}")
+            parsed = require_parsed(
+                response_obj, ApiSnapshot, f"Get snapshot {snapshot_id}"
+            )
             return SandboxModelConverter.to_snapshot_info(parsed)
         except Exception as e:
-            logger.error("Failed to get snapshot info: %s", snapshot_id, exc_info=e)
+            logger.warning(f"Failed to get snapshot info {snapshot_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_snapshots(self, filter: SnapshotFilter) -> PagedSnapshotInfos:
@@ -417,16 +443,23 @@ class SandboxesAdapterSync(SandboxesSync):
 
             response_obj = get_snapshots.sync_detailed(
                 client=self._get_client(),
-                sandbox_id=filter.sandbox_id if filter.sandbox_id is not None else API_UNSET,
+                sandbox_id=filter.sandbox_id
+                if filter.sandbox_id is not None
+                else API_UNSET,
+                name=filter.name if filter.name is not None else API_UNSET,
                 state=filter.states if filter.states else API_UNSET,
                 page=filter.page if filter.page is not None else API_UNSET,
-                page_size=filter.page_size if filter.page_size is not None else API_UNSET,
+                page_size=filter.page_size
+                if filter.page_size is not None
+                else API_UNSET,
             )
             handle_api_error(response_obj, "List snapshots")
-            parsed = require_parsed(response_obj, ApiListSnapshotsResponse, "List snapshots")
+            parsed = require_parsed(
+                response_obj, ApiListSnapshotsResponse, "List snapshots"
+            )
             return SandboxModelConverter.to_paged_snapshot_infos(parsed)
         except Exception as e:
-            logger.error("Failed to list snapshots", exc_info=e)
+            logger.warning(f"Failed to list snapshots: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def delete_snapshot(self, snapshot_id: str) -> None:
@@ -441,5 +474,5 @@ class SandboxesAdapterSync(SandboxesSync):
             )
             handle_api_error(response_obj, f"Delete snapshot {snapshot_id}")
         except Exception as e:
-            logger.error("Failed to delete snapshot: %s", snapshot_id, exc_info=e)
+            logger.warning(f"Failed to delete snapshot {snapshot_id}: {e}")
             raise ExceptionConverter.to_sandbox_exception(e) from e

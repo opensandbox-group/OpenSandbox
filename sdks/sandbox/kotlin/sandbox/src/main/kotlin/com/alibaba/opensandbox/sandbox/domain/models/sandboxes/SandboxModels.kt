@@ -798,6 +798,7 @@ class SnapshotInfo(
 
 class SnapshotFilter private constructor(
     val sandboxId: String?,
+    val name: String?,
     val states: List<String>?,
     val pageSize: Int?,
     val page: Int?,
@@ -809,12 +810,18 @@ class SnapshotFilter private constructor(
 
     class Builder {
         private var sandboxId: String? = null
+        private var name: String? = null
         private var states: List<String>? = null
         private var pageSize: Int? = null
         private var page: Int? = null
 
         fun sandboxId(sandboxId: String): Builder {
             this.sandboxId = sandboxId
+            return this
+        }
+
+        fun name(name: String): Builder {
+            this.name = name
             return this
         }
 
@@ -840,7 +847,7 @@ class SnapshotFilter private constructor(
             return this
         }
 
-        fun build(): SnapshotFilter = SnapshotFilter(sandboxId, states, pageSize, page)
+        fun build(): SnapshotFilter = SnapshotFilter(sandboxId, name, states, pageSize, page)
     }
 }
 

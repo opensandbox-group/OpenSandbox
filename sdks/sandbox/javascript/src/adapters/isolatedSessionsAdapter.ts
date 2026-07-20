@@ -15,18 +15,27 @@
 import { createExecdClient } from "../openapi/execdClient.js";
 import { IsolatedFilesystemAdapter } from "./isolatedFilesystemAdapter.js";
 import { parseJsonEventStream } from "./sse.js";
+import type { components as ExecdComponents } from "../api/execd.js";
 import type { CommandExecution, ServerStreamEvent } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
 import type { SandboxFiles } from "../services/filesystem.js";
-import type { IsolationService, IsolationSession } from "../services/isolatedSessions.js";
+import type {
+  IsolationService,
+  IsolationSession,
+  RunOnceOpts,
+} from "../services/isolatedSessions.js";
 import type {
   CreateIsolatedSessionRequest,
   IsolatedCapabilities,
   IsolatedRunOpts,
   IsolatedSessionInfo,
   IsolatedSessionState,
+  IsolatedSessionSummary,
+  ListIsolatedSessionsResponse,
 } from "../models/isolated.js";
+
+type SessionStateWire = ExecdComponents["schemas"]["SessionState"];
 
 function joinUrl(baseUrl: string, pathname: string): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -141,6 +150,35 @@ export class IsolatedSessionsAdapter implements IsolationService {
     return new IsolationSessionHandle(info, this);
   }
 
+  async attach(sessionId: string): Promise<IsolationSessionHandle> {
+    assertNonBlank(sessionId, "sessionId");
+    const state = await this.jsonRequest<SessionStateWire>(
+      "GET",
+      `/v1/isolated/session/${encodeURIComponent(sessionId)}`,
+    );
+    // Build an IsolatedSessionInfo from the SessionState response.
+    // Creation-parameter echo fields are optional; older execd builds omit
+    // them. Unknown/absent fields become `undefined` so the handle is still
+    // usable via sessionId for run/get/delete/files.
+    const info: IsolatedSessionInfo = {
+      session_id: sessionId,
+      created_at: state.created_at ?? "",
+    };
+    if (state.profile !== undefined) info.profile = state.profile;
+    if (state.workspace !== undefined) info.workspace = state.workspace;
+    if (state.extra_writable !== undefined) info.extra_writable = state.extra_writable;
+    if (state.binds !== undefined) info.binds = state.binds;
+    if (state.share_net !== undefined) info.share_net = state.share_net;
+    if (state.env_passthrough !== undefined) info.env_passthrough = state.env_passthrough;
+    if (state.uid !== undefined) info.uid = state.uid;
+    if (state.gid !== undefined) info.gid = state.gid;
+    if (state.uid_mode !== undefined) info.uid_mode = state.uid_mode;
+    if (state.idle_timeout_seconds !== undefined) {
+      info.idle_timeout_seconds = state.idle_timeout_seconds;
+    }
+    return new IsolationSessionHandle(info, this);
+  }
+
   async _get(sessionId: string): Promise<IsolatedSessionState> {
     assertNonBlank(sessionId, "sessionId");
     return this.jsonRequest<IsolatedSessionState>(
@@ -203,9 +241,52 @@ export class IsolatedSessionsAdapter implements IsolationService {
   }
 
   async capabilities(): Promise<IsolatedCapabilities> {
-    return this.jsonRequest<IsolatedCapabilities>(
+    const response = await this.jsonRequest<IsolatedCapabilities>(
       "GET",
       "/v1/isolated/capabilities",
     );
+    return {
+      ...response,
+      setpriv_available: response.setpriv_available ?? false,
+      userns_available: response.userns_available ?? false,
+    };
+  }
+
+  async list(): Promise<IsolatedSessionSummary[]> {
+    const resp = await this.jsonRequest<ListIsolatedSessionsResponse>(
+      "GET",
+      "/v1/isolated/sessions",
+    );
+    return resp.sessions ?? [];
+  }
+
+  async runOnce(
+    code: string,
+    workspace: string,
+    opts?: RunOnceOpts,
+  ): Promise<CommandExecution> {
+    const session = await this.create({
+      workspace: { path: workspace, mode: opts?.workspaceMode },
+      profile: opts?.profile,
+      share_net: opts?.shareNet,
+      binds: opts?.binds,
+    });
+    try {
+      return await session.run(code, opts?.runOpts, opts?.handlers, opts?.signal);
+    } finally {
+      try { await session.delete(); } catch { /* best-effort cleanup */ }
+    }
+  }
+
+  async withSession<T>(
+    request: CreateIsolatedSessionRequest,
+    fn: (session: IsolationSession) => Promise<T>,
+  ): Promise<T> {
+    const session = await this.create(request);
+    try {
+      return await fn(session);
+    } finally {
+      try { await session.delete(); } catch { /* best-effort cleanup */ }
+    }
   }
 }

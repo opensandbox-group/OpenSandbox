@@ -61,3 +61,43 @@ type Task struct {
 	// Status is now a first-class citizen and persisted.
 	Status Status `json:"status"`
 }
+
+// StartError is returned by Executor.Start() to carry a structured Reason so
+// that the manager can persist an accurate SubStatus without guessing.
+type StartError struct {
+	// Reason is a machine-readable token such as "PreStartHookFailed" or
+	// "ProcessStartFailed".
+	Reason string
+	// Message is a human-readable description, typically including stderr.
+	Message string
+}
+
+func (e *StartError) Error() string {
+	return e.Message
+}
+
+// Predefined Reason constants for StartError.
+const (
+	ReasonPreStartHookFailed = "PreStartHookFailed"
+	ReasonProcessStartFailed = "ProcessStartFailed"
+)
+
+// StopError is returned by Executor.Stop() to carry a structured Reason so
+// that the manager can persist an accurate SubStatus without guessing.
+type StopError struct {
+	// Reason is a machine-readable token such as "ProcessStopFailed" or
+	// "PostStopHookFailed".
+	Reason string
+	// Message is a human-readable description, typically including stderr.
+	Message string
+}
+
+func (e *StopError) Error() string {
+	return e.Message
+}
+
+// Predefined Reason constants for StopError.
+const (
+	ReasonProcessStopFailed  = "ProcessStopFailed"
+	ReasonPostStopHookFailed = "PostStopHookFailed"
+)

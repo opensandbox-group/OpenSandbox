@@ -51,11 +51,19 @@ type TransportConfig struct {
 
 // DefaultTransportConfig returns connection pool settings tuned for SDK
 // workloads: moderate concurrency across multiple sandbox endpoints.
+//
+// IdleConnTimeout is deliberately kept below the idle timeout of common load
+// balancers/proxies (often 60s). Many LBs drop an idle keep-alive connection
+// without sending a FIN; if the SDK later reuses such a connection the request
+// hangs until it times out. Evicting idle connections after 30s ensures the SDK
+// closes them before a typical LB does, so they are never reused while dead.
+// (doRequest additionally retries idempotent requests on a fresh connection as
+// a backstop for shorter or unknown LB timeouts.)
 func DefaultTransportConfig() TransportConfig {
 	return TransportConfig{
 		MaxIdleConns:                  100,
 		MaxIdleConnsPerHost:           10,
-		IdleConnTimeout:               90 * time.Second,
+		IdleConnTimeout:               30 * time.Second,
 		TLSHandshakeTimeout:           10 * time.Second,
 		DialTimeout:                   30 * time.Second,
 		KeepAlive:                     30 * time.Second,

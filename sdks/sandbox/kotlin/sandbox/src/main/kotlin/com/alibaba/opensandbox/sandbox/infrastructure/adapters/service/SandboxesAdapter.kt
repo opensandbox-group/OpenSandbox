@@ -257,7 +257,7 @@ internal class SandboxesAdapter(
 
     override fun listSnapshots(filter: SnapshotFilter): PagedSnapshotInfos {
         return try {
-            snapshotApi.snapshotsGet(filter.sandboxId, filter.states, filter.page, filter.pageSize).toPagedSnapshotInfos()
+            snapshotApi.snapshotsGet(filter.sandboxId, filter.name, filter.states, filter.page, filter.pageSize).toPagedSnapshotInfos()
         } catch (e: Exception) {
             throw e.toSandboxException()
         }

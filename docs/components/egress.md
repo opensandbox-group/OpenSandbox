@@ -9,6 +9,10 @@ The **Egress** is a core component of OpenSandbox that provides **FQDN-based egr
 
 It runs alongside the sandbox application container (sharing the same network namespace) and enforces declared network policies.
 
+::: warning Pooled sandboxes
+The lifecycle API cannot add this sidecar to a pod that was already created by a Pool. It therefore rejects per-request `networkPolicy` together with `extensions.poolRef` instead of silently ignoring the policy. Put required egress controls in the Pool pod template before pods are created, or use a non-pooled sandbox for per-request policies.
+:::
+
 ## Features
 
 - **FQDN-based Allowlist**: Control outbound traffic by domain name (e.g., `api.github.com`).
@@ -17,7 +21,7 @@ It runs alongside the sandbox application container (sharing the same network na
 - **Transparent Interception**: Uses transparent DNS proxying; no application configuration required.
 - **Experimental: Transparent HTTPS MITM (mitmproxy)**: Optional transparent TLS interception for outbound `80/443` traffic in the sidecar network namespace.
 - **Dynamic DNS (dns+nft mode)**: When a domain is allowed and the proxy resolves it, the resolved A/AAAA IPs are added to nftables with TTL so that default-deny + domain-allow is enforced at the network layer.
-- **Credential Vault**: Automatic credential injection (bearer, basic, API-key, custom headers) for allowed hosts via transparent mitmproxy. See [Credential Vault](/guides/credential-vault).
+- **Credential Vault**: Automatic credential injection (bearer, basic, API-key, custom headers, and scoped placeholder substitutions) for allowed hosts via transparent mitmproxy. See [Credential Vault](/guides/credential-vault).
 - **Privilege Isolation**: Requires `CAP_NET_ADMIN` only for the sidecar; the application container runs unprivileged.
 - **Fail-Closed Enforcement**: DNS redirect setup is required through `iptables` or the native nft fallback; the sidecar exits if no enforced redirect can be installed. Optional subsystems (OpenTelemetry, startup hooks) degrade gracefully.
 

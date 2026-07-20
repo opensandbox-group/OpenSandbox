@@ -18,6 +18,34 @@
  */
 
 export interface paths {
+    "/metrics/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report an SDK metrics event
+         * @description Accepts best-effort telemetry from SDKs (Phase 1: sandbox creation latency).
+         *
+         *     SDKs SHOULD fire-and-forget this call after `create` + readiness complete
+         *     (or after a failed creation attempt). Failures to report MUST NOT affect
+         *     sandbox usability. The server accepts events even when OpenTelemetry
+         *     export is disabled (noop recording).
+         *
+         *     SDK language and version are taken from the HTTP `User-Agent` header
+         *     (for example `OpenSandbox-Python-SDK/0.1.14`), not from the JSON body.
+         */
+        post: operations["reportMetricsEvent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sandboxes": {
         parameters: {
             query?: never;
@@ -153,6 +181,8 @@ export interface paths {
                 query?: {
                     /** @description Filter snapshots by source sandbox identifier */
                     sandboxId?: string;
+                    /** @description Filter snapshots by exact snapshot name */
+                    name?: string;
                     /**
                      * @description Filter by snapshot lifecycle state. Pass multiple times for OR logic.
                      *     Example: `?state=Ready&state=Failed`
@@ -741,6 +771,28 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description SDK-reported metrics event. Phase 1 covers sandbox creation latency from
+         *     the start of create until readiness succeeds or creation fails.
+         *
+         *     SDK language and package version are identified via the request
+         *     `User-Agent` header (for example `OpenSandbox-Go-SDK/0.1.0`), not body fields.
+         */
+        MetricsEvent: {
+            /**
+             * @description Metric event type
+             * @enum {string}
+             */
+            eventType: "sandbox.create";
+            /** @description Sandbox identifier when available (may be omitted if create failed before an ID was assigned) */
+            sandboxId?: string;
+            /** @description Container image URI or snapshot startup source label */
+            image?: string;
+            /** @description Wall-clock duration in milliseconds from create start to ready or failure */
+            createDurationMs: number;
+            /** @description Whether create + readiness completed successfully */
+            success: boolean;
+        };
         ListSandboxesResponse: {
             items: components["schemas"]["Sandbox"][];
             pagination: components["schemas"]["PaginationInfo"];
@@ -1026,7 +1078,8 @@ export interface components {
          *     **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
          *     a pre-configured pool. In this case `image`, `entrypoint`, and
          *     `resourceLimits` are all optional (defined by the Pool CRD template).
-         *     `snapshotId` must not be provided together with `poolRef`.
+         *     `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
+         *     `credentialProxy.enabled` must not be provided together with `poolRef`.
          *
          *     **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
          */
@@ -1126,6 +1179,9 @@ export interface components {
              * @description Optional outbound network policy for the sandbox.
              *     Shape matches the sidecar `/policy` endpoint. If omitted or empty,
              *     the sidecar starts in allow-all mode until updated.
+             *     Not supported together with `extensions.poolRef`; pooled pods are
+             *     pre-created, so the server rejects this combination instead of
+             *     silently ignoring the requested policy.
              */
             networkPolicy?: components["schemas"]["NetworkPolicy"];
             /**
@@ -1497,4 +1553,40 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    reportMetricsEvent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "eventType": "sandbox.create",
+                 *       "sandboxId": "sbx_01HZYEXAMPLE",
+                 *       "image": "python:3.12",
+                 *       "createDurationMs": 1842,
+                 *       "success": true
+                 *     }
+                 */
+                "application/json": components["schemas"]["MetricsEvent"];
+            };
+        };
+        responses: {
+            /** @description Event accepted */
+            204: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestId"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+}

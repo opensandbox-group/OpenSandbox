@@ -67,6 +67,46 @@ class PoolLifecycleState(Enum):
     STOPPED = "STOPPED"
 
 
+class PoolDestroyState(Enum):
+    """Shared destroy lifecycle for one pool namespace."""
+
+    ACTIVE = "ACTIVE"
+    DESTROYING = "DESTROYING"
+    DESTROYED = "DESTROYED"
+
+
+class PoolDestroyStrategy(Enum):
+    """Destroy strategy. V1 implements FORCE only."""
+
+    FORCE = "FORCE"
+
+
+@dataclass(frozen=True)
+class PoolDestroyOptions:
+    """Options for destroying a pool namespace."""
+
+    strategy: PoolDestroyStrategy = PoolDestroyStrategy.FORCE
+    tombstone_ttl: timedelta | None = timedelta(days=7)
+    drain_timeout: timedelta = timedelta(seconds=30)
+
+    def __post_init__(self) -> None:
+        if self.tombstone_ttl is not None:
+            _require_positive(self.tombstone_ttl, "tombstone_ttl must be positive")
+        if self.drain_timeout.total_seconds() < 0:
+            raise ValueError("drain_timeout must be non-negative")
+
+
+@dataclass(frozen=True)
+class PoolDestroyResult:
+    """Result of a successful pool namespace destroy operation."""
+
+    pool_name: str
+    state: PoolDestroyState
+    drained_idle_count: int
+    killed_idle_count: int
+    persistent_state_cleared: bool
+
+
 @dataclass(frozen=True)
 class IdleEntry:
     sandbox_id: str
@@ -180,6 +220,16 @@ class PoolStateStore(Protocol):
 
     def set_idle_entry_ttl(self, pool_name: str, idle_ttl: timedelta) -> None: ...
 
+    def get_destroy_state(self, pool_name: str) -> PoolDestroyState: ...
+
+    def begin_destroy(self, pool_name: str, owner_id: str) -> None: ...
+
+    def clear_pool_state(self, pool_name: str) -> None: ...
+
+    def mark_destroyed(
+        self, pool_name: str, owner_id: str, tombstone_ttl: timedelta | None
+    ) -> None: ...
+
 
 class AsyncPoolStateStore(Protocol):
     """Async coordination state and idle sandbox membership store."""
@@ -211,6 +261,16 @@ class AsyncPoolStateStore(Protocol):
     async def set_max_idle(self, pool_name: str, max_idle: int) -> None: ...
 
     async def set_idle_entry_ttl(self, pool_name: str, idle_ttl: timedelta) -> None: ...
+
+    async def get_destroy_state(self, pool_name: str) -> PoolDestroyState: ...
+
+    async def begin_destroy(self, pool_name: str, owner_id: str) -> None: ...
+
+    async def clear_pool_state(self, pool_name: str) -> None: ...
+
+    async def mark_destroyed(
+        self, pool_name: str, owner_id: str, tombstone_ttl: timedelta | None
+    ) -> None: ...
 
 
 @dataclass(frozen=True)

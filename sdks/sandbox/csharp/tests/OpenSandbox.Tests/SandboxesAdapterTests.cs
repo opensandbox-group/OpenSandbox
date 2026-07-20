@@ -156,6 +156,23 @@ public class SandboxesAdapterTests
         result.Metadata.Should().ContainKey("team").WhoseValue.Should().Be("platform");
     }
 
+    [Fact]
+    public async Task ListSnapshotsAsync_ShouldIncludeExactNameFilter()
+    {
+        var handler = new CaptureListSnapshotsHandler();
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        _ = await adapter.ListSnapshotsAsync(new ListSnapshotsParams
+        {
+            Name = "toolchain:csharp@rev-1"
+        });
+
+        handler.PathAndQuery.Should().Be(
+            "/v1/snapshots?name=toolchain%3Acsharp%40rev-1");
+    }
+
     private static SandboxesAdapter CreateAdapterWithJsonResponse(string payload)
     {
         var handler = new StaticJsonHandler(payload);
@@ -244,6 +261,35 @@ public class SandboxesAdapterTests
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
             return response;
+        }
+    }
+
+    private sealed class CaptureListSnapshotsHandler : HttpMessageHandler
+    {
+        public string? PathAndQuery { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            PathAndQuery = request.RequestUri?.PathAndQuery;
+            const string payload = """
+            {
+              "items": [],
+              "pagination": {
+                "page": 1,
+                "pageSize": 20,
+                "totalItems": 0,
+                "totalPages": 0,
+                "hasNextPage": false
+              }
+            }
+            """;
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+            return Task.FromResult(response);
         }
     }
 }

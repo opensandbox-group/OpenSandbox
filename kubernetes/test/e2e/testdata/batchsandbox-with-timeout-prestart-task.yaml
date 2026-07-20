@@ -1,0 +1,19 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: {{.BatchSandboxName}}
+  namespace: {{.Namespace}}
+spec:
+  replicas: {{.Replicas}}
+  poolRef: {{.PoolName}}
+  taskTemplate:
+    spec:
+      process:
+        command: ["echo"]
+        args: ["should not run"]
+        lifecycle:
+          preStart:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 60"]
+            execMode: Local
+            timeoutSeconds: 3

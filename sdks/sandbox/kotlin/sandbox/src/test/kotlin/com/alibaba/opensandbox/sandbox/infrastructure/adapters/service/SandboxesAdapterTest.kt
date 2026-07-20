@@ -417,6 +417,7 @@ class SandboxesAdapterTest {
         val filter =
             SnapshotFilter.builder()
                 .sandboxId("sandbox-123")
+                .name("toolchain:kotlin@rev-1")
                 .states("ready", "pending")
                 .page(1)
                 .pageSize(20)
@@ -432,6 +433,7 @@ class SandboxesAdapterTest {
         val url = request.requestUrl
         assertNotNull(url)
         assertEquals("sandbox-123", url!!.queryParameter("sandboxId"))
+        assertEquals("toolchain:kotlin@rev-1", url.queryParameter("name"))
         assertEquals(listOf("ready", "pending"), url.queryParameterValues("state"))
         assertEquals("1", url.queryParameter("page"))
         assertEquals("20", url.queryParameter("pageSize"))

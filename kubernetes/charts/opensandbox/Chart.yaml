@@ -27,9 +27,9 @@ keywords:
   - lifecycle
   - batchsandbox
 
-home: https://github.com/alibaba/OpenSandbox
+home: https://github.com/opensandbox-group/OpenSandbox
 sources:
-  - https://github.com/alibaba/OpenSandbox/tree/main/kubernetes
+  - https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes
 
 maintainers:
   - name: OpenSandbox Team
@@ -52,6 +52,6 @@ annotations:
   artifacthub.io/prerelease: "false"
   artifacthub.io/links: |
     - name: Documentation
-      url: https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/README.md
+      url: https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/README.md
     - name: Support
-      url: https://github.com/alibaba/OpenSandbox/issues
+      url: https://github.com/opensandbox-group/OpenSandbox/issues

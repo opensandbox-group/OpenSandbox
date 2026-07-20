@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from opensandbox_server.services.k8s.informer import WorkloadInformer
 
@@ -267,3 +267,80 @@ class TestWorkloadInformerStartStop:
 
         informer.stop()
         assert call_count >= 2, "list_fn should be called more than once in poll mode"
+
+    def test_watch_mode_full_resyncs_after_period(self):
+        """A normal watch timeout triggers a full list when the resync period elapses."""
+        list_fn = MagicMock(
+            side_effect=[
+                _list_response("stale"),
+                _list_response("fresh"),
+            ]
+        )
+        informer = WorkloadInformer(
+            list_fn=list_fn,
+            enable_watch=True,
+            resync_period_seconds=5,
+            watch_timeout_seconds=60,
+        )
+        clock = [0.0]
+        watch_timeouts = []
+        fake_watch = MagicMock()
+
+        def stream(*args, **kwargs):
+            watch_timeouts.append(kwargs["timeout_seconds"])
+            clock[0] += kwargs["timeout_seconds"]
+            if len(watch_timeouts) == 2:
+                informer.stop()
+            return iter(())
+
+        fake_watch.stream.side_effect = stream
+
+        with (
+            patch("time.monotonic", side_effect=lambda: clock[0]),
+            patch(
+                "opensandbox_server.services.k8s.informer.watch.Watch",
+                return_value=fake_watch,
+            ),
+        ):
+            informer._run()
+
+        assert watch_timeouts == [5, 5]
+        assert list_fn.call_count == 2
+        assert informer.get("stale") is None
+        assert informer.get("fresh") is not None
+
+    def test_watch_mode_does_not_resync_before_period(self):
+        """Short watch timeouts resume until the full-resync deadline is reached."""
+        list_fn = MagicMock(return_value=_list_response("sandbox"))
+        informer = WorkloadInformer(
+            list_fn=list_fn,
+            enable_watch=True,
+            resync_period_seconds=5,
+            watch_timeout_seconds=2,
+        )
+        clock = [0.0]
+        list_counts = []
+        watch_timeouts = []
+        fake_watch = MagicMock()
+
+        def stream(*args, **kwargs):
+            watch_timeouts.append(kwargs["timeout_seconds"])
+            list_counts.append(list_fn.call_count)
+            clock[0] += kwargs["timeout_seconds"]
+            if len(watch_timeouts) == 4:
+                informer.stop()
+            return iter(())
+
+        fake_watch.stream.side_effect = stream
+
+        with (
+            patch("time.monotonic", side_effect=lambda: clock[0]),
+            patch(
+                "opensandbox_server.services.k8s.informer.watch.Watch",
+                return_value=fake_watch,
+            ),
+        ):
+            informer._run()
+
+        assert watch_timeouts == [2, 2, 1, 2]
+        assert list_counts == [1, 1, 1, 2]

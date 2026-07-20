@@ -35,6 +35,8 @@ from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_SECURE_ACCESS_HEADER
+from opensandbox_server.tenants.context import set_current_tenant
+from opensandbox_server.tenants.provider import TenantProviderUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +167,44 @@ def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None
     proxy_renew = getattr(request.app.state, "proxy_renew_coordinator", None)
     if proxy_renew is not None:
         proxy_renew.schedule(sandbox_id)
+
+
+async def _authenticate_websocket_tenant(websocket: WebSocket) -> bool:
+    """Authenticate WebSocket connections in multi-tenant mode.
+
+    BaseHTTPMiddleware only intercepts HTTP requests, so WebSocket
+    connections must be authenticated here to establish tenant context.
+    Returns True if the request is authorized (or single-tenant mode).
+    """
+    import asyncio
+
+    provider = getattr(websocket.app.state, "tenant_provider", None)
+    if provider is None:
+        return True
+
+    api_key = websocket.headers.get(SANDBOX_API_KEY_HEADER)
+    if not api_key:
+        await _fail_client_websocket(
+            websocket, status.WS_1008_POLICY_VIOLATION, "missing API key"
+        )
+        return False
+
+    try:
+        tenant = await asyncio.to_thread(provider.lookup, api_key)
+    except TenantProviderUnavailable:
+        await _fail_client_websocket(
+            websocket, status.WS_1011_INTERNAL_ERROR, "tenant provider unavailable"
+        )
+        return False
+
+    if tenant is None:
+        await _fail_client_websocket(
+            websocket, status.WS_1008_POLICY_VIOLATION, "invalid API key"
+        )
+        return False
+
+    set_current_tenant(tenant)
+    return True
 
 
 async def _stream_backend_response(resp: httpx.Response) -> AsyncIterator[bytes]:
@@ -359,6 +399,9 @@ async def _proxy_websocket_request(
     port: int,
     full_path: str,
 ) -> None:
+    if not await _authenticate_websocket_tenant(websocket):
+        return
+
     try:
         endpoint = lifecycle.sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
     except HTTPException as exc:
@@ -386,7 +429,6 @@ async def _proxy_websocket_request(
         return
 
     _schedule_proxy_renew(websocket, sandbox_id)
-
     query_string = websocket.url.query or ""
     target_url = _build_proxy_target_url(
         endpoint,

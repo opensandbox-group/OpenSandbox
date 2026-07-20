@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import gc
 import threading
 import time
 
@@ -161,15 +162,26 @@ class TestAsyncEndpointCache:
         assert all(r.endpoint == "result" for r in results)
 
     @pytest.mark.asyncio
-    async def test_get_or_fetch_error(self):
+    async def test_get_or_fetch_error(self, caplog):
         c = AsyncEndpointCache(maxsize=10, ttl=60.0)
         key = ("sb-1", 8080, False)
 
         async def fetch():
             raise RuntimeError("network error")
 
-        with pytest.raises(RuntimeError, match="network error"):
-            await c.get_or_fetch(key, fetch)
+        with caplog.at_level("ERROR", logger="asyncio"):
+            with pytest.raises(RuntimeError, match="network error"):
+                await c.get_or_fetch(key, fetch)
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
+
+        assert not [
+            record
+            for record in caplog.records
+            if "Future exception was never retrieved" in record.getMessage()
+        ]
 
         # Cache should not be populated on error
         assert c.get(key) is None
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]

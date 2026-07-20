@@ -1,0 +1,36 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: {{.PoolName}}
+  namespace: {{.Namespace}}
+spec:
+  template:
+    spec:
+      containers:
+      - name: task-executor
+        image: {{.TaskExecutorImage}}
+        volumeMounts:
+        - name: workspace
+          mountPath: /shared-workspace
+        - name: host-copy
+          mountPath: /host-copy
+      - name: sandbox
+        image: {{.SandboxImage}}
+        command: ["/bin/sh", "-c", "sleep 3600"]
+        volumeMounts:
+        - name: workspace
+          mountPath: /shared-workspace
+      volumes:
+      - name: workspace
+        emptyDir: {}
+      - name: host-copy
+        hostPath:
+          path: {{.HostCopyNodePath}}
+          type: Directory
+  capacitySpec:
+    bufferMax: 0
+    bufferMin: 0
+    poolMax: 2
+    poolMin: 1
+  recycleStrategy:
+    type: Noop

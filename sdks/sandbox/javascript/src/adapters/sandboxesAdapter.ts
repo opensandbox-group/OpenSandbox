@@ -274,6 +274,7 @@ export class SandboxesAdapter implements Sandboxes {
   async listSnapshots(params: ListSnapshotsParams = {}): Promise<ListSnapshotsResponse> {
     const query: Record<string, string | number | (string | number)[] | undefined> = {};
     if (params.sandboxId) query.sandboxId = params.sandboxId;
+    if (params.name != null) query.name = params.name;
     if (params.states?.length) query.state = params.states;
     if (params.page != null) query.page = params.page;
     if (params.pageSize != null) query.pageSize = params.pageSize;

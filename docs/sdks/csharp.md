@@ -420,8 +420,8 @@ await sandbox.CreateCredentialVaultAsync(
     });
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, binding
+guidance, and Git/curl examples.
 
 ### 6. Timeout and Retry Behavior
 

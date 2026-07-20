@@ -76,7 +76,10 @@ class ReconcileState:
         until = self.backoff_until
         if until is None:
             return False
-        return self.state == PoolState.DEGRADED and (now or datetime.now(timezone.utc)) < until
+        return (
+            self.state == PoolState.DEGRADED
+            and (now or datetime.now(timezone.utc)) < until
+        )
 
 
 def run_reconcile_tick(
@@ -93,7 +96,7 @@ def run_reconcile_tick(
     ttl = config.primary_lock_ttl
 
     if not state_store.try_acquire_primary_lock(pool_name, owner_id, ttl):
-        logger.debug("Reconcile skip (not primary): pool_name=%s", pool_name)
+        logger.debug(f"Reconcile skip (not primary): pool_name={pool_name}")
         return
     _run_primary_replenish_once(
         config=config,
@@ -166,9 +169,7 @@ def _run_primary_replenish_once(
             for orphaned_id in created_ids[index:]:
                 _discard(on_discard_sandbox, orphaned_id)
             logger.warning(
-                "Reconcile lost primary lock before put_idle; dropped %s newly created sandbox(es): pool_name=%s",
-                len(created_ids) - index,
-                pool_name,
+                f"Reconcile lost primary lock before put_idle; dropped {len(created_ids) - index} newly created sandbox(es): pool_name={pool_name}"
             )
             return
         try:
@@ -184,14 +185,11 @@ def _run_primary_replenish_once(
                     pass
                 _discard(on_discard_sandbox, orphaned_id)
             logger.warning(
-                "Reconcile put_idle failed; dropped %s newly created sandbox(es): pool_name=%s error=%s",
-                len(created_ids) - index,
-                pool_name,
-                exc,
+                f"Reconcile put_idle failed; dropped {len(created_ids) - index} newly created sandbox(es): pool_name={pool_name} error={exc}"
             )
             return
     if created > 0:
-        logger.debug("Reconcile created %s sandboxes: pool_name=%s", created, pool_name)
+        logger.debug(f"Reconcile created {created} sandboxes: pool_name={pool_name}")
 
 
 def _shrink_excess_idle(
@@ -207,9 +205,7 @@ def _shrink_excess_idle(
     for _ in range(to_remove):
         if not state_store.renew_primary_lock(pool_name, owner_id, ttl):
             logger.warning(
-                "Reconcile lost primary lock before shrinking idle: pool_name=%s removed=%s",
-                pool_name,
-                removed,
+                f"Reconcile lost primary lock before shrinking idle: pool_name={pool_name} removed={removed}"
             )
             return
         sandbox_id = state_store.try_take_idle(pool_name)
@@ -219,7 +215,7 @@ def _shrink_excess_idle(
         removed += 1
 
     state_store.renew_primary_lock(pool_name, owner_id, ttl)
-    logger.debug("Reconcile shrunk %s idle sandbox(es): pool_name=%s", removed, pool_name)
+    logger.debug(f"Reconcile shrunk {removed} idle sandbox(es): pool_name={pool_name}")
 
 
 def _discard(on_discard_sandbox: Callable[[str], None], sandbox_id: str) -> None:
@@ -227,5 +223,5 @@ def _discard(on_discard_sandbox: Callable[[str], None], sandbox_id: str) -> None
         on_discard_sandbox(sandbox_id)
     except Exception as exc:
         logger.warning(
-            "Reconcile sandbox cleanup failed: sandbox_id=%s error=%s", sandbox_id, exc
+            f"Reconcile sandbox cleanup failed: sandbox_id={sandbox_id} error={exc}"
         )

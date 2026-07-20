@@ -42,7 +42,8 @@ npm install @alibaba-group/opensandbox
 
 ```kotlin [Kotlin/Java (Gradle)]
 dependencies {
-    implementation("com.alibaba.opensandbox:sandbox:{latest_version}")
+    implementation(platform("com.alibaba.opensandbox:sandbox-bom:{latest_version}"))
+    implementation("com.alibaba.opensandbox:sandbox")
 }
 ```
 
@@ -82,7 +83,9 @@ npm install @alibaba-group/opensandbox-code-interpreter
 
 ```kotlin [Kotlin/Java (Gradle)]
 dependencies {
-    implementation("com.alibaba.opensandbox:code-interpreter:{latest_version}")
+    implementation(platform("com.alibaba.opensandbox:sandbox-bom:{latest_version}"))
+    implementation("com.alibaba.opensandbox:sandbox")
+    implementation("com.alibaba.opensandbox:code-interpreter")
 }
 ```
 

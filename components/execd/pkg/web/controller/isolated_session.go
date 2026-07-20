@@ -79,28 +79,34 @@ func (c *IsolatedSessionController) Create() {
 		return
 	}
 
+	binds := make([]isolation.BindMount, 0, len(req.Binds))
+	for _, b := range req.Binds {
+		binds = append(binds, isolation.BindMount{
+			Source:   b.Source,
+			Dest:     b.Dest,
+			ReadOnly: b.ReadOnly,
+		})
+	}
+
 	opts := &runtime.IsolatedSessionOptions{
 		Profile:            req.Profile,
 		WorkspacePath:      req.Workspace.Path,
 		WorkspaceMode:      req.Workspace.Mode,
 		ExtraWritable:      req.ExtraWritable,
+		Binds:              binds,
 		ShareNet:           req.ShareNet,
 		EnvPassthroughMode: req.EnvPassthrough.Mode,
 		EnvPassthroughKeys: req.EnvPassthrough.Keys,
 		Uid:                req.Uid,
 		Gid:                req.Gid,
+		UidMode:            req.UidMode,
 		IdleTimeoutSeconds: req.IdleTimeoutSeconds,
 	}
 
 	sessionID, err := isolatedRunner.CreateIsolatedSession(opts)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "not in allowlist") ||
-			strings.Contains(err.Error(), "not allowed") ||
-			strings.Contains(err.Error(), "unknown isolation profile") {
-			status = http.StatusBadRequest
-		}
-		c.RespondError(status, model.ErrorCodeRuntimeError, err.Error())
+		status, code := classifyIsolatedCreateError(err)
+		c.RespondError(status, code, err.Error())
 		return
 	}
 
@@ -108,6 +114,21 @@ func (c *IsolatedSessionController) Create() {
 		SessionID: sessionID,
 		CreatedAt: time.Now(),
 	})
+}
+
+func classifyIsolatedCreateError(err error) (int, model.ErrorCode) {
+	if errors.Is(err, runtime.ErrUidModeUnavailable) {
+		return http.StatusServiceUnavailable, model.ErrorCodeNotSupported
+	}
+	if strings.Contains(err.Error(), "not in allowlist") ||
+		strings.Contains(err.Error(), "not allowed") ||
+		strings.Contains(err.Error(), "unknown isolation profile") ||
+		strings.Contains(err.Error(), "must be an existing path") ||
+		strings.Contains(err.Error(), "must be an absolute path") ||
+		strings.Contains(err.Error(), "source is required") {
+		return http.StatusBadRequest, model.ErrorCodeRuntimeError
+	}
+	return http.StatusInternalServerError, model.ErrorCodeRuntimeError
 }
 
 // Get handles GET /v1/isolated/session/:sessionId.
@@ -128,12 +149,71 @@ func (c *IsolatedSessionController) Get() {
 		return
 	}
 
-	c.RespondSuccess(model.SessionState{
+	resp := model.SessionState{
 		Status:               state.Status,
 		CreatedAt:            state.CreatedAt,
 		LastRunAt:            state.LastRunAt,
 		IdleRemainingSeconds: state.IdleRemainingSeconds,
-	})
+
+		Profile:       state.Profile,
+		ExtraWritable: state.ExtraWritable,
+		ShareNet:      state.ShareNet,
+		Uid:           state.Uid,
+		Gid:           state.Gid,
+		UidMode:       state.UidMode,
+	}
+	if state.WorkspacePath != "" {
+		resp.Workspace = &model.WorkspaceSpec{
+			Path: state.WorkspacePath,
+			Mode: state.WorkspaceMode,
+		}
+	}
+	if len(state.Binds) > 0 {
+		resp.Binds = make([]model.BindMount, 0, len(state.Binds))
+		for _, b := range state.Binds {
+			resp.Binds = append(resp.Binds, model.BindMount{
+				Source:   b.Source,
+				Dest:     b.Dest,
+				ReadOnly: b.ReadOnly,
+			})
+		}
+	}
+	if state.EnvPassthroughMode != "" || len(state.EnvPassthroughKeys) > 0 {
+		resp.EnvPassthrough = &model.EnvPassthroughSpec{
+			Mode: state.EnvPassthroughMode,
+			Keys: state.EnvPassthroughKeys,
+		}
+	}
+	// Echo idle_timeout_seconds unconditionally. A value of 0 is meaningful:
+	// it means the session was created with idle GC disabled — the exact
+	// configuration a stateless caller doing long-window recovery needs to
+	// see. Older execd builds that don't set this field are distinguished
+	// by the pointer being nil.
+	idle := state.IdleTimeoutSeconds
+	resp.IdleTimeoutSeconds = &idle
+	c.RespondSuccess(resp)
+}
+
+// List handles GET /v1/isolated/sessions.
+func (c *IsolatedSessionController) List() {
+	if !c.probed() {
+		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
+		return
+	}
+
+	sessions := isolatedRunner.ListIsolatedSessions()
+	items := make([]model.IsolatedSessionSummary, 0, len(sessions))
+	for _, s := range sessions {
+		items = append(items, model.IsolatedSessionSummary{
+			SessionID:            s.SessionID,
+			Status:               s.Status,
+			CreatedAt:            s.CreatedAt,
+			LastRunAt:            s.LastRunAt,
+			IdleRemainingSeconds: s.IdleRemainingSeconds,
+		})
+	}
+
+	c.RespondSuccess(model.ListIsolatedSessionsResponse{Sessions: items})
 }
 
 // Run handles POST /v1/isolated/session/:sessionId/run (SSE streaming).
@@ -252,18 +332,24 @@ func (c *IsolatedSessionController) Capabilities() {
 			DiffSupported:   false,
 		}
 		if isolatedProbeResult != nil {
+			resp.Isolator = isolatedProbeResult.Isolator
+			resp.Version = isolatedProbeResult.Version
 			resp.Message = isolatedProbeResult.Message
+			resp.SetprivAvailable = isolatedProbeResult.SetprivAvailable
+			resp.UsernsAvailable = isolatedProbeResult.UsernsAvailable
 		}
 		c.RespondSuccess(resp)
 		return
 	}
 	caps := isolatedRunner.Capabilities()
 	resp := model.CapabilitiesResponse{
-		Available:       caps.Available,
-		Isolator:        caps.Isolator,
-		Version:         caps.Version,
-		CommitSupported: caps.CommitSupported,
-		DiffSupported:   caps.DiffSupported,
+		Available:        caps.Available,
+		Isolator:         caps.Isolator,
+		Version:          caps.Version,
+		SetprivAvailable: caps.SetprivAvailable,
+		UsernsAvailable:  caps.UsernsAvailable,
+		CommitSupported:  caps.CommitSupported,
+		DiffSupported:    caps.DiffSupported,
 	}
 	// Probe results indicate overlay capability, not diff/commit implementation.
 	// Diff and commit are Phase 2; do not advertise them as supported.

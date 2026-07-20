@@ -24,6 +24,8 @@ func TestBuildMitmdumpArgsNoUserScripts(t *testing.T) {
 	args := buildMitmdumpArgs(Config{ListenPort: 18081})
 	require.Contains(t, args, "--listen-port")
 	require.Contains(t, args, "18081")
+	require.Contains(t, args, "--set")
+	require.Contains(t, args, "flow_detail=0")
 	require.Contains(t, args, "-s")
 	require.Contains(t, args, systemScriptPath)
 	// Only one -s (system addon)

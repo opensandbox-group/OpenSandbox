@@ -62,6 +62,11 @@ export interface ConnectionConfigOptions {
    * Disable endpoint caching entirely.
    */
   endpointCacheDisabled?: boolean;
+  /**
+   * Disable SDK telemetry (sandbox.create latency reports).
+   * Also honored via `OPENSANDBOX_DISABLE_METRICS=1`.
+   */
+  disableMetrics?: boolean;
 }
 
 function isNodeRuntime(): boolean {
@@ -281,6 +286,7 @@ export class ConnectionConfig {
   readonly endpointCacheTtlMs: number;
   readonly endpointCacheSize: number;
   readonly endpointCacheDisabled: boolean;
+  readonly disableMetrics: boolean;
   private _closeTransport: () => Promise<void>;
   private _closePromise: Promise<void> | null = null;
   private _transportInitialized = false;
@@ -291,6 +297,7 @@ export class ConnectionConfig {
    * Environment variables (optional):
    * - `OPEN_SANDBOX_DOMAIN` (default: `localhost:8080`)
    * - `OPEN_SANDBOX_API_KEY`
+   * - `OPENSANDBOX_DISABLE_METRICS=1` to opt out of create-latency telemetry
    */
   constructor(opts: ConnectionConfigOptions = {}) {
     const envDomain = readEnv("OPEN_SANDBOX_DOMAIN");
@@ -312,6 +319,7 @@ export class ConnectionConfig {
     this.endpointCacheTtlMs = opts.endpointCacheTtlMs ?? 600_000;
     this.endpointCacheSize = opts.endpointCacheSize ?? 1024;
     this.endpointCacheDisabled = !!opts.endpointCacheDisabled;
+    this.disableMetrics = !!opts.disableMetrics;
 
     const headers: Record<string, string> = { ...(opts.headers ?? {}) };
     // Attach API key via header unless the user already provided one.
@@ -399,6 +407,7 @@ export class ConnectionConfig {
       endpointCacheTtlMs: this.endpointCacheTtlMs,
       endpointCacheSize: this.endpointCacheSize,
       endpointCacheDisabled: this.endpointCacheDisabled,
+      disableMetrics: this.disableMetrics,
     });
     clone.initializeTransport();
     return clone;

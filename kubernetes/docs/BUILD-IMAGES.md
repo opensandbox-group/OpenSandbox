@@ -43,7 +43,7 @@ COMPONENT=task-executor TAG=v0.1.0 ./build.sh
 
 ### Manually Trigger the Workflow
 
-1. Open the [Actions page](https://github.com/alibaba/OpenSandbox/actions)
+1. Open the [Actions page](https://github.com/opensandbox-group/OpenSandbox/actions)
 2. Select the "Publish Components Image" workflow
 3. Click "Run workflow"
 4. Select the component and image tag:
