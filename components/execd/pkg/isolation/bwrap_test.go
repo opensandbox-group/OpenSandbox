@@ -321,37 +321,62 @@ func TestBuildArgv_Binds(t *testing.T) {
 }
 
 func TestBuildArgv_Setpriv(t *testing.T) {
-	t.Run("default_uid_gid", func(t *testing.T) {
+	t.Run("matching_process_identity_omits_setpriv", func(t *testing.T) {
 		opts := basicWrapOpts()
-		argv, err := buildArgv(opts, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		s := strings.Join(argv, " ")
-		if !strings.Contains(s, "setpriv") {
-			t.Error("missing setpriv")
-		}
-		if !strings.Contains(s, "--clear-groups") {
-			t.Error("missing --clear-groups")
-		}
-	})
-
-	t.Run("explicit_uid_gid", func(t *testing.T) {
-		opts := basicWrapOpts()
-		u, g := uint32(1001), uint32(1002)
+		u, g := uint32(os.Geteuid()), uint32(os.Getegid())
 		opts.Uid = &u
 		opts.Gid = &g
 		argv, err := buildArgv(opts, "")
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		s := strings.Join(argv, " ")
-		if !strings.Contains(s, "--reuid=1001") {
-			t.Error("missing --reuid=1001")
-		}
-		if !strings.Contains(s, "--regid=1002") {
-			t.Error("missing --regid=1002")
-		}
+		assert.NotContains(t, s, "setpriv")
+		assert.NotContains(t, s, "--clear-groups")
+	})
+
+	t.Run("default_uid_gid", func(t *testing.T) {
+		opts := basicWrapOpts()
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.NotContains(t, s, "setpriv")
+		assert.NotContains(t, s, "--clear-groups")
+	})
+
+	t.Run("explicit_matching_uid_gid", func(t *testing.T) {
+		opts := basicWrapOpts()
+		u, g := uint32(os.Geteuid()), uint32(os.Getegid())
+		opts.Uid = &u
+		opts.Gid = &g
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.NotContains(t, s, "setpriv")
+	})
+}
+
+func TestIdentitySwitchArgv(t *testing.T) {
+	t.Run("matching_non_root_identity_omits_setpriv", func(t *testing.T) {
+		argv, err := identitySwitchArgv(1000, 1000, 1000, 1000)
+		require.NoError(t, err)
+		assert.Empty(t, argv)
+	})
+
+	t.Run("non_root_cannot_switch_uid", func(t *testing.T) {
+		argv, err := identitySwitchArgv(1000, 1000, 1001, 1000)
+		require.ErrorContains(t, err, "cannot switch identity")
+		assert.Empty(t, argv)
+	})
+
+	t.Run("non_root_cannot_switch_gid", func(t *testing.T) {
+		argv, err := identitySwitchArgv(1000, 1000, 1000, 1001)
+		require.ErrorContains(t, err, "cannot switch identity")
+		assert.Empty(t, argv)
+	})
+
+	t.Run("root_switches_identity_and_clears_groups", func(t *testing.T) {
+		argv, err := identitySwitchArgv(0, 0, 1000, 1000)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"setpriv", "--reuid=1000", "--regid=1000", "--clear-groups"}, argv)
 	})
 }
 
@@ -402,9 +427,9 @@ func TestBuildArgv_Userns(t *testing.T) {
 		assert.NotContains(t, s, "--regid", "userns mode must not include --regid")
 	})
 
-	t.Run("setpriv_mode_no_unshare_user", func(t *testing.T) {
+	t.Run("setpriv_mode_matching_identity_omits_setpriv", func(t *testing.T) {
 		opts := basicWrapOpts()
-		u, g := uint32(1000), uint32(1000)
+		u, g := uint32(os.Geteuid()), uint32(os.Getegid())
 		opts.Uid = &u
 		opts.Gid = &g
 		opts.UidMode = UidModeSetpriv
@@ -414,23 +439,22 @@ func TestBuildArgv_Userns(t *testing.T) {
 
 		assert.NotContains(t, s, "--unshare-user", "setpriv mode must not include --unshare-user")
 		assert.NotContains(t, s, "--disable-userns", "setpriv mode must not include --disable-userns")
-		assert.Contains(t, s, "setpriv", "setpriv mode must include setpriv")
-		assert.Contains(t, s, "--reuid=1000", "setpriv mode must include --reuid")
-		assert.Contains(t, s, "--regid=1000", "setpriv mode must include --regid")
+		assert.NotContains(t, s, "setpriv", "matching identity must not invoke setpriv")
 	})
 
-	t.Run("empty_uid_mode_defaults_to_setpriv", func(t *testing.T) {
+	t.Run("empty_uid_mode_matching_identity_omits_setpriv", func(t *testing.T) {
 		opts := basicWrapOpts()
-		u, g := uint32(1000), uint32(1000)
+		u, g := uint32(os.Geteuid()), uint32(os.Getegid())
 		opts.Uid = &u
 		opts.Gid = &g
-		// UidMode is empty string — should behave like setpriv.
+		// Empty UidMode follows setpriv-mode identity rules, including omitting
+		// setpriv when no identity change is required.
 		argv, err := buildArgv(opts, "")
 		require.NoError(t, err)
 		s := strings.Join(argv, " ")
 
 		assert.NotContains(t, s, "--unshare-user")
-		assert.Contains(t, s, "setpriv")
+		assert.NotContains(t, s, "setpriv")
 	})
 
 	t.Run("userns_namespace_flag_order", func(t *testing.T) {
@@ -502,7 +526,7 @@ func TestBuildArgv_SegmentOrder(t *testing.T) {
 		{"8.extra_writable", "--bind"},
 		{"9.env", "--unsetenv"},
 		{"10.seccomp", "--seccomp"},
-		{"11.setpriv", "setpriv"},
+		{"11.lifecycle", "--die-with-parent"},
 	}
 
 	lastIdx := -1

@@ -126,8 +126,10 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 
 	// In userns mode, uid/gid are set via --uid/--gid in segment 1.
 	if !useUserns {
-		uid := uint32(os.Getuid())
-		gid := uint32(os.Getgid())
+		currentUID := uint32(os.Geteuid())
+		currentGID := uint32(os.Getegid())
+		uid := currentUID
+		gid := currentGID
 		if opts.Uid != nil {
 			uid = *opts.Uid
 		}
@@ -135,18 +137,35 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 			gid = *opts.Gid
 		}
 
-		if uid != 0 || gid != 0 {
-			setprivArgv := []string{
-				"setpriv",
-				fmt.Sprintf("--reuid=%d", uid),
-				fmt.Sprintf("--regid=%d", gid),
-				"--clear-groups",
-			}
-			argv = append(argv, setprivArgv...)
+		identityArgv, err := identitySwitchArgv(currentUID, currentGID, uid, gid)
+		if err != nil {
+			return nil, err
 		}
+		argv = append(argv, identityArgv...)
 	}
 
 	return argv, nil
+}
+
+func identitySwitchArgv(effectiveUID, effectiveGID, targetUID, targetGID uint32) ([]string, error) {
+	// setpriv is redundant when the requested identity already matches execd.
+	// In particular, --clear-groups calls setgroups(2), which a non-root process
+	// cannot use in a locked-down container.
+	if targetUID == effectiveUID && targetGID == effectiveGID {
+		return nil, nil
+	}
+	if effectiveUID != 0 {
+		return nil, fmt.Errorf(
+			"isolation: cannot switch identity from %d:%d to %d:%d as non-root; use uid_mode=userns",
+			effectiveUID, effectiveGID, targetUID, targetGID,
+		)
+	}
+	return []string{
+		"setpriv",
+		fmt.Sprintf("--reuid=%d", targetUID),
+		fmt.Sprintf("--regid=%d", targetGID),
+		"--clear-groups",
+	}, nil
 }
 
 // validateWrapOptions checks for invalid or conflicting options.
