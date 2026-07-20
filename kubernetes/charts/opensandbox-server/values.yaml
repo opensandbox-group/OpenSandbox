@@ -71,6 +71,9 @@ server:
     dataplaneNamespace: "opensandbox"
     providerType: "batchsandbox"
     logLevel: "info"
+    # -- Additional environment variables for the ingress-gateway container
+    # (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics).
+    env: []
     resources:
       limits:
         cpu: "2"

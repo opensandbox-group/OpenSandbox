@@ -121,6 +121,10 @@ spec:
             - name: http
               containerPort: {{ .Values.server.gateway.port }}
               protocol: TCP
+          {{- with .Values.server.gateway.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /status.ok
