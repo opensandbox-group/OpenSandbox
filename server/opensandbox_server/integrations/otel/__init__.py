@@ -15,13 +15,13 @@
 """Optional OpenTelemetry integration for SDK metrics ingestion."""
 
 from opensandbox_server.integrations.otel.metrics import (
-    record_sandbox_create_duration,
+    record_sandbox_lifecycle_duration,
     setup_otel_metrics,
     shutdown_otel_metrics,
 )
 
 __all__ = [
-    "record_sandbox_create_duration",
+    "record_sandbox_lifecycle_duration",
     "setup_otel_metrics",
     "shutdown_otel_metrics",
 ]

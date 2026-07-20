@@ -17,11 +17,17 @@ import type { ConnectionConfig } from "../config/connection.js";
 
 const DISABLE_METRICS_ENV = "OPENSANDBOX_DISABLE_METRICS";
 
-export interface SandboxCreateMetricsPayload {
-  eventType: "sandbox.create";
+export type SandboxLifecycleEventType =
+  | "sandbox.create"
+  | "sandbox.resume"
+  | "sandbox.pause"
+  | "sandbox.kill";
+
+export interface SandboxLifecycleMetricsPayload {
+  eventType: SandboxLifecycleEventType;
   sandboxId?: string;
   image?: string;
-  createDurationMs: number;
+  durationMs: number;
   success: boolean;
 }
 
@@ -41,16 +47,17 @@ function metricsDisabled(connectionConfig: ConnectionConfig): boolean {
 }
 
 /**
- * Best-effort fire-and-forget report of sandbox create latency.
+ * Best-effort fire-and-forget report of a sandbox lifecycle operation latency.
  * Never throws and never awaits for callers.
  * SDK identity is conveyed via the User-Agent header.
  */
-export function reportSandboxCreateMetric(
+export function reportSandboxLifecycleMetric(
   connectionConfig: ConnectionConfig,
   opts: {
+    eventType: SandboxLifecycleEventType;
     sandboxId?: string;
     image?: string;
-    createDurationMs: number;
+    durationMs: number;
     success: boolean;
   }
 ): void {
@@ -58,9 +65,9 @@ export function reportSandboxCreateMetric(
     return;
   }
 
-  const payload: SandboxCreateMetricsPayload = {
-    eventType: "sandbox.create",
-    createDurationMs: Math.max(0, Math.floor(opts.createDurationMs)),
+  const payload: SandboxLifecycleMetricsPayload = {
+    eventType: opts.eventType,
+    durationMs: Math.max(0, Math.floor(opts.durationMs)),
     success: opts.success,
   };
   if (opts.sandboxId) {

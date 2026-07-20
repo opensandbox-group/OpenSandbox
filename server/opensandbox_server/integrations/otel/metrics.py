@@ -30,12 +30,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CREATE_DURATION_HISTOGRAM_NAME = "opensandbox.sandbox.create.duration"
-_CREATE_DURATION_UNIT = "ms"
-_CREATE_DURATION_DESCRIPTION = (
-    "Sandbox creation latency from SDK create start until ready or failure"
-)
-_CREATE_DURATION_BOUNDARIES = (
+_DURATION_UNIT = "ms"
+_DURATION_BOUNDARIES = (
     100.0,
     250.0,
     500.0,
@@ -47,25 +43,49 @@ _CREATE_DURATION_BOUNDARIES = (
     60000.0,
 )
 
+# Lifecycle event type -> (histogram name, description)
+_LIFECYCLE_HISTOGRAMS = {
+    "sandbox.create": (
+        "opensandbox.sandbox.create.duration",
+        "Sandbox creation latency from SDK create start until ready or failure",
+    ),
+    "sandbox.resume": (
+        "opensandbox.sandbox.resume.duration",
+        "Sandbox resume latency from SDK resume start until ready or failure",
+    ),
+    "sandbox.pause": (
+        "opensandbox.sandbox.pause.duration",
+        "Sandbox pause latency from SDK pause start until completion or failure",
+    ),
+    "sandbox.kill": (
+        "opensandbox.sandbox.kill.duration",
+        "Sandbox kill latency from SDK kill start until completion or failure",
+    ),
+}
+
 _meter_provider: Optional[MeterProvider] = None
-_create_duration_histogram = None
+_duration_histograms: dict[str, object] = {}
 
 
-def _histogram_from_provider(provider: MeterProvider):
-    return provider.get_meter("opensandbox.server").create_histogram(
-        name=_CREATE_DURATION_HISTOGRAM_NAME,
-        unit=_CREATE_DURATION_UNIT,
-        description=_CREATE_DURATION_DESCRIPTION,
-    )
+def _histograms_from_provider(provider: MeterProvider) -> dict[str, object]:
+    meter = provider.get_meter("opensandbox.server")
+    return {
+        event_type: meter.create_histogram(
+            name=name,
+            unit=_DURATION_UNIT,
+            description=description,
+        )
+        for event_type, (name, description) in _LIFECYCLE_HISTOGRAMS.items()
+    }
 
 
 def setup_otel_metrics(config: OtelConfig) -> None:
     """Configure OTEL metrics export when enabled; otherwise keep recording as noop."""
-    global _meter_provider, _create_duration_histogram
+    global _meter_provider, _duration_histograms
 
     # Disabled: do not attach instruments to any global provider (may already export).
     if not config.enabled:
-        _create_duration_histogram = None
+        _duration_histograms = {}
         logger.info(
             "OpenTelemetry metrics export disabled; SDK events are accepted but not exported"
         )
@@ -93,11 +113,12 @@ def setup_otel_metrics(config: OtelConfig) -> None:
     resource = Resource.create({"service.name": config.service_name})
     views = [
         View(
-            instrument_name=_CREATE_DURATION_HISTOGRAM_NAME,
+            instrument_name=name,
             aggregation=ExplicitBucketHistogramAggregation(
-                boundaries=list(_CREATE_DURATION_BOUNDARIES)
+                boundaries=list(_DURATION_BOUNDARIES)
             ),
         )
+        for name, _ in _LIFECYCLE_HISTOGRAMS.values()
     ]
     provider = MeterProvider(
         resource=resource,
@@ -117,7 +138,7 @@ def setup_otel_metrics(config: OtelConfig) -> None:
     # Always bind instruments to *this* provider so export uses our OTLP reader,
     # even when set_meter_provider() cannot override a preexisting global provider.
     _meter_provider = provider
-    _create_duration_histogram = _histogram_from_provider(provider)
+    _duration_histograms = _histograms_from_provider(provider)
     logger.info(
         "OpenTelemetry metrics enabled (service=%s, endpoint=%s)",
         config.service_name,
@@ -127,10 +148,10 @@ def setup_otel_metrics(config: OtelConfig) -> None:
 
 def shutdown_otel_metrics() -> None:
     """Flush and shut down the configured MeterProvider if any."""
-    global _meter_provider, _create_duration_histogram
+    global _meter_provider, _duration_histograms
     provider = _meter_provider
     _meter_provider = None
-    _create_duration_histogram = None
+    _duration_histograms = {}
     if provider is None:
         return
     try:
@@ -139,23 +160,25 @@ def shutdown_otel_metrics() -> None:
         logger.exception("Failed to shut down OpenTelemetry MeterProvider")
 
 
-def record_sandbox_create_duration(
+def record_sandbox_lifecycle_duration(
     *,
-    create_duration_ms: int,
+    event_type: str,
+    duration_ms: int,
     sdk_language: str,
     sdk_version: str,
     success: bool,
 ) -> None:
-    """Record a sandbox.create duration sample. Never raises.
+    """Record a sandbox lifecycle duration sample. Never raises.
 
-    No-ops when OTEL export is disabled or setup has not installed a histogram.
+    No-ops when OTEL export is disabled, setup has not installed histograms,
+    or the event type is unknown.
     """
-    hist = _create_duration_histogram
+    hist = _duration_histograms.get(event_type)
     if hist is None:
         return
     try:
-        hist.record(
-            float(create_duration_ms),
+        hist.record(  # type: ignore[attr-defined]
+            float(duration_ms),
             attributes={
                 "sdk.language": sdk_language,
                 "sdk.version": sdk_version,
@@ -163,4 +186,4 @@ def record_sandbox_create_duration(
             },
         )
     except Exception:
-        logger.exception("Failed to record sandbox create duration metric")
+        logger.exception("Failed to record %s duration metric", event_type)

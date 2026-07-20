@@ -987,10 +987,15 @@ class ListPoolsResponse(BaseModel):
 
 class MetricsEvent(BaseModel):
     """
-    SDK-reported metrics event (Phase 1: sandbox creation latency).
+    SDK-reported metrics event covering sandbox lifecycle latency.
     """
 
-    event_type: Literal["sandbox.create"] = Field(
+    event_type: Literal[
+        "sandbox.create",
+        "sandbox.resume",
+        "sandbox.pause",
+        "sandbox.kill",
+    ] = Field(
         ...,
         alias="eventType",
         description="Metric event type",
@@ -1004,15 +1009,18 @@ class MetricsEvent(BaseModel):
         default=None,
         description="Container image URI or snapshot startup source label",
     )
-    create_duration_ms: int = Field(
+    duration_ms: int = Field(
         ...,
-        alias="createDurationMs",
+        alias="durationMs",
         ge=0,
-        description="Wall-clock duration in milliseconds from create start to ready or failure",
+        description=(
+            "Wall-clock duration in milliseconds of the lifecycle operation, "
+            "measured from start until success or failure"
+        ),
     )
     success: bool = Field(
         ...,
-        description="Whether create + readiness completed successfully",
+        description="Whether the lifecycle operation completed successfully",
     )
 
     class Config:

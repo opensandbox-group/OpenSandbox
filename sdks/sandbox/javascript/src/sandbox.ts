@@ -22,7 +22,7 @@ import {
   DEFAULT_TIMEOUT_SECONDS,
 } from "./core/constants.js";
 import { ConnectionConfig, type ConnectionConfigOptions } from "./config/connection.js";
-import { reportSandboxCreateMetric } from "./internal/lifecycleMetrics.js";
+import { reportSandboxLifecycleMetric } from "./internal/lifecycleMetrics.js";
 import type { SandboxFiles } from "./services/filesystem.js";
 import type { CredentialVault, Egress } from "./services/egress.js";
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
@@ -476,19 +476,21 @@ export class Sandbox {
         });
       }
 
-      reportSandboxCreateMetric(connectionConfig, {
+      reportSandboxLifecycleMetric(connectionConfig, {
+        eventType: "sandbox.create",
         sandboxId,
         image: startupSource,
-        createDurationMs: Date.now() - createStarted,
+        durationMs: Date.now() - createStarted,
         success: true,
       });
 
       return sbx;
     } catch (err) {
-      reportSandboxCreateMetric(connectionConfig, {
+      reportSandboxLifecycleMetric(connectionConfig, {
+        eventType: "sandbox.create",
         sandboxId,
         image: startupSource,
-        createDurationMs: Date.now() - createStarted,
+        durationMs: Date.now() - createStarted,
         success: false,
       });
       if (sandboxId) {
@@ -602,7 +604,27 @@ export class Sandbox {
 
   async pause(): Promise<void> {
     this.sandboxes.invalidateEndpointCache?.(this.id);
-    await this.sandboxes.pauseSandbox(this.id);
+    const started = Date.now();
+    try {
+      await this.sandboxes.pauseSandbox(this.id);
+    } catch (err) {
+      this.reportLifecycleMetric("sandbox.pause", started, false);
+      throw err;
+    }
+    this.reportLifecycleMetric("sandbox.pause", started, true);
+  }
+
+  private reportLifecycleMetric(
+    eventType: "sandbox.pause" | "sandbox.kill",
+    started: number,
+    success: boolean
+  ): void {
+    reportSandboxLifecycleMetric(this.connectionConfig, {
+      eventType,
+      sandboxId: this.id,
+      durationMs: Date.now() - started,
+      success,
+    });
   }
 
   /**
@@ -618,15 +640,33 @@ export class Sandbox {
       healthCheckPollingInterval?: number;
     } = {}
   ): Promise<Sandbox> {
-    await this.sandboxes.resumeSandbox(this.id);
-    return await Sandbox.connect({
-      sandboxId: this.id,
-      connectionConfig: this.connectionConfig,
-      adapterFactory: Sandbox._priv.get(this)!.adapterFactory,
-      skipHealthCheck: opts.skipHealthCheck ?? false,
-      readyTimeoutSeconds: opts.readyTimeoutSeconds,
-      healthCheckPollingInterval: opts.healthCheckPollingInterval,
-    });
+    const started = Date.now();
+    try {
+      await this.sandboxes.resumeSandbox(this.id);
+      const sbx = await Sandbox.connect({
+        sandboxId: this.id,
+        connectionConfig: this.connectionConfig,
+        adapterFactory: Sandbox._priv.get(this)!.adapterFactory,
+        skipHealthCheck: opts.skipHealthCheck ?? false,
+        readyTimeoutSeconds: opts.readyTimeoutSeconds,
+        healthCheckPollingInterval: opts.healthCheckPollingInterval,
+      });
+      reportSandboxLifecycleMetric(this.connectionConfig, {
+        eventType: "sandbox.resume",
+        sandboxId: this.id,
+        durationMs: Date.now() - started,
+        success: true,
+      });
+      return sbx;
+    } catch (err) {
+      reportSandboxLifecycleMetric(this.connectionConfig, {
+        eventType: "sandbox.resume",
+        sandboxId: this.id,
+        durationMs: Date.now() - started,
+        success: false,
+      });
+      throw err;
+    }
   }
 
   /**
@@ -640,6 +680,14 @@ export class Sandbox {
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
     const resumeConnectionConfig = baseConnectionConfig.withTransportIfMissing();
     const lifecycleBaseUrl = resumeConnectionConfig.getBaseUrl();
+    const started = Date.now();
+    const reportResume = (success: boolean) =>
+      reportSandboxLifecycleMetric(baseConnectionConfig, {
+        eventType: "sandbox.resume",
+        sandboxId: opts.sandboxId,
+        durationMs: Date.now() - started,
+        success,
+      });
 
     let sandboxes: Sandboxes;
     try {
@@ -649,17 +697,32 @@ export class Sandbox {
       }).sandboxes;
       await sandboxes.resumeSandbox(opts.sandboxId);
     } catch (err) {
+      reportResume(false);
       await resumeConnectionConfig.closeTransport();
       throw err;
     }
 
     await resumeConnectionConfig.closeTransport();
-    return await Sandbox.connect({ ...opts, connectionConfig: baseConnectionConfig, adapterFactory });
+    try {
+      const sbx = await Sandbox.connect({ ...opts, connectionConfig: baseConnectionConfig, adapterFactory });
+      reportResume(true);
+      return sbx;
+    } catch (err) {
+      reportResume(false);
+      throw err;
+    }
   }
 
   async kill(): Promise<void> {
     this.sandboxes.invalidateEndpointCache?.(this.id);
-    await this.sandboxes.deleteSandbox(this.id);
+    const started = Date.now();
+    try {
+      await this.sandboxes.deleteSandbox(this.id);
+    } catch (err) {
+      this.reportLifecycleMetric("sandbox.kill", started, false);
+      throw err;
+    }
+    this.reportLifecycleMetric("sandbox.kill", started, true);
   }
 
   /**

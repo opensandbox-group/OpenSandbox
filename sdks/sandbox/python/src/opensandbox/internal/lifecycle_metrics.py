@@ -51,19 +51,20 @@ def _env_metrics_disabled() -> bool:
 
 
 def _metrics_disabled(config: _MetricsConnection) -> bool:
-    return bool(config.disable_metrics) or _env_metrics_disabled()
+    return bool(getattr(config, "disable_metrics", False)) or _env_metrics_disabled()
 
 
 def _build_payload(
     *,
+    event_type: str,
     sandbox_id: str | None,
     image: str | None,
-    create_duration_ms: int,
+    duration_ms: int,
     success: bool,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "eventType": "sandbox.create",
-        "createDurationMs": max(0, int(create_duration_ms)),
+        "eventType": event_type,
+        "durationMs": max(0, int(duration_ms)),
         "success": bool(success),
     }
     if sandbox_id:
@@ -102,22 +103,24 @@ async def _post_async(config: _MetricsConnection, payload: dict[str, Any]) -> No
         await client.post(url, json=payload, headers=_headers(config))
 
 
-def report_sandbox_create_metric(
+def report_sandbox_lifecycle_metric(
     config: _MetricsConnection,
     *,
+    event_type: str,
     sandbox_id: str | None,
-    image: str | None,
-    create_duration_ms: int,
+    duration_ms: int,
     success: bool,
+    image: str | None = None,
 ) -> None:
-    """Fire-and-forget create latency report. Never raises or blocks callers."""
+    """Fire-and-forget lifecycle latency report. Never raises or blocks callers."""
     if _metrics_disabled(config):
         return
 
     payload = _build_payload(
+        event_type=event_type,
         sandbox_id=sandbox_id,
         image=image,
-        create_duration_ms=create_duration_ms,
+        duration_ms=duration_ms,
         success=success,
     )
 
@@ -128,7 +131,7 @@ def report_sandbox_create_metric(
             try:
                 _post_sync(config, payload)
             except Exception:
-                logger.debug("Failed to report sandbox.create metrics", exc_info=True)
+                logger.debug("Failed to report %s metrics", event_type, exc_info=True)
 
         threading.Thread(target=_thread_run, daemon=True).start()
         return
@@ -137,7 +140,7 @@ def report_sandbox_create_metric(
         try:
             await _post_async(config, payload)
         except Exception:
-            logger.debug("Failed to report sandbox.create metrics", exc_info=True)
+            logger.debug("Failed to report %s metrics", event_type, exc_info=True)
 
     task = loop.create_task(_run())
     _pending.add(task)

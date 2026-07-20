@@ -300,7 +300,7 @@ Per-sandbox enablement uses create request extensions (see OSEP-0009 and `exampl
 
 ## `[otel]`
 
-Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the ingestion endpoint still accepts events and records them as noop.
+Optional OpenTelemetry metrics export for SDK-reported sandbox lifecycle latency — create, resume, pause, and kill (`POST /v1/metrics/events`). Off by default; the ingestion endpoint still accepts events and records them as noop.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

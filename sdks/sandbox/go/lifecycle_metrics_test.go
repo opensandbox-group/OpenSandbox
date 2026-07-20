@@ -35,12 +35,15 @@ func TestReportSandboxCreateMetricPostsEvent(t *testing.T) {
 			t.Errorf("unexpected method %s", r.Method)
 		}
 		body, _ := io.ReadAll(r.Body)
-		var event sandboxCreateMetricsEvent
+		var event sandboxLifecycleMetricsEvent
 		if err := json.Unmarshal(body, &event); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		if event.EventType != "sandbox.create" || !event.Success {
 			t.Fatalf("unexpected event: %+v", event)
+		}
+		if event.DurationMs != 42 {
+			t.Fatalf("expected durationMs=42, got %d", event.DurationMs)
 		}
 		if gotUA := r.Header.Get("User-Agent"); !strings.HasPrefix(gotUA, "OpenSandbox-Go-SDK/") {
 			t.Fatalf("unexpected User-Agent: %q", gotUA)
@@ -53,7 +56,7 @@ func TestReportSandboxCreateMetricPostsEvent(t *testing.T) {
 	cfg := ConnectionConfig{Domain: server.URL, Protocol: "http", APIKey: "k"}
 	// Domain already has scheme via server.URL
 	cfg.Domain = server.URL
-	reportSandboxCreateMetric(cfg, "sbx", "python:3.12", 42, true)
+	reportSandboxLifecycleMetric(cfg, "sandbox.create", "sbx", "python:3.12", 42, true)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -65,10 +68,39 @@ func TestReportSandboxCreateMetricPostsEvent(t *testing.T) {
 	t.Fatal("metrics POST was not received")
 }
 
+func TestReportSandboxLifecycleMetricUsesDurationMs(t *testing.T) {
+	events := make(chan sandboxLifecycleMetricsEvent, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var event sandboxLifecycleMetricsEvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			t.Errorf("unmarshal: %v", err)
+		}
+		events <- event
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cfg := ConnectionConfig{Domain: server.URL, Protocol: "http", APIKey: "k"}
+	reportSandboxLifecycleMetric(cfg, "sandbox.pause", "sbx", "", 77, true)
+
+	select {
+	case event := <-events:
+		if event.EventType != "sandbox.pause" || !event.Success {
+			t.Fatalf("unexpected event: %+v", event)
+		}
+		if event.DurationMs != 77 {
+			t.Fatalf("expected durationMs=77, got %d", event.DurationMs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("metrics POST was not received")
+	}
+}
+
 func TestReportSandboxCreateMetricIgnoresFailure(t *testing.T) {
 	cfg := ConnectionConfig{Domain: "http://127.0.0.1:1", Protocol: "http"}
 	// Should not panic or block.
-	reportSandboxCreateMetric(cfg, "", "img", 1, false)
+	reportSandboxLifecycleMetric(cfg, "sandbox.create", "", "img", 1, false)
 	time.Sleep(50 * time.Millisecond)
 }
 
@@ -81,7 +113,7 @@ func TestReportSandboxCreateMetricDisabledByConfig(t *testing.T) {
 	defer server.Close()
 
 	cfg := ConnectionConfig{Domain: server.URL, DisableMetrics: true}
-	reportSandboxCreateMetric(cfg, "sbx", "img", 1, true)
+	reportSandboxLifecycleMetric(cfg, "sandbox.create", "sbx", "img", 1, true)
 	time.Sleep(100 * time.Millisecond)
 	if got.Load() {
 		t.Fatal("expected metrics POST to be skipped when DisableMetrics is set")
@@ -99,7 +131,7 @@ func TestReportSandboxCreateMetricDisabledByEnv(t *testing.T) {
 	defer server.Close()
 
 	cfg := ConnectionConfig{Domain: server.URL}
-	reportSandboxCreateMetric(cfg, "sbx", "img", 1, true)
+	reportSandboxLifecycleMetric(cfg, "sandbox.create", "sbx", "img", 1, true)
 	time.Sleep(100 * time.Millisecond)
 	if got.Load() {
 		t.Fatal("expected metrics POST to be skipped when OPENSANDBOX_DISABLE_METRICS=1")

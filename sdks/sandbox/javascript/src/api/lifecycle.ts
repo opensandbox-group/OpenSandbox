@@ -29,10 +29,11 @@ export interface paths {
         put?: never;
         /**
          * Report an SDK metrics event
-         * @description Accepts best-effort telemetry from SDKs (Phase 1: sandbox creation latency).
+         * @description Accepts best-effort telemetry from SDKs covering sandbox lifecycle
+         *     latency (create, resume, pause, kill).
          *
-         *     SDKs SHOULD fire-and-forget this call after `create` + readiness complete
-         *     (or after a failed creation attempt). Failures to report MUST NOT affect
+         *     SDKs SHOULD fire-and-forget this call after the lifecycle operation
+         *     completes (successfully or not). Failures to report MUST NOT affect
          *     sandbox usability. The server accepts events even when OpenTelemetry
          *     export is disabled (noop recording).
          *
@@ -770,8 +771,8 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
-         * @description SDK-reported metrics event. Phase 1 covers sandbox creation latency from
-         *     the start of create until readiness succeeds or creation fails.
+         * @description SDK-reported metrics event covering sandbox lifecycle latency measured
+         *     from the start of the operation until it succeeds or fails.
          *
          *     SDK language and package version are identified via the request
          *     `User-Agent` header (for example `OpenSandbox-Go-SDK/0.1.0`), not body fields.
@@ -781,14 +782,14 @@ export interface components {
              * @description Metric event type
              * @enum {string}
              */
-            eventType: "sandbox.create";
+            eventType: "sandbox.create" | "sandbox.resume" | "sandbox.pause" | "sandbox.kill";
             /** @description Sandbox identifier when available (may be omitted if create failed before an ID was assigned) */
             sandboxId?: string;
             /** @description Container image URI or snapshot startup source label */
             image?: string;
-            /** @description Wall-clock duration in milliseconds from create start to ready or failure */
-            createDurationMs: number;
-            /** @description Whether create + readiness completed successfully */
+            /** @description Wall-clock duration in milliseconds of the lifecycle operation, measured from start until success or failure */
+            durationMs: number;
+            /** @description Whether the lifecycle operation completed successfully */
             success: boolean;
         };
         ListSandboxesResponse: {
@@ -1562,7 +1563,7 @@ export interface operations {
                  *       "eventType": "sandbox.create",
                  *       "sandboxId": "sbx_01HZYEXAMPLE",
                  *       "image": "python:3.12",
-                 *       "createDurationMs": 1842,
+                 *       "durationMs": 1842,
                  *       "success": true
                  *     }
                  */

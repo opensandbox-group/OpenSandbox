@@ -159,7 +159,7 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 
 	created, err := lc.CreateSandbox(ctx, req)
 	if err != nil {
-		reportSandboxCreateMetric(config, "", startupSource, time.Since(started).Milliseconds(), false)
+		reportSandboxLifecycleMetric(config, "sandbox.create", "", startupSource, time.Since(started).Milliseconds(), false)
 		return nil, fmt.Errorf("opensandbox: create sandbox: %w", err)
 	}
 
@@ -172,13 +172,13 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 	if err := sb.waitForRunning(ctx, opts.ReadyTimeout); err != nil {
 		// Best-effort cleanup
 		_ = lc.DeleteSandbox(context.Background(), created.ID)
-		reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), false)
+		reportSandboxLifecycleMetric(config, "sandbox.create", created.ID, startupSource, time.Since(started).Milliseconds(), false)
 		return nil, err
 	}
 
 	if err := sb.resolveExecd(ctx); err != nil {
 		_ = lc.DeleteSandbox(context.Background(), created.ID)
-		reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), false)
+		reportSandboxLifecycleMetric(config, "sandbox.create", created.ID, startupSource, time.Since(started).Milliseconds(), false)
 		return nil, fmt.Errorf("opensandbox: resolve execd: %w", err)
 	}
 
@@ -190,11 +190,11 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 		}
 		if err := sb.WaitUntilReady(ctx, readyOpts); err != nil {
 			_ = lc.DeleteSandbox(context.Background(), created.ID)
-			reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), false)
+			reportSandboxLifecycleMetric(config, "sandbox.create", created.ID, startupSource, time.Since(started).Milliseconds(), false)
 			return nil, err
 		}
 	}
-	reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), true)
+	reportSandboxLifecycleMetric(config, "sandbox.create", created.ID, startupSource, time.Since(started).Milliseconds(), true)
 
 	return sb, nil
 }
@@ -234,11 +234,15 @@ func ConnectSandbox(ctx context.Context, config ConnectionConfig, sandboxID stri
 
 // ResumeSandbox resumes a paused sandbox and reconnects to it.
 func ResumeSandbox(ctx context.Context, config ConnectionConfig, sandboxID string, opts ...ReadyOptions) (*Sandbox, error) {
+	started := time.Now()
 	lc := config.lifecycleClient()
 	if err := lc.ResumeSandbox(ctx, sandboxID); err != nil {
+		reportSandboxLifecycleMetric(config, "sandbox.resume", sandboxID, "", time.Since(started).Milliseconds(), false)
 		return nil, fmt.Errorf("opensandbox: resume sandbox: %w", err)
 	}
-	return ConnectSandbox(ctx, config, sandboxID, opts...)
+	sb, err := ConnectSandbox(ctx, config, sandboxID, opts...)
+	reportSandboxLifecycleMetric(config, "sandbox.resume", sandboxID, "", time.Since(started).Milliseconds(), err == nil)
+	return sb, err
 }
 
 // Resume resumes this sandbox if it was paused and reconnects to it.
@@ -251,7 +255,17 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	if s.lifecycle.cache != nil {
 		s.lifecycle.cache.Invalidate(s.id)
 	}
-	return s.lifecycle.DeleteSandbox(ctx, s.id)
+	started := time.Now()
+	err := s.lifecycle.DeleteSandbox(ctx, s.id)
+	s.reportLifecycleMetric("sandbox.kill", started, err == nil)
+	return err
+}
+
+func (s *Sandbox) reportLifecycleMetric(eventType string, started time.Time, success bool) {
+	if s.config == nil {
+		return
+	}
+	reportSandboxLifecycleMetric(*s.config, eventType, s.id, "", time.Since(started).Milliseconds(), success)
 }
 
 // Close releases local HTTP resources. Does NOT terminate the sandbox.
@@ -267,7 +281,10 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 	if s.lifecycle.cache != nil {
 		s.lifecycle.cache.Invalidate(s.id)
 	}
-	return s.lifecycle.PauseSandbox(ctx, s.id)
+	started := time.Now()
+	err := s.lifecycle.PauseSandbox(ctx, s.id)
+	s.reportLifecycleMetric("sandbox.pause", started, err == nil)
+	return err
 }
 
 // GetInfo returns the sandbox's current info (status, metadata, image, etc.).

@@ -55,10 +55,11 @@ paths:
       operationId: reportMetricsEvent
       summary: Report an SDK metrics event
       description: |
-        Accepts best-effort telemetry from SDKs (Phase 1: sandbox creation latency).
+        Accepts best-effort telemetry from SDKs covering sandbox lifecycle
+        latency (create, resume, pause, kill).
 
-        SDKs SHOULD fire-and-forget this call after `create` + readiness complete
-        (or after a failed creation attempt). Failures to report MUST NOT affect
+        SDKs SHOULD fire-and-forget this call after the lifecycle operation
+        completes (successfully or not). Failures to report MUST NOT affect
         sandbox usability. The server accepts events even when OpenTelemetry
         export is disabled (noop recording).
 
@@ -74,7 +75,7 @@ paths:
               eventType: sandbox.create
               sandboxId: sbx_01HZYEXAMPLE
               image: python:3.12
-              createDurationMs: 1842
+              durationMs: 1842
               success: true
       responses:
         '204':
@@ -825,8 +826,8 @@ components:
     MetricsEvent:
       type: object
       description: |
-        SDK-reported metrics event. Phase 1 covers sandbox creation latency from
-        the start of create until readiness succeeds or creation fails.
+        SDK-reported metrics event covering sandbox lifecycle latency measured
+        from the start of the operation until it succeeds or fails.
 
         SDK language and package version are identified via the request
         `User-Agent` header (for example `OpenSandbox-Go-SDK/0.1.0`), not body fields.
@@ -834,21 +835,21 @@ components:
         eventType:
           type: string
           description: Metric event type
-          enum: [sandbox.create]
+          enum: [sandbox.create, sandbox.resume, sandbox.pause, sandbox.kill]
         sandboxId:
           type: string
           description: Sandbox identifier when available (may be omitted if create failed before an ID was assigned)
         image:
           type: string
           description: Container image URI or snapshot startup source label
-        createDurationMs:
+        durationMs:
           type: integer
           minimum: 0
-          description: Wall-clock duration in milliseconds from create start to ready or failure
+          description: Wall-clock duration in milliseconds of the lifecycle operation, measured from start until success or failure
         success:
           type: boolean
-          description: Whether create + readiness completed successfully
-      required: [eventType, createDurationMs, success]
+          description: Whether the lifecycle operation completed successfully
+      required: [eventType, durationMs, success]
     ListSandboxesResponse:
       type: object
       properties:

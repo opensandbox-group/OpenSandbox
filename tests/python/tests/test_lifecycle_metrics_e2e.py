@@ -62,7 +62,33 @@ async def test_server_accepts_metrics_event():
         "eventType": "sandbox.create",
         "sandboxId": "e2e-metrics-direct",
         "image": get_sandbox_image(),
-        "createDurationMs": 42,
+        "durationMs": 42,
+        "success": True,
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            _metrics_url(),
+            json=payload,
+            headers={
+                "OPEN-SANDBOX-API-KEY": TEST_API_KEY,
+                "User-Agent": "OpenSandbox-Python-SDK/e2e",
+            },
+        )
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_type",
+    ["sandbox.resume", "sandbox.pause", "sandbox.kill"],
+)
+async def test_server_accepts_lifecycle_metrics_events(event_type):
+    """Direct lifecycle endpoint smoke for the durationMs-based event types."""
+    payload = {
+        "eventType": event_type,
+        "sandboxId": "e2e-metrics-direct",
+        "durationMs": 42,
         "success": True,
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -121,14 +147,81 @@ async def test_sandbox_create_reports_lifecycle_metrics():
     assert event["sandboxId"] == sandbox.id
     assert "sdkLanguage" not in event
     assert "sdkVersion" not in event
-    assert isinstance(event["createDurationMs"], int)
-    assert event["createDurationMs"] > 0
+    assert isinstance(event["durationMs"], int)
+    assert event["durationMs"] > 0
     logger.info(
-        "sandbox.create metrics createDurationMs=%s ms sandboxId=%s",
-        event["createDurationMs"],
+        "sandbox.create metrics durationMs=%s ms sandboxId=%s",
+        event["durationMs"],
         event["sandboxId"],
     )
     assert event.get("image")
+
+
+@pytest.mark.asyncio
+async def test_sandbox_lifecycle_operations_report_metrics():
+    """pause → resume → kill each fire-and-forget a durationMs metrics event."""
+    captured: list[dict] = []
+    original = lifecycle_metrics._post_async
+
+    async def _capture(config, payload):
+        captured.append(dict(payload))
+        await original(config, payload)
+
+    def _events(event_type: str) -> list[dict]:
+        return [e for e in captured if e["eventType"] == event_type]
+
+    connection_config = create_connection_config()
+    with patch.object(lifecycle_metrics, "_post_async", side_effect=_capture):
+        sandbox = await Sandbox.create(
+            image=SandboxImageSpec(get_sandbox_image()),
+            resource=get_e2e_sandbox_resource(),
+            connection_config=connection_config,
+            timeout=timedelta(minutes=5),
+            ready_timeout=timedelta(seconds=60),
+            entrypoint=["tail", "-f", "/dev/null"],
+            env={"EXECD_API_GRACE_SHUTDOWN": "3s"},
+            metadata={"tag": "e2e-lifecycle-metrics-ops"},
+        )
+        resumed = None
+        try:
+            await sandbox.pause()
+            await _wait_until(lambda: len(_events("sandbox.pause")) >= 1)
+
+            resumed = await Sandbox.resume(
+                sandbox.id,
+                connection_config=create_connection_config(),
+                resume_timeout=timedelta(seconds=60),
+            )
+            await _wait_until(lambda: len(_events("sandbox.resume")) >= 1)
+        finally:
+            target = resumed or sandbox
+            try:
+                await target.kill()
+            except Exception:
+                logger.warning("cleanup kill failed", exc_info=True)
+            try:
+                await _wait_until(lambda: len(_events("sandbox.kill")) >= 1)
+            finally:
+                for sbx in {id(sandbox): sandbox, id(target): target}.values():
+                    try:
+                        await sbx.close()
+                    except Exception:
+                        logger.warning("cleanup close failed", exc_info=True)
+
+    for event_type in ("sandbox.pause", "sandbox.resume", "sandbox.kill"):
+        events = _events(event_type)
+        assert events, f"missing {event_type} metrics event"
+        event = events[0]
+        assert event["success"] is True
+        assert event["sandboxId"] == sandbox.id
+        assert isinstance(event["durationMs"], int)
+        assert event["durationMs"] > 0
+        logger.info(
+            "%s metrics durationMs=%s ms sandboxId=%s",
+            event_type,
+            event["durationMs"],
+            event["sandboxId"],
+        )
 
 
 @pytest.mark.asyncio
@@ -216,9 +309,9 @@ def test_sandbox_sync_create_reports_lifecycle_metrics():
     assert event["success"] is True
     assert event["sandboxId"] == sandbox.id
     assert "sdkLanguage" not in event
-    assert event["createDurationMs"] > 0
+    assert event["durationMs"] > 0
     logger.info(
-        "sandbox.create metrics (sync) createDurationMs=%s ms sandboxId=%s",
-        event["createDurationMs"],
+        "sandbox.create metrics (sync) durationMs=%s ms sandboxId=%s",
+        event["durationMs"],
         event["sandboxId"],
     )

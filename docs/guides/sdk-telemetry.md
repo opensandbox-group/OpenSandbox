@@ -1,38 +1,40 @@
 ---
 title: SDK Telemetry
-description: What sandbox create latency metrics the SDKs report, when they fire, and how to disable them.
+description: What sandbox lifecycle latency metrics the SDKs report, when they fire, and how to disable them.
 ---
 
 # SDK Telemetry
 
-OpenSandbox SDKs optionally report sandbox creation latency to the lifecycle server. Reporting is best-effort: failures never affect `Sandbox.create`, and the payload contains no user content.
+OpenSandbox SDKs optionally report sandbox lifecycle latency (create, resume, pause, kill) to the lifecycle server. Reporting is best-effort: failures never affect the lifecycle operations, and the payload contains no user content.
 
 ## What is sent
 
-After create succeeds or fails, the SDK fire-and-forget posts to `POST /v1/metrics/events`:
+After a lifecycle operation succeeds or fails, the SDK fire-and-forget posts to `POST /v1/metrics/events`:
 
 ```json
 {
   "eventType": "sandbox.create",
   "sandboxId": "sbx_...",
   "image": "python:3.12",
-  "createDurationMs": 1842,
+  "durationMs": 1842,
   "success": true
 }
 ```
 
-- `sandboxId` / `image` may be omitted when create fails early.
+`eventType` is one of `sandbox.create`, `sandbox.resume`, `sandbox.pause`, `sandbox.kill`; all report latency via `durationMs`.
+
+- `sandboxId` / `image` may be omitted when create fails early; `image` is only sent for create events.
 - SDK language and version come from the HTTP `User-Agent` header (for example `OpenSandbox-Python-SDK/0.1.14`), not from body fields.
 
-The server accepts the event with `204` and, when `[otel]` is enabled, records an OTEL histogram. See [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
+The server accepts each event with `204` and, when `[otel]` is enabled, records per-operation OTEL histograms (`opensandbox.sandbox.create.duration`, `opensandbox.sandbox.resume.duration`, `opensandbox.sandbox.pause.duration`, `opensandbox.sandbox.kill.duration`). See [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
 
 ## When it runs
 
 | SDK | Trigger |
 |-----|---------|
-| Python (async + sync) | After `Sandbox.create` / sync create completes or raises |
-| JavaScript / TypeScript | After `Sandbox.create` completes or fails |
-| Go | After `CreateSandbox` completes or fails |
+| Python (async + sync) | After `Sandbox.create` / `resume` / `pause` / `kill` (and sync equivalents) completes or raises |
+| JavaScript / TypeScript | After `Sandbox.create` / `resume` / `pause` / `kill` completes or fails |
+| Go | After `CreateSandbox` / `ResumeSandbox` / `Pause` / `Kill` completes or fails |
 
 ## How to disable
 
