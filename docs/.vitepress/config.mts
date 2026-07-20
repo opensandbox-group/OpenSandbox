@@ -93,6 +93,7 @@ export default defineConfig({
             { text: "Credential Vault", link: "/guides/credential-vault" },
             { text: "Secure Container", link: "/guides/secure-container" },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
+            { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
             { text: "SDK Telemetry", link: "/guides/sdk-telemetry" },
