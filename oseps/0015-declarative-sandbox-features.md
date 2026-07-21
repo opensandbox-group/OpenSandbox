@@ -107,6 +107,9 @@ therefore must not be encoded in `extensions`.
   sandbox creation.
 - Transitive feature dependency declaration or dependency solving.
 - Adding, removing, or upgrading a feature after sandbox creation.
+- Replacing pre-baked OCI images or VM templates for stable, high-throughput
+  workloads where cold-start latency, cache locality, and deterministic startup
+  are the primary constraints.
 - Pool-backed creation through `extensions.poolRef`.
 - Snapshot creation from a feature-enabled sandbox, snapshot restore with
   `features`, or including feature state in a snapshot contract.
@@ -1020,11 +1023,13 @@ AppArmor, read-only filesystems, and isolated execution.
 
 ### Continue requiring custom sandbox images
 
-This remains a valid optimization for stable, frequently used toolchains and
-may have better cold-start performance. It is not sufficient as the only API:
-it forces every user to operate an image build pipeline and does not give the
+This may remain the preferred optimization for stable, frequently used
+toolchains and high-throughput fleets where cold-start latency, cache locality,
+and deterministic startup dominate. It is not sufficient as the only API: it
+forces every user to operate an image build pipeline and does not give the
 lifecycle server a structured, persisted feature resolution. Declarative
-features complement rather than replace custom images.
+features target dynamic, per-request toolchains and complement rather than
+replace pre-baked OCI images or VM templates.
 
 ### Encode features in `extensions`
 
