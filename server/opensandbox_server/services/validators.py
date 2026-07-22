@@ -32,7 +32,7 @@ from opensandbox_server.services.constants import RESERVED_LABEL_PREFIX, Sandbox
 
 if TYPE_CHECKING:
     from opensandbox_server.api.schema import CredentialProxyConfig, NetworkPolicy, OSSFS, PlatformSpec, Volume
-    from opensandbox_server.config import EgressConfig, SecureRuntimeConfig
+    from opensandbox_server.config import EgressConfig
 
 logger = logging.getLogger(__name__)
 
@@ -633,43 +633,6 @@ def ensure_credential_proxy_configured(
             "compatibility but is deprecated and may allow credential destination bypass; "
             "use defaultAction=deny",
             default_action,
-        )
-
-
-_GVISOR_NAT_INCOMPATIBLE_RUNTIMES = frozenset({"gvisor"})
-
-
-def ensure_egress_runtime_compatible(
-    network_policy: Optional["NetworkPolicy"],
-    secure_runtime: Optional["SecureRuntimeConfig"] = None,
-    effective_runtime_class: Optional[str] = None,
-) -> None:
-    """
-    Reject network_policy when the secure runtime lacks iptables nat table support.
-
-    gVisor's netstack does not implement the iptables nat table, which the egress
-    sidecar requires for DNS redirect (REDIRECT target on port 53).
-    """
-    if not network_policy:
-        return
-    runtime_type = None
-    if secure_runtime is not None and secure_runtime.type:
-        runtime_type = secure_runtime.type
-    elif effective_runtime_class:
-        runtime_type = effective_runtime_class
-    if not runtime_type:
-        return
-    if runtime_type in _GVISOR_NAT_INCOMPATIBLE_RUNTIMES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": (
-                    f"networkPolicy is not compatible with runtime '{runtime_type}': "
-                    f"gVisor does not support the iptables nat table required by the egress sidecar. "
-                    f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
-                ),
-            },
         )
 
 

@@ -176,10 +176,10 @@ sandbox = await Sandbox.create(
 
 ## Runtime Compatibility
 
-Both Approach 1 (`deny.always` via egress sidecar) and Approach 2 (per-sandbox `network_policy`) depend on the egress sidecar, which uses an iptables `nat` table REDIRECT rule for DNS interception. This works with `runc` (default) and all Kata Containers variants (`kata-qemu`, `kata-clh`, `kata-fc`), but **not with gVisor** — gVisor's netstack does not implement the `nat` table.
+Both Approach 1 (`deny.always` via egress sidecar) and Approach 2 (per-sandbox `network_policy`) depend on the egress sidecar, which programs its dataplane with **native nftables** (a `nat`/`output` chain with `redirect to :port` for DNS interception). This works with `runc` (default), all Kata Containers variants (`kata-qemu`, `kata-clh`, `kata-fc`), and **gVisor** — the latter on a runsc build that includes native nftables support ([google/gvisor#13796](https://github.com/google/gvisor/issues/13796)). Earlier releases used an iptables `nat` table REDIRECT rule, which gVisor's netstack could not run (it does not implement the iptables `nat` table).
 
-If you need both gVisor's syscall isolation and FQDN egress control:
-- Use `kata-qemu` instead — it provides comparable security isolation and supports the egress sidecar.
+If your runsc build does not yet include native nftables support and you need FQDN egress control under gVisor:
+- Use `kata-qemu` instead — it provides comparable security isolation and runs the egress sidecar with any kernel.
 - Alternatively, use a CNI-level FQDN policy (e.g., Cilium `toFQDNs`) for network isolation alongside gVisor.
 
 The same architectural constraint applies to transparent service meshes such as Istio/Envoy sidecar injection: OpenSandbox egress expects to own outbound interception inside the pod network namespace. If a mesh sidecar also rewrites outbound traffic in that namespace, egress-sidecar features such as per-sandbox network policy, transparent MITM, and Credential Vault are not currently supported together. Prefer excluding sandbox pods from mesh injection or enforcing outbound policy at the platform network layer instead.

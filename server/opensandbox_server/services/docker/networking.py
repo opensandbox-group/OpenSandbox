@@ -56,7 +56,6 @@ from opensandbox_server.services.endpoint_auth import (
 from opensandbox_server.services.validators import (
     ensure_credential_proxy_configured,
     ensure_egress_configured,
-    ensure_egress_runtime_compatible,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,7 +158,6 @@ class DockerNetworkingMixin:
         ensure_credential_proxy_configured(
             request.credential_proxy, request.network_policy, self.app_config.egress
         )
-        ensure_egress_runtime_compatible(request.network_policy, self.app_config.secure_runtime)
 
     def _ensure_secure_access_support(self, request) -> None:
         """Validate that secure access can be honored under the current Docker runtime."""

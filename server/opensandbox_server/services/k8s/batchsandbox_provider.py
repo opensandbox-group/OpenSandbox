@@ -39,7 +39,6 @@ from opensandbox_server.services.k8s.image_pull_secret_helper import (
 from opensandbox_server.services.k8s.batchsandbox_template import BatchSandboxTemplateManager
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
-from opensandbox_server.services.validators import ensure_egress_runtime_compatible
 from opensandbox_server.services.k8s.provider_common import (
     DEFAULT_ENTRYPOINT,
     _build_execd_init_container,
@@ -286,10 +285,6 @@ class BatchSandboxProvider(WorkloadProvider):
             batchsandbox["spec"]["expireTime"] = expires_at.isoformat()
         self._merge_pod_spec_extras(batchsandbox, extra_volumes, extra_mounts)
         merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
-        ensure_egress_runtime_compatible(
-            network_policy,
-            effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
-        )
         if platform is not None and not windows_profile:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
 
