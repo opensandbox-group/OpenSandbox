@@ -314,6 +314,8 @@ The controller creates a short-lived Kubernetes `Job` for each pause:
 
 The commit Job mounts the host containerd socket from the source node and runs as UID 0. This gives the `image-committer` image node-level container runtime access. Use only a trusted image, preferably pinned by digest or controlled by an admission policy.
 
+Before pausing containers, `image-committer` attempts to run `sync` inside every running container included in the snapshot. This flushes guest filesystem caches for VM-isolated runtimes such as Kata Containers, where a host-side sync cannot flush the guest kernel. Guest sync is best effort: if it fails, the commit Job logs a warning and continues, so recent guest filesystem writes may be absent from the resulting snapshot. Containers that were already stopped cannot be targeted by `nerdctl exec` and continue through the stopped-container commit path. The Job mounts both the containerd socket and the host `/run/containerd/fifo` directory; the FIFO mount lets the host-side containerd shim access the I/O streams created by `nerdctl exec`.
+
 If the commit Job fails, the controller creates a best-effort `<snapshotName>-unpause` Job on the same node to unpause any source containers that may have been left paused by an abrupt committer exit.
 
 Deleting a `SandboxSnapshot` cleans up Kubernetes commit/unpause Jobs, but does not delete pushed OCI images from the registry. Repeated pause cycles create tags such as `snap-gen<N>`; configure registry retention or garbage collection externally.

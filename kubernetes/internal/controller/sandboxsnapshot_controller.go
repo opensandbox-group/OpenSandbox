@@ -51,6 +51,10 @@ const (
 	// ContainerdSocketPath is the default containerd socket path
 	ContainerdSocketPath = "/var/run/containerd/containerd.sock"
 
+	// ContainerdFIFODir is shared with the host so nerdctl exec's I/O FIFOs are
+	// visible to the host-side containerd shim.
+	ContainerdFIFODir = "/run/containerd/fifo"
+
 	// LabelSandboxSnapshotName is the label key for sandbox snapshot name
 	LabelSandboxSnapshotName = "sandbox.opensandbox.io/sandbox-snapshot-name"
 )

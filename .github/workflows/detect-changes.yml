@@ -65,7 +65,7 @@ jobs:
                 path.startsWith("sdks/") ||
                 path.startsWith("tests/"),
               egress: (path) =>
-                workflowChanged(path, "egress-test.yaml.yml") ||
+                workflowChanged(path, "egress-test.yml") ||
                 path.startsWith("components/egress/") ||
                 path.startsWith("components/internal/"),
               "kubernetes-mini-e2e": (path) =>
