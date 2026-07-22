@@ -50,16 +50,19 @@ curl -v http://localhost:44772/ping
   - PTY over WebSocket (`/pty`)
   - Local metrics endpoints (`/metrics`, `/metrics/watch`)
 
-PTY sessions use Bash when it is available and fall back to `sh` on minimal
-images that do not include Bash. Commands submitted to a fallback session must
-use syntax supported by that image's `sh` implementation.
+Shell-backed sessions use Bash when it is available and fall back to `sh` on
+minimal images that do not include Bash. This applies to PTY sessions, the
+Bash session API (which keeps its existing name for compatibility), and
+isolated sessions. Commands submitted to a fallback session must use syntax
+supported by that image's `sh` implementation.
 
 ## Isolated Sessions
 
-Isolated sessions run a bash process inside a per-execution
+Isolated sessions run a shell inside a per-execution
 [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) namespace,
-created via `POST /v1/isolated/session`. Beyond the workspace, callers can
-expose additional host paths into the namespace.
+created via `POST /v1/isolated/session`. Bash is preferred, with `sh` used as a
+fallback. Beyond the workspace, callers can expose additional host paths into
+the namespace.
 
 ### UID modes and capabilities
 

@@ -145,7 +145,7 @@ func (r *IsolatedRunner) Available() bool {
 	return r.isolator.Available()
 }
 
-// CreateIsolatedSession starts a new bwrap + bash session.
+// CreateIsolatedSession starts a new bwrap + shell session.
 func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (string, error) {
 	if err := r.validateExtraWritable(opts.ExtraWritable); err != nil {
 		return "", err
@@ -328,7 +328,7 @@ type StdoutCallback func(line string)
 
 // RunInIsolatedSession executes code in the session.
 // Runs are serialized per session via s.runMu.
-// envs are exported in the bash session before code runs.
+// envs are exported in the shell session before code runs.
 func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, code string, envs map[string]string, onStdout StdoutCallback) error {
 	s := r.lookup(id)
 	if s == nil {
@@ -375,8 +375,8 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	script += fmt.Sprintf("echo %s $?\n", runMarker)
 
 	// On timeout/cancel, send SIGINT to interrupt the running command
-	// without killing the persistent bash session. Closing stdin would
-	// terminate bash entirely.
+	// without killing the persistent shell session. Closing stdin would
+	// terminate the shell entirely.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {

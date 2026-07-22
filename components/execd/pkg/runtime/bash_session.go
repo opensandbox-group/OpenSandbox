@@ -205,7 +205,13 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		return fmt.Errorf("close script file: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", scriptPath)
+	shell := getShell()
+	args := make([]string, 0, 3)
+	if shell == "bash" {
+		args = append(args, "--noprofile", "--norc")
+	}
+	args = append(args, scriptPath)
+	cmd := exec.CommandContext(ctx, shell, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Do not pass envSnapshot via cmd.Env to avoid "argument list too long" when session env is large.
 	// Child inherits parent env (nil => default in Go). The script file already has "export K=V" for
@@ -217,8 +223,8 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
-		log.Error("start bash session failed: %v (command: %q)", err, log.SanitizeCommand(request.Code))
-		return fmt.Errorf("start bash: %w", err)
+		log.Error("start %s session failed: %v (command: %q)", shell, err, log.SanitizeCommand(request.Code))
+		return fmt.Errorf("start %s: %w", shell, err)
 	}
 	defer s.untrackCurrentProcess()
 	s.trackCurrentProcess(cmd.Process.Pid)
@@ -385,21 +391,32 @@ func parseExportDump(lines []string) map[string]string {
 }
 
 func parseExportLine(line string) (string, string, bool) {
-	const prefix = "declare -x "
-	if !strings.HasPrefix(line, prefix) {
+	var rest string
+	switch {
+	case strings.HasPrefix(line, "declare -x "):
+		rest = strings.TrimSpace(strings.TrimPrefix(line, "declare -x "))
+	case strings.HasPrefix(line, "export "):
+		rest = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+	default:
 		return "", "", false
 	}
-	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 	if rest == "" {
 		return "", "", false
 	}
+
 	name, value := rest, ""
 	if eq := strings.Index(rest, "="); eq >= 0 {
 		name = rest[:eq]
 		raw := rest[eq+1:]
 		if unquoted, err := strconv.Unquote(raw); err == nil {
 			value = unquoted
+		} else if len(raw) >= 2 && strings.HasPrefix(raw, "'") && strings.HasSuffix(raw, "'") {
+			// POSIX shells commonly emit single-quoted values and represent an
+			// embedded quote by ending the quote, escaping it, and reopening it.
+			value = strings.ReplaceAll(raw[1:len(raw)-1], `'\''`, `'`)
 		} else {
+			// Preserve the previous best-effort behavior for shell-specific
+			// formats such as Bash ANSI-C quoting.
 			value = strings.Trim(raw, `"`)
 		}
 	}

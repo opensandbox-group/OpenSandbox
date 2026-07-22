@@ -43,7 +43,7 @@ type IsolatedSessionOptions struct {
 	IdleTimeoutSeconds int
 }
 
-// isolatedSession holds a long-running bash process inside a bwrap namespace.
+// isolatedSession holds a long-running shell process inside a bwrap namespace.
 type isolatedSession struct {
 	id        string
 	mu        sync.RWMutex
@@ -72,9 +72,14 @@ func newIsolatedSession(id string, opts *IsolatedSessionOptions, iso isolation.I
 	}
 }
 
-// start launches bwrap + bash inside a namespace.
+// start launches bwrap and the preferred shell inside a namespace.
 func (s *isolatedSession) start() error {
-	cmd := exec.Command("bash", "--noprofile", "--norc")
+	shell := getShell()
+	var args []string
+	if shell == "bash" {
+		args = append(args, "--noprofile", "--norc")
+	}
+	cmd := exec.Command(shell, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	wrapOpts := isolation.WrapOptions{
@@ -140,7 +145,7 @@ func (s *isolatedSession) start() error {
 		for _, f := range cmd.ExtraFiles {
 			f.Close()
 		}
-		return err
+		return fmt.Errorf("start %s: %w", shell, err)
 	}
 
 	for _, f := range cmd.ExtraFiles {

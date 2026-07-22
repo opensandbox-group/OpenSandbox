@@ -20,9 +20,7 @@ package runtime
 import (
 	"bufio"
 	"io"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,15 +46,7 @@ func replayContains(t *testing.T, s *ptySession, substr string, timeout time.Dur
 }
 
 func TestPTYSession_FallsBackToSh(t *testing.T) {
-	shPath, err := exec.LookPath("sh")
-	require.NoError(t, err, "sh is required to test the fallback")
-	shPath, err = filepath.Abs(shPath)
-	require.NoError(t, err)
-
-	binDir := t.TempDir()
-	require.NoError(t, os.Symlink(shPath, filepath.Join(binDir, "sh")))
-	t.Setenv("PATH", binDir)
-	require.Equal(t, "sh", getShell())
+	useShOnlyPath(t)
 
 	t.Run("pty", func(t *testing.T) {
 		s := newPTYSession(uuidString(), "", "printf fallback_pty")

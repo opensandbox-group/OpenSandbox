@@ -175,6 +175,31 @@ func TestSetprivIdentitySwitchRequired(t *testing.T) {
 	}
 }
 
+func TestIsolatedSession_FallsBackToSh(t *testing.T) {
+	useShOnlyPath(t)
+
+	runner := newTestRunner(t)
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "workspace"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatalf("CreateIsolatedSession: %v", err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	var lines []string
+	err = runner.RunInIsolatedSession(context.Background(), id, "printf 'fallback_isolated\\n'", nil, func(line string) {
+		lines = append(lines, line)
+	})
+	if err != nil {
+		t.Fatalf("RunInIsolatedSession: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "fallback_isolated" {
+		t.Fatalf("output = %v, want [fallback_isolated]", lines)
+	}
+}
+
 func TestCreateIsolatedSession_HappyPath(t *testing.T) {
 	runner := newTestRunner(t)
 
@@ -647,7 +672,7 @@ func TestRunInIsolatedSession_EnvPersistence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Run 1: set env var in bash session.
+	// Run 1: set env var in the shell session.
 	err = runner.RunInIsolatedSession(ctx, id, "export MY_VAR=hello_from_session", nil, nil)
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
