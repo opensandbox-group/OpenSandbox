@@ -77,10 +77,10 @@ RUN cd /workspace/components/internal && \
 
 FROM debian:bookworm-slim
 
-# iptables is needed for DNS REDIRECT; ca-certificates for TLS to upstream resolvers
+# nftables provides `nft` for the native-nft dataplane (DNS redirect, transparent
+# redirect, filter policy); ca-certificates for TLS to upstream resolvers
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        iptables \
         iproute2 \
         nftables \
         ca-certificates \
@@ -103,7 +103,9 @@ RUN apt-get update \
         python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Python mitmproxy (transparent mode): mitmdump runs as user mitmproxy; iptables skips this uid.
+# Python mitmproxy (transparent mode): mitmdump runs as user mitmproxy; the nft
+# transparent redirect skips this uid (meta skuid != mitmproxy) so the proxy's own
+# upstream connections are not redirected back into itself.
 # /var/lib/mitmproxy is mitm's home, used as the confdir (CA + config.yaml live under .mitmproxy/).
 RUN useradd -r -u 10042 -d /var/lib/mitmproxy -s /usr/sbin/nologin mitmproxy \
     && mkdir -p /var/lib/mitmproxy/.mitmproxy \
@@ -124,10 +126,12 @@ RUN chown mitmproxy:mitmproxy /var/lib/mitmproxy/.mitmproxy/config.yaml \
 COPY --from=builder /out/egress /opt/opensandbox-egress/egress
 COPY --from=builder /out/opensandbox-supervisor /opt/opensandbox-egress/supervisor
 # Pre-start hook: reap any mitmdump left over from a previous crashed
-# egress so the new launch can bind the transparent-MITM listen port.
-# Intentionally does NOT touch iptables/nft rules — the sidecar shares
-# a network namespace with the workload, so leaving rules in place keeps
-# egress filtering active across the supervisor's backoff window.
+# egress so the new launch can bind the transparent-MITM listen port, and
+# delete the stale nat redirect tables (they point at a dead proxy).
+# Intentionally leaves the `inet opensandbox` filter table in place — the
+# sidecar shares a network namespace with the workload, so keeping the
+# allow/deny rules active across the supervisor's backoff window keeps
+# egress filtering fail-closed during restarts.
 COPY components/egress/scripts/cleanup.sh /opt/opensandbox-egress/cleanup.sh
 RUN chmod 0755 /opt/opensandbox-egress/cleanup.sh \
             /opt/opensandbox-egress/egress \

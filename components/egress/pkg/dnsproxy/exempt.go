@@ -62,7 +62,7 @@ func parseNameserverExemptListUncached() {
 	exemptSet = set
 }
 
-// If true, dialer omits SO_MARK; exempt dst also skips REDIRECT in iptables.
+// If true, dialer omits SO_MARK; exempt dst also skips the nft DNS redirect.
 func UpstreamInExemptList(upstreamHost string) bool {
 	addr, err := netip.ParseAddr(upstreamHost)
 	if err != nil {

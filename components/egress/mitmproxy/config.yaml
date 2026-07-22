@@ -23,7 +23,7 @@ mode:
 connection_strategy: lazy
 
 # mitm default 0.0.0.0; transparent mode must only accept loopback inside
-# the netns (iptables REDIRECT pushes outbound traffic here, and exposing
+# the netns (the nft REDIRECT pushes outbound traffic here, and exposing
 # mitm on the LAN would route any inbound connection through it).
 listen_host: 127.0.0.1
 

@@ -16,23 +16,24 @@
 # Pre-start hook for opensandbox-supervisor wrapping the egress worker.
 # Reaps any mitmdump left over from a previous crashed egress so the next
 # launch can bind the transparent-MITM listen port (default 18081), and
-# tears down stale iptables DNS redirect rules so DNS queries reach the
+# tears down the stale native-nft redirect tables so DNS queries reach the
 # real nameserver while the new egress process is still initializing.
 #
 # Scope:
-#   * iptables NAT OUTPUT rules for port 53 ARE removed here. Without
-#     this, a crashed egress leaves REDIRECT rules pointing at a dead
-#     proxy (127.0.0.1:15353), causing DNS resolution failure for the
-#     entire restart window. The new egress process re-installs them
-#     after its DNS proxy is listening, so the unfiltered window is
-#     limited to the startup duration (~200ms).
 #   * The `inet/ip/ip6 opensandbox_dns_redirect` nft tables ARE removed
-#     here. Native nft DNS fallback uses those tables when iptables-nft
-#     cannot append OUTPUT rules; after a crash they would otherwise keep
-#     redirecting DNS to a dead proxy.
+#     here. A crashed egress leaves the DNS REDIRECT chain pointing at a
+#     dead proxy (127.0.0.1:15353), causing DNS resolution failure for the
+#     entire restart window. The new egress process re-installs them after
+#     its DNS proxy is listening, so the unfiltered window is limited to
+#     the startup duration (~200ms).
+#   * The `ip opensandbox_transparent` nft table (mitmproxy transparent
+#     80/443 redirect) is removed here too; after a crash it would
+#     otherwise keep redirecting to a dead mitmdump.
 #   * The `inet opensandbox` nft table is NOT touched here. The egress
 #     nftables manager already prepends `delete table inet opensandbox` to
 #     its ruleset script, so ApplyStatic is idempotent.
+#   * The egress no longer uses iptables at all — the dataplane is 100%
+#     native nftables — so there are no iptables rules to remove.
 #
 # Hard contract: this script MUST NOT exit non-zero. A misbehaving cleanup
 # hook is worse than a stray mitmdump; supervisor would treat the hook
@@ -47,36 +48,19 @@ log() { printf '[egress-cleanup] %s\n' "$*" >&2; }
 # stderr so it shows up in container logs without polluting the event log.
 try() { "$@" 2>&1 | sed 's/^/  /' >&2; return 0; }
 
-# ─── stale iptables rules (DNS redirect + mitmproxy transparent) ────
-# When egress crashes, iptables REDIRECT rules survive in the shared
-# network namespace. DNS rules point port 53 at a dead proxy (15353);
-# mitmproxy rules point 80/443 at a dead mitmdump. Remove both so
-# traffic flows normally until the new egress re-installs them.
-remove_stale_iptables() {
-  for cmd in iptables ip6tables; do
-    command -v "$cmd" >/dev/null 2>&1 || continue
-    # Delete all nat/OUTPUT rules that redirect port 53 (DNS proxy).
-    "$cmd" -t nat -S OUTPUT 2>/dev/null \
-      | awk '/--dport 53/ {sub(/^-A/,"-D"); print}' \
-      | while IFS= read -r rule; do
-          eval "$cmd -t nat $rule" 2>/dev/null || true
-        done
-    # Delete all nat/OUTPUT rules that redirect ports 80,443 (mitmproxy transparent).
-    "$cmd" -t nat -S OUTPUT 2>/dev/null \
-      | awk '/--dports 80,443/ {sub(/^-A/,"-D"); print}' \
-      | while IFS= read -r rule; do
-          eval "$cmd -t nat $rule" 2>/dev/null || true
-        done
-  done
-  log "stale iptables rules removed (best-effort)"
-}
-
-remove_stale_dns_redirect_nft() {
-  command -v nft >/dev/null 2>&1 || { log "nft not present; skipping native DNS redirect cleanup"; return 0; }
+# ─── stale native-nft redirect tables (DNS + mitmproxy transparent) ──
+# When egress crashes, its nat REDIRECT tables survive in the shared
+# network namespace: opensandbox_dns_redirect points port 53 at a dead
+# proxy (15353); opensandbox_transparent points 80/443 at a dead
+# mitmdump. Delete both so traffic flows normally until the new egress
+# re-installs them.
+remove_stale_redirect_nft() {
+  command -v nft >/dev/null 2>&1 || { log "nft not present; skipping native redirect cleanup"; return 0; }
   for family in inet ip ip6; do
     printf 'delete table %s opensandbox_dns_redirect\n' "$family" | nft -f - 2>/dev/null || true
   done
-  log "stale native DNS redirect nft tables removed (best-effort)"
+  printf 'delete table ip opensandbox_transparent\n' | nft -f - 2>/dev/null || true
+  log "stale native redirect nft tables removed (best-effort)"
 }
 
 # ─── stray mitmdump (orphaned after hard crash) ──────────────────────
@@ -96,8 +80,7 @@ kill_stray_mitmdump() {
 
 main() {
   log "starting (worker_exit_code=${WORKER_EXIT_CODE:-?} signal=${WORKER_SIGNAL:-?} attempt=${WORKER_ATTEMPT:-?})"
-  remove_stale_dns_redirect_nft
-  remove_stale_iptables
+  remove_stale_redirect_nft
   kill_stray_mitmdump
   log "done"
   exit 0
