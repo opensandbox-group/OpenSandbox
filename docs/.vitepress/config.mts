@@ -210,6 +210,10 @@ export default defineConfig({
             { text: "Code Interpreter", link: "/examples/code-interpreter" },
             { text: "AIO Sandbox", link: "/examples/aio-sandbox" },
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
+            {
+              text: "Egress Extension API POC",
+              link: "/examples/egress-extension-poc",
+            },
             { text: "Windows", link: "/examples/windows" },
             { text: "AKS Kata", link: "/examples/aks-kata" },
             { text: "Harbor Evaluation", link: "/examples/harbor-evaluation" },

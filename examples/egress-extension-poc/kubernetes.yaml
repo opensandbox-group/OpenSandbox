@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-extension-poc
+  namespace: POC_NAMESPACE
+  labels:
+    app.kubernetes.io/name: egress-extension-poc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: egress-extension-poc
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: egress-extension-poc
+    spec:
+      containers:
+        - name: egress
+          image: POC_IMAGE
+          imagePullPolicy: Always
+          env:
+            - name: OPENSANDBOX_EGRESS_EXTENSIONS_POC
+              value: "true"
+            - name: OPENSANDBOX_EGRESS_MODE
+              value: dns
+            - name: OPENSANDBOX_EGRESS_RULES
+              value: '{"defaultAction":"allow","egress":[]}'
+            - name: OPENSANDBOX_EGRESS_HTTP_ADDR
+              value: :18080
+            - name: OPENSANDBOX_EGRESS_TOKEN
+              value: poc-token
+          ports:
+            - name: api
+              containerPort: 18080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: api
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            runAsUser: 0
+            capabilities:
+              add:
+                - NET_ADMIN
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-extension-poc
+  namespace: POC_NAMESPACE
+spec:
+  selector:
+    app.kubernetes.io/name: egress-extension-poc
+  ports:
+    - name: api
+      port: 18080
+      targetPort: api

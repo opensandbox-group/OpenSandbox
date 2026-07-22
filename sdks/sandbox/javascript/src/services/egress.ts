@@ -21,6 +21,11 @@ import type {
   NetworkPolicy,
   NetworkRule,
 } from "../models/sandboxes.js";
+import type {
+  ExtensionCapabilities,
+  ExtensionResource,
+  ExtensionResourceState,
+} from "../models/extensions.js";
 
 export interface CredentialVault {
   /**
@@ -58,6 +63,19 @@ export interface CredentialVault {
 }
 
 export interface Egress {
+  /** Discover versioned extension resources supported by this egress endpoint. */
+  getCapabilities?(): Promise<ExtensionCapabilities>;
+  /** Get the complete effective extension resource set and its revision. */
+  getExtensions?(): Promise<ExtensionResourceState>;
+  /**
+   * Atomically replace the complete extension resource set.
+   *
+   * An empty list clears extensions without changing the core network policy.
+   */
+  replaceExtensions?(
+    resources: ExtensionResource[],
+    expectedRevision?: number,
+  ): Promise<ExtensionResourceState>;
   getPolicy(): Promise<NetworkPolicy>;
   /**
    * Patch egress rules with sidecar merge semantics.

@@ -32,6 +32,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/extensions"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
@@ -85,10 +86,13 @@ func startPolicyServer(
 		mitmGate:         mitmGate,
 	}
 	handler.credentialVault = credentialvault.NewStore(mitmGate, func() bool { return strings.TrimSpace(token) != "" })
+	handler.extensionStore = newExtensionStoreFromEnv()
 	handler.credentialVaultRequireTLS = constants.IsTruthy(os.Getenv(constants.EnvCredentialVaultRequireTLS))
 	handler.setAlwaysRules(alwaysDeny, alwaysAllow)
 
 	mux.HandleFunc("/policy", handler.handlePolicy)
+	mux.HandleFunc("/capabilities", handler.handleExtensionCapabilities)
+	mux.HandleFunc("/extensions", handler.handleExtensions)
 	mux.HandleFunc("/credential-vault", handler.handleCredentialVault)
 	mux.HandleFunc("/credential-vault/", handler.handleCredentialVaultSubresource)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -178,6 +182,7 @@ type policyServer struct {
 	lastAlwaysFP              uint64
 	lastAlwaysFPSet           bool
 	credentialVault           *credentialvault.Store
+	extensionStore            *extensions.Store
 	mitmGate                  *mitmproxy.HealthGate
 	credentialVaultRequireTLS bool
 }

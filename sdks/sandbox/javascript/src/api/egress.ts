@@ -18,6 +18,59 @@
  */
 
 export interface paths {
+    "/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get egress extension capabilities
+         * @description Returns the exact extension resource versions and operations supported by
+         *     this egress implementation. Discovery is advisory; mutation responses are
+         *     authoritative if capabilities change between requests.
+         */
+        get: operations["getExtensionCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/extensions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get effective egress extension resources
+         * @description Returns the complete effective extension resource set, its revision, and
+         *     implementation conditions. Unknown fields inside resource `metadata` and
+         *     `spec` are preserved.
+         */
+        get: operations["getExtensionResources"];
+        /**
+         * Replace egress extension resources
+         * @description Atomically replace the complete egress extension resource set. The
+         *     optional `expectedRevision` provides optimistic concurrency. An empty
+         *     `resources` list clears extensions without changing the core `/policy`.
+         *
+         *     The previous acknowledged revision remains active when validation or
+         *     application fails.
+         */
+        put: operations["replaceExtensionResources"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/policy": {
         parameters: {
             query?: never;
@@ -411,6 +464,90 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ExtensionCapabilitiesResponse: {
+            /**
+             * @description Version of the extension discovery and mutation protocol.
+             * @example extensions.opensandbox.io/v1alpha1
+             */
+            protocolVersion: string;
+            resources: components["schemas"]["ExtensionCapability"][];
+        };
+        ExtensionCapability: {
+            /**
+             * @description Exact API group and version supported by this implementation.
+             * @example gateway.networking.k8s.io/v1
+             */
+            apiVersion: string;
+            /** @example HTTPRoute */
+            kind: string;
+            available: boolean;
+            /** @description Supported operations. Initial values are read and replace. */
+            operations: string[];
+            /** @description Optional qualified feature names within this resource schema. */
+            features?: string[];
+            /** @description Human-readable reason when a known resource is unavailable. */
+            reason?: string;
+        };
+        ExtensionResource: {
+            /**
+             * @description Qualified API group and version identifying the resource schema.
+             * @example gateway.networking.k8s.io/v1
+             */
+            apiVersion: string;
+            /**
+             * @description Resource schema kind.
+             * @example HTTPRoute
+             */
+            kind: string;
+            metadata: components["schemas"]["ExtensionResourceMetadata"];
+            /** @description Extension-defined configuration validated by the registered schema. */
+            spec: {
+                [key: string]: unknown;
+            };
+        };
+        ExtensionResourceMetadata: {
+            name: string;
+            namespace?: string;
+        } & {
+            [key: string]: unknown;
+        };
+        ExtensionResourceSetRequest: {
+            /** @description Optional optimistic concurrency guard. */
+            expectedRevision?: number;
+            resources: components["schemas"]["ExtensionResource"][];
+        };
+        ExtensionResourceState: {
+            revision: number;
+            resources: components["schemas"]["ExtensionResource"][];
+            conditions: components["schemas"]["ExtensionCondition"][];
+        };
+        ExtensionCondition: {
+            /** @description Condition type such as Accepted or Programmed. */
+            type: string;
+            /** @enum {string} */
+            status: "True" | "False" | "Unknown";
+            reason: string;
+            message?: string;
+            observedRevision: number;
+            resource?: components["schemas"]["ExtensionResourceReference"];
+        };
+        ExtensionResourceReference: {
+            apiVersion: string;
+            kind: string;
+            namespace?: string;
+            name: string;
+        };
+        ExtensionErrorResponse: {
+            /**
+             * @description Stable error code. SDKs must preserve codes they do not recognize.
+             * @example CAPABILITY_UNAVAILABLE
+             */
+            code: string;
+            message: string;
+            resource?: components["schemas"]["ExtensionResourceReference"];
+            /** @description JSON path identifying the invalid field when available. */
+            fieldPath?: string;
+        };
         PolicyStatusResponse: {
             /**
              * @description Operation status reported by the sidecar.
@@ -665,6 +802,51 @@ export interface components {
                 "text/plain": string;
             };
         };
+        /** @description An extension envelope or registered resource schema was invalid. */
+        InvalidExtension: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ExtensionErrorResponse"];
+            };
+        };
+        /** @description The exact extension apiVersion and kind are not recognized. */
+        UnsupportedExtension: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ExtensionErrorResponse"];
+            };
+        };
+        /** @description A known extension is unavailable for the active egress implementation. */
+        ExtensionCapabilityUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ExtensionErrorResponse"];
+            };
+        };
+        /** @description Extension resources conflict or the expected revision is stale. */
+        ExtensionConflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ExtensionErrorResponse"];
+            };
+        };
+        /** @description Extension resources were valid but could not be applied. */
+        ExtensionApplyFailed: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ExtensionErrorResponse"];
+            };
+        };
     };
     parameters: never;
     requestBodies: never;
@@ -672,4 +854,79 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    getExtensionCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Extension capabilities returned successfully. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExtensionCapabilitiesResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    getExtensionResources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Extension resource state returned successfully. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExtensionResourceState"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["ExtensionApplyFailed"];
+        };
+    };
+    replaceExtensionResources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExtensionResourceSetRequest"];
+            };
+        };
+        responses: {
+            /** @description Extension resources replaced and acknowledged. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExtensionResourceState"];
+                };
+            };
+            400: components["responses"]["InvalidExtension"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["ExtensionConflict"];
+            412: components["responses"]["ExtensionCapabilityUnavailable"];
+            422: components["responses"]["UnsupportedExtension"];
+            500: components["responses"]["ExtensionApplyFailed"];
+        };
+    };
+}
