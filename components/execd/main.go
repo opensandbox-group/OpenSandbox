@@ -30,6 +30,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/mitmca"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web"
@@ -59,6 +60,9 @@ func main() {
 		isolationProbe.Available, isolationProbe.Isolator, isolationProbe.Version)
 
 	log.Init(flag.ServerLogLevel)
+	watchCtx, cancelWatcher := context.WithCancel(context.Background())
+	defer cancelWatcher()
+	mitmca.Start(watchCtx)
 
 	ctrl := controller.InitCodeRunner()
 

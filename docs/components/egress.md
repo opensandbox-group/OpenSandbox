@@ -161,6 +161,8 @@ APIs, environment variables, and behavior may change.
 
 Optional transparent HTTPS interception for outbound `80/443` traffic in the sidecar network namespace.
 
+The egress sidecar exports only its public root certificate to the shared OpenSandbox volume. The agent bootstrap installs that certificate into the system, NSS, and JDK trust stores. If an egress container restart rotates the root certificate, `execd` detects the new certificate fingerprint and refreshes those stores and the merged CA bundle automatically. Processes started through `execd` after the refresh use the new trust material; long-running applications that cache TLS contexts must recreate those contexts or restart.
+
 ### Credential Vault
 
 The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer.

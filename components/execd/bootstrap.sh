@@ -50,18 +50,27 @@ OPENSANDBOX_MERGED_CA=""
 trust_mitm_ca() {
 	cert="$1"
 	merged="/opt/opensandbox/merged-ca-certificates.pem"
+	trust_failed=0
 
 	# 1) Try to install into the system trust store (best-effort).
 	if command -v update-ca-certificates >/dev/null 2>&1; then
-		_sudo mkdir -p /usr/local/share/ca-certificates \
+		if _sudo mkdir -p /usr/local/share/ca-certificates \
 			&& _sudo cp "$cert" /usr/local/share/ca-certificates/opensandbox-mitmproxy-ca.crt \
-			&& _sudo update-ca-certificates \
-			|| echo "warning: update-ca-certificates failed; system trust store may not include mitm CA" >&2
+			&& _sudo update-ca-certificates; then
+			:
+		else
+			echo "warning: update-ca-certificates failed; system trust store may not include mitm CA" >&2
+			trust_failed=1
+		fi
 	elif command -v update-ca-trust >/dev/null 2>&1; then
-		_sudo mkdir -p /etc/pki/ca-trust/source/anchors \
+		if _sudo mkdir -p /etc/pki/ca-trust/source/anchors \
 			&& _sudo cp "$cert" /etc/pki/ca-trust/source/anchors/opensandbox-mitmproxy-ca.pem \
-			&& { _sudo update-ca-trust extract || _sudo update-ca-trust; } \
-			|| echo "warning: update-ca-trust failed; system trust store may not include mitm CA" >&2
+			&& { _sudo update-ca-trust extract || _sudo update-ca-trust; }; then
+			:
+		else
+			echo "warning: update-ca-trust failed; system trust store may not include mitm CA" >&2
+			trust_failed=1
+		fi
 	else
 		echo "warning: no system trust-store tooling found (need update-ca-certificates or update-ca-trust)" >&2
 	fi
@@ -83,14 +92,17 @@ trust_mitm_ca() {
 		/etc/ssl/cert.pem \
 		/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
 		if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -s "$candidate" ]; then
-			cat "$candidate" "$cert" > "$merged"
-			OPENSANDBOX_MERGED_CA="$merged"
-			return 0
+			merged_tmp="${merged}.tmp.$$"
+			if cat "$candidate" "$cert" > "$merged_tmp" && mv -f "$merged_tmp" "$merged"; then
+				OPENSANDBOX_MERGED_CA="$merged"
+				return "$trust_failed"
+			fi
+			rm -f "$merged_tmp"
 		fi
 	done
 
 	echo "warning: could not locate any CA bundle to merge with mitm CA" >&2
-	return 0
+	return 1
 }
 
 # Chromium/Chrome on Linux do not use only the system trust store: they also honor the per-user
@@ -105,7 +117,8 @@ trust_mitm_ca_nss() {
 	fi
 	pki="${HOME}/.pki/nssdb"
 	if ! mkdir -p "$pki" 2>/dev/null; then
-		return 0
+		echo "warning: failed to create NSS database directory at $pki" >&2
+		return 1
 	fi
 	if [ -f "$pki/cert9.db" ]; then
 		nssdb="sql:$pki"
@@ -114,21 +127,25 @@ trust_mitm_ca_nss() {
 	else
 		nssdb="sql:$pki"
 		if ! certutil -N -d "$nssdb" --empty-password 2>/dev/null; then
-			[ -f "$pki/cert9.db" ] || return 0
+			if [ ! -f "$pki/cert9.db" ]; then
+				echo "warning: failed to initialize NSS database at $pki" >&2
+				return 1
+			fi
 		fi
 	fi
 	nick="opensandbox-mitmproxy"
 	certutil -D -d "$nssdb" -n "$nick" 2>/dev/null || true
 	if ! certutil -A -d "$nssdb" -n "$nick" -t "C,," -i "$cert"; then
 		echo "warning: failed to import mitm CA into NSS at $pki (Chrome may still distrust); need certutil" >&2
-		return 0
+		return 1
 	fi
 	return 0
 }
 
 # Import the mitm CA into every JDK trust store found on the system so that Java
 # tooling (Maven, Gradle, HttpClient) trusts the credential-proxy MITM cert.
-# Best-effort: missing keytool or import failure only warns, never blocks.
+# Missing keytool is ignored. Import failures remain best-effort during initial
+# bootstrap, while execd's strict refresh mode surfaces them for retry.
 _jdk_import_ca() {
 	jh="$1"
 	cert="$2"
@@ -150,7 +167,10 @@ _jdk_import_ca() {
 
 	# Remove stale alias first so a regenerated CA cert is always picked up.
 	if "$kt" -list -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1; then
-		_sudo "$kt" -delete -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1
+		if ! _sudo "$kt" -delete -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1; then
+			echo "warning: failed to remove stale mitm CA from $ks" >&2
+			return 1
+		fi
 	fi
 
 	if _sudo "$kt" -importcert -noprompt -trustcacerts \
@@ -161,10 +181,13 @@ _jdk_import_ca() {
 		echo "imported mitm CA into JDK trust store at $ks"
 	else
 		echo "warning: failed to import mitm CA into $ks" >&2
+		return 1
 	fi
+	return 0
 }
 
 _SEEN_JDKS=""
+_JDK_IMPORT_FAILED=0
 _try_jdk() {
 	candidate="$1"
 	cert="$2"
@@ -175,13 +198,17 @@ _try_jdk() {
 	*" $real "*) return 0 ;;
 	esac
 	_SEEN_JDKS="$_SEEN_JDKS $real"
-	_jdk_import_ca "$real" "$cert"
+	if ! _jdk_import_ca "$real" "$cert"; then
+		_JDK_IMPORT_FAILED=1
+	fi
+	return 0
 }
 
 trust_mitm_ca_jdk() {
 	cert="$1"
 	[ -f "$cert" ] || return 0
 	_SEEN_JDKS=""
+	_JDK_IMPORT_FAILED=0
 
 	# 1) $JAVA_HOME if set.
 	if [ -n "${JAVA_HOME:-}" ]; then
@@ -217,14 +244,22 @@ trust_mitm_ca_jdk() {
 		_try_jdk "$jh_candidate" "$cert"
 	fi
 
+	jdk_status="$_JDK_IMPORT_FAILED"
 	_SEEN_JDKS=""
-	return 0
+	_JDK_IMPORT_FAILED=0
+	return "$jdk_status"
 }
 
 MITM_CA="/opt/opensandbox/mitmproxy-ca-cert.pem"
-if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
+refresh_mitm_ca() {
+	strict="${1:-0}"
+	refresh_failed=0
+	wait_limit=300
+	if [ "$strict" = "1" ]; then
+		wait_limit=30
+	fi
 	i=0
-	while [ "$i" -lt 300 ]; do
+	while [ "$i" -lt "$wait_limit" ]; do
 		if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
 			break
 		fi
@@ -232,17 +267,23 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 		i=$((i + 1))
 	done
 	if [ ! -f "$MITM_CA" ] || [ ! -s "$MITM_CA" ]; then
-		echo "warning: timed out after 300s waiting for $MITM_CA (egress mitm CA export); continuing without system CA trust" >&2
+		echo "warning: timed out after ${wait_limit}s waiting for $MITM_CA (egress mitm CA export); continuing without system CA trust" >&2
+		refresh_failed=1
 	else
 		echo "mitm CA ready at $MITM_CA after ${i}s"
 		if ! trust_mitm_ca "$MITM_CA"; then
 			echo "warning: failed to install mitm CA into system trust store; TLS interception may not work for system libraries" >&2
+			refresh_failed=1
 		fi
 	fi
 
 	if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
-		trust_mitm_ca_nss "$MITM_CA" || true
-		trust_mitm_ca_jdk "$MITM_CA" || true
+		if ! trust_mitm_ca_nss "$MITM_CA"; then
+			refresh_failed=1
+		fi
+		if ! trust_mitm_ca_jdk "$MITM_CA"; then
+			refresh_failed=1
+		fi
 		export NODE_EXTRA_CA_CERTS="$MITM_CA"  # additive — Node appends to built-in roots
 
 		# REQUESTS_CA_BUNDLE and SSL_CERT_FILE replace the default bundle,
@@ -256,6 +297,23 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 			export SSL_CERT_FILE="$MITM_CA"
 		fi
 	fi
+	if [ "$strict" = "1" ] && [ "$refresh_failed" -ne 0 ]; then
+		return 1
+	fi
+	return 0
+}
+
+# Execd invokes this internal mode after the shared CA fingerprint changes.
+# It refreshes future child-process trust without starting another daemon.
+if [ "${1:-}" = "--refresh-mitm-ca-trust" ]; then
+	if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
+		refresh_mitm_ca 1
+	fi
+	exit $?
+fi
+
+if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
+	refresh_mitm_ca 0
 fi
 
 EXECD="${EXECD:=/opt/opensandbox/execd}"
