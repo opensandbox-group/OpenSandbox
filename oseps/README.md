@@ -21,3 +21,5 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0013](0013-isolated-execution-api.md)                    |      Isolated Execution API                                               | implementing  |  2026-06-23  |
 | [OSEP-0014](0014-multi-tenancy.md)                             |      Multi-Tenancy Support for Kubernetes Runtime                         |     draft     |  2026-05-07  |
 | [OSEP-0015](0015-pod-snapshot.md)                              |      Spec-Driven Pod Snapshot for Pause and Resume                        |     draft     |  2026-06-27  |
+| [OSEP-0016](0016-unified-umbrella-release-governance.md)       |      Unified Umbrella Release Governance                                  |     draft     |  2026-07-21  |
+| [OSEP-0017](0017-resilient-sdk-transport.md)                   |      Resilient SDK Transport                                              | implementing  |  2026-07-22  |

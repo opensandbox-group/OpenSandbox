@@ -7,7 +7,7 @@ last-updated: 2026-07-21
 status: draft
 ---
 
-# OSEP-0015: Unified Umbrella Release Governance
+# OSEP-0016: Unified Umbrella Release Governance
 
 <!-- toc -->
 - [Summary](#summary)
