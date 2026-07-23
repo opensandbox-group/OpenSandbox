@@ -67,7 +67,7 @@ func (c *Controller) runJupyterCode(ctx context.Context, kernel *jupyterKernel, 
 	if err != nil {
 		return err
 	}
-	defer kernel.client.DisconnectFromKernel(kernel.kernelID)
+	defer kernel.client.DisconnectFromKernel()
 
 	results := make(chan *execute.ExecutionResult, 10)
 
@@ -85,7 +85,7 @@ func (c *Controller) runJupyterCode(ctx context.Context, kernel *jupyterKernel, 
 			dispatchExecutionResultHooks(request, result)
 
 		case <-ctx.Done():
-			log.Warning("context cancelled, try to interrupt kernel")
+			log.Warn("context cancelled, try to interrupt kernel")
 			err = kernel.client.InterruptKernel(kernel.kernelID)
 			if err != nil {
 				log.Error("interrupt kernel failed: %v", err)
@@ -127,11 +127,6 @@ func dispatchExecutionResultHooks(request *ExecuteCodeRequest, result *execute.E
 			request.Hooks.OnExecuteStderr(stream.Text)
 		}
 	}
-}
-
-// setWorkingDir configures the working directory for a kernel session.
-func (c *Controller) setWorkingDir(_ *jupyterKernel, _ *CreateContextRequest) error {
-	return nil
 }
 
 // getJupyterKernel retrieves a kernel connection from the session map.

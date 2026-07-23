@@ -88,4 +88,12 @@ public class ConstantsTests
     {
         Constants.RequestIdHeader.Should().Be("x-request-id");
     }
+
+    // Regression: the User-Agent version is hand-maintained and must be bumped
+    // together with the package version. Update this expectation when releasing.
+    [Fact]
+    public void DefaultUserAgent_ShouldMatchPackageVersion()
+    {
+        Constants.DefaultUserAgent.Should().Be("OpenSandbox-CSharp-SDK/0.1.4");
+    }
 }

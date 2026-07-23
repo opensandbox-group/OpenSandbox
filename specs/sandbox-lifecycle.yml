@@ -12,8 +12,8 @@ info:
 
     A sandbox follows this lifecycle:
 
-    1. **Creation** → Sandbox enters `Pending` state (auto-starts)
-    2. **Execution** → Transitions to `Running` state
+    1. **Creation** → Sandbox is provisioned and enters `Running` state
+    2. **Execution** → Sandbox is running and ready to accept requests
     3. **Pause** (optional) → `Pausing` → `Paused` (asynchronous process)
     4. **Resume** (optional) → `Resuming` → `Running` (asynchronous process)
     5. **Termination** → `Stopping` → `Terminated` (can be triggered by kill action, TTL expiry, or error)
@@ -46,7 +46,48 @@ tags:
     description: Provision and transition sandboxes through their lifecycle
   - name: Snapshots
     description: Create, list, and delete persistent sandbox snapshots
+  - name: Metrics
+    description: Best-effort SDK telemetry ingestion for server-side aggregation
 paths:
+  /metrics/events:
+    post:
+      tags: [Metrics]
+      operationId: reportMetricsEvent
+      summary: Report an SDK metrics event
+      description: |
+        Accepts best-effort telemetry from SDKs (Phase 1: sandbox creation latency).
+
+        SDKs SHOULD fire-and-forget this call after `create` + readiness complete
+        (or after a failed creation attempt). Failures to report MUST NOT affect
+        sandbox usability. The server accepts events even when OpenTelemetry
+        export is disabled (noop recording).
+
+        SDK language and version are taken from the HTTP `User-Agent` header
+        (for example `OpenSandbox-Python-SDK/0.1.14`), not from the JSON body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MetricsEvent'
+            example:
+              eventType: sandbox.create
+              sandboxId: sbx_01HZYEXAMPLE
+              image: python:3.12
+              createDurationMs: 1842
+              success: true
+      responses:
+        '204':
+          description: Event accepted
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /sandboxes:
     get:
       tags: [ Sandboxes ]
@@ -204,19 +245,16 @@ paths:
       responses:
         '202':
           description: |
-            Sandbox created and accepted for provisioning.
+            Sandbox created and provisioned successfully.
 
             The returned sandbox includes:
             - `id`: Unique sandbox identifier
-            - `status.state: "Pending"` (auto-starting provisioning or restore)
-            - `status.reason` and `status.message` indicating initialization stage
+            - `status.state: "Running"` (provisioning completed synchronously)
+            - `status.reason` and `status.message` indicating current state
             - `metadata`, `expiresAt`, `createdAt`: Core sandbox information
 
             Note: startup source details and `updatedAt` are not included in the create response.
             Use GET /sandboxes/{sandboxId} to retrieve the complete sandbox information.
-
-            To track provisioning progress, poll GET /sandboxes/{sandboxId}.
-            The sandbox will automatically transition to `Running` state once provisioning or restore completes.
           content:
             application/json:
               schema:
@@ -245,6 +283,11 @@ paths:
         - name: sandboxId
           in: query
           description: Filter snapshots by source sandbox identifier
+          schema:
+            type: string
+        - name: name
+          in: query
+          description: Filter snapshots by exact snapshot name
           schema:
             type: string
         - name: state
@@ -784,6 +827,33 @@ components:
         X-Request-ID:
           $ref: '#/components/headers/XRequestId'
   schemas:
+    MetricsEvent:
+      type: object
+      description: |
+        SDK-reported metrics event. Phase 1 covers sandbox creation latency from
+        the start of create until readiness succeeds or creation fails.
+
+        SDK language and package version are identified via the request
+        `User-Agent` header (for example `OpenSandbox-Go-SDK/0.1.0`), not body fields.
+      properties:
+        eventType:
+          type: string
+          description: Metric event type
+          enum: [sandbox.create]
+        sandboxId:
+          type: string
+          description: Sandbox identifier when available (may be omitted if create failed before an ID was assigned)
+        image:
+          type: string
+          description: Container image URI or snapshot startup source label
+        createDurationMs:
+          type: integer
+          minimum: 0
+          description: Wall-clock duration in milliseconds from create start to ready or failure
+        success:
+          type: boolean
+          description: Whether create + readiness completed successfully
+      required: [eventType, createDurationMs, success]
     ListSandboxesResponse:
       type: object
       properties:
@@ -845,6 +915,12 @@ components:
           additionalProperties:
             type: string
           description: Custom metadata from creation request
+
+        extensions:
+          type: object
+          additionalProperties:
+            type: string
+          description: Opaque extension data restored from provider-specific storage
 
         platform:
           $ref: '#/components/schemas/PlatformSpec'
@@ -996,6 +1072,12 @@ components:
           additionalProperties:
             type: string
           description: Custom metadata from creation request
+
+        extensions:
+          type: object
+          additionalProperties:
+            type: string
+          description: Opaque extension data restored from provider-specific storage
 
         entrypoint:
           type: array
@@ -1169,7 +1251,8 @@ components:
         **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
         a pre-configured pool. In this case `image`, `entrypoint`, and
         `resourceLimits` are all optional (defined by the Pool CRD template).
-        `snapshotId` must not be provided together with `poolRef`.
+        `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
+        `credentialProxy.enabled` must not be provided together with `poolRef`.
 
         **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
       properties:
@@ -1281,6 +1364,9 @@ components:
             Optional outbound network policy for the sandbox.
             Shape matches the sidecar `/policy` endpoint. If omitted or empty,
             the sidecar starts in allow-all mode until updated.
+            Not supported together with `extensions.poolRef`; pooled pods are
+            pre-created, so the server rejects this combination instead of
+            silently ignoring the requested policy.
 
         credentialProxy:
           $ref: '#/components/schemas/CredentialProxyConfig'
@@ -1428,8 +1514,10 @@ components:
       type: object
       description: |
         Credential Vault proxy startup settings. This is an explicit opt-in for
-        transparent MITM support used by credential injection; plain egress
-        network policy remains DNS/FQDN policy enforcement only.
+        transparent MITM support used by credential injection. Credential Vault
+        requires `dns+nft` enforcement and a network policy. A deny-default policy
+        is strongly recommended; default-allow remains temporarily supported for
+        backward compatibility and emits a security warning.
       properties:
         enabled:
           type: boolean
@@ -1437,7 +1525,9 @@ components:
           description: |
             When true, the server starts the egress sidecar with transparent
             MITM enabled and installs the runtime-managed MITM CA bundle into
-            the sandbox container. Requires `networkPolicy`.
+            the sandbox container. Requires `networkPolicy` and server
+            `[egress].mode = "dns+nft"`. `defaultAction: deny` is strongly
+            recommended; default-allow support is deprecated.
       additionalProperties: false
 
     NetworkRule:

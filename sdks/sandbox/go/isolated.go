@@ -33,30 +33,97 @@ type EnvPassthroughSpec struct {
 	Keys []string `json:"keys,omitempty"`
 }
 
+// BindMount describes an explicit source-to-destination bind mount into the namespace.
+type BindMount struct {
+	Source   string `json:"source"`
+	Dest     string `json:"dest,omitempty"`
+	ReadOnly bool   `json:"readonly,omitempty"`
+}
+
 // CreateIsolatedSessionRequest is the request body for creating an isolated session.
 type CreateIsolatedSessionRequest struct {
 	Workspace          IsolatedWorkspaceSpec `json:"workspace"`
 	Profile            string                `json:"profile,omitempty"`
 	ExtraWritable      []string              `json:"extra_writable,omitempty"`
+	Binds              []BindMount           `json:"binds,omitempty"`
 	ShareNet           *bool                 `json:"share_net,omitempty"`
 	EnvPassthrough     *EnvPassthroughSpec   `json:"env_passthrough,omitempty"`
 	Uid                *uint32               `json:"uid,omitempty"`
 	Gid                *uint32               `json:"gid,omitempty"`
+	UidMode            string                `json:"uid_mode,omitempty"` // "setpriv" | "userns"
 	IdleTimeoutSeconds int                   `json:"idle_timeout_seconds,omitempty"`
 }
 
 // IsolatedSessionInfo is the response from creating an isolated session.
+//
+// The creation-parameter echo fields (Profile, Workspace, ExtraWritable, Binds,
+// ShareNet, EnvPassthrough, Uid, Gid, UidMode, IdleTimeoutSeconds) are populated
+// only when the info is built by IsolationAttach against an execd build that
+// echoes creation parameters on GET /v1/isolated/session/{id}. Older execd
+// builds and the POST /v1/isolated/session create response leave them zero
+// (or nil, for pointer fields).
+//
+// IdleTimeoutSeconds is a pointer so callers can distinguish "execd did not
+// echo the field" (nil, e.g. older execd) from "session was created with
+// idle GC disabled" (non-nil zero).
 type IsolatedSessionInfo struct {
 	SessionID string    `json:"session_id"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// Creation-parameter echoes (populated on attach when the server supports it).
+	Profile            string                 `json:"profile,omitempty"`
+	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
+	ExtraWritable      []string               `json:"extra_writable,omitempty"`
+	Binds              []BindMount            `json:"binds,omitempty"`
+	ShareNet           *bool                  `json:"share_net,omitempty"`
+	EnvPassthrough     *EnvPassthroughSpec    `json:"env_passthrough,omitempty"`
+	Uid                *uint32                `json:"uid,omitempty"`
+	Gid                *uint32                `json:"gid,omitempty"`
+	UidMode            string                 `json:"uid_mode,omitempty"`
+	IdleTimeoutSeconds *int                   `json:"idle_timeout_seconds,omitempty"`
 }
 
 // IsolatedSessionState represents the current state of an isolated session.
+//
+// Since feat/isolated-session-attach, execd additionally echoes the
+// creation parameters on GET /v1/isolated/session/{id}. The echoed fields
+// are optional; older execd builds omit them and clients must tolerate
+// their absence.
+//
+// IdleTimeoutSeconds is a pointer so callers can distinguish "execd did not
+// echo the field" (nil, e.g. older execd) from "session was created with
+// idle GC disabled" (non-nil zero).
 type IsolatedSessionState struct {
 	Status               string    `json:"status"`
 	CreatedAt            time.Time `json:"created_at"`
 	LastRunAt            time.Time `json:"last_run_at"`
 	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
+
+	// Creation-parameter echoes (optional; omitted by older execd builds).
+	Profile            string                 `json:"profile,omitempty"`
+	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
+	ExtraWritable      []string               `json:"extra_writable,omitempty"`
+	Binds              []BindMount            `json:"binds,omitempty"`
+	ShareNet           *bool                  `json:"share_net,omitempty"`
+	EnvPassthrough     *EnvPassthroughSpec    `json:"env_passthrough,omitempty"`
+	Uid                *uint32                `json:"uid,omitempty"`
+	Gid                *uint32                `json:"gid,omitempty"`
+	UidMode            string                 `json:"uid_mode,omitempty"`
+	IdleTimeoutSeconds *int                   `json:"idle_timeout_seconds,omitempty"`
+}
+
+// IsolatedSessionSummary describes a single isolated session in a list response.
+type IsolatedSessionSummary struct {
+	SessionID            string    `json:"session_id"`
+	Status               string    `json:"status"`
+	CreatedAt            time.Time `json:"created_at"`
+	LastRunAt            time.Time `json:"last_run_at"`
+	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`
+}
+
+// listIsolatedSessionsResponse is the wire response for listing isolated sessions.
+type listIsolatedSessionsResponse struct {
+	Sessions []IsolatedSessionSummary `json:"sessions"`
 }
 
 // IsolatedRunRequest is the request body for running code in an isolated session.
@@ -68,12 +135,14 @@ type IsolatedRunRequest struct {
 
 // IsolatedCapabilities reports isolation capabilities.
 type IsolatedCapabilities struct {
-	Available       bool   `json:"available"`
-	Isolator        string `json:"isolator,omitempty"`
-	Version         string `json:"version,omitempty"`
-	Message         string `json:"message,omitempty"`
-	CommitSupported bool   `json:"commit_supported"`
-	DiffSupported   bool   `json:"diff_supported"`
+	Available        bool   `json:"available"`
+	Isolator         string `json:"isolator,omitempty"`
+	Version          string `json:"version,omitempty"`
+	Message          string `json:"message,omitempty"`
+	SetprivAvailable bool   `json:"setpriv_available"`
+	UsernsAvailable  bool   `json:"userns_available"`
+	CommitSupported  bool   `json:"commit_supported"`
+	DiffSupported    bool   `json:"diff_supported"`
 }
 
 // IsolatedCreate creates an isolated bash session.
@@ -95,6 +164,16 @@ func (e *ExecdClient) IsolatedGet(ctx context.Context, sessionID string) (*Isola
 		return nil, err
 	}
 	return &result, nil
+}
+
+// IsolatedList lists all active isolated sessions.
+func (e *ExecdClient) IsolatedList(ctx context.Context) ([]IsolatedSessionSummary, error) {
+	var result listIsolatedSessionsResponse
+	err := e.client.doRequest(ctx, http.MethodGet, "/v1/isolated/sessions", nil, &result)
+	if err != nil {
+		return nil, err
+	}
+	return result.Sessions, nil
 }
 
 // IsolatedRun runs code in an isolated session, streaming output via SSE.

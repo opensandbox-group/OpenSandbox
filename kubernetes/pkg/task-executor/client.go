@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"k8s.io/klog/v2"
 )
@@ -36,10 +35,8 @@ func NewClient(baseURL string) *Client {
 		klog.Warning("baseURL is empty, client may not work properly")
 	}
 	return &Client{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:    baseURL,
+		httpClient: &http.Client{},
 	}
 }
 

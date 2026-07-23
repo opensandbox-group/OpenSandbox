@@ -154,6 +154,7 @@ class TestBatchSandboxProvider:
         assert body["spec"]["replicas"] == 1
         assert body["spec"]["expireTime"] == "2025-12-31T10:00:00+00:00"
         assert "template" in body["spec"]
+        assert body["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
         assert "initContainers" in body["spec"]["template"]["spec"]
         assert "containers" in body["spec"]["template"]["spec"]
         assert "volumes" in body["spec"]["template"]["spec"]
@@ -1361,6 +1362,46 @@ spec:
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
 
+    def test_create_workload_poolref_rejects_network_policy(self, mock_k8s_client):
+        provider = BatchSandboxProvider(mock_k8s_client)
+
+        with pytest.raises(ValueError, match="Pool mode does not support networkPolicy"):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+                extensions={"poolRef": "my-pool"},
+                network_policy=NetworkPolicy(default_action="deny", egress=[]),
+            )
+
+        mock_k8s_client.create_custom_object.assert_not_called()
+
+    def test_create_workload_poolref_rejects_credential_proxy(self, mock_k8s_client):
+        provider = BatchSandboxProvider(mock_k8s_client)
+
+        with pytest.raises(ValueError, match="Pool mode does not support credentialProxy.enabled"):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+                extensions={"poolRef": "my-pool"},
+                credential_proxy_enabled=True,
+            )
+
+        mock_k8s_client.create_custom_object.assert_not_called()
+
     def test_create_workload_poolref_allows_entrypoint_and_env(self, mock_k8s_client):
         """
         Test that pool-based creation allows customizing entrypoint and env.
@@ -1711,7 +1752,7 @@ class TestBatchSandboxProviderEgress:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
             credential_proxy_enabled=True,
         )
 
@@ -1725,7 +1766,7 @@ class TestBatchSandboxProviderEgress:
         # Find sidecar container
         sidecar = next((c for c in containers if c["name"] == "egress"), None)
         assert sidecar is not None
-        assert sidecar["image"] == "opensandbox/egress:v1.1.2"
+        assert sidecar["image"] == "opensandbox/egress:v1.1.4"
 
         # Verify sidecar has environment variable
         env_vars = {e["name"]: e["value"] for e in sidecar.get("env", [])}
@@ -1789,7 +1830,7 @@ class TestBatchSandboxProviderEgress:
             execd_image="execd:latest",
             platform=PlatformSpec(os="windows", arch="amd64"),
             network_policy=NetworkPolicy(default_action="deny", egress=[]),
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -1828,7 +1869,7 @@ class TestBatchSandboxProviderEgress:
             expires_at=None,
             execd_image="execd:latest",
             network_policy=NetworkPolicy(default_action="deny", egress=[]),
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
             annotations={SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY: "egress-token"},
             egress_auth_token="egress-token",
         )
@@ -1866,7 +1907,7 @@ class TestBatchSandboxProviderEgress:
             expires_at=None,
             execd_image="execd:latest",
             network_policy=NetworkPolicy(default_action="deny", egress=[]),
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
             egress_mode=EGRESS_MODE_DNS_NFT,
         )
 
@@ -1906,7 +1947,7 @@ class TestBatchSandboxProviderEgress:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -1950,7 +1991,7 @@ class TestBatchSandboxProviderEgress:
             expires_at=None,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -1985,7 +2026,7 @@ class TestBatchSandboxProviderEgress:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -2062,7 +2103,7 @@ class TestBatchSandboxProviderEgress:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -2152,7 +2193,7 @@ spec:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.2",
+            egress_image="opensandbox/egress:v1.1.4",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -2697,8 +2738,11 @@ spec:
         main_container = pod_spec["containers"][0]
         mounts = main_container.get("volumeMounts", [])
         models_mount = next((m for m in mounts if m["name"] == "models-volume"), None)
+        models_volume = next((v for v in pod_spec["volumes"] if v["name"] == "models-volume"), None)
         assert models_mount is not None
         assert models_mount["readOnly"] is True
+        assert models_volume is not None
+        assert models_volume["persistentVolumeClaim"]["readOnly"] is True
 
     def test_create_workload_with_pvc_volume_subpath(self, mock_k8s_client):
         """
@@ -2960,7 +3004,10 @@ spec:
         # One volume definition for the shared PVC (first Volume name used)
         assert len(pod_spec["volumes"]) == 1
         assert pod_spec["volumes"][0]["name"] == "skills"
-        assert pod_spec["volumes"][0]["persistentVolumeClaim"]["claimName"] == "oss-pvc-r"
+        shared_volume = next((v for v in pod_spec["volumes"] if v["name"] == "skills"), None)
+        assert shared_volume is not None
+        assert shared_volume["persistentVolumeClaim"]["claimName"] == "oss-pvc-r"
+        assert shared_volume["persistentVolumeClaim"]["readOnly"] is True
 
         # Two volumeMounts, both referencing the same volume name
         mounts = pod_spec["containers"][0]["volumeMounts"]
@@ -2970,3 +3017,67 @@ spec:
         assert by_path["/path/to/skills"].get("subPath") == "skill-hub/publish"
         assert by_path["/path/to/draft"]["name"] == "skills"
         assert by_path["/path/to/draft"].get("subPath") == "skill-hub/draft"
+
+    def test_apply_volumes_to_pod_spec_same_pvc_multiple_mounts_readwrite(self, mock_k8s_client):
+        """Shared PVC mounts with read_only=False should keep source-level readOnly false."""
+        from opensandbox_server.api.schema import Volume, PVC
+
+        pod_spec = {
+            "containers": [{"name": "main", "volumeMounts": []}],
+            "volumes": [],
+        }
+        volumes = [
+            Volume(
+                name="skills",
+                pvc=PVC(claim_name="oss-pvc-rw"),
+                mount_path="/path/to/skills",
+                sub_path="skill-hub/publish",
+                read_only=False,
+            ),
+            Volume(
+                name="draft",
+                pvc=PVC(claim_name="oss-pvc-rw"),
+                mount_path="/path/to/draft",
+                sub_path="skill-hub/draft",
+                read_only=False,
+            ),
+        ]
+
+        apply_volumes_to_pod_spec(pod_spec, volumes)
+
+        assert len(pod_spec["volumes"]) == 1
+        shared_volume = next((v for v in pod_spec["volumes"] if v["name"] == "skills"), None)
+        assert shared_volume is not None
+        assert shared_volume["persistentVolumeClaim"]["claimName"] == "oss-pvc-rw"
+        assert shared_volume["persistentVolumeClaim"]["readOnly"] is False
+
+        mounts = pod_spec["containers"][0]["volumeMounts"]
+        assert len(mounts) == 2
+        assert all(mount["name"] == "skills" for mount in mounts)
+        assert all(mount["readOnly"] is False for mount in mounts)
+
+    def test_apply_volumes_to_pod_spec_same_pvc_mixed_read_only_raises(self, mock_k8s_client):
+        """Shared PVC mounts with mixed read_only values should fail fast."""
+        from opensandbox_server.api.schema import Volume, PVC
+
+        pod_spec = {
+            "containers": [{"name": "main", "volumeMounts": []}],
+            "volumes": [],
+        }
+        volumes = [
+            Volume(
+                name="skills",
+                pvc=PVC(claim_name="oss-pvc-mixed"),
+                mount_path="/path/to/skills",
+                read_only=False,
+            ),
+            Volume(
+                name="draft",
+                pvc=PVC(claim_name="oss-pvc-mixed"),
+                mount_path="/path/to/draft",
+                read_only=True,
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="mixed read_only values"):
+            apply_volumes_to_pod_spec(pod_spec, volumes)

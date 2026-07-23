@@ -73,6 +73,9 @@ kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 | `controller.resources.requests.cpu` | CPU resource requests | `10m` |
 | `controller.resources.requests.memory` | Memory resource requests | `64Mi` |
 | `controller.logLevel` | Can be one of 'debug', 'info', 'error' | `info` |
+| `controller.metrics.enabled` | Expose the controller-runtime `/metrics` endpoint (sets `--metrics-bind-address`) | `false` |
+| `controller.metrics.port` | Port for the metrics endpoint | `8080` |
+| `controller.metrics.secure` | Serve metrics over HTTPS with authn/authz (`--metrics-secure`); set `false` for plain HTTP scraping | `false` |
 | `controller.kubeClient.qps` | QPS for Kubernetes client rate limiter | `100` |
 | `controller.kubeClient.burst` | Burst for Kubernetes client rate limiter | `200` |
 | `controller.snapshot.imageCommitterImage` | Image used by snapshot commit Jobs | `image-committer:dev` |
@@ -80,6 +83,7 @@ kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 | `controller.snapshot.registry` | OCI registry prefix used for snapshot images | `""` |
 | `controller.snapshot.registryInsecure` | Use insecure registry mode for snapshot pushes | `false` |
 | `controller.snapshot.snapshotPushSecret` | Secret name used by commit Jobs to push snapshots | `""` |
+| `controller.snapshot.imageCommitterPullSecret` | Secret name for pulling the image-committer image in commit Jobs (needed when it's in a private registry) | `""` |
 | `controller.snapshot.resumePullSecret` | Secret name injected into resumed sandboxes for image pulls | `""` |
 | `controller.leaderElection.enabled` | Enable leader election | `true` |
 | `controller.nodeSelector` | Node labels for pod assignment | `{}` |
@@ -164,11 +168,12 @@ The chart exposes the snapshot-related settings below:
 ```yaml
 controller:
   snapshot:
-    imageCommitterImage: my-registry/image-committer:v0.1.0
+    imageCommitterImage: my-registry/image-committer:v0.1.1
     commitJobTimeout: 15m
     registry: my-registry/snapshots
     registryInsecure: false
     snapshotPushSecret: registry-snapshot-push-secret
+    imageCommitterPullSecret: registry-image-committer-pull-secret
     resumePullSecret: registry-pull-secret
 ```
 
@@ -179,6 +184,7 @@ These values render directly to the controller flags:
 - `--snapshot-registry`
 - `--snapshot-registry-insecure`
 - `--snapshot-push-secret`
+- `--image-committer-pull-secret`
 - `--resume-pull-secret`
 
 ### Node Affinity
@@ -264,11 +270,11 @@ kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-con
 
 ## Additional Resources
 
-- [OpenSandbox GitHub](https://github.com/alibaba/OpenSandbox)
-- [Documentation](https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/README.md)
+- [OpenSandbox GitHub](https://github.com/opensandbox-group/OpenSandbox)
+- [Documentation](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/README.md)
 - [Pause and Resume Guide](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/pause-resume.md)
-- [Server Configuration Reference](https://github.com/alibaba/OpenSandbox/blob/main/server/configuration.md)
-- [Examples](https://github.com/alibaba/OpenSandbox/tree/main/kubernetes/config/samples)
+- [Server Configuration Reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md)
+- [Examples](https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes/config/samples)
 
 ## License
 

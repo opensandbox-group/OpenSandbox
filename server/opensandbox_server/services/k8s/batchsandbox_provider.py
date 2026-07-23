@@ -141,6 +141,16 @@ class BatchSandboxProvider(WorkloadProvider):
                     "Pool mode does not support volumes. "
                     "Remove 'volumes' from request or use template mode."
                 )
+            if network_policy is not None:
+                raise ValueError(
+                    "Pool mode does not support networkPolicy. "
+                    "Remove 'networkPolicy' from request or use template mode."
+                )
+            if credential_proxy_enabled:
+                raise ValueError(
+                    "Pool mode does not support credentialProxy.enabled. "
+                    "Disable credential proxy or use template mode."
+                )
             return self._create_workload_from_pool(
                 batchsandbox_name=sandbox_id,
                 namespace=namespace,
@@ -196,6 +206,7 @@ class BatchSandboxProvider(WorkloadProvider):
                 "emptyDir": {}
             })
         pod_spec = {
+            "automountServiceAccountToken": False,
             "initContainers": [_container_to_dict(init_container)],
             "containers": containers,
             "volumes": pod_volumes,

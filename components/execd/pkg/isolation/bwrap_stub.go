@@ -24,12 +24,21 @@ import (
 // findBwrap returns empty string on non-Linux.
 func findBwrap() string { return "" }
 
+func isSetuidBinary(_ string) bool { return false }
+
+func currentProcessIDs() (uint32, uint32) { return 0, 0 }
+
 // bwrapStub is the non-Linux bwrap implementation. It reports Available=false
 // and fails all Wrap calls.
 type bwrapStub struct{}
 
 // NewBwrap returns a stub on non-Linux platforms.
 func NewBwrap(_ Config) Isolator {
+	return &bwrapStub{}
+}
+
+// NewBwrapWithProbe returns a stub on non-Linux platforms.
+func NewBwrapWithProbe(_ Config, _ ProbeResult) Isolator {
 	return &bwrapStub{}
 }
 

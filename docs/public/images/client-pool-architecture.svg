@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="720" viewBox="0 0 1400 720" role="img" aria-labelledby="title desc">
+  <title id="title">Client Pool Architecture</title>
+  <desc id="desc">Client pool architecture. Multiple application nodes call pool.acquire on a per-node SandboxPool instance. The pool consists of an any-node acquire path and a leader-only reconcile loop that drives a small pool of warmup workers. The shared PoolStateStore holds only sandbox IDs with expiry and a primary lock. All server-side sandboxes are created via the OpenSandbox Lifecycle API.</desc>
+  <defs>
+    <marker id="a1-arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1e3a5f"/>
+    </marker>
+    <marker id="a1-arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
+    </marker>
+    <marker id="a1-arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2410c"/>
+    </marker>
+    <marker id="a1-arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 26px; font-weight: 700; fill: #1e40af; }
+      .group-title { font-size: 15px; font-weight: 700; }
+      .box-title { font-size: 14px; font-weight: 700; fill: #0f172a; }
+      .box-text { font-size: 12px; fill: #334155; }
+      .edge-label { font-size: 11px; fill: #475569; }
+      .caption { font-size: 12px; fill: #475569; font-style: italic; }
+    </style>
+  </defs>
+
+  <text x="700" y="38" class="title" text-anchor="middle">Client Pool Architecture</text>
+
+  <!-- Application nodes -->
+  <g>
+    <rect x="40" y="80" width="280" height="360" fill="#eff6ff" stroke="#1e3a5f" stroke-width="2" rx="8"/>
+    <text x="180" y="108" class="group-title" fill="#1e3a5f" text-anchor="middle">Application nodes (N)</text>
+
+    <rect x="70" y="140" width="220" height="120" fill="#ffffff" stroke="#1e3a5f" stroke-width="1.5" rx="6"/>
+    <text x="180" y="168" class="box-title" text-anchor="middle">App code #1</text>
+    <text x="180" y="192" class="box-text" text-anchor="middle">pool.acquire(...)</text>
+    <text x="180" y="212" class="box-text" text-anchor="middle">sandbox.commands.run(...)</text>
+    <text x="180" y="232" class="box-text" text-anchor="middle">sandbox.destroy()</text>
+
+    <rect x="70" y="290" width="220" height="120" fill="#ffffff" stroke="#1e3a5f" stroke-width="1.5" rx="6"/>
+    <text x="180" y="318" class="box-title" text-anchor="middle">App code #2</text>
+    <text x="180" y="342" class="box-text" text-anchor="middle">pool.acquire(...)</text>
+    <text x="180" y="362" class="box-text" text-anchor="middle">...</text>
+  </g>
+
+  <!-- SandboxPool instance -->
+  <g>
+    <rect x="400" y="80" width="380" height="500" fill="#faf5ff" stroke="#6d28d9" stroke-width="2" rx="8"/>
+    <text x="590" y="108" class="group-title" fill="#6d28d9" text-anchor="middle">SandboxPool instance (per node)</text>
+
+    <rect x="430" y="140" width="320" height="120" fill="#ffffff" stroke="#6d28d9" stroke-width="1.5" rx="6"/>
+    <text x="590" y="168" class="box-title" text-anchor="middle">Acquire path</text>
+    <text x="590" y="188" class="box-text" text-anchor="middle">(runs on every node)</text>
+    <text x="590" y="216" class="box-text" text-anchor="middle">pop idle ID → connect → renew</text>
+    <text x="590" y="236" class="box-text" text-anchor="middle">policy = FAIL_FAST | DIRECT_CREATE</text>
+
+    <rect x="430" y="290" width="320" height="120" fill="#ffffff" stroke="#6d28d9" stroke-width="1.5" rx="6"/>
+    <text x="590" y="318" class="box-title" text-anchor="middle">Reconcile loop</text>
+    <text x="590" y="338" class="box-text" text-anchor="middle">(leader-only replenish / shrink)</text>
+    <text x="590" y="366" class="box-text" text-anchor="middle">fires every reconcile_interval</text>
+    <text x="590" y="386" class="box-text" text-anchor="middle">acquire lock → compute gap → dispatch</text>
+
+    <rect x="430" y="440" width="320" height="120" fill="#ffffff" stroke="#6d28d9" stroke-width="1.5" rx="6"/>
+    <text x="590" y="468" class="box-title" text-anchor="middle">Warmup workers</text>
+    <text x="590" y="488" class="box-text" text-anchor="middle">parallelism = warmup_concurrency</text>
+    <text x="590" y="516" class="box-text" text-anchor="middle">create → ready → (preparer)</text>
+    <text x="590" y="536" class="box-text" text-anchor="middle">→ push id into idle buffer</text>
+  </g>
+
+  <!-- PoolStateStore -->
+  <g>
+    <rect x="860" y="80" width="300" height="360" fill="#fff7ed" stroke="#c2410c" stroke-width="2" rx="8"/>
+    <text x="1010" y="108" class="group-title" fill="#c2410c" text-anchor="middle">PoolStateStore (shared)</text>
+
+    <rect x="890" y="140" width="240" height="180" fill="#ffffff" stroke="#c2410c" stroke-width="1.5" rx="6"/>
+    <text x="1010" y="168" class="box-title" text-anchor="middle">Idle buffer</text>
+    <text x="1010" y="196" class="box-text" text-anchor="middle">[sandbox_id, expiry]</text>
+    <text x="1010" y="216" class="box-text" text-anchor="middle">[sandbox_id, expiry]</text>
+    <text x="1010" y="236" class="box-text" text-anchor="middle">[sandbox_id, expiry]</text>
+    <text x="1010" y="266" class="box-text" text-anchor="middle" font-style="italic">only IDs + expiry</text>
+    <text x="1010" y="286" class="box-text" text-anchor="middle" font-style="italic">no HTTP connections</text>
+    <text x="1010" y="306" class="box-text" text-anchor="middle" font-style="italic">no SDK client objects</text>
+
+    <rect x="890" y="345" width="240" height="80" fill="#ffffff" stroke="#c2410c" stroke-width="1.5" rx="6"/>
+    <text x="1010" y="373" class="box-title" text-anchor="middle">Primary lock</text>
+    <text x="1010" y="395" class="box-text" text-anchor="middle">owner_id + TTL</text>
+    <text x="1010" y="415" class="box-text" text-anchor="middle">default 60s</text>
+  </g>
+
+  <!-- Lifecycle API -->
+  <g>
+    <rect x="860" y="480" width="300" height="100" fill="#ecfdf5" stroke="#047857" stroke-width="2" rx="8"/>
+    <text x="1010" y="510" class="group-title" fill="#047857" text-anchor="middle">OpenSandbox Lifecycle API</text>
+    <text x="1010" y="536" class="box-text" text-anchor="middle">create / connect / renew / destroy</text>
+    <text x="1010" y="556" class="box-text" text-anchor="middle">(server-side sandbox lifecycle)</text>
+  </g>
+
+  <!-- Edges -->
+  <!-- App -> Acquire -->
+  <path d="M 290 200 L 428 200" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a1-arrow-blue)"/>
+  <path d="M 290 350 L 428 220" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a1-arrow-blue)"/>
+
+  <!-- Acquire -> Idle Buffer (pop) -->
+  <path d="M 752 200 L 888 220" stroke="#6d28d9" stroke-width="2" fill="none" marker-end="url(#a1-arrow-purple)"/>
+  <text x="820" y="200" class="edge-label" text-anchor="middle">pop id</text>
+
+  <!-- Reconcile -> Primary Lock -->
+  <path d="M 752 360 L 888 385" stroke="#6d28d9" stroke-width="2" fill="none" marker-end="url(#a1-arrow-purple)"/>
+  <text x="820" y="365" class="edge-label" text-anchor="middle">acquire lock</text>
+
+  <!-- Reconcile -> Warmup Workers -->
+  <path d="M 590 410 L 590 438" stroke="#6d28d9" stroke-width="2" fill="none" marker-end="url(#a1-arrow-purple)"/>
+  <text x="640" y="428" class="edge-label" text-anchor="start">dispatch when gap &gt; 0</text>
+
+  <!-- Warmup -> Lifecycle create -->
+  <path d="M 752 500 L 888 510" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a1-arrow-green)"/>
+  <text x="820" y="500" class="edge-label" text-anchor="middle">create()</text>
+
+  <!-- Warmup -> Idle Buffer (push) -->
+  <path d="M 700 440 Q 800 380 890 240" stroke="#c2410c" stroke-width="2" fill="none" marker-end="url(#a1-arrow-orange)" stroke-dasharray="6,4"/>
+  <text x="810" y="380" class="edge-label" text-anchor="middle">push id</text>
+
+  <!-- Acquire -> Lifecycle (connect / renew) -->
+  <path d="M 752 235 Q 820 400 888 510" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a1-arrow-green)" stroke-dasharray="6,4"/>
+  <text x="770" y="455" class="edge-label" text-anchor="middle">connect / renew</text>
+
+  <text x="700" y="620" class="caption" text-anchor="middle">Acquire runs on every node; reconcile only runs on the node that holds the primary lock.</text>
+  <text x="700" y="642" class="caption" text-anchor="middle">The store holds only IDs + expiry, so switching to Redis makes the pool truly shared across processes / pods.</text>
+</svg>

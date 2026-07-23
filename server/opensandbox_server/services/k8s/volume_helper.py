@@ -24,6 +24,30 @@ from opensandbox_server.api.schema import Volume
 logger = logging.getLogger(__name__)
 
 
+def _raise_mixed_pvc_read_only_policy(pvc_claim_name: str) -> None:
+    raise ValueError(
+        f"PVC claim '{pvc_claim_name}' is mounted with mixed read_only values. "
+        "All mounts sharing the same PVC must use the same read_only policy."
+    )
+
+
+def ensure_shared_pvc_read_only_policy(volumes: List[Volume]) -> None:
+    """Ensure every mount that references the same PVC uses the same read_only policy."""
+    pvc_to_read_only: Dict[str, bool] = {}
+
+    for vol in volumes:
+        if vol.pvc is None:
+            continue
+
+        pvc_claim_name = vol.pvc.claim_name
+        if pvc_claim_name in pvc_to_read_only:
+            if pvc_to_read_only[pvc_claim_name] != vol.read_only:
+                _raise_mixed_pvc_read_only_policy(pvc_claim_name)
+            continue
+
+        pvc_to_read_only[pvc_claim_name] = vol.read_only
+
+
 def apply_volumes_to_pod_spec(
     pod_spec: Dict[str, Any],
     volumes: List[Volume],
@@ -37,6 +61,8 @@ def apply_volumes_to_pod_spec(
     main_container = containers[0]
     mounts = main_container.get("volumeMounts", [])
     pod_volumes = pod_spec.get("volumes", [])
+
+    ensure_shared_pvc_read_only_policy(volumes)
 
     existing_volume_names = {v.get("name") for v in pod_volumes if isinstance(v, dict)}
     pvc_to_volume_name: Dict[str, str] = {}
@@ -58,6 +84,7 @@ def apply_volumes_to_pod_spec(
                     "name": vol_name,
                     "persistentVolumeClaim": {
                         "claimName": pvc_claim_name,
+                        "readOnly": vol.read_only,
                     },
                 })
                 pvc_to_volume_name[pvc_claim_name] = vol_name
@@ -73,7 +100,11 @@ def apply_volumes_to_pod_spec(
             mounts.append(mount)
 
             logger.info(
-                f"Added PVC volume '{vol_name}' (claim: {pvc_claim_name}) mounted at '{vol.mount_path}' for sandbox"
+                "Added PVC volume '%s' (claim: %s, read_only=%s) mounted at '%s' for sandbox",
+                pvc_to_volume_name[pvc_claim_name],
+                pvc_claim_name,
+                vol.read_only,
+                vol.mount_path,
             )
         elif vol.host is not None:
             host_path = vol.host.path

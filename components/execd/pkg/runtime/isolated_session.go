@@ -33,15 +33,17 @@ type IsolatedSessionOptions struct {
 	WorkspacePath      string
 	WorkspaceMode      string
 	ExtraWritable      []string
+	Binds              []isolation.BindMount
 	ShareNet           *bool
 	EnvPassthroughMode string
 	EnvPassthroughKeys []string
 	Uid                *uint32
 	Gid                *uint32
+	UidMode            string // "setpriv" (default) or "userns"
 	IdleTimeoutSeconds int
 }
 
-// isolatedSession holds a long-running bash process inside a bwrap namespace.
+// isolatedSession holds a long-running shell process inside a bwrap namespace.
 type isolatedSession struct {
 	id        string
 	mu        sync.RWMutex
@@ -70,13 +72,19 @@ func newIsolatedSession(id string, opts *IsolatedSessionOptions, iso isolation.I
 	}
 }
 
-// start launches bwrap + bash inside a namespace.
+// start launches bwrap and the preferred shell inside a namespace.
 func (s *isolatedSession) start() error {
-	cmd := exec.Command("bash", "--noprofile", "--norc")
+	shell := getShell()
+	var args []string
+	if shell == "bash" {
+		args = append(args, "--noprofile", "--norc")
+	}
+	cmd := exec.Command(shell, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	wrapOpts := isolation.WrapOptions{
 		ExtraWritable: s.opts.ExtraWritable,
+		Binds:         s.opts.Binds,
 		ShareNet:      true,
 	}
 
@@ -110,6 +118,9 @@ func (s *isolatedSession) start() error {
 	}
 	wrapOpts.Uid = s.opts.Uid
 	wrapOpts.Gid = s.opts.Gid
+	if s.opts.UidMode != "" {
+		wrapOpts.UidMode = isolation.UidMode(s.opts.UidMode)
+	}
 	wrapOpts.UpperDir = s.upperDir
 	wrapOpts.WorkDir = s.workDir
 
@@ -134,7 +145,7 @@ func (s *isolatedSession) start() error {
 		for _, f := range cmd.ExtraFiles {
 			f.Close()
 		}
-		return err
+		return fmt.Errorf("start %s: %w", shell, err)
 	}
 
 	for _, f := range cmd.ExtraFiles {

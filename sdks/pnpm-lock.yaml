@@ -13,6 +13,7 @@ overrides:
   flatted@^3.0.0: 3.4.2
   fast-uri@^3.0.0: 3.1.2
   js-yaml@^4.0.0: 4.2.0
+  undici: 7.28.0
 
 importers:
 
@@ -62,8 +63,8 @@ importers:
         specifier: ^0.14.1
         version: 0.14.1
       undici:
-        specifier: ^7.25.0
-        version: 7.25.0
+        specifier: 7.28.0
+        version: 7.28.0
     devDependencies:
       '@eslint/js':
         specifier: ^9.39.4
@@ -1089,8 +1090,8 @@ packages:
   ufo@1.6.3:
     resolution: {integrity: sha512-yDJTmhydvl5lJzBmy/hyOAA0d+aqCBuwl818haVdYCRrWV84o7YyeVm4QlVHStqNrrJSTb6jKuFAVqAFsr+K3Q==}
 
-  undici@7.25.0:
-    resolution: {integrity: sha512-xXnp4kTyor2Zq+J1FfPI6Eq3ew5h6Vl0F/8d9XU5zZQf1tX9s2Su1/3PiMmUANFULpmksxkClamIZcaUqryHsQ==}
+  undici@7.28.0:
+    resolution: {integrity: sha512-cRZYrTDwWznlnRiPjggAGxZXanty6M8RV1ff8Wm4LWXBp7/IG8v5DnOm74DtUBp9OONpK75YlPnIjQqX0dBDtA==}
     engines: {node: '>=20.18.1'}
 
   uri-js@4.4.1:
@@ -2017,7 +2018,7 @@ snapshots:
 
   ufo@1.6.3: {}
 
-  undici@7.25.0: {}
+  undici@7.28.0: {}
 
   uri-js@4.4.1:
     dependencies:

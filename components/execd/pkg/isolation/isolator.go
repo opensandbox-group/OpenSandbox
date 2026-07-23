@@ -59,6 +59,27 @@ func (m EnvMode) Valid() bool {
 	return m == EnvModeDeny || m == EnvModeAllow
 }
 
+// UidMode controls how user identity is established inside the namespace.
+type UidMode string
+
+const (
+	// UidModeSetpriv uses setpriv(1) after bwrap to drop privileges via
+	// real setuid/setgid. Requires CAP_SETUID/CAP_SETGID or root.
+	// This is the default when UidMode is empty.
+	UidModeSetpriv UidMode = "setpriv"
+
+	// UidModeUserns creates a user namespace (--unshare-user) and maps the
+	// desired uid/gid inside it via --uid/--gid. Also passes
+	// --disable-userns to prevent nested user namespace creation.
+	// Does not require elevated privileges.
+	UidModeUserns UidMode = "userns"
+)
+
+// Valid reports whether m is a known uid mode.
+func (m UidMode) Valid() bool {
+	return m == UidModeSetpriv || m == UidModeUserns
+}
+
 // Structs
 
 // WorkspaceSpec describes a workspace directory and how it is mounted.
@@ -73,11 +94,26 @@ type EnvSpec struct {
 	Keys []string // allowlist (mode=allow) or denylist (mode=deny)
 }
 
+// BindMount describes an additional host path bind-mounted into the namespace
+// with an explicit source-to-destination mapping. Unlike WrapOptions.ExtraWritable
+// (which always mounts Source==Dest read-write), a BindMount may map a distinct
+// destination and be mounted read-only.
+type BindMount struct {
+	Source   string // host path (required)
+	Dest     string // mount destination; defaults to Source when empty
+	ReadOnly bool   // true → --ro-bind; false → --bind
+}
+
 // Capabilities describes what the isolator can and cannot do.
 type Capabilities struct {
-	Available              bool
-	Isolator               string
-	Version                string
+	Available        bool
+	Isolator         string
+	Version          string
+	SetprivAvailable bool
+	// SetprivSwitchAvailable is used internally to reject a setpriv
+	// request that selects IDs different from execd's own before side effects.
+	SetprivSwitchAvailable bool
+	UsernsAvailable        bool
 	Profiles               []Profile
 	AllowedWorkspaces      []string
 	AllowedExtraWritable   []string
@@ -96,10 +132,12 @@ type WrapOptions struct {
 	Profile        Profile
 	Workspace      WorkspaceSpec
 	ExtraWritable  []string
+	Binds          []BindMount
 	ShareNet       bool
 	EnvPassthrough EnvSpec
 	Uid, Gid       *uint32
-	UpperDir       string // empty when upper is on tmpfs (persist disabled)
+	UidMode        UidMode // "" or "setpriv" → setpriv; "userns" → user namespace
+	UpperDir       string  // empty when upper is on tmpfs (persist disabled)
 	WorkDir        string
 }
 

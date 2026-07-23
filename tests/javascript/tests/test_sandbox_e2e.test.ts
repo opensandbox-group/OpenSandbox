@@ -121,6 +121,34 @@ test("01 sandbox lifecycle, health, endpoint, metrics, renew, connect", async ()
   }
 });
 
+test("01 extensions round-trip", async () => {
+  const connectionConfig = createConnectionConfig();
+  const extSandbox = await Sandbox.create({
+    connectionConfig,
+    image: getSandboxImage(),
+    timeoutSeconds: 2 * 60,
+    readyTimeoutSeconds: 60,
+    metadata: { tag: "e2e-extensions" },
+    extensions: {
+      "opensandbox.extensions.test-key": "test-value",
+      "opensandbox.extensions.second": "second-value",
+    },
+    healthCheckPollingInterval: 200,
+  });
+  try {
+    const info = await extSandbox.getInfo();
+    expect(info.extensions).toBeDefined();
+    expect(info.extensions!["opensandbox.extensions.test-key"]).toBe("test-value");
+    expect(info.extensions!["opensandbox.extensions.second"]).toBe("second-value");
+  } finally {
+    try {
+      await extSandbox.kill();
+    } catch {
+      // ignore teardown errors
+    }
+  }
+});
+
 test("01b manual cleanup sandbox returns null expiresAt", async () => {
   const connectionConfig = createConnectionConfig();
   const manualSandbox = await Sandbox.create({

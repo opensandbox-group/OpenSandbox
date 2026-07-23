@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 def _multipart_header_filename(filename: str) -> str:
     return (
         filename.replace("\\", "\\\\")
-        .replace('"', r'\"')
+        .replace('"', r"\"")
         .replace("\r", "_")
         .replace("\n", "_")
     )
@@ -68,6 +68,8 @@ def _rewind_seekable_stream(stream: IOBase) -> None:
     if not stream.seekable():
         return
     stream.seek(0)
+
+
 class _DownloadRequest(TypedDict):
     url: str
     params: dict[str, str]
@@ -78,7 +80,9 @@ class FilesystemAdapterSync(FilesystemSync):
     FILESYSTEM_UPLOAD_PATH = "/files/upload"
     FILESYSTEM_DOWNLOAD_PATH = "/files/download"
 
-    def __init__(self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint) -> None:
+    def __init__(
+        self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint
+    ) -> None:
         self.connection_config = connection_config
         self.execd_endpoint = execd_endpoint
         from opensandbox.api.execd import Client
@@ -105,7 +109,9 @@ class FilesystemAdapterSync(FilesystemSync):
         return f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}"
 
     def _get_execd_url(self, path: str) -> str:
-        return f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}{path}"
+        return (
+            f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}{path}"
+        )
 
     def _build_download_request(
         self,
@@ -135,7 +141,9 @@ class FilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> str:
-        content = self.read_bytes(path, range_header=range_header, offset=offset, limit=limit)
+        content = self.read_bytes(
+            path, range_header=range_header, offset=offset, limit=limit
+        )
         return content.decode(encoding)
 
     def read_bytes(
@@ -146,9 +154,11 @@ class FilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> bytes:
-        logger.debug("Reading file as bytes: %s", path)
+        logger.debug(f"Reading file as bytes: {path}")
         try:
-            request_data = self._build_download_request(path, range_header, offset=offset, limit=limit)
+            request_data = self._build_download_request(
+                path, range_header, offset=offset, limit=limit
+            )
             response = self._httpx_client.get(
                 request_data["url"],
                 headers=request_data["headers"],
@@ -157,7 +167,7 @@ class FilesystemAdapterSync(FilesystemSync):
             response.raise_for_status()
             return response.content
         except Exception as e:
-            logger.error("Failed to read file %s", path, exc_info=e)
+            logger.error(f"Failed to read file {path}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def read_bytes_stream(
@@ -169,8 +179,10 @@ class FilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> Iterator[bytes]:
-        logger.debug("Streaming file as bytes: %s (chunk_size=%s)", path, chunk_size)
-        request_data = self._build_download_request(path, range_header, offset=offset, limit=limit)
+        logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
+        request_data = self._build_download_request(
+            path, range_header, offset=offset, limit=limit
+        )
         url = request_data["url"]
         params = request_data["params"]
         headers = request_data["headers"]
@@ -211,7 +223,7 @@ class FilesystemAdapterSync(FilesystemSync):
         """
         if not entries:
             return
-        logger.debug("Writing %s files", len(entries))
+        logger.debug(f"Writing {len(entries)} files")
         try:
             url = self._get_execd_url(self.FILESYSTEM_UPLOAD_PATH)
 
@@ -222,7 +234,7 @@ class FilesystemAdapterSync(FilesystemSync):
 
             response.raise_for_status()
         except Exception as e:
-            logger.error("Failed to write %s files", len(entries), exc_info=e)
+            logger.error(f"Failed to write {len(entries)} files", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def _write_files_with_content_length(
@@ -331,7 +343,9 @@ class FilesystemAdapterSync(FilesystemSync):
                 yield metadata_json.encode()
                 yield b"\r\n"
 
-                filename = _multipart_header_filename(os.path.basename(entry.path) or "file")
+                filename = _multipart_header_filename(
+                    os.path.basename(entry.path) or "file"
+                )
                 yield f"--{boundary}\r\n".encode()
                 yield (
                     f'Content-Disposition: form-data; name="file"; '
@@ -370,7 +384,9 @@ class FilesystemAdapterSync(FilesystemSync):
         owner: str | None = None,
         group: str | None = None,
     ) -> None:
-        entry = WriteEntry(path=path, data=data, mode=mode, owner=owner, group=group, encoding=encoding)
+        entry = WriteEntry(
+            path=path, data=data, mode=mode, owner=owner, group=group, encoding=encoding
+        )
         self.write_files([entry])
 
     def create_directories(self, entries: list[WriteEntry]) -> None:
@@ -393,7 +409,7 @@ class FilesystemAdapterSync(FilesystemSync):
             response_obj = remove_files.sync_detailed(client=self._client, path=paths)
             handle_api_error(response_obj, "Delete files")
         except Exception as e:
-            logger.error("Failed to delete %s files", len(paths), exc_info=e)
+            logger.error(f"Failed to delete {len(paths)} files", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def delete_directories(self, paths: list[str]) -> None:
@@ -403,7 +419,7 @@ class FilesystemAdapterSync(FilesystemSync):
             response_obj = remove_dirs.sync_detailed(client=self._client, path=paths)
             handle_api_error(response_obj, "Delete directories")
         except Exception as e:
-            logger.error("Failed to delete %s directories", len(paths), exc_info=e)
+            logger.error(f"Failed to delete {len(paths)} directories", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def move_files(self, entries: list[MoveEntry]) -> None:
@@ -411,7 +427,9 @@ class FilesystemAdapterSync(FilesystemSync):
             from opensandbox.api.execd.api.filesystem import rename_files
 
             rename_items = FilesystemModelConverter.to_api_rename_file_items(entries)
-            response_obj = rename_files.sync_detailed(client=self._client, body=rename_items)
+            response_obj = rename_files.sync_detailed(
+                client=self._client, body=rename_items
+            )
             handle_api_error(response_obj, "Move files")
         except Exception as e:
             logger.error("Failed to move files", exc_info=e)
@@ -448,7 +466,9 @@ class FilesystemAdapterSync(FilesystemSync):
             logger.error("Failed to replace contents", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
-    def replace_contents_detailed(self, entries: list[ContentReplaceEntry]) -> list[ContentReplaceResult]:
+    def replace_contents_detailed(
+        self, entries: list[ContentReplaceEntry]
+    ) -> list[ContentReplaceResult]:
         try:
             from opensandbox.api.execd.api.filesystem import replace_content
 
@@ -479,7 +499,9 @@ class FilesystemAdapterSync(FilesystemSync):
             parsed = response_obj.parsed
             if not parsed:
                 return []
-            if isinstance(parsed, list) and all(isinstance(x, FileInfo) for x in parsed):
+            if isinstance(parsed, list) and all(
+                isinstance(x, FileInfo) for x in parsed
+            ):
                 return FilesystemModelConverter.to_entry_info_list(parsed)
             raise SandboxApiException(
                 message="Search files failed: unexpected response type",
@@ -504,7 +526,9 @@ class FilesystemAdapterSync(FilesystemSync):
             parsed = response_obj.parsed
             if not parsed:
                 return []
-            if isinstance(parsed, list) and all(isinstance(x, FileInfo) for x in parsed):
+            if isinstance(parsed, list) and all(
+                isinstance(x, FileInfo) for x in parsed
+            ):
                 return FilesystemModelConverter.to_entry_info_list(parsed)
             raise SandboxApiException(
                 message="List directory failed: unexpected response type",
@@ -524,5 +548,5 @@ class FilesystemAdapterSync(FilesystemSync):
                 return {}
             return FilesystemModelConverter.to_entry_info_map(response_obj.parsed)
         except Exception as e:
-            logger.error("Failed to get file info for %s paths", len(paths), exc_info=e)
+            logger.error(f"Failed to get file info for {len(paths)} paths", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e

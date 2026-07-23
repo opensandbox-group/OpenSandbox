@@ -19,6 +19,7 @@ func init() {
 	registerPredicate("resource", newResourcePredicate)
 	registerPredicate("nodeselector", newNodeSelectorPredicate)
 	registerPredicate("labelselector", newLabelSelectorPredicate)
+	registerPredicate("capacity", newCapacityPredicate)
 
 	registerScorer("resbalance", newResBalanceScorer)
 }

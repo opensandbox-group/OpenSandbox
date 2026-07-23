@@ -51,6 +51,8 @@ class SnapshotRuntime(Protocol):
         self,
         snapshot_id: str,
         sandbox_id: str,
+        *,
+        namespace: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         """
         Create a snapshot for a sandbox and return the final runtime status.
@@ -61,12 +63,12 @@ class SnapshotRuntime(Protocol):
         Return the most recent runtime view for a snapshot if known.
         """
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None) -> None:
+    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
         """
         Delete runtime-managed artifacts for a snapshot.
         """
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
         """
         Inspect runtime-managed artifacts for startup recovery.
         """
@@ -87,16 +89,18 @@ class NoopSnapshotRuntime:
         self,
         snapshot_id: str,
         sandbox_id: str,
+        *,
+        namespace: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         raise NotImplementedError(self.create_snapshot_unsupported_message())
 
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
         return None
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None) -> None:
+    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
         return None
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
         return SnapshotRuntimeStatus(
             state=SnapshotState.FAILED,
             reason="snapshot_recovery_not_supported",

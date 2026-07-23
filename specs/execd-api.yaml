@@ -18,7 +18,7 @@ info:
 
   contact:
     name: OpenSandbox Team
-    url: https://github.com/alibaba/OpenSandbox
+    url: https://github.com/opensandbox-group/OpenSandbox
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0.html
@@ -1136,6 +1136,22 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
+  /v1/isolated/sessions:
+    get:
+      summary: List isolated sessions
+      operationId: listIsolatedSessions
+      tags:
+        - IsolatedExecution
+      responses:
+        "200":
+          description: List of active isolated sessions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListIsolatedSessionsResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
   /v1/isolated/capabilities:
     get:
       summary: Get isolator capabilities
@@ -1153,6 +1169,11 @@ paths:
   /v1/isolated/session/{sessionId}:
     get:
       summary: Get isolated session state
+      description: >-
+        Returns runtime status plus the creation parameters of the session.
+        A stateless client that only has a session ID (e.g. after a restart)
+        can call this endpoint to rebuild a session handle without needing
+        to have retained the original create request.
       operationId: getIsolatedSession
       tags:
         - IsolatedExecution
@@ -2074,6 +2095,17 @@ components:
           type: array
           items:
             type: string
+        binds:
+          type: array
+          description: >-
+            Additional host paths bind-mounted into the namespace with an
+            explicit source-to-destination mapping. Unlike extra_writable
+            (which mounts source==destination read-write), each entry may map
+            a distinct destination path and be mounted read-only. The source
+            path of every entry must fall within the configured writable
+            allowlist.
+          items:
+            $ref: "#/components/schemas/BindMount"
         share_net:
           type: boolean
         env_passthrough:
@@ -2084,6 +2116,13 @@ components:
         gid:
           type: integer
           format: uint32
+        uid_mode:
+          type: string
+          enum: ["setpriv", "userns"]
+          description: >-
+            Controls how user identity is established inside the namespace.
+            "setpriv" (default) uses real setuid via setpriv(1).
+            "userns" creates a user namespace via --unshare-user --disable-userns.
         idle_timeout_seconds:
           type: integer
 
@@ -2097,6 +2136,26 @@ components:
         mode:
           type: string
           enum: ["rw", "overlay", "ro"]
+
+    BindMount:
+      type: object
+      required:
+        - source
+      properties:
+        source:
+          type: string
+          description: Host path to bind-mount into the namespace.
+        dest:
+          type: string
+          description: >-
+            Mount destination inside the namespace. Defaults to source when
+            omitted.
+        readonly:
+          type: boolean
+          default: false
+          description: >-
+            When true the mount is read-only (--ro-bind); otherwise it is
+            read-write (--bind).
 
     EnvPassthroughSpec:
       type: object
@@ -2136,6 +2195,16 @@ components:
 
     SessionState:
       type: object
+      description: >-
+        State of an isolated session. Runtime status fields (status,
+        created_at, last_run_at, idle_remaining_seconds) are always present.
+        Creation-parameter fields (profile, workspace, binds, share_net,
+        env_passthrough, uid, gid, uid_mode, extra_writable,
+        idle_timeout_seconds) echo the parameters used to create the session
+        and let a stateless client rebuild a session handle from just a
+        session ID (e.g. after a client restart or in serverless workers).
+        Older execd builds may omit the creation-parameter fields; clients
+        must tolerate them being absent.
       properties:
         status:
           type: string
@@ -2149,6 +2218,69 @@ components:
         idle_remaining_seconds:
           type: integer
           nullable: true
+        profile:
+          type: string
+          enum: ["strict", "balanced"]
+          description: Profile the session was created with.
+        workspace:
+          $ref: "#/components/schemas/IsolatedWorkspaceSpec"
+        extra_writable:
+          type: array
+          items:
+            type: string
+        binds:
+          type: array
+          items:
+            $ref: "#/components/schemas/BindMount"
+        share_net:
+          type: boolean
+        env_passthrough:
+          $ref: "#/components/schemas/EnvPassthroughSpec"
+        uid:
+          type: integer
+          format: uint32
+        gid:
+          type: integer
+          format: uint32
+        uid_mode:
+          type: string
+          enum: ["setpriv", "userns"]
+        idle_timeout_seconds:
+          type: integer
+
+    IsolatedSessionSummary:
+      type: object
+      required:
+        - session_id
+        - status
+        - created_at
+        - last_run_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: ["active", "dead", "destroyed"]
+        created_at:
+          type: string
+          format: date-time
+        last_run_at:
+          type: string
+          format: date-time
+        idle_remaining_seconds:
+          type: integer
+          nullable: true
+
+    ListIsolatedSessionsResponse:
+      type: object
+      required:
+        - sessions
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/IsolatedSessionSummary"
 
     CapabilitiesResponse:
       type: object
@@ -2162,6 +2294,16 @@ components:
         message:
           type: string
           description: Diagnostic message when isolation is unavailable
+        setpriv_available:
+          type: boolean
+          description: >-
+            Whether sessions using uid_mode setpriv can be created with execd's
+            default UID/GID. Requests that select different UID/GID values may
+            still return 503 NOT_SUPPORTED when identity switching is
+            unavailable.
+        userns_available:
+          type: boolean
+          description: Whether sessions using uid_mode userns can be created
         commit_supported:
           type: boolean
         diff_supported:

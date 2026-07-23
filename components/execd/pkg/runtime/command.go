@@ -326,12 +326,15 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		return fmt.Errorf("failed to start commands: %w", err)
 	}
 
+	// Register the kernel synchronously so that GetCommandStatus callers
+	// can find the session immediately after Execute returns. Previously
+	// this happened inside the goroutine, creating a race where the HTTP
+	// handler could return before the kernel was stored.
+	kernel.pid = cmd.Process.Pid
+	c.storeCommandKernel(session, kernel)
+
 	safego.Go(func() {
 		defer pipe.Close()
-
-		kernel.running = true
-		kernel.pid = cmd.Process.Pid
-		c.storeCommandKernel(session, kernel)
 
 		err = cmd.Wait()
 		cancel()

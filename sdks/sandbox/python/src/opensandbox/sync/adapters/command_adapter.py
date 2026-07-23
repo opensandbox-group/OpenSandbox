@@ -60,9 +60,7 @@ def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
         if timeout_ms < 0:
             raise InvalidArgumentException("timeout must be positive")
         return timeout_ms
-    raise InvalidArgumentException(
-        "timeout must be a datetime.timedelta or None"
-    )
+    raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
 
 
 def _infer_foreground_exit_code(execution: Execution) -> int | None:
@@ -112,7 +110,7 @@ def _decode_sse_event_line(line: str) -> EventNode | None:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error("Failed to parse SSE line: %s", line, exc_info=e)
+        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
         return None
 
 
@@ -128,7 +126,9 @@ class CommandsAdapterSync(CommandsSync):
     SESSION_PATH = "/session"
     RUN_IN_SESSION_PATH = "/session/{session_id}/run"
 
-    def __init__(self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint) -> None:
+    def __init__(
+        self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint
+    ) -> None:
         """
         Initialize the command adapter (sync).
 
@@ -180,7 +180,9 @@ class CommandsAdapterSync(CommandsSync):
 
     def _get_execd_url(self, path: str) -> str:
         """Build URL for execd endpoint."""
-        return f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}{path}"
+        return (
+            f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}{path}"
+        )
 
     def _execute_streaming_request(
         self,
@@ -237,7 +239,7 @@ class CommandsAdapterSync(CommandsSync):
             )
 
         except Exception as e:
-            logger.error("Failed to run command (length: %s)", len(command), exc_info=e)
+            logger.error(f"Failed to run command (length: {len(command)})", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def interrupt(self, execution_id: str) -> None:
@@ -250,7 +252,9 @@ class CommandsAdapterSync(CommandsSync):
         try:
             from opensandbox.api.execd.api.command import interrupt_command
 
-            response_obj = interrupt_command.sync_detailed(client=self._client, id=execution_id)
+            response_obj = interrupt_command.sync_detailed(
+                client=self._client, id=execution_id
+            )
             handle_api_error(response_obj, "Interrupt command")
         except Exception as e:
             logger.error("Failed to interrupt command", exc_info=e)
@@ -271,7 +275,9 @@ class CommandsAdapterSync(CommandsSync):
                 id=execution_id,
             )
             handle_api_error(response_obj, "Get command status")
-            parsed = require_parsed(response_obj, CommandStatusResponse, "Get command status")
+            parsed = require_parsed(
+                response_obj, CommandStatusResponse, "Get command status"
+            )
             return to_command_status(parsed)
         except Exception as e:
             logger.error("Failed to get command status", exc_info=e)
@@ -318,9 +324,7 @@ class CommandsAdapterSync(CommandsSync):
         from opensandbox.api.execd.types import UNSET
 
         body = (
-            CreateSessionRequest(cwd=working_directory)
-            if working_directory
-            else UNSET
+            CreateSessionRequest(cwd=working_directory) if working_directory else UNSET
         )
         try:
             parsed = create_session_sync(client=self._client, body=body)
@@ -379,9 +383,7 @@ class CommandsAdapterSync(CommandsSync):
         )
 
         try:
-            parsed = delete_session_sync(
-                client=self._client, session_id=session_id
-            )
+            parsed = delete_session_sync(client=self._client, session_id=session_id)
             if parsed is not None:
                 handle_api_error(parsed, "delete_session")
         except Exception as e:

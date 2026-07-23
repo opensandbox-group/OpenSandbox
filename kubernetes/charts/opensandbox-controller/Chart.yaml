@@ -13,15 +13,15 @@ keywords:
   - batch-sandbox
   - task-orchestration
 
-home: https://github.com/alibaba/OpenSandbox
+home: https://github.com/opensandbox-group/OpenSandbox
 sources:
-  - https://github.com/alibaba/OpenSandbox/tree/main/kubernetes
+  - https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes
 
 maintainers:
   - name: OpenSandbox Team
     email: opensandbox@example.com
 
-icon: https://raw.githubusercontent.com/alibaba/OpenSandbox/main/kubernetes/images/logo.png
+icon: https://raw.githubusercontent.com/opensandbox-group/OpenSandbox/main/kubernetes/images/logo.png
 
 # Kubernetes version constraints
 kubeVersion: ">=1.21.1-0"
@@ -39,6 +39,6 @@ annotations:
     - url: https://github.com/kubernetes-sigs/kind
   artifacthub.io/links: |
     - name: Documentation
-      url: https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/README.md
+      url: https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/README.md
     - name: Support
-      url: https://github.com/alibaba/OpenSandbox/issues
+      url: https://github.com/opensandbox-group/OpenSandbox/issues

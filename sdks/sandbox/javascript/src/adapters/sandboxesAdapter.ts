@@ -15,6 +15,7 @@
 import type { LifecycleClient } from "../openapi/lifecycleClient.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 import type { paths as LifecyclePaths } from "../api/lifecycle.js";
+import { EndpointCache } from "../core/endpointCache.js";
 import type {
   Sandboxes,
 } from "../services/sandboxes.js";
@@ -75,7 +76,21 @@ function encodeMetadataFilter(metadata: Record<string, string>): string {
 }
 
 export class SandboxesAdapter implements Sandboxes {
-  constructor(private readonly client: LifecycleClient) {}
+  private readonly endpointCache: EndpointCache | null;
+
+  constructor(
+    private readonly client: LifecycleClient,
+    cacheOpts?: { ttlMs?: number; maxSize?: number; disabled?: boolean }
+  ) {
+    if (cacheOpts?.disabled) {
+      this.endpointCache = null;
+    } else {
+      this.endpointCache = new EndpointCache({
+        ttlMs: cacheOpts?.ttlMs,
+        maxSize: cacheOpts?.maxSize,
+      });
+    }
+  }
 
   private parseIsoDate(field: string, v: unknown): Date {
     if (typeof v !== "string" || !v) {
@@ -259,6 +274,7 @@ export class SandboxesAdapter implements Sandboxes {
   async listSnapshots(params: ListSnapshotsParams = {}): Promise<ListSnapshotsResponse> {
     const query: Record<string, string | number | (string | number)[] | undefined> = {};
     if (params.sandboxId) query.sandboxId = params.sandboxId;
+    if (params.name != null) query.name = params.name;
     if (params.states?.length) query.state = params.states;
     if (params.page != null) query.page = params.page;
     if (params.pageSize != null) query.pageSize = params.pageSize;
@@ -291,6 +307,19 @@ export class SandboxesAdapter implements Sandboxes {
     port: number,
     useServerProxy = false
   ): Promise<Endpoint> {
+    if (this.endpointCache) {
+      return this.endpointCache.getOrFetch(sandboxId, port, useServerProxy, () =>
+        this.fetchSandboxEndpoint(sandboxId, port, useServerProxy)
+      );
+    }
+    return this.fetchSandboxEndpoint(sandboxId, port, useServerProxy);
+  }
+
+  private async fetchSandboxEndpoint(
+    sandboxId: SandboxId,
+    port: number,
+    useServerProxy: boolean
+  ): Promise<Endpoint> {
     const { data, error, response } = await this.client.GET("/sandboxes/{sandboxId}/endpoints/{port}", {
       params: { path: { sandboxId, port }, query: { use_server_proxy: useServerProxy } },
     });
@@ -300,6 +329,10 @@ export class SandboxesAdapter implements Sandboxes {
       throw new Error("Get sandbox endpoint failed: unexpected response shape");
     }
     return ok as unknown as Endpoint;
+  }
+
+  invalidateEndpointCache(sandboxId: SandboxId): void {
+    this.endpointCache?.invalidate(sandboxId);
   }
 
   async getSignedEndpoint(

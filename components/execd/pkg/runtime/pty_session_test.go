@@ -45,6 +45,40 @@ func replayContains(t *testing.T, s *ptySession, substr string, timeout time.Dur
 	return false
 }
 
+func TestPTYSession_FallsBackToSh(t *testing.T) {
+	useShOnlyPath(t)
+
+	t.Run("pty", func(t *testing.T) {
+		s := newPTYSession(uuidString(), "", "printf fallback_pty")
+		require.NoError(t, s.StartPTY())
+		t.Cleanup(func() { s.close() })
+
+		require.True(t, replayContains(t, s, "fallback_pty", 5*time.Second),
+			"expected custom command output from sh in PTY mode")
+	})
+
+	t.Run("pipe", func(t *testing.T) {
+		s := newPTYSession(uuidString(), "", "")
+		require.NoError(t, s.StartPipe())
+		t.Cleanup(func() { s.close() })
+
+		stdoutR, _, detach := s.AttachOutput()
+		defer detach()
+		stdoutCh := make(chan string, 1)
+		safego.Go(func() {
+			sc := bufio.NewScanner(stdoutR)
+			for sc.Scan() {
+				stdoutCh <- sc.Text()
+			}
+		})
+
+		_, writeErr := s.WriteStdin([]byte("printf 'fallback_pipe\\n'\nexit\n"))
+		require.NoError(t, writeErr)
+		require.True(t, waitForLine(stdoutCh, "fallback_pipe", 5*time.Second),
+			"expected interactive command output from sh in pipe mode")
+	})
+}
+
 func TestPTYSession_BasicExecution(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not found")
@@ -366,9 +400,4 @@ func waitForLine(ch <-chan string, target string, timeout time.Duration) bool {
 			return false
 		}
 	}
-}
-
-// discardAll drains r until EOF.
-func discardAll(r io.Reader) {
-	_, _ = io.Copy(io.Discard, r)
 }

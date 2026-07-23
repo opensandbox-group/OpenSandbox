@@ -241,7 +241,7 @@ This project is part of the OpenSandbox suite. See the main [LICENSE](../../LICE
 
 For issues and questions:
 
-- GitHub Issues: [OpenSandbox Issues](https://github.com/alibaba/OpenSandbox/issues)
+- GitHub Issues: [OpenSandbox Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
 
 ## Related Projects
 

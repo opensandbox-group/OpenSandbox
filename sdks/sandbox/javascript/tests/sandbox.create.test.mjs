@@ -443,3 +443,146 @@ test("Sandbox.create treats null backends as absent", async () => {
   assert.equal(recordedRequests.length, 1);
   assert.equal(recordedRequests[0].volumes[0].host.path, "/tmp");
 });
+
+test("Sandbox.create reports create metrics after ready", async () => {
+  const { adapterFactory } = createAdapterFactory();
+  adapterFactory.createExecdStack = () => ({
+    commands: {},
+    files: {},
+    health: {
+      async ping() {
+        return true;
+      },
+    },
+    metrics: {},
+  });
+
+  const metricsPosts = [];
+  let connectionConfig = new ConnectionConfig({
+    domain: "http://127.0.0.1:8080",
+    apiKey: "test-key",
+  });
+  connectionConfig = connectionConfig.withTransportIfMissing();
+  Object.defineProperty(connectionConfig, "fetch", {
+    configurable: true,
+    get() {
+      return async (url, init) => {
+        metricsPosts.push({ url: String(url), init });
+        return { arrayBuffer: async () => new ArrayBuffer(0) };
+      };
+    },
+  });
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig,
+    image: "python:3.12",
+    readyTimeoutSeconds: 1,
+  });
+
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(metricsPosts.length, 1);
+  assert.match(metricsPosts[0].url, /\/v1\/metrics\/events$/);
+  const body = JSON.parse(metricsPosts[0].init.body);
+  assert.equal(body.eventType, "sandbox.create");
+  assert.equal(body.success, true);
+  assert.equal(body.sandboxId, "sandbox-test-id");
+  assert.equal(body.image, "python:3.12");
+  assert.equal(body.sdkLanguage, undefined);
+  assert.equal(body.sdkVersion, undefined);
+  const headers = metricsPosts[0].init.headers || {};
+  const ua = headers["User-Agent"] || headers["user-agent"] || "";
+  assert.match(ua, /^OpenSandbox-JS-SDK\//);
+});
+
+test("Sandbox.create metrics failure does not change create error", async () => {
+  const { adapterFactory } = createAdapterFactory();
+  adapterFactory.createExecdStack = () => ({
+    commands: {},
+    files: {},
+    health: {
+      async ping() {
+        throw new Error("unhealthy");
+      },
+    },
+    metrics: {},
+  });
+
+  const connectionConfig = new ConnectionConfig({
+    domain: "http://127.0.0.1:8080",
+  });
+  Object.defineProperty(connectionConfig, "fetch", {
+    configurable: true,
+    get() {
+      return async () => {
+        throw new Error("metrics down");
+      };
+    },
+  });
+
+  await assert.rejects(
+    Sandbox.create({
+      adapterFactory,
+      connectionConfig,
+      image: "python:3.12",
+      readyTimeoutSeconds: 0.2,
+      healthCheckPollingInterval: 50,
+    }),
+    /timed out|unhealthy|Sandbox/
+  );
+});
+
+test("Sandbox.create metrics synchronous throw does not change create error", async () => {
+  // Regression test: previously, payload/URL/headers construction and
+  // `connectionConfig.fetch(...)` ran outside any try/catch in the reporter.
+  // A synchronous throw from custom `fetch` (or an invalid base URL causing
+  // `new URL(...)` inside fetch to throw synchronously) would replace the
+  // original Sandbox.create failure. The reporter must swallow it.
+  const { adapterFactory } = createAdapterFactory();
+  adapterFactory.createExecdStack = () => ({
+    commands: {},
+    files: {},
+    health: {
+      async ping() {
+        throw new Error("unhealthy");
+      },
+    },
+    metrics: {},
+  });
+
+  let connectionConfig = new ConnectionConfig({
+    domain: "http://127.0.0.1:8080",
+  });
+  // Materialize the transport-carrying config the same way Sandbox.create
+  // does internally, so our fetch override actually reaches the reporter.
+  connectionConfig = connectionConfig.withTransportIfMissing();
+  Object.defineProperty(connectionConfig, "fetch", {
+    configurable: true,
+    get() {
+      // NOTE: synchronous throw, not a rejected promise.
+      return () => {
+        throw new Error("metrics fetch synchronously broken");
+      };
+    },
+  });
+
+  await assert.rejects(
+    Sandbox.create({
+      adapterFactory,
+      connectionConfig,
+      image: "python:3.12",
+      readyTimeoutSeconds: 0.2,
+      healthCheckPollingInterval: 50,
+    }),
+    // The rejection must be the create failure (unhealthy/timed out),
+    // NOT the telemetry error.
+    (err) => {
+      assert.doesNotMatch(String(err && err.message), /metrics fetch/);
+      assert.match(
+        String(err && err.message),
+        /timed out|unhealthy|Sandbox/
+      );
+      return true;
+    }
+  );
+});

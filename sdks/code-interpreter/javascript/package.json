@@ -18,10 +18,10 @@
   "sideEffects": false,
   "repository": {
     "type": "git",
-    "url": "https://github.com/alibaba/OpenSandbox.git"
+    "url": "https://github.com/opensandbox-group/OpenSandbox.git"
   },
   "bugs": {
-    "url": "https://github.com/alibaba/OpenSandbox/issues"
+    "url": "https://github.com/opensandbox-group/OpenSandbox/issues"
   },
   "homepage": "https://open-sandbox.ai",
   "files": [

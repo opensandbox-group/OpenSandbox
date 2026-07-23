@@ -55,6 +55,32 @@ Integrated task management system that executes custom workloads within sandboxe
 - **Process-Based Tasks**: Support for process-based tasks that execute within the sandbox environment
 - **Heterogeneous Task Distribution**: Customize individual tasks for each sandbox in a batch using shardTaskPatches
 
+#### Process lifecycle hooks
+
+Process tasks can define `preStart` and `postStop` exec hooks under `spec.taskTemplate.spec.process.lifecycle`:
+
+```yaml
+spec:
+  taskTemplate:
+    spec:
+      process:
+        command: ["/bin/sh", "-c"]
+        args: ["run-task"]
+        lifecycle:
+          preStart:
+            exec:
+              command: ["/bin/sh", "-c", "prepare-inputs"]
+            timeoutSeconds: 30
+          postStop:
+            exec:
+              command: ["/bin/sh", "-c", "persist-outputs"]
+            timeoutSeconds: 30
+```
+
+`preStart` runs before the main process starts. A failed or timed-out hook prevents the main process from starting and is reported in the task status.
+
+`postStop` is attempted whenever a task reaches a terminal state, including natural success or failure, `preStart` or process start failure, timeout, and task deletion. The task executor preserves the original terminal status and records the successful or failed hook outcome so a recorded `postStop` attempt is not repeated during later reconciliation or recovery. This makes the hooks suitable for staging files into a sandbox before execution and persisting outputs to a mounted volume after execution.
+
 ### Advanced Scheduling
 Intelligent resource management features:
 - Minimum and maximum buffer settings to ensure resource availability while controlling costs
@@ -369,6 +395,10 @@ spec:
   replicas: 3
   poolRef: example-pool
 ```
+
+::: warning Per-request network policies
+Pool pods are created before allocation. The lifecycle API therefore rejects `networkPolicy` together with `extensions.poolRef`; it cannot inject an egress sidecar into an existing pool pod. Configure required network controls in the Pool pod template before pods are created, or use a non-pooled sandbox for per-request policies.
+:::
 
 #### Pooled Sandbox with Heterogeneous Tasks
 Create a batch of sandboxes with process-based heterogeneous tasks. For task execution to work properly, the task-executor must be deployed as a sidecar container in the pool template and share the process namespace with the sandbox container:

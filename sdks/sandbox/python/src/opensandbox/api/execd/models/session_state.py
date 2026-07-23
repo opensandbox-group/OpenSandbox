@@ -18,32 +18,65 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..models.session_state_profile import SessionStateProfile
 from ..models.session_state_status import SessionStateStatus
+from ..models.session_state_uid_mode import SessionStateUidMode
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.bind_mount import BindMount
+    from ..models.env_passthrough_spec import EnvPassthroughSpec
+    from ..models.isolated_workspace_spec import IsolatedWorkspaceSpec
+
 
 T = TypeVar("T", bound="SessionState")
 
 
 @_attrs_define
 class SessionState:
-    """
-    Attributes:
-        status (SessionStateStatus | Unset):
-        created_at (datetime.datetime | Unset):
-        last_run_at (datetime.datetime | Unset):
-        idle_remaining_seconds (int | None | Unset):
+    """State of an isolated session. Runtime status fields (status, created_at, last_run_at, idle_remaining_seconds) are
+    always present. Creation-parameter fields (profile, workspace, binds, share_net, env_passthrough, uid, gid,
+    uid_mode, extra_writable, idle_timeout_seconds) echo the parameters used to create the session and let a stateless
+    client rebuild a session handle from just a session ID (e.g. after a client restart or in serverless workers). Older
+    execd builds may omit the creation-parameter fields; clients must tolerate them being absent.
+
+        Attributes:
+            status (SessionStateStatus | Unset):
+            created_at (datetime.datetime | Unset):
+            last_run_at (datetime.datetime | Unset):
+            idle_remaining_seconds (int | None | Unset):
+            profile (SessionStateProfile | Unset): Profile the session was created with.
+            workspace (IsolatedWorkspaceSpec | Unset):
+            extra_writable (list[str] | Unset):
+            binds (list[BindMount] | Unset):
+            share_net (bool | Unset):
+            env_passthrough (EnvPassthroughSpec | Unset):
+            uid (int | Unset):
+            gid (int | Unset):
+            uid_mode (SessionStateUidMode | Unset):
+            idle_timeout_seconds (int | Unset):
     """
 
     status: SessionStateStatus | Unset = UNSET
     created_at: datetime.datetime | Unset = UNSET
     last_run_at: datetime.datetime | Unset = UNSET
     idle_remaining_seconds: int | None | Unset = UNSET
+    profile: SessionStateProfile | Unset = UNSET
+    workspace: IsolatedWorkspaceSpec | Unset = UNSET
+    extra_writable: list[str] | Unset = UNSET
+    binds: list[BindMount] | Unset = UNSET
+    share_net: bool | Unset = UNSET
+    env_passthrough: EnvPassthroughSpec | Unset = UNSET
+    uid: int | Unset = UNSET
+    gid: int | Unset = UNSET
+    uid_mode: SessionStateUidMode | Unset = UNSET
+    idle_timeout_seconds: int | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +98,41 @@ class SessionState:
         else:
             idle_remaining_seconds = self.idle_remaining_seconds
 
+        profile: str | Unset = UNSET
+        if not isinstance(self.profile, Unset):
+            profile = self.profile.value
+
+        workspace: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.workspace, Unset):
+            workspace = self.workspace.to_dict()
+
+        extra_writable: list[str] | Unset = UNSET
+        if not isinstance(self.extra_writable, Unset):
+            extra_writable = self.extra_writable
+
+        binds: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.binds, Unset):
+            binds = []
+            for binds_item_data in self.binds:
+                binds_item = binds_item_data.to_dict()
+                binds.append(binds_item)
+
+        share_net = self.share_net
+
+        env_passthrough: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.env_passthrough, Unset):
+            env_passthrough = self.env_passthrough.to_dict()
+
+        uid = self.uid
+
+        gid = self.gid
+
+        uid_mode: str | Unset = UNSET
+        if not isinstance(self.uid_mode, Unset):
+            uid_mode = self.uid_mode.value
+
+        idle_timeout_seconds = self.idle_timeout_seconds
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
@@ -76,11 +144,35 @@ class SessionState:
             field_dict["last_run_at"] = last_run_at
         if idle_remaining_seconds is not UNSET:
             field_dict["idle_remaining_seconds"] = idle_remaining_seconds
+        if profile is not UNSET:
+            field_dict["profile"] = profile
+        if workspace is not UNSET:
+            field_dict["workspace"] = workspace
+        if extra_writable is not UNSET:
+            field_dict["extra_writable"] = extra_writable
+        if binds is not UNSET:
+            field_dict["binds"] = binds
+        if share_net is not UNSET:
+            field_dict["share_net"] = share_net
+        if env_passthrough is not UNSET:
+            field_dict["env_passthrough"] = env_passthrough
+        if uid is not UNSET:
+            field_dict["uid"] = uid
+        if gid is not UNSET:
+            field_dict["gid"] = gid
+        if uid_mode is not UNSET:
+            field_dict["uid_mode"] = uid_mode
+        if idle_timeout_seconds is not UNSET:
+            field_dict["idle_timeout_seconds"] = idle_timeout_seconds
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.bind_mount import BindMount
+        from ..models.env_passthrough_spec import EnvPassthroughSpec
+        from ..models.isolated_workspace_spec import IsolatedWorkspaceSpec
+
         d = dict(src_dict)
         _status = d.pop("status", UNSET)
         status: SessionStateStatus | Unset
@@ -112,11 +204,68 @@ class SessionState:
 
         idle_remaining_seconds = _parse_idle_remaining_seconds(d.pop("idle_remaining_seconds", UNSET))
 
+        _profile = d.pop("profile", UNSET)
+        profile: SessionStateProfile | Unset
+        if isinstance(_profile, Unset):
+            profile = UNSET
+        else:
+            profile = SessionStateProfile(_profile)
+
+        _workspace = d.pop("workspace", UNSET)
+        workspace: IsolatedWorkspaceSpec | Unset
+        if isinstance(_workspace, Unset):
+            workspace = UNSET
+        else:
+            workspace = IsolatedWorkspaceSpec.from_dict(_workspace)
+
+        extra_writable = cast(list[str], d.pop("extra_writable", UNSET))
+
+        _binds = d.pop("binds", UNSET)
+        binds: list[BindMount] | Unset = UNSET
+        if _binds is not UNSET:
+            binds = []
+            for binds_item_data in _binds:
+                binds_item = BindMount.from_dict(binds_item_data)
+
+                binds.append(binds_item)
+
+        share_net = d.pop("share_net", UNSET)
+
+        _env_passthrough = d.pop("env_passthrough", UNSET)
+        env_passthrough: EnvPassthroughSpec | Unset
+        if isinstance(_env_passthrough, Unset):
+            env_passthrough = UNSET
+        else:
+            env_passthrough = EnvPassthroughSpec.from_dict(_env_passthrough)
+
+        uid = d.pop("uid", UNSET)
+
+        gid = d.pop("gid", UNSET)
+
+        _uid_mode = d.pop("uid_mode", UNSET)
+        uid_mode: SessionStateUidMode | Unset
+        if isinstance(_uid_mode, Unset):
+            uid_mode = UNSET
+        else:
+            uid_mode = SessionStateUidMode(_uid_mode)
+
+        idle_timeout_seconds = d.pop("idle_timeout_seconds", UNSET)
+
         session_state = cls(
             status=status,
             created_at=created_at,
             last_run_at=last_run_at,
             idle_remaining_seconds=idle_remaining_seconds,
+            profile=profile,
+            workspace=workspace,
+            extra_writable=extra_writable,
+            binds=binds,
+            share_net=share_net,
+            env_passthrough=env_passthrough,
+            uid=uid,
+            gid=gid,
+            uid_mode=uid_mode,
+            idle_timeout_seconds=idle_timeout_seconds,
         )
 
         session_state.additional_properties = d

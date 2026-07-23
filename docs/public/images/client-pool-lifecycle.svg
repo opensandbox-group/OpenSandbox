@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="720" viewBox="0 0 1400 720" role="img" aria-labelledby="title desc">
+  <title id="title">Client Pool Lifecycle State Machine</title>
+  <desc id="desc">State machine of the client pool. Lifecycle states NOT_STARTED, STARTING, RUNNING, DRAINING and STOPPED, with an inner health substate machine on RUNNING that toggles between HEALTHY and DEGRADED based on consecutive create failures.</desc>
+  <defs>
+    <marker id="a4-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1e3a5f"/>
+    </marker>
+    <marker id="a4-arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b91c1c"/>
+    </marker>
+    <marker id="a4-arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 26px; font-weight: 700; fill: #1e40af; }
+      .subtitle { font-size: 13px; fill: #475569; }
+      .state-name { font-size: 15px; font-weight: 700; fill: #0f172a; }
+      .state-hint { font-size: 11px; fill: #475569; }
+      .edge-label { font-size: 12px; fill: #1e3a5f; font-weight: 600; }
+      .edge-label-red { font-size: 12px; fill: #b91c1c; font-weight: 600; }
+      .edge-label-green { font-size: 12px; fill: #047857; font-weight: 600; }
+      .frame-label { font-size: 13px; font-weight: 700; fill: #6d28d9; }
+      .caption { font-size: 12px; fill: #475569; font-style: italic; }
+    </style>
+  </defs>
+
+  <text x="700" y="38" class="title" text-anchor="middle">Client Pool Lifecycle State Machine</text>
+  <text x="700" y="60" class="subtitle" text-anchor="middle">Outer: pool instance lifecycle. Inner: health substates while RUNNING.</text>
+
+  <!-- initial dot -->
+  <circle cx="90" cy="240" r="9" fill="#0f172a"/>
+
+  <!-- NOT_STARTED -->
+  <rect x="140" y="200" width="180" height="80" rx="14" fill="#f1f5f9" stroke="#334155" stroke-width="2"/>
+  <text x="230" y="235" class="state-name" text-anchor="middle">NOT_STARTED</text>
+  <text x="230" y="258" class="state-hint" text-anchor="middle">constructed, not started</text>
+
+  <path d="M 99 240 L 138 240" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a4-arrow)"/>
+
+  <!-- STARTING -->
+  <rect x="380" y="200" width="180" height="80" rx="14" fill="#eff6ff" stroke="#1e3a5f" stroke-width="2"/>
+  <text x="470" y="235" class="state-name" text-anchor="middle">STARTING</text>
+  <text x="470" y="258" class="state-hint" text-anchor="middle">init warmup / reconcile</text>
+
+  <path d="M 320 240 L 378 240" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a4-arrow)"/>
+  <text x="349" y="228" class="edge-label" text-anchor="middle">start()</text>
+
+  <!-- RUNNING frame (contains inner states) -->
+  <rect x="620" y="130" width="440" height="360" rx="14" fill="#ecfdf5" stroke="#047857" stroke-width="2.5"/>
+  <text x="640" y="156" class="frame-label" fill="#047857">RUNNING</text>
+  <text x="640" y="176" class="state-hint">acquire enabled; reconcile replenishes</text>
+
+  <!-- HEALTHY -->
+  <rect x="670" y="220" width="160" height="80" rx="12" fill="#ffffff" stroke="#047857" stroke-width="2"/>
+  <text x="750" y="253" class="state-name" text-anchor="middle" fill="#047857">HEALTHY</text>
+  <text x="750" y="276" class="state-hint" text-anchor="middle">normal cadence</text>
+
+  <!-- DEGRADED -->
+  <rect x="860" y="380" width="160" height="80" rx="12" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="940" y="413" class="state-name" text-anchor="middle" fill="#92400e">DEGRADED</text>
+  <text x="940" y="436" class="state-hint" text-anchor="middle">exponential backoff</text>
+
+  <!-- HEALTHY -> DEGRADED -->
+  <path d="M 830 300 Q 900 340 890 378" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a4-arrow-red)"/>
+  <text x="885" y="336" class="edge-label-red">consecutive failures ≥ degraded_threshold</text>
+
+  <!-- DEGRADED -> HEALTHY -->
+  <path d="M 870 380 Q 800 340 795 302" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a4-arrow-green)"/>
+  <text x="720" y="366" class="edge-label-green" text-anchor="middle">one success</text>
+
+  <!-- initial dot inside RUNNING -->
+  <circle cx="670" cy="182" r="6" fill="#0f172a"/>
+  <path d="M 675 186 L 720 218" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a4-arrow)"/>
+
+  <!-- note about acquire allowed in degraded -->
+  <text x="840" y="490" class="caption" text-anchor="middle">acquire is still allowed while DEGRADED</text>
+
+  <!-- STARTING -> RUNNING -->
+  <path d="M 560 240 L 618 240" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a4-arrow)"/>
+  <text x="589" y="228" class="edge-label" text-anchor="middle">init complete</text>
+
+  <!-- STARTING -> STOPPED (start failure) -->
+  <path d="M 470 280 Q 470 500 470 560" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a4-arrow-red)"/>
+  <text x="490" y="450" class="edge-label-red">start failed</text>
+
+  <!-- DRAINING -->
+  <rect x="380" y="540" width="180" height="80" rx="14" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="470" y="575" class="state-name" text-anchor="middle" fill="#92400e">DRAINING</text>
+  <text x="470" y="598" class="state-hint" text-anchor="middle">wait for in-flight warmups</text>
+
+  <!-- RUNNING -> DRAINING -->
+  <path d="M 780 490 Q 780 580 562 580" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a4-arrow)"/>
+  <text x="672" y="568" class="edge-label" text-anchor="middle">shutdown(graceful=true)</text>
+
+  <!-- STOPPED -->
+  <rect x="140" y="540" width="180" height="80" rx="14" fill="#f1f5f9" stroke="#334155" stroke-width="2"/>
+  <text x="230" y="575" class="state-name" text-anchor="middle">STOPPED</text>
+  <text x="230" y="598" class="state-hint" text-anchor="middle">terminal</text>
+
+  <!-- DRAINING -> STOPPED -->
+  <path d="M 378 580 L 322 580" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a4-arrow)"/>
+  <text x="350" y="568" class="edge-label" text-anchor="middle">done or timeout</text>
+
+  <!-- RUNNING -> STOPPED (force) -->
+  <path d="M 620 400 Q 400 400 320 540" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a4-arrow-red)" stroke-dasharray="6,4"/>
+  <text x="410" y="410" class="edge-label-red">shutdown(graceful=false)</text>
+
+  <!-- final dot -->
+  <circle cx="230" cy="670" r="9" fill="none" stroke="#0f172a" stroke-width="2"/>
+  <circle cx="230" cy="670" r="4" fill="#0f172a"/>
+  <path d="M 230 620 L 230 660" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a4-arrow)"/>
+
+  <text x="700" y="700" class="caption" text-anchor="middle">SandboxPoolManager.destroy(poolName) applies an extra DESTROYING → DESTROYED tombstone protocol to prevent other nodes from silently recreating the same pool name.</text>
+</svg>

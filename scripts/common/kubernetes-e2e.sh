@@ -191,6 +191,7 @@ configToml: |
 
   [egress]
   image = "${EGRESS_IMG}"
+  mode = "dns+nft"
 
   [kubernetes]
   namespace = "${E2E_NAMESPACE}"

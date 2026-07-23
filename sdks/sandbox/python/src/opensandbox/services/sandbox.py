@@ -250,3 +250,7 @@ class Sandboxes(Protocol):
     async def delete_snapshot(self, snapshot_id: str) -> None:
         """Delete a snapshot."""
         ...
+
+    def invalidate_endpoint_cache(self, sandbox_id: str) -> None:
+        """Remove all cached endpoints for a sandbox. No-op if caching is disabled."""
+        ...

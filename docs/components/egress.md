@@ -9,6 +9,10 @@ The **Egress** is a core component of OpenSandbox that provides **FQDN-based egr
 
 It runs alongside the sandbox application container (sharing the same network namespace) and enforces declared network policies.
 
+::: warning Pooled sandboxes
+The lifecycle API cannot add this sidecar to a pod that was already created by a Pool. It therefore rejects per-request `networkPolicy` together with `extensions.poolRef` instead of silently ignoring the policy. Put required egress controls in the Pool pod template before pods are created, or use a non-pooled sandbox for per-request policies.
+:::
+
 ## Features
 
 - **FQDN-based Allowlist**: Control outbound traffic by domain name (e.g., `api.github.com`).
@@ -17,9 +21,9 @@ It runs alongside the sandbox application container (sharing the same network na
 - **Transparent Interception**: Uses transparent DNS proxying; no application configuration required.
 - **Experimental: Transparent HTTPS MITM (mitmproxy)**: Optional transparent TLS interception for outbound `80/443` traffic in the sidecar network namespace.
 - **Dynamic DNS (dns+nft mode)**: When a domain is allowed and the proxy resolves it, the resolved A/AAAA IPs are added to nftables with TTL so that default-deny + domain-allow is enforced at the network layer.
-- **Credential Vault**: Automatic credential injection (bearer, basic, API-key, custom headers) for allowed hosts via transparent mitmproxy. See [Credential Vault](/guides/credential-vault).
+- **Credential Vault**: Automatic credential injection (bearer, basic, API-key, custom headers, and scoped placeholder substitutions) for allowed hosts via transparent mitmproxy. See [Credential Vault](/guides/credential-vault).
 - **Privilege Isolation**: Requires `CAP_NET_ADMIN` only for the sidecar; the application container runs unprivileged.
-- **Fail-Closed Enforcement**: `iptables` setup is required; the sidecar exits on failure to guarantee no traffic leaks without enforcement. Optional subsystems (OpenTelemetry, startup hooks) degrade gracefully.
+- **Fail-Closed Enforcement**: DNS redirect setup is required through `iptables` or the native nft fallback; the sidecar exits if no enforced redirect can be installed. Optional subsystems (OpenTelemetry, startup hooks) degrade gracefully.
 
 ## Architecture
 
@@ -76,7 +80,7 @@ Optional advanced features:
 - DoH/DoT controls: `OPENSANDBOX_EGRESS_BLOCK_DOH_443`, `OPENSANDBOX_EGRESS_DOH_BLOCKLIST`
 - Custom DNS upstream: `OPENSANDBOX_EGRESS_DNS_UPSTREAM` (comma-separated IPs, optional `:port`), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT` (default `5` seconds)
 - DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (enable), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC`
-- Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
+- Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
 - Metrics: `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (extra key=value attributes for OTLP metrics and structured log fields)
 
 ### Always-Rules Files
@@ -245,7 +249,7 @@ ENTRYPOINT: supervisor --pre-start=cleanup.sh --name=egress --grace-period=20s -
 Egress-specific configuration:
 
 - **`--grace-period=20s`**: Egress needs extra time to drain DNS connections and tear down iptables/nft rules on shutdown (default is 10 s).
-- **Pre-start hook** (`cleanup.sh`): Reaps orphaned `mitmdump` processes from a previous crash so the new egress can bind the MITM listen port. Intentionally does NOT tear down iptables/nft rules -- keeping enforcement active during the backoff window protects the workload.
+- **Pre-start hook** (`cleanup.sh`): Reaps orphaned `mitmdump` processes from a previous crash and removes stale DNS redirect iptables/native nft state that would otherwise point port 53 at a dead proxy. It does not manage the `inet opensandbox` policy table; the nftables manager deletes and recreates that table when policy enforcement starts.
 
 ## Troubleshooting
 

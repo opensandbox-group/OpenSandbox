@@ -46,8 +46,85 @@ curl -v http://localhost:44772/ping
   - Code execution (`/code`, SSE stream)
   - Session and command execution (`/session`, `/command`)
   - Filesystem operations (`/files`, `/directories`)
+  - Isolated sessions (`/v1/isolated/session`, bubblewrap namespaces)
   - PTY over WebSocket (`/pty`)
   - Local metrics endpoints (`/metrics`, `/metrics/watch`)
+
+Shell-backed sessions use Bash when it is available and fall back to `sh` on
+minimal images that do not include Bash. This applies to PTY sessions, the
+Bash session API (which keeps its existing name for compatibility), and
+isolated sessions. Commands submitted to a fallback session must use syntax
+supported by that image's `sh` implementation.
+
+## Isolated Sessions
+
+Isolated sessions run a shell inside a per-execution
+[bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) namespace,
+created via `POST /v1/isolated/session`. Bash is preferred, with `sh` used as a
+fallback. Beyond the workspace, callers can expose additional host paths into
+the namespace.
+
+### UID modes and capabilities
+
+The optional `uid_mode` request field selects how identity is established:
+
+- `setpriv` (the default) uses the container's existing user namespace and
+  drops to the requested UID/GID with `setpriv`.
+- `userns` creates a new user namespace and maps the requested UID/GID inside
+  it, which can work in environments where the capabilities required by
+  `setpriv` mode are unavailable.
+
+At startup, execd probes both modes independently. `GET
+/v1/isolated/capabilities` reports `setpriv_available` and
+`userns_available`; the overall `available` field is true when either mode is
+usable. Creating a session returns `503 NOT_SUPPORTED` only when the selected
+mode is unavailable. The probes exercise the same identity path used at
+runtime: the public `setpriv_available` flag covers execd's default UID/GID
+path (so a root session that keeps UID/GID 0 does not require the `setpriv`
+binary), while `userns` applies the UID/GID mapping and the setuid-aware
+`--disable-userns` policy. A setpriv request that selects IDs different from
+execd's own is checked against a separate startup identity-switch probe and
+returns `503 NOT_SUPPORTED` before session side effects when that switch is not
+available.
+
+### Bind mounts
+
+Two request fields control extra host paths:
+
+- `extra_writable`: a list of paths bind-mounted read-write at the same path
+  inside the namespace (`source == destination`).
+- `binds`: explicit `source` → `dest` mappings, each optionally read-only.
+  - `source` (required): host path to bind. It must **already exist** and is
+    resolved (symlinks followed) before use.
+  - `dest`: mount destination inside the namespace; defaults to `source` when
+    omitted. It must be an **existing** mount point — `bwrap` cannot create a
+    destination under the read-only root, so create the directory first.
+  - `readonly` (default `false`): mount read-only (`--ro-bind`) when `true`,
+    read-write (`--bind`) otherwise.
+
+Example:
+
+```json
+{
+  "workspace": { "path": "/workspace", "mode": "rw" },
+  "binds": [
+    { "source": "/data/in",  "dest": "/mnt/in", "readonly": true },
+    { "source": "/data/out", "dest": "/mnt/out" }
+  ]
+}
+```
+
+### Writable allowlist
+
+The source path of every `extra_writable` entry and every `binds` entry must
+fall within the `allowed_writable` allowlist (see the isolation config file
+below). The allowlist is enforced against the fully symlink-resolved real
+path, so a symlink cannot redirect a bind outside the allowlist. An empty
+allowlist rejects all `extra_writable`/`binds` requests.
+
+The built-in default allowlist is `/workspace`, `/mnt`, `/media`, `/data`
+(subpaths included). Set `allowed_writable` in the isolation config to
+override it.
 
 ## Configuration
 
@@ -62,6 +139,7 @@ curl -v http://localhost:44772/ping
 | `--access-token` | `""` | Optional shared API access token. |
 | `--graceful-shutdown-timeout` | `1s` | SSE tail-drain wait window before closing. |
 | `--jupyter-idle-poll-interval` | `100ms` | Poll interval after Jupyter reports idle. |
+| `--isolation-config` | `""` | Path to the isolation TOML config (see below). |
 
 ### Environment Variables
 
@@ -72,12 +150,29 @@ curl -v http://localhost:44772/ping
 | `EXECD_ACCESS_TOKEN` | Same as `--access-token` (overridden by explicit flag). |
 | `EXECD_API_GRACE_SHUTDOWN` | Same as `--graceful-shutdown-timeout`. |
 | `EXECD_JUPYTER_IDLE_POLL_INTERVAL` | Same as `--jupyter-idle-poll-interval`. |
+| `EXECD_ISOLATION_CONFIG` | Same as `--isolation-config`. |
 | `EXECD_CLONE3_COMPAT` | Linux clone3 compatibility switch (see below). |
 | `EXECD_LOG_FILE` | Optional log output file path; default is stdout. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Preferred OTLP metrics endpoint. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Fallback OTLP endpoint when metrics-specific endpoint is unset. |
 | `OPENSANDBOX_ID` | Optional `sandbox_id` metric/resource attribute. |
 | `OPENSANDBOX_EXECD_METRICS_EXTRA_ATTRS` | Optional extra metric attrs (`k=v,k2=v2`). |
+
+### Isolation Config File
+
+Isolated sessions read an optional TOML file given by `--isolation-config`
+(or `EXECD_ISOLATION_CONFIG`). All fields are optional; omitted fields use
+built-in defaults.
+
+```toml
+# Parent directory for per-session overlay upper directories.
+upper_root = "/var/lib/execd/isolation"
+
+# Host paths callers may request via extra_writable / binds.
+# Enforced against the fully symlink-resolved real path; subpaths are allowed.
+# Default: ["/workspace", "/mnt", "/media", "/data"]. Empty = reject all.
+allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
+```
 
 ## Observability
 

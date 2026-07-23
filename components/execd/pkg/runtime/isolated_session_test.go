@@ -18,8 +18,11 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,10 +44,13 @@ func newStubIsolator() *stubIsolator {
 	return &stubIsolator{
 		available: true,
 		caps: isolation.Capabilities{
-			Available:       true,
-			Isolator:        "stub",
-			CommitSupported: false,
-			DiffSupported:   false,
+			Available:              true,
+			Isolator:               "stub",
+			SetprivAvailable:       true,
+			SetprivSwitchAvailable: true,
+			UsernsAvailable:        true,
+			CommitSupported:        false,
+			DiffSupported:          false,
 		},
 	}
 }
@@ -70,6 +76,127 @@ func TestNewIsolatedRunner(t *testing.T) {
 	}
 	if !runner.Available() {
 		t.Error("runner should be available with stub isolator")
+	}
+}
+
+func TestCreateIsolatedSession_RejectsOnlyUnavailableUidMode(t *testing.T) {
+	customUID := uint32(424242)
+	tests := []struct {
+		name              string
+		mode              string
+		setprivAvailable  bool
+		identityAvailable bool
+		usernsAvailable   bool
+		uid               *uint32
+		wantUnavailable   bool
+	}{
+		{name: "setpriv supported", mode: "setpriv", setprivAvailable: true},
+		{name: "setpriv custom identity supported", mode: "setpriv", setprivAvailable: true, identityAvailable: true, uid: &customUID},
+		{name: "setpriv custom identity unsupported", mode: "setpriv", setprivAvailable: true, uid: &customUID, wantUnavailable: true},
+		{name: "setpriv unsupported", mode: "setpriv", usernsAvailable: true, wantUnavailable: true},
+		{name: "default setpriv unsupported", mode: "", usernsAvailable: true, wantUnavailable: true},
+		{name: "userns supported", mode: "userns", usernsAvailable: true},
+		{name: "userns unsupported", mode: "userns", setprivAvailable: true, wantUnavailable: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := newTestRunner(t)
+			stub := runner.isolator.(*stubIsolator)
+			stub.caps.SetprivAvailable = tt.setprivAvailable
+			stub.caps.SetprivSwitchAvailable = tt.identityAvailable
+			stub.caps.UsernsAvailable = tt.usernsAvailable
+
+			opts := &IsolatedSessionOptions{
+				WorkspacePath: filepath.Join(t.TempDir(), "workspace"),
+				WorkspaceMode: "rw",
+				UidMode:       tt.mode,
+				Uid:           tt.uid,
+			}
+			id, err := runner.CreateIsolatedSession(opts)
+			if tt.wantUnavailable {
+				if !errors.Is(err, ErrUidModeUnavailable) {
+					t.Fatalf("error = %v, want ErrUidModeUnavailable", err)
+				}
+				if id != "" {
+					t.Errorf("session id = %q, want empty", id)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("CreateIsolatedSession: %v", err)
+			}
+			defer runner.DeleteIsolatedSession(id)
+		})
+	}
+}
+
+func TestValidateUidModeAvailable_RejectsUnknownMode(t *testing.T) {
+	runner := newTestRunner(t)
+	err := runner.validateUidModeAvailable(&IsolatedSessionOptions{UidMode: "bogus"})
+	if !errors.Is(err, ErrUidModeUnavailable) {
+		t.Fatalf("error = %v, want ErrUidModeUnavailable", err)
+	}
+}
+
+func TestValidateUidModeAvailable_EmptyModeUsesSetpriv(t *testing.T) {
+	runner := newTestRunner(t)
+	stub := runner.isolator.(*stubIsolator)
+	stub.caps.SetprivAvailable = false
+	stub.caps.UsernsAvailable = true
+
+	err := runner.validateUidModeAvailable(&IsolatedSessionOptions{})
+	if !errors.Is(err, ErrUidModeUnavailable) {
+		t.Fatalf("error = %v, want ErrUidModeUnavailable", err)
+	}
+}
+
+func TestSetprivIdentitySwitchRequired(t *testing.T) {
+	currentUID, currentGID := uint32(1000), uint32(1001)
+	otherUID, otherGID := uint32(2000), uint32(2001)
+	tests := []struct {
+		name string
+		opts *IsolatedSessionOptions
+		want bool
+	}{
+		{name: "omitted identity", opts: &IsolatedSessionOptions{}},
+		{name: "same identity", opts: &IsolatedSessionOptions{Uid: &currentUID, Gid: &currentGID}},
+		{name: "different uid", opts: &IsolatedSessionOptions{Uid: &otherUID}, want: true},
+		{name: "different gid", opts: &IsolatedSessionOptions{Gid: &otherGID}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := setprivIdentitySwitchRequired(tt.opts, currentUID, currentGID); got != tt.want {
+				t.Errorf("setprivIdentitySwitchRequired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsolatedSession_FallsBackToSh(t *testing.T) {
+	useShOnlyPath(t)
+
+	runner := newTestRunner(t)
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "workspace"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatalf("CreateIsolatedSession: %v", err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	var lines []string
+	err = runner.RunInIsolatedSession(context.Background(), id, "printf 'fallback_isolated\\n'", nil, func(line string) {
+		lines = append(lines, line)
+	})
+	if err != nil {
+		t.Fatalf("RunInIsolatedSession: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "fallback_isolated" {
+		t.Fatalf("output = %v, want [fallback_isolated]", lines)
 	}
 }
 
@@ -139,6 +266,199 @@ func TestGetIsolatedSession_Found(t *testing.T) {
 	}
 
 	runner.DeleteIsolatedSession(id)
+}
+
+// TestGetIsolatedSession_ReturnsCreationParams verifies GetIsolatedSession
+// echoes back the parameters the session was created with, so a
+// stateless client (that only holds the sessionId) can rebuild a session
+// handle without needing to have retained the original create request.
+func TestGetIsolatedSession_ReturnsCreationParams(t *testing.T) {
+	runner := newTestRunner(t)
+
+	// Extend the runner's writable allowlist so a bind can be validated.
+	bindSrc := filepath.Join(t.TempDir(), "bind-src")
+	if err := os.MkdirAll(bindSrc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extraDir := filepath.Join(t.TempDir(), "extra")
+	if err := os.MkdirAll(extraDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner.allowedWritable = []string{bindSrc, extraDir}
+
+	shareNet := true
+	uid := uint32(1234)
+	gid := uint32(5678)
+
+	opts := &IsolatedSessionOptions{
+		Profile:            "balanced",
+		WorkspacePath:      filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode:      "overlay",
+		ExtraWritable:      []string{extraDir},
+		Binds:              []isolation.BindMount{{Source: bindSrc, Dest: "/mnt/in", ReadOnly: true}},
+		ShareNet:           &shareNet,
+		EnvPassthroughMode: "allow",
+		EnvPassthroughKeys: []string{"HOME", "PATH"},
+		Uid:                &uid,
+		Gid:                &gid,
+		UidMode:            "setpriv",
+		IdleTimeoutSeconds: 900,
+	}
+
+	id, err := runner.CreateIsolatedSession(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	state, err := runner.GetIsolatedSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if state.Profile != "balanced" {
+		t.Errorf("Profile = %q, want balanced", state.Profile)
+	}
+	if state.WorkspacePath == "" {
+		t.Error("WorkspacePath is empty")
+	}
+	if state.WorkspaceMode != "overlay" {
+		t.Errorf("WorkspaceMode = %q, want overlay", state.WorkspaceMode)
+	}
+	if len(state.ExtraWritable) != 1 {
+		t.Errorf("ExtraWritable len = %d, want 1", len(state.ExtraWritable))
+	}
+	if len(state.Binds) != 1 || state.Binds[0].Dest != "/mnt/in" || !state.Binds[0].ReadOnly {
+		t.Errorf("Binds = %+v, want [{Source:%s Dest:/mnt/in ReadOnly:true}]", state.Binds, bindSrc)
+	}
+	if state.ShareNet == nil || !*state.ShareNet {
+		t.Error("ShareNet not echoed")
+	}
+	if state.EnvPassthroughMode != "allow" {
+		t.Errorf("EnvPassthroughMode = %q, want allow", state.EnvPassthroughMode)
+	}
+	if len(state.EnvPassthroughKeys) != 2 {
+		t.Errorf("EnvPassthroughKeys len = %d, want 2", len(state.EnvPassthroughKeys))
+	}
+	if state.Uid == nil || *state.Uid != 1234 {
+		t.Errorf("Uid = %v, want 1234", state.Uid)
+	}
+	if state.Gid == nil || *state.Gid != 5678 {
+		t.Errorf("Gid = %v, want 5678", state.Gid)
+	}
+	if state.UidMode != "setpriv" {
+		t.Errorf("UidMode = %q, want setpriv", state.UidMode)
+	}
+	if state.IdleTimeoutSeconds != 900 {
+		t.Errorf("IdleTimeoutSeconds = %d, want 900", state.IdleTimeoutSeconds)
+	}
+	if state.IdleRemainingSeconds == nil {
+		t.Error("IdleRemainingSeconds nil despite IdleTimeoutSeconds > 0")
+	}
+}
+
+// TestGetIsolatedSession_EchoesEffectiveDefaults verifies that a session
+// created with omitted Profile/WorkspaceMode/EnvPassthroughMode/UidMode
+// is echoed back with the effective values execd actually applied, not
+// the empty strings the caller sent. This lets a stateless client
+// (attaching by sessionId only) rebuild handle info that matches the
+// running configuration.
+func TestGetIsolatedSession_EchoesEffectiveDefaults(t *testing.T) {
+	runner := newTestRunner(t)
+
+	// Bare-minimum create request: only workspace path is required.
+	opts := &IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		// Profile / WorkspaceMode / EnvPassthroughMode / UidMode all omitted.
+	}
+
+	id, err := runner.CreateIsolatedSession(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	state, err := runner.GetIsolatedSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Each of these must be the effective value, not "".
+	if state.Profile != "strict" {
+		t.Errorf("Profile = %q, want strict (execd default)", state.Profile)
+	}
+	if state.WorkspaceMode != "overlay" {
+		t.Errorf("WorkspaceMode = %q, want overlay (execd default)", state.WorkspaceMode)
+	}
+	if state.EnvPassthroughMode != "deny" {
+		t.Errorf("EnvPassthroughMode = %q, want deny (execd default)", state.EnvPassthroughMode)
+	}
+	if state.UidMode != "setpriv" {
+		t.Errorf("UidMode = %q, want setpriv (execd default)", state.UidMode)
+	}
+}
+
+// TestNormalize_EnvPassthroughEmptyModeDropsKeys verifies that a create
+// request supplying env_passthrough.keys without an explicit mode has
+// its keys dropped during normalization. Rationale: the pre-normalize
+// behavior of start() forwarded EnvSpec{Mode: deny, Keys: nil} to
+// bwrap on empty mode, which bwrapEnvSegment interprets as "apply the
+// built-in secret blacklist". Normalizing mode to "deny" while
+// preserving keys would flip bwrap to "unset only those keys, skip
+// the blacklist" — a silent security regression. Keys must be
+// dropped so the effective config (blacklist wins) is echoed and run
+// unchanged.
+func TestNormalize_EnvPassthroughEmptyModeDropsKeys(t *testing.T) {
+	runner := newTestRunner(t)
+
+	opts := &IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		// mode omitted, but caller supplied keys — must be dropped
+		// so the built-in secret blacklist is not silently bypassed.
+		EnvPassthroughMode: "",
+		EnvPassthroughKeys: []string{"USER_TOKEN", "AWS_SECRET_ACCESS_KEY"},
+	}
+
+	id, err := runner.CreateIsolatedSession(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	state, err := runner.GetIsolatedSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if state.EnvPassthroughMode != "deny" {
+		t.Errorf("EnvPassthroughMode = %q, want deny", state.EnvPassthroughMode)
+	}
+	if len(state.EnvPassthroughKeys) != 0 {
+		t.Errorf("EnvPassthroughKeys should be dropped when mode was omitted, got %v", state.EnvPassthroughKeys)
+	}
+
+	// Caller-supplied keys are preserved when mode is explicit.
+	opts2 := &IsolatedSessionOptions{
+		WorkspacePath:      filepath.Join(t.TempDir(), "ws2"),
+		EnvPassthroughMode: "deny",
+		EnvPassthroughKeys: []string{"USER_TOKEN"},
+	}
+	id2, err := runner.CreateIsolatedSession(opts2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id2)
+
+	state2, err := runner.GetIsolatedSession(id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state2.EnvPassthroughMode != "deny" {
+		t.Errorf("explicit deny: mode = %q, want deny", state2.EnvPassthroughMode)
+	}
+	if len(state2.EnvPassthroughKeys) != 1 || state2.EnvPassthroughKeys[0] != "USER_TOKEN" {
+		t.Errorf("explicit deny should preserve keys, got %v", state2.EnvPassthroughKeys)
+	}
 }
 
 func TestDeleteIsolatedSession_NotFound(t *testing.T) {
@@ -352,7 +672,7 @@ func TestRunInIsolatedSession_EnvPersistence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Run 1: set env var in bash session.
+	// Run 1: set env var in the shell session.
 	err = runner.RunInIsolatedSession(ctx, id, "export MY_VAR=hello_from_session", nil, nil)
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
@@ -410,5 +730,67 @@ func TestRunInIsolatedSession_ConcurrentSessions(t *testing.T) {
 	}
 	if len(out2) != 1 || out2[0] != "two" {
 		t.Errorf("session 2: expected [two], got %v", out2)
+	}
+}
+
+// TestValidateBinds_SymlinkBypass verifies that a symlink placed inside an
+// allowed directory cannot be used to smuggle a bind source whose real target
+// lies outside the allowlist.
+func TestValidateBinds_SymlinkBypass(t *testing.T) {
+	allowed := t.TempDir()
+	outside := t.TempDir()
+
+	// allowed/link -> outside (a directory outside the allowlist).
+	link := filepath.Join(allowed, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &IsolatedRunner{allowedWritable: []string{allowed}}
+
+	// A direct path under the allowlist is fine.
+	if err := r.validateBinds([]isolation.BindMount{{Source: allowed}}); err != nil {
+		t.Errorf("direct allowlisted source should be accepted: %v", err)
+	}
+
+	// The symlink resolves outside the allowlist and must be rejected.
+	err := r.validateBinds([]isolation.BindMount{{Source: link}})
+	if err == nil {
+		t.Fatal("expected symlinked source resolving outside allowlist to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not in allowlist") {
+		t.Errorf("expected allowlist rejection, got: %v", err)
+	}
+
+	// A symlink whose target stays inside the allowlist is still accepted, and
+	// the source is rewritten to the resolved real path so bwrap mounts the
+	// resolved target (closing the TOCTOU window).
+	innerTarget := filepath.Join(allowed, "real")
+	if err := os.Mkdir(innerTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	innerLink := filepath.Join(allowed, "inner")
+	if err := os.Symlink(innerTarget, innerLink); err != nil {
+		t.Fatal(err)
+	}
+	binds := []isolation.BindMount{{Source: innerLink}}
+	if err := r.validateBinds(binds); err != nil {
+		t.Errorf("symlink resolving inside allowlist should be accepted: %v", err)
+	}
+	wantResolved, _ := filepath.EvalSymlinks(innerLink)
+	if binds[0].Source != wantResolved {
+		t.Errorf("bind source should be rewritten to resolved path %q, got %q", wantResolved, binds[0].Source)
+	}
+
+	// A non-existent source under the allowlist must be rejected: a missing
+	// leaf could otherwise be swapped to an out-of-allowlist symlink between
+	// validation and bwrap start.
+	missing := filepath.Join(allowed, "does-not-exist-yet")
+	err = r.validateBinds([]isolation.BindMount{{Source: missing}})
+	if err == nil {
+		t.Fatal("expected non-existent bind source to be rejected")
+	}
+	if !strings.Contains(err.Error(), "must be an existing path") {
+		t.Errorf("expected existing-path rejection, got: %v", err)
 	}
 }

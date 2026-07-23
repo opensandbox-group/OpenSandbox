@@ -33,6 +33,8 @@ from .credential_match import CredentialMatch
 from .credential_match_schemes_item import CredentialMatchSchemesItem
 from .credential_metadata import CredentialMetadata
 from .credential_mutation_set import CredentialMutationSet
+from .credential_substitution import CredentialSubstitution
+from .credential_substitution_in_item import CredentialSubstitutionInItem
 from .credential_vault_create_request import CredentialVaultCreateRequest
 from .credential_vault_mutation_request import CredentialVaultMutationRequest
 from .credential_vault_state import CredentialVaultState
@@ -45,6 +47,8 @@ from .network_policy import NetworkPolicy
 from .network_policy_default_action import NetworkPolicyDefaultAction
 from .network_rule import NetworkRule
 from .network_rule_action import NetworkRuleAction
+from .passthrough_credential_auth import PassthroughCredentialAuth
+from .passthrough_credential_auth_type import PassthroughCredentialAuthType
 from .policy_status_response import PolicyStatusResponse
 
 __all__ = (
@@ -65,6 +69,8 @@ __all__ = (
     "CredentialMatchSchemesItem",
     "CredentialMetadata",
     "CredentialMutationSet",
+    "CredentialSubstitution",
+    "CredentialSubstitutionInItem",
     "CredentialVaultCreateRequest",
     "CredentialVaultMutationRequest",
     "CredentialVaultState",
@@ -77,5 +83,7 @@ __all__ = (
     "NetworkPolicyDefaultAction",
     "NetworkRule",
     "NetworkRuleAction",
+    "PassthroughCredentialAuth",
+    "PassthroughCredentialAuthType",
     "PolicyStatusResponse",
 )

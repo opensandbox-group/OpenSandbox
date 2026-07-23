@@ -20,6 +20,8 @@ import (
 	"strings"
 )
 
+const EnvCredentialVaultTrustedProxyCIDRs = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS"
+
 const (
 	EnvBlockDoH443               = "OPENSANDBOX_EGRESS_BLOCK_DOH_443"
 	EnvDoHBlocklist              = "OPENSANDBOX_EGRESS_DOH_BLOCKLIST"

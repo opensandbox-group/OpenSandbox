@@ -17,11 +17,24 @@ Credential Vault is OpenSandbox's outbound credential broker for sandboxed agent
 - Go SDK >= 1.0.3
 - C# SDK >= 0.1.3
 - Server config sets `[egress].image`.
+- Server config sets `[egress].mode = "dns+nft"`. Credential Vault refuses to
+  activate in DNS-only mode because direct-IP connections can bypass DNS policy.
 - Sandbox create request includes an outbound network policy.
+- The outbound network policy should use `defaultAction="deny"` and explicitly
+  allow every host referenced by a credential binding. Default-allow remains
+  temporarily supported for backward compatibility but emits a security warning.
 - Sandbox create request enables Credential Proxy.
 - Sandbox pods are not running with an additional transparent service-mesh sidecar (for example Istio/Envoy injection) in the same network namespace. Credential Vault currently assumes the OpenSandbox egress sidecar is the only transparent outbound interception layer in the pod.
 - The sandbox image has the tools you want to run. For Claude Code, use an image
   with Node.js and npm, such as the OpenSandbox code-interpreter image.
+
+::: warning Migration notice
+Credential Proxy still requires server `[egress].mode = "dns+nft"`; deployments
+that cannot provide nft enforcement cannot safely enable credential injection.
+Default-allow policies remain accepted during the compatibility period, but emit
+a security warning and should migrate to `defaultAction="deny"` before enforcement
+is tightened in a future release.
+:::
 
 ## How It Works
 
@@ -40,7 +53,8 @@ At a high level:
 4. When the sandbox makes an HTTPS request, transparent MITM in the sidecar
    inspects the request metadata.
 5. If exactly one binding matches the request scheme, host, port, method, and
-   path, the sidecar injects the configured auth header.
+   path, the sidecar injects the configured auth header and scoped placeholder
+   substitutions.
 6. Secret values are redacted from vault responses and response headers.
 
 The active vault used by the MITM process is served over a local Unix domain
@@ -59,8 +73,8 @@ Use one of these operator patterns instead:
 
 For the underlying egress-sidecar limitation, see [Egress](/components/egress#service-mesh-compatibility).
 
-Credential bindings are intentionally precise. Prefer a default-deny egress
-policy and a narrow path match, for example `/v1/*` for Anthropic API calls.
+Credential bindings are intentionally precise. A default-deny egress policy is
+required. Use a narrow path match, for example `/v1/*` for Anthropic API calls.
 
 ## Auth Types
 
@@ -73,6 +87,9 @@ rendered into the outbound request:
 - `apiKey`: injects the credential value into the configured header name.
 - `customHeaders`: injects multiple configured headers, each backed by its own
   credential.
+- `passthrough`: does not inject an auth header. Use it with `substitutions`
+  when the upstream API requires a credential in a path, query string, or body
+  placeholder instead of a header.
 
 Simple examples:
 
@@ -115,11 +132,121 @@ X-Client-Id: <client-id>
 X-Client-Secret: <client-secret>
 ```
 
+### Scoped Placeholder Substitutions
+
+Some upstream APIs require credentials in a request URL or body instead of a
+dedicated auth header. Credential Vault can handle those APIs without placing the
+real credential in the sandbox process. All auth types accept an optional
+`substitutions` list. Each substitution names a credential, a literal
+placeholder, and the request surfaces where replacement is allowed:
+
+```python
+auth={
+    "type": "passthrough",
+    "substitutions": [
+        {
+            "credential": "client-secret",
+            "placeholder": "__client_secret__",
+            "in": ["body", "query"],
+        }
+    ],
+}
+```
+
+Use `type="passthrough"` when the binding only performs substitutions and should
+not inject an auth header. You can also combine substitutions with `bearer`,
+`basic`, `apiKey`, or `customHeaders` when the same upstream request needs both
+header injection and placeholder replacement.
+
+Substitution is disabled by default and is exact, literal, and case-sensitive.
+Only the configured surfaces are rewritten:
+
+| Surface | Behavior |
+| --- | --- |
+| `path` | Replaces placeholders in the request path and URL-encodes the credential value. If the rewritten path contains ambiguous path segments, encoded separators, or traversal-like content, the sidecar rejects the request instead of forwarding a secret-bearing URL outside the matched scope. |
+| `query` | Replaces placeholders in the query string and URL-encodes the credential value. |
+| `header` | Replaces placeholders in the original request headers, excluding hop-by-hop and security-sensitive headers such as `Host`, `Content-Length`, and forwarding headers. Substitutions run before Credential Vault injects auth headers, so the sidecar does not rewrite the credential headers it creates. |
+| `body` | Replaces placeholders in UTF-8 request bodies. For `application/json`, the replacement is encoded as JSON string contents, so put the placeholder inside a quoted JSON string. For `application/x-www-form-urlencoded`, the replacement is form-encoded. Compressed and multipart bodies are skipped. |
+
+The sidecar applies all replacements for a surface against the original request
+text in one pass. Inserted credential values are not scanned again for later
+placeholders, which prevents one secret from accidentally rewriting another
+secret. When a body is rewritten, the sidecar updates `Content-Length` and
+removes `Transfer-Encoding` because the forwarded request now has a fixed-size
+buffered body.
+
+The placeholder, raw credential value, URL-encoded value, form-encoded value,
+and JSON-escaped values are added to the active redaction set. A binding with
+substitutions that matched the request but did not find any placeholder emits a
+substitution-miss log without exposing credential values.
+
+Example configuration:
+
+```python
+await sandbox.credential_vault.create(
+    credentials=[
+        Credential(name="tenant-id", source={"value": "tenant 42"}),
+        Credential(name="api-key", source={"value": "query secret+value"}),
+        Credential(name="client-secret", source={"value": 'body "secret" value'}),
+    ],
+    bindings=[
+        CredentialBinding(
+            name="token-request",
+            match={
+                "schemes": ["https"],
+                "hosts": ["api.example.com"],
+                "methods": ["POST"],
+                "paths": ["/tenants/__tenant_id__/token"],
+            },
+            auth={
+                "type": "passthrough",
+                "substitutions": [
+                    {
+                        "credential": "tenant-id",
+                        "placeholder": "__tenant_id__",
+                        "in": ["path"],
+                    },
+                    {
+                        "credential": "api-key",
+                        "placeholder": "__api_key__",
+                        "in": ["query"],
+                    },
+                    {
+                        "credential": "client-secret",
+                        "placeholder": "__client_secret__",
+                        "in": ["body"],
+                    },
+                ],
+            },
+        )
+    ],
+)
+```
+
+The sandbox can use placeholders instead of real secrets:
+
+```bash
+curl -X POST \
+  "https://api.example.com/tenants/__tenant_id__/token?api_key=__api_key__" \
+  -H "content-type: application/json" \
+  --data '{"client_secret":"__client_secret__"}'
+```
+
+The upstream receives the rewritten request:
+
+```http
+POST /tenants/tenant%2042/token?api_key=query%20secret%2Bvalue HTTP/1.1
+content-type: application/json
+
+{"client_secret":"body \"secret\" value"}
+```
+
 ## Egress Sidecar Configuration
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
-| `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS` | off | When enabled (`true`/`1`/`on`), credential vault write operations (create, patch, delete) require the request to arrive over TLS, from a loopback address, or with `X-Forwarded-Proto: https`. When disabled (default), any authenticated request is accepted regardless of transport. Enable this in deployments where the egress sidecar is directly reachable from untrusted networks without a TLS-terminating reverse proxy. |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS` | off | When enabled (`true`/`1`/`on`), credential vault write operations (create, patch, delete) require TLS, loopback transport, or `X-Forwarded-Proto: https` from a configured trusted proxy. When disabled (default), any authenticated request is accepted regardless of transport. Enable this in deployments where the egress sidecar is directly reachable from untrusted networks without a TLS-terminating reverse proxy. |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS` | empty | Comma-separated IP addresses or CIDRs allowed to assert `X-Forwarded-Proto: https`. Forwarded transport headers from all other peers are ignored. Configure this when TLS terminates at a reverse proxy before the egress sidecar. |
 
 
 ## SDK Quick Reference
@@ -210,7 +337,6 @@ try:
                 name="anthropic-api",
                 match={
                     "schemes": ["https"],
-                    "ports": [443],
                     "hosts": [ANTHROPIC_HOST],
                     "methods": ["GET", "POST"],
                     "paths": ["/v1/*"],
@@ -257,7 +383,6 @@ CredentialBinding(
     name="git-basic",
     match={
         "schemes": ["https"],
-        "ports": [443],
         "hosts": ["git.example.com"],
         "paths": ["/org/private-repo.git*"],
     },
@@ -281,7 +406,6 @@ CredentialBinding(
     name="api-token",
     match={
         "schemes": ["https"],
-        "ports": [443],
         "hosts": ["api.example.com"],
         "methods": ["GET"],
         "paths": ["/v1/projects/123/variables"],
@@ -299,7 +423,8 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 ## Binding Guidance
 
 - Use `defaultAction="deny"` and only allow the service hosts required by the
-  tool.
+  tool. Default-allow policies are deprecated because they may allow credential
+  destination bypass and will emit a security warning.
 - Scope bindings by path whenever possible, for example `/v1/*`.
 - Avoid overlapping bindings at the same precedence; ambiguous matches are
   rejected.
@@ -307,3 +432,15 @@ curl -fsS https://api.example.com/v1/projects/123/variables
   metadata.
 - Keep fake environment variables when a CLI refuses to start without a key; the
   vault-injected header is what authenticates the outbound request.
+
+## Migrating From `ports`
+
+The `match.ports` field is deprecated. Port is now derived from scheme (`https`→443, `http`→80). Only ports 80 and 443 are supported; non-standard values are rejected with a validation error.
+
+If you have existing bindings that use `ports` to narrow scope, migrate them to the equivalent `schemes` restriction:
+
+| Before | After |
+|--------|-------|
+| `schemes: ["http", "https"], ports: [443]` | `schemes: ["https"]` |
+| `schemes: ["http", "https"], ports: [80]` | `schemes: ["http"]` |
+| `schemes: ["https"], ports: [443]` | `schemes: ["https"]` (remove `ports`) |

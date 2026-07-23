@@ -111,6 +111,10 @@ func (f fakeSchedulerTask) IsResourceReleased() bool {
 	return f.released
 }
 
+func (f fakeSchedulerTask) GetTerminatedMessage() string {
+	return ""
+}
+
 type recordingTaskScheduler struct {
 	updatePodsCalls int
 	scheduleCalls   int

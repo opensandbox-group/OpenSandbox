@@ -25,7 +25,7 @@ server:
   # -- Server image configuration
   image:
     repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server
-    tag: "v0.2.0"
+    tag: "v0.2.2"
 
   # -- Number of server replicas
   replicaCount: 2
@@ -43,6 +43,20 @@ server:
   affinity: {}
   volumeMounts: []
   volumes: []
+  # -- Node selector for the server pod.
+  nodeSelector: {}
+  # -- Pod-level security context for the server pod.
+  podSecurityContext: {}
+  # -- Container-level security context for the server container.
+  containerSecurityContext: {}
+  # -- Extra annotations for the server pod.
+  podAnnotations: {}
+  # -- Extra labels for the server pod.
+  podLabels: {}
+  # -- Priority class name for the server pod.
+  priorityClassName: ""
+  # -- Topology spread constraints for the server pod.
+  topologySpreadConstraints: []
 
   # Gateway (components/ingress): when enabled, writes config [ingress] and deploys the gateway
   gateway:
@@ -51,12 +65,15 @@ server:
     gatewayRouteMode: "header"
     image:
       repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress
-      tag: "v1.0.8"
+      tag: "v1.0.10"
     replicaCount: 2
     port: 28888
     dataplaneNamespace: "opensandbox"
     providerType: "batchsandbox"
     logLevel: "info"
+    # -- Additional environment variables for the ingress-gateway container
+    # (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics).
+    env: []
     resources:
       limits:
         cpu: "2"
@@ -72,6 +89,24 @@ server:
       # List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }.
       # key_id must be exactly one character in [0-9a-z].
       keys: []
+    # -- Node selector for the ingress gateway pod.
+    nodeSelector: {}
+    # -- Pod-level security context for the ingress gateway pod.
+    podSecurityContext: {}
+    # -- Container-level security context for the ingress gateway container.
+    containerSecurityContext: {}
+    # -- Extra annotations for the ingress gateway pod.
+    podAnnotations: {}
+    # -- Extra labels for the ingress gateway pod.
+    podLabels: {}
+    # -- Priority class name for the ingress gateway pod.
+    priorityClassName: ""
+    # -- Topology spread constraints for the ingress gateway pod.
+    topologySpreadConstraints: []
+    # -- Tolerations for the ingress gateway pod.
+    tolerations: []
+    # -- Affinity for the ingress gateway pod.
+    affinity: {}
 
 # -- Server config (TOML). Mounted at /etc/opensandbox/config.toml.
 configToml: |
@@ -85,7 +120,7 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.19"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21"
 
   [kubernetes]
   kubeconfig_path = ""
@@ -98,5 +133,5 @@ configToml: |
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
   
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.2"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.4"
   mode = "dns+nft"

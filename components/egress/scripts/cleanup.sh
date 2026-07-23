@@ -26,9 +26,13 @@
 #     entire restart window. The new egress process re-installs them
 #     after its DNS proxy is listening, so the unfiltered window is
 #     limited to the startup duration (~200ms).
-#   * The `inet opensandbox` nft table is NOT touched here. The
-#     egress nftables manager already prepends `delete table inet
-#     opensandbox` to its ruleset script, so ApplyStatic is idempotent.
+#   * The `inet/ip/ip6 opensandbox_dns_redirect` nft tables ARE removed
+#     here. Native nft DNS fallback uses those tables when iptables-nft
+#     cannot append OUTPUT rules; after a crash they would otherwise keep
+#     redirecting DNS to a dead proxy.
+#   * The `inet opensandbox` nft table is NOT touched here. The egress
+#     nftables manager already prepends `delete table inet opensandbox` to
+#     its ruleset script, so ApplyStatic is idempotent.
 #
 # Hard contract: this script MUST NOT exit non-zero. A misbehaving cleanup
 # hook is worse than a stray mitmdump; supervisor would treat the hook
@@ -67,6 +71,14 @@ remove_stale_iptables() {
   log "stale iptables rules removed (best-effort)"
 }
 
+remove_stale_dns_redirect_nft() {
+  command -v nft >/dev/null 2>&1 || { log "nft not present; skipping native DNS redirect cleanup"; return 0; }
+  for family in inet ip ip6; do
+    printf 'delete table %s opensandbox_dns_redirect\n' "$family" | nft -f - 2>/dev/null || true
+  done
+  log "stale native DNS redirect nft tables removed (best-effort)"
+}
+
 # ─── stray mitmdump (orphaned after hard crash) ──────────────────────
 kill_stray_mitmdump() {
   command -v pkill >/dev/null 2>&1 || { log "pkill not present; skipping mitmdump reap"; return 0; }
@@ -84,6 +96,7 @@ kill_stray_mitmdump() {
 
 main() {
   log "starting (worker_exit_code=${WORKER_EXIT_CODE:-?} signal=${WORKER_SIGNAL:-?} attempt=${WORKER_ATTEMPT:-?})"
+  remove_stale_dns_redirect_nft
   remove_stale_iptables
   kill_stray_mitmdump
   log "done"

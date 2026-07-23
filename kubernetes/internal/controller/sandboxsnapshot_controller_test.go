@@ -508,6 +508,21 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 		"main;echo nope:registry.example.com/test:tag",
 	}, container.Args)
 	assert.Contains(t, container.Env, corev1.EnvVar{Name: "SNAPSHOT_REGISTRY_INSECURE", Value: "true"})
+	assert.Contains(t, container.VolumeMounts, corev1.VolumeMount{Name: "containerd-fifo", MountPath: ContainerdFIFODir})
+
+	var fifoVolume *corev1.Volume
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Name == "containerd-fifo" {
+			fifoVolume = &job.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	require.NotNil(t, fifoVolume)
+	require.NotNil(t, fifoVolume.HostPath)
+	assert.Equal(t, ContainerdFIFODir, fifoVolume.HostPath.Path)
+	require.NotNil(t, fifoVolume.HostPath.Type)
+	assert.Equal(t, corev1.HostPathDirectoryOrCreate, *fifoVolume.HostPath.Type)
+
 	require.NotNil(t, container.SecurityContext)
 	require.NotNil(t, container.SecurityContext.AllowPrivilegeEscalation)
 	assert.False(t, *container.SecurityContext.AllowPrivilegeEscalation)

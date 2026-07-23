@@ -64,6 +64,31 @@ def test_get_endpoint_use_server_proxy_rewrites_url(
     )
 
     assert response.status_code == 200
+    # The mount prefix the client came through (/v1) must be preserved: the
+    # proxy routes live under the same prefix, and on shared hosts the bare
+    # root path belongs to a different backend.
+    assert response.json()["endpoint"] == "testserver/v1/sandboxes/sbx-001/proxy/44772"
+
+
+def test_get_endpoint_use_server_proxy_without_mount_prefix(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109/proxy/44772")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.get(
+        "/sandboxes/sbx-001/endpoints/44772",
+        params={"use_server_proxy": "true"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
     assert response.json()["endpoint"] == "testserver/sandboxes/sbx-001/proxy/44772"
 
 

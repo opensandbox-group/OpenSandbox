@@ -128,7 +128,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 KIND_CLUSTER ?= sandbox-k8s-test-e2e
 KIND_K8S_VERSION ?= v1.22.4
 GINKGO_ARGS ?=
-E2E_TIMEOUT ?= 45m
+E2E_TIMEOUT ?= 60m
 
 .PHONY: install-kind
 install-kind: ## Install Kind using go install if not already installed
@@ -375,6 +375,7 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 	$(KUSTOMIZE) build config/default | \
 		sed 's|--snapshot-registry=docker-registry.default.svc.cluster.local:5000|--snapshot-registry=$(SNAPSHOT_REGISTRY)|' | \
 		sed 's|--image-committer-image=image-committer:dev|--image-committer-image=$(IMAGE_COMMITTER_IMG)|' | \
+		sed 's|--image-committer-pull-secret=|--image-committer-pull-secret=$(IMAGE_COMMITTER_PULL_SECRET)|' | \
 		$(KUBECTL) apply -f -
 
 .PHONY: undeploy

@@ -228,4 +228,7 @@ interface Sandboxes {
      * @param sandboxId Unique identifier of the sandbox
      */
     fun killSandbox(sandboxId: String)
+
+    /** Remove all cached endpoints for a sandbox. No-op if caching is disabled. */
+    fun invalidateEndpointCache(sandboxId: String) {}
 }

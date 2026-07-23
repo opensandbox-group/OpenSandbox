@@ -598,6 +598,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/isolated/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List isolated sessions */
+        get: operations["listIsolatedSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/isolated/capabilities": {
         parameters: {
             query?: never;
@@ -622,7 +639,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get isolated session state */
+        /**
+         * Get isolated session state
+         * @description Returns runtime status plus the creation parameters of the session. A stateless client that only has a session ID (e.g. after a restart) can call this endpoint to rebuild a session handle without needing to have retained the original create request.
+         */
         get: operations["getIsolatedSession"];
         put?: never;
         post?: never;
@@ -1250,18 +1270,36 @@ export interface components {
             profile?: "strict" | "balanced";
             workspace: components["schemas"]["IsolatedWorkspaceSpec"];
             extra_writable?: string[];
+            /** @description Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist. */
+            binds?: components["schemas"]["BindMount"][];
             share_net?: boolean;
             env_passthrough?: components["schemas"]["EnvPassthroughSpec"];
             /** Format: uint32 */
             uid?: number;
             /** Format: uint32 */
             gid?: number;
+            /**
+             * @description Controls how user identity is established inside the namespace. "setpriv" (default) uses real setuid via setpriv(1). "userns" creates a user namespace via --unshare-user --disable-userns.
+             * @enum {string}
+             */
+            uid_mode?: "setpriv" | "userns";
             idle_timeout_seconds?: number;
         };
         IsolatedWorkspaceSpec: {
             path: string;
             /** @enum {string} */
             mode?: "rw" | "overlay" | "ro";
+        };
+        BindMount: {
+            /** @description Host path to bind-mount into the namespace. */
+            source: string;
+            /** @description Mount destination inside the namespace. Defaults to source when omitted. */
+            dest?: string;
+            /**
+             * @description When true the mount is read-only (--ro-bind); otherwise it is read-write (--bind).
+             * @default false
+             */
+            readonly: boolean;
         };
         EnvPassthroughSpec: {
             /** @enum {string} */
@@ -1281,6 +1319,7 @@ export interface components {
             };
             timeout_seconds?: number;
         };
+        /** @description State of an isolated session. Runtime status fields (status, created_at, last_run_at, idle_remaining_seconds) are always present. Creation-parameter fields (profile, workspace, binds, share_net, env_passthrough, uid, gid, uid_mode, extra_writable, idle_timeout_seconds) echo the parameters used to create the session and let a stateless client rebuild a session handle from just a session ID (e.g. after a client restart or in serverless workers). Older execd builds may omit the creation-parameter fields; clients must tolerate them being absent. */
         SessionState: {
             /** @enum {string} */
             status?: "active" | "dead" | "destroyed";
@@ -1289,6 +1328,37 @@ export interface components {
             /** Format: date-time */
             last_run_at?: string;
             idle_remaining_seconds?: number | null;
+            /**
+             * @description Profile the session was created with.
+             * @enum {string}
+             */
+            profile?: "strict" | "balanced";
+            workspace?: components["schemas"]["IsolatedWorkspaceSpec"];
+            extra_writable?: string[];
+            binds?: components["schemas"]["BindMount"][];
+            share_net?: boolean;
+            env_passthrough?: components["schemas"]["EnvPassthroughSpec"];
+            /** Format: uint32 */
+            uid?: number;
+            /** Format: uint32 */
+            gid?: number;
+            /** @enum {string} */
+            uid_mode?: "setpriv" | "userns";
+            idle_timeout_seconds?: number;
+        };
+        IsolatedSessionSummary: {
+            /** Format: uuid */
+            session_id: string;
+            /** @enum {string} */
+            status: "active" | "dead" | "destroyed";
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            last_run_at: string;
+            idle_remaining_seconds?: number | null;
+        };
+        ListIsolatedSessionsResponse: {
+            sessions: components["schemas"]["IsolatedSessionSummary"][];
         };
         CapabilitiesResponse: {
             available?: boolean;
@@ -1296,6 +1366,10 @@ export interface components {
             version?: string;
             /** @description Diagnostic message when isolation is unavailable */
             message?: string;
+            /** @description Whether sessions using uid_mode setpriv can be created with execd's default UID/GID. Requests that select different UID/GID values may still return 503 NOT_SUPPORTED when identity switching is unavailable. */
+            setpriv_available?: boolean;
+            /** @description Whether sessions using uid_mode userns can be created */
+            userns_available?: boolean;
             commit_supported?: boolean;
             diff_supported?: boolean;
         };
@@ -2296,6 +2370,27 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listIsolatedSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of active isolated sessions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListIsolatedSessionsResponse"];
+                };
+            };
             503: components["responses"]["ServiceUnavailable"];
         };
     };

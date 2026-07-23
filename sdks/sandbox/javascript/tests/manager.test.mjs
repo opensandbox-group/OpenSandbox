@@ -90,7 +90,11 @@ test("SandboxManager delegates lifecycle operations and closes its transport", a
   await manager.renewSandbox("sbx-42", 30);
   const snapshot = await manager.createSnapshot("sbx-42", { name: "before-upgrade" });
   assert.equal(snapshot.id, "snap-1");
-  const snapshots = await manager.listSnapshots({ sandboxId: "sbx-42", states: ["Ready"] });
+  const snapshots = await manager.listSnapshots({
+    sandboxId: "sbx-42",
+    name: "toolchain:node@rev-1",
+    states: ["Ready"],
+  });
   assert.equal(snapshots.items[0].id, "snap-1");
   const loadedSnapshot = await manager.getSnapshot("snap-1");
   assert.equal(loadedSnapshot.id, "snap-1");
@@ -124,7 +128,11 @@ test("SandboxManager delegates lifecycle operations and closes its transport", a
   assert.ok(typeof calls[6].args[1].expiresAt === "string");
   assert.ok(Number.isFinite(Date.parse(calls[6].args[1].expiresAt)));
   assert.deepEqual(calls[7].args, ["sbx-42", { name: "before-upgrade" }]);
-  assert.deepEqual(calls[8].args[0], { sandboxId: "sbx-42", states: ["Ready"] });
+  assert.deepEqual(calls[8].args[0], {
+    sandboxId: "sbx-42",
+    name: "toolchain:node@rev-1",
+    states: ["Ready"],
+  });
   assert.equal(calls[9].args[0], "snap-1");
   assert.equal(calls[10].args[0], "snap-1");
   assert.equal(closeCalls, 1);

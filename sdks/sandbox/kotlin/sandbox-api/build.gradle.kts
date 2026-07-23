@@ -26,7 +26,15 @@ repositories {
 
 dependencies {
     implementation(libs.okhttp)
-    implementation(libs.bundles.serialization)
+    compileOnly(libs.bundles.serialization)
+    "shadow"(libs.bundles.serialization)
+}
+
+tasks.named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
+    configurations = listOf(project.configurations.getByName("shadow"))
+    dependencies {
+        include(dependency("org.jetbrains.kotlinx:.*:.*"))
+    }
 }
 
 fun GenerateTask.configureCommonOptions() {

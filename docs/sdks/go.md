@@ -164,8 +164,127 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
 })
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, binding
+guidance, and Git/curl examples.
+
+### Sandbox Pool (Client-Side)
+
+Use `SandboxPool` to keep an idle buffer of ready sandboxes and reduce acquire latency.
+
+::: warning Experimental
+`SandboxPool` is still evolving based on production feedback and may introduce breaking changes in future releases.
+:::
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "time"
+
+    opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+)
+
+func main() {
+    ctx := context.Background()
+
+    pool, err := opensandbox.NewSandboxPoolBuilder().
+        PoolName("demo-pool").
+        OwnerID("worker-1").
+        MaxIdle(3).
+        ConnectionConfig(opensandbox.ConnectionConfig{
+            Domain: "api.opensandbox.io",
+        }).
+        CreationSpec(opensandbox.PoolCreationSpec{
+            Image: "ubuntu:22.04",
+        }).
+        StateStore(opensandbox.NewInMemoryPoolStateStore()). // single-process only
+        Build()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    if err := pool.Start(ctx); err != nil {
+        log.Fatal(err)
+    }
+
+    failFast := opensandbox.AcquirePolicyFailFast
+    sb, err := pool.Acquire(ctx, opensandbox.AcquireOptions{
+        SandboxTimeout: 10 * time.Minute,
+        Policy:         &failFast,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    result, err := sb.RunCommand(ctx, "echo pool-ok", nil)
+    if err == nil {
+        fmt.Println(result.Text())
+    }
+
+    _ = sb.Kill(context.Background())
+    // Drain idle sandboxes before shutdown (single-process cleanup).
+    pool.ReleaseAllIdle(ctx)
+    _ = pool.Shutdown(ctx, true)
+}
+```
+
+For distributed deployment with multiple processes or pods, use `RedisPoolStateStore`.
+The store accepts a caller-managed `redis.Client` and does not create or close Redis
+connections.
+
+```go
+import (
+    "github.com/redis/go-redis/v9"
+    opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+    "github.com/alibaba/OpenSandbox/sdks/sandbox/go/poolredis"
+)
+
+redisClient := redis.NewClient(&redis.Options{
+    Addr: "redis.example.com:6379",
+})
+
+store, err := poolredis.NewRedisPoolStateStore(poolredis.RedisPoolStateStoreConfig{
+    Client:    redisClient,
+    KeyPrefix: "opensandbox:pool:prod",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+pool, err := opensandbox.NewSandboxPoolBuilder().
+    PoolName("prod-pool").
+    OwnerID("worker-1").
+    MaxIdle(10).
+    StateStore(store).
+    ConnectionConfig(opensandbox.ConnectionConfig{
+        Domain: "api.opensandbox.io",
+    }).
+    CreationSpec(opensandbox.PoolCreationSpec{
+        Image: "ubuntu:22.04",
+    }).
+    PrimaryLockTTL(60 * time.Second).
+    Build()
+```
+
+::: info Pool Lifecycle Semantics
+- `Acquire()` is only allowed when pool state is `RUNNING`.
+- In `DRAINING` / `STOPPED`, `Acquire()` returns `*PoolNotRunningError`.
+- `MaxIdle` is the target/cap for ready idle sandboxes. It is not a global limit on borrowed sandboxes or sandboxes created by `DirectCreate`.
+- `OwnerID` is the lock owner identity (node/process id), not the pool identifier. If omitted, SDK auto-generates a default.
+- Use `WarmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool.
+:::
+
+::: tip Distributed Deployment
+- `InMemoryPoolStateStore` is for single-process development and tests.
+- For distributed deployment, all nodes in one logical pool must share the same Redis key prefix and `PoolName`.
+- All nodes sharing one pool must use the same creation and warmup definition. If that definition changes, use a new `PoolName` or key prefix and drain the old pool.
+- `Resize(ctx, maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile.
+- Use `Resize(ctx, 0)` and wait for `Snapshot().IdleCount == 0` to drain a distributed idle buffer. `ReleaseAllIdle()` is only a best-effort cleanup pass in distributed mode.
+- Configure `PrimaryLockTTL` greater than `WarmupReadyTimeout` plus expected warmup preparer time.
+:::
 
 ## API Reference
 
@@ -297,6 +416,10 @@ client := opensandbox.NewExecdClient(url, token,
 
 ::: info TLS Certificate Strength
 SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by default (RSA >= 2048, EC >= 224, DSA P >= 2048/Q >= 224, hash >= 224). If you must interoperate with legacy endpoints, set `AllowWeakServerCertKeyLengths: true` in `TransportConfig`.
+:::
+
+::: tip SDK Telemetry
+`CreateSandbox` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfig.DisableMetrics` or `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/guides/sdk-telemetry).
 :::
 
 ## Error Handling

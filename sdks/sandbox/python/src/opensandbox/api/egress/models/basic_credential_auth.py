@@ -17,11 +17,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from attrs import define as _attrs_define
 
 from ..models.basic_credential_auth_type import BasicCredentialAuthType
+from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.credential_substitution import CredentialSubstitution
+
 
 T = TypeVar("T", bound="BasicCredentialAuth")
 
@@ -32,15 +37,24 @@ class BasicCredentialAuth:
     Attributes:
         type_ (BasicCredentialAuthType):
         credential (str): Credential containing pre-encoded base64(username:password).
+        substitutions (list[CredentialSubstitution] | Unset):
     """
 
     type_: BasicCredentialAuthType
     credential: str
+    substitutions: list[CredentialSubstitution] | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         type_ = self.type_.value
 
         credential = self.credential
+
+        substitutions: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.substitutions, Unset):
+            substitutions = []
+            for substitutions_item_data in self.substitutions:
+                substitutions_item = substitutions_item_data.to_dict()
+                substitutions.append(substitutions_item)
 
         field_dict: dict[str, Any] = {}
 
@@ -50,19 +64,33 @@ class BasicCredentialAuth:
                 "credential": credential,
             }
         )
+        if substitutions is not UNSET:
+            field_dict["substitutions"] = substitutions
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.credential_substitution import CredentialSubstitution
+
         d = dict(src_dict)
         type_ = BasicCredentialAuthType(d.pop("type"))
 
         credential = d.pop("credential")
 
+        _substitutions = d.pop("substitutions", UNSET)
+        substitutions: list[CredentialSubstitution] | Unset = UNSET
+        if _substitutions is not UNSET:
+            substitutions = []
+            for substitutions_item_data in _substitutions:
+                substitutions_item = CredentialSubstitution.from_dict(substitutions_item_data)
+
+                substitutions.append(substitutions_item)
+
         basic_credential_auth = cls(
             type_=type_,
             credential=credential,
+            substitutions=substitutions,
         )
 
         return basic_credential_auth

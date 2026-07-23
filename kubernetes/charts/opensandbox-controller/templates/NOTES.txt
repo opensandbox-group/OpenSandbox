@@ -70,13 +70,13 @@ To learn more about the release, try:
 
 📖 Documentation:
 
-  GitHub: https://github.com/alibaba/OpenSandbox
-  Docs:   https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/README.md
+  GitHub: https://github.com/opensandbox-group/OpenSandbox
+  Docs:   https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/README.md
 
 💡 Examples:
 
   Check out example configurations in the repository:
-  https://github.com/alibaba/OpenSandbox/tree/main/kubernetes/config/samples
+  https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes/config/samples
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

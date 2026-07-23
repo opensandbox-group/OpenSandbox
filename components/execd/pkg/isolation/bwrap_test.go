@@ -184,7 +184,7 @@ func TestBuildArgv_EnvPassthrough(t *testing.T) {
 		}
 	})
 
-	t.Run("empty_mode_no_env_args", func(t *testing.T) {
+	t.Run("empty_mode_strips_execd_config_env", func(t *testing.T) {
 		opts := basicWrapOpts()
 		opts.EnvPassthrough = EnvSpec{} // empty mode
 		argv, err := buildArgv(opts, "")
@@ -192,9 +192,61 @@ func TestBuildArgv_EnvPassthrough(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := strings.Join(argv, " ")
-		if strings.Contains(s, "--clearenv") || strings.Contains(s, "--unsetenv") {
-			t.Error("should not have env args for empty mode")
+		// Default mode must always strip execd's own configuration env,
+		// but must not emit --clearenv (user business env is untouched).
+		if strings.Contains(s, "--clearenv") {
+			t.Error("empty mode must not use --clearenv")
 		}
+		for _, k := range execdConfigEnvBlacklist {
+			if !strings.Contains(s, "--unsetenv "+k) {
+				t.Errorf("empty mode must --unsetenv %s, argv:\n  %s", k, s)
+			}
+		}
+	})
+}
+
+func TestBuildArgv_ExecdConfigEnvAlwaysStripped(t *testing.T) {
+	tests := []struct {
+		name string
+		spec EnvSpec
+	}{
+		{"empty_mode", EnvSpec{}},
+		{"deny_empty_keys", EnvSpec{Mode: EnvModeDeny}},
+		{"deny_with_keys", EnvSpec{Mode: EnvModeDeny, Keys: []string{"FOO"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := basicWrapOpts()
+			opts.EnvPassthrough = tt.spec
+			argv, err := buildArgv(opts, "")
+			require.NoError(t, err)
+			s := strings.Join(argv, " ")
+			for _, k := range execdConfigEnvBlacklist {
+				assert.Contains(t, s, "--unsetenv "+k,
+					"%s: execd config env %s must be unset", tt.name, k)
+			}
+		})
+	}
+
+	t.Run("allow_mode_uses_clearenv_and_refuses_reinjection", func(t *testing.T) {
+		// Even if the caller explicitly allow-lists an execd config env,
+		// we must not re-inject it via --setenv.
+		t.Setenv("EXECD_ACCESS_TOKEN", "supersecret")
+		t.Setenv("JUPYTER_TOKEN", "jt")
+
+		opts := basicWrapOpts()
+		opts.EnvPassthrough = EnvSpec{
+			Mode: EnvModeAllow,
+			Keys: []string{"EXECD_ACCESS_TOKEN", "JUPYTER_TOKEN", "PATH"},
+		}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.Contains(t, s, "--clearenv")
+		assert.NotContains(t, s, "supersecret",
+			"allow mode must not re-inject execd config env value")
+		assert.NotContains(t, s, "--setenv EXECD_ACCESS_TOKEN")
+		assert.NotContains(t, s, "--setenv JUPYTER_TOKEN")
 	})
 }
 
@@ -213,6 +265,59 @@ func TestBuildArgv_ExtraWritable(t *testing.T) {
 			t.Errorf("missing bind for %q in:\n  %s", p, s)
 		}
 	}
+}
+
+func TestBuildArgv_Binds(t *testing.T) {
+	t.Run("rw_src_to_dest", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "/host/data", Dest: "/container/data"}}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.Contains(t, s, "--bind /host/data /container/data")
+	})
+
+	t.Run("readonly_uses_ro_bind", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "/host/ro", Dest: "/mnt/ro", ReadOnly: true}}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.Contains(t, s, "--ro-bind /host/ro /mnt/ro")
+	})
+
+	t.Run("empty_dest_defaults_to_source", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "/host/same"}}
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+		assert.Contains(t, s, "--bind /host/same /host/same")
+	})
+
+	t.Run("validation_empty_source", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Dest: "/mnt/x"}}
+		_, err := buildArgv(opts, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "bind.source is required")
+	})
+
+	t.Run("validation_relative_source", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "relative/path"}}
+		_, err := buildArgv(opts, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be an absolute path")
+	})
+
+	t.Run("validation_relative_dest", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Binds = []BindMount{{Source: "/host/a", Dest: "rel/dest"}}
+		_, err := buildArgv(opts, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be an absolute path")
+	})
 }
 
 func TestBuildArgv_Setpriv(t *testing.T) {
@@ -248,6 +353,115 @@ func TestBuildArgv_Setpriv(t *testing.T) {
 			t.Error("missing --regid=1002")
 		}
 	})
+}
+
+func TestBuildArgv_Userns(t *testing.T) {
+	t.Run("userns_mode_uses_unshare_user", func(t *testing.T) {
+		opts := basicWrapOpts()
+		u, g := uint32(1000), uint32(1000)
+		opts.Uid = &u
+		opts.Gid = &g
+		opts.UidMode = UidModeUserns
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+
+		assert.Contains(t, s, "--unshare-user", "userns mode must include --unshare-user")
+		assert.Contains(t, s, "--disable-userns", "userns mode must include --disable-userns")
+		assert.Contains(t, s, "--uid 1000", "userns mode must include --uid")
+		assert.Contains(t, s, "--gid 1000", "userns mode must include --gid")
+	})
+
+	t.Run("userns_mode_setuid_bwrap_skips_disable_userns", func(t *testing.T) {
+		// --disable-userns is unsupported by the setuid build of bwrap.
+		bwrapIsSetuid = true
+		defer func() { bwrapIsSetuid = false }()
+
+		opts := basicWrapOpts()
+		opts.UidMode = UidModeUserns
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+
+		assert.Contains(t, s, "--unshare-user", "userns mode must still include --unshare-user")
+		assert.NotContains(t, s, "--disable-userns", "setuid bwrap must not include --disable-userns")
+	})
+
+	t.Run("userns_mode_no_setpriv", func(t *testing.T) {
+		opts := basicWrapOpts()
+		u, g := uint32(1000), uint32(1000)
+		opts.Uid = &u
+		opts.Gid = &g
+		opts.UidMode = UidModeUserns
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+
+		assert.NotContains(t, s, "setpriv", "userns mode must not include setpriv")
+		assert.NotContains(t, s, "--reuid", "userns mode must not include --reuid")
+		assert.NotContains(t, s, "--regid", "userns mode must not include --regid")
+	})
+
+	t.Run("setpriv_mode_no_unshare_user", func(t *testing.T) {
+		opts := basicWrapOpts()
+		u, g := uint32(1000), uint32(1000)
+		opts.Uid = &u
+		opts.Gid = &g
+		opts.UidMode = UidModeSetpriv
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+
+		assert.NotContains(t, s, "--unshare-user", "setpriv mode must not include --unshare-user")
+		assert.NotContains(t, s, "--disable-userns", "setpriv mode must not include --disable-userns")
+		assert.Contains(t, s, "setpriv", "setpriv mode must include setpriv")
+		assert.Contains(t, s, "--reuid=1000", "setpriv mode must include --reuid")
+		assert.Contains(t, s, "--regid=1000", "setpriv mode must include --regid")
+	})
+
+	t.Run("empty_uid_mode_defaults_to_setpriv", func(t *testing.T) {
+		opts := basicWrapOpts()
+		u, g := uint32(1000), uint32(1000)
+		opts.Uid = &u
+		opts.Gid = &g
+		// UidMode is empty string — should behave like setpriv.
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+		s := strings.Join(argv, " ")
+
+		assert.NotContains(t, s, "--unshare-user")
+		assert.Contains(t, s, "setpriv")
+	})
+
+	t.Run("userns_namespace_flag_order", func(t *testing.T) {
+		opts := basicWrapOpts()
+		u := uint32(1000)
+		opts.Uid = &u
+		opts.UidMode = UidModeUserns
+		argv, err := buildArgv(opts, "")
+		require.NoError(t, err)
+
+		// --unshare-user must come before --unshare-pid (both in segment 1).
+		idxUser := indexOf(argv, "--unshare-user")
+		idxPid := indexOf(argv, "--unshare-pid")
+		assert.Greater(t, idxPid, idxUser,
+			"--unshare-user should appear before --unshare-pid")
+
+		// --uid/--gid should come after --unshare-ipc (still in segment 1),
+		// before segment 2 (--ro-bind).
+		idxUid := indexOf(argv, "--uid")
+		idxRoBind := indexOf(argv, "--ro-bind")
+		assert.Greater(t, idxRoBind, idxUid,
+			"--uid should appear before --ro-bind (segment 2)")
+	})
+}
+
+func TestBuildArgv_Validation_UidMode(t *testing.T) {
+	opts := basicWrapOpts()
+	opts.UidMode = "bogus"
+	_, err := buildArgv(opts, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown uid mode")
 }
 
 func TestBuildArgv_Seccomp(t *testing.T) {
@@ -303,6 +517,56 @@ func TestBuildArgv_SegmentOrder(t *testing.T) {
 		}
 		lastIdx = idx
 	}
+}
+
+func TestBuildArgv_SegmentOrder_Userns(t *testing.T) {
+	opts := basicWrapOpts()
+	opts.Profile = ProfileStrict
+	opts.Workspace.Mode = WorkspaceOverlay
+	opts.UpperDir = "/tmp/upper"
+	opts.ExtraWritable = []string{"/data"}
+	opts.EnvPassthrough = EnvSpec{Mode: EnvModeDeny, Keys: []string{"TOKEN"}}
+	u := uint32(1000)
+	opts.Uid = &u
+	opts.UidMode = UidModeUserns
+
+	argv, err := buildArgv(opts, "3")
+	require.NoError(t, err)
+
+	type seg struct {
+		label string
+		match string
+	}
+	// In userns mode: --unshare-user comes first, no setpriv at the end.
+	order := []seg{
+		{"1.ns.userns", "--unshare-user"},
+		{"1.ns.pid", "--unshare-pid"},
+		{"2.rootfs", "--ro-bind"},
+		{"3.tmp", "/tmp"},
+		{"4.run", "/run"},
+		{"5.dev", "--dev"},
+		{"6.proc", "--proc"},
+		{"7.workspace", "--overlay-src"},
+		{"8.extra_writable", "--bind"},
+		{"9.env", "--unsetenv"},
+		{"10.seccomp", "--seccomp"},
+	}
+
+	lastIdx := -1
+	for _, s := range order {
+		idx := indexOf(argv, s.match)
+		if idx < 0 {
+			t.Errorf("segment %s (%q) not found in argv:\n  %v", s.label, s.match, argv)
+			continue
+		}
+		if idx <= lastIdx {
+			t.Errorf("segment %s (%q) at %d: should be after index %d", s.label, s.match, idx, lastIdx)
+		}
+		lastIdx = idx
+	}
+
+	// setpriv must NOT appear in userns mode.
+	assert.Equal(t, -1, indexOf(argv, "setpriv"), "setpriv must not appear in userns mode")
 }
 
 func TestBuildArgv_Validation(t *testing.T) {
@@ -425,6 +689,18 @@ func TestEnvMode_Valid(t *testing.T) {
 		t.Error("allow should be valid")
 	}
 	if EnvMode("bogus").Valid() {
+		t.Error("bogus should be invalid")
+	}
+}
+
+func TestUidMode_Valid(t *testing.T) {
+	if !UidModeSetpriv.Valid() {
+		t.Error("setpriv should be valid")
+	}
+	if !UidModeUserns.Valid() {
+		t.Error("userns should be valid")
+	}
+	if UidMode("bogus").Valid() {
 		t.Error("bogus should be invalid")
 	}
 }

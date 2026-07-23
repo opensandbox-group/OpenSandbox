@@ -1,6 +1,6 @@
 # OpenSandbox Go SDK
 
-Go client library for the [OpenSandbox](https://github.com/alibaba/OpenSandbox) API.
+Go client library for the [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) API.
 
 Covers all three OpenAPI specs:
 - **Lifecycle** — Create, manage, and destroy sandbox instances

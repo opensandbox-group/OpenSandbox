@@ -51,6 +51,7 @@ Optional: override gateway image, replicas, or resources (see `server.gateway.*`
 | `server.gateway.enabled` | When true: set server config to gateway and deploy components/ingress gateway | `false` |
 | `server.gateway.host` | config `gateway.address` (address returned to clients) | `opensandbox.example.com` |
 | `server.gateway.gatewayRouteMode` | server config and gateway route mode (header/uri) | `header` |
+| `server.gateway.env` | Additional environment variables for the ingress-gateway container (e.g. `OTEL_EXPORTER_OTLP_ENDPOINT`) | `[]` |
 | `server.gateway.*` | Gateway image, replicas, port, dataplaneNamespace, providerType, resources | See values.yaml |
 
 Versioning note:
@@ -76,5 +77,5 @@ helm uninstall opensandbox-server -n opensandbox-system
 
 ## References
 
-- [OpenSandbox](https://github.com/alibaba/OpenSandbox)
+- [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox)
 - [Helm deployment docs](../../docs/HELM-DEPLOYMENT.md)

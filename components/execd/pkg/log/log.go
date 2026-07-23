@@ -80,11 +80,6 @@ func Warn(format string, args ...any) {
 	getLogger().Warnf(format, args...)
 }
 
-// Warning is an alias to Warn for compatibility.
-func Warning(format string, args ...any) {
-	Warn(format, args...)
-}
-
 func Error(format string, args ...any) {
 	getLogger().Errorf(format, args...)
 }

@@ -1,0 +1,60 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  labels:
+    app.kubernetes.io/name: opensandbox
+    app.kubernetes.io/managed-by: kustomize
+  name: batchsandbox-lifecycle-sample
+  namespace: opensandbox
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: lifecycle-example
+    spec:
+      containers:
+      - name: main
+        image: registry.k8s.io/e2e-test-images/busybox:1.29-4
+        command:
+        - tail
+        - -f
+        - /dev/null
+  expireTime: "2025-12-31T23:59:59Z"
+  taskTemplate:
+    spec:
+      process:
+        command:
+        - sleep
+        args:
+        - "30"
+        env:
+        - name: TASK_NAME
+          value: lifecycle-task
+        lifecycle:
+          # preStart hook runs before the main task process starts.
+          # Useful for preparing the environment, checking dependencies, warming up data, etc.
+          preStart:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                echo "[preStart] Starting environment preparation..."
+                mkdir -p /tmp/workdir
+                echo "$(date): Task starting" > /tmp/workdir/prestart-marker
+                echo "[preStart] Environment ready!"
+              timeoutSeconds: 30
+          # postStop hook runs after the main task process exits.
+          # Useful for cleaning up resources, uploading logs, sending notifications, etc.
+          postStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                echo "[postStop] Starting cleanup..."
+                echo "$(date): Task finished" >> /tmp/workdir/poststop-marker
+                echo "Task logs:" && cat /tmp/workdir/*
+                echo "[postStop] Cleanup complete!"
+              timeoutSeconds: 30

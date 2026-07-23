@@ -86,6 +86,37 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
     }
 
     [Fact(Timeout = 2 * 60 * 1000)]
+    public async Task Sandbox_Extensions_RoundTrip()
+    {
+        var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+        {
+            ConnectionConfig = _fixture.ConnectionConfig,
+            Image = _fixture.DefaultImage,
+            TimeoutSeconds = 120,
+            ReadyTimeoutSeconds = _fixture.DefaultReadyTimeoutSeconds,
+            Metadata = new Dictionary<string, string> { ["tag"] = "e2e-extensions" },
+            Extensions = new Dictionary<string, string>
+            {
+                ["opensandbox.extensions.test-key"] = "test-value",
+                ["opensandbox.extensions.second"] = "second-value",
+            },
+            HealthCheckPollingInterval = 500
+        });
+        try
+        {
+            var info = await sandbox.GetInfoAsync();
+            Assert.NotNull(info.Extensions);
+            Assert.Equal("test-value", info.Extensions["opensandbox.extensions.test-key"]);
+            Assert.Equal("second-value", info.Extensions["opensandbox.extensions.second"]);
+        }
+        finally
+        {
+            try { await sandbox.KillAsync(); } catch (SandboxApiException) { }
+            await sandbox.DisposeAsync();
+        }
+    }
+
+    [Fact(Timeout = 2 * 60 * 1000)]
     public async Task Sandbox_XRequestId_Passthrough_OnServerError()
     {
         var requestId = $"e2e-csharp-server-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
