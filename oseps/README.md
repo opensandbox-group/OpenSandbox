@@ -18,3 +18,8 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0010](0010-opentelemetry-instrumentation.md)             |      OpenTelemetry Metrics and Logs (execd, egress, and ingress)           |  implemented  |  2026-07-03  |
 | [OSEP-0011](0011-secure-access-endpoint.md)                    |      Secure Access on GetEndpoint and Signed Endpoint                     |  implemented  |  2026-04-25  |
 | [OSEP-0012](0012-credential-vault.md)                          |      Credential Vault and Credential Proxy                                | implementing  |  2026-06-10  |
+| [OSEP-0013](0013-isolated-execution-api.md)                    |      Isolated Execution API                                               | implementing  |  2026-06-23  |
+| [OSEP-0014](0014-multi-tenancy.md)                             |      Multi-Tenancy Support for Kubernetes Runtime                         |     draft     |  2026-05-07  |
+| [OSEP-0015](0015-pod-snapshot.md)                              |      Spec-Driven Pod Snapshot for Pause and Resume                        |     draft     |  2026-06-27  |
+| [OSEP-0016](0016-unified-umbrella-release-governance.md)       |      Unified Umbrella Release Governance                                  |     draft     |  2026-07-21  |
+| [OSEP-0017](0017-resilient-sdk-transport.md)                   |      Resilient SDK Transport                                              | implementing  |  2026-07-22  |

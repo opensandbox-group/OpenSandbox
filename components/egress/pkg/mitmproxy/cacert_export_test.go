@@ -15,6 +15,7 @@
 package mitmproxy
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -32,4 +33,42 @@ func TestCandidateCACertPaths(t *testing.T) {
 		filepath.Join("/custom", ".mitmproxy", mitmCACertName),
 		filepath.Join(h, ".mitmproxy", mitmCACertName),
 	}, got)
+}
+
+func TestPurgeStaleExportedCAFrom_RemovesExistingFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, mitmCACertName)
+	require.NoError(t, os.WriteFile(path, []byte("stale-ca"), 0o644))
+
+	purgeStaleExportedCAFrom(root)
+
+	_, err := os.Stat(path)
+	require.True(t, os.IsNotExist(err), "expected file to be removed, got err=%v", err)
+}
+
+func TestPurgeStaleExportedCAFrom_NoFileIsNoOp(t *testing.T) {
+	root := t.TempDir()
+	// No file present; must not panic and must not create anything.
+	purgeStaleExportedCAFrom(root)
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestPurgeStaleExportedCAFrom_LeavesUnrelatedFiles(t *testing.T) {
+	root := t.TempDir()
+	stale := filepath.Join(root, mitmCACertName)
+	require.NoError(t, os.WriteFile(stale, []byte("stale-ca"), 0o644))
+
+	// A sibling file that must survive (e.g. the agent's merged bundle).
+	other := filepath.Join(root, "merged-ca-certificates.pem")
+	require.NoError(t, os.WriteFile(other, []byte("merged"), 0o644))
+
+	purgeStaleExportedCAFrom(root)
+
+	_, err := os.Stat(stale)
+	require.True(t, os.IsNotExist(err))
+	_, err = os.Stat(other)
+	require.NoError(t, err)
 }
