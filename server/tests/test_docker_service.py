@@ -143,7 +143,7 @@ async def test_create_sandbox_applies_security_defaults(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_client.api.create_host_config.return_value = {
-        "security_opt": ["no-new-privileges:true"],
+        "security_opt": ["no-new-privileges=true"],
         "cap_drop": _app_config().docker.drop_capabilities,
         "pids_limit": _app_config().docker.pids_limit,
     }
@@ -175,7 +175,7 @@ async def test_create_sandbox_applies_security_defaults(mock_docker):
         await service.create_sandbox(request)
 
     host_config = mock_client.api.create_container.call_args.kwargs["host_config"]
-    assert "no-new-privileges:true" in host_config.get("security_opt", [])
+    assert "no-new-privileges=true" in host_config.get("security_opt", [])
     assert host_config.get("cap_drop") == service.app_config.docker.drop_capabilities
     assert host_config.get("pids_limit") == service.app_config.docker.pids_limit
 

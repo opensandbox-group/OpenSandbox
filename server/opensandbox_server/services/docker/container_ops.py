@@ -348,7 +348,7 @@ class DockerContainerOpsMixin:
         security_opts: list[str] = []
         docker_cfg = self.app_config.docker
         if docker_cfg.no_new_privileges:
-            security_opts.append("no-new-privileges:true")
+            security_opts.append("no-new-privileges=true")
         if docker_cfg.apparmor_profile:
             security_opts.append(f"apparmor={docker_cfg.apparmor_profile}")
         if docker_cfg.seccomp_profile:
