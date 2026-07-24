@@ -730,14 +730,16 @@ Or with iptables-legacy:
 iptables v1.8.9 (legacy): can't initialize iptables table 'nat': Table does not exist (do you need to insmod?)
 ```
 
-**Cause**: gVisor's netstack implements the `filter` and `mangle` iptables tables but does not implement the `nat` table. The egress sidecar uses a REDIRECT rule in the `nat` table to intercept DNS queries (port 53 → 15353), so it cannot start under gVisor. This is an upstream gVisor limitation ([gvisor#170](https://github.com/google/gvisor/issues/170)).
+**Cause**: Historically the egress sidecar used an iptables `nat` table REDIRECT rule to intercept DNS queries (port 53 → 15353), and gVisor's netstack implements the `filter`/`mangle` iptables tables but not the `nat` table ([gvisor#170](https://github.com/google/gvisor/issues/170)), so the sidecar could not start under gVisor.
 
-**Solution**:
-- Use `secure_runtime.type = "kata"` with `k8s_runtime_class = "kata-qemu"` — Kata provides a full Linux kernel per pod, so the `nat` table is available and the egress sidecar works unchanged.
+**Resolution**: The egress sidecar now programs its dataplane with **native nftables** (a `nat`/`output` chain with `redirect to :port`) instead of iptables, so it no longer needs the iptables `nat` table. gVisor's netstack supports these native-nftables features on a **runsc build that includes them** — tracking issue [google/gvisor#13796](https://github.com/google/gvisor/issues/13796) (`meta mark`, interval/timeout sets, `redir`). With such a runsc, the egress sidecar runs under gVisor unchanged.
+
+If your runsc build does **not** yet include native nftables support, the sidecar will still CrashLoopBackOff under gVisor; use one of the previous workarounds:
+- Use `secure_runtime.type = "kata"` with `k8s_runtime_class = "kata-qemu"` — Kata provides a full Linux kernel per pod, so native nftables works out of the box.
 - Use a CNI-level FQDN policy (e.g., Cilium `toFQDNs`) instead of the egress sidecar for network isolation under gVisor.
 - Remove `network_policy` from sandbox creation requests if egress control is not required.
 
-> **Note**: The server validates this combination at request time and returns HTTP 400 with a clear error message when `secure_runtime.type = "gvisor"` and `network_policy` are used together.
+> **Note**: The server no longer rejects `secure_runtime.type = "gvisor"` with `network_policy`. Make sure your runsc build supports native nftables (see [google/gvisor#13796](https://github.com/google/gvisor/issues/13796)) before enabling this combination — on an unsupported runsc the egress sidecar fails to install its rules and crashloops.
 
 ### Compatibility Matrix
 
@@ -749,7 +751,9 @@ iptables v1.8.9 (legacy): can't initialize iptables table 'nat': Table does not 
 | Privileged Mode | Yes | No | Yes | Yes | No |
 | Docker Volume | Yes | Yes | Yes | Yes | Yes |
 | Systemd | Yes | No | Yes | Yes | No |
-| iptables `nat` table (egress sidecar) | Yes | **No** | Yes | Yes | Yes |
+| Egress sidecar (native nftables) | Yes | Yes¹ | Yes | Yes | Yes |
+
+¹ gVisor requires a runsc build that includes native nftables support ([google/gvisor#13796](https://github.com/google/gvisor/issues/13796)); on older runsc the egress sidecar does not start.
 
 ### Getting Help
 

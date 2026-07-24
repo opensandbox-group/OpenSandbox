@@ -23,7 +23,7 @@ The lifecycle API cannot add this sidecar to a pod that was already created by a
 - **Dynamic DNS (dns+nft mode)**: When a domain is allowed and the proxy resolves it, the resolved A/AAAA IPs are added to nftables with TTL so that default-deny + domain-allow is enforced at the network layer.
 - **Credential Vault**: Automatic credential injection (bearer, basic, API-key, custom headers, and scoped placeholder substitutions) for allowed hosts via transparent mitmproxy. See [Credential Vault](/guides/credential-vault).
 - **Privilege Isolation**: Requires `CAP_NET_ADMIN` only for the sidecar; the application container runs unprivileged.
-- **Fail-Closed Enforcement**: DNS redirect setup is required through `iptables` or the native nft fallback; the sidecar exits if no enforced redirect can be installed. Optional subsystems (OpenTelemetry, startup hooks) degrade gracefully.
+- **Fail-Closed Enforcement**: the native-nftables DNS redirect must install successfully; the sidecar exits if no enforced redirect can be installed. Optional subsystems (OpenTelemetry, startup hooks) degrade gracefully.
 
 ## Architecture
 
@@ -31,7 +31,7 @@ The egress control is implemented as a **Sidecar** that shares the network names
 
 1.  **DNS Proxy (Layer 1)**:
     - Runs on `127.0.0.1:15353`.
-    - `iptables` rules redirect all port 53 (DNS) traffic to this proxy.
+    - Native `nftables` rules (a `nat`/`output` chain with `redirect to :15353`) redirect all port 53 (DNS) traffic to this proxy.
     - Filters queries based on the allowlist.
     - Returns `NXDOMAIN` for denied domains.
 
@@ -54,7 +54,7 @@ See [Network Isolation](/architecture/network-isolation#allowing-legitimate-in-c
 
 - **Runtime**: Docker or Kubernetes.
 - **Capabilities**: `CAP_NET_ADMIN` (for the sidecar container only).
-- **Kernel**: Linux kernel with `iptables` support.
+- **Kernel**: Linux kernel (or a compatible netstack) with native `nftables` support. Under gVisor this requires a runsc build that includes the nftables features the egress uses — see [google/gvisor#13796](https://github.com/google/gvisor/issues/13796).
 - **Service mesh**: OpenSandbox egress is not currently supported inside pods that already have a transparent service-mesh sidecar (for example Istio/Envoy injection). Both layers rewrite outbound traffic in the same network namespace and can conflict.
 
 ## Configuration
@@ -107,7 +107,7 @@ OpenSandbox egress is designed to be the only transparent outbound interception 
 
 Why this conflicts today:
 
-- OpenSandbox egress installs `iptables`/`nft` redirect rules in the shared pod network namespace so DNS and optional HTTPS MITM traffic flow through the egress sidecar.
+- OpenSandbox egress installs native `nft` redirect rules in the shared pod network namespace so DNS and optional HTTPS MITM traffic flow through the egress sidecar.
 - Service meshes such as Istio also redirect outbound traffic in that same namespace, usually to Envoy.
 - When both are present, the redirect order becomes deployment-dependent and can produce double interception, broken TLS, or traffic that bypasses the expected Credential Vault / egress-policy path.
 
@@ -226,12 +226,11 @@ curl -I https://github.com
 - **Language**: Go 1.25+
 - **Key Packages**:
     - `pkg/dnsproxy`: DNS server and policy matching logic.
-    - `pkg/iptables`: `iptables` rule management.
-    - `pkg/nftables`: nftables static/dynamic rules and DNS-resolved IP sets.
+    - `pkg/nftables`: native nftables dataplane — static/dynamic filter rules, DNS-resolved IP sets, and the DNS/transparent NAT redirects.
     - `pkg/policy`: Policy parsing and definition.
     - `pkg/credentialvault`: Credential vault store and binding validation.
     - `pkg/startup`: Post-startup hook registry (`Register`/`RunPost`).
-    - `hooks/`: Side-effect import target; `init()` functions register startup hooks that run after iptables/MITM setup.
+    - `hooks/`: Side-effect import target; `init()` functions register startup hooks that run after the nft-redirect/MITM setup.
 
 ```bash
 cd components/egress
@@ -248,11 +247,11 @@ ENTRYPOINT: supervisor --pre-start=cleanup.sh --name=egress --grace-period=20s -
 
 Egress-specific configuration:
 
-- **`--grace-period=20s`**: Egress needs extra time to drain DNS connections and tear down iptables/nft rules on shutdown (default is 10 s).
-- **Pre-start hook** (`cleanup.sh`): Reaps orphaned `mitmdump` processes from a previous crash and removes stale DNS redirect iptables/native nft state that would otherwise point port 53 at a dead proxy. It does not manage the `inet opensandbox` policy table; the nftables manager deletes and recreates that table when policy enforcement starts.
+- **`--grace-period=20s`**: Egress needs extra time to drain DNS connections and tear down its nft rules on shutdown (default is 10 s).
+- **Pre-start hook** (`cleanup.sh`): Reaps orphaned `mitmdump` processes from a previous crash and removes the stale native-nft redirect tables (`opensandbox_dns_redirect`, `opensandbox_transparent`) that would otherwise point port 53 / 80,443 at a dead proxy. It does not manage the `inet opensandbox` policy table; the nftables manager deletes and recreates that table when policy enforcement starts.
 
 ## Troubleshooting
 
-- **"iptables setup failed"**: ensure sidecar has `--cap-add=NET_ADMIN`.
+- **"nft apply failed" / "DNS redirect setup failed"**: ensure the sidecar has `--cap-add=NET_ADMIN`. Under gVisor, also ensure runsc includes native nftables support (see [google/gvisor#13796](https://github.com/google/gvisor/issues/13796)).
 - **DNS fails for all domains**: check sidecar upstream DNS reachability and logs.
 - **Traffic not blocked as expected**: in `dns+nft`, verify nft applied (`nft list table inet opensandbox`) and check sidecar logs for fallback.

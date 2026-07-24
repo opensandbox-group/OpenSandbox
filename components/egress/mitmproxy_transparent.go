@@ -24,9 +24,9 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
-	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
@@ -125,8 +125,8 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 	if err := mitmproxy.WaitListenPort(waitAddr, 15*time.Second); err != nil {
 		return nil, fmt.Errorf("wait listen %s: %w", waitAddr, err)
 	}
-	if err := iptables.SetupTransparentHTTP(mpPort, mpUID); err != nil {
-		return nil, fmt.Errorf("iptables transparent: %w", err)
+	if err := nftables.SetupTransparentHTTP(mpPort, mpUID); err != nil {
+		return nil, fmt.Errorf("nft transparent: %w", err)
 	}
 	log.Infof("mitmproxy: transparent intercept active (OUTPUT tcp 80,443 -> %d; trust mitm CA in clients)", mpPort)
 

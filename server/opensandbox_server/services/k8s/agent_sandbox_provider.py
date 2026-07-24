@@ -28,7 +28,6 @@ from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_MITMPROXY_T
 from opensandbox_server.services.helpers import format_ingress_endpoint
 from opensandbox_server.api.schema import Endpoint, ImageSpec, NetworkPolicy, PlatformSpec, Volume
 from opensandbox_server.services.k8s.agent_sandbox_template import AgentSandboxTemplateManager
-from opensandbox_server.services.validators import ensure_egress_runtime_compatible
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
 from opensandbox_server.services.k8s.provider_common import (
@@ -201,10 +200,6 @@ class AgentSandboxProvider(WorkloadProvider):
         else:
             sandbox["spec"]["shutdownTime"] = expires_at.isoformat()
         merged_pod_spec = sandbox.get("spec", {}).get("podTemplate", {}).get("spec", {})
-        ensure_egress_runtime_compatible(
-            network_policy,
-            effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
-        )
         if platform is not None:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
 

@@ -1,6 +1,6 @@
 # Python mitmproxy Transparent Mode (with Egress)
 
-Transparent mode starts `mitmdump --mode transparent` inside the sidecar and redirects local outbound `TCP 80/443` traffic to the mitmproxy listener via `iptables`. Its core benefits are:
+Transparent mode starts `mitmdump --mode transparent` inside the sidecar and redirects local outbound `TCP 80/443` traffic to the mitmproxy listener via native `nftables` (a `nat`/`output` chain with `redirect to :port`). Its core benefits are:
 
 - **No application changes**: no need to set `HTTP_PROXY`; app traffic is intercepted transparently.
 - **Observability and extensibility**: use mitm scripts for header injection, auditing, and debugging.
@@ -45,7 +45,7 @@ To bypass decryption for selected domains, edit the baked-in
 | Variable | Required | Purpose | Default |
 |------|----------|------|--------|
 | `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` | Yes | Enable transparent mitmproxy (`1/true/on`, etc.) | Disabled |
-| `OPENSANDBOX_EGRESS_MITMPROXY_PORT` | No | mitmdump listen port; `iptables` redirects `80/443` here | `18081` |
+| `OPENSANDBOX_EGRESS_MITMPROXY_PORT` | No | mitmdump listen port; the nft `redirect` sends `80/443` here | `18081` |
 | `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT` | No | User mitm addon script paths (comma-separated); each is passed as `-s` and loaded after the system addon in order | Empty |
 | `OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR` | No | Trust directory for upstream TLS verification (OpenSSL style); overrides the config.yaml default | `/etc/ssl/certs` |
 | `OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE` | No | Skip upstream TLS verification (`1/true/on`); use when clients connect by IP and SNI is unavailable | Disabled |
@@ -53,7 +53,7 @@ To bypass decryption for selected domains, edit the baked-in
 Notes:
 
 - In transparent mode, mitmproxy generally recommends matching by IP/range; verify SNI/resolve behavior if using domain regex only.
-- Before mitm, `iptables`, and CA export are ready, `GET /healthz` returns `503 (mitm not ready)` to prevent premature readiness.
+- Before mitm, the nft redirect, and CA export are ready, `GET /healthz` returns `503 (mitm not ready)` to prevent premature readiness.
 
 ### Static Configuration (config.yaml)
 
@@ -173,11 +173,11 @@ Startup flow (high level):
 
 1. Start mitmdump as user `mitmproxy`, listening on `127.0.0.1:<port>`.
 2. Wait until the local listener is reachable.
-3. Apply IPv4 `iptables` redirect rules: except loopback and mitmproxy-owned traffic, redirect outbound `80/443` to mitm port.
+3. Apply IPv4 native `nftables` redirect rules (`nat`/`output` chain): except loopback and mitmproxy-owned traffic (`meta skuid != <mitm uid>`), redirect outbound `80/443` to mitm port.
 
 Limits:
 
-- Currently IPv4 `iptables` only; IPv6 is not automatically handled.
+- Currently IPv4 `nftables` only; IPv6 is not automatically handled.
 - Non-Linux environments (for example local macOS runtime) are not supported for transparent mode.
 - Full HTTPS decryption introduces CPU/memory and certificate trust overhead; benchmark before production rollout.
 

@@ -23,9 +23,9 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
-	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 )
 
 const (
@@ -54,10 +54,10 @@ func waitForShutdown(ctx context.Context, proxy *dnsproxy.Proxy, policySrv *http
 	}
 
 	if mitm != nil {
-		iptables.RemoveTransparentHTTP(mitm.port, mitm.uid)
+		nftables.RemoveTransparentHTTP(mitm.port, mitm.uid)
 		mitmproxy.GracefulShutdown(mitm.getRunning(), defaultMitmShutdownTimeout)
 	}
-	iptables.RemoveRedirect(15353, exemptDst)
+	nftables.RemoveRedirect(15353, exemptDst)
 
 	if applier != nil {
 		nftCtx, nftCancel := context.WithTimeout(context.Background(), defaultNftTeardownTimeout)

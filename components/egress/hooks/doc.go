@@ -13,5 +13,5 @@
 // limitations under the License.
 
 // Package hooks: side-effect import target. Add files here whose init() registers startup.Register/RegisterFunc;
-// hooks run in startup.RunPost after the MITM/iptables path in main, before blocking on signal.
+// hooks run in startup.RunPost after the MITM/nft-redirect path in main, before blocking on signal.
 package hooks
