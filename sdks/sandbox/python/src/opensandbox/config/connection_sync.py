@@ -25,6 +25,8 @@ from datetime import timedelta
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from opensandbox.transport import RetryPolicy, RetrySyncTransport
+
 
 class ConnectionConfigSync(BaseModel):
     """
@@ -60,9 +62,17 @@ class ConnectionConfigSync(BaseModel):
     transport: httpx.BaseTransport | None = Field(
         default=None,
         description=(
-            "Shared httpx transport instance used by all HTTP clients within a "
-            "Sandbox/Manager instance. Pass a custom transport (e.g. HTTPTransport "
-            "with custom limits/proxies) to control connection pooling, proxies, retries, etc."
+            "Shared httpx transport instance used by all HTTP clients within "
+            "a Sandbox/Manager instance. When unset the SDK builds an "
+            "HTTPTransport wrapped by RetrySyncTransport honoring "
+            "`retry_policy`."
+        ),
+    )
+    retry_policy: RetryPolicy = Field(
+        default_factory=RetryPolicy,
+        description=(
+            "Retry policy applied to non-streaming requests going through "
+            "the shared transport. Pass RetryPolicy.disabled() for fast-fail."
         ),
     )
     use_server_proxy: bool = Field(
@@ -108,19 +118,28 @@ class ConnectionConfigSync(BaseModel):
         """
         Ensure a transport exists for this SDK resource.
 
-        If `transport` is missing, return a copy with a default transport and
-        mark it as SDK-owned. If present, return self unchanged.
+        When `transport` is missing, return a copy whose `transport` is
+        a retry-wrapped HTTPTransport (unless the policy has no
+        wrapper-only knobs, in which case the raw transport is used).
+        When present, return self unchanged.
         """
         if self.transport is not None:
             return self
-        transport = httpx.HTTPTransport(
+        inner = httpx.HTTPTransport(
             limits=httpx.Limits(
                 max_connections=100,
                 max_keepalive_connections=20,
                 keepalive_expiry=30.0,
             ),
         )
-        config = self.model_copy(update={"transport": transport})
+        wrapped: httpx.BaseTransport
+        if self.retry_policy.wraps_transport():
+            wrapped = RetrySyncTransport(
+                inner, self.retry_policy, owns_inner=True
+            )
+        else:
+            wrapped = inner
+        config = self.model_copy(update={"transport": wrapped})
         config._owns_transport = True
         return config
 

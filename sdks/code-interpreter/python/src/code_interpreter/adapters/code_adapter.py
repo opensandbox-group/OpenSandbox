@@ -41,6 +41,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.sandboxes import SandboxEndpoint
+from opensandbox.transport import unwrap_retry_transport
 
 from code_interpreter.adapters.converter.code_execution_converter import (
     CodeExecutionConverter,
@@ -130,6 +131,9 @@ class CodesAdapter(Codes):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
+        # SSE bootstraps bypass the retry wrapper: request bodies are
+        # not replayable and a non-idempotent status opt-in would cause
+        # duplicate execution on a resent SSE POST.
         self._sse_client = httpx.AsyncClient(
             headers=sse_headers,
             timeout=httpx.Timeout(
@@ -138,7 +142,7 @@ class CodesAdapter(Codes):
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=self.connection_config.transport,
+            transport=unwrap_retry_transport(self.connection_config.transport),
         )
 
     async def _get_client(self):

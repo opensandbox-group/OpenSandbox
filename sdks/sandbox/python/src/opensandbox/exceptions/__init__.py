@@ -26,17 +26,23 @@ from opensandbox.exceptions.sandbox import (
     PoolNotRunningException,
     PoolStateStoreUnavailableException,
     SandboxApiException,
+    SandboxConnectionException,
     SandboxError,
     SandboxException,
     SandboxInternalException,
+    SandboxRateLimitException,
     SandboxReadyTimeoutException,
+    SandboxTimeoutException,
     SandboxUnhealthyException,
 )
 
 __all__ = [
     "SandboxException",
     "SandboxApiException",
+    "SandboxRateLimitException",
     "SandboxInternalException",
+    "SandboxTimeoutException",
+    "SandboxConnectionException",
     "SandboxUnhealthyException",
     "SandboxReadyTimeoutException",
     "InvalidArgumentException",

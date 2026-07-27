@@ -91,6 +91,9 @@ def _timeout_seconds(config: _MetricsConnection) -> float:
 
 
 def _post_sync(config: _MetricsConnection, payload: dict[str, Any]) -> None:
+    # Deliberately does not reuse the SDK's shared transport: closing the
+    # httpx.Client below would also close that shared transport and break
+    # every other adapter on this connection_config.
     url = f"{config.get_base_url().rstrip('/')}/metrics/events"
     with httpx.Client(timeout=_timeout_seconds(config)) as client:
         client.post(url, json=payload, headers=_headers(config))
