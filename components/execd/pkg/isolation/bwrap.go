@@ -26,8 +26,26 @@ import (
 	"strings"
 )
 
-// buildArgv constructs the bwrap command line from wrap options.
+type bwrapLifecycleArgv struct {
+	gateExecFD string
+	controlFD  string
+	blockFD    string
+	statusFD   string
+}
+
+// buildArgv constructs the legacy bwrap command line from wrap options.
 func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
+	return buildArgvWithLifecycle(opts, seccompFd, nil)
+}
+
+// buildArgvWithLifecycle constructs the bwrap command line and, when lifecycle
+// is non-nil, executes the native fail-closed workload gate directly through
+// its inherited descriptor.
+func buildArgvWithLifecycle(
+	opts WrapOptions,
+	seccompFd string,
+	lifecycle *bwrapLifecycleArgv,
+) ([]string, error) {
 	if err := validateWrapOptions(opts); err != nil {
 		return nil, err
 	}
@@ -37,32 +55,7 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 	var argv []string
 
 	// 1. Namespace flags.
-	if useUserns {
-		argv = append(argv, "--unshare-user")
-		// --disable-userns is unsupported by the setuid build of bwrap;
-		// only add it for the non-setuid binary.
-		if !bwrapIsSetuid {
-			argv = append(argv, "--disable-userns")
-		}
-	}
-	argv = append(argv, "--unshare-pid", "--unshare-uts", "--hostname", "sandbox", "--unshare-ipc", "--unshare-cgroup")
-	if !opts.ShareNet {
-		argv = append(argv, "--unshare-net")
-	}
-	if useUserns {
-		uid := uint32(os.Getuid())
-		gid := uint32(os.Getgid())
-		if opts.Uid != nil {
-			uid = *opts.Uid
-		}
-		if opts.Gid != nil {
-			gid = *opts.Gid
-		}
-		argv = append(argv,
-			"--uid", strconv.FormatUint(uint64(uid), 10),
-			"--gid", strconv.FormatUint(uint64(gid), 10),
-		)
-	}
+	argv = append(argv, bwrapNamespaceSegment(opts, useUserns)...)
 
 	// 2. Root filesystem (read-only).
 	argv = append(argv, "--ro-bind", "/", "/")
@@ -72,8 +65,13 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 		argv = append(argv, bwrapTmpSegment(opts.Profile)...)
 	}
 
-	// 4–6. Virtual filesystems.
-	argv = append(argv, "--tmpfs", "/run", "--dev", "/dev", "--proc", "/proc")
+	// 4–6. Virtual filesystems. Lifecycle mode installs procfs after all
+	// caller-controlled mounts so /proc/self/fd remains the trusted execution
+	// path for the native gate descriptor.
+	argv = append(argv, "--tmpfs", "/run", "--dev", "/dev")
+	if lifecycle == nil {
+		argv = append(argv, "--proc", "/proc")
+	}
 
 	// 7. Workspace.
 	wsArgv, err := bwrapWorkspaceSegment(opts)
@@ -106,6 +104,18 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 		argv = append(argv, flag, b.Source, dest)
 	}
 
+	// Restore trusted procfs after every caller-controlled mount, then execute
+	// the verified gate through its inherited descriptor. Static mount aliases
+	// therefore cannot replace the gate between validation and execution.
+	//
+	// The isolated-session MVP treats processes sharing the parent sandbox
+	// mount namespace as one trusted owner. Defending against that owner
+	// concurrently replacing the proc mount ancestor still requires a future
+	// execveat-based launcher.
+	if lifecycle != nil {
+		argv = append(argv, "--proc", "/proc")
+	}
+
 	// 9. Environment.
 	argv = append(argv, bwrapEnvSegment(opts.EnvPassthrough)...)
 
@@ -120,9 +130,31 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 	// setsid(2) returns EPERM for a group leader — it would fail every
 	// session start. Process-group isolation from Setpgid is sufficient.
 	argv = append(argv, "--die-with-parent")
+	if lifecycle != nil {
+		argv = append(
+			argv,
+			"--block-fd", lifecycle.blockFD,
+			"--json-status-fd", lifecycle.statusFD,
+		)
+	}
 
-	// 12. Separator + identity switch.
+	// 12. Separator + fail-closed gate + identity switch.
 	argv = append(argv, "--")
+
+	// In setpriv mode the trusted gate must run before credentials are dropped.
+	// Execd authenticates and inspects the blocked gate through /proc; moving
+	// setpriv after the gate keeps those checks available without granting
+	// CAP_SYS_PTRACE. Once READY arrives, the gate execs setpriv and the caller's
+	// command in the same PID and namespaces.
+	if lifecycle != nil {
+		argv = append(
+			argv,
+			"/proc/self/fd/"+lifecycle.gateExecFD,
+			lifecycle.controlFD,
+			lifecycle.gateExecFD,
+			"--",
+		)
+	}
 
 	// In userns mode, uid/gid are set via --uid/--gid in segment 1.
 	if !useUserns {
@@ -147,6 +179,37 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 	}
 
 	return argv, nil
+}
+
+func bwrapNamespaceSegment(opts WrapOptions, useUserns bool) []string {
+	var argv []string
+	if useUserns {
+		argv = append(argv, "--unshare-user")
+		// --disable-userns is unsupported by the setuid build of bwrap;
+		// only add it for the non-setuid binary.
+		if !bwrapIsSetuid {
+			argv = append(argv, "--disable-userns")
+		}
+	}
+	argv = append(argv, "--unshare-pid", "--unshare-uts", "--hostname", "sandbox", "--unshare-ipc", "--unshare-cgroup")
+	if !opts.ShareNet {
+		argv = append(argv, "--unshare-net")
+	}
+	if useUserns {
+		uid := uint32(os.Getuid())
+		gid := uint32(os.Getgid())
+		if opts.Uid != nil {
+			uid = *opts.Uid
+		}
+		if opts.Gid != nil {
+			gid = *opts.Gid
+		}
+		argv = append(argv,
+			"--uid", strconv.FormatUint(uint64(uid), 10),
+			"--gid", strconv.FormatUint(uint64(gid), 10),
+		)
+	}
+	return argv
 }
 
 // validateWrapOptions checks for invalid or conflicting options.
@@ -326,8 +389,8 @@ func matchEnvPattern(name, pattern string) bool {
 // Wrap rewrites cmd to execute under bwrap.
 func wrapWithArgv(cmd *exec.Cmd, bwrapPath string, argv []string) {
 	// Prepend bwrap argv before the original command.
-	// argv already ends with ["--", "setpriv", ...] and the original
-	// cmd.Args[0] is the user command after setpriv.
+	// argv already contains the bwrap separator and any lifecycle gate or
+	// identity-switch prefix. The original cmd.Args[0] follows that prefix.
 	userArgs := cmd.Args
 	cmd.Args = make([]string, 0, len(argv)+len(userArgs))
 	cmd.Args = append(cmd.Args, bwrapPath)

@@ -31,6 +31,11 @@ jobs:
         with:
           go-version: '1.25.9'
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
       - name: Check gofmt
         working-directory: components/egress
         run: |
@@ -50,6 +55,11 @@ jobs:
         working-directory: components/egress
         run: |
           go test ./...
+
+      - name: Run mitmscripts unit tests
+        working-directory: components/egress
+        run: |
+          python -m unittest discover -v -s tests -p "test_*.py"
 
   smoke:
     needs: changes

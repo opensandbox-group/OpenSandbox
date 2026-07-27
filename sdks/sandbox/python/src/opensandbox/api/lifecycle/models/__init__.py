@@ -33,6 +33,8 @@ from .image_spec import ImageSpec
 from .image_spec_auth import ImageSpecAuth
 from .list_sandboxes_response import ListSandboxesResponse
 from .list_snapshots_response import ListSnapshotsResponse
+from .metrics_event import MetricsEvent
+from .metrics_event_event_type import MetricsEventEventType
 from .network_policy import NetworkPolicy
 from .network_policy_default_action import NetworkPolicyDefaultAction
 from .network_rule import NetworkRule
@@ -74,6 +76,8 @@ __all__ = (
     "ImageSpecAuth",
     "ListSandboxesResponse",
     "ListSnapshotsResponse",
+    "MetricsEvent",
+    "MetricsEventEventType",
     "NetworkPolicy",
     "NetworkPolicyDefaultAction",
     "NetworkRule",

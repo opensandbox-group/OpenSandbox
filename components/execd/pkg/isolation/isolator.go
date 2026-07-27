@@ -15,7 +15,10 @@
 // Package isolation provides per-execution namespace isolation via bubblewrap.
 package isolation
 
-import "os/exec"
+import (
+	"context"
+	"os/exec"
+)
 
 // Profile presets default isolation settings.
 type Profile string
@@ -149,4 +152,64 @@ type Isolator interface {
 	Available() bool
 	Capabilities() Capabilities
 	Wrap(cmd *exec.Cmd, opts WrapOptions) error
+}
+
+// WorkloadIdentity is the host-visible identity of a workload that is
+// completely constructed but still blocked behind its fail-closed ready gate.
+//
+// PID is the process that will exec the caller's command after MarkReady.
+// SandboxPID is bubblewrap's host-visible child PID (the namespace init when
+// PID namespaces are enabled). NetNamespaceID is the inode reported by
+// /proc/PID/ns/net. ProcessStartTimeTicks disambiguates PID reuse.
+//
+// These values identify the workload; they do not pin a namespace or create a
+// cgroup. Callers that require those facilities must install them before
+// MarkReady and fail closed if they cannot.
+type WorkloadIdentity struct {
+	PID                   int
+	SandboxPID            int
+	NetNamespaceID        uint64
+	ProcessStartTimeTicks uint64
+}
+
+// WorkloadLifecycle controls the startup gate and consumes bubblewrap's
+// complete JSON status stream. A workload cannot execute the caller's command
+// until MarkReady succeeds. Abort and Close are idempotent.
+type WorkloadLifecycle interface {
+	// WaitForIdentity waits until both bubblewrap and the native workload gate
+	// have been authenticated and returns the host-visible workload identity.
+	// Context cancellation aborts startup; it never releases the workload.
+	WaitForIdentity(ctx context.Context) (WorkloadIdentity, error)
+
+	// MarkReady releases the native workload gate. It is valid only after a
+	// successful WaitForIdentity call.
+	MarkReady() error
+
+	// Abort permanently denies startup and closes all gate channels. Closing a
+	// gate is deliberately not treated as readiness.
+	Abort()
+
+	// DrainDone closes after the JSON status stream reaches a validated EOF or
+	// encounters an error. The stream continues to be drained after MarkReady.
+	// Once a workload has been released, callers must monitor DrainDone and
+	// terminate that workload if DrainError is non-nil: its lifecycle identity
+	// and exit accounting can no longer be trusted.
+	DrainDone() <-chan struct{}
+	DrainError() error
+	ExitCode() (int, bool)
+
+	// Close releases lifecycle descriptors and waits for the status-drain
+	// goroutine. It does not release or terminate the workload, so callers must
+	// stop a running command before Close.
+	Close() error
+}
+
+// LifecycleIsolator is required for secure isolated sessions. The legacy Wrap
+// method remains for ordinary callers, while WrapWithLifecycle adds the
+// fail-closed startup protocol. After WrapWithLifecycle returns successfully,
+// the caller owns every file in cmd.ExtraFiles and must close those parent
+// copies immediately after cmd.Start returns, whether Start succeeds or fails.
+type LifecycleIsolator interface {
+	Isolator
+	WrapWithLifecycle(cmd *exec.Cmd, opts WrapOptions) (WorkloadLifecycle, error)
 }

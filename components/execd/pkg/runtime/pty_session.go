@@ -224,7 +224,7 @@ func (s *ptySession) ReplayBuffer() *replayBuffer {
 func buildPTYCommand(command string) *exec.Cmd {
 	shell := getShell()
 	var args []string
-	if shell == "bash" {
+	if shell == bashShell {
 		args = append(args, "--norc", "--noprofile")
 	}
 	if command != "" {

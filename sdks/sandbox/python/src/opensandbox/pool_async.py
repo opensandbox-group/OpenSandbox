@@ -31,6 +31,7 @@ from opensandbox.exceptions import (
     PoolDestroyedException,
     PoolEmptyException,
     PoolNotRunningException,
+    PoolStateStoreUnavailableException,
 )
 from opensandbox.manager import SandboxManager
 from opensandbox.pool_types import (
@@ -46,6 +47,8 @@ from opensandbox.pool_types import (
     PoolLifecycleState,
     PoolSnapshot,
     PoolState,
+    effective_max_idle_attempts,
+    policy_falls_through_to_direct_create,
 )
 from opensandbox.pool_types import (
     try_take_idle_with_min_ttl_async as _try_take_idle_with_min_ttl_async,
@@ -85,6 +88,7 @@ class SandboxPoolAsync:
         idle_timeout: timedelta = timedelta(hours=24),
         drain_timeout: timedelta = timedelta(seconds=30),
         acquire_min_remaining_ttl: timedelta | None = None,
+        max_acquire_retries: int = 3,
         sandbox_manager_factory: Callable[
             [ConnectionConfig], Awaitable[SandboxManager]
         ] = SandboxManager.create,
@@ -115,6 +119,7 @@ class SandboxPoolAsync:
             drain_timeout=drain_timeout,
             acquire_min_remaining_ttl=acquire_min_remaining_ttl,
             sandbox_creator=sandbox_creator,
+            max_acquire_retries=max_acquire_retries,
         )
         self._state_store = self._config.state_store
         self._connection_config = connection_config
@@ -183,21 +188,50 @@ class SandboxPoolAsync:
                 raise PoolNotRunningException(
                     f"Cannot acquire when pool state is {state.value}"
                 )
-            await self._ensure_pool_namespace_active()
+            await self._ensure_pool_namespace_active_for_acquire(policy)
             pool_name = self._config.pool_name
-            take_result = await _try_take_idle_with_min_ttl_async(
-                self._state_store,
-                pool_name,
-                self._config.acquire_min_remaining_ttl,
+            max_attempts = effective_max_idle_attempts(
+                policy, self._config.max_acquire_retries
             )
-            sandbox_id = take_result.sandbox_id
-            # Defer cleanup of below-threshold-but-still-alive sandboxes until after the chosen
-            # candidate is connected and renewed. Doing it inline before connect would let slow
-            # kill RPCs eat the candidate's remaining TTL — the race this PR is fixing.
-            pending_kill = take_result.discarded_alive_sandbox_ids
-            no_idle_reason: str | None = None
-            idle_connect_failure: Exception | None = None
-            if sandbox_id is not None:
+
+            pending_kill: list[str] = []
+            last_sandbox_id: str | None = None
+            last_idle_connect_failure: Exception | None = None
+            attempted_any = False
+            loop_exhausted = True
+            attempt = 0
+            while attempt < max_attempts:
+                attempt += 1
+                try:
+                    take_result = await _try_take_idle_with_min_ttl_async(
+                        self._state_store,
+                        pool_name,
+                        self._config.acquire_min_remaining_ttl,
+                    )
+                except PoolStateStoreUnavailableException:
+                    # State store outage. Per OSEP-0005, under policies that fall through to
+                    # direct-create on empty idle we degrade to that fallback so the pool stays
+                    # at least as available as raw SDK usage during store outages.
+                    if not policy_falls_through_to_direct_create(policy):
+                        self._schedule_kill_discarded_alive(
+                            pool_name, tuple(pending_kill), source="acquire"
+                        )
+                        raise
+                    logger.warning(
+                        "acquire: state store unavailable, falling through to direct create "
+                        "per policy=%s",
+                        policy.value,
+                    )
+                    loop_exhausted = False
+                    break
+                if take_result.discarded_alive_sandbox_ids:
+                    pending_kill.extend(take_result.discarded_alive_sandbox_ids)
+                sandbox_id = take_result.sandbox_id
+                if sandbox_id is None:
+                    loop_exhausted = False
+                    break
+                last_sandbox_id = sandbox_id
+                attempted_any = True
                 try:
                     sandbox = await self._sandbox_factory.connect(
                         sandbox_id,
@@ -209,51 +243,116 @@ class SandboxPoolAsync:
                         ),
                         skip_health_check=self._config.acquire_skip_health_check,
                     )
-                    if sandbox_timeout is not None:
-                        await sandbox.renew(sandbox_timeout)
-                    await self._ensure_pool_namespace_active_after_create(sandbox)
-                    # Candidate is connected and (optionally) renewed. Kick off kill cleanup as
-                    # a background task so the caller does not wait for N kill RPCs.
-                    self._schedule_kill_discarded_alive(
-                        pool_name, pending_kill, source="acquire"
-                    )
-                    return sandbox
                 except PoolDestroyedException:
                     self._schedule_kill_discarded_alive(
-                        pool_name, pending_kill, source="acquire"
+                        pool_name, tuple(pending_kill), source="acquire"
                     )
                     raise
                 except Exception as exc:
-                    idle_connect_failure = exc
+                    # Connect / readiness / health-check failure — the idle candidate itself
+                    # is unusable. Remove it, fire-and-forget the remote kill so a slow DELETE
+                    # (up to the lifecycle client's request_timeout, 30s by default) does not
+                    # block the next retry iteration, then let the loop try the next candidate.
+                    last_idle_connect_failure = exc
                     await self._state_store.remove_idle(pool_name, sandbox_id)
-                    try:
-                        if self._sandbox_manager is not None:
-                            await self._sandbox_manager.kill_sandbox(sandbox_id)
-                    except Exception:
-                        pass
-                    no_idle_reason = (
-                        f"idle connect failed for sandbox_id={sandbox_id} "
-                        "(stale or unreachable)"
+                    self._schedule_kill_discarded_alive(
+                        pool_name, (sandbox_id,), source="acquire-stale"
                     )
-            else:
-                no_idle_reason = "idle buffer empty"
+                    if self._lifecycle_state != PoolLifecycleState.RUNNING:
+                        state = self._lifecycle_state
+                        await self._raise_if_pool_namespace_destroyed()
+                        self._schedule_kill_discarded_alive(
+                            pool_name, tuple(pending_kill), source="acquire"
+                        )
+                        raise PoolNotRunningException(
+                            f"Cannot acquire when pool state is {state.value}"
+                        ) from exc
+                    await self._ensure_pool_namespace_active()
+                    continue
+                # Connect + readiness succeeded. From here on the sandbox is a healthy,
+                # borrowable idle: any failure below (renew rejection, namespace fenced) is
+                # NOT a candidate-specific problem, so we must not treat it as "stale idle"
+                # and burn another retry. Dispose the sandbox and surface the error.
+                try:
+                    if sandbox_timeout is not None:
+                        await sandbox.renew(sandbox_timeout)
+                    await self._ensure_pool_namespace_active_after_create(sandbox)
+                except PoolDestroyedException:
+                    self._schedule_kill_discarded_alive(
+                        pool_name, tuple(pending_kill), source="acquire"
+                    )
+                    raise
+                except Exception as exc:
+                    # Renew failed against a healthy sandbox. try_take_idle already popped this
+                    # id out of the store; a bare close() would only release local resources and
+                    # leave the remote sandbox alive-but-untracked until its server-side TTL
+                    # expires. Kill it best-effort, then close local resources and re-raise.
+                    logger.warning(
+                        "Acquire renew failed after idle connect; killing remote sandbox and "
+                        "not retrying (renew errors are not candidate-specific): "
+                        "pool_name=%s sandbox_id=%s policy=%s error=%s",
+                        pool_name,
+                        sandbox_id,
+                        policy.value,
+                        exc,
+                    )
+                    try:
+                        await sandbox.kill()
+                    except Exception as kill_exc:
+                        logger.warning(
+                            "Best-effort kill after renew failure failed: "
+                            "pool_name=%s sandbox_id=%s error=%s",
+                            pool_name,
+                            sandbox_id,
+                            kill_exc,
+                        )
+                    try:
+                        await sandbox.close()
+                    except Exception as close_exc:
+                        # Best-effort local resource release; original renew error must be the
+                        # one that surfaces, so log at debug and continue with the raise below.
+                        logger.debug(
+                            "Best-effort close after renew failure failed: "
+                            "pool_name=%s sandbox_id=%s error=%s",
+                            pool_name,
+                            sandbox_id,
+                            close_exc,
+                        )
+                    self._schedule_kill_discarded_alive(
+                        pool_name, tuple(pending_kill), source="acquire"
+                    )
+                    raise
+                self._schedule_kill_discarded_alive(
+                    pool_name, tuple(pending_kill), source="acquire"
+                )
+                return sandbox
 
-            # Reaching here means we did not return a sandbox from idle. Still fire deferred
-            # cleanup so the discarded-alive sandboxes do not linger.
             self._schedule_kill_discarded_alive(
-                pool_name, pending_kill, source="acquire"
+                pool_name, tuple(pending_kill), source="acquire"
             )
-            reason = no_idle_reason or "idle buffer empty"
-            if policy == AcquirePolicy.FAIL_FAST:
-                if sandbox_id is not None:
+
+            if not attempted_any:
+                reason = "idle buffer empty"
+            elif loop_exhausted:
+                reason = (
+                    f"idle connect failed for {max_attempts} candidate(s); "
+                    f"last sandbox_id={last_sandbox_id} (stale or unreachable)"
+                )
+            else:
+                reason = (
+                    f"idle connect failed for sandbox_id={last_sandbox_id}; "
+                    f"idle buffer drained before reaching max_acquire_retries={max_attempts}"
+                )
+            if not policy_falls_through_to_direct_create(policy):
+                if attempted_any:
                     raise PoolAcquireFailedException(
-                        f"Cannot acquire: {reason}; policy is FAIL_FAST",
-                        idle_connect_failure,
+                        f"Cannot acquire: {reason}; policy is {policy.value}",
+                        last_idle_connect_failure,
                     )
                 raise PoolEmptyException(
-                    f"Cannot acquire: {reason}; policy is FAIL_FAST"
+                    f"Cannot acquire: {reason}; policy is {policy.value}"
                 )
-            return await self._direct_create(sandbox_timeout)
+            return await self._direct_create(sandbox_timeout, policy=policy)
         finally:
             await self._end_operation()
 
@@ -469,8 +568,16 @@ class SandboxPoolAsync:
             skip_health_check=self._config.warmup_skip_health_check,
         )
 
-    async def _direct_create(self, sandbox_timeout: timedelta | None) -> Sandbox:
-        await self._ensure_pool_namespace_active()
+    async def _direct_create(
+        self,
+        sandbox_timeout: timedelta | None,
+        policy: AcquirePolicy = AcquirePolicy.DIRECT_CREATE,
+    ) -> Sandbox:
+        # policy-aware namespace check: if the state store is down and the policy is a
+        # fallthrough one, treat destroy-state as unknown and proceed to direct-create
+        # instead of surfacing the outage. See _ensure_pool_namespace_active_for_acquire
+        # for the full rationale.
+        await self._ensure_pool_namespace_active_for_acquire(policy)
         if self._config.sandbox_creator is not None:
             sandbox = await self._build_sandbox_from_creator(
                 creator=self._config.sandbox_creator,
@@ -489,7 +596,7 @@ class SandboxPoolAsync:
                     finally:
                         await sandbox.close()
                     raise
-            await self._ensure_pool_namespace_active_after_create(sandbox)
+            await self._ensure_pool_namespace_active_after_create(sandbox, policy=policy)
             return sandbox
 
         spec = self._creation_spec
@@ -520,7 +627,7 @@ class SandboxPoolAsync:
                 finally:
                     await sandbox.close()
                 raise
-        await self._ensure_pool_namespace_active_after_create(sandbox)
+        await self._ensure_pool_namespace_active_after_create(sandbox, policy=policy)
         return sandbox
 
     async def _ensure_pool_namespace_active(self) -> None:
@@ -528,6 +635,36 @@ class SandboxPoolAsync:
         if state != PoolDestroyState.ACTIVE:
             raise PoolDestroyedException(
                 f"Pool namespace is {state.value}: pool_name={self._config.pool_name}"
+            )
+
+    async def _ensure_pool_namespace_active_for_acquire(
+        self, policy: AcquirePolicy
+    ) -> None:
+        """Namespace-active check on the acquire path with graceful degradation.
+
+        Same as :meth:`_ensure_pool_namespace_active`, but when the state store itself
+        is unavailable (``PoolStateStoreUnavailableException``) and the effective
+        ``policy`` falls through to direct-create on empty idle, we treat the destroy
+        state as *unknown* and allow the acquire to proceed. This is the necessary
+        counterpart to the state-store-outage fallthrough already implemented at the
+        ``try_take_idle`` and ``_direct_create`` call sites (see OSEP-0005 error-code
+        matrix): without it a full Redis outage would short-circuit acquire before the
+        fallthrough branch could run, making ``RETRY_NEXT_IDLE_THEN_CREATE`` and
+        ``DIRECT_CREATE`` less available than documented.
+
+        Fail-closed behavior for non-fallthrough policies (``FAIL_FAST`` /
+        ``RETRY_NEXT_IDLE``) is preserved: the outage is surfaced as-is so callers
+        can react.
+        """
+        try:
+            await self._ensure_pool_namespace_active()
+        except PoolStateStoreUnavailableException:
+            if not policy_falls_through_to_direct_create(policy):
+                raise
+            logger.warning(
+                "acquire: state store unavailable during namespace check, "
+                "assuming ACTIVE and degrading to direct-create per policy=%s",
+                policy.value,
             )
 
     async def _raise_if_pool_namespace_destroyed(self) -> None:
@@ -538,9 +675,52 @@ class SandboxPoolAsync:
         except Exception:
             return
 
-    async def _ensure_pool_namespace_active_after_create(self, sandbox: Sandbox) -> None:
+    async def _ensure_pool_namespace_active_after_create(
+        self,
+        sandbox: Sandbox,
+        policy: AcquirePolicy | None = None,
+    ) -> None:
+        """Post-create fence check.
+
+        If the state store itself is unavailable we cannot tell whether the pool was
+        destroyed, so under a fallthrough ``policy`` we assume ACTIVE and keep the
+        freshly-created sandbox (mirrors the OSEP-0005 acquire-outage semantics).
+        Non-fallthrough policies keep the original fail-closed behavior for backward
+        compatibility.
+        """
         try:
             await self._ensure_pool_namespace_active()
+        except PoolStateStoreUnavailableException:
+            if policy is not None and policy_falls_through_to_direct_create(policy):
+                logger.warning(
+                    "acquire: state store unavailable during post-create fence check, "
+                    "keeping sandbox and degrading per policy=%s sandbox_id=%s",
+                    policy.value,
+                    sandbox.id,
+                )
+                return
+            # Fall through to the fence-triggered cleanup path below.
+            try:
+                await sandbox.kill()
+            except Exception as exc:
+                logger.warning(
+                    "Pool sandbox cleanup after store-outage fence failed: pool_name=%s "
+                    "sandbox_id=%s operation=kill error=%s",
+                    self._config.pool_name,
+                    sandbox.id,
+                    exc,
+                )
+            try:
+                await sandbox.close()
+            except Exception as exc:
+                logger.warning(
+                    "Pool sandbox cleanup after store-outage fence failed: pool_name=%s "
+                    "sandbox_id=%s operation=close error=%s",
+                    self._config.pool_name,
+                    sandbox.id,
+                    exc,
+                )
+            raise
         except BaseException:
             try:
                 await sandbox.kill()

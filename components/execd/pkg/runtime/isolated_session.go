@@ -76,7 +76,7 @@ func newIsolatedSession(id string, opts *IsolatedSessionOptions, iso isolation.I
 func (s *isolatedSession) start() error {
 	shell := getShell()
 	var args []string
-	if shell == "bash" {
+	if shell == bashShell {
 		args = append(args, "--noprofile", "--norc")
 	}
 	cmd := exec.Command(shell, args...)

@@ -37,7 +37,7 @@ export interface paths {
          *     export is disabled (noop recording).
          *
          *     SDK language and version are taken from the HTTP `User-Agent` header
-         *     (for example `OpenSandbox-Python-SDK/0.1.14`), not from the JSON body.
+         *     (for example `OpenSandbox-Python-SDK/0.1.15`), not from the JSON body.
          */
         post: operations["reportMetricsEvent"];
         delete?: never;

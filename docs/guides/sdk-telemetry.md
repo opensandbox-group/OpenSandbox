@@ -43,7 +43,7 @@ After create succeeds or fails, the SDK fire-and-forget posts to `POST /v1/metri
 ```
 
 - `sandboxId` / `image` may be omitted when create fails early.
-- SDK language and version come from the HTTP `User-Agent` header (for example `OpenSandbox-Python-SDK/0.1.14`), not from body fields.
+- SDK language and version come from the HTTP `User-Agent` header (for example `OpenSandbox-Python-SDK/0.1.15`), not from body fields.
 
 The server accepts the event with `204` and, when `[otel]` is enabled, records an OTEL histogram. See [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
 

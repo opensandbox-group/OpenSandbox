@@ -191,13 +191,29 @@ def _request_path(flow: http.HTTPFlow) -> str:
 _DOT_SEGMENT_RE = re.compile(r"/\.\.(/|$)")
 
 
-def _path_is_ambiguous(raw_path: str) -> bool:
+def _path_is_ambiguous(raw_path: str, *, allow_single_encoded_slash: bool = False) -> bool:
     """Return True if the raw request path contains ambiguous segments.
 
     Legitimate HTTP clients resolve dot segments before sending. Raw ``..``
     or percent-encoded separators on the wire indicate an attempt to confuse
     path-based authorization checks because the canonical path seen by the
     upstream server may differ from the raw prefix matched here.
+
+    ``allow_single_encoded_slash`` toggles how a single-layer ``%2f`` on the
+    wire is treated:
+
+    * ``False`` (default) — historical strict behavior. Suitable for paths
+      produced by our own substitution pipeline, where the credential proxy
+      injects a ``%2f`` on the fly. Such a rewrite always shifts the
+      canonical path relative to what the client sent, so it is treated as
+      ambiguous.
+    * ``True`` — used when checking the raw path the client sent. Legit
+      ecosystems require a single ``%2f`` (npm scoped package registry paths
+      like ``/@scope%2fname``). Nested encodings (``%252f`` etc.) and raw
+      backslash / dot-segments are still rejected. The complementary
+      :func:`_path_encoded_slash_changes_binding` check rejects a
+      single-layer ``%2f`` if decoding it would cross an authorization
+      boundary.
     """
     path = raw_path.split("?", 1)[0]
 
@@ -209,7 +225,15 @@ def _path_is_ambiguous(raw_path: str) -> bool:
     decoded = path
     for _ in range(10):
         lower = decoded.lower()
-        if "%2f" in lower or "%5c" in lower:
+        if "%2f" in lower:
+            # A single-layer ``%2f`` on the wire is legitimate for some
+            # ecosystems (e.g. npm scoped package registry paths use
+            # ``/@scope%2fname``). Tolerate it on the first pass when the
+            # caller opts in; a nested ``%252f`` still trips this check on
+            # the next iteration because it decodes back to ``%2f``.
+            if not (allow_single_encoded_slash and decoded is path):
+                return True
+        if "%5c" in lower:
             return True
         if "\\" in decoded:
             return True
@@ -221,6 +245,67 @@ def _path_is_ambiguous(raw_path: str) -> bool:
         return True
 
     return False
+
+
+def _path_encoded_slash_changes_binding(
+    flow: http.HTTPFlow, vault: ActiveVault
+) -> bool:
+    """Return True if decoding ``%2f`` in the raw path would change which
+    credential binding matches.
+
+    Called only when the raw request path contains ``%2f``. Legitimate uses
+    (e.g. npm scoped package registry paths ``/@scope%2fname``) decode to a
+    path that still matches the same binding, so this returns False and the
+    request proceeds. A crafted path such as
+    ``/api/v8/projects/123%2f..%2f456/variables`` decodes to a different
+    scope and this returns True so the caller can respond 403 before
+    injecting credentials.
+    """
+    raw_path = _request_path(flow)
+    if "%2f" not in raw_path.lower():
+        return False
+
+    decoded_path = unquote(raw_path)
+    if decoded_path == raw_path:
+        return False
+
+    # If the decoded form contains dot-segments, treat it as ambiguous.
+    if _DOT_SEGMENT_RE.search(decoded_path):
+        return True
+
+    scheme = (flow.request.scheme or "").lower()
+    host = _request_host(flow)
+    port = _request_port(flow)
+    method = (flow.request.method or "").upper()
+
+    def _non_path_matches(binding: dict[str, Any]) -> bool:
+        match = binding.get("match") or {}
+        schemes = match.get("schemes") or ["https"]
+        if scheme not in schemes:
+            return False
+        canonical_port = 443 if scheme == "https" else 80
+        if port != canonical_port:
+            return False
+        methods = [m.upper() for m in (match.get("methods") or ["GET", "POST", "PUT", "PATCH", "DELETE"])]
+        if method not in methods:
+            return False
+        for pattern in match.get("hosts") or []:
+            ok, _ = _host_matches(host, pattern)
+            if ok:
+                return True
+        return False
+
+    def _matches_with_path(path: str) -> set[int]:
+        matched: set[int] = set()
+        for idx, binding in enumerate(vault.bindings):
+            if not _non_path_matches(binding):
+                continue
+            paths = (binding.get("match") or {}).get("paths") or ["/*"]
+            if any(_path_matches(path, p) for p in paths):
+                matched.add(idx)
+        return matched
+
+    return _matches_with_path(raw_path) != _matches_with_path(decoded_path)
 
 
 def _host_matches(host: str, pattern: str) -> tuple[bool, int]:
@@ -499,8 +584,12 @@ def request(flow: http.HTTPFlow) -> None:
     # Raw dot-segments or encoded variants on the wire are not produced by
     # legitimate HTTP clients and can trick prefix-based path matching into
     # injecting credentials for a scope the canonical path does not belong to.
+    # A single-layer ``%2f`` is tolerated at this stage because some legit
+    # ecosystems require it (npm scoped packages send ``/@scope%2fname``);
+    # the follow-up ``_path_encoded_slash_changes_binding`` check rejects any
+    # ``%2f`` whose decoded form would cross a credential binding boundary.
     raw_path = flow.request.path or "/"
-    if _path_is_ambiguous(raw_path):
+    if _path_is_ambiguous(raw_path, allow_single_encoded_slash=True):
         flow.response = http.Response.make(
             403,
             b"request path contains ambiguous segments\n",
@@ -508,6 +597,25 @@ def request(flow: http.HTTPFlow) -> None:
         )
         ctx.log.warn(
             "credential proxy: rejected request with ambiguous path: "
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+        )
+        return
+
+    # A single-layer ``%2f`` is tolerated by ``_path_is_ambiguous`` (legit
+    # ecosystems like npm scoped packages require it). Reject it here only
+    # when decoding the ``%2f`` would change which credential binding
+    # matches, i.e. the encoded slash actually crosses an authorization
+    # boundary. This keeps ``/@scope%2fname`` requests working while still
+    # stopping crafted paths such as ``/api/v8/projects/123%2f..%2f456/...``.
+    if _path_encoded_slash_changes_binding(flow, vault):
+        flow.response = http.Response.make(
+            403,
+            b"request path contains ambiguous segments\n",
+            {"content-type": "text/plain"},
+        )
+        ctx.log.warn(
+            "credential proxy: rejected request whose encoded slash crosses "
+            "the credential binding boundary: "
             f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
         )
         return

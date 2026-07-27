@@ -27,7 +27,7 @@ export const DEFAULT_READY_TIMEOUT_SECONDS = 30;
 export const DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS = 200;
 
 export const DEFAULT_REQUEST_TIMEOUT_SECONDS = 30;
-export const DEFAULT_USER_AGENT = "OpenSandbox-JS-SDK/0.1.10";
+export const DEFAULT_USER_AGENT = "OpenSandbox-JS-SDK/0.1.11";
 
 // Custom header carrying the SDK host's own IP. A non-standard name is used on
 // purpose: standard forwarded headers (X-Forwarded-For, etc.) are rewritten or

@@ -37,6 +37,8 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
 
+const bashShell = "bash"
+
 var forwardSignals = []os.Signal{
 	syscall.SIGINT,
 	syscall.SIGTERM,
@@ -50,8 +52,8 @@ var forwardSignals = []os.Signal{
 // getShell returns the preferred shell, falling back to sh if bash is not available.
 // This is needed for Alpine-based Docker images that only have sh by default.
 func getShell() string {
-	if _, err := exec.LookPath("bash"); err == nil {
-		return "bash"
+	if _, err := exec.LookPath(bashShell); err == nil {
+		return bashShell
 	}
 	return "sh"
 }

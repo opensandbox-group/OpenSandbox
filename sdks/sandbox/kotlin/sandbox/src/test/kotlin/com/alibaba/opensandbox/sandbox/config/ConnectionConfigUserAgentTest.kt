@@ -26,6 +26,6 @@ class ConnectionConfigUserAgentTest {
     fun `default userAgent matches package version`() {
         val config = ConnectionConfig.builder().build()
 
-        assertEquals("OpenSandbox-Kotlin-SDK/1.0.16", config.userAgent)
+        assertEquals("OpenSandbox-Kotlin-SDK/1.0.17", config.userAgent)
     }
 }

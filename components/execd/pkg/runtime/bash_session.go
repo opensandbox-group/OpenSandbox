@@ -207,7 +207,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 
 	shell := getShell()
 	args := make([]string, 0, 3)
-	if shell == "bash" {
+	if shell == bashShell {
 		args = append(args, "--noprofile", "--norc")
 	}
 	args = append(args, scriptPath)

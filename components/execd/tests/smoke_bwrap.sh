@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Smoke test: build execd image, extract execd+bwrap, verify bwrap works.
+# Smoke test: build execd image, extract execd+bwrap+the native workload gate,
+# and verify the packaged isolation artifacts work.
 #
 # Prerequisites: docker
 #
@@ -57,16 +58,25 @@ echo ">> Image built."
 # Step 2: Extract binaries from image
 # -------------------------------------------------------------------
 echo ""
-echo ">> Step 2: Extracting execd and bwrap from image..."
+echo ">> Step 2: Extracting execd, bwrap, and workload gate from image..."
 mkdir -p "${SMOKE_DIR}"
 docker run --rm \
   --entrypoint "" \
   -v "${SMOKE_DIR}:/out" \
   "${IMAGE}" \
-  sh -c 'cp /execd /usr/local/bin/bwrap /out/ && chmod +x /out/execd /out/bwrap'
+  sh -c 'cp /execd /usr/local/bin/bwrap /out/ && \
+    cp /usr/local/libexec/opensandbox-session-gate /out/session-gate-source && \
+    cp /opt/opensandbox/opensandbox-session-gate /out/session-gate-runtime && \
+    chmod +x /out/execd /out/bwrap \
+      /out/session-gate-source /out/session-gate-runtime'
 
 echo ">> Extracted:"
-ls -lh "${SMOKE_DIR}/execd" "${SMOKE_DIR}/bwrap"
+ls -lh \
+  "${SMOKE_DIR}/execd" \
+  "${SMOKE_DIR}/bwrap" \
+  "${SMOKE_DIR}/session-gate-source" \
+  "${SMOKE_DIR}/session-gate-runtime"
+cmp "${SMOKE_DIR}/session-gate-source" "${SMOKE_DIR}/session-gate-runtime"
 
 # -------------------------------------------------------------------
 # Step 3: Verify bwrap is static
@@ -170,6 +180,7 @@ echo "========================================="
 echo " Smoke Test PASSED"
 echo "========================================="
 echo "  bwrap: static binary, namespace works"
+echo "  gate: native fail-closed workload gate packaged"
 echo "  execd: starts, serves /ping"
 echo "  image: ${IMAGE}"
 echo ""

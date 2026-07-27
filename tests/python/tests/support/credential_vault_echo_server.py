@@ -45,6 +45,24 @@ EXPECTED_HEADERS: dict[str, dict[str, str]] = {
     },
 }
 
+# npm-style scoped package registry paths are sent on the wire with the
+# ``/`` between scope and package name percent-encoded (``/@scope%2fname``).
+# The credential proxy used to reject these as ambiguous, which broke
+# ``npm install`` for scoped packages inside sandboxes. This route echoes
+# whichever ``Authorization`` header the upstream actually received so the
+# same route can back two E2E cases: one where a binding matches and the
+# credential is injected, and one where no binding matches so the request
+# passes through unchanged. Both slash encodings and the canonical form are
+# accepted because mitmproxy is free to canonicalize the path when
+# forwarding.
+NPM_SCOPED_PATHS: frozenset[str] = frozenset(
+    {
+        "/npm-scoped/@ali%2forion-claude-plugin",
+        "/npm-scoped/@ali%2Forion-claude-plugin",
+        "/npm-scoped/@ali/orion-claude-plugin",
+    }
+)
+
 
 class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
     server_version = "OpenSandboxCredentialVaultE2E/1.0"
@@ -66,6 +84,19 @@ class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
                     "case": "query-substitution",
                     "query": query,
                     "missingOrInvalid": [] if ok else ["api_key"],
+                },
+            )
+            return
+
+        if route in NPM_SCOPED_PATHS:
+            received = {name.lower(): value for name, value in self.headers.items()}
+            self._write_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "case": "npm-scoped",
+                    "receivedPath": route,
+                    "authorization": received.get("authorization"),
                 },
             )
             return
