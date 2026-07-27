@@ -61,7 +61,12 @@ func (c *Controller) createBashSession(req *CreateContextRequest) (string, error
 		return "", fmt.Errorf("failed to start bash session: %w", err)
 	}
 
+	c.bashSessionEnvironmentMu.Lock()
+	for name, update := range c.managedBashSessionEnvironment {
+		session.updateManagedEnvironment(name, update)
+	}
 	c.bashSessionClientMap.Store(session.config.Session, session)
+	c.bashSessionEnvironmentMu.Unlock()
 	log.Info("created bash session %s", session.config.Session)
 	return session.config.Session, nil
 }
@@ -176,6 +181,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		cwd = expandedCwd
 	}
 	sessionID := s.config.Session
+	managedEnvironmentSnapshot := copyManagedEnvironmentUpdates(s.managedEnvironment)
 	s.mu.Unlock()
 
 	startAt := time.Now()
@@ -191,7 +197,12 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 
-	script := buildWrappedScript(request.Code, envSnapshot, cwd)
+	script := buildWrappedScriptWithManagedEnvironment(
+		request.Code,
+		envSnapshot,
+		cwd,
+		managedEnvironmentSnapshot,
+	)
 	scriptFile, err := os.CreateTemp("", "execd_bash_*.sh")
 	if err != nil {
 		return fmt.Errorf("create script file: %w", err)
@@ -279,7 +290,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	updatedEnv := parseExportDump(envLines)
 	s.mu.Lock()
 	if len(updatedEnv) > 0 {
-		applyManagedEnvironmentUpdates(updatedEnv, s.managedEnvironment)
+		applyManagedEnvironmentUpdates(updatedEnv, s.managedEnvironment, false)
 		s.env = updatedEnv
 	}
 	if pwdLine != "" {
@@ -322,6 +333,15 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 }
 
 func buildWrappedScript(command string, env map[string]string, cwd string) string {
+	return buildWrappedScriptWithManagedEnvironment(command, env, cwd, nil)
+}
+
+func buildWrappedScriptWithManagedEnvironment(
+	command string,
+	env map[string]string,
+	cwd string,
+	managedEnvironment map[string]managedEnvironmentUpdate,
+) string {
 	var b strings.Builder
 
 	keys := make([]string, 0, len(env))
@@ -337,6 +357,18 @@ func buildWrappedScript(command string, env map[string]string, cwd string) strin
 		b.WriteString(k)
 		b.WriteString("=")
 		b.WriteString(shellEscape(env[k]))
+		b.WriteString("\n")
+	}
+	clearedKeys := make([]string, 0, len(managedEnvironment))
+	for key := range managedEnvironment {
+		if _, exists := env[key]; !exists && isValidEnvKey(key) {
+			clearedKeys = append(clearedKeys, key)
+		}
+	}
+	sort.Strings(clearedKeys)
+	for _, key := range clearedKeys {
+		b.WriteString("unset ")
+		b.WriteString(key)
 		b.WriteString("\n")
 	}
 

@@ -35,17 +35,19 @@ var kernelWaitingBackoff = wait.Backoff{
 
 // Controller manages code execution across runtimes.
 type Controller struct {
-	baseURL                 string
-	token                   string
-	mu                      sync.RWMutex
-	jupyterClientMap        sync.Map // map[sessionID]*jupyterKernel
-	defaultLanguageSessions sync.Map // map[Language]string
-	commandClientMap        sync.Map // map[sessionID]*commandKernel
-	bashSessionClientMap    sync.Map // map[sessionID]*bashSession
-	ptySessionMap           sync.Map // map[sessionID]*ptySession
-	isolatedSessionMap      sync.Map // map[sessionID]*isolatedSession
-	db                      *sql.DB
-	dbOnce                  sync.Once
+	baseURL                       string
+	token                         string
+	mu                            sync.RWMutex
+	jupyterClientMap              sync.Map // map[sessionID]*jupyterKernel
+	defaultLanguageSessions       sync.Map // map[Language]string
+	commandClientMap              sync.Map // map[sessionID]*commandKernel
+	bashSessionClientMap          sync.Map // map[sessionID]*bashSession
+	bashSessionEnvironmentMu      sync.Mutex
+	managedBashSessionEnvironment map[string]managedEnvironmentUpdate
+	ptySessionMap                 sync.Map // map[sessionID]*ptySession
+	isolatedSessionMap            sync.Map // map[sessionID]*isolatedSession
+	db                            *sql.DB
+	dbOnce                        sync.Once
 }
 
 type jupyterKernel struct {
@@ -76,38 +78,70 @@ type managedEnvironmentUpdate struct {
 // UpdateManagedBashSessionEnvironment upgrades daemon-managed values in
 // existing bash sessions without replacing user overrides.
 func (c *Controller) UpdateManagedBashSessionEnvironment(name, value, managedFallback string) {
+	c.bashSessionEnvironmentMu.Lock()
+	defer c.bashSessionEnvironmentMu.Unlock()
+
+	if c.managedBashSessionEnvironment == nil {
+		c.managedBashSessionEnvironment = make(map[string]managedEnvironmentUpdate)
+	}
+	update := managedEnvironmentUpdate{value: value, managedFallback: managedFallback}
+	c.managedBashSessionEnvironment[name] = update
 	c.bashSessionClientMap.Range(func(_, sessionValue any) bool {
 		if session, ok := sessionValue.(*bashSession); ok {
-			session.updateManagedEnvironment(name, value, managedFallback)
+			session.updateManagedEnvironment(name, update)
 		}
 		return true
 	})
 }
 
-func (s *bashSession) updateManagedEnvironment(name, value, managedFallback string) {
+func (s *bashSession) updateManagedEnvironment(name string, update managedEnvironmentUpdate) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.managedEnvironment == nil {
 		s.managedEnvironment = make(map[string]managedEnvironmentUpdate)
 	}
-	update := managedEnvironmentUpdate{value: value, managedFallback: managedFallback}
 	s.managedEnvironment[name] = update
-	applyManagedEnvironmentUpdate(s.env, name, update)
+	applyManagedEnvironmentUpdate(s.env, name, update, true)
 }
 
-func applyManagedEnvironmentUpdates(env map[string]string, updates map[string]managedEnvironmentUpdate) {
+func applyManagedEnvironmentUpdates(
+	env map[string]string,
+	updates map[string]managedEnvironmentUpdate,
+	replaceEmpty bool,
+) {
 	for name, update := range updates {
-		applyManagedEnvironmentUpdate(env, name, update)
+		applyManagedEnvironmentUpdate(env, name, update, replaceEmpty)
 	}
 }
 
-func applyManagedEnvironmentUpdate(env map[string]string, name string, update managedEnvironmentUpdate) {
-	current := env[name]
+func applyManagedEnvironmentUpdate(
+	env map[string]string,
+	name string,
+	update managedEnvironmentUpdate,
+	replaceEmpty bool,
+) {
+	current, exists := env[name]
+	if (!exists || current == "") && !replaceEmpty {
+		return
+	}
 	if current == update.value || (current != "" && current != update.managedFallback) {
 		return
 	}
 	env[name] = update.value
+}
+
+func copyManagedEnvironmentUpdates(
+	updates map[string]managedEnvironmentUpdate,
+) map[string]managedEnvironmentUpdate {
+	if len(updates) == 0 {
+		return nil
+	}
+	copy := make(map[string]managedEnvironmentUpdate, len(updates))
+	for name, update := range updates {
+		copy[name] = update
+	}
+	return copy
 }
 
 // NewController creates a runtime controller.

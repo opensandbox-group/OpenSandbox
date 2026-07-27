@@ -154,6 +154,71 @@ func TestControllerUpdateManagedBashSessionEnvironmentPreservesCustomValues(t *t
 	require.Equal(t, "/managed/merged.pem", empty.env["REQUESTS_CA_BUNDLE"])
 }
 
+func TestCreateBashSessionAppliesExistingManagedEnvironmentUpdates(t *testing.T) {
+	t.Setenv("REQUESTS_CA_BUNDLE", "/managed/mitm.pem")
+	controller := NewController("", "")
+	controller.UpdateManagedBashSessionEnvironment(
+		"REQUESTS_CA_BUNDLE",
+		"/managed/merged.pem",
+		"/managed/mitm.pem",
+	)
+
+	sessionID, err := controller.createBashSession(&CreateContextRequest{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = controller.closeBashSession(sessionID) })
+	session := controller.getBashSession(sessionID)
+	require.NotNil(t, session)
+	require.Equal(t, "/managed/merged.pem", session.env["REQUESTS_CA_BUNDLE"])
+}
+
+func TestBashSessionManagedEnvironmentPreservesExplicitClears(t *testing.T) {
+	requireBash(t)
+	t.Setenv("REQUESTS_CA_BUNDLE", "/managed/merged.pem")
+	session := newBashSession("")
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+	session.updateManagedEnvironment("REQUESTS_CA_BUNDLE", managedEnvironmentUpdate{
+		value:           "/managed/merged.pem",
+		managedFallback: "/managed/mitm.pem",
+	})
+
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    "unset REQUESTS_CA_BUNDLE",
+		Timeout: 3 * time.Second,
+	}))
+	_, exists := session.env["REQUESTS_CA_BUNDLE"]
+	require.False(t, exists)
+	require.Equal(t, "<unset>", runBashSessionEnvProbe(t, session))
+
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    "export REQUESTS_CA_BUNDLE=''",
+		Timeout: 3 * time.Second,
+	}))
+	value, exists := session.env["REQUESTS_CA_BUNDLE"]
+	require.True(t, exists)
+	require.Empty(t, value)
+	require.Equal(t, "<>", runBashSessionEnvProbe(t, session))
+}
+
+func runBashSessionEnvProbe(t *testing.T, session *bashSession) string {
+	t.Helper()
+	var output []string
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    `if [ -z "${REQUESTS_CA_BUNDLE+x}" ]; then printf '<unset>\n'; else printf '<%s>\n' "$REQUESTS_CA_BUNDLE"; fi`,
+		Timeout: 3 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(line string) { output = append(output, line) },
+		},
+	}))
+	for _, line := range output {
+		if strings.TrimSpace(line) != "" {
+			return line
+		}
+	}
+	require.FailNow(t, "bash session env probe returned no output")
+	return ""
+}
+
 func TestBashSessionManagedEnvironmentUpdateSurvivesInFlightRun(t *testing.T) {
 	requireBash(t)
 	session := newBashSession("")
@@ -178,11 +243,10 @@ func TestBashSessionManagedEnvironmentUpdateSurvivesInFlightRun(t *testing.T) {
 	case <-time.After(time.Second):
 		require.FailNow(t, "bash session did not start")
 	}
-	session.updateManagedEnvironment(
-		"REQUESTS_CA_BUNDLE",
-		"/managed/merged.pem",
-		"/managed/mitm.pem",
-	)
+	session.updateManagedEnvironment("REQUESTS_CA_BUNDLE", managedEnvironmentUpdate{
+		value:           "/managed/merged.pem",
+		managedFallback: "/managed/mitm.pem",
+	})
 
 	select {
 	case err := <-done:
