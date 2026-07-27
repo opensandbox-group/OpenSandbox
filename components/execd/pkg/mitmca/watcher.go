@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -78,7 +77,7 @@ func Start(ctx context.Context) {
 		refresh: func(refreshCtx context.Context) error {
 			commandCtx, cancel := context.WithTimeout(refreshCtx, refreshTimeout)
 			defer cancel()
-			output, refreshErr := exec.CommandContext(commandCtx, "/bin/sh", bootstrapPath, refreshOnlyArg).CombinedOutput()
+			output, refreshErr := runRefreshCommand(commandCtx, bootstrapPath)
 			if refreshErr != nil {
 				return fmt.Errorf("bootstrap refresh failed: %w output=%q", refreshErr, compactOutput(output))
 			}
