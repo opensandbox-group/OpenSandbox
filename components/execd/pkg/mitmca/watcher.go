@@ -94,15 +94,17 @@ func Start(ctx context.Context) {
 
 func setProcessTrustEnvironment(getenv func(string) string, setenv func(string, string) error) error {
 	variables := []struct {
-		name  string
-		value string
+		name            string
+		value           string
+		managedFallback string
 	}{
 		{name: "NODE_EXTRA_CA_CERTS", value: defaultCAPath},
-		{name: "REQUESTS_CA_BUNDLE", value: defaultMergedCAPath},
-		{name: "SSL_CERT_FILE", value: defaultMergedCAPath},
+		{name: "REQUESTS_CA_BUNDLE", value: defaultMergedCAPath, managedFallback: defaultCAPath},
+		{name: "SSL_CERT_FILE", value: defaultMergedCAPath, managedFallback: defaultCAPath},
 	}
 	for _, variable := range variables {
-		if getenv(variable.name) != "" {
+		current := getenv(variable.name)
+		if current == variable.value || (current != "" && current != variable.managedFallback) {
 			continue
 		}
 		if err := setenv(variable.name, variable.value); err != nil {

@@ -62,6 +62,26 @@ func TestSetProcessTrustEnvironmentPreservesOverrides(t *testing.T) {
 	require.Equal(t, "/custom/ssl.pem", values["SSL_CERT_FILE"])
 }
 
+func TestSetProcessTrustEnvironmentReplacesManagedFallbacks(t *testing.T) {
+	values := map[string]string{
+		"NODE_EXTRA_CA_CERTS": defaultCAPath,
+		"REQUESTS_CA_BUNDLE":  defaultCAPath,
+		"SSL_CERT_FILE":       defaultCAPath,
+	}
+
+	err := setProcessTrustEnvironment(func(name string) string {
+		return values[name]
+	}, func(name, value string) error {
+		values[name] = value
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, defaultCAPath, values["NODE_EXTRA_CA_CERTS"])
+	require.Equal(t, defaultMergedCAPath, values["REQUESTS_CA_BUNDLE"])
+	require.Equal(t, defaultMergedCAPath, values["SSL_CERT_FILE"])
+}
+
 func TestSetProcessTrustEnvironmentReportsFailure(t *testing.T) {
 	err := setProcessTrustEnvironment(func(string) string { return "" }, func(name, _ string) error {
 		if name == "REQUESTS_CA_BUNDLE" {
