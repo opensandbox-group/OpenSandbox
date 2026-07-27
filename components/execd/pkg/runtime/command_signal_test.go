@@ -39,9 +39,7 @@ import (
 // processes. Regression test for
 // https://github.com/alibaba/OpenSandbox/issues/922.
 func TestRunCommand_CancelKillsChildren(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 
@@ -118,9 +116,7 @@ func TestRunCommand_CancelKillsChildren(t *testing.T) {
 // Without this guard, group-wide kill would amplify the stale-PID hazard
 // to every process in an unrelated process group.
 func TestInterrupt_AfterFinished_ReturnsError(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	c := NewController("", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -167,9 +163,7 @@ func TestInterrupt_AfterFinished_ReturnsError(t *testing.T) {
 // state as a failure caused Interrupt to surface a 500 even though the
 // kill succeeded.
 func TestKillPid_ZombieLeaderDoesNotFail(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	cmd := exec.Command("bash", "-c", `sleep 30 & wait`)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -194,9 +188,7 @@ func TestKillPid_ZombieLeaderDoesNotFail(t *testing.T) {
 // the whole process group, not just the leader. Regression test for
 // https://github.com/alibaba/OpenSandbox/issues/922.
 func TestKillPid_TerminatesEntireProcessGroup(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := exec.Command("bash", "-c",

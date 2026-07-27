@@ -539,6 +539,12 @@ class TestSplitEgressEnv:
         assert sandbox_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
         assert egress_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
 
+    def test_allows_mitmproxy_extra_ports(self):
+        env = {"OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS": "8080,8443"}
+        sandbox_env, egress_env = split_egress_env(env)
+        assert sandbox_env == {}
+        assert egress_env == {"OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS": "8080,8443"}
+
     def test_allows_policy_file(self):
         env = {"OPENSANDBOX_EGRESS_POLICY_FILE": "/var/egress/policy.json"}
         sandbox_env, egress_env = split_egress_env(env)

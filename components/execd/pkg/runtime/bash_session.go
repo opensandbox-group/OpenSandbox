@@ -205,12 +205,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		return fmt.Errorf("close script file: %w", err)
 	}
 
-	shell := getShell()
-	args := make([]string, 0, 3)
-	if shell == "bash" {
-		args = append(args, "--noprofile", "--norc")
-	}
-	args = append(args, scriptPath)
+	shell, args := shellCommand(scriptPath)
 	cmd := exec.CommandContext(ctx, shell, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Do not pass envSnapshot via cmd.Env to avoid "argument list too long" when session env is large.
@@ -410,10 +405,13 @@ func parseExportLine(line string) (string, string, bool) {
 		raw := rest[eq+1:]
 		if unquoted, err := strconv.Unquote(raw); err == nil {
 			value = unquoted
-		} else if len(raw) >= 2 && strings.HasPrefix(raw, "'") && strings.HasSuffix(raw, "'") {
-			// POSIX shells commonly emit single-quoted values and represent an
-			// embedded quote by ending the quote, escaping it, and reopening it.
-			value = strings.ReplaceAll(raw[1:len(raw)-1], `'\''`, `'`)
+		} else if unquoted, ok := unquoteShellWord(raw); ok {
+			// POSIX shell word: a concatenation of '...' and "..." segments
+			// possibly with backslash escapes outside quotes. bash writes
+			// embedded quotes as '\'' while dash/BusyBox ash write '"'"',
+			// and neither wraps the whole value in a single pair of quotes
+			// when it starts or ends with a quote character.
+			value = unquoted
 		} else {
 			// Preserve the previous best-effort behavior for shell-specific
 			// formats such as Bash ANSI-C quoting.
@@ -428,6 +426,64 @@ func parseExportLine(line string) (string, string, bool) {
 
 func shellEscape(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+// unquoteShellWord decodes a concatenation of POSIX shell word segments as
+// produced by `export -p` across bash, zsh, dash, and BusyBox ash. It returns
+// the raw value and true on success, or ("", false) when input is not a
+// well-formed shell word (unterminated quote, dangling backslash, etc.).
+//
+// Recognized segments:
+//   - '...'          Verbatim single-quoted content (no escapes allowed).
+//   - "..."          Double-quoted content with POSIX escapes: \\ \" \$ \` \newline.
+//   - \c             Backslash-escaped character outside quotes.
+//   - any other rune Literal character.
+func unquoteShellWord(raw string) (string, bool) {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); {
+		switch raw[i] {
+		case '\'':
+			end := strings.IndexByte(raw[i+1:], '\'')
+			if end < 0 {
+				return "", false
+			}
+			b.WriteString(raw[i+1 : i+1+end])
+			i += 1 + end + 1
+		case '"':
+			j := i + 1
+			for j < len(raw) && raw[j] != '"' {
+				if raw[j] == '\\' && j+1 < len(raw) {
+					next := raw[j+1]
+					switch next {
+					case '\\', '"', '$', '`':
+						b.WriteByte(next)
+						j += 2
+						continue
+					case '\n':
+						j += 2
+						continue
+					}
+				}
+				b.WriteByte(raw[j])
+				j++
+			}
+			if j >= len(raw) {
+				return "", false
+			}
+			i = j + 1
+		case '\\':
+			if i+1 >= len(raw) {
+				return "", false
+			}
+			b.WriteByte(raw[i+1])
+			i += 2
+		default:
+			b.WriteByte(raw[i])
+			i++
+		}
+	}
+	return b.String(), true
 }
 
 func isValidEnvKey(key string) bool {

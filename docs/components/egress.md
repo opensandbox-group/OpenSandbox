@@ -161,6 +161,12 @@ APIs, environment variables, and behavior may change.
 
 Optional transparent HTTPS interception for outbound `80/443` traffic in the sidecar network namespace.
 
+Extra ports can be added via the experimental `OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS` env var (comma-separated, e.g. `8080,8443`), which is appended to the always-on `80,443`. The total port count (including 80/443) must not exceed the iptables `multiport` limit of 15; invalid values fail egress startup rather than silently intercept a subset.
+
+::: warning Extra ports limitation
+On extra ports, mitmproxy still decrypts and logs traffic normally, but the Credential Vault's binding matcher currently only fires on the canonical `80/443` — bindings will not match requests to custom ports until follow-up work extends the matcher.
+:::
+
 ### Credential Vault
 
 The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer.

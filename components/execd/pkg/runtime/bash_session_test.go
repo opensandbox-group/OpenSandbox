@@ -20,7 +20,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -33,9 +32,7 @@ import (
 )
 
 func TestBashSession_NonZeroExitEmitsError(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	c := NewController("", "")
 
@@ -111,6 +108,32 @@ func TestBashSession_FallsBackToSh(t *testing.T) {
 	require.Contains(t, stdoutLines, "hello world")
 }
 
+// Round-trip a value containing a single quote under sh to guard against
+// silent corruption on bash-less images (dash / BusyBox ash).
+func TestBashSession_FallsBackToSh_PersistsSingleQuotedValue(t *testing.T) {
+	useShOnlyPath(t)
+
+	session := newBashSession("")
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	const want = "it's fine"
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    fmt.Sprintf(`export QUOTED_VALUE=%s`, shellEscape(want)),
+		Timeout: 3 * time.Second,
+	}))
+
+	var stdoutLines []string
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    `printf '%s\n' "$QUOTED_VALUE"`,
+		Timeout: 3 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(line string) { stdoutLines = append(stdoutLines, line) },
+		},
+	}))
+	require.Contains(t, stdoutLines, want)
+}
+
 func TestParseExportLine_BashAndShFormats(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -121,7 +144,16 @@ func TestParseExportLine_BashAndShFormats(t *testing.T) {
 	}{
 		{name: "bash", line: `declare -x FOO="hello world"`, wantName: "FOO", wantValue: "hello world", wantOK: true},
 		{name: "sh", line: `export FOO='hello world'`, wantName: "FOO", wantValue: "hello world", wantOK: true},
-		{name: "sh escaped quote", line: `export FOO='it'\''s'`, wantName: "FOO", wantValue: "it's", wantOK: true},
+		{name: "sh escaped quote bash style", line: `export FOO='it'\''s'`, wantName: "FOO", wantValue: "it's", wantOK: true},
+		// dash / BusyBox ash write embedded quotes as a "'" segment concatenated
+		// with '...' segments. The result does not always start or end with a
+		// single quote when the value itself starts or ends with a quote.
+		{name: "sh embedded quote dash style", line: `export FOO='it'"'"'s'`, wantName: "FOO", wantValue: "it's", wantOK: true},
+		{name: "sh multiple embedded quotes dash style", line: `export FOO='a'"'"'b'"'"'c'`, wantName: "FOO", wantValue: "a'b'c", wantOK: true},
+		{name: "sh trailing quote dash style", line: `export FOO='trailing'"'"`, wantName: "FOO", wantValue: "trailing'", wantOK: true},
+		{name: "sh leading quote dash style", line: `export FOO=''"'"'leading'`, wantName: "FOO", wantValue: "'leading", wantOK: true},
+		{name: "sh both-side quotes dash style", line: `export FOO=''"'"'both'"'"`, wantName: "FOO", wantValue: "'both'", wantOK: true},
+		{name: "sh lone quote dash style", line: `export FOO=''"'"`, wantName: "FOO", wantValue: "'", wantOK: true},
 		{name: "empty", line: `export FOO=""`, wantName: "FOO", wantValue: "", wantOK: true},
 		{name: "lone quote", line: `export FOO='`, wantName: "FOO", wantValue: "'", wantOK: true},
 	}
@@ -132,6 +164,108 @@ func TestParseExportLine_BashAndShFormats(t *testing.T) {
 			require.Equal(t, tt.wantOK, gotOK)
 			require.Equal(t, tt.wantName, gotName)
 			require.Equal(t, tt.wantValue, gotValue)
+		})
+	}
+}
+
+// dashExportEscape mimics dash / BusyBox ash export -p output, splitting the
+// value into '...' segments interleaved with "..."-quoted runs of literal
+// single quotes. Notably this does NOT wrap the entire value in a single pair
+// of quotes, so the resulting string may start or end with a character other
+// than "'". Runs of consecutive quotes are grouped into one "..." segment,
+// matching dash's actual output (verified against /bin/dash 0.5.x).
+func dashExportEscape(v string) string {
+	if v == "" {
+		return `''`
+	}
+	var b strings.Builder
+	b.WriteByte('\'')
+	inSingle := true
+	i := 0
+	for i < len(v) {
+		if v[i] == '\'' {
+			if inSingle {
+				b.WriteByte('\'')
+				inSingle = false
+			}
+			b.WriteByte('"')
+			for i < len(v) && v[i] == '\'' {
+				b.WriteByte('\'')
+				i++
+			}
+			b.WriteByte('"')
+			continue
+		}
+		if !inSingle {
+			b.WriteByte('\'')
+			inSingle = true
+		}
+		b.WriteByte(v[i])
+		i++
+	}
+	if inSingle {
+		b.WriteByte('\'')
+	}
+	return b.String()
+}
+
+// TestParseExportLine_DashFormatRoundTrip verifies parseExportLine accepts
+// dash / BusyBox ash's exact export -p wire format across a range of values,
+// including ones that start or end with a single quote (which produce a
+// leading or trailing "'" segment rather than a wrapping ' ').
+func TestParseExportLine_DashFormatRoundTrip(t *testing.T) {
+	values := []string{
+		"",
+		"plain",
+		"it's",
+		"'leading",
+		"trailing'",
+		"'both'",
+		"'",
+		"''",
+		"'''",
+		"a'b'c",
+		`with "double" and 'single'`,
+	}
+	for _, v := range values {
+		t.Run(fmt.Sprintf("%q", v), func(t *testing.T) {
+			line := "export FOO=" + dashExportEscape(v)
+			name, got, ok := parseExportLine(line)
+			require.True(t, ok, "line %q rejected", line)
+			require.Equal(t, "FOO", name)
+			require.Equal(t, v, got, "line %q", line)
+		})
+	}
+}
+
+// shellEscape → parseExportLine must round-trip so env persistence survives
+// the sh fallback path (dash / BusyBox ash echo shellEscape's output verbatim).
+func TestShellEscapeParseExportLine_RoundTrip(t *testing.T) {
+	values := []string{
+		"",
+		"plain",
+		"hello world",
+		"it's",
+		"'leading",
+		"trailing'",
+		"'both'",
+		"'",
+		"''",
+		"a'b'c",
+		`double"quote`,
+		`mix "and" 'match'`,
+		"multi\nline",
+		"tab\there",
+		`with\backslash`,
+	}
+
+	for _, v := range values {
+		t.Run(fmt.Sprintf("%q", v), func(t *testing.T) {
+			line := "export FOO=" + shellEscape(v)
+			name, got, ok := parseExportLine(line)
+			require.True(t, ok, "line %q rejected", line)
+			require.Equal(t, "FOO", name)
+			require.Equal(t, v, got, "line %q", line)
 		})
 	}
 }
@@ -555,9 +689,7 @@ func containsLine(lines []string, target string) bool {
 // TestBashSession_CloseKillsRunningProcess verifies that session.close() kills the active
 // process group so that a long-running command (e.g. sleep) does not keep running after close.
 func TestBashSession_CloseKillsRunningProcess(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	session := newBashSession("")
 	require.NoError(t, session.start())
@@ -590,9 +722,7 @@ func TestBashSession_CloseKillsRunningProcess(t *testing.T) {
 // TestBashSession_DeleteBashSessionKillsRunningProcess verifies that DeleteBashSession
 // (close path) kills the active run and removes the session from the controller.
 func TestBashSession_DeleteBashSessionKillsRunningProcess(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	c := NewController("", "")
 	sessionID, err := c.CreateBashSession(&CreateContextRequest{})

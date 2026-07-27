@@ -222,14 +222,11 @@ func (s *ptySession) ReplayBuffer() *replayBuffer {
 // buildPTYCommand selects Bash when available and otherwise falls back to sh.
 // Bash startup flags must not be passed to sh because they are not portable.
 func buildPTYCommand(command string) *exec.Cmd {
-	shell := getShell()
-	var args []string
-	if shell == "bash" {
-		args = append(args, "--norc", "--noprofile")
-	}
+	var extra []string
 	if command != "" {
-		args = append(args, "-c", command)
+		extra = []string{"-c", command}
 	}
+	shell, args := shellCommand(extra...)
 	return exec.Command(shell, args...)
 }
 

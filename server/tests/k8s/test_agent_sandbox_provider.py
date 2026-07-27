@@ -711,6 +711,11 @@ class TestAgentSandboxProviderExecdInit:
         init_containers = body["spec"]["podTemplate"]["spec"]["initContainers"]
         assert len(init_containers) == 1
         assert "resources" not in init_containers[0]
+        init_script = init_containers[0]["args"][0]
+        assert (
+            "cp /usr/local/libexec/opensandbox-session-gate "
+            "/opt/opensandbox/opensandbox-session-gate"
+        ) in init_script
 
     def test_init_container_has_resources_when_configured(self, mock_k8s_client):
         provider = AgentSandboxProvider(

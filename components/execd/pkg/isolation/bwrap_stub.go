@@ -48,5 +48,12 @@ func (b *bwrapStub) Capabilities() Capabilities { return Capabilities{Available:
 func (b *bwrapStub) Wrap(_ *exec.Cmd, _ WrapOptions) error {
 	return fmt.Errorf("bwrap: unavailable on non-Linux platform")
 }
+func (b *bwrapStub) WrapWithLifecycle(
+	_ *exec.Cmd,
+	_ WrapOptions,
+) (WorkloadLifecycle, error) {
+	return nil, fmt.Errorf("bwrap: lifecycle unavailable on non-Linux platform")
+}
 
 var _ Isolator = (*bwrapStub)(nil)
+var _ LifecycleIsolator = (*bwrapStub)(nil)

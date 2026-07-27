@@ -61,9 +61,11 @@ remove_stale_iptables() {
       | while IFS= read -r rule; do
           eval "$cmd -t nat $rule" 2>/dev/null || true
         done
-    # Delete all nat/OUTPUT rules that redirect ports 80,443 (mitmproxy transparent).
+    # Delete all nat/OUTPUT REDIRECT rules produced by the mitmproxy transparent
+    # setup. Port-agnostic: any multiport --dports list + REDIRECT --to-ports
+    # (with --uid-owner) matches, so custom EXTRA_PORTS lists get cleaned too.
     "$cmd" -t nat -S OUTPUT 2>/dev/null \
-      | awk '/--dports 80,443/ {sub(/^-A/,"-D"); print}' \
+      | awk '/-m multiport --dports/ && /-j REDIRECT --to-ports/ && /--uid-owner/ {sub(/^-A/,"-D"); print}' \
       | while IFS= read -r rule; do
           eval "$cmd -t nat $rule" 2>/dev/null || true
         done

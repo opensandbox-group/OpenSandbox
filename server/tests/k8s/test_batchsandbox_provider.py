@@ -411,7 +411,17 @@ spec:
         assert init_container["name"] == "execd-installer"
         assert init_container["image"] == "execd:test"
         assert init_container["command"] == ["/bin/sh", "-c"]
-        assert "bootstrap.sh" in init_container["args"][0]
+        init_script = init_container["args"][0]
+        assert "bootstrap.sh" in init_script
+        assert (
+            "cp /usr/local/libexec/opensandbox-session-gate "
+            "/opt/opensandbox/opensandbox-session-gate"
+        ) in init_script
+        assert (
+            "test ! -e /usr/local/libexec/opensandbox-session-gate || "
+            "(cp /usr/local/libexec/opensandbox-session-gate"
+        ) in init_script
+        assert "chmod 0555 /opt/opensandbox/opensandbox-session-gate" in init_script
         assert init_container["volumeMounts"][0]["name"] == "opensandbox-bin"
         # No resources configured: resources field should be absent
         assert "resources" not in init_container

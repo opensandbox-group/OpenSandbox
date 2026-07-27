@@ -45,6 +45,7 @@ type mitmTransparent struct {
 	currentGen uint64 // generation of the mitmdump currently considered live
 	port       int
 	uid        uint32
+	dports     string           // iptables --dports list (e.g. "80,443" or "80,443,8080")
 	cfg        mitmproxy.Config // OnExit must NOT be set here; built per-Launch
 	nextGen    uint64           // atomic; monotonic gen counter handed to each Launch
 	restartCh  chan exitEvent
@@ -103,6 +104,11 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 		return nil, fmt.Errorf("lookup user %q: %w (ensure this user exists in the image)", mitmproxy.RunAsUser, err)
 	}
 
+	dports, err := constants.BuildMitmproxyPortList(os.Getenv(constants.EnvMitmproxyExtraPorts))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", constants.EnvMitmproxyExtraPorts, err)
+	}
+
 	cfg := mitmproxy.Config{
 		ListenPort:  mpPort,
 		UserName:    mitmproxy.RunAsUser,
@@ -125,10 +131,10 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 	if err := mitmproxy.WaitListenPort(waitAddr, 15*time.Second); err != nil {
 		return nil, fmt.Errorf("wait listen %s: %w", waitAddr, err)
 	}
-	if err := iptables.SetupTransparentHTTP(mpPort, mpUID); err != nil {
+	if err := iptables.SetupTransparentHTTP(mpPort, mpUID, dports); err != nil {
 		return nil, fmt.Errorf("iptables transparent: %w", err)
 	}
-	log.Infof("mitmproxy: transparent intercept active (OUTPUT tcp 80,443 -> %d; trust mitm CA in clients)", mpPort)
+	log.Infof("mitmproxy: transparent intercept active (OUTPUT tcp %s -> %d; trust mitm CA in clients)", dports, mpPort)
 
 	if err := mitmproxy.SyncRootCA("", mpHome); err != nil {
 		return nil, fmt.Errorf("mitm CA export: %w", err)
@@ -138,6 +144,7 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 		currentGen: initialGen,
 		port:       mpPort,
 		uid:        mpUID,
+		dports:     dports,
 		cfg:        cfg,
 		nextGen:    initialGen,
 		restartCh:  restartCh,
