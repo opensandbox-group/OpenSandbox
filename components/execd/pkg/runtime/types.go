@@ -104,6 +104,7 @@ type bashSession struct {
 	env                map[string]string
 	cwd                string
 	managedEnvironment map[string]managedEnvironmentUpdate
+	clearedEnvironment map[string]bool
 
 	// currentProcessPid is the pid of the active run's process group leader (bash).
 	// Set after cmd.Start(), cleared when run() returns. Used by close() to kill the process group.

@@ -200,6 +200,27 @@ func TestBashSessionManagedEnvironmentPreservesExplicitClears(t *testing.T) {
 	require.Equal(t, "<>", runBashSessionEnvProbe(t, session))
 }
 
+func TestBashSessionManagedEnvironmentPreservesClearBeforeFirstUpdate(t *testing.T) {
+	requireBash(t)
+	t.Setenv("REQUESTS_CA_BUNDLE", "/managed/mitm.pem")
+	session := newBashSession("")
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    "unset REQUESTS_CA_BUNDLE",
+		Timeout: 3 * time.Second,
+	}))
+	session.updateManagedEnvironment("REQUESTS_CA_BUNDLE", managedEnvironmentUpdate{
+		value:           "/managed/merged.pem",
+		managedFallback: "/managed/mitm.pem",
+	})
+
+	_, exists := session.env["REQUESTS_CA_BUNDLE"]
+	require.False(t, exists)
+	require.Equal(t, "<unset>", runBashSessionEnvProbe(t, session))
+}
+
 func runBashSessionEnvProbe(t *testing.T, session *bashSession) string {
 	t.Helper()
 	var output []string

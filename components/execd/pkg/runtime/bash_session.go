@@ -181,7 +181,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		cwd = expandedCwd
 	}
 	sessionID := s.config.Session
-	managedEnvironmentSnapshot := copyManagedEnvironmentUpdates(s.managedEnvironment)
+	clearedEnvironmentSnapshot := copyClearedEnvironment(s.clearedEnvironment)
 	s.mu.Unlock()
 
 	startAt := time.Now()
@@ -197,11 +197,11 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 
-	script := buildWrappedScriptWithManagedEnvironment(
+	script := buildWrappedScriptWithEnvironmentClears(
 		request.Code,
 		envSnapshot,
 		cwd,
-		managedEnvironmentSnapshot,
+		clearedEnvironmentSnapshot,
 	)
 	scriptFile, err := os.CreateTemp("", "execd_bash_*.sh")
 	if err != nil {
@@ -290,6 +290,11 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	updatedEnv := parseExportDump(envLines)
 	s.mu.Lock()
 	if len(updatedEnv) > 0 {
+		s.clearedEnvironment = updateClearedEnvironment(
+			s.clearedEnvironment,
+			envSnapshot,
+			updatedEnv,
+		)
 		applyManagedEnvironmentUpdates(updatedEnv, s.managedEnvironment, false)
 		s.env = updatedEnv
 	}
@@ -333,14 +338,14 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 }
 
 func buildWrappedScript(command string, env map[string]string, cwd string) string {
-	return buildWrappedScriptWithManagedEnvironment(command, env, cwd, nil)
+	return buildWrappedScriptWithEnvironmentClears(command, env, cwd, nil)
 }
 
-func buildWrappedScriptWithManagedEnvironment(
+func buildWrappedScriptWithEnvironmentClears(
 	command string,
 	env map[string]string,
 	cwd string,
-	managedEnvironment map[string]managedEnvironmentUpdate,
+	clearedEnvironment map[string]bool,
 ) string {
 	var b strings.Builder
 
@@ -359,8 +364,8 @@ func buildWrappedScriptWithManagedEnvironment(
 		b.WriteString(shellEscape(env[k]))
 		b.WriteString("\n")
 	}
-	clearedKeys := make([]string, 0, len(managedEnvironment))
-	for key := range managedEnvironment {
+	clearedKeys := make([]string, 0, len(clearedEnvironment))
+	for key := range clearedEnvironment {
 		if _, exists := env[key]; !exists && isValidEnvKey(key) {
 			clearedKeys = append(clearedKeys, key)
 		}

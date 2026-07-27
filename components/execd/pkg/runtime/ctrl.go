@@ -102,7 +102,9 @@ func (s *bashSession) updateManagedEnvironment(name string, update managedEnviro
 		s.managedEnvironment = make(map[string]managedEnvironmentUpdate)
 	}
 	s.managedEnvironment[name] = update
-	applyManagedEnvironmentUpdate(s.env, name, update, true)
+	if !s.clearedEnvironment[name] {
+		applyManagedEnvironmentUpdate(s.env, name, update, true)
+	}
 }
 
 func applyManagedEnvironmentUpdates(
@@ -131,15 +133,39 @@ func applyManagedEnvironmentUpdate(
 	env[name] = update.value
 }
 
-func copyManagedEnvironmentUpdates(
-	updates map[string]managedEnvironmentUpdate,
-) map[string]managedEnvironmentUpdate {
-	if len(updates) == 0 {
+func updateClearedEnvironment(
+	cleared map[string]bool,
+	previous map[string]string,
+	current map[string]string,
+) map[string]bool {
+	if cleared == nil {
+		cleared = make(map[string]bool)
+	}
+	for name, previousValue := range previous {
+		currentValue, exists := current[name]
+		if !exists || (previousValue != "" && currentValue == "") {
+			cleared[name] = true
+		}
+	}
+	for name, currentValue := range current {
+		previousValue, existed := previous[name]
+		switch {
+		case currentValue != "":
+			delete(cleared, name)
+		case !existed || previousValue != "":
+			cleared[name] = true
+		}
+	}
+	return cleared
+}
+
+func copyClearedEnvironment(cleared map[string]bool) map[string]bool {
+	if len(cleared) == 0 {
 		return nil
 	}
-	copy := make(map[string]managedEnvironmentUpdate, len(updates))
-	for name, update := range updates {
-		copy[name] = update
+	copy := make(map[string]bool, len(cleared))
+	for name := range cleared {
+		copy[name] = true
 	}
 	return copy
 }
