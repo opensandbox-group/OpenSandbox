@@ -59,7 +59,7 @@ configToml: |
   batchsandbox_template_file = "/etc/opensandbox/aks-kata.batchsandbox-template.yaml"
 
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.4"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.5"
   mode = "dns+nft"
   disable_ipv6 = true
 
