@@ -74,11 +74,7 @@ func newIsolatedSession(id string, opts *IsolatedSessionOptions, iso isolation.I
 
 // start launches bwrap and the preferred shell inside a namespace.
 func (s *isolatedSession) start() error {
-	shell := getShell()
-	var args []string
-	if shell == "bash" {
-		args = append(args, "--noprofile", "--norc")
-	}
+	shell, args := shellCommand()
 	cmd := exec.Command(shell, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 

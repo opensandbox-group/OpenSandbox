@@ -40,7 +40,7 @@ test("ConnectionConfig default userAgent matches package version", () => {
     domain: "https://api.opensandbox.test",
   });
 
-  assert.equal(connectionConfig.userAgent, "OpenSandbox-JS-SDK/0.1.10");
+  assert.equal(connectionConfig.userAgent, "OpenSandbox-JS-SDK/0.1.11");
 });
 
 test("ConnectionConfig.disableMetrics is preserved by withTransportIfMissing", () => {

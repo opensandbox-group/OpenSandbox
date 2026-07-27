@@ -161,6 +161,12 @@ APIs, environment variables, and behavior may change.
 
 Optional transparent HTTPS interception for outbound `80/443` traffic in the sidecar network namespace.
 
+Extra ports can be added via the experimental `OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS` env var (comma-separated, e.g. `8080,8443`), which is appended to the always-on `80,443`. The total port count (including 80/443) must not exceed the iptables `multiport` limit of 15; invalid values fail egress startup rather than silently intercept a subset.
+
+::: warning Extra ports limitation
+On extra ports, mitmproxy still decrypts and logs traffic normally, but the Credential Vault's binding matcher currently only fires on the canonical `80/443` — bindings will not match requests to custom ports until follow-up work extends the matcher.
+:::
+
 The egress sidecar exports only its public root certificate to the shared OpenSandbox volume. The agent bootstrap installs that certificate into the system, NSS, and JDK trust stores. If an egress container restart rotates the root certificate, `execd` detects the new certificate fingerprint and refreshes those stores and the merged CA bundle automatically. Processes started through `execd` after the refresh use the new trust material; long-running applications that cache TLS contexts must recreate those contexts or restart.
 
 ### Credential Vault

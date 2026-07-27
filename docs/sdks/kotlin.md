@@ -263,6 +263,19 @@ try {
 pool.shutdown(true);
 ```
 
+::: tip AcquirePolicy
+`AcquirePolicy` controls what happens when the idle buffer is empty **or** the first idle candidate fails its readiness check:
+
+| Policy | Retry across idles | Fallback on exhaustion |
+|---|---|---|
+| `FAIL_FAST` | no | throw `PoolEmptyException` / `PoolAcquireFailedException` |
+| `DIRECT_CREATE` (default) | no | create a new sandbox via lifecycle API |
+| `RETRY_NEXT_IDLE` | up to `maxAcquireRetries` idles | throw |
+| `RETRY_NEXT_IDLE_THEN_CREATE` | up to `maxAcquireRetries` idles | create a new sandbox |
+
+Use the `RETRY_NEXT_IDLE*` variants when the pool may contain a mix of healthy and stale idle sandboxes (e.g. custom templates with long cold-start; a network flap left a few unreachable idles). Each failed candidate still pays up to `acquireReadyTimeout`, so bound the retry with `maxAcquireRetries` (default `3`).
+:::
+
 Use `SandboxPoolManager` for release or operations workflows that need to destroy an old
 pool namespace without constructing the old `SandboxPool` object:
 

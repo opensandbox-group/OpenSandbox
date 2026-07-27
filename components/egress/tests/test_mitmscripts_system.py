@@ -696,6 +696,161 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         # (flow.response is the pre-initialized _Response, not a 403)
         self.assertNotIn("Private-Token", flow.request.headers._values)
 
+    def test_encoded_slash_within_binding_scope_allowed(self) -> None:
+        """A ``%2f`` whose decoded form still matches the same binding must
+        be allowed. Regression for the npm scoped package case where the
+        registry path ``/@scope%2fname`` was rejected as a false positive."""
+        system = self._make_system_with_vault()
+        flow = _Flow()
+        # ``/api/v8/*`` covers both raw and decoded forms, so this is the
+        # tolerated case: the encoded slash does not cross a binding boundary.
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "gitlab-api",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "secret-token"}],
+                }
+            ],
+            ["secret-token"],
+        )
+        flow.request.path = "/api/v8/projects/123%2fnested/variables"
+
+        system.request(flow)
+
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_encoded_slash_crossing_binding_rejected(self) -> None:
+        """A ``%2f`` that decodes across a binding boundary must be rejected.
+
+        Two bindings are configured: one for a broad scope with a
+        low-privilege token, and one for a narrow scope with a high-privilege
+        token. A crafted path can match the narrow binding literally while
+        its decoded form belongs only to the broad one — that mismatch is
+        what the new guard must catch before injecting the wrong credential.
+        """
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "gitlab-api-broad",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "broad-token"}],
+                },
+                {
+                    "name": "gitlab-api-narrow",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        # Literal ``%2f`` in the pattern only matches the raw
+                        # form; the decoded path stops matching this pattern.
+                        "paths": ["/api/v8/projects/123%2f*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "narrow-token"}],
+                },
+            ],
+            ["broad-token", "narrow-token"],
+        )
+        flow = _Flow()
+        flow.request.path = "/api/v8/projects/123%2fescape/variables"
+
+        system.request(flow)
+
+        # Raw match set = {broad, narrow}; decoded match set = {broad}.
+        # The two differ, so the request is rejected before injection.
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
+
+class SystemAddonNpmScopedPackageTest(unittest.TestCase):
+    """npm scoped package registry paths must not be blocked as ambiguous."""
+
+    def _make_system_with_npm_vault(self):
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "npm-registry",
+                    "match": {
+                        "hosts": ["registry.npmjs.org"],
+                        "methods": ["GET"],
+                        "paths": ["/*"],
+                    },
+                    "headers": [{"name": "Authorization", "value": "Bearer npm-token"}],
+                }
+            ],
+            ["npm-token"],
+        )
+        return system
+
+    def test_scoped_package_path_receives_credential(self) -> None:
+        """``/@scope%2fname`` is the npm-mandated wire format for scoped
+        packages. It must reach the upstream with credentials attached."""
+        system = self._make_system_with_npm_vault()
+        flow = _Flow()
+        flow.request.pretty_host = "registry.npmjs.org"
+        flow.request.host = "registry.npmjs.org"
+        flow.request.path = "/@ali%2forion-claude-plugin"
+
+        system.request(flow)
+
+        self.assertEqual("Bearer npm-token", flow.request.headers.get("Authorization"))
+        self.assertIsNone(getattr(flow.response, "status_code", None))
+
+    def test_scoped_package_uppercase_encoding_receives_credential(self) -> None:
+        """Uppercase ``%2F`` variant used by some clients is equally valid."""
+        system = self._make_system_with_npm_vault()
+        flow = _Flow()
+        flow.request.pretty_host = "registry.npmjs.org"
+        flow.request.host = "registry.npmjs.org"
+        flow.request.path = "/@ali%2Forion-claude-plugin"
+
+        system.request(flow)
+
+        self.assertEqual("Bearer npm-token", flow.request.headers.get("Authorization"))
+
+    def test_scoped_package_encoded_backslash_still_rejected(self) -> None:
+        """``%5c`` (encoded backslash) has no legitimate use even in scoped
+        registry paths and must still be rejected."""
+        system = self._make_system_with_npm_vault()
+        flow = _Flow()
+        flow.request.pretty_host = "registry.npmjs.org"
+        flow.request.host = "registry.npmjs.org"
+        flow.request.path = "/@ali%5corion-claude-plugin"
+
+        system.request(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("Authorization", flow.request.headers._values)
+
+    def test_scoped_package_double_encoded_slash_still_rejected(self) -> None:
+        """A double-encoded ``%252f`` has no legitimate use and is rejected
+        even under the relaxed single-layer ``%2f`` policy."""
+        system = self._make_system_with_npm_vault()
+        flow = _Flow()
+        flow.request.pretty_host = "registry.npmjs.org"
+        flow.request.host = "registry.npmjs.org"
+        flow.request.path = "/@ali%252forion-claude-plugin"
+
+        system.request(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("Authorization", flow.request.headers._values)
+
 
 if __name__ == "__main__":
     unittest.main()

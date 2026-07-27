@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolAcquireFailedExcept
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyedException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolEmptyException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolNotRunningException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolStateStoreUnavailableException
 import com.alibaba.opensandbox.sandbox.domain.pool.AcquirePolicy
 import com.alibaba.opensandbox.sandbox.domain.pool.IdleEntry
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolConfig
@@ -183,19 +184,25 @@ class SandboxPool internal constructor(
      * Acquires a sandbox from the pool or creates one directly per policy.
      *
      * 1. Tries to take an idle sandbox ID from the store and connect.
-     * 2. If connect fails (stale ID), removes the ID, best-effort kill, then falls back to direct create.
-     * 3. Under [AcquirePolicy.FAIL_FAST]:
-     *    - throws [PoolEmptyException] when idle buffer is empty;
-     *    - throws [PoolAcquireFailedException] when an idle candidate exists but connect fails.
-     * 4. If no idle and [policy] is [AcquirePolicy.DIRECT_CREATE], creates a new sandbox via lifecycle API and returns it.
-     * 5. If pool is not RUNNING (e.g. DRAINING/STOPPED), throws [PoolNotRunningException].
+     * 2. If connect fails (stale ID), removes the ID, best-effort kill, then applies the policy:
+     *    - [AcquirePolicy.FAIL_FAST] / [AcquirePolicy.DIRECT_CREATE]: no retry across idles;
+     *      FAIL_FAST throws, DIRECT_CREATE falls through to lifecycle create.
+     *    - [AcquirePolicy.RETRY_NEXT_IDLE] / [AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE]:
+     *      skip the bad candidate and try the next idle up to [PoolConfig.maxAcquireRetries]
+     *      total attempts. On exhaustion, `_THEN_CREATE` falls through to lifecycle create;
+     *      the retry-only variant throws [PoolAcquireFailedException].
+     * 3. Under [AcquirePolicy.FAIL_FAST] / [AcquirePolicy.RETRY_NEXT_IDLE]:
+     *    - throws [PoolEmptyException] when idle buffer is empty (no candidate ever seen);
+     *    - throws [PoolAcquireFailedException] with `cause` set to the last connect failure
+     *      when at least one idle candidate was attempted.
+     * 4. If pool is not RUNNING (e.g. DRAINING/STOPPED), throws [PoolNotRunningException].
      *
      * @param sandboxTimeout Optional duration to set on the acquired sandbox (applied via renew after connect).
-     * @param policy Behavior when idle buffer is empty (default: [AcquirePolicy.DIRECT_CREATE]).
+     * @param policy Behavior on idle-empty / candidate failure (default: [AcquirePolicy.DIRECT_CREATE]).
      * @return A connected [Sandbox] instance. Caller must call [Sandbox.kill] when done.
      * @throws PoolNotRunningException when pool lifecycle state is not RUNNING.
-     * @throws PoolEmptyException when policy is FAIL_FAST and idle is empty.
-     * @throws PoolAcquireFailedException when policy is FAIL_FAST and idle candidate is unusable.
+     * @throws PoolEmptyException when the effective policy throws and idle was empty.
+     * @throws PoolAcquireFailedException when the effective policy throws and an idle candidate was attempted.
      * @throws SandboxException for lifecycle create/connect/renew errors.
      */
     fun acquire(
@@ -216,20 +223,56 @@ class SandboxPool internal constructor(
                 logger.info("Pool not running after acquire started, rejected: pool_name={} state={}", config.poolName, state)
                 throw PoolNotRunningException("Cannot acquire when pool state is $state")
             }
-            ensurePoolNamespaceActive()
+            ensurePoolNamespaceActiveForAcquire(policy)
             val poolName = config.poolName
-            val takeResult = stateStore.tryTakeIdle(poolName, config.acquireMinRemainingTtl)
-            val sandboxId = takeResult.sandboxId
-            // Defer the cleanup of below-threshold-but-still-alive sandboxes until after the
-            // chosen candidate is connected and renewed. Doing it inline (synchronously, before
-            // connect) would let slow kill RPCs eat the candidate's remaining TTL — exactly the
-            // race this PR is trying to fix.
-            val pendingKill = takeResult.discardedAliveSandboxIds
-            var noIdleReason: String? = null // null = got a sandbox from idle; non-null = reason we have no usable idle
-            var idleConnectFailure: Exception? = null
-            if (sandboxId != null) {
+            val maxAttempts = effectiveMaxIdleAttempts(policy)
+            // Accumulate discarded-alive sandbox IDs across all take iterations so we schedule
+            // a single deferred cleanup, instead of one kill batch per retry.
+            val pendingKill = ArrayList<String>()
+            var lastSandboxId: String? = null
+            var lastIdleConnectFailure: Exception? = null
+            var attemptedAny = false
+            var attempt = 0
+            var loopExhausted = true
+            while (attempt < maxAttempts) {
+                attempt++
+                val takeResult =
+                    try {
+                        stateStore.tryTakeIdle(poolName, config.acquireMinRemainingTtl)
+                    } catch (e: PoolStateStoreUnavailableException) {
+                        // State store outage. Per OSEP-0005, under policies that fall through to
+                        // direct-create on empty idle we degrade to that fallback so the pool
+                        // stays at least as available as raw SDK usage during store outages.
+                        // Under non-fallthrough policies (FAIL_FAST / RETRY_NEXT_IDLE) we surface
+                        // the outage as-is so callers can react.
+                        if (!policyFallsThroughToDirectCreate(policy)) {
+                            scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
+                            throw e
+                        }
+                        logger.warn(
+                            "Acquire: state store unavailable, falling through to direct create " +
+                                "per policy={} error={}",
+                            policy,
+                            e.message,
+                        )
+                        loopExhausted = false
+                        break
+                    }
+                if (takeResult.discardedAliveSandboxIds.isNotEmpty()) {
+                    pendingKill.addAll(takeResult.discardedAliveSandboxIds)
+                }
+                val sandboxId = takeResult.sandboxId
+                if (sandboxId == null) {
+                    // Idle buffer drained mid-loop (or was empty from the start). Stop retrying —
+                    // continuing would just pay another take round-trip for no gain.
+                    loopExhausted = false
+                    break
+                }
+                lastSandboxId = sandboxId
+                attemptedAny = true
+                val sandbox: Sandbox
                 try {
-                    val sandbox =
+                    sandbox =
                         Sandbox.connector()
                             .sandboxId(sandboxId)
                             .connectTimeout(config.acquireReadyTimeout)
@@ -239,65 +282,153 @@ class SandboxPool internal constructor(
                             .run {
                                 config.acquireHealthCheck?.let { healthCheck(it) } ?: this
                             }.connect()
-                    sandboxTimeout?.let { sandbox.renew(it) }
-                    ensurePoolNamespaceActiveOrDispose(sandbox)
-                    // Candidate is connected and (optionally) renewed. Now safe to clean up the
-                    // discarded-alive sandboxes; offload to the warmup executor so the caller
-                    // does not wait for N kill RPCs.
-                    scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
-                    logger.debug(
-                        "Acquire from idle: pool_name={} sandbox_id={} policy={}",
-                        poolName,
-                        sandboxId,
-                        policy,
-                    )
-                    return sandbox
                 } catch (e: PoolDestroyedException) {
                     scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
                     throw e
                 } catch (e: Exception) {
-                    idleConnectFailure = e
+                    // Connect / readiness / health-check failure — the idle candidate itself is
+                    // unusable. Remove it, best-effort kill, then let the loop try the next.
+                    lastIdleConnectFailure = e
                     logger.warn(
-                        "Idle connect failed (stale or unreachable), removed from pool and falling back: " +
-                            "pool_name={} sandbox_id={} error={}",
+                        "Idle connect failed (stale or unreachable), removed from pool: " +
+                            "pool_name={} sandbox_id={} policy={} attempt={}/{} error={}",
                         poolName,
                         sandboxId,
+                        policy,
+                        attempt,
+                        maxAttempts,
                         e.message,
                     )
                     stateStore.removeIdle(poolName, sandboxId)
-                    try {
-                        sandboxManager?.killSandbox(sandboxId)
-                    } catch (_: Exception) {
-                        // best-effort kill; do not replace original error
+                    // Fire-and-forget the remote kill on the warmup executor. Awaiting kill
+                    // inline would let a slow DELETE (up to the lifecycle client's request
+                    // timeout) block the next retry iteration, defeating the point of
+                    // RETRY_NEXT_IDLE. scheduleKillDiscardedAlive uses the same executor path
+                    // as discarded-alive cleanup and falls back to inline execution when the
+                    // pool is mid-shutdown so cleanup is never silently dropped.
+                    scheduleKillDiscardedAlive(poolName, listOf(sandboxId), source = "acquire-stale")
+                    // Re-check lifecycle between iterations so an in-flight shutdown / namespace
+                    // destroy short-circuits the retry loop instead of paying another readyTimeout.
+                    if (lifecycleState.get() != LifecycleState.RUNNING) {
+                        val state = lifecycleState.get()
+                        throwIfPoolNamespaceDestroyed()
+                        scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
+                        throw PoolNotRunningException("Cannot acquire when pool state is $state")
                     }
-                    noIdleReason = "idle connect failed for sandbox_id=$sandboxId (stale or unreachable)"
+                    ensurePoolNamespaceActive()
+                    continue
                 }
-            } else {
-                noIdleReason = "idle buffer empty"
+                // Connect + readiness succeeded. From here on the sandbox is a healthy, borrowable
+                // idle: any failure below (renew rejection, namespace fenced) is NOT a candidate-
+                // specific problem, so we must not treat it as "stale idle" and burn another retry.
+                // Dispose the sandbox and rethrow instead.
+                try {
+                    sandboxTimeout?.let { sandbox.renew(it) }
+                    ensurePoolNamespaceActiveOrDispose(sandbox)
+                } catch (e: PoolDestroyedException) {
+                    scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
+                    throw e
+                } catch (e: Exception) {
+                    // Renew failed against a healthy sandbox. Retrying another idle will not fix a
+                    // lifecycle-API renew rejection, so we must not loop. But `tryTakeIdle` has
+                    // already popped this ID out of the idle store — if we only close() locally,
+                    // the remote sandbox stays alive on the server until its TTL expires and is
+                    // no longer tracked anywhere (leaks against pool capacity accounting). Kill
+                    // the remote sandbox best-effort, then close local resources and rethrow.
+                    logger.warn(
+                        "Acquire renew failed after idle connect; killing remote sandbox and not " +
+                            "retrying (renew errors are not candidate-specific): " +
+                            "pool_name={} sandbox_id={} policy={} error={}",
+                        poolName,
+                        sandboxId,
+                        policy,
+                        e.message,
+                    )
+                    try {
+                        sandbox.kill()
+                    } catch (killEx: Exception) {
+                        logger.warn(
+                            "Best-effort kill after renew failure failed: pool_name={} sandbox_id={} error={}",
+                            poolName,
+                            sandboxId,
+                            killEx.message,
+                        )
+                    }
+                    try {
+                        sandbox.close()
+                    } catch (_: Exception) {
+                        // best-effort local resource release
+                    }
+                    scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
+                    throw e
+                }
+                // Candidate is connected and renewed. Now safe to clean up the discarded-alive
+                // sandboxes; offload to the warmup executor so the caller does not wait for
+                // N kill RPCs.
+                scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
+                logger.debug(
+                    "Acquire from idle: pool_name={} sandbox_id={} policy={} attempt={}/{}",
+                    poolName,
+                    sandboxId,
+                    policy,
+                    attempt,
+                    maxAttempts,
+                )
+                return sandbox
             }
-            // Reaching here means we did not return a sandbox from idle. Still kick off the
-            // deferred cleanup so the discarded-alive sandboxes do not linger; FAIL_FAST throws
-            // and DIRECT_CREATE falls through to a fresh sandbox creation, neither of which
-            // benefits from a synchronous kill.
+            // Reaching here means we did not return a sandbox from idle. Fire the deferred cleanup
+            // so the discarded-alive sandboxes do not linger; both the fail-fast and direct-create
+            // fallthroughs below benefit from asynchronous cleanup instead of a synchronous kill.
             scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
-            val reason = noIdleReason!!
-            if (policy == AcquirePolicy.FAIL_FAST) {
-                logger.debug("Acquire FAIL_FAST: pool_name={} reason={}", poolName, reason)
-                if (sandboxId != null) {
+
+            val reason =
+                when {
+                    !attemptedAny -> "idle buffer empty"
+                    loopExhausted ->
+                        "idle connect failed for $maxAttempts candidate(s); last sandbox_id=$lastSandboxId " +
+                            "(stale or unreachable)"
+                    else ->
+                        "idle connect failed for sandbox_id=$lastSandboxId; idle buffer drained " +
+                            "before reaching maxAcquireRetries=$maxAttempts"
+                }
+            if (!policyFallsThroughToDirectCreate(policy)) {
+                logger.debug("Acquire no-fallback: pool_name={} policy={} reason={}", poolName, policy, reason)
+                if (attemptedAny) {
                     throw PoolAcquireFailedException(
-                        message = "Cannot acquire: $reason; policy is FAIL_FAST",
-                        cause = idleConnectFailure,
+                        message = "Cannot acquire: $reason; policy is $policy",
+                        cause = lastIdleConnectFailure,
                     )
                 }
-                throw PoolEmptyException("Cannot acquire: $reason; policy is FAIL_FAST")
+                throw PoolEmptyException("Cannot acquire: $reason; policy is $policy")
             }
-            ensurePoolNamespaceActive()
+            ensurePoolNamespaceActiveForAcquire(policy)
             logger.debug("Acquire direct create: pool_name={} reason={} policy={}", poolName, reason, policy)
-            return directCreate(sandboxTimeout)
+            return directCreate(sandboxTimeout, policy)
         } finally {
             endOperation()
         }
     }
+
+    /**
+     * Effective per-acquire cap on how many idle candidates to attempt before giving up. The
+     * legacy single-shot policies always try exactly one idle; the retry policies use the
+     * user-configured `maxAcquireRetries` (default 3). Kept private so we can revisit the bound
+     * (e.g. add a wall-clock deadline) without changing the public policy enum.
+     */
+    private fun effectiveMaxIdleAttempts(policy: AcquirePolicy): Int =
+        when (policy) {
+            AcquirePolicy.FAIL_FAST, AcquirePolicy.DIRECT_CREATE -> 1
+            AcquirePolicy.RETRY_NEXT_IDLE, AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE ->
+                config.maxAcquireRetries.coerceAtLeast(1)
+        }
+
+    /**
+     * Returns whether [policy], after exhausting its idle budget (or on state-store outage),
+     * should silently create a fresh sandbox instead of throwing. Mirrors the equivalent Go /
+     * Python helpers so the three SDKs share one fallthrough classification.
+     */
+    private fun policyFallsThroughToDirectCreate(policy: AcquirePolicy): Boolean =
+        policy == AcquirePolicy.DIRECT_CREATE || policy == AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE
 
     /**
      * Updates the maximum idle target. In distributed mode the new value is written to the store
@@ -609,8 +740,15 @@ class SandboxPool internal constructor(
         return builder.build()
     }
 
-    private fun directCreate(sandboxTimeout: Duration?): Sandbox {
-        ensurePoolNamespaceActive()
+    private fun directCreate(
+        sandboxTimeout: Duration?,
+        policy: AcquirePolicy = AcquirePolicy.DIRECT_CREATE,
+    ): Sandbox {
+        // policy-aware namespace check: if the state store is down and the policy is a
+        // fallthrough one, treat destroy-state as unknown and proceed to direct-create
+        // instead of surfacing the outage. See ensurePoolNamespaceActiveForAcquire for
+        // the full rationale.
+        ensurePoolNamespaceActiveForAcquire(policy)
         sandboxCreator?.let {
             val sandbox =
                 buildSandboxFromCreator(
@@ -634,7 +772,7 @@ class SandboxPool internal constructor(
                     throw e
                 }
             }
-            ensurePoolNamespaceActiveOrDispose(sandbox)
+            ensurePoolNamespaceActiveOrDispose(sandbox, policy)
             return sandbox
         }
 
@@ -649,9 +787,9 @@ class SandboxPool internal constructor(
             )
         config.acquireHealthCheck?.let { builder.healthCheck(it) }
         val sandbox = builder.build()
+        // Renew is a candidate-specific step; failure means kill+close and rethrow.
         try {
             sandboxTimeout?.let { sandbox.renew(it) }
-            ensurePoolNamespaceActive()
         } catch (e: Exception) {
             try {
                 sandbox.kill()
@@ -660,6 +798,10 @@ class SandboxPool internal constructor(
             }
             throw e
         }
+        // Post-create fence check uses the policy-aware helper so full state-store
+        // outages degrade correctly under fallthrough policies; on rethrow the helper
+        // has already killed and closed the sandbox.
+        ensurePoolNamespaceActiveOrDispose(sandbox, policy)
         return sandbox
     }
 
@@ -667,6 +809,38 @@ class SandboxPool internal constructor(
         val state = stateStore.getDestroyState(config.poolName)
         if (state != PoolDestroyState.ACTIVE) {
             throw PoolDestroyedException("Pool namespace is $state: poolName=${config.poolName}")
+        }
+    }
+
+    /**
+     * Namespace-active check on the acquire path with graceful degradation.
+     *
+     * Same as [ensurePoolNamespaceActive], but when the state store itself is unavailable
+     * ([PoolStateStoreUnavailableException]) and the effective [policy] falls through to
+     * direct-create on empty idle, we treat the destroy state as *unknown* and allow the
+     * acquire to proceed. This is the necessary counterpart to the state-store-outage
+     * fallthrough already implemented at the `tryTakeIdle` and `directCreate` call sites
+     * (see OSEP-0005 error-code matrix): without it a full Redis outage would short-circuit
+     * acquire before the fallthrough branch could run, making `RETRY_NEXT_IDLE_THEN_CREATE`
+     * and `DIRECT_CREATE` less available than documented.
+     *
+     * Fail-closed behavior for non-fallthrough policies ([AcquirePolicy.FAIL_FAST] /
+     * [AcquirePolicy.RETRY_NEXT_IDLE]) is preserved: the outage is surfaced as-is so
+     * callers can react.
+     */
+    private fun ensurePoolNamespaceActiveForAcquire(policy: AcquirePolicy) {
+        try {
+            ensurePoolNamespaceActive()
+        } catch (e: PoolStateStoreUnavailableException) {
+            if (!policyFallsThroughToDirectCreate(policy)) {
+                throw e
+            }
+            logger.warn(
+                "Acquire: state store unavailable during namespace check, " +
+                    "assuming ACTIVE and degrading to direct-create per policy={} error={}",
+                policy,
+                e.message,
+            )
         }
     }
 
@@ -682,9 +856,54 @@ class SandboxPool internal constructor(
 
     private fun isPoolNamespaceActive(): Boolean = stateStore.getDestroyState(config.poolName) == PoolDestroyState.ACTIVE
 
-    private fun ensurePoolNamespaceActiveOrDispose(sandbox: Sandbox) {
+    /**
+     * Post-create fence check.
+     *
+     * If [policy] is a fallthrough policy and the state store itself is unavailable
+     * ([PoolStateStoreUnavailableException]), we cannot tell whether the pool was
+     * destroyed, so we assume ACTIVE and keep the freshly-created sandbox (mirrors
+     * the OSEP-0005 acquire-outage semantics). Non-fallthrough policies (and callers
+     * that pass `policy=null`) keep the original fail-closed behavior for backward
+     * compatibility.
+     */
+    private fun ensurePoolNamespaceActiveOrDispose(
+        sandbox: Sandbox,
+        policy: AcquirePolicy? = null,
+    ) {
         try {
             ensurePoolNamespaceActive()
+        } catch (e: PoolStateStoreUnavailableException) {
+            if (policy != null && policyFallsThroughToDirectCreate(policy)) {
+                logger.warn(
+                    "Acquire: state store unavailable during post-create fence check, " +
+                        "keeping sandbox and degrading per policy={} sandbox_id={} error={}",
+                    policy,
+                    sandbox.id,
+                    e.message,
+                )
+                return
+            }
+            try {
+                sandbox.kill()
+            } catch (cleanupError: Exception) {
+                logger.warn(
+                    "Pool sandbox cleanup after store-outage fence failed: pool_name={} sandbox_id={} operation=kill error={}",
+                    config.poolName,
+                    sandbox.id,
+                    cleanupError.message,
+                )
+            }
+            try {
+                sandbox.close()
+            } catch (cleanupError: Exception) {
+                logger.warn(
+                    "Pool sandbox cleanup after store-outage fence failed: pool_name={} sandbox_id={} operation=close error={}",
+                    config.poolName,
+                    sandbox.id,
+                    cleanupError.message,
+                )
+            }
+            throw e
         } catch (e: Exception) {
             try {
                 sandbox.kill()
@@ -1012,6 +1231,11 @@ class SandboxPool internal constructor(
 
         fun idleTimeout(idleTimeout: Duration): Builder {
             configBuilder.idleTimeout(idleTimeout)
+            return this
+        }
+
+        fun maxAcquireRetries(maxAcquireRetries: Int): Builder {
+            configBuilder.maxAcquireRetries(maxAcquireRetries)
             return this
         }
 

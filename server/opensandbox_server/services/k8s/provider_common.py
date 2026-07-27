@@ -125,7 +125,11 @@ def _build_execd_init_container(
         "chmod +x /opt/opensandbox/execd && "
         "chmod +x /opt/opensandbox/bootstrap.sh && "
         "(cp /usr/local/bin/bwrap /opt/opensandbox/bwrap && "
-        "chmod +x /opt/opensandbox/bwrap || true)"
+        "chmod +x /opt/opensandbox/bwrap || true) && "
+        "(test ! -e /usr/local/libexec/opensandbox-session-gate || "
+        "(cp /usr/local/libexec/opensandbox-session-gate "
+        "/opt/opensandbox/opensandbox-session-gate && "
+        "chmod 0555 /opt/opensandbox/opensandbox-session-gate))"
     )
     security_context = None
     if disable_ipv6_for_egress:

@@ -181,6 +181,19 @@ finally:
     await pool.shutdown(graceful=True)
 ```
 
+::: tip AcquirePolicy
+`AcquirePolicy` controls what happens when the idle buffer is empty **or** the first idle candidate fails its readiness check:
+
+| Policy | Retry across idles | Fallback on exhaustion |
+|---|---|---|
+| `FAIL_FAST` | no | raise `PoolEmptyException` / `PoolAcquireFailedException` |
+| `DIRECT_CREATE` (default) | no | create a new sandbox via lifecycle API |
+| `RETRY_NEXT_IDLE` | up to `max_acquire_retries` idles | raise |
+| `RETRY_NEXT_IDLE_THEN_CREATE` | up to `max_acquire_retries` idles | create a new sandbox |
+
+Use the `RETRY_NEXT_IDLE*` variants when the pool may contain a mix of healthy and stale idle sandboxes (custom templates with long cold-start; network flap left a few unreachable idles). Each failed candidate still pays up to `acquire_ready_timeout`, so bound the retry with the `max_acquire_retries` constructor argument (default `3`). Both `SandboxPoolSync` and `SandboxPoolAsync` accept the same argument.
+:::
+
 For Python production services with multiple processes or pods, use Redis-backed
 pool state. Install the optional dependency:
 

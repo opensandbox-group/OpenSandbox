@@ -141,14 +141,15 @@ func poolTag(prefix string) string {
 }
 
 type poolCreateOpts struct {
-	warmupConcurrency    int
+	warmupConcurrency     int
 	warmupSandboxPreparer func(ctx context.Context, sb *opensandbox.Sandbox) error
-	connectionConfig     *opensandbox.ConnectionConfig
-	degradedThreshold    int
-	warmupReadyTimeout   time.Duration
-	acquireReadyTimeout  time.Duration
-	primaryLockTTL       time.Duration
-	reconcileInterval    time.Duration
+	connectionConfig      *opensandbox.ConnectionConfig
+	degradedThreshold     int
+	warmupReadyTimeout    time.Duration
+	acquireReadyTimeout   time.Duration
+	primaryLockTTL        time.Duration
+	reconcileInterval     time.Duration
+	maxAcquireRetries     int
 }
 
 func createTestPool(
@@ -168,6 +169,7 @@ func createTestPool(
 	acquireReady := 30 * time.Second
 	lockTTL := poolPrimaryLockTTL
 	reconcileInt := poolReconcileInterval
+	maxAcquireRetries := 0
 	var preparer func(ctx context.Context, sb *opensandbox.Sandbox) error
 
 	if opts != nil {
@@ -192,6 +194,9 @@ func createTestPool(
 		if opts.connectionConfig != nil {
 			connCfg = *opts.connectionConfig
 		}
+		if opts.maxAcquireRetries > 0 {
+			maxAcquireRetries = opts.maxAcquireRetries
+		}
 		preparer = opts.warmupSandboxPreparer
 	}
 
@@ -208,8 +213,8 @@ func createTestPool(
 			Metadata:   map[string]string{"tag": tag, "suite": "sandbox-pool-go-e2e"},
 			Env: map[string]string{
 				"E2E_TEST":                         "true",
-				"EXECD_API_GRACE_SHUTDOWN":          "3s",
-				"EXECD_JUPYTER_IDLE_POLL_INTERVAL":  "1s",
+				"EXECD_API_GRACE_SHUTDOWN":         "3s",
+				"EXECD_JUPYTER_IDLE_POLL_INTERVAL": "1s",
 			},
 			ResourceLimits: getE2eSandboxResource(),
 		}).
@@ -220,6 +225,9 @@ func createTestPool(
 		WarmupReadyTimeout(warmupReady).
 		AcquireReadyTimeout(acquireReady)
 
+	if maxAcquireRetries > 0 {
+		builder = builder.MaxAcquireRetries(maxAcquireRetries)
+	}
 	if preparer != nil {
 		builder = builder.WarmupSandboxPreparer(preparer)
 	}

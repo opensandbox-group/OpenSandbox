@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -200,9 +199,7 @@ func TestPTYWS_UnknownSessionReturns404(t *testing.T) {
 }
 
 func TestPTYWS_AlreadyConnectedReturns409(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -215,9 +212,7 @@ func TestPTYWS_AlreadyConnectedReturns409(t *testing.T) {
 }
 
 func TestPTYWS_ConnectedFramePTYMode(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -231,9 +226,7 @@ func TestPTYWS_ConnectedFramePTYMode(t *testing.T) {
 }
 
 func TestPTYWS_StdinForwarding(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -246,9 +239,7 @@ func TestPTYWS_StdinForwarding(t *testing.T) {
 }
 
 func TestPTYWS_PingPong(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -262,9 +253,7 @@ func TestPTYWS_PingPong(t *testing.T) {
 }
 
 func TestPTYWS_ExitFrame(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -281,9 +270,7 @@ func TestPTYWS_ExitFrame(t *testing.T) {
 }
 
 func TestPTYWS_ReplayOnReconnect(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -330,9 +317,7 @@ func TestPTYWS_ReplayOnReconnect(t *testing.T) {
 // reattaches to the SAME shell: it replays the prior scrollback and can read a
 // shell variable set by the evicted client.
 func TestPTYWS_TakeoverEvictsHolder(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -372,9 +357,7 @@ func TestPTYWS_TakeoverEvictsHolder(t *testing.T) {
 // TestPTYWS_TakeoverOnFreeSessionConnects verifies ?takeover=1 is a no-op when the
 // session is free: it connects normally (there is no holder to evict).
 func TestPTYWS_TakeoverOnFreeSessionConnects(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -389,9 +372,7 @@ func TestPTYWS_TakeoverOnFreeSessionConnects(t *testing.T) {
 // then fail to upgrade, orphaning the session. It must return 409 and leave the
 // holder attached and functional.
 func TestPTYWS_TakeoverRequiresWebSocketUpgrade(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -415,9 +396,7 @@ func TestPTYWS_TakeoverRequiresWebSocketUpgrade(t *testing.T) {
 // the lock without tripping the race detector — exercising the initial replay/connected
 // writes vs. eviction and the cleanup-window paths — and the shell must survive.
 func TestPTYWS_ConcurrentTakeovers(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -468,9 +447,7 @@ func TestPTYWS_ConcurrentTakeovers(t *testing.T) {
 }
 
 func TestPTYWS_ResizeFrame(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 
@@ -490,9 +467,7 @@ func TestPTYWS_ResizeFrame(t *testing.T) {
 }
 
 func TestPTYWS_PipeModeConnectedFrame(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found")
-	}
+	requireBash(t)
 	srv := newPTYTestServer(t)
 	defer srv.Close()
 

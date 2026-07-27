@@ -53,6 +53,7 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.docker import DockerSandboxService
 from opensandbox_server.services.docker.metadata import DockerMetadataStore
+from opensandbox_server.services.docker.runtime import SESSION_GATE_SOURCE_PATH
 from opensandbox_server.services.helpers import (
     parse_gpu_request,
     parse_memory_limit,
@@ -580,6 +581,83 @@ def test_fetch_execd_archive_caches_by_platform_key(mock_docker):
     assert amd64_second == b"amd64"
     assert arm64_data == b"arm64"
     assert mock_client.containers.create.call_count == 2
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_fetch_execd_archive_caches_session_gate_by_platform_key(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    mock_client.info.return_value = {"OSType": "linux", "Architecture": "amd64"}
+    container = MagicMock()
+
+    def get_archive(path):
+        return ([f"archive:{path}".encode()], {})
+
+    container.get_archive.side_effect = get_archive
+    mock_client.containers.create.return_value = container
+    service = DockerSandboxService(config=_app_config())
+
+    with patch.object(service, "_ensure_image_available"), patch.object(
+        service, "_docker_operation"
+    ):
+        service._fetch_execd_archive()
+
+    assert service._session_gate_archive_cache["default"] == (
+        f"archive:{SESSION_GATE_SOURCE_PATH}".encode()
+    )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_fetch_execd_archive_allows_older_image_without_session_gate(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    mock_client.info.return_value = {"OSType": "linux", "Architecture": "amd64"}
+    container = MagicMock()
+
+    def get_archive(path):
+        if path == SESSION_GATE_SOURCE_PATH:
+            raise DockerNotFound("session gate missing")
+        return ([f"archive:{path}".encode()], {})
+
+    container.get_archive.side_effect = get_archive
+    mock_client.containers.create.return_value = container
+    service = DockerSandboxService(config=_app_config())
+
+    with patch.object(service, "_ensure_image_available"), patch.object(
+        service, "_docker_operation"
+    ):
+        assert service._fetch_execd_archive() == b"archive:/execd"
+
+    assert "default" not in service._session_gate_archive_cache
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_fetch_execd_archive_rejects_session_gate_read_failure(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    mock_client.info.return_value = {"OSType": "linux", "Architecture": "amd64"}
+    container = MagicMock()
+
+    def get_archive(path):
+        if path == SESSION_GATE_SOURCE_PATH:
+            raise DockerException("session gate read failed")
+        return ([f"archive:{path}".encode()], {})
+
+    container.get_archive.side_effect = get_archive
+    mock_client.containers.create.return_value = container
+    service = DockerSandboxService(config=_app_config())
+
+    with patch.object(service, "_ensure_image_available"), patch.object(
+        service, "_docker_operation"
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            service._fetch_execd_archive()
+
+    assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.EXECD_DISTRIBUTION_FAILED
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
 def test_fetch_execd_archive_maps_platform_typeerror_to_invalid_parameter(mock_docker):

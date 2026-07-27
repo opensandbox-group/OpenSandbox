@@ -17,8 +17,14 @@ import pathlib
 import tarfile
 from unittest.mock import MagicMock, patch
 
+from docker.errors import DockerException
+from fastapi import HTTPException
+import pytest
+
 from opensandbox_server.config import AppConfig, IngressConfig, RuntimeConfig, ServerConfig
+from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.docker import DockerSandboxService
+from opensandbox_server.services.docker.runtime import OPENSANDBOX_DIR
 
 
 def _app_config() -> AppConfig:
@@ -93,3 +99,66 @@ def test_install_bootstrap_script_uses_full_bootstrap_sh(mock_docker):
     assert 'EXECD="${EXECD:=/opt/opensandbox/execd}"' in script or "EXECD=" in script
     assert 'if [ -z "${EXECD_ENVS:-}" ]; then' in script
     assert 'export EXECD_ENVS' in script
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_copy_session_gate_installs_cached_archive_in_managed_directory(mock_docker):
+    mock_docker.from_env.return_value = MagicMock()
+    service = DockerSandboxService(config=_app_config())
+    cache_key = service._normalize_platform_key(None)
+    service._session_gate_archive_cache[cache_key] = b"session-gate-archive"
+    mock_container = MagicMock()
+
+    with patch.object(service, "_docker_operation"):
+        service._copy_session_gate_to_container(mock_container, "test-sandbox")
+
+    mock_container.put_archive.assert_called_once_with(
+        path=OPENSANDBOX_DIR,
+        data=b"session-gate-archive",
+    )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_copy_session_gate_is_backward_compatible_when_archive_is_missing(mock_docker):
+    mock_docker.from_env.return_value = MagicMock()
+    service = DockerSandboxService(config=_app_config())
+    mock_container = MagicMock()
+
+    service._copy_session_gate_to_container(mock_container, "test-sandbox")
+
+    mock_container.put_archive.assert_not_called()
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_copy_session_gate_rejects_distribution_failure(mock_docker):
+    mock_docker.from_env.return_value = MagicMock()
+    service = DockerSandboxService(config=_app_config())
+    cache_key = service._normalize_platform_key(None)
+    service._session_gate_archive_cache[cache_key] = b"session-gate-archive"
+    mock_container = MagicMock()
+    mock_container.put_archive.side_effect = DockerException("copy failed")
+
+    with patch.object(service, "_docker_operation"):
+        with pytest.raises(HTTPException) as exc_info:
+            service._copy_session_gate_to_container(mock_container, "test-sandbox")
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.EXECD_DISTRIBUTION_FAILED
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_prepare_sandbox_runtime_distributes_session_gate(mock_docker):
+    mock_docker.from_env.return_value = MagicMock()
+    service = DockerSandboxService(config=_app_config())
+    mock_container = MagicMock()
+
+    with patch.object(service, "_copy_execd_to_container"), patch.object(
+        service,
+        "_install_bootstrap_script",
+    ), patch.object(service, "_copy_bwrap_to_container"), patch.object(
+        service,
+        "_copy_session_gate_to_container",
+    ) as copy_gate:
+        service._prepare_sandbox_runtime(mock_container, "test-sandbox")
+
+    copy_gate.assert_called_once_with(mock_container, "test-sandbox", None)

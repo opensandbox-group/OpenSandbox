@@ -20,12 +20,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// useShOnlyPath limits PATH to a directory containing sh but not bash.
+// resetShellCacheForTest clears getShell's cache so PATH-mutating tests
+// observe a fresh lookup. Production code must not call this.
+func resetShellCacheForTest() {
+	shellCacheOnce = sync.Once{}
+	shellCacheVal = ""
+}
+
+// useShOnlyPath restricts PATH to a directory containing sh but not bash.
 func useShOnlyPath(t *testing.T) {
 	t.Helper()
 
@@ -37,5 +45,7 @@ func useShOnlyPath(t *testing.T) {
 	binDir := t.TempDir()
 	require.NoError(t, os.Symlink(shPath, filepath.Join(binDir, "sh")))
 	t.Setenv("PATH", binDir)
+	resetShellCacheForTest()
+	t.Cleanup(resetShellCacheForTest)
 	require.Equal(t, "sh", getShell())
 }

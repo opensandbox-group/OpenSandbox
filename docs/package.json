@@ -5,7 +5,7 @@
   "pnpm": {
     "overrides": {
       "rollup": "4.60.2",
-      "postcss": "8.5.10",
+      "postcss": "8.5.11",
       "esbuild": "0.25.2",
       "vite": "6.4.3"
     }
