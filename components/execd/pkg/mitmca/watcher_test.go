@@ -36,14 +36,34 @@ func TestSetProcessTrustEnvironment(t *testing.T) {
 	t.Setenv("REQUESTS_CA_BUNDLE", "")
 	t.Setenv("SSL_CERT_FILE", "")
 
-	require.NoError(t, setProcessTrustEnvironment(os.Setenv))
+	require.NoError(t, setProcessTrustEnvironment(os.Getenv, os.Setenv))
 	require.Equal(t, defaultCAPath, os.Getenv("NODE_EXTRA_CA_CERTS"))
 	require.Equal(t, defaultMergedCAPath, os.Getenv("REQUESTS_CA_BUNDLE"))
 	require.Equal(t, defaultMergedCAPath, os.Getenv("SSL_CERT_FILE"))
 }
 
+func TestSetProcessTrustEnvironmentPreservesOverrides(t *testing.T) {
+	values := map[string]string{
+		"NODE_EXTRA_CA_CERTS": "/custom/node.pem",
+		"REQUESTS_CA_BUNDLE":  "/custom/requests.pem",
+		"SSL_CERT_FILE":       "/custom/ssl.pem",
+	}
+
+	err := setProcessTrustEnvironment(func(name string) string {
+		return values[name]
+	}, func(name, value string) error {
+		values[name] = value
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "/custom/node.pem", values["NODE_EXTRA_CA_CERTS"])
+	require.Equal(t, "/custom/requests.pem", values["REQUESTS_CA_BUNDLE"])
+	require.Equal(t, "/custom/ssl.pem", values["SSL_CERT_FILE"])
+}
+
 func TestSetProcessTrustEnvironmentReportsFailure(t *testing.T) {
-	err := setProcessTrustEnvironment(func(name, _ string) error {
+	err := setProcessTrustEnvironment(func(string) string { return "" }, func(name, _ string) error {
 		if name == "REQUESTS_CA_BUNDLE" {
 			return errors.New("setenv failed")
 		}

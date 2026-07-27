@@ -81,7 +81,7 @@ func Start(ctx context.Context) {
 			if refreshErr != nil {
 				return fmt.Errorf("bootstrap refresh failed: %w output=%q", refreshErr, compactOutput(output))
 			}
-			return setProcessTrustEnvironment(os.Setenv)
+			return setProcessTrustEnvironment(os.Getenv, os.Setenv)
 		},
 		onError: func(watchErr error) {
 			log.Warn("mitm_ca_watch status=waiting error=%v", watchErr)
@@ -92,7 +92,7 @@ func Start(ctx context.Context) {
 	})
 }
 
-func setProcessTrustEnvironment(setenv func(string, string) error) error {
+func setProcessTrustEnvironment(getenv func(string) string, setenv func(string, string) error) error {
 	variables := []struct {
 		name  string
 		value string
@@ -102,6 +102,9 @@ func setProcessTrustEnvironment(setenv func(string, string) error) error {
 		{name: "SSL_CERT_FILE", value: defaultMergedCAPath},
 	}
 	for _, variable := range variables {
+		if getenv(variable.name) != "" {
+			continue
+		}
 		if err := setenv(variable.name, variable.value); err != nil {
 			return fmt.Errorf("set child-process trust environment %s: %w", variable.name, err)
 		}
