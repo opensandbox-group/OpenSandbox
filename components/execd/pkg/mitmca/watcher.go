@@ -35,6 +35,7 @@ import (
 const (
 	mitmEnabledEnv      = "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT"
 	defaultCAPath       = "/opt/opensandbox/mitmproxy-ca-cert.pem"
+	defaultMergedCAPath = "/opt/opensandbox/merged-ca-certificates.pem"
 	refreshOnlyArg      = "--refresh-mitm-ca-trust"
 	defaultPollInterval = 2 * time.Second
 	refreshTimeout      = 2 * time.Minute
@@ -81,7 +82,7 @@ func Start(ctx context.Context) {
 			if refreshErr != nil {
 				return fmt.Errorf("bootstrap refresh failed: %w output=%q", refreshErr, compactOutput(output))
 			}
-			return nil
+			return setProcessTrustEnvironment(os.Setenv)
 		},
 		onError: func(watchErr error) {
 			log.Warn("mitm_ca_watch status=waiting error=%v", watchErr)
@@ -90,6 +91,23 @@ func Start(ctx context.Context) {
 			log.Info("mitm_ca_watch status=refreshed fingerprint_sha256=%x", fingerprint)
 		},
 	})
+}
+
+func setProcessTrustEnvironment(setenv func(string, string) error) error {
+	variables := []struct {
+		name  string
+		value string
+	}{
+		{name: "NODE_EXTRA_CA_CERTS", value: defaultCAPath},
+		{name: "REQUESTS_CA_BUNDLE", value: defaultMergedCAPath},
+		{name: "SSL_CERT_FILE", value: defaultMergedCAPath},
+	}
+	for _, variable := range variables {
+		if err := setenv(variable.name, variable.value); err != nil {
+			return fmt.Errorf("set child-process trust environment %s: %w", variable.name, err)
+		}
+	}
+	return nil
 }
 
 func watch(ctx context.Context, cfg watchConfig) {

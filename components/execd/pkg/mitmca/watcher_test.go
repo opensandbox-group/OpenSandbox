@@ -31,6 +31,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSetProcessTrustEnvironment(t *testing.T) {
+	t.Setenv("NODE_EXTRA_CA_CERTS", "")
+	t.Setenv("REQUESTS_CA_BUNDLE", "")
+	t.Setenv("SSL_CERT_FILE", "")
+
+	require.NoError(t, setProcessTrustEnvironment(os.Setenv))
+	require.Equal(t, defaultCAPath, os.Getenv("NODE_EXTRA_CA_CERTS"))
+	require.Equal(t, defaultMergedCAPath, os.Getenv("REQUESTS_CA_BUNDLE"))
+	require.Equal(t, defaultMergedCAPath, os.Getenv("SSL_CERT_FILE"))
+}
+
+func TestSetProcessTrustEnvironmentReportsFailure(t *testing.T) {
+	err := setProcessTrustEnvironment(func(name, _ string) error {
+		if name == "REQUESTS_CA_BUNDLE" {
+			return errors.New("setenv failed")
+		}
+		return nil
+	})
+
+	require.ErrorContains(t, err, "REQUESTS_CA_BUNDLE")
+	require.ErrorContains(t, err, "setenv failed")
+}
+
 func TestWatchRefreshesOnlyAfterValidCertificateRotation(t *testing.T) {
 	caPath := filepath.Join(t.TempDir(), "mitmproxy-ca-cert.pem")
 	first := testCertificate(t, 1)
