@@ -58,6 +58,14 @@ older execd omits both fields (clients must tolerate their absence).
 Host requirements (`bwrap` binary, `CAP_SYS_ADMIN`, `overlayfs`, etc.) are
 listed under [Server Configuration → Host Requirements](#server-configuration).
 
+The published execd image includes the fail-closed native workload gate used
+during session startup. For a Linux source build, `make build` requires a C
+compiler plus static libc and produces `bin/opensandbox-session-gate`; run
+`make build-session-gate` and then `sudo make install-session-gate` before
+starting execd to install the helper at
+`/opt/opensandbox/opensandbox-session-gate`. Keep that path and its parent
+directory root-owned and not group- or world-writable.
+
 ---
 
 ## Overview
@@ -339,8 +347,9 @@ curl -s http://localhost:44772/v1/isolated/capabilities
 }
 ```
 
-- `available: false` — bubblewrap is missing or the host can't create the
-  required namespaces (missing `CAP_SYS_ADMIN`, restricted user-ns sysctl, etc.).
+- `available: false` — the trusted native workload gate is missing or
+  untrusted, bubblewrap is missing, or the host can't create the required
+  namespaces (missing `CAP_SYS_ADMIN`, restricted user-ns sysctl, etc.).
 - `setpriv_available` / `userns_available` — whether sessions with
   `uid_mode: "setpriv"` or `"userns"` can be created. `setpriv_available`
   reflects only execd's **default** UID/GID; a session that requests a
@@ -373,17 +382,20 @@ allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 
 Example: `components/execd/configs/isolation.example.toml`.
 
-**Host requirements:** `bwrap` binary in the execd image; `CAP_SYS_ADMIN`
-(and `kernel.unprivileged_userns_clone=1` for `uid_mode: "userns"`);
-`overlayfs` in the kernel for `overlay` workspaces.
+**Host requirements:** `bwrap` and the trusted native workload gate in the
+execd image; `CAP_SYS_ADMIN` (and `kernel.unprivileged_userns_clone=1` for
+`uid_mode: "userns"`); `overlayfs` in the kernel for `overlay` workspaces.
+The published image installs the gate automatically. Linux source builds must
+run `make build-session-gate` and then `sudo make install-session-gate` from
+`components/execd` before starting execd.
 
-Note: `/capabilities` reports `available: false` only when bwrap itself
-cannot be started at all (missing binary or missing namespace capabilities).
-A missing `overlayfs` does **not** flip `available` — the overlay probe only
-influences Phase 2 `commit`/`diff` support, and default overlay-mode session
-creation can still fail at runtime on such hosts. If you rely on
-`workspace.mode: "overlay"`, verify `overlayfs` support directly on the
-host.
+Note: `/capabilities` reports `available: false` when the native workload gate
+cannot be opened as a trusted executable or when bwrap itself cannot be
+started (missing binary or missing namespace capabilities). A missing
+`overlayfs` does **not** flip `available` — the overlay probe only influences
+Phase 2 `commit`/`diff` support, and default overlay-mode session creation can
+still fail at runtime on such hosts. If you rely on `workspace.mode:
+"overlay"`, verify `overlayfs` support directly on the host.
 
 ---
 

@@ -62,6 +62,10 @@ func (c *IsolatedSessionController) probed() bool {
 	return isolatedRunner != nil && isolatedRunner.Available()
 }
 
+func (c *IsolatedSessionController) initialized() bool {
+	return isolatedRunner != nil
+}
+
 // Create handles POST /v1/isolated/session.
 func (c *IsolatedSessionController) Create() {
 	if !c.probed() {
@@ -133,7 +137,7 @@ func classifyIsolatedCreateError(err error) (int, model.ErrorCode) {
 
 // Get handles GET /v1/isolated/session/:sessionId.
 func (c *IsolatedSessionController) Get() {
-	if !c.probed() {
+	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
 		return
 	}
@@ -196,7 +200,7 @@ func (c *IsolatedSessionController) Get() {
 
 // List handles GET /v1/isolated/sessions.
 func (c *IsolatedSessionController) List() {
-	if !c.probed() {
+	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
 		return
 	}
@@ -218,7 +222,7 @@ func (c *IsolatedSessionController) List() {
 
 // Run handles POST /v1/isolated/session/:sessionId/run (SSE streaming).
 func (c *IsolatedSessionController) Run() {
-	if !c.probed() {
+	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
 		return
 	}
@@ -295,7 +299,7 @@ func (c *IsolatedSessionController) Run() {
 
 // Delete handles DELETE /v1/isolated/session/:sessionId.
 func (c *IsolatedSessionController) Delete() {
-	if !c.probed() {
+	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
 		return
 	}

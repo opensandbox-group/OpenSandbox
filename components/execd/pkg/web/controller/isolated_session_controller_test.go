@@ -18,7 +18,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
@@ -80,4 +83,86 @@ func TestCapabilities_ReportsModeSpecificProbeResults(t *testing.T) {
 			t.Errorf("%s = %#v, present=%v; want false and present", key, value, ok)
 		}
 	}
+}
+
+func TestUnavailableAdmissionDoesNotBlockSessionCleanupRoutes(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		unavailableTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	createCtx, createRecorder := newTestContext(
+		http.MethodPost,
+		"/v1/isolated/session",
+		nil,
+	)
+	NewIsolatedSessionController(createCtx).Create()
+	if createRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"Create status with unavailable admission = %d, want %d",
+			createRecorder.Code,
+			http.StatusServiceUnavailable,
+		)
+	}
+
+	deleteCtx, deleteRecorder := newTestContext(
+		http.MethodDelete,
+		"/v1/isolated/session/existing",
+		nil,
+	)
+	deleteCtx.Params = gin.Params{{Key: "sessionId", Value: "existing"}}
+	NewIsolatedSessionController(deleteCtx).Delete()
+	if deleteRecorder.Code != http.StatusNotFound {
+		t.Fatalf(
+			"Delete status with unavailable admission = %d, want %d",
+			deleteRecorder.Code,
+			http.StatusNotFound,
+		)
+	}
+
+	filesCtx, filesRecorder := newTestContext(
+		http.MethodGet,
+		"/v1/isolated/session/existing/files",
+		nil,
+	)
+	filesCtx.Params = gin.Params{{Key: "sessionId", Value: "existing"}}
+	_, _, _ = NewIsolatedSessionController(filesCtx).getMergedView()
+	if filesRecorder.Code != http.StatusNotFound {
+		t.Fatalf(
+			"Files status with unavailable admission = %d, want %d",
+			filesRecorder.Code,
+			http.StatusNotFound,
+		)
+	}
+}
+
+type unavailableTestIsolator struct{}
+
+func (unavailableTestIsolator) Name() string {
+	return "unavailable-test"
+}
+
+func (unavailableTestIsolator) Available() bool {
+	return false
+}
+
+func (unavailableTestIsolator) Capabilities() isolation.Capabilities {
+	return isolation.Capabilities{}
+}
+
+func (unavailableTestIsolator) Wrap(*exec.Cmd, isolation.WrapOptions) error {
+	return fmt.Errorf("unavailable")
 }

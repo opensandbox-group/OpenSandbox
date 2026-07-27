@@ -583,6 +583,56 @@ func TestLifecycleContextCancellationClosesAllGates(t *testing.T) {
 	waitForDrain(t, lifecycle)
 }
 
+func TestLifecycleAbortedEOFIsExpectedTeardown(t *testing.T) {
+	statusReader, statusWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupReader, setupWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlParent, controlChild, controlSocketInode, err := newGateSocketpair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := newBwrapLifecycle(
+		statusReader,
+		setupWriter,
+		controlParent,
+		int(controlChild.Fd()),
+		controlSocketInode,
+		true,
+	)
+	t.Cleanup(func() {
+		_ = lifecycle.Close()
+		_ = statusWriter.Close()
+		_ = setupReader.Close()
+		_ = controlChild.Close()
+	})
+
+	// Model the peer EOF race after Abort has made teardown irreversible but
+	// before closing the local reader becomes visible to Scanner.
+	lifecycle.mu.Lock()
+	lifecycle.state = lifecycleAborted
+	if lifecycle.control != nil {
+		_ = lifecycle.control.Close()
+		lifecycle.control = nil
+	}
+	if lifecycle.setup != nil {
+		_ = lifecycle.setup.Close()
+		lifecycle.setup = nil
+	}
+	lifecycle.mu.Unlock()
+	if err := statusWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForDrain(t, lifecycle)
+	if err := lifecycle.Close(); err != nil {
+		t.Fatalf("Close after aborted EOF = %v, want nil", err)
+	}
+}
+
 func TestLifecycleAbortAndCloseAreConcurrentAndDoNotLeakFDs(t *testing.T) {
 	countFDs := func() int {
 		t.Helper()

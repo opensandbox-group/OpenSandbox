@@ -98,6 +98,11 @@ func (r *IsolatedRunner) GetMergedView(_ string) (vfs.FS, error) {
 	return nil, ErrContextNotFound
 }
 
+// GetMergedViewWithLease returns an error on Windows.
+func (r *IsolatedRunner) GetMergedViewWithLease(_ string) (vfs.FS, func(), error) {
+	return nil, nil, ErrContextNotFound
+}
+
 // Capabilities returns empty capabilities on Windows.
 func (r *IsolatedRunner) Capabilities() isolation.Capabilities {
 	return isolation.Capabilities{Available: false}

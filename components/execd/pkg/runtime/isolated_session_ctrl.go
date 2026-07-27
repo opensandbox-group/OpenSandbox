@@ -19,12 +19,14 @@ package runtime
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,6 +47,10 @@ type IsolatedRunner struct {
 	upperMgr        *isolation.UpperManager
 	allowedWritable []string
 	stopGC          chan struct{}
+	// pendingStartupCleanup owns failed creates whose workload did not reap
+	// within the bounded startup rollback. These sessions are deliberately
+	// kept out of the public controller map and retried by the collector.
+	pendingStartupCleanup sync.Map // map[sessionID]*isolatedSession
 }
 
 // NewIsolatedRunner creates the isolated session runner.
@@ -99,7 +105,6 @@ func (r *IsolatedRunner) gcLoop() {
 // CollectIdle scans sessions and deletes those past their idle timeout
 // or whose bwrap process has died.
 func (r *IsolatedRunner) CollectIdle() {
-	now := time.Now()
 	r.ctrl.isolatedSessionMap.Range(func(key, value any) bool {
 		s, ok := value.(*isolatedSession)
 		if !ok {
@@ -108,31 +113,119 @@ func (r *IsolatedRunner) CollectIdle() {
 
 		sessionID := s.id
 
-		if s.dead() {
-			log.Info("idle GC: cleaning up dead session %s", sessionID)
-			if err := r.DeleteIsolatedSession(sessionID); err != nil {
-				log.Warn("idle GC: delete dead session %s: %v", sessionID, err)
-			}
+		// A Run updates lastRunAt while holding runMu. Acquire it before reading
+		// the timestamp and retain it through deletion so a fresh Run cannot
+		// enter between the idle decision and teardown.
+		if !s.runMu.TryLock() {
 			return true
 		}
-
-		s.mu.RLock()
-		timeout := time.Duration(s.opts.IdleTimeoutSeconds) * time.Second
-		idle := now.Sub(s.lastRunAt)
-		s.mu.RUnlock()
-
-		if timeout > 0 && idle > timeout {
-			if !s.runMu.TryLock() {
-				return true
+		func() {
+			defer s.runMu.Unlock()
+			if current := r.lookup(sessionID); current != s {
+				return
 			}
-			s.runMu.Unlock()
-			log.Info("idle GC: deleting session %s (idle %v > timeout %v)", sessionID, idle, timeout)
+
+			dead := s.dead()
+			s.mu.RLock()
+			timeout := time.Duration(s.opts.IdleTimeoutSeconds) * time.Second
+			idle := time.Since(s.lastRunAt)
+			s.mu.RUnlock()
+			if !dead && (timeout <= 0 || idle <= timeout) {
+				return
+			}
+
+			if dead {
+				log.Info("idle GC: cleaning up dead session %s", sessionID)
+			} else {
+				log.Info(
+					"idle GC: deleting session %s (idle %v > timeout %v)",
+					sessionID,
+					idle,
+					timeout,
+				)
+			}
 			if err := r.DeleteIsolatedSession(sessionID); err != nil {
 				log.Warn("idle GC: delete session %s: %v", sessionID, err)
 			}
+		}()
+		return true
+	})
+	if err := r.collectPendingStartupCleanup(); err != nil {
+		log.Warn("idle GC: retry failed session startups: %v", err)
+	}
+	if err := r.collectReleasedUppers(); err != nil {
+		log.Warn("idle GC: retry released upper directories: %v", err)
+	}
+}
+
+// collectPendingStartupCleanup retries failed creates that could not be reaped
+// during their bounded startup rollback.
+func (r *IsolatedRunner) collectPendingStartupCleanup() error {
+	var cleanupErr error
+	r.pendingStartupCleanup.Range(func(key, value any) bool {
+		id, idOK := key.(string)
+		session, sessionOK := value.(*isolatedSession)
+		if !idOK || !sessionOK {
+			r.pendingStartupCleanup.Delete(key)
+			return true
+		}
+		if err := r.cleanupPendingStartup(id, session); err != nil {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf("clean up failed startup %s: %w", id, err),
+			)
 		}
 		return true
 	})
+	return cleanupErr
+}
+
+func (r *IsolatedRunner) cleanupPendingStartup(
+	id string,
+	session *isolatedSession,
+) error {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	current, ok := r.pendingStartupCleanup.Load(id)
+	if !ok || current != session {
+		return nil
+	}
+
+	stopErr := session.stop()
+	if errors.Is(stopErr, ErrSessionTeardownTimeout) {
+		// The process or trusted lifecycle drain is still live. Keep both the
+		// private owner entry and upper allocation intact for a later retry.
+		return fmt.Errorf("stop session process: %w", stopErr)
+	}
+
+	var cleanupErr error
+	if stopErr != nil {
+		cleanupErr = errors.Join(
+			cleanupErr,
+			fmt.Errorf("stop session process: %w", stopErr),
+		)
+	}
+	if session.upperID != "" {
+		if err := r.upperMgr.Remove(session.upperID); err != nil {
+			// Remove marks the upper released but retains it in UpperManager on
+			// failure, transferring retry ownership away from this session.
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf("remove failed session upper: %w", err),
+			)
+		}
+	}
+	r.pendingStartupCleanup.CompareAndDelete(id, session)
+	return cleanupErr
+}
+
+func (r *IsolatedRunner) collectReleasedUppers() error {
+	freed, err := r.upperMgr.CollectWithErrors()
+	for _, id := range freed {
+		log.Info("idle GC: removed released upper directory %s", id)
+	}
+	return err
 }
 
 // StopGC stops the background GC goroutine.
@@ -191,10 +284,23 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	}
 
 	if err := session.start(); err != nil {
-		if session.upperID != "" {
-			_ = r.upperMgr.Remove(session.upperID)
+		startErr := fmt.Errorf("start bwrap: %w", err)
+		if errors.Is(err, ErrSessionTeardownTimeout) {
+			// Create returns no ID, so failed startup ownership cannot live in
+			// the public session map. Retain it privately until GC can prove the
+			// workload and lifecycle are fully reaped.
+			r.pendingStartupCleanup.Store(id, session)
+			return "", startErr
 		}
-		return "", fmt.Errorf("start bwrap: %w", err)
+		if session.upperID != "" {
+			if cleanupErr := r.upperMgr.Remove(session.upperID); cleanupErr != nil {
+				return "", errors.Join(
+					startErr,
+					fmt.Errorf("remove failed session upper: %w", cleanupErr),
+				)
+			}
+		}
+		return "", startErr
 	}
 
 	r.ctrl.isolatedSessionMap.Store(id, session)
@@ -340,7 +446,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	defer s.runMu.Unlock()
 
 	if s.dead() {
-		return fmt.Errorf("session process has exited")
+		return fmt.Errorf("%w: session process has exited", ErrSessionNotActive)
 	}
 
 	s.mu.RLock()
@@ -378,13 +484,19 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	// without killing the persistent shell session. Closing stdin would
 	// terminate the shell entirely.
 	done := make(chan struct{})
-	defer close(done)
+	watcherDone := make(chan struct{})
+	defer func() {
+		close(done)
+		// Keep runMu held until the watcher has either observed done or
+		// completed its SIGINT. Otherwise a delayed cancellation from this Run
+		// can interrupt the next serialized Run.
+		<-watcherDone
+	}()
 	go func() {
+		defer close(watcherDone)
 		select {
 		case <-ctx.Done():
-			if s.cmd != nil && s.cmd.Process != nil {
-				_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGINT)
-			}
+			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
 		case <-done:
 		}
 	}()
@@ -473,17 +585,49 @@ func (r *IsolatedRunner) DeleteIsolatedSession(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.stop(); err != nil {
-		log.Warn("stop isolated session %s: %v", id, err)
+	// A concurrent delete may have completed while this caller waited for the
+	// session lock. Do not stop or remove the same resources twice.
+	if current := r.lookup(id); current != s {
+		return ErrContextNotFound
 	}
 
+	var cleanupErr error
+	if stopErr := s.stop(); stopErr != nil {
+		log.Warn("stop isolated session %s: %v", id, stopErr)
+		cleanupErr = errors.Join(
+			cleanupErr,
+			fmt.Errorf("stop session process: %w", stopErr),
+		)
+		// The process may still be using the overlay. Keep both the map entry
+		// and upper allocation intact so a later Delete or GC can retry.
+		if errors.Is(stopErr, ErrSessionTeardownTimeout) {
+			return cleanupErr
+		}
+	}
+	if operationErr := s.waitForOperations(isolatedSessionStopTimeout); operationErr != nil {
+		cleanupErr = errors.Join(
+			cleanupErr,
+			fmt.Errorf("drain session filesystem operations: %w", operationErr),
+		)
+		// An admitted filesystem write may still be targeting the upper.
+		// Retain the map entry and upper allocation until a later Delete or GC
+		// observes the operation drain and can safely remove both.
+		return cleanupErr
+	}
 	if s.upperID != "" {
 		if err := r.upperMgr.Remove(s.upperID); err != nil {
 			log.Warn("remove upper dir for session %s: %v", id, err)
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf("remove session upper: %w", err),
+			)
 		}
 	}
 
-	r.ctrl.isolatedSessionMap.Delete(id)
+	r.ctrl.isolatedSessionMap.CompareAndDelete(id, s)
+	if cleanupErr != nil {
+		return cleanupErr
+	}
 	log.Info("deleted isolated session %s", id)
 	return nil
 }
@@ -498,7 +642,9 @@ func (r *IsolatedRunner) CommitUpper(id string) error {
 	return fmt.Errorf("commit not implemented yet")
 }
 
-// GetMergedView returns a VFS for the session's filesystem.
+// GetMergedView returns a VFS whose individual calls acquire session operation
+// leases. Callers that retain a handle returned by Open must instead use
+// GetMergedViewWithLease so the lease covers the handle's full lifetime.
 func (r *IsolatedRunner) GetMergedView(id string) (vfs.FS, error) {
 	s := r.lookup(id)
 	if s == nil {
@@ -507,7 +653,44 @@ func (r *IsolatedRunner) GetMergedView(id string) (vfs.FS, error) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.dead() {
+		return nil, ErrSessionNotActive
+	}
 
+	return &isolatedSessionFS{
+		session:  s,
+		delegate: newMergedView(s),
+	}, nil
+}
+
+// GetMergedViewWithLease atomically admits a multi-step files request and
+// returns a raw VFS plus an idempotent release function. Delete denies new
+// leases and waits for this lease before removing the session upper.
+func (r *IsolatedRunner) GetMergedViewWithLease(id string) (vfs.FS, func(), error) {
+	s := r.lookup(id)
+	if s == nil {
+		return nil, nil, ErrContextNotFound
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.dead() {
+		return nil, nil, ErrSessionNotActive
+	}
+	if err := s.beginOperation(); err != nil {
+		return nil, nil, err
+	}
+
+	var once sync.Once
+	release := func() {
+		once.Do(s.endOperation)
+	}
+	return newMergedView(s), release, nil
+}
+
+// newMergedView snapshots the immutable filesystem configuration. The caller
+// must hold s.mu for reading while constructing the view.
+func newMergedView(s *isolatedSession) vfs.FS {
 	// MergedView chowns files on the host side (execd's namespace).
 	// In setpriv mode the requested uid/gid are real host IDs, so use them.
 	// In userns mode the requested uid/gid are in-namespace IDs mapped to
@@ -536,7 +719,7 @@ func (r *IsolatedRunner) GetMergedView(id string) (vfs.FS, error) {
 		mode = isolation.WorkspaceRO
 	}
 
-	return isolation.NewMergedView(s.opts.WorkspacePath, upper, mode, uid, gid), nil
+	return isolation.NewMergedView(s.opts.WorkspacePath, upper, mode, uid, gid)
 }
 
 // Capabilities returns the current isolator capabilities.

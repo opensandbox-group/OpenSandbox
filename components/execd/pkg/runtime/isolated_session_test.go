@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +40,46 @@ func (s *stubIsolator) Name() string                                    { return
 func (s *stubIsolator) Available() bool                                 { return s.available }
 func (s *stubIsolator) Capabilities() isolation.Capabilities            { return s.caps }
 func (s *stubIsolator) Wrap(_ *exec.Cmd, _ isolation.WrapOptions) error { return nil }
+func (s *stubIsolator) WrapWithLifecycle(
+	cmd *exec.Cmd,
+	opts isolation.WrapOptions,
+) (isolation.WorkloadLifecycle, error) {
+	if err := s.Wrap(cmd, opts); err != nil {
+		return nil, err
+	}
+	return newStubWorkloadLifecycle(), nil
+}
+
+type stubWorkloadLifecycle struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newStubWorkloadLifecycle() *stubWorkloadLifecycle {
+	return &stubWorkloadLifecycle{done: make(chan struct{})}
+}
+
+func (*stubWorkloadLifecycle) WaitForIdentity(context.Context) (isolation.WorkloadIdentity, error) {
+	return isolation.WorkloadIdentity{
+		PID:                   2,
+		SandboxPID:            1,
+		NetNamespaceID:        1,
+		ProcessStartTimeTicks: 1,
+	}, nil
+}
+func (*stubWorkloadLifecycle) MarkReady() error { return nil }
+func (s *stubWorkloadLifecycle) Abort() {
+	s.once.Do(func() {
+		close(s.done)
+	})
+}
+func (s *stubWorkloadLifecycle) DrainDone() <-chan struct{} { return s.done }
+func (*stubWorkloadLifecycle) DrainError() error            { return nil }
+func (*stubWorkloadLifecycle) ExitCode() (int, bool)        { return 0, true }
+func (s *stubWorkloadLifecycle) Close() error {
+	s.Abort()
+	return nil
+}
 
 func newStubIsolator() *stubIsolator {
 	return &stubIsolator{

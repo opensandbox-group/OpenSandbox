@@ -142,6 +142,75 @@ func TestUpperManager_RemoveMissing(t *testing.T) {
 	}
 }
 
+func TestUpperManager_RemoveFailureRemainsTrackedForGC(t *testing.T) {
+	mgr := newTestUpperManager(t)
+	id, upper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeErr := errors.New("transient remove failure")
+	mgr.removeAll = func(string) error { return removeErr }
+
+	if err := mgr.Remove(id); !errors.Is(err, removeErr) {
+		t.Fatalf("Remove error = %v, want %v", err, removeErr)
+	}
+	mgr.mu.Lock()
+	entry := mgr.entries[id]
+	mgr.mu.Unlock()
+	if entry == nil {
+		t.Fatal("failed removal must remain tracked")
+	}
+	if entry.InUse {
+		t.Fatal("failed removal must be released for a later GC retry")
+	}
+	if _, err := os.Stat(filepath.Dir(upper)); err != nil {
+		t.Fatalf("failed removal unexpectedly removed upper: %v", err)
+	}
+
+	mgr.removeAll = os.RemoveAll
+	freed, err := mgr.CollectWithErrors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(freed) != 1 || freed[0] != id {
+		t.Fatalf("CollectWithErrors freed %v, want [%s]", freed, id)
+	}
+}
+
+func TestUpperManager_CollectWithErrorsRetainsFailureForRetry(t *testing.T) {
+	mgr := newTestUpperManager(t)
+	id, _, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.Release(id)
+
+	removeErr := errors.New("transient collect failure")
+	mgr.removeAll = func(string) error { return removeErr }
+	freed, err := mgr.CollectWithErrors()
+	if len(freed) != 0 {
+		t.Fatalf("CollectWithErrors freed %v after removal failure", freed)
+	}
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("CollectWithErrors error = %v, want %v", err, removeErr)
+	}
+	mgr.mu.Lock()
+	_, tracked := mgr.entries[id]
+	mgr.mu.Unlock()
+	if !tracked {
+		t.Fatal("failed collection removed the entry from tracking")
+	}
+
+	mgr.removeAll = os.RemoveAll
+	freed, err = mgr.CollectWithErrors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(freed) != 1 || freed[0] != id {
+		t.Fatalf("retry freed %v, want [%s]", freed, id)
+	}
+}
+
 func TestUpperManager_Collect(t *testing.T) {
 	mgr := newTestUpperManager(t)
 

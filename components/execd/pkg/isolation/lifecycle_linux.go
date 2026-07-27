@@ -603,6 +603,13 @@ func (l *bwrapLifecycle) drainStatus() {
 		l.finishStatusDrain(err, sawChild)
 		return
 	}
+	// Abort may race bubblewrap closing its status writer. In that case Scanner
+	// observes a clean EOF rather than os.ErrClosed, but missing status records
+	// still describe an intentional teardown rather than a trust failure.
+	if l.isAborted() {
+		l.finishStatusDrain(errWorkloadLifecycleAborted, sawChild)
+		return
+	}
 	if !sawChild {
 		l.finishStatusDrain(
 			errors.New("bwrap status reached EOF before child-pid"),

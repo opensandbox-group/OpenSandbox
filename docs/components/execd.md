@@ -18,6 +18,22 @@ cd components/execd
 make build
 ```
 
+On Linux, `make build` uses the native C compiler and static libc to produce
+`bin/opensandbox-session-gate`. The published execd image already installs
+this helper. If you run execd from a source build and need isolated sessions,
+install it at the fixed trusted runtime path first:
+
+```bash
+make build-session-gate
+sudo make install-session-gate
+# /opt/opensandbox/opensandbox-session-gate (mode 0555)
+```
+
+Compilation runs before privilege escalation; the install target only copies
+the built helper. Keep `/opt/opensandbox` and the helper root-owned and not
+group- or world-writable. Other execd APIs still work without it, but
+isolated-session capability probing and creation fail closed.
+
 ### 2) Start Jupyter Server
 
 ```bash

@@ -17,14 +17,18 @@
 package runtime
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
+	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
 // IsolatedSessionOptions bundles the parameters for creating an isolated session.
@@ -45,30 +49,51 @@ type IsolatedSessionOptions struct {
 
 // isolatedSession holds a long-running shell process inside a bwrap namespace.
 type isolatedSession struct {
-	id        string
-	mu        sync.RWMutex
-	runMu     sync.Mutex // serializes concurrent Run calls
-	opts      *IsolatedSessionOptions
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	doneCh    chan struct{} // closed when the bwrap process exits
-	upperID   string        // key in UpperManager, used for Release/Remove
-	upperDir  string
-	workDir   string
-	createdAt time.Time
-	lastRunAt time.Time
-	isolator  isolation.Isolator
+	id                   string
+	mu                   sync.RWMutex
+	runMu                sync.Mutex // serializes concurrent Run calls
+	operationMu          sync.Mutex // protects filesystem-operation admission
+	activeOperations     int
+	operationsDrained    chan struct{} // closed when activeOperations reaches zero
+	opts                 *IsolatedSessionOptions
+	cmd                  *exec.Cmd
+	stdin                io.WriteCloser
+	stdout               io.ReadCloser
+	processWaited        chan struct{} // closed immediately after cmd.Wait returns
+	processSignalMu      sync.Mutex    // serializes process-group signals with the pre-reap barrier
+	processExited        bool          // set before Linux can reap and reuse the numeric PID/PGID
+	stopping             atomic.Bool   // once true, the session never admits another Run
+	lifecycleInvalid     atomic.Bool   // trusted lifecycle accounting was lost unexpectedly
+	doneCh               chan struct{} // closed after process wait and lifecycle drain
+	lifecycleMonitorDone chan struct{} // closed after drain-failure monitor exits
+	upperID              string        // key in UpperManager, used for Release/Remove
+	upperDir             string
+	workDir              string
+	createdAt            time.Time
+	lastRunAt            time.Time
+	isolator             isolation.Isolator
+	lifecycle            isolation.WorkloadLifecycle
+	identity             isolation.WorkloadIdentity
 }
+
+const isolatedSessionStartupTimeout = 10 * time.Second
+
+var (
+	isolatedSessionStopTimeout = 5 * time.Second
+	signalSessionProcessGroup  = func(pid int, signal syscall.Signal) error {
+		return syscall.Kill(-pid, signal)
+	}
+)
 
 func newIsolatedSession(id string, opts *IsolatedSessionOptions, iso isolation.Isolator) *isolatedSession {
 	return &isolatedSession{
-		id:        id,
-		opts:      opts,
-		isolator:  iso,
-		doneCh:    make(chan struct{}),
-		createdAt: time.Now(),
-		lastRunAt: time.Now(),
+		id:            id,
+		opts:          opts,
+		isolator:      iso,
+		processWaited: make(chan struct{}),
+		doneCh:        make(chan struct{}),
+		createdAt:     time.Now(),
+		lastRunAt:     time.Now(),
 	}
 }
 
@@ -77,6 +102,7 @@ func (s *isolatedSession) start() error {
 	shell, args := shellCommand()
 	cmd := exec.Command(shell, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	s.cmd = cmd
 
 	wrapOpts := isolation.WrapOptions{
 		ExtraWritable: s.opts.ExtraWritable,
@@ -120,77 +146,389 @@ func (s *isolatedSession) start() error {
 	wrapOpts.UpperDir = s.upperDir
 	wrapOpts.WorkDir = s.workDir
 
-	if err := s.isolator.Wrap(cmd, wrapOpts); err != nil {
+	lifecycleIsolator, ok := s.isolator.(isolation.LifecycleIsolator)
+	if !ok {
+		return ErrSessionLifecycleUnavailable
+	}
+	lifecycle, err := lifecycleIsolator.WrapWithLifecycle(cmd, wrapOpts)
+	if err != nil {
+		closeCommandExtraFiles(cmd)
+		if lifecycle != nil {
+			s.lifecycle = lifecycle
+			return s.failStartup(err)
+		}
 		return err
 	}
+	if lifecycle == nil {
+		closeCommandExtraFiles(cmd)
+		return ErrSessionLifecycleUnavailable
+	}
+	s.lifecycle = lifecycle
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		closeCommandExtraFiles(cmd)
+		return s.failStartup(err)
 	}
+	s.stdin = stdin
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		stdin.Close()
-		return err
+		closeCommandExtraFiles(cmd)
+		return s.failStartup(err)
 	}
+	s.stdout = stdout
 	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
-		stdin.Close()
-		stdout.Close()
-		for _, f := range cmd.ExtraFiles {
-			f.Close()
-		}
-		return fmt.Errorf("start %s: %w", shell, err)
+		closeCommandExtraFiles(cmd)
+		return s.failStartup(fmt.Errorf("start %s: %w", shell, err))
 	}
 
-	for _, f := range cmd.ExtraFiles {
-		f.Close()
-	}
-
-	s.cmd = cmd
-	s.stdin = stdin
-	s.stdout = stdout
+	closeCommandExtraFiles(cmd)
 
 	go func() {
-		_ = cmd.Wait()
+		_ = waitCommandWithExitBarrier(cmd, s.markProcessExitedBeforeReap)
+		// Publish process reaping before waiting for lifecycle accounting.
+		// Once Wait returns, the numeric PID/PGID may be reused and must never
+		// be signalled again.
+		close(s.processWaited)
+		// A session is not fully reaped until bubblewrap's status stream has
+		// also reached a validated terminal state.
+		<-lifecycle.DrainDone()
 		close(s.doneCh)
 	}()
+	s.lifecycleMonitorDone = make(chan struct{})
+	go func() {
+		defer close(s.lifecycleMonitorDone)
+		<-lifecycle.DrainDone()
+		if lifecycle.DrainError() != nil &&
+			!s.stopping.Load() &&
+			cmd.Process != nil {
+			// Losing trusted lifecycle accounting invalidates the workload
+			// identity. Publish the terminal state before attempting the kill
+			// so no later Run can enter even if signalling fails.
+			s.lifecycleInvalid.Store(true)
+			if err := s.signalProcessGroupIfRunning(syscall.SIGKILL); err != nil &&
+				!errors.Is(err, syscall.ESRCH) {
+				log.Error(
+					"kill isolated session after lifecycle failure: %v",
+					err,
+				)
+			}
+		}
+	}()
+
+	startupCtx, cancelStartup := context.WithTimeout(
+		context.Background(),
+		isolatedSessionStartupTimeout,
+	)
+	identity, err := lifecycle.WaitForIdentity(startupCtx)
+	cancelStartup()
+	if err != nil {
+		return s.failStartup(fmt.Errorf("wait for isolated workload identity: %w", err))
+	}
+	s.identity = identity
+
+	if err := lifecycle.MarkReady(); err != nil {
+		return s.failStartup(fmt.Errorf("release isolated workload gate: %w", err))
+	}
+	if err := s.startupTerminalError(lifecycle); err != nil {
+		return s.failStartup(err)
+	}
 
 	// Brief startup check — if bwrap fails immediately (bad capabilities,
-	// missing binary inside namespace, etc.) we detect it here instead of
-	// waiting until the first Run call.
+	// missing binary inside namespace, lifecycle trust loss, etc.) we detect it
+	// here instead of returning a terminal session to the caller.
+	startupTimer := time.NewTimer(100 * time.Millisecond)
 	select {
-	case <-s.doneCh:
-		return fmt.Errorf("bwrap process exited immediately after start")
-	case <-time.After(100 * time.Millisecond):
+	case <-s.processWaited:
+		if !startupTimer.Stop() {
+			<-startupTimer.C
+		}
+		return s.failStartup(fmt.Errorf("bwrap process exited immediately after start"))
+	case <-lifecycle.DrainDone():
+		if !startupTimer.Stop() {
+			<-startupTimer.C
+		}
+		return s.failStartup(lifecycleStartupErrorAfterDrain(lifecycle))
+	case <-startupTimer.C:
+	}
+	// DrainDone can close concurrently with the timer. Recheck it before
+	// publishing the session so the random select winner cannot turn a
+	// lifecycle failure into a successful Create.
+	if err := s.startupTerminalError(lifecycle); err != nil {
+		return s.failStartup(err)
 	}
 
 	return nil
+}
+
+func (s *isolatedSession) startupTerminalError(
+	lifecycle isolation.WorkloadLifecycle,
+) error {
+	select {
+	case <-s.processWaited:
+		return fmt.Errorf("bwrap process exited immediately after start")
+	default:
+	}
+	return lifecycleStartupError(lifecycle)
+}
+
+func lifecycleStartupError(lifecycle isolation.WorkloadLifecycle) error {
+	select {
+	case <-lifecycle.DrainDone():
+		return lifecycleStartupErrorAfterDrain(lifecycle)
+	default:
+		return nil
+	}
+}
+
+func lifecycleStartupErrorAfterDrain(lifecycle isolation.WorkloadLifecycle) error {
+	if err := lifecycle.DrainError(); err != nil {
+		return fmt.Errorf("isolated session lifecycle failed during startup: %w", err)
+	}
+	return fmt.Errorf("isolated session lifecycle ended during startup")
 }
 
 // stop kills the bwrap process group and waits for process reaping.
 func (s *isolatedSession) stop() error {
+	s.stopping.Store(true)
+
+	hasProcess := s.cmd != nil && s.cmd.Process != nil
+	if s.lifecycle != nil {
+		// Deny an unreleased startup gate and mark the status stream as an
+		// intentional teardown before killing the process. The Linux pre-reap
+		// barrier below still prevents signalling a reused process group if the
+		// gate exits between Abort and the signal.
+		s.lifecycle.Abort()
+	}
+	processDone, processGroupKillErr := s.stopProcess(hasProcess)
+	if hasProcess {
+		if !processDone {
+			// lifecycle.Close may wait for its status-drain goroutine. Do not
+			// turn an unreapable workload into an unbounded session teardown.
+			return errors.Join(
+				processGroupKillErr,
+				ErrSessionTeardownTimeout,
+			)
+		}
+	} else if s.lifecycle != nil &&
+		!waitForSessionDrain(s.lifecycle.DrainDone(), isolatedSessionStopTimeout) {
+		return ErrSessionTeardownTimeout
+	}
+	if processDone && processGroupKillErr != nil {
+		// A group signal can race a naturally exiting or already-zombie
+		// leader and return EPERM on some kernels. Once both cmd.Wait and the
+		// trusted lifecycle drain are complete, teardown is confirmed and the
+		// transient signal error must not turn a successful delete into 500.
+		log.Warn("%v; session process and lifecycle are fully reaped", processGroupKillErr)
+	}
+	return s.closeLifecycle()
+}
+
+func (s *isolatedSession) stopProcess(hasProcess bool) (bool, error) {
+	processDone := false
+	if hasProcess {
+		select {
+		case <-s.doneCh:
+			processDone = true
+		default:
+		}
+	}
+
+	var processGroupKillErr error
+	if hasProcess && !processDone {
+		// Signal while the session pipes and lifecycle gate are still open.
+		// Closing stdin first lets an interactive shell exit and be reaped just
+		// before a group signal, creating a stale-PID window.
+		if err := s.signalProcessGroupIfRunning(syscall.SIGKILL); err != nil &&
+			!errors.Is(err, syscall.ESRCH) {
+			processGroupKillErr = fmt.Errorf(
+				"kill isolated session process group: %w",
+				err,
+			)
+		}
+	}
+
+	s.closeProcessPipes()
+	if hasProcess && !processDone {
+		processDone = waitForSessionDrain(s.doneCh, isolatedSessionStopTimeout)
+	}
+	return processDone, processGroupKillErr
+}
+
+func (s *isolatedSession) closeProcessPipes() {
 	if s.stdin != nil {
-		s.stdin.Close()
+		_ = s.stdin.Close()
+		s.stdin = nil
 	}
 	if s.stdout != nil {
-		s.stdout.Close()
+		_ = s.stdout.Close()
+		s.stdout = nil
 	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
-		// Wait for the death-watch goroutine to finish cmd.Wait().
-		<-s.doneCh
+}
+
+func waitForSessionDrain(done <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	select {
+	case <-done:
+		if !timer.Stop() {
+			<-timer.C
+		}
+		return true
+	case <-timer.C:
+		return false
 	}
+}
+
+func (s *isolatedSession) closeLifecycle() error {
+	if s.lifecycleMonitorDone != nil {
+		// DrainDone is closed before doneCh, so the monitor is guaranteed to
+		// make progress here. Waiting gives teardown ownership of the monitor
+		// and prevents it from outliving the session or test hooks it uses.
+		<-s.lifecycleMonitorDone
+	}
+
+	var cleanupErr error
+	if s.lifecycle != nil {
+		if err := s.lifecycle.Close(); err != nil {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf("close isolated session lifecycle: %w", err),
+			)
+		}
+		// Close owns and releases every lifecycle descriptor even when it
+		// reports a terminal status-stream error. Retaining the pointer would
+		// only make later retries return the same immutable drain error.
+		s.lifecycle = nil
+	}
+	return cleanupErr
+}
+
+// markProcessExitedBeforeReap publishes the Linux WNOWAIT exit barrier before
+// cmd.Wait can reap and release the numeric PID/PGID. If the kernel barrier
+// itself fails, disable numeric group signals rather than risk targeting a
+// reused identity; the bounded teardown path will force sandbox-level cleanup.
+func (s *isolatedSession) markProcessExitedBeforeReap(barrierErr error) {
+	s.processSignalMu.Lock()
+	defer s.processSignalMu.Unlock()
+
+	if barrierErr != nil {
+		log.Error("isolated session exit barrier failed: %v", barrierErr)
+	}
+	s.processExited = true
+}
+
+// signalProcessGroupIfRunning serializes the signal syscall with the Linux
+// pre-reap exit barrier. The group leader remains an unreaped child while this
+// mutex is held, so its numeric PID/PGID cannot be reused for another session.
+func (s *isolatedSession) signalProcessGroupIfRunning(signal syscall.Signal) error {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return nil
+	}
+	s.processSignalMu.Lock()
+	defer s.processSignalMu.Unlock()
+	if s.processExited {
+		return nil
+	}
+	select {
+	case <-s.processWaited:
+		s.processExited = true
+		return nil
+	default:
+	}
+	return signalSessionProcessGroup(s.cmd.Process.Pid, signal)
+}
+
+// dead returns true once the session can no longer admit work. Process exit,
+// lifecycle trust loss, and an in-progress teardown are all terminal states.
+func (s *isolatedSession) dead() bool {
+	if s.stopping.Load() || s.lifecycleInvalid.Load() {
+		return true
+	}
+	if s.processWaited != nil {
+		select {
+		case <-s.processWaited:
+			return true
+		default:
+		}
+	}
+	// Keep synthetic and pre-lifecycle tests compatible; production sessions
+	// always have processWaited.
+	if s.doneCh != nil {
+		select {
+		case <-s.doneCh:
+			return true
+		default:
+		}
+	}
+	return false
+}
+
+// beginOperation admits one filesystem operation while the session is active.
+// Delete sets stopping before waiting for admitted operations, so no new
+// operation can appear after the drain snapshot.
+func (s *isolatedSession) beginOperation() error {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+
+	if s.dead() {
+		return ErrSessionNotActive
+	}
+	if s.activeOperations == 0 {
+		s.operationsDrained = make(chan struct{})
+	}
+	s.activeOperations++
 	return nil
 }
 
-// dead returns true if the bwrap process has exited.
-func (s *isolatedSession) dead() bool {
-	select {
-	case <-s.doneCh:
-		return true
-	default:
-		return false
+func (s *isolatedSession) endOperation() {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+
+	if s.activeOperations == 0 {
+		return
 	}
+	s.activeOperations--
+	if s.activeOperations == 0 {
+		close(s.operationsDrained)
+	}
+}
+
+func (s *isolatedSession) waitForOperations(timeout time.Duration) error {
+	s.operationMu.Lock()
+	if s.activeOperations == 0 {
+		s.operationMu.Unlock()
+		return nil
+	}
+	drained := s.operationsDrained
+	s.operationMu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-drained:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf(
+			"%w: filesystem operations did not drain",
+			ErrSessionTeardownTimeout,
+		)
+	}
+}
+
+func (s *isolatedSession) failStartup(startErr error) error {
+	if cleanupErr := s.stop(); cleanupErr != nil {
+		return errors.Join(startErr, fmt.Errorf("clean up failed session startup: %w", cleanupErr))
+	}
+	return startErr
+}
+
+func closeCommandExtraFiles(cmd *exec.Cmd) {
+	for _, file := range cmd.ExtraFiles {
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+	cmd.ExtraFiles = nil
 }

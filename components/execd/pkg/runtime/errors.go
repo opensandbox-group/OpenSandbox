@@ -21,3 +21,17 @@ var ErrContextNotFound = errors.New("context not found")
 // ErrUidModeUnavailable indicates that the requested isolation uid mode did
 // not pass the startup capability probe in the current environment.
 var ErrUidModeUnavailable = errors.New("requested uid mode is unavailable")
+
+// ErrSessionTeardownTimeout indicates that a session workload could not be
+// reaped within the bounded teardown window. The caller must retain ownership
+// and retry cleanup rather than treating deletion as successful.
+var ErrSessionTeardownTimeout = errors.New("isolated session teardown timed out")
+
+// ErrSessionLifecycleUnavailable indicates that the selected isolator cannot
+// provide a fail-closed startup gate and verified host workload identity.
+var ErrSessionLifecycleUnavailable = errors.New("isolated session lifecycle is unavailable")
+
+// ErrSessionNotActive indicates that a terminal or stopping session no longer
+// accepts run or filesystem operations. Cleanup may still be retried through
+// Delete while the controller retains ownership of the session resources.
+var ErrSessionNotActive = errors.New("isolated session is not active")
