@@ -98,11 +98,12 @@ type bashSessionConfig struct {
 
 // bashSession represents a bash session.
 type bashSession struct {
-	config  *bashSessionConfig
-	mu      sync.Mutex
-	started bool
-	env     map[string]string
-	cwd     string
+	config             *bashSessionConfig
+	mu                 sync.Mutex
+	started            bool
+	env                map[string]string
+	cwd                string
+	managedEnvironment map[string]managedEnvironmentUpdate
 
 	// currentProcessPid is the pid of the active run's process group leader (bash).
 	// Set after cmd.Start(), cleared when run() returns. Used by close() to kill the process group.

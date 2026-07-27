@@ -60,11 +60,10 @@ func main() {
 		isolationProbe.Available, isolationProbe.Isolator, isolationProbe.Version)
 
 	log.Init(flag.ServerLogLevel)
+	ctrl := controller.InitCodeRunner()
 	watchCtx, cancelWatcher := context.WithCancel(context.Background())
 	defer cancelWatcher()
-	mitmca.Start(watchCtx)
-
-	ctrl := controller.InitCodeRunner()
+	mitmca.Start(watchCtx, ctrl.UpdateManagedBashSessionEnvironment)
 
 	// Always store probe result for capabilities endpoint.
 	controller.InitIsolatedProbe(&isolationProbe)

@@ -279,6 +279,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	updatedEnv := parseExportDump(envLines)
 	s.mu.Lock()
 	if len(updatedEnv) > 0 {
+		applyManagedEnvironmentUpdates(updatedEnv, s.managedEnvironment)
 		s.env = updatedEnv
 	}
 	if pwdLine != "" {

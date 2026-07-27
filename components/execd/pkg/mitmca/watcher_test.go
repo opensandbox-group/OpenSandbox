@@ -36,7 +36,7 @@ func TestSetProcessTrustEnvironment(t *testing.T) {
 	t.Setenv("REQUESTS_CA_BUNDLE", "")
 	t.Setenv("SSL_CERT_FILE", "")
 
-	require.NoError(t, setProcessTrustEnvironment(os.Getenv, os.Setenv))
+	require.NoError(t, setProcessTrustEnvironment(os.Getenv, os.Setenv, nil))
 	require.Equal(t, defaultCAPath, os.Getenv("NODE_EXTRA_CA_CERTS"))
 	require.Equal(t, defaultMergedCAPath, os.Getenv("REQUESTS_CA_BUNDLE"))
 	require.Equal(t, defaultMergedCAPath, os.Getenv("SSL_CERT_FILE"))
@@ -54,7 +54,7 @@ func TestSetProcessTrustEnvironmentPreservesOverrides(t *testing.T) {
 	}, func(name, value string) error {
 		values[name] = value
 		return nil
-	})
+	}, nil)
 
 	require.NoError(t, err)
 	require.Equal(t, "/custom/node.pem", values["NODE_EXTRA_CA_CERTS"])
@@ -74,7 +74,7 @@ func TestSetProcessTrustEnvironmentReplacesManagedFallbacks(t *testing.T) {
 	}, func(name, value string) error {
 		values[name] = value
 		return nil
-	})
+	}, nil)
 
 	require.NoError(t, err)
 	require.Equal(t, defaultCAPath, values["NODE_EXTRA_CA_CERTS"])
@@ -88,10 +88,39 @@ func TestSetProcessTrustEnvironmentReportsFailure(t *testing.T) {
 			return errors.New("setenv failed")
 		}
 		return nil
-	})
+	}, nil)
 
 	require.ErrorContains(t, err, "REQUESTS_CA_BUNDLE")
 	require.ErrorContains(t, err, "setenv failed")
+}
+
+func TestSetProcessTrustEnvironmentReportsManagedUpdates(t *testing.T) {
+	values := map[string]string{
+		"NODE_EXTRA_CA_CERTS": "",
+		"REQUESTS_CA_BUNDLE":  defaultCAPath,
+		"SSL_CERT_FILE":       "/custom/ssl.pem",
+	}
+	type update struct {
+		value           string
+		managedFallback string
+	}
+	updates := make(map[string]update)
+
+	err := setProcessTrustEnvironment(func(name string) string {
+		return values[name]
+	}, func(name, value string) error {
+		values[name] = value
+		return nil
+	}, func(name, value, managedFallback string) {
+		updates[name] = update{value: value, managedFallback: managedFallback}
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, map[string]update{
+		"NODE_EXTRA_CA_CERTS": {value: defaultCAPath},
+		"REQUESTS_CA_BUNDLE":  {value: defaultMergedCAPath, managedFallback: defaultCAPath},
+	}, updates)
+	require.NotContains(t, updates, "SSL_CERT_FILE")
 }
 
 func TestWatchRefreshesInitialCertificateAndValidRotations(t *testing.T) {

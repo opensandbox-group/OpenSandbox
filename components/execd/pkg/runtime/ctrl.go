@@ -68,6 +68,48 @@ type commandKernel struct {
 	content      string
 }
 
+type managedEnvironmentUpdate struct {
+	value           string
+	managedFallback string
+}
+
+// UpdateManagedBashSessionEnvironment upgrades daemon-managed values in
+// existing bash sessions without replacing user overrides.
+func (c *Controller) UpdateManagedBashSessionEnvironment(name, value, managedFallback string) {
+	c.bashSessionClientMap.Range(func(_, sessionValue any) bool {
+		if session, ok := sessionValue.(*bashSession); ok {
+			session.updateManagedEnvironment(name, value, managedFallback)
+		}
+		return true
+	})
+}
+
+func (s *bashSession) updateManagedEnvironment(name, value, managedFallback string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.managedEnvironment == nil {
+		s.managedEnvironment = make(map[string]managedEnvironmentUpdate)
+	}
+	update := managedEnvironmentUpdate{value: value, managedFallback: managedFallback}
+	s.managedEnvironment[name] = update
+	applyManagedEnvironmentUpdate(s.env, name, update)
+}
+
+func applyManagedEnvironmentUpdates(env map[string]string, updates map[string]managedEnvironmentUpdate) {
+	for name, update := range updates {
+		applyManagedEnvironmentUpdate(env, name, update)
+	}
+}
+
+func applyManagedEnvironmentUpdate(env map[string]string, name string, update managedEnvironmentUpdate) {
+	current := env[name]
+	if current == update.value || (current != "" && current != update.managedFallback) {
+		return
+	}
+	env[name] = update.value
+}
+
 // NewController creates a runtime controller.
 func NewController(baseURL, token string) *Controller {
 	return &Controller{

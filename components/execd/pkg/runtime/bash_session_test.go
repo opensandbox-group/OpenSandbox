@@ -134,6 +134,75 @@ func TestBashSession_FallsBackToSh_PersistsSingleQuotedValue(t *testing.T) {
 	require.Contains(t, stdoutLines, want)
 }
 
+func TestControllerUpdateManagedBashSessionEnvironmentPreservesCustomValues(t *testing.T) {
+	controller := NewController("", "")
+	managed := &bashSession{env: map[string]string{"REQUESTS_CA_BUNDLE": "/managed/mitm.pem"}}
+	custom := &bashSession{env: map[string]string{"REQUESTS_CA_BUNDLE": "/custom/ca.pem"}}
+	empty := &bashSession{env: map[string]string{}}
+	controller.bashSessionClientMap.Store("managed", managed)
+	controller.bashSessionClientMap.Store("custom", custom)
+	controller.bashSessionClientMap.Store("empty", empty)
+
+	controller.UpdateManagedBashSessionEnvironment(
+		"REQUESTS_CA_BUNDLE",
+		"/managed/merged.pem",
+		"/managed/mitm.pem",
+	)
+
+	require.Equal(t, "/managed/merged.pem", managed.env["REQUESTS_CA_BUNDLE"])
+	require.Equal(t, "/custom/ca.pem", custom.env["REQUESTS_CA_BUNDLE"])
+	require.Equal(t, "/managed/merged.pem", empty.env["REQUESTS_CA_BUNDLE"])
+}
+
+func TestBashSessionManagedEnvironmentUpdateSurvivesInFlightRun(t *testing.T) {
+	requireBash(t)
+	session := newBashSession("")
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+	session.env["REQUESTS_CA_BUNDLE"] = "/managed/mitm.pem"
+
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	safego.Go(func() {
+		done <- session.run(context.Background(), &ExecuteCodeRequest{
+			Code:    "sleep 0.1",
+			Timeout: 3 * time.Second,
+			Hooks: ExecuteResultHook{
+				OnExecuteInit: func(string) { close(started) },
+			},
+		})
+	})
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		require.FailNow(t, "bash session did not start")
+	}
+	session.updateManagedEnvironment(
+		"REQUESTS_CA_BUNDLE",
+		"/managed/merged.pem",
+		"/managed/mitm.pem",
+	)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		require.FailNow(t, "bash session did not complete")
+	}
+	require.Equal(t, "/managed/merged.pem", session.env["REQUESTS_CA_BUNDLE"])
+
+	var output []string
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    `printf '%s\n' "$REQUESTS_CA_BUNDLE"`,
+		Timeout: 3 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(line string) { output = append(output, line) },
+		},
+	}))
+	require.Contains(t, output, "/managed/merged.pem")
+}
+
 func TestParseExportLine_BashAndShFormats(t *testing.T) {
 	tests := []struct {
 		name      string

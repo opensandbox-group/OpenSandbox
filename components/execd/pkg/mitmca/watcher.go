@@ -54,7 +54,7 @@ type watchConfig struct {
 // Start launches the agent-side mitmproxy CA watcher when transparent MITM is
 // enabled. The watcher runs inside execd's context and therefore cannot outlive
 // the daemon.
-func Start(ctx context.Context) {
+func Start(ctx context.Context, onEnvironmentUpdate func(name, value, managedFallback string)) {
 	if runtime.GOOS == "windows" || !isTruthy(os.Getenv(mitmEnabledEnv)) {
 		return
 	}
@@ -81,7 +81,7 @@ func Start(ctx context.Context) {
 			if refreshErr != nil {
 				return fmt.Errorf("bootstrap refresh failed: %w output=%q", refreshErr, compactOutput(output))
 			}
-			return setProcessTrustEnvironment(os.Getenv, os.Setenv)
+			return setProcessTrustEnvironment(os.Getenv, os.Setenv, onEnvironmentUpdate)
 		},
 		onError: func(watchErr error) {
 			log.Warn("mitm_ca_watch status=waiting error=%v", watchErr)
@@ -92,7 +92,11 @@ func Start(ctx context.Context) {
 	})
 }
 
-func setProcessTrustEnvironment(getenv func(string) string, setenv func(string, string) error) error {
+func setProcessTrustEnvironment(
+	getenv func(string) string,
+	setenv func(string, string) error,
+	onUpdate func(name, value, managedFallback string),
+) error {
 	variables := []struct {
 		name            string
 		value           string
@@ -109,6 +113,9 @@ func setProcessTrustEnvironment(getenv func(string) string, setenv func(string, 
 		}
 		if err := setenv(variable.name, variable.value); err != nil {
 			return fmt.Errorf("set child-process trust environment %s: %w", variable.name, err)
+		}
+		if onUpdate != nil {
+			onUpdate(variable.name, variable.value, variable.managedFallback)
 		}
 	}
 	return nil
