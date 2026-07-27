@@ -123,6 +123,11 @@ jobs:
           chmod +x tests/sigterm_forward.sh
           ./tests/sigterm_forward.sh
 
+      - name: MITM CA refresh test
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: components/execd
+        run: bash tests/mitm_ca_refresh.sh
+
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
