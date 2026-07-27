@@ -39,6 +39,9 @@ for command_name in cat cp dirname id mkdir mv rm sh sleep touch tr; do
 	ln -s "$(command -v "$command_name")" "$MOCK_BIN/$command_name"
 done
 
+# Keep the bootstrap JDK scan isolated from the host toolchain.
+unset JAVA_HOME
+
 cat > "$TEST_DIR/execd" <<EOF
 #!/bin/sh
 touch "$EXECD_MARKER"

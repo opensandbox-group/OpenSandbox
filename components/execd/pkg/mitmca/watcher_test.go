@@ -54,7 +54,7 @@ func TestSetProcessTrustEnvironmentReportsFailure(t *testing.T) {
 	require.ErrorContains(t, err, "setenv failed")
 }
 
-func TestWatchRefreshesOnlyAfterValidCertificateRotation(t *testing.T) {
+func TestWatchRefreshesInitialCertificateAndValidRotations(t *testing.T) {
 	caPath := filepath.Join(t.TempDir(), "mitmproxy-ca-cert.pem")
 	first := testCertificate(t, 1)
 	second := testCertificate(t, 2)
@@ -71,12 +71,12 @@ func TestWatchRefreshesOnlyAfterValidCertificateRotation(t *testing.T) {
 	})
 	defer stopTestWatcher(t, cancel, done)
 
-	require.Never(t, func() bool { return refreshes.Load() != 0 }, 30*time.Millisecond, 5*time.Millisecond)
-	require.NoError(t, os.WriteFile(caPath, second, 0o644))
 	require.Eventually(t, func() bool { return refreshes.Load() == 1 }, time.Second, 5*time.Millisecond)
+	require.NoError(t, os.WriteFile(caPath, second, 0o644))
+	require.Eventually(t, func() bool { return refreshes.Load() == 2 }, time.Second, 5*time.Millisecond)
 
 	require.NoError(t, os.WriteFile(caPath, second, 0o644))
-	require.Never(t, func() bool { return refreshes.Load() != 1 }, 30*time.Millisecond, 5*time.Millisecond)
+	require.Never(t, func() bool { return refreshes.Load() != 2 }, 30*time.Millisecond, 5*time.Millisecond)
 }
 
 func TestWatchRefreshesWhenCertificateAppearsAfterStartup(t *testing.T) {
@@ -119,7 +119,6 @@ func TestWatchIgnoresEmptyAndInvalidCertificates(t *testing.T) {
 
 func TestWatchRetriesFailedRefreshWithoutAdvancingFingerprint(t *testing.T) {
 	caPath := filepath.Join(t.TempDir(), "mitmproxy-ca-cert.pem")
-	require.NoError(t, os.WriteFile(caPath, testCertificate(t, 1), 0o644))
 
 	var attempts atomic.Int32
 	cancel, done := runTestWatcher(t, watchConfig{
@@ -134,7 +133,6 @@ func TestWatchRetriesFailedRefreshWithoutAdvancingFingerprint(t *testing.T) {
 	})
 	defer stopTestWatcher(t, cancel, done)
 
-	require.Never(t, func() bool { return attempts.Load() != 0 }, 30*time.Millisecond, 5*time.Millisecond)
 	require.NoError(t, os.WriteFile(caPath, testCertificate(t, 2), 0o644))
 	require.Eventually(t, func() bool { return attempts.Load() == 2 }, time.Second, 5*time.Millisecond)
 	require.Never(t, func() bool { return attempts.Load() != 2 }, 30*time.Millisecond, 5*time.Millisecond)
@@ -142,7 +140,6 @@ func TestWatchRetriesFailedRefreshWithoutAdvancingFingerprint(t *testing.T) {
 
 func TestWatchRetriesWhenCertificateChangesDuringRefresh(t *testing.T) {
 	caPath := filepath.Join(t.TempDir(), "mitmproxy-ca-cert.pem")
-	require.NoError(t, os.WriteFile(caPath, testCertificate(t, 1), 0o644))
 	second := testCertificate(t, 2)
 	third := testCertificate(t, 3)
 

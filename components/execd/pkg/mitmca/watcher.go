@@ -115,8 +115,10 @@ func watch(ctx context.Context, cfg watchConfig) {
 		panic("mitmca watcher requires a positive poll interval")
 	}
 
-	trusted, hasTrusted, err := readCertificateFingerprint(cfg.caPath)
+	_, _, err := readCertificateFingerprint(cfg.caPath)
 	lastError := reportChangedError("", err, cfg.onError)
+	var trusted certificateFingerprint
+	var hasTrusted bool
 	if cfg.onReady != nil {
 		cfg.onReady()
 	}
