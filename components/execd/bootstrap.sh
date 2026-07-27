@@ -42,14 +42,73 @@ _sudo() {
 	fi
 }
 
-# Install mitm CA into the system trust store (for non-Python programs)
-# and set OPENSANDBOX_MERGED_CA to a PEM bundle containing a full root
-# set + mitm CA (for env vars like REQUESTS_CA_BUNDLE that *replace*
-# rather than append to the default roots).
+MITM_CA="/opt/opensandbox/mitmproxy-ca-cert.pem"
+MERGED_CA="/opt/opensandbox/merged-ca-certificates.pem"
 OPENSANDBOX_MERGED_CA=""
+
+find_default_ca_bundle() {
+	certifi_ca=""
+	if command -v python3 >/dev/null 2>&1; then
+		certifi_ca="$(python3 -c 'import certifi; print(certifi.where())' 2>/dev/null)" || certifi_ca=""
+	elif command -v python >/dev/null 2>&1; then
+		certifi_ca="$(python -c 'import certifi; print(certifi.where())' 2>/dev/null)" || certifi_ca=""
+	fi
+
+	for candidate in \
+		"$certifi_ca" \
+		/etc/ssl/certs/ca-certificates.crt \
+		/etc/pki/tls/certs/ca-bundle.crt \
+		/etc/ssl/cert.pem \
+		/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
+		if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -s "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Keep one stable path for REQUESTS_CA_BUNDLE and SSL_CERT_FILE. Bootstrap can
+# export it before Jupyter starts, while later refreshes replace its contents
+# atomically without needing to mutate the Jupyter server's environment.
+build_merged_ca() {
+	mitm_cert="${1:-}"
+	default_bundle="$(find_default_ca_bundle)" || default_bundle=""
+	merged_tmp="${MERGED_CA}.tmp.$$"
+
+	if [ -n "$default_bundle" ]; then
+		if [ -n "$mitm_cert" ]; then
+			cat "$default_bundle" "$mitm_cert" > "$merged_tmp" || {
+				rm -f "$merged_tmp"
+				return 1
+			}
+		else
+			cat "$default_bundle" > "$merged_tmp" || {
+				rm -f "$merged_tmp"
+				return 1
+			}
+		fi
+	elif [ -n "$mitm_cert" ]; then
+		cat "$mitm_cert" > "$merged_tmp" || {
+			rm -f "$merged_tmp"
+			return 1
+		}
+	else
+		return 1
+	fi
+
+	if ! mv -f "$merged_tmp" "$MERGED_CA"; then
+		rm -f "$merged_tmp"
+		return 1
+	fi
+	OPENSANDBOX_MERGED_CA="$MERGED_CA"
+	return 0
+}
+
+# Install mitm CA into the system trust store (for non-Python programs)
+# and build the stable full-root + mitm bundle used by child processes.
 trust_mitm_ca() {
 	cert="$1"
-	merged="/opt/opensandbox/merged-ca-certificates.pem"
 	trust_failed=0
 
 	# 1) Try to install into the system trust store (best-effort).
@@ -75,34 +134,11 @@ trust_mitm_ca() {
 		echo "warning: no system trust-store tooling found (need update-ca-certificates or update-ca-trust)" >&2
 	fi
 
-	# 2) Build a merged bundle (complete root set + mitm CA).
-	#    Prefer certifi (full Mozilla root set) over system bundles which
-	#    may be incomplete in minimal Docker images.
-	certifi_ca=""
-	if command -v python3 >/dev/null 2>&1; then
-		certifi_ca="$(python3 -c 'import certifi; print(certifi.where())' 2>/dev/null)" || certifi_ca=""
-	elif command -v python >/dev/null 2>&1; then
-		certifi_ca="$(python -c 'import certifi; print(certifi.where())' 2>/dev/null)" || certifi_ca=""
+	if ! build_merged_ca "$cert"; then
+		echo "warning: could not write merged CA bundle" >&2
+		return 1
 	fi
-
-	for candidate in \
-		"$certifi_ca" \
-		/etc/ssl/certs/ca-certificates.crt \
-		/etc/pki/tls/certs/ca-bundle.crt \
-		/etc/ssl/cert.pem \
-		/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
-		if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -s "$candidate" ]; then
-			merged_tmp="${merged}.tmp.$$"
-			if cat "$candidate" "$cert" > "$merged_tmp" && mv -f "$merged_tmp" "$merged"; then
-				OPENSANDBOX_MERGED_CA="$merged"
-				return "$trust_failed"
-			fi
-			rm -f "$merged_tmp"
-		fi
-	done
-
-	echo "warning: could not locate any CA bundle to merge with mitm CA" >&2
-	return 1
+	return "$trust_failed"
 }
 
 # Chromium/Chrome on Linux do not use only the system trust store: they also honor the per-user
@@ -250,13 +286,14 @@ trust_mitm_ca_jdk() {
 	return "$jdk_status"
 }
 
-MITM_CA="/opt/opensandbox/mitmproxy-ca-cert.pem"
 refresh_mitm_ca() {
 	strict="${1:-0}"
 	refresh_failed=0
 	wait_limit=300
 	if [ "$strict" = "1" ]; then
 		wait_limit=30
+	elif ! build_merged_ca ""; then
+		echo "warning: could not prepare the bootstrap CA bundle before runtime startup" >&2
 	fi
 	i=0
 	while [ "$i" -lt "$wait_limit" ]; do
@@ -284,18 +321,18 @@ refresh_mitm_ca() {
 		if ! trust_mitm_ca_jdk "$MITM_CA"; then
 			refresh_failed=1
 		fi
-		export NODE_EXTRA_CA_CERTS="$MITM_CA"  # additive — Node appends to built-in roots
+	fi
 
-		# REQUESTS_CA_BUNDLE and SSL_CERT_FILE replace the default bundle,
-		# so use merged roots (certifi/system CA + mitm CA).
-		if [ -n "$OPENSANDBOX_MERGED_CA" ] && [ -f "$OPENSANDBOX_MERGED_CA" ]; then
-			export REQUESTS_CA_BUNDLE="$OPENSANDBOX_MERGED_CA"
-			export SSL_CERT_FILE="$OPENSANDBOX_MERGED_CA"
-		else
-			echo "warning: merged CA bundle not available; REQUESTS_CA_BUNDLE/SSL_CERT_FILE will only contain the mitm CA" >&2
-			export REQUESTS_CA_BUNDLE="$MITM_CA"
-			export SSL_CERT_FILE="$MITM_CA"
-		fi
+	# Export stable paths before execd and chained runtimes such as Jupyter start.
+	# Node appends NODE_EXTRA_CA_CERTS to built-in roots when each process starts.
+	export NODE_EXTRA_CA_CERTS="$MITM_CA"
+	if [ -n "$OPENSANDBOX_MERGED_CA" ] && [ -f "$OPENSANDBOX_MERGED_CA" ]; then
+		export REQUESTS_CA_BUNDLE="$OPENSANDBOX_MERGED_CA"
+		export SSL_CERT_FILE="$OPENSANDBOX_MERGED_CA"
+	elif [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
+		echo "warning: merged CA bundle not available; REQUESTS_CA_BUNDLE/SSL_CERT_FILE will only contain the mitm CA" >&2
+		export REQUESTS_CA_BUNDLE="$MITM_CA"
+		export SSL_CERT_FILE="$MITM_CA"
 	fi
 	if [ "$strict" = "1" ] && [ "$refresh_failed" -ne 0 ]; then
 		return 1

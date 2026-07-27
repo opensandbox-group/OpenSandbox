@@ -24,12 +24,15 @@ MERGED_PATH="$TEST_DIR/merged-ca-certificates.pem"
 EXECD_MARKER="$TEST_DIR/execd-started"
 TEST_BOOTSTRAP="$TEST_DIR/bootstrap.sh"
 FAILED_BOOTSTRAP="$TEST_DIR/bootstrap-failed-refresh.sh"
+NO_CA_BOOTSTRAP="$TEST_DIR/bootstrap-no-initial-ca.sh"
+CAPTURE_ENV="$TEST_DIR/capture-env.sh"
+CAPTURED_ENV="$TEST_DIR/inherited-env"
 MOCK_BIN="$TEST_DIR/bin"
 
 cp "$ROOT_DIR/bootstrap.sh" "$TEST_BOOTSTRAP"
 sed -i \
 	-e "s|^MITM_CA=.*|MITM_CA=\"$CA_PATH\"|" \
-	-e "s|^[[:space:]]*merged=\"/opt/opensandbox/merged-ca-certificates.pem\"|\tmerged=\"$MERGED_PATH\"|" \
+	-e "s|^MERGED_CA=.*|MERGED_CA=\"$MERGED_PATH\"|" \
 	-e "s|for search_dir in /usr/lib/jvm /usr/java /opt/java|for search_dir in \"$TEST_DIR/no-jdks\"|" \
 	-e "s|for d in /opt/jdk\*|for d in \"$TEST_DIR/no-jdks\"/*|" \
 	"$TEST_BOOTSTRAP"
@@ -66,7 +69,7 @@ if test -e "$EXECD_MARKER"; then
 fi
 
 cp "$TEST_BOOTSTRAP" "$FAILED_BOOTSTRAP"
-sed -i "s|merged=\"$MERGED_PATH\"|merged=\"$TEST_DIR/missing/merged-ca-certificates.pem\"|" "$FAILED_BOOTSTRAP"
+sed -i "s|^MERGED_CA=.*|MERGED_CA=\"$TEST_DIR/missing/merged-ca-certificates.pem\"|" "$FAILED_BOOTSTRAP"
 set +e
 OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true \
 	EXECD="$TEST_DIR/execd" \
@@ -91,4 +94,29 @@ for _ in $(seq 1 20); do
 done
 test -e "$EXECD_MARKER"
 
-echo "PASS: strict refresh reports failures while initial bootstrap remains best-effort"
+cp "$TEST_BOOTSTRAP" "$NO_CA_BOOTSTRAP"
+sed -i 's/^[[:space:]]*wait_limit=300$/\twait_limit=0/' "$NO_CA_BOOTSTRAP"
+rm -f "$CA_PATH" "$MERGED_PATH" "$CAPTURED_ENV"
+cat > "$CAPTURE_ENV" <<'EOF'
+#!/bin/sh
+{
+	printf 'NODE_EXTRA_CA_CERTS=%s\n' "${NODE_EXTRA_CA_CERTS:-}"
+	printf 'REQUESTS_CA_BUNDLE=%s\n' "${REQUESTS_CA_BUNDLE:-}"
+	printf 'SSL_CERT_FILE=%s\n' "${SSL_CERT_FILE:-}"
+} > "$CAPTURED_ENV"
+EOF
+chmod +x "$CAPTURE_ENV" "$NO_CA_BOOTSTRAP"
+
+OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true \
+	CAPTURED_ENV="$CAPTURED_ENV" \
+	EXECD="$TEST_DIR/execd" \
+	EXECD_ENVS="$TEST_DIR/.env" \
+	PATH="$MOCK_BIN" \
+	sh "$NO_CA_BOOTSTRAP" "$CAPTURE_ENV" >/dev/null 2>&1
+
+test -s "$MERGED_PATH"
+grep -Fx "NODE_EXTRA_CA_CERTS=$CA_PATH" "$CAPTURED_ENV"
+grep -Fx "REQUESTS_CA_BUNDLE=$MERGED_PATH" "$CAPTURED_ENV"
+grep -Fx "SSL_CERT_FILE=$MERGED_PATH" "$CAPTURED_ENV"
+
+echo "PASS: refresh failures stay strict and chained runtimes inherit stable CA paths"

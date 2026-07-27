@@ -167,7 +167,7 @@ Extra ports can be added via the experimental `OPENSANDBOX_EGRESS_MITMPROXY_EXTR
 On extra ports, mitmproxy still decrypts and logs traffic normally, but the Credential Vault's binding matcher currently only fires on the canonical `80/443` — bindings will not match requests to custom ports until follow-up work extends the matcher.
 :::
 
-The egress sidecar exports only its public root certificate to the shared OpenSandbox volume. The agent bootstrap installs that certificate into the system, NSS, and JDK trust stores. If an egress container restart rotates the root certificate, `execd` detects the new certificate fingerprint and refreshes those stores and the merged CA bundle automatically. Processes started through `execd` after the refresh use the new trust material. Existing bash sessions upgrade bootstrap-managed fallback paths while preserving explicit environment overrides. Long-running applications that cache TLS contexts must recreate those contexts or restart.
+The egress sidecar exports only its public root certificate to the shared OpenSandbox volume. The agent bootstrap installs that certificate into the system, NSS, and JDK trust stores. If an egress container restart rotates the root certificate, `execd` detects the new certificate fingerprint and refreshes those stores and the merged CA bundle automatically. Bootstrap-managed trust variables use stable file paths inherited by `execd`, Jupyter, and other chained runtimes, so new processes and kernels use the refreshed files even when the certificate appeared after startup. Existing bash sessions preserve explicit environment overrides and clears. Long-running applications and kernels that cache TLS contexts must recreate those contexts or restart.
 
 ### Credential Vault
 

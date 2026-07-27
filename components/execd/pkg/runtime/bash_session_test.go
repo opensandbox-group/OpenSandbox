@@ -221,11 +221,46 @@ func TestBashSessionManagedEnvironmentPreservesClearBeforeFirstUpdate(t *testing
 	require.Equal(t, "<unset>", runBashSessionEnvProbe(t, session))
 }
 
+func TestBashSessionPreservesOversizedInheritedEnvironment(t *testing.T) {
+	requireBash(t)
+	const name = "EXECD_TEST_OVERSIZED_ENV"
+	value := strings.Repeat("x", maxPersistedEnvValueSize+1)
+	t.Setenv(name, value)
+	session := newBashSession("")
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    "true",
+		Timeout: 3 * time.Second,
+	}))
+	require.Equal(t, "<"+value+">", runBashSessionNamedEnvProbe(t, session, name))
+}
+
+func TestBashSessionPreservesExplicitUnsetOfOversizedEnvironment(t *testing.T) {
+	requireBash(t)
+	const name = "EXECD_TEST_OVERSIZED_ENV"
+	t.Setenv(name, strings.Repeat("x", maxPersistedEnvValueSize+1))
+	session := newBashSession("")
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    "unset " + name,
+		Timeout: 3 * time.Second,
+	}))
+	require.Equal(t, "<unset>", runBashSessionNamedEnvProbe(t, session, name))
+}
+
 func runBashSessionEnvProbe(t *testing.T, session *bashSession) string {
+	return runBashSessionNamedEnvProbe(t, session, "REQUESTS_CA_BUNDLE")
+}
+
+func runBashSessionNamedEnvProbe(t *testing.T, session *bashSession, name string) string {
 	t.Helper()
 	var output []string
 	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
-		Code:    `if [ -z "${REQUESTS_CA_BUNDLE+x}" ]; then printf '<unset>\n'; else printf '<%s>\n' "$REQUESTS_CA_BUNDLE"; fi`,
+		Code:    fmt.Sprintf(`if [ -z "${%[1]s+x}" ]; then printf '<unset>\n'; else printf '<%%s>\n' "$%[1]s"; fi`, name),
 		Timeout: 3 * time.Second,
 		Hooks: ExecuteResultHook{
 			OnExecuteStdout: func(line string) { output = append(output, line) },
@@ -236,7 +271,7 @@ func runBashSessionEnvProbe(t *testing.T, session *bashSession) string {
 			return line
 		}
 	}
-	require.FailNow(t, "bash session env probe returned no output")
+	require.FailNow(t, "bash session env probe returned no output", "name=%s", name)
 	return ""
 }
 

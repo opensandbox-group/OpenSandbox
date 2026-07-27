@@ -137,13 +137,14 @@ func updateClearedEnvironment(
 	cleared map[string]bool,
 	previous map[string]string,
 	current map[string]string,
+	exported map[string]bool,
 ) map[string]bool {
 	if cleared == nil {
 		cleared = make(map[string]bool)
 	}
 	for name, previousValue := range previous {
 		currentValue, exists := current[name]
-		if !exists || (previousValue != "" && currentValue == "") {
+		if (!exists && !exported[name]) || (exists && previousValue != "" && currentValue == "") {
 			cleared[name] = true
 		}
 	}

@@ -287,13 +287,14 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		exitCode = &code                    //nolint:ineffassign
 	}
 
-	updatedEnv := parseExportDump(envLines)
+	updatedEnv, exportedEnvironment := parseExportDump(envLines)
 	s.mu.Lock()
 	if len(updatedEnv) > 0 {
 		s.clearedEnvironment = updateClearedEnvironment(
 			s.clearedEnvironment,
 			envSnapshot,
 			updatedEnv,
+			exportedEnvironment,
 		)
 		applyManagedEnvironmentUpdates(updatedEnv, s.managedEnvironment, false)
 		s.env = updatedEnv
@@ -408,19 +409,24 @@ var envKeysNotPersisted = map[string]bool{
 // maxPersistedEnvValueSize caps single env value length as a safeguard.
 const maxPersistedEnvValueSize = 8 * 1024
 
-func parseExportDump(lines []string) map[string]string {
+func parseExportDump(lines []string) (map[string]string, map[string]bool) {
 	if len(lines) == 0 {
-		return nil
+		return nil, nil
 	}
 	env := make(map[string]string, len(lines))
+	exported := make(map[string]bool, len(lines))
 	for _, line := range lines {
 		k, v, ok := parseExportLine(line)
-		if !ok || envKeysNotPersisted[k] || len(v) > maxPersistedEnvValueSize {
+		if !ok || envKeysNotPersisted[k] {
+			continue
+		}
+		exported[k] = true
+		if len(v) > maxPersistedEnvValueSize {
 			continue
 		}
 		env[k] = v
 	}
-	return env
+	return env, exported
 }
 
 func parseExportLine(line string) (string, string, bool) {
