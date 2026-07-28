@@ -334,9 +334,15 @@ Attributes:
   and so on), so the server's existing error taxonomy becomes queryable:
   `sum by (error_code) (rate(opensandbox_sandbox_operation_total{outcome="error"}[5m]))`.
 
-Note `POST /sandboxes` returns `202 Accepted` and provisions asynchronously, so `create`
-here is **time-to-scheduled, not time-to-ready**. Time-to-ready needs instrumentation in the
-provisioning path, which this does not yet cover.
+`create` covers **provisioning, not just scheduling**, despite the `202 Accepted` status: the
+handler blocks until the sandbox exists. In Kubernetes `create_sandbox` awaits
+`_wait_for_sandbox_ready`, so the sample includes pod readiness; in Docker it awaits the
+provisioning thread, so it includes container start and egress sidecar readiness. This is
+therefore a usable **server-side cold-start signal**, and the one metric here that does not
+depend on clients reporting anything.
+
+What it does not include is anything the sandbox does after it is ready — execd bootstrapping
+its own workload, for instance.
 
 ---
 

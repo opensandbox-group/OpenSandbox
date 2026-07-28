@@ -67,9 +67,13 @@ Two consequences:
   failures queryable:
   `sum by (error_code) (rate(opensandbox_sandbox_operation_total{outcome="error"}[5m]))`.
 
-Note `POST /sandboxes` answers `202` and provisions asynchronously, so the server-measured
-`create` is **time-to-scheduled**. Time-to-ready is what the SDK number approximates. Full
-attribute reference: [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
+Both cover provisioning: despite the `202 Accepted` status, `POST /sandboxes` blocks until
+the sandbox exists — Kubernetes awaits pod readiness, Docker awaits container start and
+egress sidecar readiness. So `operation.duration{operation="create"}` is a **server-side
+cold-start signal**, and unlike the SDK histogram it does not depend on clients reporting
+anything. The difference between the two is the client's share: network, auth, SDK overhead.
+
+Full attribute reference: [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
 
 ## When it runs
 

@@ -54,9 +54,10 @@ def instrumented_operation(operation: str) -> Callable[[Callable], Callable]:
     """Record duration and outcome of a lifecycle handler.
 
     Measures the server's own work at the API boundary, which is the one place where every
-    runtime converges and where the error code has already been decided. Note that
-    ``POST /sandboxes`` returns 202 and provisions asynchronously, so for ``create`` this is
-    time-to-scheduled, not time-to-ready.
+    runtime converges and where the error code has already been decided. Despite the 202
+    status, ``POST /sandboxes`` blocks until the sandbox is provisioned — Kubernetes awaits
+    ``_wait_for_sandbox_ready``, Docker awaits the provisioning thread — so ``create`` is a
+    cold-start measurement rather than a scheduling one.
 
     ``functools.wraps`` is load-bearing: FastAPI builds the request model from the handler
     signature, and ``inspect.signature`` follows ``__wrapped__``, so the route keeps its
