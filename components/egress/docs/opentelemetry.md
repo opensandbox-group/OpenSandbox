@@ -45,7 +45,9 @@ gets no series at all, rather than a flat zero that reads like an idle sidecar.
 
 All egress metrics may include shared attributes:
 
-- `sandbox_id` from `OPENSANDBOX_EGRESS_SANDBOX_ID` (when set)
+- `sandbox_id` from `OPENSANDBOX_EGRESS_SANDBOX_ID` (when set). Without it the sidecars of
+  different sandboxes export identical attribute sets, so their series collide in the
+  backend — which matters most for the per-sandbox `egress.process.*` gauges.
 - extra key/value attributes from `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (when set)
 
 ## OTEL Endpoint Configuration

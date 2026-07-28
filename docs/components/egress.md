@@ -203,6 +203,11 @@ The `process` pair is read from the sidecar's own cgroup, so it really is per sa
 `rate()`. A sampled ratio would depend on the export interval and could not be compared
 across deployments.
 
+Per-sandbox attribution needs `OPENSANDBOX_EGRESS_SANDBOX_ID` to be set, since that is what
+becomes the `sandbox_id` attribute. Without it every sidecar exports the same attribute set
+and the series from different sandboxes collide in the backend — which makes the `process`
+metrics look flat or flapping rather than absent. Set it when launching the sidecar.
+
 Both `process` metrics are **only present when the sidecar's cgroup is readable** (cgroup v2
 `memory.current` / `cpu.stat`, or v1 `memory.usage_in_bytes` / `cpuacct.usage`). Under a
 runtime that does not expose cgroupfs the series are absent rather than zero, so a flat zero
