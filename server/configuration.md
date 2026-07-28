@@ -328,6 +328,9 @@ Attributes:
 - `operation` — a lifecycle verb from a closed set: `create`, `update_metadata`, `delete`,
   `pause`, `resume`, `renew`, `create_snapshot`, `delete_snapshot`. Read-only endpoints are
   not instrumented.
+- Recorded at the **route**, so it also covers requests rejected before the handler runs — a
+  body that fails validation is counted with `error.code = "HTTP_422"` rather than going
+  missing from the error rate.
 - `outcome` — `success` or `error`.
 - `error.code` — on the counter only, and only when the operation failed. Values come from
   `SandboxErrorCodes` (`KUBERNETES::POD_READY_TIMEOUT`, `DOCKER::SANDBOX_IMAGE_PULL_FAILED`,

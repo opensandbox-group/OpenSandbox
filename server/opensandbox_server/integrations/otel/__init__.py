@@ -14,7 +14,10 @@
 
 """Optional OpenTelemetry integration for SDK metrics ingestion and server metrics."""
 
-from opensandbox_server.integrations.otel.instrument import instrumented_operation
+from opensandbox_server.integrations.otel.instrument import (
+    InstrumentedRoute,
+    lifecycle_operation,
+)
 from opensandbox_server.integrations.otel.metrics import (
     record_sandbox_create_duration,
     record_sandbox_operation,
@@ -23,7 +26,8 @@ from opensandbox_server.integrations.otel.metrics import (
 )
 
 __all__ = [
-    "instrumented_operation",
+    "InstrumentedRoute",
+    "lifecycle_operation",
     "record_sandbox_create_duration",
     "record_sandbox_operation",
     "setup_otel_metrics",

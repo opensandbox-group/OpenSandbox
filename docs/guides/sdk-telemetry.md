@@ -67,6 +67,10 @@ Two consequences:
   failures queryable:
   `sum by (error_code) (rate(opensandbox_sandbox_operation_total{outcome="error"}[5m]))`.
 
+The `operation.*` pair is recorded at the route, so it also counts requests rejected before
+the handler runs — a malformed body appears with `error.code = "HTTP_422"` instead of being
+missing from your error rate.
+
 Both cover provisioning: despite the `202 Accepted` status, `POST /sandboxes` blocks until
 the sandbox exists — Kubernetes awaits pod readiness, Docker awaits container start and
 egress sidecar readiness. So `operation.duration{operation="create"}` is a **server-side

@@ -14,14 +14,18 @@
 
 """Server-side lifecycle operation metrics."""
 
-import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 import opensandbox_server.integrations.otel.metrics as otel_metrics
-from opensandbox_server.integrations.otel.instrument import instrumented_operation
+from opensandbox_server.integrations.otel.instrument import (
+    InstrumentedRoute,
+    lifecycle_operation,
+)
 from opensandbox_server.integrations.otel.metrics import (
     normalize_error_code,
     record_sandbox_operation,
@@ -108,112 +112,156 @@ class TestRecordSandboxOperation:
             record_sandbox_operation(operation="pause", duration_ms=1.0, outcome="success")
 
 
-class TestInstrumentedOperation:
-    """The decorator must be invisible to the handler it wraps."""
+class _Body(BaseModel):
+    name: str
 
-    def test_sync_success(self):
-        @instrumented_operation("pause")
-        def handler(sandbox_id: str) -> str:
-            return f"paused {sandbox_id}"
 
-        with patch(
-            "opensandbox_server.integrations.otel.instrument.record_sandbox_operation"
-        ) as record:
-            assert handler("sbx-1") == "paused sbx-1"
+def _app() -> FastAPI:
+    """A router using the real route class, with one marked and one unmarked endpoint."""
+    router = APIRouter(route_class=InstrumentedRoute)
 
-        call = record.call_args.kwargs
-        assert call["operation"] == "pause"
-        assert call["outcome"] == "success"
-        assert call["error_code"] is None
-        assert call["duration_ms"] >= 0
-
-    def test_async_success_preserves_the_signature(self):
-        @instrumented_operation("create")
-        async def handler(request: str, x_request_id: str = "") -> str:
-            return f"created {request}"
-
-        # FastAPI builds the request model from the signature, so it has to survive.
-        import inspect
-
-        assert list(inspect.signature(handler).parameters) == ["request", "x_request_id"]
-
-        with patch(
-            "opensandbox_server.integrations.otel.instrument.record_sandbox_operation"
-        ) as record:
-            assert asyncio.run(handler("spec")) == "created spec"
-
-        assert record.call_args.kwargs["outcome"] == "success"
-
-    def test_http_exception_with_code_is_counted_and_reraised(self):
-        @instrumented_operation("delete")
-        def handler() -> None:
+    @router.post("/marked")
+    @lifecycle_operation("create")
+    async def marked(body: _Body) -> dict:
+        if body.name == "boom":
+            raise ValueError("boom")
+        if body.name == "missing":
             raise HTTPException(
                 status_code=404,
                 detail={"code": SandboxErrorCodes.SANDBOX_NOT_FOUND, "message": "gone"},
             )
+        if body.name == "conflict":
+            raise HTTPException(status_code=409, detail="conflict")
+        return {"created": body.name}
 
+    @router.get("/unmarked")
+    def unmarked() -> dict:
+        return {"ok": True}
+
+    app = FastAPI()
+    app.include_router(router)
+    return app
+
+
+class TestInstrumentedRoute:
+    """Recording happens at the route, so it covers the whole API boundary."""
+
+    def _call(self, method: str, path: str, **kwargs):
         with patch(
             "opensandbox_server.integrations.otel.instrument.record_sandbox_operation"
         ) as record:
-            with pytest.raises(HTTPException) as raised:
-                handler()
+            response = getattr(TestClient(_app(), raise_server_exceptions=False), method)(
+                path, **kwargs
+            )
+        return response, record
 
-        assert raised.value.status_code == 404
+    def test_success(self):
+        response, record = self._call("post", "/marked", json={"name": "sbx"})
+
+        assert response.status_code == 200
+        call = record.call_args.kwargs
+        assert call["operation"] == "create"
+        assert call["outcome"] == "success"
+        assert call["error_code"] is None
+        assert call["duration_ms"] >= 0
+
+    def test_http_exception_with_code(self):
+        response, record = self._call("post", "/marked", json={"name": "missing"})
+
+        assert response.status_code == 404
         call = record.call_args.kwargs
         assert call["outcome"] == "error"
         assert call["error_code"] == SandboxErrorCodes.SANDBOX_NOT_FOUND
 
     def test_http_exception_without_a_code_falls_back_to_the_status(self):
-        @instrumented_operation("resume")
-        def handler() -> None:
-            raise HTTPException(status_code=409, detail="conflict")
+        response, record = self._call("post", "/marked", json={"name": "conflict"})
 
-        with patch(
-            "opensandbox_server.integrations.otel.instrument.record_sandbox_operation"
-        ) as record:
-            with pytest.raises(HTTPException):
-                handler()
-
+        assert response.status_code == 409
         assert record.call_args.kwargs["error_code"] == "HTTP_409"
 
-    def test_unexpected_exception_is_counted_and_reraised(self):
-        @instrumented_operation("create_snapshot")
-        def handler() -> None:
-            raise ValueError("boom")
+    def test_unexpected_exception(self):
+        response, record = self._call("post", "/marked", json={"name": "boom"})
 
-        with patch(
-            "opensandbox_server.integrations.otel.instrument.record_sandbox_operation"
-        ) as record:
-            with pytest.raises(ValueError, match="boom"):
-                handler()
-
+        assert response.status_code == 500
         assert record.call_args.kwargs["error_code"] == SandboxErrorCodes.UNKNOWN_ERROR
 
-    def test_a_metrics_failure_does_not_break_the_handler(self):
+    def test_request_rejected_before_the_handler_runs_is_still_counted(self):
+        """A malformed body never reaches the endpoint; the route still sees the failure."""
+        response, record = self._call("post", "/marked", json={"wrong": "field"})
+
+        assert response.status_code == 422
+        call = record.call_args.kwargs
+        assert call["operation"] == "create"
+        assert call["outcome"] == "error"
+        assert call["error_code"] == "HTTP_422"
+
+    def test_unmarked_routes_are_not_recorded(self):
+        response, record = self._call("get", "/unmarked")
+
+        assert response.status_code == 200
+        record.assert_not_called()
+
+    def test_recorded_exactly_once(self):
+        """The marker must not wrap the handler as well, or every call counts twice."""
+        _, record = self._call("post", "/marked", json={"name": "sbx"})
+
+        assert record.call_count == 1
+
+    def test_a_metrics_failure_does_not_break_the_request(self):
         """Instrumentation sits on every mutating route; it must not be able to fail one."""
-
-        @instrumented_operation("renew")
-        def handler() -> str:
-            return "renewed"
-
         with patch(
             "opensandbox_server.integrations.otel.instrument.record_sandbox_operation",
             side_effect=RuntimeError("metrics down"),
         ):
-            assert handler() == "renewed"
+            response = TestClient(_app()).post("/marked", json={"name": "sbx"})
+
+        assert response.status_code == 200
+        assert response.json() == {"created": "sbx"}
 
     def test_a_metrics_failure_does_not_mask_a_handler_error(self):
-        """And it must not swallow the failure the caller actually needs to see."""
-
-        @instrumented_operation("delete")
-        def handler() -> None:
-            raise HTTPException(status_code=404, detail="gone")
-
         with patch(
             "opensandbox_server.integrations.otel.instrument.record_sandbox_operation",
             side_effect=RuntimeError("metrics down"),
         ):
-            with pytest.raises(HTTPException) as raised:
-                handler()
+            response = TestClient(_app()).post("/marked", json={"name": "missing"})
 
-        assert raised.value.status_code == 404
+        assert response.status_code == 404
+
+
+class TestLifecycleOperationMarker:
+    def test_returns_the_handler_untouched(self):
+        """FastAPI reads the signature; the marker must not stand in front of it."""
+
+        async def handler(request: str, x_request_id: str = "") -> str:
+            return request
+
+        marked = lifecycle_operation("create")(handler)
+
+        assert marked is handler
+
+
+class TestLifecycleRouterIsInstrumented:
+    """Guards the wiring itself: decorator order and route_class are easy to get wrong."""
+
+    def test_mutating_routes_are_marked_and_use_the_route_class(self):
+        from opensandbox_server.api.lifecycle import router
+
+        marked = {
+            route.endpoint.__name__: getattr(route.endpoint, "__opensandbox_operation__")
+            for route in router.routes
+            if hasattr(route.endpoint, "__opensandbox_operation__")
+        }
+
+        assert marked == {
+            "create_sandbox": "create",
+            "patch_sandbox_metadata": "update_metadata",
+            "delete_sandbox": "delete",
+            "pause_sandbox": "pause",
+            "resume_sandbox": "resume",
+            "renew_sandbox_expiration": "renew",
+            "create_snapshot": "create_snapshot",
+            "delete_snapshot": "delete_snapshot",
+        }
+        # A marker with the wrong decorator order, or a router without route_class, would
+        # leave the metric silently unrecorded.
+        assert all(isinstance(route, InstrumentedRoute) for route in router.routes)
