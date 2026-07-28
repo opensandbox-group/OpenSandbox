@@ -38,6 +38,12 @@ type Config struct {
 	ServiceName        string
 	ResourceAttributes []attribute.KeyValue
 	RegisterMetrics    func() error
+	// ExporterOptions are appended last, so a component can override the defaults
+	// set here. The egress uses it to supply an HTTP client that SO_MARKs its own
+	// connections: the sidecar shares a netns with the sandbox and is therefore
+	// subject to the very policy it installs, which would otherwise drop its
+	// exports. See components/egress/pkg/telemetry.
+	ExporterOptions []otlpmetrichttp.Option
 }
 
 const (
@@ -71,6 +77,7 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		opts := append(metricsClientOptions(),
 			otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector),
 		)
+		opts = append(opts, cfg.ExporterOptions...)
 		mexp, err := otlpmetrichttp.New(ctx, opts...)
 		if err != nil {
 			return nil, err

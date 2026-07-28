@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	inttelemetry "github.com/alibaba/opensandbox/internal/telemetry"
@@ -33,9 +34,17 @@ func Init(ctx context.Context) (shutdown func(context.Context) error, err error)
 	if id := strings.TrimSpace(os.Getenv(constants.EnvSandboxID)); id != "" {
 		attrs = append(attrs, attribute.String("sandbox_id", id))
 	}
+	// The sidecar is subject to the egress policy it installs (shared netns), so its
+	// exports must be SO_MARK'd to bypass it. See exporterHTTPClient.
+	var exporterOpts []otlpmetrichttp.Option
+	if client := exporterHTTPClient(); client != nil {
+		exporterOpts = append(exporterOpts, otlpmetrichttp.WithHTTPClient(client))
+	}
+
 	return inttelemetry.Init(ctx, inttelemetry.Config{
 		ServiceName:        serviceName + "-" + version.Version,
 		ResourceAttributes: attrs,
 		RegisterMetrics:    registerEgressMetrics,
+		ExporterOptions:    exporterOpts,
 	})
 }
