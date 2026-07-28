@@ -94,6 +94,37 @@ err := exec.RunCommand(ctx, opensandbox.RunCommandRequest{
 })
 ```
 
+### Command inventory
+
+Use `sandbox.ListCommands` (or `ExecdClient.ListCommands` for a direct execd
+client) to list command summaries. Set `Running` to a pointer to `true` or
+`false` to filter by state; leave it `nil` for both. `Cursor` is opaque, bound
+to the exact initial `Running` filter, and valid only for the lifetime of the
+execd controller that returned it. Preserve the filter on each subsequent page
+or receive `INVALID_QUERY`; restart without a cursor after a restart or routing
+change.
+
+```go
+running := false
+page, err := sandbox.ListCommands(ctx, opensandbox.ListCommandsRequest{
+    Running: &running,
+    Limit:   50,
+})
+if err != nil {
+    log.Fatal(err)
+}
+if page.Pagination.NextCursor != nil {
+    nextPage, err := sandbox.ListCommands(ctx, opensandbox.ListCommandsRequest{
+        Running: &running,
+        Cursor: *page.Pagination.NextCursor,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = nextPage
+}
+```
+
 ### Check egress policy
 
 ```go

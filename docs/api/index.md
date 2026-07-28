@@ -88,6 +88,7 @@ Defines interfaces for executing code, commands, and file operations within sand
 **Command Execution:**
 - `POST /command` - Execute shell command (streaming output)
 - `DELETE /command` - Interrupt command execution
+- `GET /command` - List running and recently completed command summaries with pagination
 - `GET /command/status/{id}` - Get foreground/background command status
 - `GET /command/{id}/logs` - Fetch accumulated stdout/stderr for a background command
 

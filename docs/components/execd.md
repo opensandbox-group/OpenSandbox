@@ -36,9 +36,32 @@ isolated-session capability probing and creation fail closed.
 
 ### 2) Start Jupyter Server
 
+execd requires a Jupyter Server that is reachable at the address passed to
+`--jupyter-host`. In a source checkout, source the repository helper and invoke
+its `install_jupyter` function:
+
 ```bash
-./tests/jupyter.sh
+. ./tests/jupyter.sh
+install_jupyter
 ```
+
+Alternatively, install Jupyter if necessary, then start it with the token you
+will pass to execd:
+
+```bash
+python3 -m pip install jupyter
+jupyter server \
+  --ip=127.0.0.1 \
+  --port=54321 \
+  --no-browser \
+  --ServerApp.token=your-jupyter-token
+```
+
+The helper sets `JUPYTER_PORT=54321` and
+`JUPYTER_TOKEN=opensandboxexecdintegrationtest`, then starts a Jupyter Notebook
+process in the background. Use those values for the execd connection when
+following the helper path. Keep the standalone Jupyter Server process running
+while using execd.
 
 ### 3) Run execd
 
@@ -54,6 +77,33 @@ isolated-session capability probing and creation fail closed.
 ```bash
 curl -v http://localhost:44772/ping
 ```
+
+### Local Smoke Test (Command Inventory Regression)
+
+`components/execd/tests/smoke.sh` starts dedicated local Jupyter and execd instances, waits for them to become ready, and then runs API smoke tests. It verifies command-inventory default compatibility, cap eviction only after the earliest terminal summary is absent while the second and third remain visible, and TTL expiry only after the command was publicly observed before terminal retention begins. Build execd in `components/execd`, then run one of these three modes:
+
+```bash
+# Default command-inventory lifecycle compatibility
+./tests/smoke.sh
+
+# Completed-summary cap: must use exactly TTL=1h and cap=2
+EXECD_COMMAND_RECOVERY_TTL=1h EXECD_COMMAND_RECOVERY_MAX_TERMINAL=2 ./tests/smoke.sh --inventory-cap
+
+# Completed-summary TTL expiry: must use exactly TTL=2s and cap=1000
+EXECD_COMMAND_RECOVERY_TTL=2s EXECD_COMMAND_RECOVERY_MAX_TERMINAL=1000 ./tests/smoke.sh --inventory-expiry
+```
+
+To deterministically validate the inventory cap/expiry observation helpers without starting an additional service, run:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_smoke_api_inventory.py'
+```
+
+Prerequisites are Bash, `curl`, Python, Python `requests`, a built `./bin/execd`, and a usable `jupyter notebook`. Ports `127.0.0.1:54321` and `127.0.0.1:44772` must be free.
+
+The script sets a fixed 30-second readiness deadline for Jupyter `/api` and execd `/ping`, and checks that the `JUPYTER_PID` and `EXECD_PID` it started remain alive before and after requests to avoid accidentally using an existing listener. On success, failure, or interruption, its exit trap automatically stops and waits for both child processes. On success, it prints `[+] smoke tests PASS` and exits with code `0`.
+
+On failure, first check the terminal for dependency, argument, or 30-second timeout messages. Then check `startup.log` (execd startup failures) and `execd.log` (execd runtime logs) in the current directory. If a port is occupied, stop the process using it or retry in an isolated environment.
 
 ## API
 
@@ -71,6 +121,52 @@ minimal images that do not include Bash. This applies to PTY sessions, the
 Bash session API (which keeps its existing name for compatibility), and
 isolated sessions. Commands submitted to a fallback session must use syntax
 supported by that image's `sh` implementation.
+
+### Command Inventory `GET /command`
+
+`GET /command` returns a **summary inventory** of commands known to the current instance, for observing running and recently completed commands. It does not return command content or logs. Optional query parameters are:
+
+- `running=true` returns only running commands; `running=false` returns only completed commands; omit it to return both.
+- `limit` is `1` to `100` per page, with a default of `50`.
+- `cursor` continues to the next page.
+
+A cursor is opaque and bound to the requested filter. It is valid only for the lifetime of the Execd controller instance that issued it. After an Execd restart, controller replacement, or request routing to another instance, omit the cursor and restart from the first page. Inventory pagination is weakly consistent; retained summaries do not replace legacy status/log APIs.
+
+The response contains `commands` and `pagination` (`limit` and optional `nextCursor`). Each summary includes `session`, `running`, `background`, and `started_at`; completed entries also include `finished_at`, `exit_code`, and optional `error`. Ordering and pagination are weakly consistent: if commands start, complete, or disappear because of retention during a read, results across pages are not guaranteed to be an exact snapshot or a complete recoverable history.
+
+The inventory enumerates only summaries visible in this execd instance's memory. Callers with that instance's access token can enumerate it, so the token must be protected at the instance boundary. Inventory eviction does not clear existing session status, background logs, or command content; these legacy interfaces continue to follow their respective known-session lifecycles. This feature adds no inventory metrics.
+
+#### SDK entry points
+
+- Python async:
+
+  ```python
+  inventory = sandbox.command_inventory
+  if inventory is not None:
+      await inventory.list_commands(...)
+  ```
+
+- Python sync:
+
+  ```python
+  inventory = sandbox_sync.command_inventory
+  if inventory is not None:
+      inventory.list_commands(...)
+  ```
+
+- JavaScript: `sandbox.commands.listCommands?.(...)`
+- Kotlin: `sandbox.commands().listCommands(...)`
+- C#: `sandbox.CommandInventory?.ListCommandsAsync(...)`
+- Go: `sandbox.ListCommands(ctx, req)` or `ExecdClient.ListCommands(ctx, req)`
+
+`running`, `limit`, and `cursor` are the common query inputs. Python and C# inventory access may be unavailable with legacy/custom adapters, so check the capability before calling it. JavaScript legacy/custom `ExecdCommands` implementations may omit `listCommands`, so use the optional method invocation shown above. Blank request cursors normalize to omission; present blank response cursors are rejected by SDKs.
+
+| Method and Path | Purpose |
+|---|---|
+| `GET /command` | Read the command summary inventory with pagination. |
+| `GET /command/status/:id` | Read the detailed status of a known session. |
+| `GET /command/:id/logs` | Read background command logs; foreground commands are rejected. |
+| `DELETE /command?id=:id` | Interrupt a running command; completed sessions retain the existing not-running error semantics. |
 
 ## Isolated Sessions
 
@@ -156,6 +252,8 @@ override it.
 | `--graceful-shutdown-timeout` | `1s` | SSE tail-drain wait window before closing. |
 | `--jupyter-idle-poll-interval` | `100ms` | Poll interval after Jupyter reports idle. |
 | `--isolation-config` | `""` | Path to the isolation TOML config (see below). |
+| `--command-recovery-ttl` | `1h` | Retention duration for completed command summaries. |
+| `--command-recovery-max-terminal` | `1000` | Maximum number of completed command summaries to retain (maximum `10000`). |
 
 ### Environment Variables
 
@@ -167,12 +265,16 @@ override it.
 | `EXECD_API_GRACE_SHUTDOWN` | Same as `--graceful-shutdown-timeout`. |
 | `EXECD_JUPYTER_IDLE_POLL_INTERVAL` | Same as `--jupyter-idle-poll-interval`. |
 | `EXECD_ISOLATION_CONFIG` | Same as `--isolation-config`. |
+| `EXECD_COMMAND_RECOVERY_TTL` | Retention duration for completed command summaries; default `1h`. |
+| `EXECD_COMMAND_RECOVERY_MAX_TERMINAL` | Maximum number of completed command summaries; default `1000`, maximum `10000`. |
 | `EXECD_CLONE3_COMPAT` | Linux clone3 compatibility switch (see below). |
 | `EXECD_LOG_FILE` | Optional log output file path; default is stdout. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Preferred OTLP metrics endpoint. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Fallback OTLP endpoint when metrics-specific endpoint is unset. |
 | `OPENSANDBOX_ID` | Optional `sandbox_id` metric/resource attribute. |
 | `OPENSANDBOX_EXECD_METRICS_EXTRA_ATTRS` | Optional extra metric attrs (`k=v,k2=v2`). |
+
+Command-summary retention configuration is read from environment variables first, then overridden by CLI flags of the same name. `EXECD_COMMAND_RECOVERY_TTL=0` or `--command-recovery-ttl=0`, and `EXECD_COMMAND_RECOVERY_MAX_TERMINAL=0` or `--command-recovery-max-terminal=0`, all mean that only running commands are listed and no completed-summary entries are retained. Empty or unparseable values, a negative TTL, a negative cap, or a cap above `10000` emit a clear invalid-configuration diagnostic at startup and prevent the process from starting; correct the configuration before starting again.
 
 ### Isolation Config File
 
