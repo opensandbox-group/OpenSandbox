@@ -45,6 +45,7 @@ def _egress_container(
     credential_proxy_enabled: bool = False,
     extra_env: Optional[dict] = None,
     otlp_endpoint: Optional[str] = None,
+    sandbox_id: Optional[str] = None,
 ) -> dict:
     """Sidecar dict produced by ``apply_egress_to_spec``."""
     containers: list = []
@@ -57,6 +58,7 @@ def _egress_container(
         credential_proxy_enabled=credential_proxy_enabled,
         extra_env=extra_env,
         otlp_endpoint=otlp_endpoint,
+        sandbox_id=sandbox_id,
     )
     return containers[0]
 
@@ -248,8 +250,8 @@ class TestEgressSidecarViaApply:
 
         assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in _env_map(container)
 
-    def test_caller_metric_attrs_dropped_when_endpoint_is_server_managed(self):
-        """A request cannot label metrics that land in the operator's own backend."""
+    def test_caller_telemetry_identity_replaced_when_endpoint_is_server_managed(self):
+        """A request cannot label, or misattribute, metrics landing in the operator's backend."""
         network_policy = NetworkPolicy(default_action="deny", egress=[])
 
         container = _egress_container(
@@ -257,27 +259,49 @@ class TestEgressSidecarViaApply:
             network_policy,
             extra_env={
                 "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "sandbox_id=other,tenant=attacker",
+                "OPENSANDBOX_EGRESS_SANDBOX_ID": "sbx-victim",
                 "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
             },
             otlp_endpoint="http://otel-collector.observability:4318",
+            sandbox_id="sbx-real",
         )
 
         env = _env_map(container)
         assert "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS" not in env
+        assert env["OPENSANDBOX_EGRESS_SANDBOX_ID"] == "sbx-real"
         # Unrelated allowlisted env vars are untouched.
         assert env["OPENSANDBOX_EGRESS_LOG_LEVEL"] == "debug"
 
-    def test_caller_metric_attrs_kept_without_server_endpoint(self):
-        """No server-managed collector -> the value only labels the sidecar's own logs."""
+    def test_sandbox_id_is_pinned_even_when_caller_sends_no_env(self):
+        """Server-managed collector -> metrics are attributed without the caller's help."""
         network_policy = NetworkPolicy(default_action="deny", egress=[])
 
         container = _egress_container(
             "opensandbox/egress:v1.1.5",
             network_policy,
-            extra_env={"OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "tenant=t1"},
+            otlp_endpoint="http://otel-collector.observability:4318",
+            sandbox_id="sbx-real",
         )
 
-        assert _env_map(container)["OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS"] == "tenant=t1"
+        assert _env_map(container)["OPENSANDBOX_EGRESS_SANDBOX_ID"] == "sbx-real"
+
+    def test_caller_telemetry_identity_kept_without_server_endpoint(self):
+        """No server-managed collector -> the values only label the sidecar's own logs."""
+        network_policy = NetworkPolicy(default_action="deny", egress=[])
+
+        container = _egress_container(
+            "opensandbox/egress:v1.1.5",
+            network_policy,
+            extra_env={
+                "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "tenant=t1",
+                "OPENSANDBOX_EGRESS_SANDBOX_ID": "sbx-caller",
+            },
+            sandbox_id="sbx-real",
+        )
+
+        env = _env_map(container)
+        assert env["OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS"] == "tenant=t1"
+        assert env["OPENSANDBOX_EGRESS_SANDBOX_ID"] == "sbx-caller"
 
     def test_security_context_adds_net_admin_not_privileged(self):
         """Egress sidecar uses NET_ADMIN only (IPv6 is disabled in execd init when egress is on)."""

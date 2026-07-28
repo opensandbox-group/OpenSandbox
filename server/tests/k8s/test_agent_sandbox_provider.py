@@ -786,6 +786,44 @@ class TestAgentSandboxProviderEgress:
             "securityContext", {}
         )
 
+    def test_sidecar_reports_the_real_sandbox_id_when_collector_is_server_managed(
+        self, mock_k8s_client
+    ):
+        """The caller cannot make the sidecar report under another sandbox's identity."""
+        provider = AgentSandboxProvider(
+            mock_k8s_client,
+            _app_config(egress=EgressConfig(otlp_endpoint="http://collector:4318")),
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="sbx-real",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="execd:latest",
+            network_policy=NetworkPolicy(default_action="deny", egress=[]),
+            egress_image="opensandbox/egress:v1.1.5",
+            egress_env={
+                "OPENSANDBOX_EGRESS_SANDBOX_ID": "sbx-victim",
+                "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "tenant=attacker",
+            },
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        containers = body["spec"]["podTemplate"]["spec"]["containers"]
+        sidecar = next(c for c in containers if c["name"] == "egress")
+        env = {item["name"]: item["value"] for item in sidecar["env"]}
+
+        assert env["OPENSANDBOX_EGRESS_SANDBOX_ID"] == "sbx-real"
+        assert "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS" not in env
+
     def test_create_workload_with_network_policy_adds_sidecar(self, mock_k8s_client):
         provider = AgentSandboxProvider(
             mock_k8s_client,

@@ -57,10 +57,13 @@ OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS = "OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_P
 OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS"
 )
-# Caller-supplied attributes attached to every egress metric and log line. Only
-# forwarded while the sidecar has no server-managed collector to export to — see
-# drop_caller_metric_attrs in services/helpers.py.
+# Caller-supplied telemetry identity: extra attributes attached to every egress metric
+# and log line, and the value used as the `sandbox_id` attribute. Both are only forwarded
+# while the sidecar has no server-managed collector to export to — see
+# enforce_server_metric_env in services/helpers.py.
 OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS = "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS"
+# Must match components/egress/pkg/constants/configuration.go EnvSandboxID
+OPENSANDBOX_EGRESS_SANDBOX_ID = "OPENSANDBOX_EGRESS_SANDBOX_ID"
 ALLOWED_EGRESS_ENV_VARS = frozenset({
     "OPENSANDBOX_EGRESS_LOG_LEVEL",
     "OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT",
@@ -68,7 +71,7 @@ ALLOWED_EGRESS_ENV_VARS = frozenset({
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS,
     "OPENSANDBOX_EGRESS_DENY_WEBHOOK",
-    "OPENSANDBOX_EGRESS_SANDBOX_ID",
+    OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS,
     "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS",
     OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS,

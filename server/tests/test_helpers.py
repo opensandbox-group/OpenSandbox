@@ -14,7 +14,7 @@
 
 from datetime import datetime, timezone
 
-from opensandbox_server.services.helpers import drop_caller_metric_attrs, parse_timestamp
+from opensandbox_server.services.helpers import enforce_server_metric_env, parse_timestamp
 
 
 def test_parse_timestamp_truncates_nanoseconds():
@@ -48,26 +48,41 @@ def test_parse_timestamp_invalid_falls_back_to_now():
     assert before <= result <= after
 
 
-def test_drop_caller_metric_attrs_removes_only_the_attrs_key():
+def test_enforce_server_metric_env_replaces_caller_identity():
     egress_env = {
-        "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "sandbox_id=other",
+        "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "tenant=attacker",
+        "OPENSANDBOX_EGRESS_SANDBOX_ID": "sbx-victim",
         "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
     }
 
-    result = drop_caller_metric_attrs(egress_env, "http://collector:4318")
+    result = enforce_server_metric_env(egress_env, "http://collector:4318", "sbx-real")
 
-    assert result == {"OPENSANDBOX_EGRESS_LOG_LEVEL": "debug"}
+    assert result == {
+        "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
+        "OPENSANDBOX_EGRESS_SANDBOX_ID": "sbx-real",
+    }
     # The caller's dict is not mutated.
-    assert "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS" in egress_env
+    assert egress_env["OPENSANDBOX_EGRESS_SANDBOX_ID"] == "sbx-victim"
 
 
-def test_drop_caller_metric_attrs_noop_without_server_endpoint():
-    egress_env = {"OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "tenant=t1"}
+def test_enforce_server_metric_env_pins_identity_without_caller_env():
+    result = enforce_server_metric_env(None, "http://collector:4318", "sbx-real")
 
-    assert drop_caller_metric_attrs(egress_env, None) == egress_env
-    assert drop_caller_metric_attrs(egress_env, "") == egress_env
+    assert result == {"OPENSANDBOX_EGRESS_SANDBOX_ID": "sbx-real"}
 
 
-def test_drop_caller_metric_attrs_handles_empty_env():
-    assert drop_caller_metric_attrs(None, "http://collector:4318") is None
-    assert drop_caller_metric_attrs({}, "http://collector:4318") == {}
+def test_enforce_server_metric_env_noop_without_server_endpoint():
+    egress_env = {
+        "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "tenant=t1",
+        "OPENSANDBOX_EGRESS_SANDBOX_ID": "sbx-caller",
+    }
+
+    assert enforce_server_metric_env(egress_env, None, "sbx-real") == egress_env
+    assert enforce_server_metric_env(egress_env, "", "sbx-real") == egress_env
+
+
+def test_enforce_server_metric_env_drops_identity_when_id_unknown():
+    """No sandbox_id to pin -> still refuse the caller's, rather than trust it."""
+    egress_env = {"OPENSANDBOX_EGRESS_SANDBOX_ID": "sbx-victim"}
+
+    assert enforce_server_metric_env(egress_env, "http://collector:4318") == {}

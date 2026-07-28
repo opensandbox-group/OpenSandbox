@@ -34,7 +34,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
     OTEL_EXPORTER_OTLP_ENDPOINT,
 )
-from opensandbox_server.services.helpers import drop_caller_metric_attrs
+from opensandbox_server.services.helpers import enforce_server_metric_env
 
 
 def prep_execd_init_for_egress(exec_install_script: str) -> tuple[str, Dict[str, Any]]:
@@ -80,6 +80,7 @@ def apply_egress_to_spec(
     credential_proxy_enabled: bool = False,
     extra_env: Optional[Dict[str, Optional[str]]] = None,
     otlp_endpoint: Optional[str] = None,
+    sandbox_id: Optional[str] = None,
 ) -> None:
     """
     Append the egress sidecar to ``containers``. When ``egress.disable_ipv6`` is enabled,
@@ -87,13 +88,14 @@ def apply_egress_to_spec(
 
     ``otlp_endpoint`` comes from the server-side ``egress.otlp_endpoint`` setting and is
     injected as ``OTEL_EXPORTER_OTLP_ENDPOINT`` so the sidecar exports its own metrics.
-    Setting it also makes caller-supplied metric attributes non-forwardable, since the
-    backend is then the operator's (see ``drop_caller_metric_attrs``).
+    Setting it also makes the sidecar's telemetry identity server-controlled: the backend
+    is then the operator's, so ``sandbox_id`` is pinned from ``sandbox_id`` rather than
+    taken from the request (see ``enforce_server_metric_env``).
     """
     if not network_policy or not egress_image:
         return
 
-    extra_env = drop_caller_metric_attrs(extra_env, otlp_endpoint)
+    extra_env = enforce_server_metric_env(extra_env, otlp_endpoint, sandbox_id)
 
     policy_payload = json.dumps(network_policy.model_dump(by_alias=True, exclude_none=True))
 

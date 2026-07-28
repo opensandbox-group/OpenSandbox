@@ -54,7 +54,7 @@ from opensandbox_server.services.endpoint_auth import (
     build_egress_auth_headers,
     merge_endpoint_headers,
 )
-from opensandbox_server.services.helpers import drop_caller_metric_attrs
+from opensandbox_server.services.helpers import enforce_server_metric_env
 from opensandbox_server.services.validators import (
     ensure_credential_proxy_configured,
     ensure_egress_configured,
@@ -419,8 +419,8 @@ class DockerNetworkingMixin:
         otlp_endpoint = self.app_config.egress.otlp_endpoint
         if otlp_endpoint:
             sidecar_env.append(f"{OTEL_EXPORTER_OTLP_ENDPOINT}={otlp_endpoint}")
-        # With a server-managed collector, metric attributes are the operator's to set.
-        extra_env = drop_caller_metric_attrs(extra_env, otlp_endpoint)
+        # With a server-managed collector, the telemetry identity is the operator's.
+        extra_env = enforce_server_metric_env(extra_env, otlp_endpoint, sandbox_id)
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
 

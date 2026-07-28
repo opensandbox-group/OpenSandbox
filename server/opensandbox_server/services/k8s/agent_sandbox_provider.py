@@ -169,6 +169,7 @@ class AgentSandboxProvider(WorkloadProvider):
             resource_requests=resource_requests,
             egress_env=egress_env,
             extensions=extensions,
+            sandbox_id=sandbox_id,
         )
 
         if volumes:
@@ -263,6 +264,7 @@ class AgentSandboxProvider(WorkloadProvider):
         resource_requests: Optional[Dict[str, str]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
         extensions: Optional[Dict[str, str]] = None,
+        sandbox_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build pod spec dict for the Sandbox CRD."""
         disable_ipv6_for_egress = (
@@ -320,6 +322,7 @@ class AgentSandboxProvider(WorkloadProvider):
             credential_proxy_enabled=credential_proxy_enabled,
             extra_env=egress_env,
             otlp_endpoint=self.egress_otlp_endpoint,
+            sandbox_id=sandbox_id,
         )
 
         return pod_spec

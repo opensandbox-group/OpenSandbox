@@ -32,6 +32,7 @@ from opensandbox_server.services.constants import (
     EGRESS_ENV_PREFIX,
     OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPEN_SANDBOX_INGRESS_HEADER,
 )
 from opensandbox_server.config import (
@@ -268,37 +269,46 @@ def split_egress_env(
     return sandbox_env, egress_env
 
 
-def drop_caller_metric_attrs(
+def enforce_server_metric_env(
     egress_env: Optional[Dict[str, Optional[str]]],
     otlp_endpoint: Optional[str],
+    sandbox_id: Optional[str] = None,
 ) -> Optional[Dict[str, Optional[str]]]:
-    """Drop caller-supplied metric attributes when the OTLP backend is the operator's.
+    """Make the egress telemetry identity server-controlled, not request-controlled.
 
-    ``OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS`` is attached verbatim to every egress
-    metric, and OTel attribute sets are last-wins, so a create request could write
-    arbitrary label values into the operator's backend and re-attribute its own metrics
-    to another tenant by re-declaring ``sandbox_id``.
+    Two ``OPENSANDBOX_EGRESS_*`` keys shape what the sidecar reports:
+    ``OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS``, attached verbatim to every metric, and
+    ``OPENSANDBOX_EGRESS_SANDBOX_ID``, used as the ``sandbox_id`` attribute. Both are in
+    ``ALLOWED_EGRESS_ENV_VARS``, so a create request can set either.
 
-    Once ``egress.otlp_endpoint`` points the sidecar at a server-managed collector,
-    those attributes are no longer the caller's to set, so they are not forwarded.
-    Without that endpoint the sidecar has nowhere to export and the value only labels
-    its own logs, so it is left alone.
+    Once ``egress.otlp_endpoint`` points the sidecar at a server-managed collector, that
+    would let a caller write arbitrary labels into the operator's backend and report
+    under another sandbox's identity. So neither is forwarded, and ``sandbox_id`` is
+    pinned to the real one — which the server knows and the caller does not choose.
+
+    Without that endpoint the sidecar has nowhere to export, the values only label its
+    own logs, and they are left alone.
     """
-    if not egress_env or not otlp_endpoint:
-        return egress_env
-    if OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS not in egress_env:
+    if not otlp_endpoint:
         return egress_env
 
-    logger.warning(
-        "Ignoring %s from the request: egress.otlp_endpoint exports to a "
-        "server-managed collector, so metric attributes are operator-controlled.",
-        OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS,
-    )
-    return {
-        key: value
-        for key, value in egress_env.items()
-        if key != OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS
-    }
+    caller_env = egress_env or {}
+    overridden = [
+        key
+        for key in (OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS, OPENSANDBOX_EGRESS_SANDBOX_ID)
+        if key in caller_env
+    ]
+    if overridden:
+        logger.warning(
+            "Ignoring %s from the request: egress.otlp_endpoint exports to a "
+            "server-managed collector, so metric identity is operator-controlled.",
+            ", ".join(overridden),
+        )
+
+    server_env = {key: value for key, value in caller_env.items() if key not in overridden}
+    if sandbox_id:
+        server_env[OPENSANDBOX_EGRESS_SANDBOX_ID] = sandbox_id
+    return server_env
 
 
 __all__ = [
@@ -310,5 +320,5 @@ __all__ = [
     "format_ingress_endpoint",
     "matches_filter",
     "split_egress_env",
-    "drop_caller_metric_attrs",
+    "enforce_server_metric_env",
 ]

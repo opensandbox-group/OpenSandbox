@@ -26,9 +26,11 @@ All egress metrics may include shared attributes:
 
 `sandbox_id` is reserved: a `sandbox_id=` pair in the extra attributes is ignored rather
 than applied. Attribute sets are last-wins, so it would otherwise re-attribute every
-metric and log line — and those extras can come from a create request. The server also
-stops forwarding them entirely once `egress.otlp_endpoint` sends metrics to a
-server-managed collector.
+metric and log line — and those extras can come from a create request.
+
+Both env vars above are request-settable, so once `egress.otlp_endpoint` sends metrics to
+a server-managed collector the server stops forwarding them and sets
+`OPENSANDBOX_EGRESS_SANDBOX_ID` from the real sandbox ID instead.
 
 ## OTEL Endpoint Configuration
 
