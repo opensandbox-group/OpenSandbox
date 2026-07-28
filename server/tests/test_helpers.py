@@ -14,7 +14,7 @@
 
 from datetime import datetime, timezone
 
-from opensandbox_server.services.helpers import parse_timestamp
+from opensandbox_server.services.helpers import drop_caller_metric_attrs, parse_timestamp
 
 
 def test_parse_timestamp_truncates_nanoseconds():
@@ -46,3 +46,28 @@ def test_parse_timestamp_invalid_falls_back_to_now():
 
     assert result.tzinfo is not None
     assert before <= result <= after
+
+
+def test_drop_caller_metric_attrs_removes_only_the_attrs_key():
+    egress_env = {
+        "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "sandbox_id=other",
+        "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
+    }
+
+    result = drop_caller_metric_attrs(egress_env, "http://collector:4318")
+
+    assert result == {"OPENSANDBOX_EGRESS_LOG_LEVEL": "debug"}
+    # The caller's dict is not mutated.
+    assert "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS" in egress_env
+
+
+def test_drop_caller_metric_attrs_noop_without_server_endpoint():
+    egress_env = {"OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "tenant=t1"}
+
+    assert drop_caller_metric_attrs(egress_env, None) == egress_env
+    assert drop_caller_metric_attrs(egress_env, "") == egress_env
+
+
+def test_drop_caller_metric_attrs_handles_empty_env():
+    assert drop_caller_metric_attrs(None, "http://collector:4318") is None
+    assert drop_caller_metric_attrs({}, "http://collector:4318") == {}

@@ -45,3 +45,25 @@ func TestSharedAttrsFromEnv(t *testing.T) {
 		t.Fatalf("attrs len = %d, want 3", len(attrs))
 	}
 }
+
+// The extra attrs can come from a create request, and attribute sets are last-wins, so
+// a re-declared sandbox_id would otherwise re-attribute every metric and log line.
+func TestSharedAttrsFromEnvIgnoresReservedKey(t *testing.T) {
+	t.Setenv("OSBX_SANDBOX_ID", "sb-real")
+	t.Setenv("OSBX_EXTRA_ATTRS", "sandbox_id=sb-spoofed,tenant=t1")
+
+	attrs := SharedAttrsFromEnv(SharedAttrsEnvConfig{
+		SandboxIDEnv:  "OSBX_SANDBOX_ID",
+		ExtraAttrsEnv: "OSBX_EXTRA_ATTRS",
+		SandboxAttr:   "sandbox_id",
+	})
+
+	if len(attrs) != 2 {
+		t.Fatalf("attrs = %v, want only sandbox_id and tenant", attrs)
+	}
+	for _, kv := range attrs {
+		if string(kv.Key) == "sandbox_id" && kv.Value.AsString() != "sb-real" {
+			t.Errorf("sandbox_id = %q, want %q", kv.Value.AsString(), "sb-real")
+		}
+	}
+}

@@ -43,6 +43,7 @@ def _egress_container(
     egress_auth_token: Optional[str] = None,
     egress_mode: str = EGRESS_MODE_DNS,
     credential_proxy_enabled: bool = False,
+    extra_env: Optional[dict] = None,
     otlp_endpoint: Optional[str] = None,
 ) -> dict:
     """Sidecar dict produced by ``apply_egress_to_spec``."""
@@ -54,6 +55,7 @@ def _egress_container(
         egress_auth_token=egress_auth_token,
         egress_mode=egress_mode,
         credential_proxy_enabled=credential_proxy_enabled,
+        extra_env=extra_env,
         otlp_endpoint=otlp_endpoint,
     )
     return containers[0]
@@ -245,6 +247,37 @@ class TestEgressSidecarViaApply:
         container = _egress_container("opensandbox/egress:v1.1.5", network_policy)
 
         assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in _env_map(container)
+
+    def test_caller_metric_attrs_dropped_when_endpoint_is_server_managed(self):
+        """A request cannot label metrics that land in the operator's own backend."""
+        network_policy = NetworkPolicy(default_action="deny", egress=[])
+
+        container = _egress_container(
+            "opensandbox/egress:v1.1.5",
+            network_policy,
+            extra_env={
+                "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "sandbox_id=other,tenant=attacker",
+                "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
+            },
+            otlp_endpoint="http://otel-collector.observability:4318",
+        )
+
+        env = _env_map(container)
+        assert "OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS" not in env
+        # Unrelated allowlisted env vars are untouched.
+        assert env["OPENSANDBOX_EGRESS_LOG_LEVEL"] == "debug"
+
+    def test_caller_metric_attrs_kept_without_server_endpoint(self):
+        """No server-managed collector -> the value only labels the sidecar's own logs."""
+        network_policy = NetworkPolicy(default_action="deny", egress=[])
+
+        container = _egress_container(
+            "opensandbox/egress:v1.1.5",
+            network_policy,
+            extra_env={"OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS": "tenant=t1"},
+        )
+
+        assert _env_map(container)["OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS"] == "tenant=t1"
 
     def test_security_context_adds_net_admin_not_privileged(self):
         """Egress sidecar uses NET_ADMIN only (IPv6 is disabled in execd init when egress is on)."""

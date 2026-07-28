@@ -37,10 +37,19 @@ func SharedAttrsFromEnv(cfg SharedAttrsEnvConfig) []attribute.KeyValue {
 	if id := strings.TrimSpace(os.Getenv(cfg.SandboxIDEnv)); id != "" {
 		kvs = append(kvs, attribute.String(attrKey, id))
 	}
-	return AppendAttrsFromKeyValuePairs(kvs, os.Getenv(cfg.ExtraAttrsEnv))
+	// The extra attrs may come from the create request, and attribute sets are
+	// last-wins, so an extra `sandbox_id=` would silently re-attribute every metric
+	// and log line to another sandbox. The identity attribute is ours, not theirs.
+	return appendAttrsFromKeyValuePairs(kvs, os.Getenv(cfg.ExtraAttrsEnv), attrKey)
 }
 
 func AppendAttrsFromKeyValuePairs(kvs []attribute.KeyValue, raw string) []attribute.KeyValue {
+	return appendAttrsFromKeyValuePairs(kvs, raw, "")
+}
+
+// appendAttrsFromKeyValuePairs parses `k=v,k=v` pairs, skipping any key equal to
+// reserved (when non-empty).
+func appendAttrsFromKeyValuePairs(kvs []attribute.KeyValue, raw, reserved string) []attribute.KeyValue {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return kvs
@@ -56,7 +65,7 @@ func AppendAttrsFromKeyValuePairs(kvs []attribute.KeyValue, raw string) []attrib
 		}
 		key := strings.TrimSpace(part[:i])
 		value := strings.TrimSpace(part[i+1:])
-		if key == "" {
+		if key == "" || (reserved != "" && key == reserved) {
 			continue
 		}
 		kvs = append(kvs, attribute.String(key, value))

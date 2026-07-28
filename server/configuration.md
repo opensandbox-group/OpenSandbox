@@ -234,6 +234,7 @@ Notes:
 - Must be an **http(s)** URL: the shared Go telemetry client only speaks OTLP over **HTTP/protobuf**. `OTEL_EXPORTER_OTLP_PROTOCOL` is not read, so a gRPC endpoint will not work.
 - It is a **server-side** setting on purpose — the collector address is infrastructure config, identical for every sandbox — so it is not settable per request and is not part of `ALLOWED_EGRESS_ENV_VARS`.
 - Applies to both the Kubernetes and Docker runtimes.
+- Setting it makes `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` **non-forwardable**: the sidecar attaches that value verbatim to every metric, so a create request could otherwise write arbitrary labels into the operator's backend. It is dropped with a warning rather than rejected, so existing callers keep working — but the attributes only reach the sidecar's logs while no server-managed collector is configured, so nothing that used to be exported stops being exported. Operators who want extra attributes should set them on the collector, where they belong.
 - The sidecar exports **delta** temporality for counters/histograms, so a collector feeding Prometheus/GMP needs the `deltatocumulative` processor.
 
 ### IPv6 and egress

@@ -34,6 +34,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
     OTEL_EXPORTER_OTLP_ENDPOINT,
 )
+from opensandbox_server.services.helpers import drop_caller_metric_attrs
 
 
 def prep_execd_init_for_egress(exec_install_script: str) -> tuple[str, Dict[str, Any]]:
@@ -86,9 +87,13 @@ def apply_egress_to_spec(
 
     ``otlp_endpoint`` comes from the server-side ``egress.otlp_endpoint`` setting and is
     injected as ``OTEL_EXPORTER_OTLP_ENDPOINT`` so the sidecar exports its own metrics.
+    Setting it also makes caller-supplied metric attributes non-forwardable, since the
+    backend is then the operator's (see ``drop_caller_metric_attrs``).
     """
     if not network_policy or not egress_image:
         return
+
+    extra_env = drop_caller_metric_attrs(extra_env, otlp_endpoint)
 
     policy_payload = json.dumps(network_policy.model_dump(by_alias=True, exclude_none=True))
 

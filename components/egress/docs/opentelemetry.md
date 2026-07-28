@@ -24,6 +24,12 @@ All egress metrics may include shared attributes:
 - `sandbox_id` from `OPENSANDBOX_EGRESS_SANDBOX_ID` (when set)
 - extra key/value attributes from `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (when set)
 
+`sandbox_id` is reserved: a `sandbox_id=` pair in the extra attributes is ignored rather
+than applied. Attribute sets are last-wins, so it would otherwise re-attribute every
+metric and log line — and those extras can come from a create request. The server also
+stops forwarding them entirely once `egress.otlp_endpoint` sends metrics to a
+server-managed collector.
+
 ## OTEL Endpoint Configuration
 
 Metric export is enabled only when at least one OTLP endpoint is set.

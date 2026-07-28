@@ -30,6 +30,7 @@ from opensandbox_server.api.schema import Endpoint, Sandbox, SandboxFilter
 from opensandbox_server.services.constants import (
     ALLOWED_EGRESS_ENV_VARS,
     EGRESS_ENV_PREFIX,
+    OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPEN_SANDBOX_INGRESS_HEADER,
 )
@@ -267,6 +268,39 @@ def split_egress_env(
     return sandbox_env, egress_env
 
 
+def drop_caller_metric_attrs(
+    egress_env: Optional[Dict[str, Optional[str]]],
+    otlp_endpoint: Optional[str],
+) -> Optional[Dict[str, Optional[str]]]:
+    """Drop caller-supplied metric attributes when the OTLP backend is the operator's.
+
+    ``OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS`` is attached verbatim to every egress
+    metric, and OTel attribute sets are last-wins, so a create request could write
+    arbitrary label values into the operator's backend and re-attribute its own metrics
+    to another tenant by re-declaring ``sandbox_id``.
+
+    Once ``egress.otlp_endpoint`` points the sidecar at a server-managed collector,
+    those attributes are no longer the caller's to set, so they are not forwarded.
+    Without that endpoint the sidecar has nowhere to export and the value only labels
+    its own logs, so it is left alone.
+    """
+    if not egress_env or not otlp_endpoint:
+        return egress_env
+    if OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS not in egress_env:
+        return egress_env
+
+    logger.warning(
+        "Ignoring %s from the request: egress.otlp_endpoint exports to a "
+        "server-managed collector, so metric attributes are operator-controlled.",
+        OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS,
+    )
+    return {
+        key: value
+        for key, value in egress_env.items()
+        if key != OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS
+    }
+
+
 __all__ = [
     "parse_memory_limit",
     "parse_nano_cpus",
@@ -276,4 +310,5 @@ __all__ = [
     "format_ingress_endpoint",
     "matches_filter",
     "split_egress_env",
+    "drop_caller_metric_attrs",
 ]
