@@ -286,8 +286,10 @@ def enforce_server_metric_env(
     under another sandbox's identity. So neither is forwarded, and ``sandbox_id`` is
     pinned to the real one — which the server knows and the caller does not choose.
 
-    Without that endpoint the sidecar has nowhere to export, the values only label its
-    own logs, and they are left alone.
+    Without that endpoint they are left alone. Note that only makes them log-only when
+    the sidecar has no endpoint at all: the shared telemetry client also falls back to a
+    node-local collector (``HOST_IP``, then ``/etc/hostinfo``), which a platform can
+    inject out of band.
     """
     if not otlp_endpoint:
         return egress_env
