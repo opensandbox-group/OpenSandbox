@@ -39,6 +39,23 @@ If both are unset, egress keeps metrics local (no OTLP export).
 export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector:4318"
 ```
 
+### When the sidecar is managed by the server (Kubernetes / Docker)
+
+The sidecar's environment is built by the OpenSandbox server, and per-request `env` only
+reaches it through the `OPENSANDBOX_EGRESS_*` allowlist — so exporting `OTEL_*` next to the
+sandbox does **not** configure the sidecar. Use the server-side setting instead:
+
+```toml
+[egress]
+otlp_endpoint = "http://otel-collector.observability:4318"
+```
+
+The server injects it as `OTEL_EXPORTER_OTLP_ENDPOINT`. Leave it unset only if a **node-local**
+collector is reachable — the telemetry client falls back to `HOST_IP` (→ `<node-ip>:4318`) and
+then `/etc/hostinfo`, which assumes a per-node collector (DaemonSet), not a ClusterIP Service.
+
+See `server/configuration.md` → "Egress metrics".
+
 ### Service Name
 
 `service.name` is set by egress code as `opensandbox-egress-<version>`.

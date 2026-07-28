@@ -743,6 +743,17 @@ class EgressConfig(BaseModel):
             "(e.g. IPv4-only CNI or experimenting with IPv6 egress despite gaps)."
         ),
     )
+    otlp_endpoint: Optional[str] = Field(
+        default=None,
+        description=(
+            "OTLP HTTP endpoint for the egress sidecar's own metrics, injected as "
+            "OTEL_EXPORTER_OTLP_ENDPOINT (e.g. http://otel-collector.observability:4318). "
+            "When unset, the sidecar exports nothing unless it can resolve a node-local "
+            "collector via HOST_IP or /etc/hostinfo. Note the egress telemetry client only "
+            "speaks OTLP over HTTP/protobuf, so this must be an http(s) URL, not a gRPC one."
+        ),
+        min_length=1,
+    )
 
 
 class RuntimeConfig(BaseModel):

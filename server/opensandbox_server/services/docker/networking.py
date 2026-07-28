@@ -40,6 +40,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_TOKEN,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
+    OTEL_EXPORTER_OTLP_ENDPOINT,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_EMBEDDING_PROXY_PORT_LABEL,
     SANDBOX_HTTP_PORT_LABEL,
@@ -412,6 +413,11 @@ class DockerNetworkingMixin:
             f"{EGRESS_MODE_ENV}={egress_mode}",
             f"{OPENSANDBOX_EGRESS_TOKEN}={egress_token}",
         ]
+        # Server-side setting, not per-request env: the collector address is the same
+        # for every sandbox (see egress.otlp_endpoint).
+        otlp_endpoint = self.app_config.egress.otlp_endpoint
+        if otlp_endpoint:
+            sidecar_env.append(f"{OTEL_EXPORTER_OTLP_ENDPOINT}={otlp_endpoint}")
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
 

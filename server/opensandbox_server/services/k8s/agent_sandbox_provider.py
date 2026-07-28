@@ -105,6 +105,11 @@ class AgentSandboxProvider(WorkloadProvider):
             if app_config and app_config.egress is not None
             else DEFAULT_EGRESS_DISABLE_IPV6
         )
+        self.egress_otlp_endpoint = (
+            app_config.egress.otlp_endpoint
+            if app_config and app_config.egress is not None
+            else None
+        )
 
     def _resource_name(self, sandbox_id: str) -> str:
         return _to_dns1035_label(sandbox_id, prefix="sandbox")
@@ -314,6 +319,7 @@ class AgentSandboxProvider(WorkloadProvider):
             egress_mode=egress_mode,
             credential_proxy_enabled=credential_proxy_enabled,
             extra_env=egress_env,
+            otlp_endpoint=self.egress_otlp_endpoint,
         )
 
         return pod_spec

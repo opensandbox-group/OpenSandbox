@@ -204,6 +204,33 @@ Configures the **egress sidecar** image and enforcement mode. The server only at
 | `image` | string \| omitted | `null` | OCI image for the egress sidecar. **Required in config** when clients send **`networkPolicy`** (create request). |
 | `mode` | string | `"dns"` | Passed to the sidecar as `OPENSANDBOX_EGRESS_MODE`. Values: **`dns`** — DNS-proxy-based enforcement (CIDR/static IP rules **not** enforced); **`dns+nft`** — adds nftables where available so **CIDR/IP** rules can be enforced. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (especially on Kubernetes). **Default on**; set `false` only when you want IPv6 left up in the netns. Details in [IPv6 and egress](#ipv6-and-egress) below. |
+| `otlp_endpoint` | string \| omitted | `null` | OTLP **HTTP** endpoint injected into the sidecar as `OTEL_EXPORTER_OTLP_ENDPOINT`, so it exports its own metrics. Details in [Egress metrics](#egress-metrics) below. |
+
+### Egress metrics
+
+The egress sidecar emits its own OpenTelemetry metrics (DNS query latency, policy denials, nftables updates, system CPU/memory). Its telemetry client resolves the collector in this order:
+
+1. `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`
+2. `HOST_IP` → `<node-ip>:4318`
+3. `/etc/hostinfo`
+
+Nothing is exported when none of these resolve. Since the sidecar's environment is built by the server (per-request `env` only reaches it through the `OPENSANDBOX_EGRESS_*` allowlist), the endpoint could not be configured at all before this setting existed — unless a node-local collector was reachable via `HOST_IP`.
+
+Set `otlp_endpoint` when your collector is **not** node-local (for example a Deployment behind a ClusterIP Service):
+
+```toml
+[egress]
+image = "opensandbox/egress:v1.1.5"
+mode = "dns+nft"
+otlp_endpoint = "http://otel-collector.observability:4318"
+```
+
+Notes:
+
+- Must be an **http(s)** URL: the shared Go telemetry client only speaks OTLP over **HTTP/protobuf**. `OTEL_EXPORTER_OTLP_PROTOCOL` is not read, so a gRPC endpoint will not work.
+- It is a **server-side** setting on purpose — the collector address is infrastructure config, identical for every sandbox — so it is not settable per request and is not part of `ALLOWED_EGRESS_ENV_VARS`.
+- Applies to both the Kubernetes and Docker runtimes.
+- The sidecar exports **delta** temporality for counters/histograms, so a collector feeding Prometheus/GMP needs the `deltatocumulative` processor.
 
 ### IPv6 and egress
 

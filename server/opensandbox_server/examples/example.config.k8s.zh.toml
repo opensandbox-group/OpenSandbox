@@ -80,6 +80,9 @@ image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1
 mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false
+# OTLP HTTP endpoint for the sidecar's own metrics (injected as OTEL_EXPORTER_OTLP_ENDPOINT).
+# Needed when the collector is not node-local; see "Egress metrics" in server/configuration.md.
+# otlp_endpoint = "http://otel-collector.observability:4318"
 
 # 按访问续期。默认关闭 — 见 server/README_zh.md。
 [renew_intent]

@@ -79,6 +79,9 @@ image = "opensandbox/egress:v1.1.5"
 mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false
+# OTLP HTTP endpoint for the sidecar's own metrics (injected as OTEL_EXPORTER_OTLP_ENDPOINT).
+# Needed when the collector is not node-local; see "Egress metrics" in server/configuration.md.
+# otlp_endpoint = "http://otel-collector.observability:4318"
 
 # Renew-on-access. Off by default — see server/README.md.
 [renew_intent]

@@ -95,6 +95,11 @@ class BatchSandboxProvider(WorkloadProvider):
             if app_config and app_config.egress is not None
             else DEFAULT_EGRESS_DISABLE_IPV6
         )
+        self.egress_otlp_endpoint = (
+            app_config.egress.otlp_endpoint
+            if app_config and app_config.egress is not None
+            else None
+        )
 
     def supports_image_auth(self) -> bool:
         """BatchSandbox supports per-request image pull auth."""
@@ -250,6 +255,7 @@ class BatchSandboxProvider(WorkloadProvider):
             egress_mode=egress_mode,
             credential_proxy_enabled=credential_proxy_enabled,
             extra_env=egress_env,
+            otlp_endpoint=self.egress_otlp_endpoint,
         )
 
         if volumes:

@@ -43,6 +43,7 @@ def _egress_container(
     egress_auth_token: Optional[str] = None,
     egress_mode: str = EGRESS_MODE_DNS,
     credential_proxy_enabled: bool = False,
+    otlp_endpoint: Optional[str] = None,
 ) -> dict:
     """Sidecar dict produced by ``apply_egress_to_spec``."""
     containers: list = []
@@ -53,8 +54,13 @@ def _egress_container(
         egress_auth_token=egress_auth_token,
         egress_mode=egress_mode,
         credential_proxy_enabled=credential_proxy_enabled,
+        otlp_endpoint=otlp_endpoint,
     )
     return containers[0]
+
+
+def _env_map(container: dict) -> dict:
+    return {item["name"]: item["value"] for item in container.get("env", [])}
 
 
 class TestEgressSidecarViaApply:
@@ -218,6 +224,27 @@ class TestEgressSidecarViaApply:
 
         assert "defaultAction" not in policy_dict or policy_dict.get("defaultAction") is None
         assert "egress" in policy_dict
+
+    def test_otlp_endpoint_is_injected_when_configured(self):
+        """egress.otlp_endpoint reaches the sidecar as OTEL_EXPORTER_OTLP_ENDPOINT."""
+        network_policy = NetworkPolicy(default_action="deny", egress=[])
+
+        container = _egress_container(
+            "opensandbox/egress:v1.1.5",
+            network_policy,
+            otlp_endpoint="http://otel-collector.observability:4318",
+        )
+
+        env = _env_map(container)
+        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otel-collector.observability:4318"
+
+    def test_otlp_endpoint_absent_when_not_configured(self):
+        """No endpoint configured -> no OTEL env var (sidecar falls back to HOST_IP or stays off)."""
+        network_policy = NetworkPolicy(default_action="deny", egress=[])
+
+        container = _egress_container("opensandbox/egress:v1.1.5", network_policy)
+
+        assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in _env_map(container)
 
     def test_security_context_adds_net_admin_not_privileged(self):
         """Egress sidecar uses NET_ADMIN only (IPv6 is disabled in execd init when egress is on)."""

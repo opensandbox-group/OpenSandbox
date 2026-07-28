@@ -32,6 +32,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_EGRESS_TOKEN,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
+    OTEL_EXPORTER_OTLP_ENDPOINT,
 )
 
 
@@ -77,10 +78,14 @@ def apply_egress_to_spec(
     egress_mode: str = EGRESS_MODE_DNS,
     credential_proxy_enabled: bool = False,
     extra_env: Optional[Dict[str, Optional[str]]] = None,
+    otlp_endpoint: Optional[str] = None,
 ) -> None:
     """
     Append the egress sidecar to ``containers``. When ``egress.disable_ipv6`` is enabled,
     IPv6 is handled in execd init (``prep_execd_init_for_egress``); Pod-level sysctls are not modified.
+
+    ``otlp_endpoint`` comes from the server-side ``egress.otlp_endpoint`` setting and is
+    injected as ``OTEL_EXPORTER_OTLP_ENDPOINT`` so the sidecar exports its own metrics.
     """
     if not network_policy or not egress_image:
         return
@@ -91,6 +96,8 @@ def apply_egress_to_spec(
         {"name": EGRESS_RULES_ENV, "value": policy_payload},
         {"name": EGRESS_MODE_ENV, "value": egress_mode},
     ]
+    if otlp_endpoint:
+        env.append({"name": OTEL_EXPORTER_OTLP_ENDPOINT, "value": otlp_endpoint})
     if credential_proxy_enabled:
         env.append({"name": OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT, "value": "true"})
     if egress_auth_token:

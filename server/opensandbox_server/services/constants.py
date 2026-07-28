@@ -42,6 +42,12 @@ EGRESS_MODE_ENV = "OPENSANDBOX_EGRESS_MODE"
 # Must match components/egress/pkg/constants/configuration.go EnvEgressToken
 OPENSANDBOX_EGRESS_TOKEN = "OPENSANDBOX_EGRESS_TOKEN"
 OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT = "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT"
+# Standard OTel env var read by components/internal/telemetry (init.go). Injected from
+# the server-side `egress.otlp_endpoint` setting rather than per-request env: the
+# collector address is infrastructure config, identical for every sandbox. Note it is
+# deliberately NOT in ALLOWED_EGRESS_ENV_VARS — that allowlist gates the per-request
+# `OPENSANDBOX_EGRESS_*` keys, and this value must not be settable by API callers.
+OTEL_EXPORTER_OTLP_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
 
 EGRESS_ENV_PREFIX = "OPENSANDBOX_EGRESS_"
 OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE = "OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE"
@@ -168,6 +174,7 @@ __all__ = [
     "EGRESS_MODE_ENV",
     "OPENSANDBOX_EGRESS_TOKEN",
     "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
     "EGRESS_ENV_PREFIX",
     "OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE",
     "ALLOWED_EGRESS_ENV_VARS",
