@@ -52,6 +52,11 @@ public sealed class Sandbox : IAsyncDisposable
     public IExecdCommands Commands { get; }
 
     /// <summary>
+    /// Gets the additive command inventory capability when provided by the adapter factory.
+    /// </summary>
+    public IExecdCommandInventory? CommandInventory { get; }
+
+    /// <summary>
     /// Gets the filesystem service.
     /// </summary>
     public ISandboxFiles Files { get; }
@@ -97,6 +102,7 @@ public sealed class Sandbox : IAsyncDisposable
         HttpClientProvider httpClientProvider,
         ISandboxes sandboxes,
         IExecdCommands commands,
+        IExecdCommandInventory? commandInventory,
         ISandboxFiles files,
         IExecdHealth health,
         IExecdMetrics metrics,
@@ -114,6 +120,7 @@ public sealed class Sandbox : IAsyncDisposable
         _logger = _loggerFactory.CreateLogger("OpenSandbox.Sandbox");
         _sandboxes = sandboxes;
         Commands = commands;
+        CommandInventory = commandInventory ?? commands as IExecdCommandInventory;
         Files = files;
         Health = health;
         Metrics = metrics;
@@ -268,6 +275,7 @@ public sealed class Sandbox : IAsyncDisposable
                 httpClientProvider,
                 sandboxes,
                 execdStack.Commands,
+                execdStack.CommandInventory,
                 execdStack.Files,
                 execdStack.Health,
                 execdStack.Metrics,
@@ -410,6 +418,7 @@ public sealed class Sandbox : IAsyncDisposable
                 httpClientProvider,
                 sandboxes,
                 execdStack.Commands,
+                execdStack.CommandInventory,
                 execdStack.Files,
                 execdStack.Health,
                 execdStack.Metrics,

@@ -17,10 +17,14 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/tidwall/btree"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter"
@@ -31,6 +35,30 @@ var kernelWaitingBackoff = wait.Backoff{
 	Duration: 500 * time.Millisecond,
 	Factor:   1.5,
 	Jitter:   0.1,
+}
+
+// ErrInvalidCommandCursor reports an invalid command inventory cursor.
+var ErrInvalidCommandCursor = errors.New("invalid cursor")
+
+// CommandInventoryConfig controls retention of completed command summaries.
+type CommandInventoryConfig struct {
+	RecoveryTTL time.Duration
+	MaxTerminal int
+}
+
+var defaultCommandInventoryConfig = CommandInventoryConfig{
+	RecoveryTTL: time.Hour,
+	MaxTerminal: 1000,
+}
+
+// ControllerOption configures a Controller.
+type ControllerOption func(*Controller)
+
+// WithCommandInventory configures command inventory retention.
+func WithCommandInventory(config CommandInventoryConfig) ControllerOption {
+	return func(c *Controller) {
+		c.commandInventoryConfig = config
+	}
 }
 
 // Controller manages code execution across runtimes.
@@ -46,6 +74,16 @@ type Controller struct {
 	isolatedSessionMap      sync.Map // map[sessionID]*isolatedSession
 	db                      *sql.DB
 	dbOnce                  sync.Once
+
+	inventoryMu            sync.Mutex
+	inventoryProcessID     string
+	bySession              map[string]*inventoryEntry
+	runningByStartedAt     *btree.BTreeG[*inventoryEntry]
+	terminalByStartedAt    *btree.BTreeG[*inventoryEntry]
+	terminalByFinishedAt   *btree.BTreeG[*inventoryEntry]
+	commandInventoryConfig CommandInventoryConfig
+	terminalSequence       uint64
+	cleanupOwner           atomic.Bool
 }
 
 type jupyterKernel struct {
@@ -69,11 +107,21 @@ type commandKernel struct {
 }
 
 // NewController creates a runtime controller.
-func NewController(baseURL, token string) *Controller {
-	return &Controller{
-		baseURL: baseURL,
-		token:   token,
+func NewController(baseURL, token string, options ...ControllerOption) *Controller {
+	c := &Controller{
+		baseURL:                baseURL,
+		token:                  token,
+		inventoryProcessID:     uuid.NewString(),
+		bySession:              make(map[string]*inventoryEntry),
+		runningByStartedAt:     btree.NewBTreeGOptions(inventoryEntryStartedLess, btree.Options{NoLocks: true}),
+		terminalByStartedAt:    btree.NewBTreeGOptions(inventoryEntryStartedLess, btree.Options{NoLocks: true}),
+		terminalByFinishedAt:   btree.NewBTreeGOptions(inventoryEntryTerminalFinishedLess, btree.Options{NoLocks: true}),
+		commandInventoryConfig: defaultCommandInventoryConfig,
 	}
+	for _, option := range options {
+		option(c)
+	}
+	return c
 }
 
 // Execute dispatches a request to the correct backend.

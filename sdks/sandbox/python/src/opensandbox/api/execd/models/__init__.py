@@ -21,6 +21,7 @@ from .capabilities_response import CapabilitiesResponse
 from .chmod_files_body import ChmodFilesBody
 from .code_context import CodeContext
 from .code_context_request import CodeContextRequest
+from .command_pagination import CommandPagination
 from .command_status_response import CommandStatusResponse
 from .create_isolated_session_request import CreateIsolatedSessionRequest
 from .create_isolated_session_request_profile import CreateIsolatedSessionRequestProfile
@@ -47,6 +48,7 @@ from .isolated_session_summary_status import IsolatedSessionSummaryStatus
 from .isolated_upload_file_body import IsolatedUploadFileBody
 from .isolated_workspace_spec import IsolatedWorkspaceSpec
 from .isolated_workspace_spec_mode import IsolatedWorkspaceSpecMode
+from .list_commands_response import ListCommandsResponse
 from .list_isolated_sessions_response import ListIsolatedSessionsResponse
 from .make_dirs_body import MakeDirsBody
 from .metrics import Metrics
@@ -60,6 +62,7 @@ from .run_code_request import RunCodeRequest
 from .run_command_request import RunCommandRequest
 from .run_command_request_envs import RunCommandRequestEnvs
 from .run_in_session_request import RunInSessionRequest
+from .running_command_summary import RunningCommandSummary
 from .server_stream_event import ServerStreamEvent
 from .server_stream_event_error import ServerStreamEventError
 from .server_stream_event_results import ServerStreamEventResults
@@ -68,6 +71,7 @@ from .session_state import SessionState
 from .session_state_profile import SessionStateProfile
 from .session_state_status import SessionStateStatus
 from .session_state_uid_mode import SessionStateUidMode
+from .terminal_command_summary import TerminalCommandSummary
 from .upload_file_body import UploadFileBody
 
 __all__ = (
@@ -76,6 +80,7 @@ __all__ = (
     "ChmodFilesBody",
     "CodeContext",
     "CodeContextRequest",
+    "CommandPagination",
     "CommandStatusResponse",
     "CreateIsolatedSessionRequest",
     "CreateIsolatedSessionRequestProfile",
@@ -102,6 +107,7 @@ __all__ = (
     "IsolatedUploadFileBody",
     "IsolatedWorkspaceSpec",
     "IsolatedWorkspaceSpecMode",
+    "ListCommandsResponse",
     "ListIsolatedSessionsResponse",
     "MakeDirsBody",
     "Metrics",
@@ -115,6 +121,7 @@ __all__ = (
     "RunCommandRequest",
     "RunCommandRequestEnvs",
     "RunInSessionRequest",
+    "RunningCommandSummary",
     "ServerStreamEvent",
     "ServerStreamEventError",
     "ServerStreamEventResults",
@@ -123,5 +130,6 @@ __all__ = (
     "SessionStateProfile",
     "SessionStateStatus",
     "SessionStateUidMode",
+    "TerminalCommandSummary",
     "UploadFileBody",
 )

@@ -26,7 +26,7 @@ namespace OpenSandbox.Adapters;
 /// <summary>
 /// Adapter for the execd commands service.
 /// </summary>
-internal sealed class CommandsAdapter : IExecdCommands
+internal sealed class CommandsAdapter : IExecdCommands, IExecdCommandInventory
 {
     private readonly HttpClientWrapper _client;
     private readonly HttpClient _sseHttpClient;
@@ -182,6 +182,36 @@ internal sealed class CommandsAdapter : IExecdCommands
 
         _logger.LogDebug("Fetching command status: {ExecutionId}", executionId);
         return _client.GetAsync<CommandStatus>($"/command/status/{Uri.EscapeDataString(executionId)}", cancellationToken: cancellationToken);
+    }
+
+    public Task<ListCommandsPage> ListCommandsAsync(
+        bool? running = null,
+        int limit = 50,
+        string? cursor = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (limit is < 1 or > 100)
+        {
+            throw new InvalidArgumentException("limit must be between 1 and 100");
+        }
+
+        var hasCursor = !string.IsNullOrWhiteSpace(cursor);
+        _logger.LogDebug("Listing command inventory (running={Running}, limit={Limit}, hasCursor={HasCursor})", running, limit, hasCursor);
+        var queryParams = new Dictionary<string, string?>();
+        if (running.HasValue)
+        {
+            queryParams["running"] = running.Value ? "true" : "false";
+        }
+        if (limit != 50)
+        {
+            queryParams["limit"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        if (hasCursor)
+        {
+            queryParams["cursor"] = cursor;
+        }
+
+        return _client.GetAsync<ListCommandsPage>("/command", queryParams, cancellationToken);
     }
 
     public async Task<CommandLogs> GetBackgroundCommandLogsAsync(

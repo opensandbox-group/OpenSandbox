@@ -74,6 +74,7 @@ func NewRouter(accessToken string) *gin.Engine {
 	{
 		command.POST("", withCode(func(c *controller.CodeInterpretingController) { c.RunCommand() }))
 		command.DELETE("", withCode(func(c *controller.CodeInterpretingController) { c.InterruptCommand() }))
+		command.GET("", withCode(func(c *controller.CodeInterpretingController) { c.ListCommands() }))
 		command.GET("/status/:id", withCode(func(c *controller.CodeInterpretingController) { c.GetCommandStatus() }))
 		command.GET("/:id/logs", withCode(func(c *controller.CodeInterpretingController) { c.GetBackgroundCommandOutput() }))
 	}
@@ -157,6 +158,9 @@ func accessTokenMiddleware(token string) gin.HandlerFunc {
 
 		requestedToken := ctx.GetHeader(model.ApiAccessTokenHeader)
 		if requestedToken == "" || requestedToken != token {
+			if ctx.Request.Method == http.MethodGet && ctx.Request.URL.Path == "/command" {
+				ctx.Header("Cache-Control", "no-store")
+			}
 			ctx.AbortWithStatusJSON(http.StatusUnauthorized, map[string]any{
 				"error": "Unauthorized: invalid or missing header " + model.ApiAccessTokenHeader,
 			})

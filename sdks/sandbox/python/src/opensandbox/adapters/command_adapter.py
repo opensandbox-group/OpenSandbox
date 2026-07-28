@@ -40,16 +40,23 @@ from opensandbox.adapters.converter.execution_event_dispatcher import (
 )
 from opensandbox.adapters.converter.response_handler import (
     build_api_exception_from_httpx,
+    extract_request_id,
     handle_api_error,
 )
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxApiException,
+    SandboxError,
+)
 from opensandbox.models.execd import (
     CommandLogs,
     CommandStatus,
     Execution,
     ExecutionHandlers,
+    ListCommandsPage,
     RunCommandOpts,
+    parse_list_commands_page,
 )
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.command import Commands
@@ -348,6 +355,42 @@ class CommandsAdapter(Commands):
             return CommandLogs(content=content, cursor=next_cursor)
         except Exception as e:
             logger.error("Failed to get command logs", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def list_commands(
+        self,
+        running: bool | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> ListCommandsPage:
+        """List command inventory through the generated execd operation."""
+        try:
+            from opensandbox.api.execd.api.command import list_commands
+            from opensandbox.api.execd.types import UNSET
+
+            request_kwargs = list_commands._get_kwargs(
+                running=running if running is not None else UNSET,
+                limit=limit,
+                cursor=cursor if cursor is not None and cursor.strip() else UNSET,
+            )
+            client = await self._get_client()
+            response = await client.get_async_httpx_client().request(**request_kwargs)
+            response.raise_for_status()
+            try:
+                return parse_list_commands_page(json.loads(response.content))
+            except ValueError as e:
+                logger.error("Invalid command inventory response", exc_info=e)
+                raise SandboxApiException(
+                    message="Invalid command inventory response",
+                    status_code=200,
+                    request_id=extract_request_id(response.headers),
+                    error=SandboxError(SandboxError.UNEXPECTED_RESPONSE, str(e)),
+                    cause=e,
+                ) from e
+        except SandboxApiException:
+            raise
+        except Exception as e:
+            logger.error("Failed to list commands", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def create_session(self, *, working_directory: str | None = None) -> str:

@@ -98,13 +98,19 @@ export type {
 export type {
   CommandExecution,
   CommandLogs,
+  CommandPagination,
+  CommandSummary,
   CommandStatus,
+  ListCommandsOptions,
+  ListCommandsPage,
+  RunningCommandSummary,
   RunCommandOpts,
   ServerStreamEvent,
   CodeContextRequest,
   SupportedLanguage,
   Metrics,
   SandboxMetrics,
+  TerminalCommandSummary,
   PingResponse,
 } from "./models/execd.js";
 export type { ExecdCommands } from "./services/execdCommands.js";

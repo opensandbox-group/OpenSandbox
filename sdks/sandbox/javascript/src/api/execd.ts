@@ -222,7 +222,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List command inventory
+         * @description Lists command inventory entries. Omitting `running` returns both running and
+         *     terminal commands; `running=true` returns only running commands; and
+         *     `running=false` returns only terminal commands. `limit` defaults to 50 and
+         *     the opaque `cursor` resumes a later page without client-side interpretation.
+         *     A cursor is bound to the exact `running` filter from its first request;
+         *     subsequent requests must preserve that filter or receive `INVALID_QUERY`.
+         *
+         *     The returned `session` is the same command identity exposed as `id` by the
+         *     legacy `GET /command/status/{id}` endpoint. Results are weakly consistent
+         *     and are not a snapshot: commands may transition or disappear between pages.
+         *     Responses must not be cached.
+         */
+        get: operations["listCommands"];
         put?: never;
         /**
          * Execute shell command
@@ -1034,6 +1048,42 @@ export interface components {
              */
             finished_at?: string | null;
         };
+        /** @description A command that is still running. Terminal fields are omitted. */
+        RunningCommandSummary: {
+            /** @description Command identity; equal to the legacy command status `id`. */
+            session: string;
+            /** @constant */
+            running: true;
+            background: boolean;
+            /** Format: date-time */
+            started_at: string;
+        };
+        /** @description A command that has finished. `exit_code` is present and may be null. */
+        TerminalCommandSummary: {
+            /** @description Command identity; equal to the legacy command status `id`. */
+            session: string;
+            /** @constant */
+            running: false;
+            background: boolean;
+            /** Format: date-time */
+            started_at: string;
+            /** Format: date-time */
+            finished_at: string;
+            /** Format: int32 */
+            exit_code: number | null;
+            error?: string;
+        };
+        /** @description A running or terminal command inventory summary. */
+        CommandSummary: components["schemas"]["RunningCommandSummary"] | components["schemas"]["TerminalCommandSummary"];
+        CommandPagination: {
+            limit: number;
+            /** @description Opaque nonblank cursor for the next page; omitted on the final page. */
+            nextCursor?: string;
+        };
+        ListCommandsResponse: {
+            commands: components["schemas"]["CommandSummary"][];
+            pagination: components["schemas"]["CommandPagination"];
+        };
         /** @description Server-sent event for streaming execution output */
         ServerStreamEvent: {
             /**
@@ -1724,6 +1774,51 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    listCommands: {
+        parameters: {
+            query?: {
+                /** @description Omit for all commands; true for running commands; false for terminal commands. */
+                running?: boolean;
+                /** @description Maximum number of commands to return. */
+                limit?: number;
+                /** @description Opaque nonblank pagination cursor returned by a previous response. It is bound to the exact `running` filter from the first request; preserve that filter or receive `INVALID_QUERY`. Omit to select the first page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A weakly consistent page of command summaries. */
+            200: {
+                headers: {
+                    /** @description Always `no-store` because command inventory is not cacheable. */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListCommandsResponse"];
+                };
+            };
+            /** @description Invalid command inventory query. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "code": "INVALID_QUERY",
+                     *       "message": "invalid cursor"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             500: components["responses"]["InternalServerError"];
         };
     };

@@ -395,6 +395,72 @@ paths:
           $ref: "#/components/responses/InternalServerError"
 
   /command:
+    get:
+      summary: List command inventory
+      description: |
+        Lists command inventory entries. Omitting `running` returns both running and
+        terminal commands; `running=true` returns only running commands; and
+        `running=false` returns only terminal commands. `limit` defaults to 50 and
+        the opaque `cursor` resumes a later page without client-side interpretation.
+        A cursor is bound to the exact `running` filter from its first request;
+        subsequent requests must preserve that filter or receive `INVALID_QUERY`.
+
+        The returned `session` is the same command identity exposed as `id` by the
+        legacy `GET /command/status/{id}` endpoint. Results are weakly consistent
+        and are not a snapshot: commands may transition or disappear between pages.
+        Responses must not be cached.
+      operationId: listCommands
+      tags:
+        - Command
+      parameters:
+        - name: running
+          in: query
+          required: false
+          description: Omit for all commands; true for running commands; false for terminal commands.
+          schema:
+            type: boolean
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of commands to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque nonblank pagination cursor returned by a previous response. It is bound to the exact `running` filter from the first request; preserve that filter or receive `INVALID_QUERY`. Omit to select the first page.
+          schema:
+            type: string
+            minLength: 1
+            pattern: '\S'
+      responses:
+        "200":
+          description: A weakly consistent page of command summaries.
+          headers:
+            Cache-Control:
+              description: Always `no-store` because command inventory is not cacheable.
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListCommandsResponse"
+        "400":
+          description: Invalid command inventory query.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: INVALID_QUERY
+                message: invalid cursor
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
     post:
       summary: Execute shell command
       description: |
@@ -1849,6 +1915,92 @@ components:
           nullable: true
           description: Finish time in RFC3339 format (null if still running)
           example: "2025-12-22T09:08:09Z"
+
+    RunningCommandSummary:
+      type: object
+      description: A command that is still running. Terminal fields are omitted.
+      additionalProperties: false
+      required:
+        - session
+        - running
+        - background
+        - started_at
+      properties:
+        session:
+          type: string
+          description: Command identity; equal to the legacy command status `id`.
+        running:
+          const: true
+        background:
+          type: boolean
+        started_at:
+          type: string
+          format: date-time
+
+    TerminalCommandSummary:
+      type: object
+      description: A command that has finished. `exit_code` is present and may be null.
+      additionalProperties: false
+      required:
+        - session
+        - running
+        - background
+        - started_at
+        - finished_at
+        - exit_code
+      properties:
+        session:
+          type: string
+          description: Command identity; equal to the legacy command status `id`.
+        running:
+          const: false
+        background:
+          type: boolean
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        exit_code:
+          type: [integer, "null"]
+          format: int32
+        error:
+          type: string
+
+    CommandSummary:
+      description: A running or terminal command inventory summary.
+      oneOf:
+        - $ref: "#/components/schemas/RunningCommandSummary"
+        - $ref: "#/components/schemas/TerminalCommandSummary"
+
+    CommandPagination:
+      type: object
+      required:
+        - limit
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        nextCursor:
+          type: string
+          minLength: 1
+          pattern: '\S'
+          description: Opaque nonblank cursor for the next page; omitted on the final page.
+
+    ListCommandsResponse:
+      type: object
+      required:
+        - commands
+        - pagination
+      properties:
+        commands:
+          type: array
+          items:
+            $ref: "#/components/schemas/CommandSummary"
+        pagination:
+          $ref: "#/components/schemas/CommandPagination"
 
     ServerStreamEvent:
       type: object
