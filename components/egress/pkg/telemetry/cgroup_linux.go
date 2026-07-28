@@ -36,6 +36,8 @@ func processMemoryUsageBytes() (int64, bool) {
 			return value, true
 		}
 	}
+	// memory has its own v1 mount; unlike cpuacct it is not co-mounted with another
+	// controller in any layout worth supporting.
 	if data, err := os.ReadFile(filepath.Join(cgroupRoot, "memory", "memory.usage_in_bytes")); err == nil {
 		if value, ok := cgroupSingleValueBytes(data); ok {
 			return value, true
@@ -53,9 +55,14 @@ func processCPUTimeSeconds() (float64, bool) {
 			return seconds, true
 		}
 	}
-	if data, err := os.ReadFile(filepath.Join(cgroupRoot, "cpuacct", "cpuacct.usage")); err == nil {
-		if seconds, ok := cgroupCPUSecondsFromNanos(data); ok {
-			return seconds, true
+	// cgroup v1: cpuacct may be mounted on its own or co-mounted with cpu, which is the
+	// systemd default and what a container usually inherits. Trying only the first layout
+	// would report CPU as unavailable on a readable cgroupfs.
+	for _, dir := range []string{"cpuacct", "cpu,cpuacct"} {
+		if data, err := os.ReadFile(filepath.Join(cgroupRoot, dir, "cpuacct.usage")); err == nil {
+			if seconds, ok := cgroupCPUSecondsFromNanos(data); ok {
+				return seconds, true
+			}
 		}
 	}
 	return 0, false

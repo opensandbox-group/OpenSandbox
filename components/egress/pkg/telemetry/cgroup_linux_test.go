@@ -73,6 +73,19 @@ func TestProcessMetricsFallBackToCgroupV1(t *testing.T) {
 	}
 }
 
+// The systemd default on cgroup v1 co-mounts cpu and cpuacct, and a container inherits
+// that layout: cpuacct.usage then lives under cpu,cpuacct/ and not cpuacct/.
+func TestProcessCPUReadsCoMountedCgroupV1(t *testing.T) {
+	withCgroupRoot(t, map[string]string{
+		"cpu,cpuacct/cpuacct.usage": "3000000000\n",
+	})
+
+	seconds, ok := processCPUTimeSeconds()
+	if !ok || seconds != 3.0 {
+		t.Errorf("cpu = %v, %v; want 3, true", seconds, ok)
+	}
+}
+
 // A runtime that does not expose cgroupfs must yield no reading at all. Publishing zero
 // would be indistinguishable from an idle sidecar.
 func TestProcessMetricsUnavailableWithoutCgroupfs(t *testing.T) {
