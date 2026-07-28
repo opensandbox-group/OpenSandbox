@@ -15,10 +15,14 @@
 package telemetry
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	inttelemetry "github.com/alibaba/opensandbox/internal/telemetry"
 )
@@ -44,4 +48,45 @@ func TestAppendMetricAttrsFromKeyValuePairs(t *testing.T) {
 
 	out = inttelemetry.AppendAttrsFromKeyValuePairs(nil, "novalue=,=bad,nokv")
 	assert.Len(t, out, 0)
+}
+
+// collectEgressMetrics registers the egress instruments against a fresh ManualReader and
+// returns the single observed value per metric name.
+func collectEgressMetrics(t *testing.T) map[string]float64 {
+	t.Helper()
+
+	reader := sdkmetric.NewManualReader()
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(previous) })
+
+	if err := registerEgressMetrics(); err != nil {
+		t.Fatalf("registerEgressMetrics: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+
+	out := map[string]float64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch data := m.Data.(type) {
+			case metricdata.Gauge[int64]:
+				for _, dp := range data.DataPoints {
+					out[m.Name] = float64(dp.Value)
+				}
+			case metricdata.Gauge[float64]:
+				for _, dp := range data.DataPoints {
+					out[m.Name] = dp.Value
+				}
+			case metricdata.Sum[float64]:
+				for _, dp := range data.DataPoints {
+					out[m.Name] = dp.Value
+				}
+			}
+		}
+	}
+	return out
 }

@@ -128,7 +128,57 @@ func registerEgressMetrics() error {
 			return nil
 		}),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	return registerProcessMetrics()
+}
+
+// registerProcessMetrics adds the sidecar's own resource usage, read from its cgroup.
+//
+// The egress.system.* gauges above come from gopsutil, i.e. /proc/meminfo and /proc/stat,
+// which inside a container describe the node. Since this sidecar runs per sandbox, every
+// sandbox on a node publishes the same node figure under its own sandbox_id — series that
+// look per-sandbox but are not. The metrics here are the per-sandbox ones.
+//
+// Registration is conditional: if the cgroup files cannot be read the instruments are not
+// created at all, so a missing source shows up as an absent series rather than a flat zero
+// that reads like real data.
+func registerProcessMetrics() error {
+	if _, ok := processMemoryUsageBytes(); ok {
+		if _, err := meter.Int64ObservableGauge(
+			"egress.process.memory.usage_bytes",
+			metric.WithDescription("Memory currently charged to the egress sidecar's own cgroup."),
+			metric.WithUnit("By"),
+			metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+				if value, ok := processMemoryUsageBytes(); ok {
+					obs.Observe(value, egressMetricOpt())
+				}
+				return nil
+			}),
+		); err != nil {
+			return err
+		}
+	}
+
+	if _, ok := processCPUTimeSeconds(); ok {
+		if _, err := meter.Float64ObservableCounter(
+			"egress.process.cpu.time",
+			metric.WithDescription("CPU seconds consumed by the egress sidecar's own cgroup."),
+			metric.WithUnit("s"),
+			metric.WithFloat64Callback(func(ctx context.Context, obs metric.Float64Observer) error {
+				if seconds, ok := processCPUTimeSeconds(); ok {
+					obs.Observe(seconds, egressMetricOpt())
+				}
+				return nil
+			}),
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func NftRuleCountFromPolicy(p *policy.NetworkPolicy) int64 {
