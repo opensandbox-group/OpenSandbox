@@ -225,7 +225,7 @@ mode = "dns+nft"
 otlp_endpoint = "http://otel-collector.observability:4318"
 ```
 
-The sidecar shares a network namespace with the sandbox container, so it is subject to the very policy it installs: under `defaultAction: deny` an unmarked export would be dropped by the nft output chain and its DNS lookups answered `NXDOMAIN` by the policy proxy. The egress therefore **`SO_MARK`s its own exporter connections**, reusing the bypass its DNS proxy already relies on (`meta mark <mark> accept` in nft, plus the matching `RETURN` in the DNS redirect).
+The sidecar shares a network namespace with the sandbox container, so it is subject to the very policy it installs: under `defaultAction: deny` an unmarked export would be dropped by the nft output chain and its DNS lookups answered `NXDOMAIN` by the policy proxy. The egress therefore **`SO_MARK`s its own exporter traffic**, reusing the bypass its DNS proxy already relies on (`meta mark <mark> accept` in nft, plus the matching `RETURN` in the DNS redirect). Both halves are marked — the TCP connection *and* the name resolution that precedes it — so a hostname endpoint like the Service example above works and does not have to be replaced by an IP.
 
 That is deliberately *not* an entry in the allow set: the allow set is namespace-wide, so it would expose the collector to the untrusted sandbox container too — and OTLP attributes are arbitrary strings, i.e. an exfiltration path into the metrics backend. `SO_MARK` requires `CAP_NET_ADMIN`, which the server drops from the sandbox container, so the workload cannot forge it. No allowlist entry is needed and none should be added.
 
