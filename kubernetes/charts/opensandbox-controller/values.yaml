@@ -12,9 +12,12 @@ fullnameOverride: ""
 namespaceOverride: ""
 
 # -- Namespace where BatchSandbox/Pool/SandboxSnapshot resources are expected to live.
-# The manager Role/RoleBinding are scoped here instead of cluster-wide. If not set,
-# defaults to the same namespace as the controller (namespaceOverride above), matching
-# the chart's existing single-namespace behavior.
+# The manager Role/RoleBinding are scoped here instead of cluster-wide, and this same
+# value is passed to the controller as --sandbox-namespace to restrict its manager
+# cache/watches to match (the RBAC and the cache scope must agree, or the controller
+# fails to list/watch with forbidden errors). If not set, defaults to the same
+# namespace as the controller (namespaceOverride above), matching the chart's
+# existing single-namespace behavior.
 sandboxNamespace: ""
 
 # Controller configuration

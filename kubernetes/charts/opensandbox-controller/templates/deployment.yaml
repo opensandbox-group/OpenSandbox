@@ -52,6 +52,7 @@ spec:
         - --leader-elect
         {{- end }}
         - --health-probe-bind-address=:8081
+        - --sandbox-namespace={{ include "opensandbox.sandboxNamespace" . }}
         - --zap-log-level={{ .Values.controller.logLevel }}
         {{- if $metrics.enabled }}
         - --metrics-bind-address=:{{ $metrics.port | default 8080 }}

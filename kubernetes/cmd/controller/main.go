@@ -32,6 +32,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -226,6 +227,12 @@ func main() {
 	var resumePullSecret string
 	flag.StringVar(&resumePullSecret, "resume-pull-secret", "", "K8s Secret name for pulling snapshot images during resume.")
 
+	var sandboxNamespace string
+	flag.StringVar(&sandboxNamespace, "sandbox-namespace", "", "Namespace to restrict the manager's cache/watches to for "+
+		"BatchSandbox/Pool/SandboxSnapshot/pods/jobs/secrets/configmaps. Must match the RBAC Role's namespace "+
+		"(see the Helm chart's sandboxNamespace value) or the manager will fail to list/watch with forbidden errors. "+
+		"Leave empty to watch cluster-wide (requires a ClusterRole/ClusterRoleBinding instead of the default Role/RoleBinding).")
+
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 
@@ -395,7 +402,7 @@ func main() {
 		config.Burst = kubeClientBurst
 	}
 
-	mgr, err := ctrl.NewManager(config, ctrl.Options{
+	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -407,7 +414,24 @@ func main() {
 		// for the full LeaseDuration. This is safe because main() exits immediately after
 		// mgr.Start() returns and performs no post-stop cleanup.
 		LeaderElectionReleaseOnCancel: true,
-	})
+	}
+
+	if sandboxNamespace != "" {
+		// Restrict the manager's cache (and therefore its list/watch calls) to this
+		// namespace, matching the RBAC Role/RoleBinding scope. Without this, the manager
+		// issues cluster-wide list/watch requests regardless of what the RBAC grants,
+		// which fail with forbidden errors under a namespaced Role.
+		setupLog.Info("restricting manager cache to namespace", "namespace", sandboxNamespace)
+		mgrOptions.Cache = cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				sandboxNamespace: {},
+			},
+		}
+	} else {
+		setupLog.Info("no sandbox-namespace set, manager will watch cluster-wide (requires a ClusterRole/ClusterRoleBinding)")
+	}
+
+	mgr, err := ctrl.NewManager(config, mgrOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
