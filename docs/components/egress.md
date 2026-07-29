@@ -181,6 +181,29 @@ See [Credential Vault](/guides/credential-vault) for full API usage, binding rul
 
 Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). OTLP log export is not used.
 
+#### DNS latency buckets
+
+`egress.dns.query.duration` is recorded in **seconds** and declares its bucket boundaries
+explicitly:
+
+```
+0.001  0.0025  0.005  0.01  0.025  0.05  0.1  0.25  0.5  1  2.5  5  10  15  30  60  120  300  600
+```
+
+The head resolves a cache hit up to one upstream timeout
+(`OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT`, 5s by default). The coarse tail is there because
+the recorded duration covers the **whole resolver chain** — forwarding walks the upstreams
+serially with the full timeout each, so a query can legitimately take
+`timeout x len(upstreams)`. A late **success** lands in the tail too, not only an
+exhausted failure: a query can succeed on the second resolver after the first burned a full
+timeout. Past the last boundary quantile resolution is lost by construction — the chain has no
+finite worst case, since the resolver list is unbounded — and `_count` is what remains.
+
+If you tune these, keep them on a seconds ladder. The SDK default boundaries are the spec's
+millisecond ladder (`0, 5, 10, … 10000`), which would put every realistic DNS latency in the
+single `le=5` bucket and make `histogram_quantile()` return an interpolation rather than a
+measurement.
+
 #### Resource usage: node vs sidecar
 
 Two pairs of gauges look interchangeable and are not:

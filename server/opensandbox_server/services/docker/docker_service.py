@@ -245,6 +245,17 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         """Helper to fetch the Docker container associated with a sandbox ID."""
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
+            try:
+                container = self.docker_client.containers.get(f"sandbox-{sandbox_id}")
+            except DockerNotFound:
+                container = None
+
+            if container is not None:
+                labels = container.attrs.get("Config", {}).get("Labels") or {}
+                if labels.get(SANDBOX_ID_LABEL) == sandbox_id:
+                    return container
+
+            # Preserve lookup for managed containers with a nonstandard name.
             containers = self.docker_client.containers.list(
                 all=True, filters={"label": label_selector}
             )
