@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -546,12 +547,7 @@ func pushImage(targetImage string) error {
 		fmt.Println("No registry credentials found, assuming insecure or pre-authenticated registry")
 	}
 
-	// Build push options
-	pushOpts := append(nerdctlBaseArgs(), "push")
-	if isInsecure {
-		pushOpts = append(pushOpts, "--insecure-registry")
-	}
-	pushOpts = append(pushOpts, targetImage)
+	pushOpts := nerdctlPushArgs(targetImage, isInsecure)
 
 	cmd := exec.Command("nerdctl", pushOpts...)
 	output, err := cmd.CombinedOutput()
@@ -560,6 +556,18 @@ func pushImage(targetImage string) error {
 	}
 
 	return nil
+}
+
+func runtimePlatform() string {
+	return runtime.GOOS + "/" + runtime.GOARCH
+}
+
+func nerdctlPushArgs(targetImage string, insecure bool) []string {
+	args := append(nerdctlBaseArgs(), "push", "--platform", runtimePlatform())
+	if insecure {
+		args = append(args, "--insecure-registry")
+	}
+	return append(args, targetImage)
 }
 
 // nerdctlLogin extracts credentials from a Docker config.json and runs nerdctl login.
