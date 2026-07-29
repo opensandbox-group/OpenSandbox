@@ -74,6 +74,19 @@ Get the namespace to use
 {{- end }}
 
 {{/*
+Namespace where sandbox workloads (BatchSandbox/Pool/SandboxSnapshot) run.
+Falls back to the controller's own namespace if not explicitly set, preserving
+the chart's existing single-namespace behavior for anyone who doesn't set it.
+*/}}
+{{- define "opensandbox.sandboxNamespace" -}}
+{{- if .Values.sandboxNamespace }}
+{{- .Values.sandboxNamespace }}
+{{- else }}
+{{- include "opensandbox.namespace" . }}
+{{- end }}
+{{- end }}
+
+{{/*
 Controller image with automatic version prefix handling.
 Prepends 'v' to semantic version tags (e.g., 0.0.1 -> v0.0.1) but preserves
 special tags like 'latest', 'dev', 'main', etc. as-is.

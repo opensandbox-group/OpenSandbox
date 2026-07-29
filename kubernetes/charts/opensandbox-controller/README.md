@@ -98,6 +98,7 @@ kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 | Name | Description | Value |
 |------|-------------|-------|
 | `rbac.create` | Specifies whether RBAC resources should be created | `true` |
+| `sandboxNamespace` | Namespace where BatchSandbox/Pool/SandboxSnapshot resources are expected to live; the manager Role/RoleBinding are scoped here. Defaults to the controller's own namespace if not set | `""` |
 | `serviceAccount.create` | Specifies whether a service account should be created | `true` |
 | `serviceAccount.annotations` | Annotations to add to the service account | `{}` |
 | `serviceAccount.name` | The name of the service account to use | `""` |
@@ -264,8 +265,10 @@ kubectl get crd | grep opensandbox
 
 ### Verify RBAC permissions
 
+The manager role is namespace-scoped to `sandboxNamespace` (defaults to the controller's own namespace):
+
 ```bash
-kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-controller-manager create pods
+kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-controller-manager create pods -n opensandbox-system
 ```
 
 ## Additional Resources

@@ -20,17 +20,18 @@ subjects:
   namespace: {{ include "opensandbox.namespace" . }}
 
 ---
-# Manager role binding
+# Manager role binding — namespace-scoped alongside the Role above.
 apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: {{ include "opensandbox.managerRoleName" . }}
+  namespace: {{ include "opensandbox.sandboxNamespace" . }}
   labels:
     {{- include "opensandbox.labels" . | nindent 4 }}
     app.kubernetes.io/component: rbac
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: {{ include "opensandbox.managerRoleName" . }}
 subjects:
 - kind: ServiceAccount

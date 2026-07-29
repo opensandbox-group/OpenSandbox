@@ -11,6 +11,12 @@ fullnameOverride: ""
 # If not set, defaults to "opensandbox-system"
 namespaceOverride: ""
 
+# -- Namespace where BatchSandbox/Pool/SandboxSnapshot resources are expected to live.
+# The manager Role/RoleBinding are scoped here instead of cluster-wide. If not set,
+# defaults to the same namespace as the controller (namespaceOverride above), matching
+# the chart's existing single-namespace behavior.
+sandboxNamespace: ""
+
 # Controller configuration
 controller:
   # -- Controller image configuration

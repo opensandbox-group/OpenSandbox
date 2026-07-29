@@ -44,11 +44,14 @@ rules:
   - patch
 
 ---
-# Manager ClusterRole
+# Manager Role — namespace-scoped to sandboxNamespace rather than cluster-wide,
+# since BatchSandbox/Pool/SandboxSnapshot are all namespaced resources and the
+# controller only ever needs to manage them in one (or a small, known) namespace.
 apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
-kind: ClusterRole
+kind: Role
 metadata:
   name: {{ include "opensandbox.managerRoleName" . }}
+  namespace: {{ include "opensandbox.sandboxNamespace" . }}
   labels:
     {{- include "opensandbox.labels" . | nindent 4 }}
     app.kubernetes.io/component: rbac
