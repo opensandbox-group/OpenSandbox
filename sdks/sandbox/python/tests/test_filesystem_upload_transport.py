@@ -23,6 +23,7 @@ import pytest
 from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.filesystem import WriteEntry
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.filesystem_adapter import FilesystemAdapterSync
@@ -50,6 +51,38 @@ class _CaptureSyncTransport(httpx.BaseTransport):
         self.request = request
         self.body = request.read()
         return httpx.Response(200, request=request, content=b"{}")
+
+
+class _RedirectAsyncTransport(httpx.AsyncBaseTransport):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.requests: list[httpx.Request] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        async for _ in request.stream:
+            pass
+        return httpx.Response(
+            self.status_code,
+            headers={"Location": "/files/redirected-upload"},
+            request=request,
+        )
+
+
+class _RedirectSyncTransport(httpx.BaseTransport):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.requests: list[httpx.Request] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        for _ in request.stream:
+            pass
+        return httpx.Response(
+            self.status_code,
+            headers={"Location": "/files/redirected-upload"},
+            request=request,
+        )
 
 
 def _headers(request: httpx.Request) -> dict[str, str]:
@@ -158,6 +191,34 @@ async def test_async_write_files_direct_execd_encodes_strings_with_entry_encodin
     await adapter._httpx_client.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
+async def test_async_chunked_upload_does_not_follow_redirects(
+    status_code: int,
+) -> None:
+    transport = _RedirectAsyncTransport(status_code)
+    adapter = FilesystemAdapter(
+        ConnectionConfig(
+            protocol="http",
+            transport=transport,
+            use_server_proxy=False,
+            follow_redirects=True,
+        ),
+        SandboxEndpoint(endpoint="localhost:44772"),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.write_files(
+            [WriteEntry(path="/tmp/large.bin", data=LARGE_PAYLOAD)]
+        )
+
+    assert exc_info.value.status_code == status_code
+    assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+    assert len(transport.requests) == 1
+
+    await adapter._httpx_client.aclose()
+
+
 def test_sync_write_files_direct_execd_uses_chunked_upload() -> None:
     transport = _CaptureSyncTransport()
     adapter = FilesystemAdapterSync(
@@ -232,5 +293,28 @@ def test_sync_write_files_server_proxy_uses_content_length_and_preserves_charset
     assert headers["content-type"].startswith("multipart/form-data; boundary=")
     assert b"text/plain; charset=latin-1" in transport.body
     assert LARGE_PAYLOAD in transport.body
+
+    adapter._httpx_client.close()
+
+
+@pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
+def test_sync_chunked_upload_does_not_follow_redirects(status_code: int) -> None:
+    transport = _RedirectSyncTransport(status_code)
+    adapter = FilesystemAdapterSync(
+        ConnectionConfigSync(
+            protocol="http",
+            transport=transport,
+            use_server_proxy=False,
+            follow_redirects=True,
+        ),
+        SandboxEndpoint(endpoint="localhost:44772"),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        adapter.write_files([WriteEntry(path="/tmp/large.bin", data=LARGE_PAYLOAD)])
+
+    assert exc_info.value.status_code == status_code
+    assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+    assert len(transport.requests) == 1
 
     adapter._httpx_client.close()

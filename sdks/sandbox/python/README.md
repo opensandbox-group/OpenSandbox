@@ -410,6 +410,11 @@ the SDK removes every header whose name starts with `OPEN-SANDBOX-` or
 `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped
 automatically.
 
+Direct chunked file uploads (`use_server_proxy=False`) never follow redirects,
+even when `follow_redirects` is enabled, because their streamed multipart
+request bodies cannot be safely replayed. A redirect response from such an
+upload is surfaced as a `SandboxApiException` with the original 3xx status.
+
 `ConnectionConfig.event_hooks` accepts async httpx hooks, while
 `ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured
 request hooks run before the SDK safety hook, so they cannot re-add protected

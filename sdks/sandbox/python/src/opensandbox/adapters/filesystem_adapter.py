@@ -412,6 +412,7 @@ class FilesystemAdapter(Filesystem):
             url,
             content=_body(),
             headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+            follow_redirects=False,
         )
 
     async def write_file(

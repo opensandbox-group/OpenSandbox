@@ -378,6 +378,7 @@ class FilesystemAdapterSync(FilesystemSync):
             url,
             content=_body(),
             headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+            follow_redirects=False,
         )
 
     def write_file(
