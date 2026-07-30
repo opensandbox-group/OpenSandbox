@@ -36,6 +36,10 @@ spec:
       jsonPath: .status.available
       name: AVAILABLE
       type: integer
+    - description: The number of nodes updated to the latest revision.
+      jsonPath: .status.updated
+      name: UPDATED
+      type: integer
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -167,6 +171,11 @@ spec:
                 type: string
               total:
                 description: Total is the total number of nodes in the pool.
+                format: int32
+                type: integer
+              updated:
+                description: Updated is the number of nodes that have been updated
+                  to the latest revision.
                 format: int32
                 type: integer
             required:

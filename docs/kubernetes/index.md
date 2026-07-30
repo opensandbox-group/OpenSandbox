@@ -378,11 +378,19 @@ spec:
     poolMin: 5
 ```
 
-Optional: add `scaleStrategy` to limit the pace of scaling:
+The pool buffer counts only unallocated pods that are Ready. Pods that are still
+starting count toward the pool's total capacity, but are not advertised as
+available buffer.
+
+Optional: add `scaleStrategy` to limit the size of each scale-up and scale-down
+batch (the default is `25%`):
 ```yaml
   scaleStrategy:
     maxUnavailable: "20%"  # or absolute number like 5
 ```
+
+The controller waits for a scale-down batch to finish terminating before it
+starts another scaling batch.
 
 Create a batch of sandboxes using the pool:
 
