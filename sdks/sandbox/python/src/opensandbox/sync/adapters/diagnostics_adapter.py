@@ -19,7 +19,7 @@ import logging
 
 import httpx
 
-from opensandbox._httpx import build_api_key_redirect_event_hooks
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.diagnostic_model_converter import (
     DiagnosticModelConverter,
 )
@@ -67,10 +67,9 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
-            follow_redirects=self.connection_config.follow_redirects,
-            event_hooks=build_api_key_redirect_event_hooks(
+            **build_redirect_client_options(
+                self.connection_config,
                 self.connection_config.get_base_url(),
-                self.connection_config.event_hooks,
             ),
         )
         self._client.set_httpx_client(self._httpx_client)

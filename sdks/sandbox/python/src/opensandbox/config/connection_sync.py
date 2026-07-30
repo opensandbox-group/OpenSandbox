@@ -20,13 +20,12 @@ This mirrors ConnectionConfig (async) but uses httpx sync transports.
 """
 
 import os
-from collections.abc import Callable
 from datetime import timedelta
-from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from opensandbox._httpx import SyncEventHook
 from opensandbox.transport import RetryPolicy, RetrySyncTransport
 
 
@@ -64,10 +63,11 @@ class ConnectionConfigSync(BaseModel):
         default=False,
         description=(
             "Whether HTTP clients should follow redirects. Cross-origin redirects strip "
-            "OPEN-SANDBOX-API-KEY, but other sensitive custom headers may still be forwarded."
+            "headers prefixed OPEN-SANDBOX- or OPENSANDBOX-, but other sensitive custom "
+            "headers may still be forwarded."
         ),
     )
-    event_hooks: dict[str, list[Callable[..., Any]]] = Field(
+    event_hooks: dict[str, list[SyncEventHook]] = Field(
         default_factory=dict,
         description=(
             "Additional httpx event hooks for SDK-created sync clients. SDK security "

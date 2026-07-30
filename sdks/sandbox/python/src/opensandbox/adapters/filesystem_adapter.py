@@ -30,7 +30,7 @@ from typing import TypedDict
 
 import httpx
 
-from opensandbox._httpx import build_async_api_key_redirect_event_hooks
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -120,10 +120,7 @@ class FilesystemAdapter(Filesystem):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
-            follow_redirects=self.connection_config.follow_redirects,
-            event_hooks=build_async_api_key_redirect_event_hooks(
-                base_url, self.connection_config.event_hooks
-            ),
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
 
         # Execd API does not require authentication

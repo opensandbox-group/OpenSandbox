@@ -23,7 +23,7 @@ from datetime import timedelta
 
 import httpx
 
-from opensandbox._httpx import build_api_key_redirect_event_hooks
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
@@ -164,10 +164,7 @@ class CommandsAdapterSync(CommandsSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
-            follow_redirects=self.connection_config.follow_redirects,
-            event_hooks=build_api_key_redirect_event_hooks(
-                base_url, self.connection_config.event_hooks
-            ),
+            **build_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -189,10 +186,7 @@ class CommandsAdapterSync(CommandsSync):
                 pool=None,
             ),
             transport=unwrap_retry_transport(self.connection_config.transport),
-            follow_redirects=self.connection_config.follow_redirects,
-            event_hooks=build_api_key_redirect_event_hooks(
-                base_url, self.connection_config.event_hooks
-            ),
+            **build_redirect_client_options(self.connection_config, base_url),
         )
 
     def _get_execd_url(self, path: str) -> str:

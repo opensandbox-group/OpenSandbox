@@ -16,19 +16,23 @@
 """httpx helpers shared by handwritten SDK adapters.
 
 These helpers preserve user-provided event hooks while appending the SDK's
-request hook that strips `OPEN-SANDBOX-API-KEY` from cross-origin redirects.
-The SDK hook must run last so user hooks cannot accidentally re-add the custom
-API key before httpx sends the redirected request.
+request hook that strips protected OpenSandbox headers from cross-origin
+requests. The SDK hook must run last so user hooks cannot accidentally re-add
+protected headers before httpx sends a redirected request.
 """
 
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Protocol, TypedDict, TypeVar
 
 import httpx
 
-OPEN_SANDBOX_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"
-EventHook = Callable[..., Any]
-EventHooks = Mapping[str, Sequence[EventHook]]
+SyncEventHook = Callable[..., None]
+AsyncEventHook = Callable[..., Awaitable[None]]
+SyncEventHooks = Mapping[str, Sequence[SyncEventHook]]
+AsyncEventHooks = Mapping[str, Sequence[AsyncEventHook]]
+
+_HookT = TypeVar("_HookT")
+_PROTECTED_HEADER_PREFIXES = ("OPEN-SANDBOX-", "OPENSANDBOX-")
 
 _DEFAULT_PORTS = {
     "http": 80,
@@ -36,62 +40,119 @@ _DEFAULT_PORTS = {
 }
 
 
+class _SyncRedirectConfig(Protocol):
+    follow_redirects: bool
+    event_hooks: dict[str, list[SyncEventHook]]
+
+
+class _AsyncRedirectConfig(Protocol):
+    follow_redirects: bool
+    event_hooks: dict[str, list[AsyncEventHook]]
+
+
+class SyncRedirectClientOptions(TypedDict):
+    """Redirect-related options accepted by ``httpx.Client``."""
+
+    follow_redirects: bool
+    event_hooks: dict[str, list[SyncEventHook]]
+
+
+class AsyncRedirectClientOptions(TypedDict):
+    """Redirect-related options accepted by ``httpx.AsyncClient``."""
+
+    follow_redirects: bool
+    event_hooks: dict[str, list[AsyncEventHook]]
+
+
 def _origin(url: httpx.URL) -> tuple[str, str | None, int | None]:
     return (url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme))
 
 
-def _strip_api_key_for_cross_origin_request(
+def _strip_protected_headers_for_cross_origin_request(
     request: httpx.Request,
     *,
     base_origin: tuple[str, str | None, int | None],
 ) -> None:
     if _origin(request.url) == base_origin:
         return
-    if OPEN_SANDBOX_API_KEY_HEADER in request.headers:
-        del request.headers[OPEN_SANDBOX_API_KEY_HEADER]
+    protected_headers = [
+        name
+        for name in request.headers
+        if name.upper().startswith(_PROTECTED_HEADER_PREFIXES)
+    ]
+    for name in protected_headers:
+        del request.headers[name]
 
 
-def _copy_event_hooks(event_hooks: EventHooks | None) -> dict[str, list[EventHook]]:
+def _copy_event_hooks(
+    event_hooks: Mapping[str, Sequence[_HookT]] | None,
+) -> dict[str, list[_HookT]]:
     if event_hooks is None:
         return {}
     return {event: list(hooks) for event, hooks in event_hooks.items()}
 
 
-def build_api_key_redirect_event_hooks(
+def build_redirect_event_hooks(
     base_url: str,
-    event_hooks: EventHooks | None = None,
-) -> dict[str, list[EventHook]]:
+    event_hooks: SyncEventHooks | None = None,
+) -> dict[str, list[SyncEventHook]]:
     """Build sync hooks for SDK clients.
 
     Existing user hooks are copied and preserved. The SDK request hook is
-    appended after user request hooks so `OPEN-SANDBOX-API-KEY` is removed from
-    any request whose origin differs from `base_url`.
+    appended after user request hooks so protected OpenSandbox headers are
+    removed from any request whose origin differs from ``base_url``.
     """
     base_origin = _origin(httpx.URL(base_url))
 
-    def strip_api_key(request: httpx.Request) -> None:
-        _strip_api_key_for_cross_origin_request(request, base_origin=base_origin)
+    def strip_protected_headers(request: httpx.Request) -> None:
+        _strip_protected_headers_for_cross_origin_request(
+            request, base_origin=base_origin
+        )
 
     hooks = _copy_event_hooks(event_hooks)
-    hooks.setdefault("request", []).append(strip_api_key)
+    hooks.setdefault("request", []).append(strip_protected_headers)
     return hooks
 
 
-def build_async_api_key_redirect_event_hooks(
+def build_async_redirect_event_hooks(
     base_url: str,
-    event_hooks: EventHooks | None = None,
-) -> dict[str, list[EventHook]]:
+    event_hooks: AsyncEventHooks | None = None,
+) -> dict[str, list[AsyncEventHook]]:
     """Build async hooks for SDK clients.
 
     Existing user hooks are copied and preserved. The SDK request hook is
-    appended after user request hooks so `OPEN-SANDBOX-API-KEY` is removed from
-    any request whose origin differs from `base_url`.
+    appended after user request hooks so protected OpenSandbox headers are
+    removed from any request whose origin differs from ``base_url``.
     """
     base_origin = _origin(httpx.URL(base_url))
 
-    async def strip_api_key(request: httpx.Request) -> None:
-        _strip_api_key_for_cross_origin_request(request, base_origin=base_origin)
+    async def strip_protected_headers(request: httpx.Request) -> None:
+        _strip_protected_headers_for_cross_origin_request(
+            request, base_origin=base_origin
+        )
 
     hooks = _copy_event_hooks(event_hooks)
-    hooks.setdefault("request", []).append(strip_api_key)
+    hooks.setdefault("request", []).append(strip_protected_headers)
     return hooks
+
+
+def build_redirect_client_options(
+    config: _SyncRedirectConfig,
+    base_url: str,
+) -> SyncRedirectClientOptions:
+    """Build redirect options for a synchronous adapter client."""
+    return {
+        "follow_redirects": config.follow_redirects,
+        "event_hooks": build_redirect_event_hooks(base_url, config.event_hooks),
+    }
+
+
+def build_async_redirect_client_options(
+    config: _AsyncRedirectConfig,
+    base_url: str,
+) -> AsyncRedirectClientOptions:
+    """Build redirect options for an asynchronous adapter client."""
+    return {
+        "follow_redirects": config.follow_redirects,
+        "event_hooks": build_async_redirect_event_hooks(base_url, config.event_hooks),
+    }

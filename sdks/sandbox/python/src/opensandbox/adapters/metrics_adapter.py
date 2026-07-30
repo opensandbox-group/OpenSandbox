@@ -23,7 +23,7 @@ import logging
 
 import httpx
 
-from opensandbox._httpx import build_async_api_key_redirect_event_hooks
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -89,10 +89,7 @@ class MetricsAdapter(Metrics):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
-            follow_redirects=self.connection_config.follow_redirects,
-            event_hooks=build_async_api_key_redirect_event_hooks(
-                base_url, self.connection_config.event_hooks
-            ),
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 
@@ -122,6 +119,7 @@ class MetricsAdapter(Metrics):
 
             handle_api_error(response_obj, "Get metrics")
             from opensandbox.api.execd.models import Metrics
+
             parsed = require_parsed(response_obj, Metrics, "Get metrics")
             return MetricsModelConverter.to_sandbox_metrics(parsed)
 

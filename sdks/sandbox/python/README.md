@@ -399,13 +399,23 @@ The `ConnectionConfig` class manages API server connection settings.
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
 | `follow_redirects` | Follow HTTP redirects for SDK requests      | `False`                      | -                      |
-| `event_hooks`     | Additional httpx event hooks for SDK clients | Empty                        | -                      |
+| `event_hooks`     | Additional httpx hooks for adapter clients   | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry)  | SDK-created per instance     | -                      |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
 
-When `follow_redirects` is enabled, the SDK strips `OPEN-SANDBOX-API-KEY`
-from cross-origin redirect requests after configured request hooks run. Other
-sensitive custom headers are not stripped automatically.
+When `follow_redirects` is enabled, same-origin redirects preserve request
+headers. An origin is the combination of scheme, host, and port, so changing
+any of those values is cross-origin. Before following a cross-origin redirect,
+the SDK removes every header whose name starts with `OPEN-SANDBOX-` or
+`OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped
+automatically.
+
+`ConnectionConfig.event_hooks` accepts async httpx hooks, while
+`ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured
+request hooks run before the SDK safety hook, so they cannot re-add protected
+OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors
+`follow_redirects` and the SDK safety hook, but does not invoke configured user
+hooks.
 
 ```python
 from datetime import timedelta
