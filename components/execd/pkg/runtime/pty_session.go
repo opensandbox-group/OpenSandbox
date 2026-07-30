@@ -64,7 +64,7 @@ func NewPTYSessionID() string {
 	return uuidString()
 }
 
-// ptySession manages a single interactive PTY or pipe-mode bash process.
+// ptySession manages a single interactive PTY or pipe-mode shell process.
 //
 // Lifecycle:
 //  1. Create via newPTYSession.
@@ -75,7 +75,7 @@ func NewPTYSessionID() string {
 type ptySession struct {
 	id      string
 	cwd     string
-	command string // optional custom command; defaults to bash if empty
+	command string // optional custom command interpreted by the selected shell
 
 	mu      sync.Mutex
 	closing bool
@@ -187,7 +187,7 @@ func (s *ptySession) TakeoverWS(timeout time.Duration) bool {
 	}
 }
 
-// IsRunning returns true if the bash process is currently alive.
+// IsRunning returns true if the shell process is currently alive.
 func (s *ptySession) IsRunning() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -219,7 +219,18 @@ func (s *ptySession) ReplayBuffer() *replayBuffer {
 	return s.replay
 }
 
-// StartPTY launches bash via pty.StartWithSize.
+// buildPTYCommand selects Bash when available and otherwise falls back to sh.
+// Bash startup flags must not be passed to sh because they are not portable.
+func buildPTYCommand(command string) *exec.Cmd {
+	var extra []string
+	if command != "" {
+		extra = []string{"-c", command}
+	}
+	shell, args := shellCommand(extra...)
+	return exec.Command(shell, args...)
+}
+
+// StartPTY launches the preferred shell via pty.StartWithSize.
 // Must be called with the WS lock held.
 func (s *ptySession) StartPTY() error {
 	s.mu.Lock()
@@ -232,11 +243,7 @@ func (s *ptySession) StartPTY() error {
 		return errors.New("pty session is closing")
 	}
 
-	cmdArgs := []string{"--norc", "--noprofile"}
-	if s.command != "" {
-		cmdArgs = append(cmdArgs, "-c", s.command)
-	}
-	cmd := exec.Command("bash", cmdArgs...)
+	cmd := buildPTYCommand(s.command)
 	cmd.Env = os.Environ()
 	if s.cwd != "" {
 		cmd.Dir = s.cwd
@@ -261,7 +268,7 @@ func (s *ptySession) StartPTY() error {
 	return nil
 }
 
-// StartPipe launches bash with plain stdin/stdout/stderr os.Pipes.
+// StartPipe launches the preferred shell with plain stdin/stdout/stderr os.Pipes.
 // Must be called with the WS lock held.
 func (s *ptySession) StartPipe() error {
 	s.mu.Lock()
@@ -293,11 +300,7 @@ func (s *ptySession) StartPipe() error {
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
-	cmdArgs := []string{"--norc", "--noprofile"}
-	if s.command != "" {
-		cmdArgs = append(cmdArgs, "-c", s.command)
-	}
-	cmd := exec.Command("bash", cmdArgs...)
+	cmd := buildPTYCommand(s.command)
 	cmd.Env = os.Environ()
 	if s.cwd != "" {
 		cmd.Dir = s.cwd
@@ -384,7 +387,7 @@ func (s *ptySession) writeAndFanout(chunk []byte, isStdout bool) {
 	if w != nil {
 		if _, err := w.Write(chunk); err != nil {
 			// Pipe was closed (client detached) — ignore.
-			log.Warning("pty fanout write: %v", err)
+			log.Warn("pty fanout write: %v", err)
 		}
 	}
 }
@@ -429,7 +432,7 @@ func (s *ptySession) waitAndExitPipe(cmd *exec.Cmd, stdinW, stdoutR, stderrR *os
 	close(doneCh)
 }
 
-// WriteStdin writes p to bash stdin (PTY master or pipe write-end).
+// WriteStdin writes p to shell stdin (PTY master or pipe write-end).
 func (s *ptySession) WriteStdin(p []byte) (int, error) {
 	s.mu.Lock()
 	w := s.stdin
@@ -539,7 +542,7 @@ func (s *ptySession) SendSignal(name string) {
 
 	sig := parseSignalName(name)
 	if sig == 0 {
-		log.Warning("ptySession.SendSignal: unknown signal %q", name)
+		log.Warn("ptySession.SendSignal: unknown signal %q", name)
 		return
 	}
 
@@ -547,7 +550,7 @@ func (s *ptySession) SendSignal(name string) {
 	// In pipe mode (Setpgid), pgid is also == pid.
 	// Either way, Kill(-pid, sig) sends to the process group.
 	if err := syscall.Kill(-pid, sig); err != nil {
-		log.Warning("ptySession.SendSignal kill(-%d, %v): %v", pid, sig, err)
+		log.Warn("ptySession.SendSignal kill(-%d, %v): %v", pid, sig, err)
 	}
 }
 

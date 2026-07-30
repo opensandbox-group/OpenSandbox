@@ -42,12 +42,14 @@ from opensandbox.models.filesystem import (
     WriteEntry,
 )
 from opensandbox.models.isolated import (
+    BindMount,
     CreateIsolatedSessionRequest,
     EnvPassthroughSpec,
     IsolatedCapabilities,
     IsolatedRunOpts,
     IsolatedSessionInfo,
     IsolatedSessionState,
+    IsolatedSessionSummary,
     IsolatedWorkspaceSpec,
 )
 from opensandbox.models.sandboxes import (
@@ -63,6 +65,7 @@ from opensandbox.models.sandboxes import (
     CredentialMetadata,
     CredentialMutationSet,
     CredentialProxyConfig,
+    CredentialSubstitution,
     CredentialVaultPatchRequest,
     CredentialVaultState,
     CustomHeaderEntry,
@@ -98,12 +101,14 @@ __all__ = [
     "CommandStatus",
     "CommandLogs",
     # Isolated session models
+    "BindMount",
     "CreateIsolatedSessionRequest",
     "EnvPassthroughSpec",
     "IsolatedCapabilities",
     "IsolatedRunOpts",
     "IsolatedSessionInfo",
     "IsolatedSessionState",
+    "IsolatedSessionSummary",
     "IsolatedWorkspaceSpec",
     # Filesystem models
     "EntryInfo",
@@ -121,6 +126,7 @@ __all__ = [
     "NetworkPolicy",
     "NetworkRule",
     "CredentialProxyConfig",
+    "CredentialSubstitution",
     "InlineCredentialSource",
     "Credential",
     "CredentialMatch",

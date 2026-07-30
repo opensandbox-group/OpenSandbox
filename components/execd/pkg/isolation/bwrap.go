@@ -22,62 +22,65 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-// buildArgv constructs the bwrap command line from wrap options. The fixed
-// segment order matches OSEP §7:
-//
-//  1. Namespace flags
-//  2. --ro-bind / /
-//  3. /tmp segment
-//  4. --tmpfs /run
-//  5. --dev /dev
-//  6. --proc /proc
-//  7. Workspace segment
-//  8. extra_writable segment
-//  9. Env segment
-//  10. --seccomp <fd>
-//  11. -- setpriv ... <user cmd>
+type bwrapLifecycleArgv struct {
+	gateExecFD string
+	controlFD  string
+	blockFD    string
+	statusFD   string
+}
+
+// buildArgv constructs the legacy bwrap command line from wrap options.
 func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
+	return buildArgvWithLifecycle(opts, seccompFd, nil)
+}
+
+// buildArgvWithLifecycle constructs the bwrap command line and, when lifecycle
+// is non-nil, executes the native fail-closed workload gate directly through
+// its inherited descriptor.
+func buildArgvWithLifecycle(
+	opts WrapOptions,
+	seccompFd string,
+	lifecycle *bwrapLifecycleArgv,
+) ([]string, error) {
 	if err := validateWrapOptions(opts); err != nil {
 		return nil, err
 	}
 
+	useUserns := opts.UidMode == UidModeUserns
+
 	var argv []string
 
-	// 1. Namespace flags — no --unshare-user (real setuid instead).
-	argv = append(argv, "--unshare-pid", "--unshare-uts", "--unshare-ipc")
-	if !opts.ShareNet {
-		argv = append(argv, "--unshare-net")
-	}
+	// 1. Namespace flags.
+	argv = append(argv, bwrapNamespaceSegment(opts, useUserns)...)
 
 	// 2. Root filesystem (read-only).
 	argv = append(argv, "--ro-bind", "/", "/")
 
-	// 3. /tmp segment — skip if workspace is /tmp (workspace bind would override).
+	// 3. /tmp — skip if workspace is /tmp (workspace bind would override).
 	if filepath.Clean(opts.Workspace.Path) != "/tmp" {
 		argv = append(argv, bwrapTmpSegment(opts.Profile)...)
 	}
 
-	// 4. /run.
-	argv = append(argv, "--tmpfs", "/run")
+	// 4–6. Virtual filesystems. Lifecycle mode installs procfs after all
+	// caller-controlled mounts so /proc/self/fd remains the trusted execution
+	// path for the native gate descriptor.
+	argv = append(argv, "--tmpfs", "/run", "--dev", "/dev")
+	if lifecycle == nil {
+		argv = append(argv, "--proc", "/proc")
+	}
 
-	// 5. /dev.
-	argv = append(argv, "--dev", "/dev")
-
-	// 6. /proc.
-	argv = append(argv, "--proc", "/proc")
-
-	// 7. Workspace segment.
+	// 7. Workspace.
 	wsArgv, err := bwrapWorkspaceSegment(opts)
 	if err != nil {
 		return nil, err
 	}
 	argv = append(argv, wsArgv...)
 
-	// 7b. Hide upper root from namespace to prevent cross-session data access.
-	// UpperDir is <root>/<id>/upper, so Dir(Dir(UpperDir)) gives the shared root.
+	// Hide upper root to prevent cross-session access.
 	if opts.UpperDir != "" {
 		upperRoot := filepath.Dir(filepath.Dir(opts.UpperDir))
 		argv = append(argv, "--tmpfs", upperRoot)
@@ -88,41 +91,125 @@ func buildArgv(opts WrapOptions, seccompFd string) ([]string, error) {
 		argv = append(argv, "--bind", p, p)
 	}
 
-	// 9. Environment segment.
+	// 8b. Explicit source→dest bind mounts.
+	for _, b := range opts.Binds {
+		dest := b.Dest
+		if dest == "" {
+			dest = b.Source
+		}
+		flag := "--bind"
+		if b.ReadOnly {
+			flag = "--ro-bind"
+		}
+		argv = append(argv, flag, b.Source, dest)
+	}
+
+	// Restore trusted procfs after every caller-controlled mount, then execute
+	// the verified gate through its inherited descriptor. Static mount aliases
+	// therefore cannot replace the gate between validation and execution.
+	//
+	// The isolated-session MVP treats processes sharing the parent sandbox
+	// mount namespace as one trusted owner. Defending against that owner
+	// concurrently replacing the proc mount ancestor still requires a future
+	// execveat-based launcher.
+	if lifecycle != nil {
+		argv = append(argv, "--proc", "/proc")
+	}
+
+	// 9. Environment.
 	argv = append(argv, bwrapEnvSegment(opts.EnvPassthrough)...)
 
-	// 10. Seccomp (optional). bwrap --seccomp takes a decimal fd number.
-	// The caller opens the BPF file, adds it to ExtraFiles, and passes the
-	// child-side fd number here.
+	// 10. Seccomp.
 	if seccompFd != "" {
 		argv = append(argv, "--seccomp", seccompFd)
 	}
 
-	// 11. setpriv + user command.
-	// The user command is appended by the caller via cmd.Args after Wrap.
+	// 11. Lifecycle: kill sandbox when execd dies.
+	// Note: --new-session is intentionally omitted. bwrap is launched with
+	// SysProcAttr{Setpgid: true}, making it a process-group leader, and
+	// setsid(2) returns EPERM for a group leader — it would fail every
+	// session start. Process-group isolation from Setpgid is sufficient.
+	argv = append(argv, "--die-with-parent")
+	if lifecycle != nil {
+		argv = append(
+			argv,
+			"--block-fd", lifecycle.blockFD,
+			"--json-status-fd", lifecycle.statusFD,
+		)
+	}
+
+	// 12. Separator + fail-closed gate + identity switch.
 	argv = append(argv, "--")
 
-	// setpriv runs before the user command.
-	uid := uint32(os.Getuid())
-	gid := uint32(os.Getgid())
-	if opts.Uid != nil {
-		uid = *opts.Uid
-	}
-	if opts.Gid != nil {
-		gid = *opts.Gid
+	// In setpriv mode the trusted gate must run before credentials are dropped.
+	// Execd authenticates and inspects the blocked gate through /proc; moving
+	// setpriv after the gate keeps those checks available without granting
+	// CAP_SYS_PTRACE. Once READY arrives, the gate execs setpriv and the caller's
+	// command in the same PID and namespaces.
+	if lifecycle != nil {
+		argv = append(
+			argv,
+			"/proc/self/fd/"+lifecycle.gateExecFD,
+			lifecycle.controlFD,
+			lifecycle.gateExecFD,
+			"--",
+		)
 	}
 
-	if uid != 0 || gid != 0 {
-		setprivArgv := []string{
-			"setpriv",
-			fmt.Sprintf("--reuid=%d", uid),
-			fmt.Sprintf("--regid=%d", gid),
-			"--clear-groups",
+	// In userns mode, uid/gid are set via --uid/--gid in segment 1.
+	if !useUserns {
+		uid := uint32(os.Getuid())
+		gid := uint32(os.Getgid())
+		if opts.Uid != nil {
+			uid = *opts.Uid
 		}
-		argv = append(argv, setprivArgv...)
+		if opts.Gid != nil {
+			gid = *opts.Gid
+		}
+
+		if uid != 0 || gid != 0 {
+			setprivArgv := []string{
+				"setpriv",
+				fmt.Sprintf("--reuid=%d", uid),
+				fmt.Sprintf("--regid=%d", gid),
+				"--clear-groups",
+			}
+			argv = append(argv, setprivArgv...)
+		}
 	}
 
 	return argv, nil
+}
+
+func bwrapNamespaceSegment(opts WrapOptions, useUserns bool) []string {
+	var argv []string
+	if useUserns {
+		argv = append(argv, "--unshare-user")
+		// --disable-userns is unsupported by the setuid build of bwrap;
+		// only add it for the non-setuid binary.
+		if !bwrapIsSetuid {
+			argv = append(argv, "--disable-userns")
+		}
+	}
+	argv = append(argv, "--unshare-pid", "--unshare-uts", "--hostname", "sandbox", "--unshare-ipc", "--unshare-cgroup")
+	if !opts.ShareNet {
+		argv = append(argv, "--unshare-net")
+	}
+	if useUserns {
+		uid := uint32(os.Getuid())
+		gid := uint32(os.Getgid())
+		if opts.Uid != nil {
+			uid = *opts.Uid
+		}
+		if opts.Gid != nil {
+			gid = *opts.Gid
+		}
+		argv = append(argv,
+			"--uid", strconv.FormatUint(uint64(uid), 10),
+			"--gid", strconv.FormatUint(uint64(gid), 10),
+		)
+	}
+	return argv
 }
 
 // validateWrapOptions checks for invalid or conflicting options.
@@ -138,6 +225,20 @@ func validateWrapOptions(opts WrapOptions) error {
 	}
 	if !opts.EnvPassthrough.Mode.Valid() && opts.EnvPassthrough.Mode != "" {
 		return fmt.Errorf("isolation: unknown env mode %q", opts.EnvPassthrough.Mode)
+	}
+	if opts.UidMode != "" && !opts.UidMode.Valid() {
+		return fmt.Errorf("isolation: unknown uid mode %q", opts.UidMode)
+	}
+	for _, b := range opts.Binds {
+		if b.Source == "" {
+			return errors.New("isolation: bind.source is required")
+		}
+		if !filepath.IsAbs(b.Source) {
+			return fmt.Errorf("isolation: bind.source %q must be an absolute path", b.Source)
+		}
+		if b.Dest != "" && !filepath.IsAbs(b.Dest) {
+			return fmt.Errorf("isolation: bind.dest %q must be an absolute path", b.Dest)
+		}
 	}
 	return nil
 }
@@ -181,6 +282,24 @@ func bwrapWorkspaceSegment(opts WrapOptions) ([]string, error) {
 	}
 }
 
+// execdConfigEnvBlacklist enumerates execd's own configuration env vars.
+// They are always stripped so execd's credentials never leak into the sandbox.
+var execdConfigEnvBlacklist = []string{
+	"EXECD_ACCESS_TOKEN",
+	"JUPYTER_HOST",
+	"JUPYTER_TOKEN",
+	"EXECD_ISOLATION_CONFIG",
+	"EXECD_ENVS",
+}
+
+func unsetExecdConfigEnv() []string {
+	argv := make([]string, 0, 2*len(execdConfigEnvBlacklist))
+	for _, key := range execdConfigEnvBlacklist {
+		argv = append(argv, "--unsetenv", key)
+	}
+	return argv
+}
+
 // unsetBlacklistedEnv returns --unsetenv args for all env vars matching strictEnvBlacklist.
 func unsetBlacklistedEnv() []string {
 	var argv []string
@@ -195,15 +314,17 @@ func unsetBlacklistedEnv() []string {
 	return argv
 }
 
-// bwrapEnvSegment returns environment passthrough args.
+// bwrapEnvSegment returns environment passthrough args. execd's own config
+// env (execdConfigEnvBlacklist) is always stripped, regardless of mode.
 func bwrapEnvSegment(spec EnvSpec) []string {
 	if spec.Mode == "" {
-		return unsetBlacklistedEnv()
+		argv := unsetExecdConfigEnv()
+		return append(argv, unsetBlacklistedEnv()...)
 	}
 
 	switch spec.Mode {
 	case EnvModeDeny:
-		var argv []string
+		argv := unsetExecdConfigEnv()
 		for _, key := range spec.Keys {
 			argv = append(argv, "--unsetenv", key)
 		}
@@ -213,9 +334,17 @@ func bwrapEnvSegment(spec EnvSpec) []string {
 		return argv
 
 	case EnvModeAllow:
-		// Clear environment, inject only allow-listed keys.
+		// --clearenv wipes everything; refuse to re-inject execd config env
+		// even if the caller allow-lists it.
 		argv := []string{"--clearenv"}
+		blacklist := make(map[string]struct{}, len(execdConfigEnvBlacklist))
+		for _, k := range execdConfigEnvBlacklist {
+			blacklist[k] = struct{}{}
+		}
 		for _, key := range spec.Keys {
+			if _, blocked := blacklist[key]; blocked {
+				continue
+			}
 			if val, ok := os.LookupEnv(key); ok {
 				argv = append(argv, "--setenv", key, val)
 			}
@@ -260,8 +389,8 @@ func matchEnvPattern(name, pattern string) bool {
 // Wrap rewrites cmd to execute under bwrap.
 func wrapWithArgv(cmd *exec.Cmd, bwrapPath string, argv []string) {
 	// Prepend bwrap argv before the original command.
-	// argv already ends with ["--", "setpriv", ...] and the original
-	// cmd.Args[0] is the user command after setpriv.
+	// argv already contains the bwrap separator and any lifecycle gate or
+	// identity-switch prefix. The original cmd.Args[0] follows that prefix.
 	userArgs := cmd.Args
 	cmd.Args = make([]string, 0, len(argv)+len(userArgs))
 	cmd.Args = append(cmd.Args, bwrapPath)

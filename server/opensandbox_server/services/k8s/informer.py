@@ -15,7 +15,9 @@
 """Lightweight informer-style cache for namespaced custom resources."""
 
 import logging
+import math
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from kubernetes import watch
@@ -40,7 +42,7 @@ class WorkloadInformer:
             list_fn: Callable that lists the custom resource, with signature
                      ``list_fn(**kwargs) -> dict``.  Typically a bound method
                      like ``custom_api.list_namespaced_custom_object``.
-            resync_period_seconds: Full-resync interval when watch is disabled.
+            resync_period_seconds: Full-resync interval for the cache.
             watch_timeout_seconds: Per-stream watch timeout before restart.
             enable_watch: When False only the initial list is performed.
             thread_name: Name for the background thread, used in stack traces
@@ -133,10 +135,12 @@ class WorkloadInformer:
 
     def _run(self) -> None:
         backoff = 1.0
+        last_full_resync_at: Optional[float] = None
         while not self._stop_event.is_set():
             try:
                 if not self._has_synced:
                     self._full_resync()
+                    last_full_resync_at = time.monotonic()
                     backoff = 1.0
 
                 if not self.enable_watch:
@@ -144,7 +148,22 @@ class WorkloadInformer:
                     self._has_synced = False  # trigger a fresh list on next loop
                     continue
 
-                self._run_watch_loop()
+                if last_full_resync_at is None:
+                    last_full_resync_at = time.monotonic()
+                remaining_resync_seconds = self.resync_period_seconds - (
+                    time.monotonic() - last_full_resync_at
+                )
+                if remaining_resync_seconds <= 0:
+                    self._has_synced = False
+                    continue
+
+                watch_timeout_seconds = min(
+                    self.watch_timeout_seconds,
+                    max(1, math.ceil(remaining_resync_seconds)),
+                )
+                self._run_watch_loop(watch_timeout_seconds)
+                if time.monotonic() - last_full_resync_at >= self.resync_period_seconds:
+                    self._has_synced = False
                 backoff = 1.0
             except ApiException as exc:
                 if exc.status == 410:
@@ -183,14 +202,14 @@ class WorkloadInformer:
             self._advance_resource_version(resource_version)
             self._has_synced = True
 
-    def _run_watch_loop(self) -> None:
+    def _run_watch_loop(self, timeout_seconds: int) -> None:
         """Stream watch events to keep the cache fresh."""
         w = watch.Watch()
         try:
             for event in w.stream(
                 self.list_fn,
                 resource_version=self._resource_version,
-                timeout_seconds=self.watch_timeout_seconds,
+                timeout_seconds=timeout_seconds,
             ):
                 if self._stop_event.is_set():
                     break

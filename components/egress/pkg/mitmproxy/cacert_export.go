@@ -62,6 +62,40 @@ func waitMitmCACertPath(confDirEnv, home string) (string, error) {
 	return "", fmt.Errorf("mitmproxy CA not found after %v (tried: %v)", waitCACert, cands)
 }
 
+// PurgeStaleExportedCA removes any mitmproxy-ca-cert.pem left on the shared
+// volume by a previous generation of this egress container. mitmproxy's CA
+// lives in the egress container's ephemeral confdir, so an egress container
+// restart rotates the CA while the previous public cert is still on the
+// (pod-scoped) shared volume; without this purge, an agent container starting
+// alongside us would pass its bootstrap readiness check on the stale file
+// and install a CA that no longer matches what mitmproxy will sign with.
+// See upstream issue #1370. Must be called as early as possible in main().
+func PurgeStaleExportedCA() {
+	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
+		return
+	}
+	purgeStaleExportedCAFrom(constants.OpenSandboxRootDir)
+}
+
+// purgeStaleExportedCAFrom is the testable core of PurgeStaleExportedCA.
+func purgeStaleExportedCAFrom(rootDir string) {
+	path := filepath.Join(rootDir, mitmCACertName)
+	err := os.Remove(path)
+	switch {
+	case err == nil:
+		// warn: on first pod startup this file should not exist; its presence
+		// means the egress container (or process) has restarted, which is
+		// useful signal when diagnosing HTTPS-from-agent problems.
+		log.Warnf("[mitmproxy] removed stale exported CA at %s (previous egress generation left it behind; see upstream issue #1370)", path)
+	case os.IsNotExist(err):
+		// Common on first pod startup.
+	default:
+		// Non-fatal: SyncRootCA will overwrite the file. But on the race
+		// path the agent may still grab the old contents before we do.
+		log.Warnf("[mitmproxy] failed to remove stale exported CA at %s: %v", path, err)
+	}
+}
+
 func SyncRootCA(confDirEnv, home string) error {
 	src, err := waitMitmCACertPath(confDirEnv, home)
 	if err != nil {

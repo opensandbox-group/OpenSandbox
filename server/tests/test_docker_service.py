@@ -51,7 +51,9 @@ from opensandbox_server.services.constants import (
     SANDBOX_SNAPSHOT_ID_LABEL,
     SandboxErrorCodes,
 )
-from opensandbox_server.services.docker import DockerSandboxService, PendingSandbox
+from opensandbox_server.services.docker import DockerSandboxService
+from opensandbox_server.services.docker.metadata import DockerMetadataStore
+from opensandbox_server.services.docker.runtime import SESSION_GATE_SOURCE_PATH
 from opensandbox_server.services.helpers import (
     parse_gpu_request,
     parse_memory_limit,
@@ -64,14 +66,14 @@ from opensandbox_server.api.schema import (
     CredentialProxyConfig,
     Host,
     ImageSpec,
-    NetworkPolicy,
     ListSandboxesRequest,
+    NetworkPolicy,
     OSSFS,
+    PaginationRequest,
     PlatformSpec,
     PVC,
     ResourceLimits,
-    Sandbox,
-    SandboxFilter,
+    RenewSandboxExpirationRequest,
     SandboxStatus,
     Volume,
 )
@@ -580,6 +582,83 @@ def test_fetch_execd_archive_caches_by_platform_key(mock_docker):
     assert arm64_data == b"arm64"
     assert mock_client.containers.create.call_count == 2
 
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_fetch_execd_archive_caches_session_gate_by_platform_key(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    mock_client.info.return_value = {"OSType": "linux", "Architecture": "amd64"}
+    container = MagicMock()
+
+    def get_archive(path):
+        return ([f"archive:{path}".encode()], {})
+
+    container.get_archive.side_effect = get_archive
+    mock_client.containers.create.return_value = container
+    service = DockerSandboxService(config=_app_config())
+
+    with patch.object(service, "_ensure_image_available"), patch.object(
+        service, "_docker_operation"
+    ):
+        service._fetch_execd_archive()
+
+    assert service._session_gate_archive_cache["default"] == (
+        f"archive:{SESSION_GATE_SOURCE_PATH}".encode()
+    )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_fetch_execd_archive_allows_older_image_without_session_gate(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    mock_client.info.return_value = {"OSType": "linux", "Architecture": "amd64"}
+    container = MagicMock()
+
+    def get_archive(path):
+        if path == SESSION_GATE_SOURCE_PATH:
+            raise DockerNotFound("session gate missing")
+        return ([f"archive:{path}".encode()], {})
+
+    container.get_archive.side_effect = get_archive
+    mock_client.containers.create.return_value = container
+    service = DockerSandboxService(config=_app_config())
+
+    with patch.object(service, "_ensure_image_available"), patch.object(
+        service, "_docker_operation"
+    ):
+        assert service._fetch_execd_archive() == b"archive:/execd"
+
+    assert "default" not in service._session_gate_archive_cache
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_fetch_execd_archive_rejects_session_gate_read_failure(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    mock_client.info.return_value = {"OSType": "linux", "Architecture": "amd64"}
+    container = MagicMock()
+
+    def get_archive(path):
+        if path == SESSION_GATE_SOURCE_PATH:
+            raise DockerException("session gate read failed")
+        return ([f"archive:{path}".encode()], {})
+
+    container.get_archive.side_effect = get_archive
+    mock_client.containers.create.return_value = container
+    service = DockerSandboxService(config=_app_config())
+
+    with patch.object(service, "_ensure_image_available"), patch.object(
+        service, "_docker_operation"
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            service._fetch_execd_archive()
+
+    assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.EXECD_DISTRIBUTION_FAILED
+
 @patch("opensandbox_server.services.docker.docker_service.docker")
 def test_fetch_execd_archive_maps_platform_typeerror_to_invalid_parameter(mock_docker):
     mock_client = MagicMock()
@@ -677,6 +756,38 @@ async def test_network_policy_requires_egress_image(mock_docker):
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_credential_proxy_requires_dns_nft_mode(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest", mode="dns")
+    service = DockerSandboxService(config=cfg)
+
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+        networkPolicy=NetworkPolicy(default_action="deny", egress=[]),
+        credentialProxy=CredentialProxyConfig(enabled=True),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await service.create_sandbox(request)
+
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+    assert "dns+nft" in exc.value.detail["message"]
+
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -782,7 +893,7 @@ async def test_create_sandbox_network_policy_enables_mitm_only_for_credential_pr
 
     cfg = _app_config()
     cfg.docker.network_mode = "bridge"
-    cfg.egress = EgressConfig(image="egress:latest")
+    cfg.egress = EgressConfig(image="egress:latest", mode="dns+nft")
     service = DockerSandboxService(config=cfg)
 
     req = CreateSandboxRequest(
@@ -1167,6 +1278,53 @@ def test_egress_sidecar_host_config_sysctls_only_when_egress_disable_ipv6(mock_d
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
+def test_egress_sidecar_retries_without_ipv6_sysctls_when_daemon_rejects_them(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+
+    def create_container_side_effect(**kwargs):
+        host_config = kwargs["host_config"]
+        if "sysctls" in host_config:
+            raise DockerException(
+                "open /proc/sys/net/ipv6/conf/all/disable_ipv6: no such file or directory"
+            )
+        return {"Id": "sidecar-id"}
+
+    mock_client.api.create_container.side_effect = create_container_side_effect
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest", disable_ipv6=True)
+    service = DockerSandboxService(config=cfg)
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_docker_operation") as mock_op,
+    ):
+        mock_op.return_value.__enter__.return_value = None
+        mock_op.return_value.__exit__.return_value = None
+        service._start_egress_sidecar(
+            "sandbox-id",
+            NetworkPolicy(defaultAction="deny", egress=[]),
+            egress_token="egress-token",
+            host_execd_port=44772,
+            host_http_port=8080,
+        )
+
+    first_create = mock_client.api.create_container.call_args_list[0].kwargs
+    second_create = mock_client.api.create_container.call_args_list[1].kwargs
+    assert first_create["host_config"]["sysctls"]["net.ipv6.conf.all.disable_ipv6"] == 1
+    assert "sysctls" not in second_create["host_config"]
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
 def test_egress_sidecar_normalizes_windows_port_bindings(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
@@ -1272,6 +1430,25 @@ def test_expire_not_found_attempts_windows_oem_volume_cleanup():
     mock_remove.assert_called_once_with("sandbox-missing")
     mock_cleanup_oem.assert_called_once_with("sandbox-missing", None)
 
+
+def test_expire_not_found_deletes_persisted_expiration_override(tmp_path):
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    service._metadata_store.set_expiration("sandbox-missing", datetime(2030, 1, 1, tzinfo=timezone.utc))
+
+    with (
+        patch.object(
+            service,
+            "_get_container_by_sandbox_id",
+            side_effect=HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={}),
+        ),
+        patch.object(service, "_remove_expiration_tracking"),
+        patch.object(service, "_cleanup_windows_oem_volume"),
+    ):
+        service._expire_sandbox("sandbox-missing")
+
+    assert service._metadata_store.get_expiration("sandbox-missing") is None
+
 def test_prepare_creation_context_allows_manual_cleanup():
     service = DockerSandboxService(config=_app_config())
     request = CreateSandboxRequest(
@@ -1315,6 +1492,90 @@ def test_build_labels_stores_extensions_json():
     labels, _ = service._build_labels_and_env("sandbox-ext", request, None)
 
     assert labels[ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY] == "3600"
+
+
+def test_build_labels_stores_opensandbox_extensions():
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        entrypoint=["python"],
+        extensions={
+            "opensandbox.extensions.pool-ref": "my-pool",
+            "opensandbox.extensions.custom": "value",
+            "access.renew.extend.seconds": "1800",
+        },
+    )
+
+    labels, _ = service._build_labels_and_env("sandbox-ext2", request, None)
+
+    assert labels["opensandbox.io/extensions.pool-ref"] == "my-pool"
+    assert labels["opensandbox.io/extensions.custom"] == "value"
+    assert "opensandbox.io/extensions.access.renew.extend.seconds" not in labels
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_container_to_sandbox_returns_extensions(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    container = MagicMock()
+    container.attrs = {
+        "Config": {
+            "Labels": {
+                SANDBOX_ID_LABEL: "sandbox-ext",
+                "opensandbox.io/extensions.pool-ref": "my-pool",
+                "opensandbox.io/extensions.custom": "value",
+                "opensandbox.io/access-renew-extend-seconds": "1800",
+            },
+            "Cmd": ["python"],
+        },
+        "Created": "2025-01-01T00:00:00Z",
+        "State": {
+            "Status": "running",
+            "Running": True,
+            "FinishedAt": "0001-01-01T00:00:00Z",
+            "ExitCode": 0,
+        },
+    }
+    container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
+
+    sandbox = service._container_to_sandbox(container)
+
+    assert sandbox.extensions == {
+        "opensandbox.extensions.pool-ref": "my-pool",
+        "opensandbox.extensions.custom": "value",
+    }
+    assert sandbox.metadata is None
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_response_includes_extensions(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        entrypoint=["python"],
+        extensions={"opensandbox.extensions.test-key": "test-value"},
+    )
+
+    with patch.object(service, "_create_and_start_container") as mock_create:
+        mock_container = MagicMock()
+        mock_container.image = MagicMock(tags=["python:3.11"])
+        mock_create.return_value = mock_container
+        response = await service.create_sandbox(request)
+
+    assert response.extensions == {"opensandbox.extensions.test-key": "test-value"}
+
 
 def test_build_labels_store_platform_constraints():
     service = DockerSandboxService(config=_app_config())
@@ -1543,7 +1804,7 @@ async def test_create_sandbox_windows_profile_injects_runtime_defaults(mock_dock
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1626,7 +1887,7 @@ async def test_create_sandbox_windows_profile_rejects_missing_runtime_devices(mo
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1665,7 +1926,7 @@ async def test_create_sandbox_windows_profile_rejects_below_minimum_resource_lim
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1702,7 +1963,7 @@ async def test_create_sandbox_windows_profile_accepts_dockur_demo_like_request(m
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1756,7 +2017,7 @@ async def test_create_sandbox_windows_profile_with_network_policy_maps_windows_p
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.20"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.21"
     cfg.docker.network_mode = "bridge"
     cfg.egress = EgressConfig(image="opensandbox/egress:latest")
     service = DockerSandboxService(config=cfg)
@@ -1850,31 +2111,6 @@ def test_restore_existing_sandboxes_ignores_manual_cleanup_without_warning():
     mock_warning.assert_not_called()
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
-def test_pending_snapshot_restore_reports_snapshot_id_without_image(mock_docker):
-    mock_client = MagicMock()
-    mock_client.containers.list.return_value = []
-    mock_docker.from_env.return_value = mock_client
-
-    service = DockerSandboxService(config=_app_config())
-    pending = PendingSandbox(
-        request=MagicMock(
-            metadata={"team": "platform"},
-            entrypoint=["tail", "-f", "/dev/null"],
-            image=ImageSpec(uri="opensandbox-snapshots:snap-001"),
-            platform=None,
-            snapshot_id="snap-001",
-        ),
-        created_at=datetime.now(timezone.utc),
-        expires_at=datetime.now(timezone.utc),
-        status=SandboxStatus(state="Pending"),
-    )
-
-    sandbox = service._pending_to_sandbox("sandbox-123", pending)
-
-    assert sandbox.snapshot_id == "snap-001"
-    assert sandbox.image is None
-
-@patch("opensandbox_server.services.docker.docker_service.docker")
 def test_container_snapshot_restore_reports_snapshot_id_without_image(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
@@ -1920,6 +2156,7 @@ def test_delete_sandbox_removes_windows_oem_volume(mock_docker):
 
     mock_client = MagicMock()
     mock_client.containers.list.return_value = [mock_container]
+    mock_client.containers.get.return_value = mock_container
     mock_docker.from_env.return_value = mock_client
     service = DockerSandboxService(config=_app_config())
 
@@ -1943,6 +2180,7 @@ def test_delete_sandbox_skips_oem_volume_cleanup_for_linux(mock_docker):
 
     mock_client = MagicMock()
     mock_client.containers.list.return_value = [mock_container]
+    mock_client.containers.get.return_value = mock_container
     mock_docker.from_env.return_value = mock_client
     service = DockerSandboxService(config=_app_config())
 
@@ -1969,6 +2207,85 @@ def test_renew_expiration_rejects_manual_cleanup_sandbox():
 
     assert exc_info.value.status_code == status.HTTP_409_CONFLICT
     assert exc_info.value.detail["message"] == "Sandbox manual-id does not have automatic expiration enabled."
+
+
+def test_renew_expiration_persists_override_when_label_refresh_fails(tmp_path):
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    container = MagicMock()
+    container.attrs = {
+        "Config": {
+            "Labels": {
+                SANDBOX_ID_LABEL: "sandbox-1",
+                SANDBOX_EXPIRES_AT_LABEL: datetime(2026, 7, 9, tzinfo=timezone.utc).isoformat(),
+            }
+        }
+    }
+    new_expiration = datetime.now(timezone.utc) + timedelta(hours=2)
+    request = RenewSandboxExpirationRequest(expiresAt=new_expiration)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=container),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+        patch.object(service, "_update_container_labels", side_effect=TypeError("labels unsupported")),
+    ):
+        response = service.renew_expiration("sandbox-1", request)
+
+    mock_schedule.assert_called_once_with("sandbox-1", new_expiration)
+    assert response.expires_at == new_expiration
+    assert service._metadata_store.get_expiration("sandbox-1") == new_expiration.isoformat()
+
+
+def test_get_tracked_expiration_prefers_persisted_override(tmp_path):
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    persisted = datetime.now(timezone.utc) + timedelta(hours=3)
+    service._metadata_store.set_expiration("sandbox-1", persisted)
+    labels = {SANDBOX_EXPIRES_AT_LABEL: datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()}
+
+    assert service._get_tracked_expiration("sandbox-1", labels) == persisted
+
+
+def test_restore_existing_sandboxes_prefers_persisted_expiration_override(tmp_path):
+    service = DockerSandboxService(config=_app_config())
+    service._metadata_store = DockerMetadataStore(root=tmp_path / "metadata")
+    persisted = datetime.now(timezone.utc) + timedelta(hours=1)
+    service._metadata_store.set_expiration("sandbox-1", persisted)
+    container = MagicMock()
+    container.attrs = {
+        "Config": {
+            "Labels": {
+                SANDBOX_ID_LABEL: "sandbox-1",
+                SANDBOX_EXPIRES_AT_LABEL: datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+            }
+        }
+    }
+
+    with (
+        patch.object(service.docker_client.containers, "list", return_value=[container]),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        service._restore_existing_sandboxes()
+
+    mock_schedule.assert_called_once_with("sandbox-1", persisted)
+
+
+def test_expire_sandbox_renewed_reschedules_timer():
+    service = DockerSandboxService(config=_app_config())
+    current_expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    container = MagicMock()
+    container.attrs = {"Config": {"Labels": {SANDBOX_ID_LABEL: "sandbox-1"}}}
+    service._sandbox_expirations["sandbox-1"] = current_expires
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=container),
+        patch.object(service, "_schedule_expiration") as mock_schedule,
+    ):
+        service._expire_sandbox("sandbox-1")
+
+    mock_schedule.assert_called_once_with("sandbox-1", current_expires, update_expiration=False)
+    container.kill.assert_not_called()
+    container.remove.assert_not_called()
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -2044,139 +2361,6 @@ async def test_get_sandbox_returns_pending_state(mock_docker):
 
     assert response.status.state == "Running"
     assert response.entrypoint == ["python", "app.py"]
-
-@patch("opensandbox_server.services.docker.docker_service.docker")
-def test_list_sandboxes_deduplicates_container_and_pending(mock_docker):
-    # Build a realistic container mock to avoid parse_timestamp errors.
-    container = MagicMock()
-    container.attrs = {
-        "Config": {"Labels": {SANDBOX_ID_LABEL: "sandbox-123"}},
-        "Created": "2025-01-01T00:00:00Z",
-        "State": {
-            "Status": "running",
-            "Running": True,
-            "FinishedAt": "0001-01-01T00:00:00Z",
-            "ExitCode": 0,
-        },
-    }
-    container.image = MagicMock(tags=["image:latest"], short_id="sha-image")
-
-    mock_client = MagicMock()
-    mock_client.containers.list.return_value = [container]
-    mock_docker.from_env.return_value = mock_client
-
-    service = DockerSandboxService(config=_app_config())
-    sandbox_id = "sandbox-123"
-
-    # Prepare container and pending representations
-    container_sandbox = Sandbox(
-        id=sandbox_id,
-        image=ImageSpec(uri="image:latest"),
-        status=SandboxStatus(
-            state="Running",
-            reason="CONTAINER_RUNNING",
-            message="running",
-            last_transition_at=datetime.now(timezone.utc),
-        ),
-        metadata={"team": "c"},
-        entrypoint=["/bin/sh"],
-        expiresAt=datetime.now(timezone.utc),
-        createdAt=datetime.now(timezone.utc),
-    )
-    # Force container state to be returned
-    service._container_to_sandbox = MagicMock(return_value=container_sandbox)
-
-    response = service.list_sandboxes(ListSandboxesRequest(filter=SandboxFilter(), pagination=None))
-
-    assert len(response.items) == 1
-    assert response.items[0].status.state == "Running"
-    assert response.items[0].metadata == {"team": "c"}
-
-@patch("opensandbox_server.services.docker.docker_service.docker")
-def test_get_sandbox_prefers_container_over_pending(mock_docker):
-    mock_client = MagicMock()
-    mock_client.containers.list.return_value = []
-    mock_docker.from_env.return_value = mock_client
-
-    service = DockerSandboxService(config=_app_config())
-    sandbox_id = "sandbox-abc"
-
-    pending_status = SandboxStatus(
-        state="Pending",
-        reason="SANDBOX_SCHEDULED",
-        message="pending",
-        last_transition_at=datetime.now(timezone.utc),
-    )
-    service._pending_sandboxes[sandbox_id] = PendingSandbox(
-        request=MagicMock(metadata={}, entrypoint=["/bin/sh"], image=ImageSpec(uri="image:latest")),
-        created_at=datetime.now(timezone.utc),
-        expires_at=datetime.now(timezone.utc),
-        status=pending_status,
-    )
-
-    container_sandbox = Sandbox(
-        id=sandbox_id,
-        image=ImageSpec(uri="image:latest"),
-        status=SandboxStatus(
-            state="Running",
-            reason="CONTAINER_RUNNING",
-            message="running",
-            last_transition_at=datetime.now(timezone.utc),
-        ),
-        metadata={},
-        entrypoint=["/bin/sh"],
-        expiresAt=datetime.now(timezone.utc),
-        createdAt=datetime.now(timezone.utc),
-    )
-
-    service._get_container_by_sandbox_id = MagicMock(return_value=MagicMock())
-    service._container_to_sandbox = MagicMock(return_value=container_sandbox)
-
-    sandbox = service.get_sandbox(sandbox_id)
-    assert sandbox.status.state == "Running"
-    assert sandbox.entrypoint == ["/bin/sh"]
-
-@patch("opensandbox_server.services.docker.docker_service.docker")
-def test_async_worker_cleans_up_leftover_container_on_failure(mock_docker):
-    mock_client = MagicMock()
-    mock_client.containers.list.return_value = []
-    mock_docker.from_env.return_value = mock_client
-
-    service = DockerSandboxService(config=_app_config())
-    sandbox_id = "sandbox-fail"
-    created_at = datetime.now(timezone.utc)
-    expires_at = created_at
-
-    pending_status = SandboxStatus(
-        state="Pending",
-        reason="SANDBOX_SCHEDULED",
-        message="pending",
-        last_transition_at=created_at,
-    )
-    service._pending_sandboxes[sandbox_id] = PendingSandbox(
-        request=MagicMock(metadata={}, entrypoint=["/bin/sh"], image=ImageSpec(uri="image:latest")),
-        created_at=created_at,
-        expires_at=expires_at,
-        status=pending_status,
-    )
-
-    service._provision_sandbox = MagicMock(
-        side_effect=HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"message": "boom"},
-        )
-    )
-    service._cleanup_failed_containers = MagicMock()
-
-    service._async_provision_worker(
-        sandbox_id,
-        MagicMock(),
-        created_at,
-        expires_at,
-    )
-
-    service._cleanup_failed_containers.assert_called_once_with(sandbox_id)
-    assert service._pending_sandboxes[sandbox_id].status.state == "Failed"
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
 class TestBuildVolumeBinds:
@@ -2765,6 +2949,7 @@ class TestDockerVolumeValidation:
 
         mock_client = MagicMock()
         mock_client.containers.list.return_value = [mock_container]
+        mock_client.containers.get.return_value = mock_container
         mock_docker.from_env.return_value = mock_client
         service = DockerSandboxService(config=_app_config())
         service._ossfs_mount_ref_counts[mount_key] = 1
@@ -2841,6 +3026,10 @@ class TestDockerVolumeValidation:
         }
         mock_client = MagicMock()
         mock_client.containers.list.return_value = [container_a, container_b]
+        mock_client.containers.get.side_effect = lambda name: {
+            "sandbox-sandbox-a": container_a,
+            "sandbox-sandbox-b": container_b,
+        }[name]
         mock_docker.from_env.return_value = mock_client
 
         service = DockerSandboxService(config=_app_config())
@@ -3550,3 +3739,325 @@ def test_docker_get_endpoint_rejects_expires():
 
         assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
         assert "not supported" in exc.value.detail["message"].lower()
+
+
+# ============================================================================
+# list_sandboxes: race-safety and full-fidelity semantics
+# ============================================================================
+
+
+def _list_summary(sandbox_id: str, *, labels: dict | None = None) -> dict:
+    """Build the subset of a Docker low-level ``containers()`` summary that
+    ``list_sandboxes`` reads (Id + Labels only)."""
+    merged_labels = {SANDBOX_ID_LABEL: sandbox_id, **(labels or {})}
+    return {"Id": f"cid-{sandbox_id}", "Labels": merged_labels}
+
+
+def _mock_container(
+    sandbox_id: str,
+    *,
+    running: bool = True,
+    paused: bool = False,
+    restarting: bool = False,
+    docker_status: str = "running",
+    exit_code: int | None = None,
+    entrypoint: list[str] | None = None,
+    image: str = "python:3.11",
+    finished_at: str = "0001-01-01T00:00:00Z",
+    extra_labels: dict | None = None,
+) -> MagicMock:
+    """Build a MagicMock container matching what ``_container_to_sandbox``
+    expects to read from ``container.attrs`` and ``container.image``."""
+    labels = {SANDBOX_ID_LABEL: sandbox_id, **(extra_labels or {})}
+    container = MagicMock()
+    container.attrs = {
+        "Created": "2024-01-01T00:00:00Z",
+        "Config": {
+            "Labels": labels,
+            "Cmd": entrypoint if entrypoint is not None else ["python", "-V"],
+        },
+        "State": {
+            "Status": docker_status,
+            "Running": running,
+            "Paused": paused,
+            "Restarting": restarting,
+            "ExitCode": exit_code,
+            "FinishedAt": finished_at,
+        },
+    }
+    container.status = docker_status
+    container.image.tags = [image]
+    container.image.short_id = f"sha256:{sandbox_id}"
+    container.image.attrs = {}
+    return container
+
+
+def _wire_list_mocks(mock_client: MagicMock, containers: list[MagicMock]) -> None:
+    """Wire ``api.containers`` (summary) + ``containers.get`` (inspect) so
+    that list_sandboxes' two-step discovery returns the given containers."""
+    summaries = [_list_summary(c.attrs["Config"]["Labels"][SANDBOX_ID_LABEL]) for c in containers]
+    mock_client.api.containers.return_value = summaries
+
+    by_id = {s["Id"]: c for s, c in zip(summaries, containers)}
+
+    def _get(container_id):
+        if container_id in by_id:
+            return by_id[container_id]
+        raise DockerNotFound(f"no such container: {container_id}")
+
+    mock_client.containers.get.side_effect = _get
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_list_sandboxes_uses_low_level_summary_endpoint(mock_docker):
+    """list_sandboxes discovers IDs via the low-level engine endpoint so a
+    concurrent deletion mid-listing can be handled explicitly (see
+    test_list_sandboxes_skips_concurrently_deleted_sandbox)."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    _wire_list_mocks(mock_client, [_mock_container("sbx-1", entrypoint=["python", "app.py"])])
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+
+    response = service.list_sandboxes(
+        ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=50))
+    )
+
+    # Uses the low-level Docker Engine endpoint with the sandbox-id label filter.
+    call_kwargs = mock_client.api.containers.call_args.kwargs
+    assert call_kwargs["all"] is True
+    assert call_kwargs["filters"] == {"label": [SANDBOX_ID_LABEL]}
+
+    assert response.pagination.total_items == 1
+    item = response.items[0]
+    assert item.id == "sbx-1"
+    assert item.status.state == "Running"
+    # Full fidelity: entrypoint from Config.Cmd, image from image.tags.
+    assert item.entrypoint == ["python", "app.py"]
+    assert item.image is not None
+    assert item.image.uri == "python:3.11"
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_list_sandboxes_skips_concurrently_deleted_sandbox(mock_docker):
+    """Regression: a container removed between list summary and follow-up
+    inspect must be silently skipped, not fail the whole request with 500.
+    The pre-fix path used ``docker_client.containers.list(filters=...)``
+    which raises inside docker-py when the second-stage inspect 404s.
+    """
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    alive = _mock_container("sbx-alive", running=True)
+    mock_client.api.containers.return_value = [
+        _list_summary("sbx-alive"),
+        _list_summary("sbx-gone"),
+    ]
+
+    def _get(container_id):
+        if container_id == "cid-sbx-alive":
+            return alive
+        raise DockerNotFound(f"no such container: {container_id}")
+
+    mock_client.containers.get.side_effect = _get
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+
+    response = service.list_sandboxes(
+        ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=50))
+    )
+
+    ids = {item.id for item in response.items}
+    assert ids == {"sbx-alive"}
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_list_sandboxes_preserves_failed_and_terminated_states(mock_docker):
+    """list_sandboxes must distinguish successful exits (Terminated) from
+    non-zero exits (Failed) so that ``filter.state == ['Failed']`` does not
+    silently drop failed sandboxes.
+    """
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    _wire_list_mocks(
+        mock_client,
+        [
+            _mock_container(
+                "sbx-terminated",
+                running=False,
+                docker_status="exited",
+                exit_code=0,
+            ),
+            _mock_container(
+                "sbx-failed",
+                running=False,
+                docker_status="exited",
+                exit_code=137,
+            ),
+        ],
+    )
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    response = service.list_sandboxes(
+        ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=50))
+    )
+
+    got = {item.id: (item.status.state, item.status.reason) for item in response.items}
+    assert got == {
+        "sbx-terminated": ("Terminated", "CONTAINER_EXITED"),
+        "sbx-failed": ("Failed", "CONTAINER_EXITED_ERROR"),
+    }
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_list_sandboxes_wraps_docker_exception(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.containers.side_effect = DockerException("boom")
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+
+    with pytest.raises(HTTPException) as exc:
+        service.list_sandboxes(
+            ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=50))
+        )
+
+    assert exc.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert exc.value.detail["code"] == SandboxErrorCodes.CONTAINER_QUERY_FAILED
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_get_container_by_sandbox_id_uses_deterministic_name(
+    mock_docker: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    container = MagicMock()
+    container.attrs = {
+        "Config": {"Labels": {SANDBOX_ID_LABEL: "sbx-current"}},
+    }
+    mock_client.containers.get.reset_mock()
+    mock_client.containers.list.reset_mock()
+    mock_client.containers.get.return_value = container
+
+    result = service._get_container_by_sandbox_id("sbx-current")
+
+    assert result is container
+    mock_client.containers.get.assert_called_once_with("sandbox-sbx-current")
+    mock_client.containers.list.assert_not_called()
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_get_container_by_sandbox_id_falls_back_to_label_lookup(
+    mock_docker: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    legacy_container = MagicMock()
+    mock_client.containers.list.reset_mock()
+    mock_client.containers.get.side_effect = DockerNotFound("no deterministic name")
+    mock_client.containers.list.return_value = [legacy_container]
+
+    result = service._get_container_by_sandbox_id("sbx-legacy")
+
+    assert result is legacy_container
+    mock_client.containers.get.assert_called_once_with("sandbox-sbx-legacy")
+    mock_client.containers.list.assert_called_once_with(
+        all=True,
+        filters={"label": f"{SANDBOX_ID_LABEL}=sbx-legacy"},
+    )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_get_container_by_sandbox_id_falls_back_when_name_has_wrong_label(
+    mock_docker: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    named_container = MagicMock()
+    named_container.attrs = {
+        "Config": {"Labels": {SANDBOX_ID_LABEL: "another-sandbox"}},
+    }
+    labelled_container = MagicMock()
+    mock_client.containers.list.reset_mock()
+    mock_client.containers.get.return_value = named_container
+    mock_client.containers.list.return_value = [labelled_container]
+
+    result = service._get_container_by_sandbox_id("sbx-collision")
+
+    assert result is labelled_container
+    mock_client.containers.list.assert_called_once_with(
+        all=True,
+        filters={"label": f"{SANDBOX_ID_LABEL}=sbx-collision"},
+    )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_get_container_by_sandbox_id_maps_empty_fallback_to_404(
+    mock_docker: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    mock_client.containers.get.side_effect = DockerNotFound("no deterministic name")
+
+    with pytest.raises(HTTPException) as exc:
+        service._get_container_by_sandbox_id("sbx-missing")
+
+    assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+    assert exc.value.detail["code"] == SandboxErrorCodes.SANDBOX_NOT_FOUND
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_get_container_by_sandbox_id_maps_notfound_to_404(
+    mock_docker: MagicMock,
+) -> None:
+    """Concurrent deletion of a single container must yield 404, not 500."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    mock_client.containers.get.side_effect = DockerNotFound("no deterministic name")
+    mock_client.containers.list.side_effect = DockerNotFound("no such container")
+
+    with pytest.raises(HTTPException) as exc:
+        service._get_container_by_sandbox_id("sbx-vanished")
+
+    assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+    assert exc.value.detail["code"] == SandboxErrorCodes.SANDBOX_NOT_FOUND
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_get_container_by_sandbox_id_maps_docker_error_to_500(
+    mock_docker: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    mock_client.containers.list.reset_mock()
+    mock_client.containers.get.side_effect = DockerException("daemon unavailable")
+
+    with pytest.raises(HTTPException) as exc:
+        service._get_container_by_sandbox_id("sbx-error")
+
+    assert exc.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert exc.value.detail["code"] == SandboxErrorCodes.CONTAINER_QUERY_FAILED
+    mock_client.containers.list.assert_not_called()

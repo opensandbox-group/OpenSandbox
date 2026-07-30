@@ -44,12 +44,22 @@ def _parse_since_to_timestamp(since: str) -> int:
 class DockerDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Docker backend."""
 
-    def get_sandbox_logs(self, sandbox_id: str, tail: int = 100, since: str | None = None) -> str:
-        container = self._get_container_by_sandbox_id(sandbox_id)
+    def get_sandbox_logs(
+        self,
+        sandbox_id: str,
+        tail: int = 100,
+        since: str | None = None,
+        container: str | None = None,
+    ) -> str:
+        # ``container`` is accepted for API parity with the Kubernetes backend;
+        # the Docker runtime models a sandbox as a single container, so the
+        # parameter is informational only.
+        del container
+        docker_container = self._get_container_by_sandbox_id(sandbox_id)
         kwargs: dict = {"tail": tail, "timestamps": True}
         if since:
             kwargs["since"] = _parse_since_to_timestamp(since)
-        output = container.logs(**kwargs)
+        output = docker_container.logs(**kwargs)
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
         return output or "(no logs)"

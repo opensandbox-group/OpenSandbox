@@ -130,7 +130,8 @@ def sync_detailed(
             **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
             a pre-configured pool. In this case `image`, `entrypoint`, and
             `resourceLimits` are all optional (defined by the Pool CRD template).
-            `snapshotId` must not be provided together with `poolRef`.
+            `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
+            `credentialProxy.enabled` must not be provided together with `poolRef`.
 
             **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
 
@@ -192,7 +193,8 @@ def sync(
             **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
             a pre-configured pool. In this case `image`, `entrypoint`, and
             `resourceLimits` are all optional (defined by the Pool CRD template).
-            `snapshotId` must not be provided together with `poolRef`.
+            `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
+            `credentialProxy.enabled` must not be provided together with `poolRef`.
 
             **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
 
@@ -249,7 +251,8 @@ async def asyncio_detailed(
             **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
             a pre-configured pool. In this case `image`, `entrypoint`, and
             `resourceLimits` are all optional (defined by the Pool CRD template).
-            `snapshotId` must not be provided together with `poolRef`.
+            `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
+            `credentialProxy.enabled` must not be provided together with `poolRef`.
 
             **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
 
@@ -309,7 +312,8 @@ async def asyncio(
             **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
             a pre-configured pool. In this case `image`, `entrypoint`, and
             `resourceLimits` are all optional (defined by the Pool CRD template).
-            `snapshotId` must not be provided together with `poolRef`.
+            `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
+            `credentialProxy.enabled` must not be provided together with `poolRef`.
 
             **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
 

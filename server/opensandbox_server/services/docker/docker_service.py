@@ -21,6 +21,7 @@ using Docker containers for sandbox lifecycle management.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -28,19 +29,19 @@ import math
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from threading import Lock, Timer
+from threading import Lock, Thread, Timer
 from typing import Any, Dict, Optional
 
 import docker
-from docker.errors import DockerException
+from docker.errors import DockerException, NotFound as DockerNotFound
 from fastapi import HTTPException, status
 
 from opensandbox_server.extensions import (
     ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
     BOOTSTRAP_EXECD_ISOLATION_KEY,
     ISOLATION_UPPER_MOUNT_PATH,
+    extract_extensions_from_mapping,
 )
 from opensandbox_server.api.schema import (
     CreateSandboxRequest,
@@ -121,17 +122,6 @@ from opensandbox_server.services.validators import (
 )
 logger = logging.getLogger(__name__)
 
-PENDING_FAILURE_TTL_SECONDS = int(os.environ.get("PENDING_FAILURE_TTL", "3600"))
-
-
-@dataclass
-class PendingSandbox:
-    request: CreateSandboxRequest
-    created_at: datetime
-    expires_at: Optional[datetime]
-    status: SandboxStatus
-
-
 class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVolumesMixin, DockerNetworkingMixin, DockerContainerOpsMixin, OSSFSMixin, SandboxService, ExtensionService):
     """
     Docker-based implementation of SandboxService.
@@ -162,6 +152,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._execd_archive_cache: Dict[str, bytes] = {}
         self._bootstrap_script_cache: Dict[str, bytes] = {}
         self._bwrap_archive_cache: Dict[str, bytes] = {}
+        self._session_gate_archive_cache: Dict[str, bytes] = {}
         self._windows_profile_cache: Dict[str, bytes] = {}
         self._daemon_platform: Optional[PlatformSpec] = None
         self._metadata_store = DockerMetadataStore()
@@ -209,9 +200,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._bootstrap_script_lock = Lock()
         self._sandbox_expirations: Dict[str, datetime] = {}
         self._expiration_timers: Dict[str, Timer] = {}
-        self._pending_sandboxes: Dict[str, PendingSandbox] = {}
-        self._pending_lock = Lock()
-        self._pending_cleanup_timers: Dict[str, Timer] = {}
         self._ossfs_mount_lock = Lock()
         self._ossfs_mount_ref_counts: Dict[str, int] = {}
         self._restore_existing_sandboxes()
@@ -257,9 +245,31 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         """Helper to fetch the Docker container associated with a sandbox ID."""
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
+            try:
+                container = self.docker_client.containers.get(f"sandbox-{sandbox_id}")
+            except DockerNotFound:
+                container = None
+
+            if container is not None:
+                labels = container.attrs.get("Config", {}).get("Labels") or {}
+                if labels.get(SANDBOX_ID_LABEL) == sandbox_id:
+                    return container
+
+            # Preserve lookup for managed containers with a nonstandard name.
             containers = self.docker_client.containers.list(
                 all=True, filters={"label": label_selector}
             )
+        except DockerNotFound as exc:
+            # Container disappeared between list-summary and inspect; treat as
+            # not found rather than surfacing a 500. See list_sandboxes for
+            # the full-table variant of this fix.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": SandboxErrorCodes.SANDBOX_NOT_FOUND,
+                    "message": f"Sandbox {sandbox_id} not found.",
+                },
+            ) from exc
         except DockerException as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -331,6 +341,9 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             tracked = self._sandbox_expirations.get(sandbox_id)
         if tracked:
             return tracked
+        persisted = self._metadata_store.get_expiration(sandbox_id)
+        if persisted:
+            return parse_timestamp(persisted)
         label_value = labels.get(SANDBOX_EXPIRES_AT_LABEL)
         if label_value:
             return parse_timestamp(label_value)
@@ -351,6 +364,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 self._cleanup_windows_oem_volume(sandbox_id, None)
                 if fallback_mount_keys:
                     self._release_ossfs_mounts(fallback_mount_keys)
+                self._metadata_store.delete(sandbox_id)
             else:
                 with self._expiration_lock:
                     current_expires = self._sandbox_expirations.get(sandbox_id)
@@ -376,9 +390,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     )
             return
 
-        with self._expiration_lock:
-            current_expires = self._sandbox_expirations.get(sandbox_id)
+        labels = container.attrs.get("Config", {}).get("Labels") or {}
+        current_expires = self._get_tracked_expiration(sandbox_id, labels)
         if current_expires and current_expires > datetime.now(timezone.utc):
+            self._schedule_expiration(sandbox_id, current_expires, update_expiration=False)
             logger.info(
                 "Sandbox %s was renewed (expires %s); aborting expiration.",
                 sandbox_id,
@@ -386,7 +401,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             )
             return
 
-        labels = container.attrs.get("Config", {}).get("Labels") or {}
         mount_keys_raw = labels.get(SANDBOX_OSSFS_MOUNTS_LABEL, "[]")
         try:
             parsed_mount_keys = json.loads(mount_keys_raw)
@@ -465,13 +479,11 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
             mount_keys = _parse_and_accumulate_mount_refs(labels)
 
-            expires_label = labels.get(SANDBOX_EXPIRES_AT_LABEL)
-            if expires_label:
-                expires_at = parse_timestamp(expires_label)
-            elif self._has_manual_cleanup(labels):
-                restored += 1
-                continue
-            else:
+            expires_at = self._get_tracked_expiration(sandbox_id, labels)
+            if expires_at is None:
+                if self._has_manual_cleanup(labels):
+                    restored += 1
+                    continue
                 logger.warning(
                     "Sandbox %s missing expires-at label; skipping expiration scheduling.",
                     sandbox_id,
@@ -594,6 +606,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             platform=platform_spec,
             status=status_info,
             metadata=metadata,
+            extensions=extract_extensions_from_mapping(labels),
             entrypoint=entrypoint,
             expiresAt=expires_at,
             createdAt=created_at,
@@ -656,11 +669,26 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
         pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[CreateSandboxResponse] = loop.create_future()
+
+        def _run() -> None:
+            try:
+                result = self._provision_sandbox(
+                    sandbox_id, request, created_at, expires_at,
+                    pvc_inspect_cache, auto_created_volumes,
+                    sandbox_env=sandbox_env, egress_env=egress_env,
+                )
+                loop.call_soon_threadsafe(future.set_result, result)
+            except BaseException as exc:
+                try:
+                    loop.call_soon_threadsafe(future.set_exception, exc)
+                except RuntimeError:
+                    pass
+
+        Thread(target=_run, daemon=True).start()
         try:
-            return self._provision_sandbox(
-                sandbox_id, request, created_at, expires_at, pvc_inspect_cache, auto_created_volumes,
-                sandbox_env=sandbox_env, egress_env=egress_env,
-            )
+            return await future
         except ValueError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -669,123 +697,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     "message": str(e),
                 },
             ) from e
-
-    def _async_provision_worker(
-        self,
-        sandbox_id: str,
-        request: CreateSandboxRequest,
-        created_at: datetime,
-        expires_at: Optional[datetime],
-        pvc_inspect_cache: Optional[dict[str, dict]] = None,
-    ) -> None:
-        try:
-            self._provision_sandbox(sandbox_id, request, created_at, expires_at, pvc_inspect_cache)
-        except HTTPException as exc:
-            message = exc.detail.get("message") if isinstance(exc.detail, dict) else str(exc)
-            self._mark_pending_failed(sandbox_id, message or "Sandbox provisioning failed.")
-            self._cleanup_failed_containers(sandbox_id)
-            self._schedule_pending_cleanup(sandbox_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Unexpected error provisioning sandbox %s: %s", sandbox_id, exc)
-            self._mark_pending_failed(sandbox_id, str(exc))
-            self._cleanup_failed_containers(sandbox_id)
-            self._schedule_pending_cleanup(sandbox_id)
-        else:
-            self._remove_pending_sandbox(sandbox_id)
-
-    def _mark_pending_failed(self, sandbox_id: str, message: str) -> None:
-        with self._pending_lock:
-            pending = self._pending_sandboxes.get(sandbox_id)
-            if not pending:
-                return
-            pending.status = SandboxStatus(
-                state="Failed",
-                reason="PROVISIONING_ERROR",
-                message=message,
-                last_transition_at=datetime.now(timezone.utc),
-            )
-
-    def _cleanup_failed_containers(self, sandbox_id: str) -> None:
-        """
-        Best-effort cleanup for containers left behind after a failed provision.
-        """
-        label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
-        try:
-            containers = self.docker_client.containers.list(
-                all=True, filters={"label": label_selector}
-            )
-        except DockerException as exc:
-            logger.warning("sandbox=%s | cleanup listing failed containers: %s", sandbox_id, exc)
-            self._cleanup_egress_sidecar(sandbox_id)
-            return
-
-        for container in containers:
-            labels = container.attrs.get("Config", {}).get("Labels") or {}
-            mount_keys_raw = labels.get(SANDBOX_OSSFS_MOUNTS_LABEL, "[]")
-            try:
-                mount_keys: list[str] = json.loads(mount_keys_raw)
-            except (TypeError, json.JSONDecodeError):
-                mount_keys = []
-            try:
-                with self._docker_operation("cleanup failed sandbox container", sandbox_id):
-                    container.remove(force=True)
-            except DockerException as exc:
-                logger.warning(
-                    "sandbox=%s | failed to remove leftover container %s: %s",
-                    sandbox_id,
-                    container.id,
-                    exc,
-                )
-            finally:
-                self._release_ossfs_mounts(mount_keys)
-        # Always attempt to cleanup sidecar as well
-        self._cleanup_egress_sidecar(sandbox_id)
-
-    def _remove_pending_sandbox(self, sandbox_id: str) -> None:
-        with self._pending_lock:
-            timer = self._pending_cleanup_timers.pop(sandbox_id, None)
-            if timer:
-                timer.cancel()
-            self._pending_sandboxes.pop(sandbox_id, None)
-
-    def _get_pending_sandbox(self, sandbox_id: str) -> Optional[PendingSandbox]:
-        with self._pending_lock:
-            pending = self._pending_sandboxes.get(sandbox_id)
-            return pending
-
-    def _iter_pending_sandboxes(self) -> list[tuple[str, PendingSandbox]]:
-        with self._pending_lock:
-            return list(self._pending_sandboxes.items())
-
-    @staticmethod
-    def _pending_to_sandbox(sandbox_id: str, pending: PendingSandbox) -> Sandbox:
-        snapshot_id = getattr(pending.request, "snapshot_id", None)
-        if not isinstance(snapshot_id, str) or not snapshot_id:
-            snapshot_id = None
-        return Sandbox(
-            id=sandbox_id,
-            image=None if snapshot_id else pending.request.image,
-            snapshotId=snapshot_id,
-            platform=pending.request.platform,
-            status=pending.status,
-            metadata=pending.request.metadata,
-            entrypoint=pending.request.entrypoint,
-            expiresAt=pending.expires_at,
-            createdAt=pending.created_at,
-        )
-
-    def _schedule_pending_cleanup(self, sandbox_id: str) -> None:
-        def _cleanup():
-            self._remove_pending_sandbox(sandbox_id)
-
-        timer = Timer(PENDING_FAILURE_TTL_SECONDS, _cleanup)
-        timer.daemon = True
-        with self._pending_lock:
-            existing = self._pending_cleanup_timers.pop(sandbox_id, None)
-            if existing:
-                existing.cancel()
-            self._pending_cleanup_timers[sandbox_id] = timer
-        timer.start()
 
     def _provision_sandbox(
         self,
@@ -893,7 +804,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
                 egress_token = generate_egress_token()
                 labels[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] = egress_token
-                sidecar_port_bindings = allocate_port_bindings([*exposed_ports, "18080"])
+                sidecar_port_bindings = allocate_port_bindings([*exposed_ports, "18080"], min_port=self.app_config.docker.port_range_min, max_port=self.app_config.docker.port_range_max)
                 host_execd_port = sidecar_port_bindings["44772"][1]
                 host_http_port = sidecar_port_bindings["8080"][1]
                 egress_api_binding = sidecar_port_bindings.get("18080")
@@ -936,7 +847,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     gpu_count=effective_gpu_count,
                 )
                 if self.network_mode != HOST_NETWORK_MODE:
-                    port_bindings = allocate_port_bindings(exposed_ports)
+                    port_bindings = allocate_port_bindings(exposed_ports, min_port=self.app_config.docker.port_range_min, max_port=self.app_config.docker.port_range_max)
                     host_execd_port = port_bindings["44772"][1]
                     host_http_port = port_bindings["8080"][1]
                     host_config_kwargs["port_bindings"] = normalize_port_bindings(port_bindings)
@@ -1029,6 +940,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             id=sandbox_id,
             status=status_info,
             metadata=request.metadata,
+            extensions=extract_extensions_from_mapping(labels),
             platform=effective_platform or request.platform,
             expiresAt=expires_at,
             createdAt=created_at,
@@ -1036,13 +948,21 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         )
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
-        """
-        List sandboxes with optional filtering and pagination.
+        """List sandboxes with optional filtering and pagination.
+
+        Discovers container IDs via ``docker_client.api.containers`` and then
+        inspects each one via ``containers.get(id)``. This gives an explicit
+        per-container failure boundary: if a container is removed between the
+        list summary and its inspect, that entry is skipped instead of
+        failing the whole listing with 500. The high-level
+        ``docker_client.containers.list(filters=...)`` inlines the same
+        second-stage inspect but does not expose that boundary.
         """
         try:
-            containers = self.docker_client.containers.list(
+            summaries = self.docker_client.api.containers(
                 all=True,
                 filters={"label": [SANDBOX_ID_LABEL]},
+                trunc=False,
             )
         except DockerException as exc:
             raise HTTPException(
@@ -1054,22 +974,27 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             ) from exc
 
         sandboxes_by_id: dict[str, Sandbox] = {}
-        container_ids: set[str] = set()
-        for container in containers:
-            labels = container.attrs.get("Config", {}).get("Labels") or {}
-            sandbox_id = labels.get(SANDBOX_ID_LABEL)
-            if not sandbox_id:
+        for summary in summaries:
+            container_id = summary.get("Id")
+            summary_labels = summary.get("Labels") or {}
+            sandbox_id = summary_labels.get(SANDBOX_ID_LABEL)
+            if not container_id or not sandbox_id:
                 continue
+            try:
+                container = self.docker_client.containers.get(container_id)
+            except DockerNotFound:
+                # Removed between list and inspect; skip so concurrent
+                # deletions do not fail the whole listing.
+                continue
+            except DockerException as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": SandboxErrorCodes.CONTAINER_QUERY_FAILED,
+                        "message": f"Failed to query sandbox containers: {str(exc)}",
+                    },
+                ) from exc
             sandbox_obj = self._container_to_sandbox(container, sandbox_id)
-            container_ids.add(sandbox_id)
-            if matches_filter(sandbox_obj, request.filter):
-                sandboxes_by_id[sandbox_id] = sandbox_obj
-
-        for sandbox_id, pending in self._iter_pending_sandboxes():
-            if sandbox_id in container_ids:
-                # If a real container exists, prefer its state regardless of filter outcome.
-                continue
-            sandbox_obj = self._pending_to_sandbox(sandbox_id, pending)
             if matches_filter(sandbox_obj, request.filter):
                 sandboxes_by_id[sandbox_id] = sandbox_obj
 
@@ -1114,16 +1039,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         Raises:
             HTTPException: If sandbox not found
         """
-        # Prefer real container state; fall back to pending record only if no container exists.
-        try:
-            container = self._get_container_by_sandbox_id(sandbox_id)
-        except HTTPException as exc:
-            if exc.status_code != status.HTTP_404_NOT_FOUND:
-                raise
-            pending = self._get_pending_sandbox(sandbox_id)
-            if pending:
-                return self._pending_to_sandbox(sandbox_id, pending)
-            raise
+        container = self._get_container_by_sandbox_id(sandbox_id)
         return self._container_to_sandbox(container, sandbox_id)
 
     def delete_sandbox(self, sandbox_id: str) -> None:
@@ -1295,8 +1211,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 },
             )
 
-        # Persist the new timeout in memory; it will also be respected on restart via _restore_existing_sandboxes
+        # Persist the new timeout in memory; the file-backed override also keeps renewals correct across restarts
         self._schedule_expiration(sandbox_id, new_expiration)
+        try:
+            self._metadata_store.set_expiration(sandbox_id, new_expiration)
+        except OSError as exc:
+            logger.warning("Failed to persist expiration override for sandbox %s: %s", sandbox_id, exc)
         labels[SANDBOX_EXPIRES_AT_LABEL] = new_expiration.isoformat()
         try:
             with self._docker_operation("update sandbox labels", sandbox_id):

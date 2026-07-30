@@ -48,6 +48,7 @@ class HttpClientProvider(
                 .connectionPool(connectionPool)
                 .addInterceptor(UserAgentInterceptor(config.userAgent))
                 .addInterceptor(ExtraHeadersInterceptor(config.headers))
+                .addInterceptor(ClientIpInterceptor { ClientIpDetector.clientIp() })
 
     // 1. Explicit lazy definition to allow checking initialization status
     private val httpClientLazy =
@@ -138,6 +139,28 @@ class HttpClientProvider(
             return chain.proceed(
                 chain.request().newBuilder()
                     .header("OPEN-SANDBOX-API-KEY", apiKey)
+                    .build(),
+            )
+        }
+    }
+
+    // Best-effort: attach the SDK host's own IP so the server can see the
+    // client's self-reported address. Runs after ExtraHeadersInterceptor so a
+    // user-supplied value (matched case-insensitively by OkHttp) is preserved,
+    // and is skipped silently when the IP cannot be determined.
+    private class ClientIpInterceptor(private val ipSupplier: () -> String) : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            if (request.header(ClientIpDetector.CLIENT_IP_HEADER) != null) {
+                return chain.proceed(request)
+            }
+            val ip = ipSupplier()
+            if (ip.isEmpty()) {
+                return chain.proceed(request)
+            }
+            return chain.proceed(
+                request.newBuilder()
+                    .header(ClientIpDetector.CLIENT_IP_HEADER, ip)
                     .build(),
             )
         }

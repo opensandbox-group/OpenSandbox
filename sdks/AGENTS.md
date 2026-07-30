@@ -14,7 +14,8 @@ If the task is driven by spec changes, also read `../specs/AGENTS.md`.
 ## Key Areas
 
 - `sandbox/python`, `sandbox/javascript`, `sandbox/kotlin`, `sandbox/csharp`, `sandbox/go`
-- `code-interpreter/python`, `code-interpreter/javascript`, `code-interpreter/kotlin`, `code-interpreter/csharp`
+- `code-interpreter/python`, `code-interpreter/javascript`, `code-interpreter/csharp`
+- `sandbox/kotlin/code-interpreter`
 - `mcp/sandbox/python`
 - Workspace config in `package.json`, `pnpm-workspace.yaml`, and shared build files
 
@@ -99,7 +100,7 @@ Kotlin sandbox SDK:
 ```bash
 cd sdks/sandbox/kotlin
 ./gradlew :sandbox-api:generateLifecycleApi :sandbox-api:generateExecdApi :sandbox-api:generateEgressApi
-./gradlew spotlessApply :sandbox:test
+./gradlew spotlessApply :sandbox:test :code-interpreter:test
 ```
 
 Go sandbox SDK:

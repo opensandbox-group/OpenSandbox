@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -28,14 +29,15 @@ import (
 )
 
 const (
-	tableName     = "opensandbox"
-	chainName     = "egress"
-	allowV4Set    = "allow_v4"
-	allowV6Set    = "allow_v6"
-	denyV4Set     = "deny_v4"
-	denyV6Set     = "deny_v6"
-	dohBlockV4Set = "doh_block_v4"
-	dohBlockV6Set = "doh_block_v6"
+	tableName                        = "opensandbox"
+	chainName                        = "egress"
+	allowV4Set                       = "allow_v4"
+	allowV6Set                       = "allow_v6"
+	denyV4Set                        = "deny_v4"
+	denyV6Set                        = "deny_v6"
+	dohBlockV4Set                    = "doh_block_v4"
+	dohBlockV6Set                    = "doh_block_v6"
+	defaultConnectionRefreshInterval = 30 * time.Second
 )
 
 type runner func(ctx context.Context, script string) ([]byte, error)
@@ -45,28 +47,45 @@ type Options struct {
 	BlockDoH443    bool
 	DoHBlocklistV4 []string
 	DoHBlocklistV6 []string
+	// ConnectionRefreshInterval controls how often active TCP connections renew
+	// DNS-derived nft leases. Shorter intervals reduce the maximum temporary
+	// reconnect gap, but increase /proc scans and nft updates. The 30-second
+	// default is half the minimum 60-second DNS lease.
+	ConnectionRefreshInterval time.Duration
 }
 
 type Manager struct {
-	run  runner
-	opts Options
-	mu   sync.Mutex
+	run     runner
+	opts    Options
+	mu      sync.Mutex
+	tracker *connectionTracker
 }
 
 func NewManager() *Manager {
-	return &Manager{run: defaultRunner, opts: Options{BlockDoT: true}}
+	return newManager(defaultRunner, Options{BlockDoT: true})
 }
 
 func NewManagerWithRunner(r runner) *Manager {
-	return &Manager{run: r, opts: Options{BlockDoT: true}}
+	return newManager(r, Options{BlockDoT: true})
 }
 
 func NewManagerWithRunnerAndOptions(r runner, opts Options) *Manager {
-	return &Manager{run: r, opts: opts}
+	return newManager(r, opts)
 }
 
 func NewManagerWithOptions(opts Options) *Manager {
-	return &Manager{run: defaultRunner, opts: opts}
+	return newManager(defaultRunner, opts)
+}
+
+func newManager(r runner, opts Options) *Manager {
+	if opts.ConnectionRefreshInterval <= 0 {
+		opts.ConnectionRefreshInterval = defaultConnectionRefreshInterval
+	}
+	return &Manager{
+		run:     r,
+		opts:    opts,
+		tracker: newConnectionTracker(),
+	}
 }
 
 func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) error {
@@ -87,6 +106,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 			fallback := removeDeleteTableLine(script)
 			if fallback != script {
 				if _, retryErr := m.run(ctx, fallback); retryErr == nil {
+					m.tracker.clear()
 					telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 					telemetry.RecordNftablesUpdate()
 					return nil
@@ -95,6 +115,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 		}
 		return err
 	}
+	m.tracker.clear()
 	telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 	telemetry.RecordNftablesUpdate()
 	log.Infof("nftables: static policy applied successfully")
@@ -115,9 +136,29 @@ func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(ips), script)
 	_, err := m.run(ctx, script)
 	if err == nil {
+		m.tracker.setDynamicIPs(ips)
 		telemetry.RecordNftablesUpdate()
 	}
 	return err
+}
+
+// StartConnectionRefresh keeps DNS-learned IPs authorized while a TCP
+// connection to them is active. The normal set timeout remains as the grace
+// period after the connection closes.
+//
+// Renewal is intentionally best-effort:
+//   - an active connection first observed after its entry expires is restored
+//     on the next poll, so reconnects may fail for up to one refresh interval;
+//   - a connection that starts and closes entirely between polls cannot be
+//     observed and requires a later DNS lookup to restore its expired entry;
+//   - delayed polls or nft failures can extend the temporary reconnect gap;
+//   - only TCP is tracked here; UDP and QUIC rely on DNS-driven entry refresh.
+//
+// Existing connections survive these gaps through conntrack. A successful
+// observation renews the entry for the full timeout, and the final observation
+// after close provides the same bounded grace period for reconnects.
+func (m *Manager) StartConnectionRefresh(ctx context.Context) {
+	m.tracker.start(ctx, m.opts.ConnectionRefreshInterval, m)
 }
 
 // RemoveEnforcement drops inet opensandbox; missing table is not an error.
@@ -133,6 +174,7 @@ func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 		}
 		return err
 	}
+	m.tracker.clear()
 	log.Infof("nftables: removed table inet %s", tableName)
 	return nil
 }
@@ -198,6 +240,8 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	fmt.Fprintf(&b, "add rule inet %s %s ct state established,related accept\n", tableName, chainName)
 	fmt.Fprintf(&b, "add rule inet %s %s meta mark %s accept\n", tableName, chainName, constants.MarkHex)
 	fmt.Fprintf(&b, "add rule inet %s %s oifname \"lo\" accept\n", tableName, chainName)
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 udp dport 15353 accept\n", tableName, chainName)
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport 15353 accept\n", tableName, chainName)
 	if opts.BlockDoT {
 		fmt.Fprintf(&b, "add rule inet %s %s tcp dport 853 drop\n", tableName, chainName)
 		fmt.Fprintf(&b, "add rule inet %s %s udp dport 853 drop\n", tableName, chainName)
@@ -222,7 +266,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, allowV6Set)
 	if chainPolicy == "drop" {
-		fmt.Fprintf(&b, "add rule inet %s %s counter drop\n", tableName, chainName)
+		fmt.Fprintf(&b, "add rule inet %s %s drop\n", tableName, chainName)
 	}
 
 	return b.String(), nil

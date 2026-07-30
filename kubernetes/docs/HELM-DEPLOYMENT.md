@@ -17,7 +17,7 @@ Download and install the published chart package directly:
 ```bash
 # Install the latest version (0.1.0)
 helm install opensandbox-controller \
-  https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
+  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
   --namespace opensandbox-system \
   --create-namespace
 ```
@@ -26,7 +26,7 @@ To use a custom image:
 
 ```bash
 helm install opensandbox-controller \
-  https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
+  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
   --set controller.image.repository=<your-registry>/controller \
   --set controller.image.tag=v0.0.1 \
   --namespace opensandbox-system \
@@ -89,7 +89,7 @@ helm list -n opensandbox-system
 ### View Available Versions
 
 Visit GitHub Releases to see all available versions:
-https://github.com/alibaba/OpenSandbox/releases
+https://github.com/opensandbox-group/OpenSandbox/releases
 
 Look for tags starting with `helm/opensandbox-controller/`, such as `helm/opensandbox-controller/0.1.0`
 
@@ -98,7 +98,7 @@ Look for tags starting with `helm/opensandbox-controller/`, such as `helm/opensa
 ```bash
 # Upgrade directly from GitHub Release
 helm upgrade opensandbox-controller \
-  https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
+  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
   --namespace opensandbox-system
 ```
 
@@ -127,6 +127,7 @@ controller:
   snapshot:
     registry: myregistry.example.com/opensandbox/snapshots
     snapshotPushSecret: registry-snapshot-push-secret
+    imageCommitterPullSecret: registry-image-committer-pull-secret
     resumePullSecret: registry-pull-secret
 
 imagePullSecrets:
@@ -184,6 +185,7 @@ helm install opensandbox-controller ./charts/opensandbox-controller \
 helm install opensandbox-controller ./charts/opensandbox-controller \
   --set controller.snapshot.registry=myregistry.example.com/opensandbox/snapshots \
   --set controller.snapshot.snapshotPushSecret=registry-snapshot-push-secret \
+  --set controller.snapshot.imageCommitterPullSecret=registry-image-committer-pull-secret \
   --set controller.snapshot.resumePullSecret=registry-pull-secret \
   --namespace opensandbox-system
 ```
@@ -197,7 +199,7 @@ Upgrade from GitHub Release:
 ```bash
 # Upgrade to a specific version
 helm upgrade opensandbox-controller \
-  https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
+  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
   --namespace opensandbox-system
 ```
 
@@ -476,12 +478,12 @@ Important versioning note:
 After publishing, users can access the Helm Chart at:
 
 ```
-https://github.com/alibaba/OpenSandbox/releases/download/helm/{COMPONENT}/{VERSION}/{COMPONENT}-{VERSION}.tgz
+https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/{COMPONENT}/{VERSION}/{COMPONENT}-{VERSION}.tgz
 ```
 
 Example:
 ```
-https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz
+https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz
 ```
 
 ### Adding a New Helm Chart Component

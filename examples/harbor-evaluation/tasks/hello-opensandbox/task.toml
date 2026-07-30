@@ -1,0 +1,50 @@
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version = "1.0"
+
+[task]
+name = "opensandbox/hello-opensandbox"
+authors = []
+keywords = []
+
+[metadata]
+author_name = "OpenSandbox"
+difficulty = "easy"
+category = "programming"
+tags = [ "trivial", "example",]
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+# OpenSandbox runs prebuilt images only, so docker_image is required. The
+# Dockerfile under environment/ is informational and lets the same task also run
+# on Harbor's local Docker backend. workdir makes the agent's relative paths
+# resolve under /app, matching the image's intended working directory.
+docker_image = "ubuntu:24.04"
+workdir = "/app"
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+mcp_servers = []
+
+[verifier.env]
+
+[solution.env]

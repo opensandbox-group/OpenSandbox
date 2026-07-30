@@ -24,6 +24,10 @@ import (
 // findBwrap returns empty string on non-Linux.
 func findBwrap() string { return "" }
 
+func isSetuidBinary(_ string) bool { return false }
+
+func currentProcessIDs() (uint32, uint32) { return 0, 0 }
+
 // bwrapStub is the non-Linux bwrap implementation. It reports Available=false
 // and fails all Wrap calls.
 type bwrapStub struct{}
@@ -33,11 +37,23 @@ func NewBwrap(_ Config) Isolator {
 	return &bwrapStub{}
 }
 
+// NewBwrapWithProbe returns a stub on non-Linux platforms.
+func NewBwrapWithProbe(_ Config, _ ProbeResult) Isolator {
+	return &bwrapStub{}
+}
+
 func (b *bwrapStub) Name() string               { return "bwrap" }
 func (b *bwrapStub) Available() bool            { return false }
 func (b *bwrapStub) Capabilities() Capabilities { return Capabilities{Available: false} }
 func (b *bwrapStub) Wrap(_ *exec.Cmd, _ WrapOptions) error {
 	return fmt.Errorf("bwrap: unavailable on non-Linux platform")
 }
+func (b *bwrapStub) WrapWithLifecycle(
+	_ *exec.Cmd,
+	_ WrapOptions,
+) (WorkloadLifecycle, error) {
+	return nil, fmt.Errorf("bwrap: lifecycle unavailable on non-Linux platform")
+}
 
 var _ Isolator = (*bwrapStub)(nil)
+var _ LifecycleIsolator = (*bwrapStub)(nil)

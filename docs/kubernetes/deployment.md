@@ -19,6 +19,33 @@ The OpenSandbox Kubernetes operator manages `BatchSandbox`, `Pool`, and `Sandbox
 
 For installation instructions and Helm chart values, see the [Kubernetes operator documentation](https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes).
 
+## Operator Metrics
+
+The operator (controller-manager) exposes standard [controller-runtime](https://book.kubebuilder.io/reference/metrics) Prometheus metrics — reconcile rate and latency (`controller_runtime_reconcile_*`), work-queue depth, client-go request counts, and Go runtime stats. The endpoint is **disabled by default** (`--metrics-bind-address=0`).
+
+Enable it through the `opensandbox-controller` chart values:
+
+| Value | Default | Purpose |
+|-------|---------|---------|
+| `controller.metrics.enabled` | `false` | Expose the `/metrics` endpoint (sets `--metrics-bind-address`) |
+| `controller.metrics.port` | `8080` | Port for the metrics endpoint |
+| `controller.metrics.secure` | `false` | Serve over HTTPS with authn/authz (`--metrics-secure`); set `false` for plain HTTP scraping |
+
+```yaml
+controller:
+  metrics:
+    enabled: true
+    port: 8080
+    secure: false   # plain HTTP, e.g. for a PodMonitoring/ServiceMonitor scrape
+```
+
+- With `secure: false` the endpoint is plain HTTP and can be scraped directly (no TLS or bearer token).
+- With `secure: true` the controller-runtime filter authenticates and authorizes each scrape via `TokenReview`/`SubjectAccessReview`. The chart then provisions two `ClusterRole`s automatically:
+  - `opensandbox-metrics-auth-role` (bound to the manager) — lets the controller run the auth checks.
+  - `opensandbox-metrics-reader` (**not** bound by the chart) — grants `get` on the `/metrics` non-resource URL. Bind it to your scraper's `ServiceAccount` (e.g. Prometheus) and have the scraper present that account's bearer token.
+
+Point your Prometheus stack at the `metrics` container port (for example via a `ServiceMonitor` or `PodMonitoring`).
+
 ## Configure the Server for Kubernetes
 
 Generate a Kubernetes-oriented server config:

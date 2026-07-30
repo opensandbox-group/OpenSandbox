@@ -94,7 +94,9 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
                 client=self._get_client(),
                 scope=scope,
             )
-            handle_api_error(response_obj, f"Get diagnostic logs for sandbox {sandbox_id}")
+            handle_api_error(
+                response_obj, f"Get diagnostic logs for sandbox {sandbox_id}"
+            )
             parsed = require_parsed(
                 response_obj,
                 DiagnosticContentResponse,
@@ -102,7 +104,9 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
             )
             return DiagnosticModelConverter.to_diagnostic_content(parsed)
         except Exception as e:
-            logger.error("Failed to get diagnostic logs for sandbox %s", sandbox_id, exc_info=e)
+            logger.error(
+                f"Failed to get diagnostic logs for sandbox {sandbox_id}", exc_info=e
+            )
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_events(
@@ -121,7 +125,9 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
                 client=self._get_client(),
                 scope=scope,
             )
-            handle_api_error(response_obj, f"Get diagnostic events for sandbox {sandbox_id}")
+            handle_api_error(
+                response_obj, f"Get diagnostic events for sandbox {sandbox_id}"
+            )
             parsed = require_parsed(
                 response_obj,
                 DiagnosticContentResponse,
@@ -129,5 +135,7 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
             )
             return DiagnosticModelConverter.to_diagnostic_content(parsed)
         except Exception as e:
-            logger.error("Failed to get diagnostic events for sandbox %s", sandbox_id, exc_info=e)
+            logger.error(
+                f"Failed to get diagnostic events for sandbox {sandbox_id}", exc_info=e
+            )
             raise ExceptionConverter.to_sandbox_exception(e) from e

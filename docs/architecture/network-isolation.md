@@ -138,6 +138,10 @@ The request can still fail after DNS resolution if the Service ClusterIP falls i
 
 If global enforced isolation is not desired, or if specific sandboxes need more permissive access, you can explicitly deny internal network access at sandbox creation time via the `network_policy` parameter:
 
+::: warning Pool mode limitation
+Per-request `networkPolicy` is not supported when the lifecycle API creates a sandbox from a pre-warmed Pool via `extensions.poolRef`. Pool pods already exist, so the server cannot inject the egress sidecar for an individual allocation and rejects requests that contain both fields. Configure the required network controls in the Pool pod template before its pods are created, or use a non-pooled sandbox when each request needs its own policy.
+:::
+
 ```python
 from opensandbox import Sandbox, NetworkPolicy, EgressRule
 

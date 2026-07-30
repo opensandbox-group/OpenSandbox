@@ -60,6 +60,14 @@ import kotlin.math.ceil
  * @property warmupSkipHealthCheck When true, skip readiness checks for pool-created sandboxes (default: false).
  * @property idleTimeout Timeout applied to pool-created sandboxes when they are initialized (default: 24h).
  * @property drainTimeout Max wait during graceful shutdown for in-flight ops (default: 30s).
+ * @property maxAcquireRetries Maximum number of idle candidates that a single acquire may attempt
+ * when the effective policy is [AcquirePolicy.RETRY_NEXT_IDLE] or
+ * [AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE]. Counts the total attempts, not additional retries:
+ * `1` disables retry (matches [AcquirePolicy.FAIL_FAST] / [AcquirePolicy.DIRECT_CREATE] behavior),
+ * `3` (default) tries up to three idles before giving up or falling through. Ignored under
+ * [AcquirePolicy.FAIL_FAST] / [AcquirePolicy.DIRECT_CREATE], which always try at most one idle.
+ * Must be >= 1. Increasing this trades acquire latency (each failed candidate pays up to
+ * `acquireReadyTimeout`) for a higher chance of returning a warm sandbox.
  */
 class PoolConfig private constructor(
     val poolName: String,
@@ -85,6 +93,7 @@ class PoolConfig private constructor(
     val warmupSkipHealthCheck: Boolean,
     val idleTimeout: Duration,
     val drainTimeout: Duration,
+    val maxAcquireRetries: Int,
 ) {
     init {
         require(poolName.isNotBlank()) { "poolName must not be blank" }
@@ -111,6 +120,7 @@ class PoolConfig private constructor(
         }
         require(!idleTimeout.isNegative && !idleTimeout.isZero) { "idleTimeout must be positive" }
         require(!drainTimeout.isNegative) { "drainTimeout must be non-negative" }
+        require(maxAcquireRetries >= 1) { "maxAcquireRetries must be >= 1" }
     }
 
     companion object {
@@ -124,6 +134,7 @@ class PoolConfig private constructor(
         private val DEFAULT_WARMUP_HEALTH_CHECK_POLLING_INTERVAL = Duration.ofMillis(200)
         private val DEFAULT_IDLE_TIMEOUT = Duration.ofHours(24)
         private val DEFAULT_DRAIN_TIMEOUT = Duration.ofSeconds(30)
+        private const val DEFAULT_MAX_ACQUIRE_RETRIES = 3
 
         @JvmStatic
         fun builder(): Builder = Builder()
@@ -169,6 +180,7 @@ class PoolConfig private constructor(
             warmupSkipHealthCheck = warmupSkipHealthCheck,
             idleTimeout = idleTimeout,
             drainTimeout = drainTimeout,
+            maxAcquireRetries = maxAcquireRetries,
         )
     }
 
@@ -196,6 +208,7 @@ class PoolConfig private constructor(
         private var warmupSkipHealthCheck: Boolean = false
         private var idleTimeout: Duration = DEFAULT_IDLE_TIMEOUT
         private var drainTimeout: Duration = DEFAULT_DRAIN_TIMEOUT
+        private var maxAcquireRetries: Int = DEFAULT_MAX_ACQUIRE_RETRIES
 
         fun poolName(poolName: String): Builder {
             this.poolName = poolName
@@ -322,6 +335,17 @@ class PoolConfig private constructor(
             return this
         }
 
+        /**
+         * Sets the upper bound on how many idle candidates a single acquire will attempt when the
+         * effective policy is [AcquirePolicy.RETRY_NEXT_IDLE] or
+         * [AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE]. Must be >= 1 (1 disables retry).
+         * Default: 3.
+         */
+        fun maxAcquireRetries(maxAcquireRetries: Int): Builder {
+            this.maxAcquireRetries = maxAcquireRetries
+            return this
+        }
+
         private fun generateDefaultOwnerId(): String {
             return "pool-owner-${UUID.randomUUID()}"
         }
@@ -362,6 +386,7 @@ class PoolConfig private constructor(
                 warmupSkipHealthCheck = warmupSkipHealthCheck,
                 idleTimeout = idleTimeout,
                 drainTimeout = drainTimeout,
+                maxAcquireRetries = maxAcquireRetries,
             )
         }
     }

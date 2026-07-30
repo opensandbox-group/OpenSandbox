@@ -1,3 +1,4 @@
+{{- $metrics := .Values.controller.metrics | default dict -}}
 {{- if .Values.rbac.create -}}
 ---
 # Leader election role
@@ -141,5 +142,49 @@ rules:
   - get
   - patch
   - update
+
+{{- if and $metrics.enabled $metrics.secure }}
+---
+# Metrics auth ClusterRole: lets the controller-runtime secure metrics filter
+# perform TokenReview / SubjectAccessReview. Mirrors config/rbac/metrics_auth_role.yaml.
+apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
+kind: ClusterRole
+metadata:
+  name: {{ include "opensandbox.metricsAuthRoleName" . }}
+  labels:
+    {{- include "opensandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+# Metrics reader ClusterRole: grants `get` on the /metrics non-resource URL so a
+# scraper (e.g. Prometheus) service account can be authorized by the secure
+# metrics filter. Mirrors config/rbac/metrics_reader_role.yaml. Bind it to your
+# scraper's ServiceAccount (the chart does not create the binding, since the
+# scraper identity lives outside this release).
+apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
+kind: ClusterRole
+metadata:
+  name: {{ include "opensandbox.metricsReaderRoleName" . }}
+  labels:
+    {{- include "opensandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- nonResourceURLs:
+  - "/metrics"
+  verbs:
+  - get
+{{- end }}
 
 {{- end }}

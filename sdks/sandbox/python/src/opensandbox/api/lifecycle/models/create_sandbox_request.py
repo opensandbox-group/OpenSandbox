@@ -54,7 +54,8 @@ class CreateSandboxRequest:
     **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
     a pre-configured pool. In this case `image`, `entrypoint`, and
     `resourceLimits` are all optional (defined by the Pool CRD template).
-    `snapshotId` must not be provided together with `poolRef`.
+    `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
+    `credentialProxy.enabled` must not be provided together with `poolRef`.
 
     **Note**: API Key authentication is required via the `OPEN-SANDBOX-API-KEY` header.
 
@@ -130,8 +131,10 @@ class CreateSandboxRequest:
                 object or null results in allow-all behavior at startup.
             credential_proxy (CredentialProxyConfig | Unset): Credential Vault proxy startup settings. This is an explicit
                 opt-in for
-                transparent MITM support used by credential injection; plain egress
-                network policy remains DNS/FQDN policy enforcement only.
+                transparent MITM support used by credential injection. Credential Vault
+                requires `dns+nft` enforcement and a network policy. A deny-default policy
+                is strongly recommended; default-allow remains temporarily supported for
+                backward compatibility and emits a security warning.
             secure_access (bool | Unset): Opts the sandbox into secured access for endpoint access.
                 This is currently supported only for Kubernetes sandboxes exposed
                 through ingress gateway mode. When enabled, the server provisions

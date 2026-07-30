@@ -42,10 +42,47 @@ if TYPE_CHECKING:
 
 
 class AcquirePolicy(Enum):
-    """Policy for acquire when the idle buffer is empty."""
+    """Policy on idle-empty / stale-idle during acquire.
+
+    - ``FAIL_FAST`` / ``DIRECT_CREATE``: try at most one idle candidate; on failure
+      ``DIRECT_CREATE`` falls through to lifecycle create, ``FAIL_FAST`` raises.
+    - ``RETRY_NEXT_IDLE`` / ``RETRY_NEXT_IDLE_THEN_CREATE``: try up to
+      ``PoolConfig.max_acquire_retries`` idle candidates, skipping stale/unhealthy ones. On
+      exhaustion, ``_THEN_CREATE`` falls through to lifecycle create; the retry-only variant
+      raises :class:`PoolAcquireFailedException`.
+    """
 
     FAIL_FAST = "FAIL_FAST"
     DIRECT_CREATE = "DIRECT_CREATE"
+    RETRY_NEXT_IDLE = "RETRY_NEXT_IDLE"
+    RETRY_NEXT_IDLE_THEN_CREATE = "RETRY_NEXT_IDLE_THEN_CREATE"
+
+
+_RETRY_POLICIES: frozenset[AcquirePolicy] = frozenset(
+    {AcquirePolicy.RETRY_NEXT_IDLE, AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE}
+)
+_FALLTHROUGH_POLICIES: frozenset[AcquirePolicy] = frozenset(
+    {AcquirePolicy.DIRECT_CREATE, AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE}
+)
+
+
+def effective_max_idle_attempts(
+    policy: AcquirePolicy, max_acquire_retries: int
+) -> int:
+    """Return the per-acquire cap on idle candidates for ``policy``.
+
+    Single-shot policies always try exactly one; retry policies use the configured budget
+    clamped to >= 1. Kept as a module-level helper so sync and async pools share one source
+    of truth and tests can pin the mapping without instantiating a pool.
+    """
+    if policy in _RETRY_POLICIES:
+        return max(1, max_acquire_retries)
+    return 1
+
+
+def policy_falls_through_to_direct_create(policy: AcquirePolicy) -> bool:
+    """Return whether ``policy``, after exhausting its idle budget, should direct-create."""
+    return policy in _FALLTHROUGH_POLICIES
 
 
 class PoolState(Enum):
@@ -65,6 +102,46 @@ class PoolLifecycleState(Enum):
     RUNNING = "RUNNING"
     DRAINING = "DRAINING"
     STOPPED = "STOPPED"
+
+
+class PoolDestroyState(Enum):
+    """Shared destroy lifecycle for one pool namespace."""
+
+    ACTIVE = "ACTIVE"
+    DESTROYING = "DESTROYING"
+    DESTROYED = "DESTROYED"
+
+
+class PoolDestroyStrategy(Enum):
+    """Destroy strategy. V1 implements FORCE only."""
+
+    FORCE = "FORCE"
+
+
+@dataclass(frozen=True)
+class PoolDestroyOptions:
+    """Options for destroying a pool namespace."""
+
+    strategy: PoolDestroyStrategy = PoolDestroyStrategy.FORCE
+    tombstone_ttl: timedelta | None = timedelta(days=7)
+    drain_timeout: timedelta = timedelta(seconds=30)
+
+    def __post_init__(self) -> None:
+        if self.tombstone_ttl is not None:
+            _require_positive(self.tombstone_ttl, "tombstone_ttl must be positive")
+        if self.drain_timeout.total_seconds() < 0:
+            raise ValueError("drain_timeout must be non-negative")
+
+
+@dataclass(frozen=True)
+class PoolDestroyResult:
+    """Result of a successful pool namespace destroy operation."""
+
+    pool_name: str
+    state: PoolDestroyState
+    drained_idle_count: int
+    killed_idle_count: int
+    persistent_state_cleared: bool
 
 
 @dataclass(frozen=True)
@@ -180,6 +257,16 @@ class PoolStateStore(Protocol):
 
     def set_idle_entry_ttl(self, pool_name: str, idle_ttl: timedelta) -> None: ...
 
+    def get_destroy_state(self, pool_name: str) -> PoolDestroyState: ...
+
+    def begin_destroy(self, pool_name: str, owner_id: str) -> None: ...
+
+    def clear_pool_state(self, pool_name: str) -> None: ...
+
+    def mark_destroyed(
+        self, pool_name: str, owner_id: str, tombstone_ttl: timedelta | None
+    ) -> None: ...
+
 
 class AsyncPoolStateStore(Protocol):
     """Async coordination state and idle sandbox membership store."""
@@ -211,6 +298,16 @@ class AsyncPoolStateStore(Protocol):
     async def set_max_idle(self, pool_name: str, max_idle: int) -> None: ...
 
     async def set_idle_entry_ttl(self, pool_name: str, idle_ttl: timedelta) -> None: ...
+
+    async def get_destroy_state(self, pool_name: str) -> PoolDestroyState: ...
+
+    async def begin_destroy(self, pool_name: str, owner_id: str) -> None: ...
+
+    async def clear_pool_state(self, pool_name: str) -> None: ...
+
+    async def mark_destroyed(
+        self, pool_name: str, owner_id: str, tombstone_ttl: timedelta | None
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -256,6 +353,7 @@ class PoolConfig:
     drain_timeout: timedelta = timedelta(seconds=30)
     acquire_min_remaining_ttl: timedelta | None = None
     sandbox_creator: PooledSandboxCreator | None = None
+    max_acquire_retries: int = 3
 
     def __post_init__(self) -> None:
         owner_id = self.owner_id or f"pool-owner-{uuid4()}"
@@ -294,6 +392,8 @@ class PoolConfig:
         _require_positive(self.idle_timeout, "idle_timeout must be positive")
         if self.drain_timeout.total_seconds() < 0:
             raise ValueError("drain_timeout must be non-negative")
+        if self.max_acquire_retries < 1:
+            raise ValueError("max_acquire_retries must be >= 1")
         resolved_min_ttl = self.acquire_min_remaining_ttl
         if resolved_min_ttl is None:
             resolved_min_ttl = _default_acquire_min_remaining_ttl(self.idle_timeout)
@@ -331,6 +431,7 @@ class AsyncPoolConfig:
     drain_timeout: timedelta = timedelta(seconds=30)
     acquire_min_remaining_ttl: timedelta | None = None
     sandbox_creator: AsyncPooledSandboxCreator | None = None
+    max_acquire_retries: int = 3
 
     def __post_init__(self) -> None:
         owner_id = self.owner_id or f"pool-owner-{uuid4()}"
@@ -369,6 +470,8 @@ class AsyncPoolConfig:
         _require_positive(self.idle_timeout, "idle_timeout must be positive")
         if self.drain_timeout.total_seconds() < 0:
             raise ValueError("drain_timeout must be non-negative")
+        if self.max_acquire_retries < 1:
+            raise ValueError("max_acquire_retries must be >= 1")
         resolved_min_ttl = self.acquire_min_remaining_ttl
         if resolved_min_ttl is None:
             resolved_min_ttl = _default_acquire_min_remaining_ttl(self.idle_timeout)

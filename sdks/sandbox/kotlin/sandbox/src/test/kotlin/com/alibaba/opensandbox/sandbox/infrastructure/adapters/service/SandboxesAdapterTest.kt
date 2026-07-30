@@ -417,6 +417,7 @@ class SandboxesAdapterTest {
         val filter =
             SnapshotFilter.builder()
                 .sandboxId("sandbox-123")
+                .name("toolchain:kotlin@rev-1")
                 .states("ready", "pending")
                 .page(1)
                 .pageSize(20)
@@ -432,6 +433,7 @@ class SandboxesAdapterTest {
         val url = request.requestUrl
         assertNotNull(url)
         assertEquals("sandbox-123", url!!.queryParameter("sandboxId"))
+        assertEquals("toolchain:kotlin@rev-1", url.queryParameter("name"))
         assertEquals(listOf("ready", "pending"), url.queryParameterValues("state"))
         assertEquals("1", url.queryParameter("page"))
         assertEquals("20", url.queryParameter("pageSize"))
@@ -553,7 +555,10 @@ class SandboxesAdapterTest {
                 "image": {
                     "uri": "ubuntu:latest"
                 },
-                "metadata": {}
+                "metadata": {},
+                "extensions": {
+                    "opensandbox.extensions.custom-label": "中文数据"
+                }
             }
             """.trimIndent()
 
@@ -564,6 +569,7 @@ class SandboxesAdapterTest {
         assertEquals(sandboxId, result.id)
         assertEquals(SandboxState.RUNNING, result.status.state)
         assertEquals("ubuntu:latest", result.image!!.image)
+        assertEquals("中文数据", result.extensions!!["opensandbox.extensions.custom-label"])
 
         val request = mockWebServer.takeRequest()
         assertEquals("/v1/sandboxes/$sandboxId", request.path)

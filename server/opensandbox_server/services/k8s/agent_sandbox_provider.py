@@ -89,7 +89,6 @@ class AgentSandboxProvider(WorkloadProvider):
         agent_config = app_config.agent_sandbox if app_config else None
 
         self.shutdown_policy = agent_config.shutdown_policy if agent_config else "Delete"
-        self.service_account = k8s_config.service_account if k8s_config else None
         self.template_manager = AgentSandboxTemplateManager(
             agent_config.template_file if agent_config else None
         )
@@ -170,8 +169,6 @@ class AgentSandboxProvider(WorkloadProvider):
         if volumes:
             apply_volumes_to_pod_spec(pod_spec, volumes)
 
-        if self.service_account:
-            pod_spec["serviceAccountName"] = self.service_account
         self._apply_platform_node_selector(pod_spec, platform)
 
         resource_name = self._resource_name(sandbox_id)
@@ -300,6 +297,7 @@ class AgentSandboxProvider(WorkloadProvider):
                 "emptyDir": {},
             })
         pod_spec: Dict[str, Any] = {
+            "automountServiceAccountToken": False,
             "initContainers": [_container_to_dict(init_container)],
             "containers": containers,
             "volumes": volumes,

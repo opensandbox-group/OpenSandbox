@@ -21,6 +21,10 @@ type Task interface {
 	// IsResourceReleased task resource is released
 	// TODO func name is strange
 	IsResourceReleased() bool
+	// GetTerminatedMessage returns a human-readable message when the task has
+	// reached a terminal failure state (e.g., a lifecycle hook error with stderr).
+	// Returns an empty string if there is no message or the task is not failed.
+	GetTerminatedMessage() string
 }
 
 type TaskState string

@@ -343,6 +343,7 @@ public class SandboxEgressLifecycleTests
                 }
             });
         }
+
     }
 
     private sealed class StubEgress : IEgress

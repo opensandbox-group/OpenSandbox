@@ -30,10 +30,12 @@ from opensandbox.adapters.converter.exception_converter import ExceptionConverte
 from opensandbox.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcher,
 )
-from opensandbox.adapters.converter.response_handler import extract_request_id
+from opensandbox.adapters.converter.response_handler import (
+    build_api_exception_from_httpx,
+)
 from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.isolated import (
     CreateIsolatedSessionRequest,
@@ -41,10 +43,16 @@ from opensandbox.models.isolated import (
     IsolatedRunOpts,
     IsolatedSessionInfo,
     IsolatedSessionState,
+    IsolatedSessionSummary,
 )
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.filesystem import Filesystem
-from opensandbox.services.isolated import IsolationService, IsolationSession
+from opensandbox.services.isolated import (
+    IsolationService,
+    IsolationServiceMixin,
+    IsolationSession,
+)
+from opensandbox.transport import unwrap_retry_transport
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +69,7 @@ def _decode_sse_event_line(line: str) -> EventNode | None:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error("Failed to parse SSE line: %s", line, exc_info=e)
+        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
         return None
 
 
@@ -74,6 +82,70 @@ def _infer_exit_code(execution: Execution) -> int | None:
     if execution.complete is not None:
         return 0
     return None
+
+
+# Creation-parameter fields execd may echo back in GET /v1/isolated/session/{id}.
+# Older execd builds omit them; when absent we leave the corresponding field as
+# None so the returned handle/state remains usable via session_id for
+# run/get/delete/files.
+#
+# NOTE: ``idle_timeout_seconds`` uses ``is not None`` (not falsy) checks
+# because 0 is a valid, meaningful configuration value ("no idle timeout").
+_ECHO_FIELDS = (
+    "profile",
+    "workspace",
+    "extra_writable",
+    "binds",
+    "share_net",
+    "env_passthrough",
+    "uid",
+    "gid",
+    "uid_mode",
+    "idle_timeout_seconds",
+)
+
+
+def _forward_echo_fields(state: dict, payload: dict) -> None:
+    """Copy creation-parameter echo fields from ``state`` into ``payload``.
+
+    Only fields present and non-null are forwarded; absent/null fields fall
+    back to the model defaults (``None``). ``0`` is preserved (e.g. for
+    ``idle_timeout_seconds``).
+    """
+    for key in _ECHO_FIELDS:
+        if key in state and state[key] is not None:
+            payload[key] = state[key]
+
+
+def _build_attach_info(session_id: str, state: dict) -> IsolatedSessionInfo:
+    """Build an :class:`IsolatedSessionInfo` from a ``GET`` session state payload.
+
+    Only fields actually returned by execd are forwarded; missing fields fall
+    back to the model defaults (``None``). ``session_id`` comes from the
+    caller because the endpoint identifies the session by path, not payload.
+    """
+    payload: dict = {"session_id": session_id}
+    created_at = state.get("created_at")
+    if created_at is not None:
+        payload["created_at"] = created_at
+    _forward_echo_fields(state, payload)
+    return IsolatedSessionInfo(**payload)
+
+
+def _build_session_state(state: dict) -> IsolatedSessionState:
+    """Build an :class:`IsolatedSessionState` from a ``GET`` session state payload.
+
+    Preserves the required ``status`` field and the runtime timestamps
+    (``created_at``, ``last_run_at``, ``idle_remaining_seconds``), and
+    forwards the same creation-parameter echo fields as
+    :func:`_build_attach_info` when execd includes them.
+    """
+    payload: dict = {"status": state["status"]}
+    for key in ("created_at", "last_run_at", "idle_remaining_seconds"):
+        if key in state and state[key] is not None:
+            payload[key] = state[key]
+    _forward_echo_fields(state, payload)
+    return IsolatedSessionState(**payload)
 
 
 class IsolationSessionHandle(IsolationSession):
@@ -109,7 +181,9 @@ class IsolationSessionHandle(IsolationSession):
         opts: IsolatedRunOpts | None = None,
         handlers: ExecutionHandlers | None = None,
     ) -> Execution:
-        return await self._adapter._run(self._info.session_id, code, opts=opts, handlers=handlers)
+        return await self._adapter._run(
+            self._info.session_id, code, opts=opts, handlers=handlers
+        )
 
     async def get(self) -> IsolatedSessionState:
         return await self._adapter._get(self._info.session_id)
@@ -118,12 +192,16 @@ class IsolationSessionHandle(IsolationSession):
         return await self._adapter._delete(self._info.session_id)
 
 
-class IsolatedSessionsAdapter(IsolationService):
-    """Async adapter for isolated session endpoints (/v1/isolated/*)."""
+class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
+    """Async adapter for isolated session endpoints (/v1/isolated/*).
+
+    ``run_once``/``session`` are inherited from :class:`IsolationServiceMixin`.
+    """
 
     CREATE_PATH = "/v1/isolated/session"
     SESSION_PATH = "/v1/isolated/session/{session_id}"
     RUN_PATH = "/v1/isolated/session/{session_id}/run"
+    SESSIONS_PATH = "/v1/isolated/sessions"
     CAPABILITIES_PATH = "/v1/isolated/capabilities"
 
     def __init__(
@@ -161,6 +239,9 @@ class IsolatedSessionsAdapter(IsolationService):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
+        # SSE bootstraps bypass the retry wrapper: request bodies are
+        # not replayable and a non-idempotent status opt-in would cause
+        # duplicate execution on a resent SSE POST.
         self._sse_client = httpx.AsyncClient(
             headers=sse_headers,
             timeout=httpx.Timeout(
@@ -169,7 +250,7 @@ class IsolatedSessionsAdapter(IsolationService):
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=self.connection_config.transport,
+            transport=unwrap_retry_transport(self.connection_config.transport),
             follow_redirects=self.connection_config.follow_redirects,
             event_hooks=build_async_api_key_redirect_event_hooks(
                 base_url, self.connection_config.event_hooks
@@ -188,13 +269,26 @@ class IsolatedSessionsAdapter(IsolationService):
             body = request.model_dump(exclude_none=True)
             response = await self._httpx_client.post(url, json=body)
             if response.status_code not in (200, 201):
-                raise SandboxApiException(
-                    message=f"create isolated session failed. Status: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
+                raise build_api_exception_from_httpx(
+                    response, "create isolated session"
                 )
             data = response.json()
             info = IsolatedSessionInfo(**data)
+            return IsolationSessionHandle(info, self)
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def attach(self, session_id: str) -> IsolationSessionHandle:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        try:
+            url = self._get_url(self.SESSION_PATH.format(session_id=session_id))
+            response = await self._httpx_client.get(url)
+            if response.status_code != 200:
+                raise build_api_exception_from_httpx(
+                    response, "attach isolated session"
+                )
+            info = _build_attach_info(session_id, response.json())
             return IsolationSessionHandle(info, self)
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -203,18 +297,13 @@ class IsolatedSessionsAdapter(IsolationService):
         if not (session_id and session_id.strip()):
             raise InvalidArgumentException("session_id cannot be empty")
         try:
-            url = self._get_url(
-                self.SESSION_PATH.format(session_id=session_id)
-            )
+            url = self._get_url(self.SESSION_PATH.format(session_id=session_id))
             response = await self._httpx_client.get(url)
             if response.status_code != 200:
-                raise SandboxApiException(
-                    message=f"get isolated session failed. Status: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
+                raise build_api_exception_from_httpx(
+                    response, "get isolated session"
                 )
-            data = response.json()
-            return IsolatedSessionState(**data)
+            return _build_session_state(response.json())
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -241,18 +330,14 @@ class IsolatedSessionsAdapter(IsolationService):
         url = self._get_url(self.RUN_PATH.format(session_id=session_id))
 
         try:
-            execution = Execution(
-                id=None, execution_count=None, result=[], error=None
-            )
+            execution = Execution(id=None, execution_count=None, result=[], error=None)
             client = self._sse_client
 
             async with client.stream("POST", url, json=json_body) as response:
                 if response.status_code != 200:
                     await response.aread()
-                    raise SandboxApiException(
-                        message=f"run in isolated session failed. Status: {response.status_code}",
-                        status_code=response.status_code,
-                        request_id=extract_request_id(response.headers),
+                    raise build_api_exception_from_httpx(
+                        response, "run in isolated session"
                     )
 
                 dispatcher = ExecutionEventDispatcher(execution, handlers)
@@ -271,16 +356,27 @@ class IsolatedSessionsAdapter(IsolationService):
         if not (session_id and session_id.strip()):
             raise InvalidArgumentException("session_id cannot be empty")
         try:
-            url = self._get_url(
-                self.SESSION_PATH.format(session_id=session_id)
-            )
+            url = self._get_url(self.SESSION_PATH.format(session_id=session_id))
             response = await self._httpx_client.delete(url)
             if response.status_code not in (200, 204):
-                raise SandboxApiException(
-                    message=f"delete isolated session failed. Status: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
+                raise build_api_exception_from_httpx(
+                    response, "delete isolated session"
                 )
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def list(self) -> list[IsolatedSessionSummary]:
+        try:
+            url = self._get_url(self.SESSIONS_PATH)
+            response = await self._httpx_client.get(url)
+            if response.status_code != 200:
+                raise build_api_exception_from_httpx(
+                    response, "list isolated sessions"
+                )
+            data = response.json()
+            return [
+                IsolatedSessionSummary(**item) for item in data.get("sessions", [])
+            ]
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -289,10 +385,8 @@ class IsolatedSessionsAdapter(IsolationService):
             url = self._get_url(self.CAPABILITIES_PATH)
             response = await self._httpx_client.get(url)
             if response.status_code != 200:
-                raise SandboxApiException(
-                    message=f"get capabilities failed. Status: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
+                raise build_api_exception_from_httpx(
+                    response, "get capabilities"
                 )
             data = response.json()
             return IsolatedCapabilities(**data)

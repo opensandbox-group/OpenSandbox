@@ -230,7 +230,9 @@ Use `SandboxPool` to keep an idle buffer of ready sandboxes and reduce acquire l
 
 ```java
 import com.alibaba.opensandbox.sandbox.pool.SandboxPool;
+import com.alibaba.opensandbox.sandbox.pool.SandboxPoolManager;
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolCreationSpec;
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyOptions;
 import com.alibaba.opensandbox.sandbox.domain.pool.AcquirePolicy;
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.InMemoryPoolStateStore;
 
@@ -261,9 +263,39 @@ try {
 pool.shutdown(true);
 ```
 
+::: tip AcquirePolicy
+`AcquirePolicy` controls what happens when the idle buffer is empty **or** the first idle candidate fails its readiness check:
+
+| Policy | Retry across idles | Fallback on exhaustion |
+|---|---|---|
+| `FAIL_FAST` | no | throw `PoolEmptyException` / `PoolAcquireFailedException` |
+| `DIRECT_CREATE` (default) | no | create a new sandbox via lifecycle API |
+| `RETRY_NEXT_IDLE` | up to `maxAcquireRetries` idles | throw |
+| `RETRY_NEXT_IDLE_THEN_CREATE` | up to `maxAcquireRetries` idles | create a new sandbox |
+
+Use the `RETRY_NEXT_IDLE*` variants when the pool may contain a mix of healthy and stale idle sandboxes (e.g. custom templates with long cold-start; a network flap left a few unreachable idles). Each failed candidate still pays up to `acquireReadyTimeout`, so bound the retry with `maxAcquireRetries` (default `3`).
+:::
+
+Use `SandboxPoolManager` for release or operations workflows that need to destroy an old
+pool namespace without constructing the old `SandboxPool` object:
+
+```java
+SandboxPoolManager poolManager = SandboxPoolManager.builder()
+    .stateStore(redisStore)
+    .connectionConfig(config)
+    .ownerId("deploy-job-123")
+    .build();
+
+poolManager.destroy(
+    "old-pool",
+    new PoolDestroyOptions()
+);
+```
+
 ::: info Pool Lifecycle Semantics
 - `acquire()` is only allowed when pool state is `RUNNING`.
 - In `DRAINING` / `STOPPED`, `acquire()` throws `PoolNotRunningException`.
+- When a pool namespace is being destroyed or has been destroyed, `acquire()` throws `PoolDestroyedException` and does not fall back to direct create.
 - `maxIdle` is the target/cap for ready idle sandboxes. It is not a global limit on borrowed sandboxes or sandboxes created by `AcquirePolicy.DIRECT_CREATE`.
 - `ownerId` is the lock owner identity (node/process id), not the pool identifier. If omitted, SDK auto-generates a UUID-based default.
 - Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool.
@@ -273,6 +305,8 @@ pool.shutdown(true);
 For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. Configure `primaryLockTtl` greater than `warmupReadyTimeout` plus expected warmup preparer time and buffer, otherwise leadership may expire while a node is creating idle sandboxes.
 
 In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass.
+
+`SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
 :::
 
 ## Configuration
@@ -291,6 +325,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `headers`        | Custom HTTP headers                        | Empty                        | -                      |
 | `connectionPool` | Shared OKHttp ConnectionPool               | SDK-created per instance     | -                      |
 | `useServerProxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false` | -                      |
+| `disableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
 
 ```java
 // 1. Basic configuration
@@ -315,6 +350,10 @@ ConnectionConfig sharedConfig = ConnectionConfig.builder()
     .connectionPool(sharedPool) // Inject shared pool
     .build();
 ```
+
+::: tip SDK Telemetry
+`Sandbox.builder()...build()` reports create latency to `POST /v1/metrics/events` by default. Call `ConnectionConfig.builder().disableMetrics(true)` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/guides/sdk-telemetry).
+:::
 
 ### 2. Sandbox Creation Configuration
 
@@ -439,7 +478,6 @@ sandbox.credentialVault().create(
                     .match(
                         CredentialMatch.builder()
                             .schemes(CredentialMatch.Scheme.HTTPS)
-                            .ports(443)
                             .hosts("api.example.com")
                             .paths("/v1/*")
                             .build()
@@ -452,5 +490,5 @@ sandbox.credentialVault().create(
 );
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, binding
+guidance, and Git/curl examples.

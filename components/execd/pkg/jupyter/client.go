@@ -53,14 +53,6 @@ func WithToken(token string) ClientOption {
 	}
 }
 
-// WithBasicAuth configures the client with basic authentication.
-func WithBasicAuth(username, password string) ClientOption {
-	return func(c *Client) {
-		c.Auth.Username = username
-		c.Auth.Password = password
-	}
-}
-
 // NewClient creates a new Jupyter client instance.
 func NewClient(baseURL string, options ...ClientOption) *Client {
 	client := &Client{
@@ -85,12 +77,6 @@ func NewClient(baseURL string, options ...ClientOption) *Client {
 // SetToken configures token authentication.
 func (c *Client) SetToken(token string) {
 	c.Auth.Token = token
-}
-
-// SetBasicAuth configures username/password authentication.
-func (c *Client) SetBasicAuth(username, password string) {
-	c.Auth.Username = username
-	c.Auth.Password = password
 }
 
 // ValidateAuth quickly checks that some auth data is present.
@@ -132,11 +118,6 @@ func (c *Client) InterruptKernel(kernelId string) error {
 	return c.kernelClient.InterruptKernel(kernelId)
 }
 
-// ShutdownKernel shuts down (and optionally restarts) the specified kernel.
-func (c *Client) ShutdownKernel(kernelId string, restart bool) error {
-	return c.kernelClient.ShutdownKernel(kernelId, restart)
-}
-
 // ListSessions retrieves active sessions.
 func (c *Client) ListSessions() ([]*session.Session, error) {
 	return c.sessionClient.ListSessions()
@@ -150,11 +131,6 @@ func (c *Client) GetSession(sessionId string) (*session.Session, error) {
 // CreateSession creates a new session.
 func (c *Client) CreateSession(name, ipynb, kernel string) (*session.Session, error) {
 	return c.sessionClient.CreateSession(name, ipynb, kernel)
-}
-
-// ModifySession updates an existing session.
-func (c *Client) ModifySession(sessionId, name, path, kernel string) (*session.Session, error) {
-	return c.sessionClient.ModifySession(sessionId, name, path, kernel)
 }
 
 // DeleteSession deletes the specified session.
@@ -184,7 +160,7 @@ func (c *Client) ConnectToKernel(kernelId string) error {
 }
 
 // DisconnectFromKernel closes the websocket connection.
-func (c *Client) DisconnectFromKernel(kernelId string) {
+func (c *Client) DisconnectFromKernel() {
 	c.executeClient.Disconnect()
 }
 

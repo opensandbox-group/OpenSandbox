@@ -1,6 +1,6 @@
 # Interactive PTY sessions
 
-Use this when you need a **long-lived Bash** driven over **WebSocket**: PTY mode behaves like a real terminal (colors, `stty`, resize); **pipe mode** (`pty=0`) splits stdout/stderr without a TTY. **Unix/macOS/Linux only** — not supported on Windows.
+Use this when you need a **long-lived shell** driven over **WebSocket**: PTY mode behaves like a real terminal (colors, `stty`, resize); **pipe mode** (`pty=0`) splits stdout/stderr without a TTY. execd uses Bash when available and falls back to `sh` on minimal images without Bash. **Unix/macOS/Linux only** — not supported on Windows.
 
 ## Typical usage
 
@@ -27,9 +27,9 @@ Use this when you need a **long-lived Bash** driven over **WebSocket**: PTY mode
 
 3. **Traffic** — after a JSON `connected` frame, the server sends **binary** chunks: first byte is the channel (`0x01` stdout, `0x02` stderr in pipe mode only, `0x03` replay with an 8-byte offset header). Send **stdin** as binary: `0x00` + raw bytes. For **resize** / **signals** / **ping**, send **JSON text** frames, e.g. `{"type":"resize","cols":120,"rows":40}`, `{"type":"signal","signal":"SIGINT"}`, `{"type":"ping"}`.
 
-4. **One WebSocket per session** — a second connection gets **409** until the first closes, unless it passes **`?takeover=1`**: the current holder is then closed with WebSocket code **4001** (reason `TAKEN_OVER`) and the new connection takes over the **same** shell. This lets a session move between clients/devices without restarting Bash.
+4. **One WebSocket per session** — a second connection gets **409** until the first closes, unless it passes **`?takeover=1`**: the current holder is then closed with WebSocket code **4001** (reason `TAKEN_OVER`) and the new connection takes over the **same** shell. This lets a session move between clients/devices without restarting the shell.
 
-5. **End** — when Bash exits, you get a JSON `exit` frame with `exit_code` and the socket closes. Use **`DELETE /pty/:id`** to tear down the session from the server side.
+5. **End** — when the shell exits, you get a JSON `exit` frame with `exit_code` and the socket closes. Use **`DELETE /pty/:id`** to tear down the session from the server side.
 
 ## Modes
 
@@ -38,5 +38,6 @@ Use this when you need a **long-lived Bash** driven over **WebSocket**: PTY mode
 
 ## Notes
 
+- Commands running under the `sh` fallback must use syntax supported by the image's `sh` implementation.
 - Output is also buffered for **replay**; reconnect with `since=` to catch up.
 - In PTY streams, **shell echo** may appear before your command’s real output, so avoid matching only on text that also appears in the typed line.

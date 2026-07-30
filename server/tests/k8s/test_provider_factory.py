@@ -74,7 +74,6 @@ spec:
         assert isinstance(provider, AgentSandboxProvider)
         assert provider.k8s_client == mock_k8s_client
         assert provider.shutdown_policy == "Retain"
-        assert provider.service_account == agent_sandbox_app_config.kubernetes.service_account
     
     def test_create_provider_case_insensitive(self, mock_k8s_client, k8s_app_config):
         provider1 = create_workload_provider("BatchSandbox", mock_k8s_client, k8s_app_config)

@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="880" viewBox="0 0 1400 880" role="img" aria-labelledby="title desc">
+  <title id="title">Warmup Reconcile Sequence</title>
+  <desc id="desc">Sequence diagram of the warmup reconcile loop on the leader node. A timer ticks every reconcile_interval, the loop tries to acquire the primary lock, and only if it succeeds does it count idle sandboxes and dispatch warmup workers to create new ones and push their IDs into the shared idle buffer. Non-leader ticks return immediately.</desc>
+  <defs>
+    <marker id="a2-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1e3a5f"/>
+    </marker>
+    <marker id="a2-arrow-ret" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 26px; font-weight: 700; fill: #1e40af; }
+      .actor { font-size: 14px; font-weight: 700; fill: #0f172a; }
+      .msg { font-size: 12px; fill: #1e3a5f; }
+      .ret { font-size: 12px; fill: #6d28d9; font-style: italic; }
+      .note { font-size: 12px; fill: #92400e; }
+      .caption { font-size: 12px; fill: #475569; font-style: italic; }
+      .phase { font-size: 13px; font-weight: 700; fill: #c2410c; }
+      .lifeline { stroke: #94a3b8; stroke-dasharray: 4,4; }
+      .actor-box { fill: #eff6ff; stroke: #1e3a5f; stroke-width: 1.5; rx: 6; }
+    </style>
+  </defs>
+
+  <text x="700" y="38" class="title" text-anchor="middle">Warmup Reconcile Sequence (Leader node)</text>
+
+  <!-- Actor headers -->
+  <g>
+    <rect x="60" y="70" width="160" height="42" class="actor-box"/>
+    <text x="140" y="97" class="actor" text-anchor="middle">Timer</text>
+
+    <rect x="320" y="70" width="180" height="42" class="actor-box"/>
+    <text x="410" y="97" class="actor" text-anchor="middle">Reconcile Loop</text>
+
+    <rect x="600" y="70" width="180" height="42" class="actor-box"/>
+    <text x="690" y="97" class="actor" text-anchor="middle">PoolStateStore</text>
+
+    <rect x="880" y="70" width="180" height="42" class="actor-box"/>
+    <text x="970" y="97" class="actor" text-anchor="middle">Warmup Worker</text>
+
+    <rect x="1160" y="70" width="180" height="42" class="actor-box"/>
+    <text x="1250" y="97" class="actor" text-anchor="middle">Lifecycle API</text>
+  </g>
+
+  <!-- Lifelines -->
+  <line x1="140" y1="112" x2="140" y2="830" class="lifeline"/>
+  <line x1="410" y1="112" x2="410" y2="830" class="lifeline"/>
+  <line x1="690" y1="112" x2="690" y2="830" class="lifeline"/>
+  <line x1="970" y1="112" x2="970" y2="830" class="lifeline"/>
+  <line x1="1250" y1="112" x2="1250" y2="830" class="lifeline"/>
+
+  <!-- 1. tick -->
+  <path d="M 140 160 L 408 160" stroke="#1e3a5f" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow)"/>
+  <text x="274" y="152" class="msg" text-anchor="middle">1. tick (every reconcile_interval)</text>
+
+  <!-- 2. acquireLock -->
+  <path d="M 410 200 L 688 200" stroke="#1e3a5f" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow)"/>
+  <text x="549" y="192" class="msg" text-anchor="middle">2. acquireLock(owner_id, ttl=primary_lock_ttl)</text>
+
+  <!-- alt frame: lock not acquired -->
+  <rect x="380" y="220" width="720" height="70" fill="#fef3c7" stroke="#92400e" stroke-width="1" rx="4" opacity="0.35"/>
+  <text x="395" y="240" class="phase">alt  lock not acquired (skip this tick)</text>
+  <path d="M 688 260 L 412 260" stroke="#6d28d9" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow-ret)" stroke-dasharray="5,3"/>
+  <text x="550" y="252" class="ret" text-anchor="middle">false</text>
+  <text x="410" y="282" class="note">→ Reconcile Loop returns immediately and waits for the next tick</text>
+
+  <!-- else frame: lock acquired -->
+  <rect x="380" y="310" width="960" height="470" fill="#ecfdf5" stroke="#047857" stroke-width="1" rx="4" opacity="0.25"/>
+  <text x="395" y="330" class="phase">else  lock acquired → leader replenishes</text>
+
+  <!-- 3. count / reap -->
+  <path d="M 410 360 L 688 360" stroke="#1e3a5f" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow)"/>
+  <text x="549" y="352" class="msg" text-anchor="middle">3. count idle &amp; reap expired entries</text>
+
+  <!-- return N -->
+  <path d="M 688 400 L 412 400" stroke="#6d28d9" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow-ret)" stroke-dasharray="5,3"/>
+  <text x="550" y="392" class="ret" text-anchor="middle">idle_count = N</text>
+
+  <!-- gap comment -->
+  <text x="410" y="430" class="note">// gap = max_idle − N; dispatch gap create tasks (max parallelism = warmup_concurrency)</text>
+
+  <!-- loop frame -->
+  <rect x="440" y="450" width="890" height="290" fill="#faf5ff" stroke="#6d28d9" stroke-width="1" rx="4" opacity="0.35"/>
+  <text x="455" y="470" class="phase" fill="#6d28d9">loop  gap times</text>
+
+  <!-- 4. dispatch -->
+  <path d="M 410 500 L 968 500" stroke="#1e3a5f" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow)"/>
+  <text x="689" y="492" class="msg" text-anchor="middle">4. dispatch create task</text>
+
+  <!-- 5. create -->
+  <path d="M 970 540 L 1248 540" stroke="#1e3a5f" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow)"/>
+  <text x="1109" y="532" class="msg" text-anchor="middle">5. create(creation_spec)</text>
+
+  <!-- 5r. sandbox_id -->
+  <path d="M 1250 580 L 972 580" stroke="#6d28d9" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow-ret)" stroke-dasharray="5,3"/>
+  <text x="1110" y="572" class="ret" text-anchor="middle">sandbox_id</text>
+
+  <!-- 6. wait ready -->
+  <path d="M 970 620 L 1248 620" stroke="#1e3a5f" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow)"/>
+  <text x="1109" y="612" class="msg" text-anchor="middle">6. wait ready (≤ warmup_ready_timeout)</text>
+
+  <!-- 7. optional health check + preparer -->
+  <text x="990" y="655" class="note">opt: warmup_health_check</text>
+  <text x="990" y="675" class="note">opt: warmup_sandbox_preparer</text>
+
+  <!-- 8. push -->
+  <path d="M 970 715 L 692 715" stroke="#1e3a5f" stroke-width="1.8" fill="none" marker-end="url(#a2-arrow)"/>
+  <text x="830" y="707" class="msg" text-anchor="middle">7. push(sandbox_id, expiry = now + idle_timeout)</text>
+
+  <!-- footer notes -->
+  <text x="60" y="800" class="caption">After degraded_threshold consecutive failures the pool enters DEGRADED and applies exponential backoff (acquire still works).</text>
+  <text x="60" y="820" class="caption">primary_lock_ttl must exceed warmup_ready_timeout + preparer time, or you risk "lock expired → two leaders replenishing at once".</text>
+</svg>

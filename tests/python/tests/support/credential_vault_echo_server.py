@@ -21,6 +21,7 @@ import json
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 EXPECTED_HEADERS: dict[str, dict[str, str]] = {
     "/bearer": {
@@ -44,16 +45,77 @@ EXPECTED_HEADERS: dict[str, dict[str, str]] = {
     },
 }
 
+# npm-style scoped package registry paths are sent on the wire with the
+# ``/`` between scope and package name percent-encoded (``/@scope%2fname``).
+# The credential proxy used to reject these as ambiguous, which broke
+# ``npm install`` for scoped packages inside sandboxes. This route echoes
+# whichever ``Authorization`` header the upstream actually received so the
+# same route can back two E2E cases: one where a binding matches and the
+# credential is injected, and one where no binding matches so the request
+# passes through unchanged. Both slash encodings and the canonical form are
+# accepted because mitmproxy is free to canonicalize the path when
+# forwarding.
+NPM_SCOPED_PATHS: frozenset[str] = frozenset(
+    {
+        "/npm-scoped/@ali%2forion-claude-plugin",
+        "/npm-scoped/@ali%2Forion-claude-plugin",
+        "/npm-scoped/@ali/orion-claude-plugin",
+    }
+)
+
 
 class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
     server_version = "OpenSandboxCredentialVaultE2E/1.0"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-        if self.path == "/healthz":
+        parsed = urlsplit(self.path)
+        route = parsed.path
+        if route == "/healthz":
             self._write_json(HTTPStatus.OK, {"status": "ok"})
             return
 
-        expected = EXPECTED_HEADERS.get(self.path)
+        if route == "/query-substitution":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            ok = query.get("api_key") == ["vault-query-secret"]
+            self._write_json(
+                HTTPStatus.OK if ok else HTTPStatus.UNAUTHORIZED,
+                {
+                    "ok": ok,
+                    "case": "query-substitution",
+                    "query": query,
+                    "missingOrInvalid": [] if ok else ["api_key"],
+                },
+            )
+            return
+
+        if route in NPM_SCOPED_PATHS:
+            received = {name.lower(): value for name, value in self.headers.items()}
+            self._write_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "case": "npm-scoped",
+                    "receivedPath": route,
+                    "authorization": received.get("authorization"),
+                },
+            )
+            return
+
+        if route == "/tenant/vault-path-secret/resource":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            ok = query.get("tenant") == ["__path_secret__"]
+            self._write_json(
+                HTTPStatus.OK if ok else HTTPStatus.UNAUTHORIZED,
+                {
+                    "ok": ok,
+                    "case": "path-substitution",
+                    "queryStillPlaceholder": ok,
+                    "missingOrInvalid": [] if ok else ["tenant"],
+                },
+            )
+            return
+
+        expected = EXPECTED_HEADERS.get(route)
         if expected is None:
             self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown path"})
             return
@@ -68,9 +130,34 @@ class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
             HTTPStatus.UNAUTHORIZED if mismatches else HTTPStatus.OK,
             {
                 "ok": not mismatches,
-                "case": self.path.lstrip("/"),
+                "case": route.lstrip("/"),
                 "validatedHeaders": sorted(expected),
                 "missingOrInvalid": mismatches,
+            },
+        )
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        parsed = urlsplit(self.path)
+        if parsed.path != "/body-substitution":
+            self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown path"})
+            return
+
+        length = int(self.headers.get("content-length", "0") or "0")
+        raw_body = self.rfile.read(length)
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._write_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid json"})
+            return
+
+        ok = body.get("client_secret") == "vault-body-secret"
+        self._write_json(
+            HTTPStatus.OK if ok else HTTPStatus.UNAUTHORIZED,
+            {
+                "ok": ok,
+                "case": "body-substitution",
+                "missingOrInvalid": [] if ok else ["client_secret"],
+                "body": body,
             },
         )
 

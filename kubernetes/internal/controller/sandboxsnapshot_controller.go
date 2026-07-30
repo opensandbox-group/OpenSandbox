@@ -51,6 +51,10 @@ const (
 	// ContainerdSocketPath is the default containerd socket path
 	ContainerdSocketPath = "/var/run/containerd/containerd.sock"
 
+	// ContainerdFIFODir is shared with the host so nerdctl exec's I/O FIFOs are
+	// visible to the host-side containerd shim.
+	ContainerdFIFODir = "/run/containerd/fifo"
+
 	// LabelSandboxSnapshotName is the label key for sandbox snapshot name
 	LabelSandboxSnapshotName = "sandbox.opensandbox.io/sandbox-snapshot-name"
 )
@@ -78,6 +82,10 @@ type SandboxSnapshotReconciler struct {
 
 	// SnapshotPushSecret is the K8s Secret name for pushing to registry (from Controller Manager startup params)
 	SnapshotPushSecret string
+
+	// ImageCommitterPullSecret is the K8s Secret name used to pull the image-committer image in commit Jobs.
+	// Required when imageCommitterImage lives in a private registry.
+	ImageCommitterPullSecret string
 
 	// SnapshotRegistryInsecure controls whether image-committer uses insecure registry mode.
 	SnapshotRegistryInsecure bool

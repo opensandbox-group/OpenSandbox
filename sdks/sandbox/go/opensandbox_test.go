@@ -440,6 +440,9 @@ func TestSnapshotLifecycle(t *testing.T) {
 			if r.URL.Query().Get("sandboxId") != "sbx-1" {
 				assert.Fail(t, fmt.Sprintf("sandboxId = %q, want %q", r.URL.Query().Get("sandboxId"), "sbx-1"))
 			}
+			if r.URL.Query().Get("name") != "toolchain:go@rev-1" {
+				assert.Fail(t, fmt.Sprintf("name = %q, want %q", r.URL.Query().Get("name"), "toolchain:go@rev-1"))
+			}
 			jsonResponse(w, http.StatusOK, ListSnapshotsResponse{
 				Items: []SnapshotInfo{{
 					ID:        "snap-1",
@@ -466,6 +469,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 
 	listed, err := client.ListSnapshots(context.Background(), ListSnapshotsOptions{
 		SandboxID: "sbx-1",
+		Name:      "toolchain:go@rev-1",
 		States:    []SnapshotState{SnapshotStateReady},
 		Page:      1,
 		PageSize:  10,
@@ -1296,9 +1300,10 @@ func TestSandboxManager_ListMultipleStates(t *testing.T) {
 
 func TestSandboxManager_GetSandboxInfo(t *testing.T) {
 	want := SandboxInfo{
-		ID:        "sbx-get",
-		Status:    SandboxStatus{State: StateRunning},
-		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		ID:         "sbx-get",
+		Status:     SandboxStatus{State: StateRunning},
+		Extensions: map[string]string{"opensandbox.extensions.custom-label": "中文数据"},
+		CreatedAt:  time.Now().UTC().Truncate(time.Second),
 	}
 
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1317,6 +1322,7 @@ func TestSandboxManager_GetSandboxInfo(t *testing.T) {
 	if got.ID != "sbx-get" {
 		assert.Fail(t, fmt.Sprintf("ID = %q, want %q", got.ID, "sbx-get"))
 	}
+	require.Equal(t, "中文数据", got.Extensions["opensandbox.extensions.custom-label"])
 }
 
 func TestSandboxManager_KillSandbox(t *testing.T) {

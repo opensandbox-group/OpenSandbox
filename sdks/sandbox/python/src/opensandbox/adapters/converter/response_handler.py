@@ -25,15 +25,33 @@ This eliminates the need to repeat response handling logic in each adapter metho
 """
 
 import logging
+from datetime import timedelta
 from http import HTTPStatus
 from typing import Any, TypeVar
 
-from opensandbox.exceptions import SandboxApiException, SandboxError
+from opensandbox.exceptions import (
+    SandboxApiException,
+    SandboxError,
+    SandboxRateLimitException,
+)
+from opensandbox.transport._decision import parse_retry_after
 
 logger = logging.getLogger(__name__)
 
 
 T = TypeVar("T")
+
+# Status codes the SDK treats as transient (the default idempotent
+# retryable set from RetryPolicy). Surfaced via ``is_retryable`` so
+# callers get a machine-checkable retry decision even after the SDK has
+# exhausted its own retries.
+_RETRYABLE_STATUS_CODES = frozenset(
+    {
+        HTTPStatus.TOO_MANY_REQUESTS,   # 429
+        HTTPStatus.BAD_GATEWAY,         # 502
+        HTTPStatus.SERVICE_UNAVAILABLE, # 503
+    }
+)
 
 
 def extract_request_id(headers: Any) -> str | None:
@@ -98,6 +116,102 @@ def require_parsed(response_obj: Any, expected_type: type[T], operation_name: st
     return parsed
 
 
+def _retry_after(headers: Any) -> timedelta | None:
+    """Return Retry-After as a timedelta from response headers, or None."""
+    if not headers:
+        return None
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except Exception:
+        return None
+    return parse_retry_after(raw if isinstance(raw, str) else None)
+
+
+# Upper bound on the raw response body slice we splice into an
+# exception's ``str()``. The full body is always available on
+# ``exc.response_body`` untruncated.
+_RAW_BODY_MESSAGE_LIMIT = 512
+
+
+def _raw_body_bytes(response_obj: Any) -> bytes | None:
+    """Return the response's raw body as ``bytes`` when available."""
+    content = getattr(response_obj, "content", None)
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, bytearray):
+        return bytes(content)
+    return None
+
+
+def _raw_body_message_fragment(body: bytes | None) -> str | None:
+    """Best-effort decode of the raw body for splicing into an error message."""
+    if not body:
+        return None
+    try:
+        text = body.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    if len(text) > _RAW_BODY_MESSAGE_LIMIT:
+        text = text[:_RAW_BODY_MESSAGE_LIMIT] + "…"
+    return text
+
+
+def build_api_exception_from_httpx(
+    response: Any,
+    operation_name: str = "API call",
+) -> SandboxApiException:
+    """
+    Build a ``SandboxApiException`` (or ``SandboxRateLimitException`` on
+    429) from a raw ``httpx.Response``.
+
+    Use this from direct-httpx adapter paths (SSE bootstraps, isolated
+    session endpoints) so 429 responses map to the same exception class
+    as those coming through the generated openapi-python-client layer.
+    """
+    status_code = _status_code_to_int(getattr(response, "status_code", 0))
+    headers = getattr(response, "headers", None)
+    request_id = extract_request_id(headers)
+    body_bytes = getattr(response, "content", None)
+    if not isinstance(body_bytes, (bytes, bytearray)):
+        body_bytes = None
+    else:
+        body_bytes = bytes(body_bytes)
+
+    # Try to pull structured code/message from the JSON body.
+    from opensandbox.adapters.converter.exception_converter import parse_sandbox_error
+
+    sandbox_error = parse_sandbox_error(body_bytes) if body_bytes else None
+    error_message = f"{operation_name} failed: HTTP {status_code}"
+    if sandbox_error and sandbox_error.message:
+        error_message = f"{operation_name} failed: {sandbox_error.message}"
+    elif sandbox_error is None:
+        raw_fragment = _raw_body_message_fragment(body_bytes)
+        if raw_fragment:
+            error_message = f"{error_message}: {raw_fragment}"
+
+    is_retryable = status_code in _RETRYABLE_STATUS_CODES
+    if status_code == HTTPStatus.TOO_MANY_REQUESTS:
+        return SandboxRateLimitException(
+            message=error_message,
+            status_code=status_code,
+            request_id=request_id,
+            retry_after=_retry_after(headers),
+            error=sandbox_error,
+            response_body=body_bytes,
+            is_retryable=is_retryable,
+        )
+    return SandboxApiException(
+        message=error_message,
+        status_code=status_code,
+        request_id=request_id,
+        error=sandbox_error,
+        response_body=body_bytes,
+        is_retryable=is_retryable,
+    )
+
+
 def handle_api_error(response_obj: Any, operation_name: str = "API call") -> None:
     """
     Check API response for errors and raise exception if needed.
@@ -109,10 +223,13 @@ def handle_api_error(response_obj: Any, operation_name: str = "API call") -> Non
         operation_name: Name of the operation for error messages
 
     Raises:
-        SandboxApiException: If the response indicates an error
+        SandboxRateLimitException: On HTTP 429 (Too Many Requests).
+        SandboxApiException: On any other HTTP >= 300.
     """
     status_code = _status_code_to_int(getattr(response_obj, "status_code", 0))
-    request_id = extract_request_id(getattr(response_obj, "headers", None))
+    headers = getattr(response_obj, "headers", None)
+    request_id = extract_request_id(headers)
+    raw_body = _raw_body_bytes(response_obj)
 
     logger.debug(f"{operation_name} response: status={status_code}")
 
@@ -136,9 +253,31 @@ def handle_api_error(response_obj: Any, operation_name: str = "API call") -> Non
                     message=str(parsed_message or ""),
                 )
 
+        # Fall back to the raw body when the SDK could not parse a
+        # structured message/code, so callers do not lose the server's
+        # own explanation.
+        if sandbox_error is None:
+            raw_fragment = _raw_body_message_fragment(raw_body)
+            if raw_fragment:
+                error_message = f"{error_message}: {raw_fragment}"
+
+        is_retryable = status_code in _RETRYABLE_STATUS_CODES
+        if status_code == HTTPStatus.TOO_MANY_REQUESTS:
+            raise SandboxRateLimitException(
+                message=error_message,
+                status_code=status_code,
+                request_id=request_id,
+                retry_after=_retry_after(headers),
+                error=sandbox_error,
+                response_body=raw_body,
+                is_retryable=is_retryable,
+            )
+
         raise SandboxApiException(
             message=error_message,
             status_code=status_code,
             request_id=request_id,
             error=sandbox_error,
+            response_body=raw_body,
+            is_retryable=is_retryable,
         )

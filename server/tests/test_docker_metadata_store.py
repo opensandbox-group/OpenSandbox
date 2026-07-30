@@ -14,6 +14,7 @@
 
 """Unit tests for DockerMetadataStore (per-sandbox file-backed)."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from opensandbox_server.services.docker.metadata import (
@@ -170,6 +171,27 @@ class TestDockerMetadataStore:
     def test_delete_nonexistent_silent(self, tmp_path: Path):
         store = self._make_store(tmp_path)
         store.delete("nonexistent")  # Should not raise
+
+    def test_set_get_expiration_override(self, tmp_path: Path):
+        store = self._make_store(tmp_path)
+        expires_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+        store.set_expiration("sbx-001", expires_at)
+
+        assert store.get_expiration("sbx-001") == expires_at.isoformat()
+
+    def test_delete_removes_expiration_override_file(self, tmp_path: Path):
+        store = self._make_store(tmp_path)
+        expires_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        store.set_expiration("sbx-001", expires_at)
+
+        expiration_file = tmp_path / "metadata" / "_expiration" / "sbx-001.json"
+        assert expiration_file.exists()
+
+        store.delete("sbx-001")
+
+        assert not expiration_file.exists()
+        assert store.get_expiration("sbx-001") is None
 
     # -- crash recovery ------------------------------------------------------
 

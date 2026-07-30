@@ -67,7 +67,7 @@ func main() {
 
 	// Init isolation runner if probe succeeded.
 	if isolationProbe.Available {
-		iso := isolation.NewBwrap(isoCfg)
+		iso := isolation.NewBwrapWithProbe(isoCfg, isolationProbe)
 		runner, err := runtime.NewIsolatedRunner(ctrl, iso, isoCfg)
 		if err != nil {
 			log.Error("isolation: runner init failed (continuing without isolation): %v", err)

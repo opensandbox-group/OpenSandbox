@@ -1,0 +1,40 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: {{.BatchSandboxName}}
+  namespace: {{.Namespace}}
+spec:
+  replicas: 1
+  poolRef: {{.PoolName}}
+  taskTemplate:
+    spec:
+      process:
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          while true; do sleep 1; done
+        lifecycle:
+          preStart:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                set -eu
+                mkdir -p /shared-workspace
+                cp -a /host-copy/input/. /shared-workspace/
+                echo prestart-complete > /shared-workspace/prestart-marker
+            execMode: Local
+            timeoutSeconds: 30
+          postStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                set -eu
+                mkdir -p /host-copy/output
+                cp -a /shared-workspace/. /host-copy/output/
+                echo poststop-complete > /host-copy/output/poststop-marker
+            execMode: Local
+            timeoutSeconds: 30

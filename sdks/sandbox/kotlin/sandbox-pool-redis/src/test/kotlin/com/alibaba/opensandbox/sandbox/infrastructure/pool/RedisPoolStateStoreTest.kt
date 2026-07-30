@@ -16,6 +16,8 @@
 
 package com.alibaba.opensandbox.sandbox.infrastructure.pool
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyedException
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyState
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -229,6 +231,40 @@ class RedisPoolStateStoreTest {
         assertThrows(IllegalArgumentException::class.java) {
             stateStore.setIdleEntryTtl(poolName, Duration.ZERO)
         }
+    }
+
+    @Test
+    fun `destroy state fences writes and clearPoolState keeps tombstone`() {
+        val stateStore = requireStore()
+
+        stateStore.putIdle(poolName, "id-1")
+        stateStore.setMaxIdle(poolName, 3)
+
+        stateStore.beginDestroy(poolName, "destroyer")
+
+        assertEquals(PoolDestroyState.DESTROYING, stateStore.getDestroyState(poolName))
+        assertThrows(PoolDestroyedException::class.java) {
+            stateStore.putIdle(poolName, "id-2")
+        }
+        assertThrows(PoolDestroyedException::class.java) {
+            stateStore.setMaxIdle(poolName, 4)
+        }
+        assertThrows(PoolDestroyedException::class.java) {
+            stateStore.setIdleEntryTtl(poolName, Duration.ofMinutes(5))
+        }
+        assertFalse(stateStore.tryAcquirePrimaryLock(poolName, "owner-1", Duration.ofSeconds(60)))
+        assertFalse(stateStore.renewPrimaryLock(poolName, "owner-1", Duration.ofSeconds(60)))
+        assertEquals("id-1", stateStore.tryTakeIdle(poolName))
+
+        stateStore.clearPoolState(poolName)
+        stateStore.markDestroyed(poolName, "destroyer", Duration.ofMinutes(5))
+
+        assertEquals(PoolDestroyState.DESTROYED, stateStore.getDestroyState(poolName))
+        assertThrows(PoolDestroyedException::class.java) {
+            stateStore.beginDestroy(poolName, "destroyer-2")
+        }
+        assertEquals(0, stateStore.snapshotCounters(poolName).idleCount)
+        assertNull(stateStore.getMaxIdle(poolName))
     }
 
     private fun requireStore(): RedisPoolStateStore = store ?: error("Redis store was not initialized")

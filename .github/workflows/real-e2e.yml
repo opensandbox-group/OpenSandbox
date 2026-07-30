@@ -2,6 +2,7 @@ name: Real E2E Tests
 
 permissions:
   contents: read
+  pull-requests: read
 
 on:
   workflow_dispatch:
@@ -13,12 +14,6 @@ on:
         default: false
   pull_request:
     branches: [ main ]
-    paths:
-      - 'server/opensandbox_server/**'
-      - 'components/execd/**'
-      - 'components/egress/**'
-      - 'sdks/**'
-      - 'tests/**'
   push:
     branches: [ main ]
 
@@ -27,11 +22,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: real-e2e
+
   python-e2e:
     name: Python E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
@@ -40,10 +41,11 @@ jobs:
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
@@ -92,7 +94,7 @@ jobs:
           execd_image = "opensandbox/execd:local"
           [egress]
           image = "opensandbox/egress:local"
-          mode = "dns"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -127,9 +129,10 @@ jobs:
 
   java-e2e:
     name: Java E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
@@ -138,10 +141,11 @@ jobs:
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
@@ -245,10 +249,10 @@ jobs:
 
   javascript-e2e:
     name: JavaScript E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
-      NODE_VERSION: "20.19.0"
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
@@ -257,28 +261,18 @@ jobs:
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
       - name: Set up Node.js
-        run: |
-          NODE_DIR="/home/admin/.local/node-v${NODE_VERSION}-linux-x64"
-          if [ -x "${NODE_DIR}/bin/node" ]; then
-            echo "Node.js ${NODE_VERSION} already cached"
-          else
-            echo "Downloading Node.js ${NODE_VERSION}..."
-            mkdir -p /home/admin/.local
-            curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
-              | tar -xJ -C /home/admin/.local/
-          fi
-          echo "${NODE_DIR}/bin" >> "$GITHUB_PATH"
-          export PATH="${NODE_DIR}/bin:${PATH}"
-          node --version
-          npm --version
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20.19.0"
 
       - name: Clean up previous E2E resources
         run: |
@@ -308,6 +302,7 @@ jobs:
           execd_image = "opensandbox/execd:local"
           [egress]
           image = "opensandbox/egress:local"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -346,9 +341,10 @@ jobs:
 
   csharp-e2e:
     name: C# E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
@@ -357,17 +353,19 @@ jobs:
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
+      - name: Configure .NET install directory
+        run: echo "DOTNET_INSTALL_DIR=${RUNNER_TEMP}/dotnet" >> "$GITHUB_ENV"
+
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v5
-        env:
-          DOTNET_INSTALL_DIR: /home/admin/.local/dotnet
         with:
           dotnet-version: "10.0.x"
 
@@ -398,6 +396,7 @@ jobs:
           execd_image = "opensandbox/execd:local"
           [egress]
           image = "opensandbox/egress:local"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -436,24 +435,28 @@ jobs:
 
   go-e2e:
     name: Go E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: self-hosted
     env:
-      UV_BIN: /home/admin/.local/bin
-      HOME: /home/admin/actions-runner
-      GOCACHE: /home/admin/actions-runner/_temp/go-build
-      GOMODCACHE: /home/admin/actions-runner/_temp/go-mod-cache
       RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Configure Go cache
+        run: |
+          echo "GOCACHE=${RUNNER_TEMP}/go-build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=${RUNNER_TEMP}/go-mod-cache" >> "$GITHUB_ENV"
+
       - name: Clean Docker runner cache
         run: bash scripts/ci-docker-cleanup.sh
 
-      - name: Set up uv PATH and verify
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
         run: |
-          echo "${UV_BIN}" >> "$GITHUB_PATH"
-          export PATH="${UV_BIN}:${PATH}"
           uv --version
           uv run python --version
 
@@ -490,6 +493,7 @@ jobs:
           execd_image = "opensandbox/execd:local"
           [egress]
           image = "opensandbox/egress:local"
+          mode = "dns+nft"
           [docker]
           network_mode = "bridge"
           [storage]
@@ -525,3 +529,29 @@ jobs:
           docker rm -f opensandbox-e2e-credential-vault-target || true
           docker ps -aq --filter "label=opensandbox.e2e=credential-vault" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+
+  required:
+    name: Real E2E CI
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [changes, python-e2e, java-e2e, javascript-e2e, csharp-e2e, go-e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          PYTHON_RESULT: ${{ needs.python-e2e.result }}
+          JAVA_RESULT: ${{ needs.java-e2e.result }}
+          JAVASCRIPT_RESULT: ${{ needs.javascript-e2e.result }}
+          CSHARP_RESULT: ${{ needs.csharp-e2e.result }}
+          GO_RESULT: ${{ needs.go-e2e.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$PYTHON_RESULT" == "success" && "$JAVA_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$PYTHON_RESULT" == "skipped" && "$JAVA_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
+          fi

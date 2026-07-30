@@ -224,6 +224,36 @@ public class SandboxE2ETest extends BaseE2ETest {
 
     @Test
     @Order(1)
+    @DisplayName("Sandbox extensions round-trip")
+    @Timeout(value = 2, unit = TimeUnit.MINUTES)
+    void testSandboxExtensionsRoundTrip() {
+        Sandbox extSandbox =
+                Sandbox.builder()
+                        .connectionConfig(sharedConnectionConfig)
+                        .image(getSandboxImage())
+                        .timeout(Duration.ofMinutes(2))
+                        .readyTimeout(Duration.ofSeconds(60))
+                        .metadata(Map.of("tag", "e2e-extensions"))
+                        .extension("opensandbox.extensions.test-key", "test-value")
+                        .extension("opensandbox.extensions.second", "second-value")
+                        .healthCheckPollingInterval(Duration.ofMillis(500))
+                        .build();
+        try {
+            SandboxInfo info = extSandbox.getInfo();
+            assertNotNull(info.getExtensions(), "extensions missing from getInfo");
+            assertEquals("test-value", info.getExtensions().get("opensandbox.extensions.test-key"));
+            assertEquals("second-value", info.getExtensions().get("opensandbox.extensions.second"));
+        } finally {
+            try {
+                extSandbox.kill();
+            } catch (Exception ignored) {
+            }
+            extSandbox.close();
+        }
+    }
+
+    @Test
+    @Order(1)
     @DisplayName("Sandbox manual cleanup returns null expiresAt")
     @Timeout(value = 2, unit = TimeUnit.MINUTES)
     void testSandboxManualCleanup() {

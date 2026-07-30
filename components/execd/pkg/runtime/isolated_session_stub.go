@@ -31,11 +31,13 @@ type IsolatedSessionOptions struct {
 	WorkspacePath      string
 	WorkspaceMode      string
 	ExtraWritable      []string
+	Binds              []isolation.BindMount
 	ShareNet           *bool
 	EnvPassthroughMode string
 	EnvPassthroughKeys []string
 	Uid                *uint32
 	Gid                *uint32
+	UidMode            string
 	IdleTimeoutSeconds int
 }
 
@@ -66,6 +68,11 @@ func (r *IsolatedRunner) GetIsolatedSession(_ string) (*IsolatedSessionState, er
 	return nil, ErrContextNotFound
 }
 
+// ListIsolatedSessions returns an empty list on Windows.
+func (r *IsolatedRunner) ListIsolatedSessions() []IsolatedSessionSummary {
+	return []IsolatedSessionSummary{}
+}
+
 // RunInIsolatedSession returns an error on Windows.
 func (r *IsolatedRunner) RunInIsolatedSession(_ context.Context, _ string, _ string, _ map[string]string, _ StdoutCallback) error {
 	return ErrContextNotFound
@@ -91,15 +98,42 @@ func (r *IsolatedRunner) GetMergedView(_ string) (vfs.FS, error) {
 	return nil, ErrContextNotFound
 }
 
+// GetMergedViewWithLease returns an error on Windows.
+func (r *IsolatedRunner) GetMergedViewWithLease(_ string) (vfs.FS, func(), error) {
+	return nil, nil, ErrContextNotFound
+}
+
 // Capabilities returns empty capabilities on Windows.
 func (r *IsolatedRunner) Capabilities() isolation.Capabilities {
 	return isolation.Capabilities{Available: false}
 }
 
-// IsolatedSessionState is the session state (Windows stub).
+// IsolatedSessionState is the session state (Windows stub — kept in sync
+// with the non-Windows build so controller code compiles on both.)
 type IsolatedSessionState struct {
 	Status               string
 	CreatedAt            time.Time
 	LastRunAt            time.Time
 	IdleRemainingSeconds *int
+
+	// Creation-parameter echoes. Never populated on Windows (isolation
+	// is unavailable) but kept to match the non-Windows struct layout.
+	Profile            string
+	WorkspacePath      string
+	WorkspaceMode      string
+	ExtraWritable      []string
+	Binds              []isolation.BindMount
+	ShareNet           *bool
+	EnvPassthroughMode string
+	EnvPassthroughKeys []string
+	Uid                *uint32
+	Gid                *uint32
+	UidMode            string
+	IdleTimeoutSeconds int
+}
+
+// IsolatedSessionSummary describes a session in a list response (Windows stub).
+type IsolatedSessionSummary struct {
+	SessionID string
+	IsolatedSessionState
 }

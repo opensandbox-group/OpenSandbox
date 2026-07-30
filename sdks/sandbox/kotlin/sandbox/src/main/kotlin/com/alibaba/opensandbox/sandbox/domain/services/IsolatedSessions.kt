@@ -17,11 +17,17 @@
 package com.alibaba.opensandbox.sandbox.domain.services
 
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionState
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionSummary
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
+import org.slf4j.LoggerFactory
+
+private val isolationServiceLogger = LoggerFactory.getLogger(IsolationService::class.java)
 
 interface IsolationSession {
     val sessionId: String
@@ -40,5 +46,72 @@ interface IsolationSession {
 interface IsolationService {
     fun create(request: CreateIsolatedSessionRequest): IsolationSession
 
+    /**
+     * Rebuild an [IsolationSession] handle from an existing execd session id, without recreating
+     * the session. Intended for stateless callers (e.g. serverless workers restarted mid-flight)
+     * that only have the session id.
+     *
+     * The returned handle exposes `run`, `get`, `delete`, and `files` keyed by [sessionId]. The
+     * handle's [IsolationSession.info] is populated from what execd echoes back on the GET
+     * response; older execd builds may omit creation parameters, in which case those fields on
+     * [IsolatedSessionInfo] will be null / empty and only [IsolatedSessionInfo.sessionId] and
+     * [IsolatedSessionInfo.createdAt] are guaranteed. `run`, `get`, and `delete` on the returned
+     * handle only need the session id and are unaffected by missing echo fields.
+     *
+     * @throws com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException with
+     *   `statusCode = 404` if the session does not exist on execd.
+     */
+    fun attach(sessionId: String): IsolationSession
+
     fun capabilities(): IsolatedCapabilities
+
+    fun list(): List<IsolatedSessionSummary>
+
+    fun runOnce(
+        code: String,
+        workspace: String,
+        workspaceMode: String? = null,
+        envs: Map<String, String>? = null,
+        timeoutSeconds: Int? = null,
+        profile: String? = null,
+        shareNet: Boolean? = null,
+        binds: List<BindMount>? = null,
+    ): Execution {
+        val session =
+            create(
+                CreateIsolatedSessionRequest(
+                    workspace = IsolatedWorkspaceSpec(path = workspace, mode = workspaceMode),
+                    profile = profile,
+                    shareNet = shareNet,
+                    binds = binds,
+                ),
+            )
+        try {
+            return session.run(
+                IsolatedRunRequest(code = code, envs = envs, timeoutSeconds = timeoutSeconds),
+            )
+        } finally {
+            try {
+                session.delete()
+            } catch (e: Exception) {
+                isolationServiceLogger.warn("failed to delete isolated session {}", session.sessionId, e)
+            }
+        }
+    }
+
+    fun <T> withSession(
+        request: CreateIsolatedSessionRequest,
+        block: (IsolationSession) -> T,
+    ): T {
+        val session = create(request)
+        try {
+            return block(session)
+        } finally {
+            try {
+                session.delete()
+            } catch (e: Exception) {
+                isolationServiceLogger.warn("failed to delete isolated session {}", session.sessionId, e)
+            }
+        }
+    }
 }

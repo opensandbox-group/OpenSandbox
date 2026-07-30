@@ -30,13 +30,16 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import com.alibaba.opensandbox.sandbox.domain.pool.AcquirePolicy
 import com.alibaba.opensandbox.sandbox.domain.pool.IdleEntry
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolConfig
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolCreationSpec
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolLifecycleState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolStateStore
 import com.alibaba.opensandbox.sandbox.domain.pool.PooledSandboxCreator
 import com.alibaba.opensandbox.sandbox.domain.pool.SandboxPreparer
 import com.alibaba.opensandbox.sandbox.domain.pool.StoreCounters
+import com.alibaba.opensandbox.sandbox.domain.pool.TakeIdleResult
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.InMemoryPoolStateStore
 import io.mockk.every
 import io.mockk.just
@@ -48,13 +51,17 @@ import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.io.InterruptedIOException
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class SandboxPoolTest {
     @Test
@@ -119,6 +126,267 @@ class SandboxPoolTest {
         val snap = pool.snapshot()
         assertEquals(PoolState.STOPPED, snap.state)
         assertEquals(PoolLifecycleState.STOPPED, snap.lifecycleState)
+    }
+
+    @Test
+    fun `shutdown graceful waits for in-flight warmup without interrupting it`() {
+        val store = InMemoryPoolStateStore()
+        val sandbox = mockk<Sandbox>(relaxed = true)
+        val warmupStarted = CountDownLatch(1)
+        val releaseWarmup = CountDownLatch(1)
+        val warmupInterrupted = AtomicBoolean(false)
+        every { sandbox.id } returns "warmup-id"
+
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(1)
+                .warmupConcurrency(1)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(PooledSandboxCreator { sandbox })
+                .warmupSkipHealthCheck()
+                .warmupSandboxPreparer(
+                    SandboxPreparer {
+                        warmupStarted.countDown()
+                        try {
+                            releaseWarmup.await()
+                        } catch (e: InterruptedException) {
+                            warmupInterrupted.set(true)
+                            throw e
+                        }
+                    },
+                ).drainTimeout(Duration.ofSeconds(2))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .build()
+
+        var releaser: Thread? = null
+        pool.start()
+        try {
+            assertTrue(warmupStarted.await(5, TimeUnit.SECONDS))
+            releaser =
+                Thread {
+                    Thread.sleep(250)
+                    releaseWarmup.countDown()
+                }.apply { start() }
+
+            pool.shutdown(graceful = true)
+
+            assertEquals(false, warmupInterrupted.get())
+            assertEquals(1, store.snapshotCounters("test-pool").idleCount)
+            verify(exactly = 0) { sandbox.kill() }
+            verify(exactly = 1) { sandbox.close() }
+        } finally {
+            releaseWarmup.countDown()
+            releaser?.join(5_000)
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `shutdown graceful force interrupts warmup after drain timeout`() {
+        val store = InMemoryPoolStateStore()
+        val sandbox = mockk<Sandbox>(relaxed = true)
+        val warmupStarted = CountDownLatch(1)
+        val blockWarmup = CountDownLatch(1)
+        val warmupInterrupted = AtomicBoolean(false)
+        val killSawInterrupt = AtomicBoolean(false)
+        val closeSawInterrupt = AtomicBoolean(false)
+        every { sandbox.id } returns "timed-out-warmup-id"
+        every { sandbox.kill() } answers {
+            killSawInterrupt.set(Thread.currentThread().isInterrupted)
+            if (killSawInterrupt.get()) {
+                throw InterruptedIOException("interrupted")
+            }
+        }
+        every { sandbox.close() } answers {
+            closeSawInterrupt.set(Thread.currentThread().isInterrupted)
+        }
+
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(1)
+                .warmupConcurrency(1)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(PooledSandboxCreator { sandbox })
+                .warmupSkipHealthCheck()
+                .warmupSandboxPreparer(
+                    SandboxPreparer {
+                        warmupStarted.countDown()
+                        try {
+                            blockWarmup.await()
+                        } catch (e: InterruptedException) {
+                            warmupInterrupted.set(true)
+                            Thread.currentThread().interrupt()
+                            throw e
+                        }
+                    },
+                ).drainTimeout(Duration.ofMillis(200))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .build()
+
+        pool.start()
+        try {
+            assertTrue(warmupStarted.await(5, TimeUnit.SECONDS))
+            val shutdownStartedAt = System.nanoTime()
+
+            pool.shutdown(graceful = true)
+
+            val shutdownElapsedMs = Duration.ofNanos(System.nanoTime() - shutdownStartedAt).toMillis()
+            assertTrue(shutdownElapsedMs >= 150, "graceful shutdown should wait for drain timeout before forcing stop")
+            assertEquals(true, warmupInterrupted.get())
+            assertEquals(false, killSawInterrupt.get(), "cleanup kill must not inherit the worker interrupt state")
+            assertEquals(true, closeSawInterrupt.get(), "worker interrupt state must be restored after cleanup kill")
+            assertEquals(0, store.snapshotCounters("test-pool").idleCount)
+            verify(exactly = 1) { sandbox.kill() }
+            verify(exactly = 1) { sandbox.close() }
+        } finally {
+            blockWarmup.countDown()
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `shutdown graceful waits for asynchronous discarded sandbox cleanup`() {
+        val store = DiscardingPoolStateStore()
+        val manager = mockk<SandboxManager>(relaxed = true)
+        val directSandbox = mockk<Sandbox>(relaxed = true)
+        val cleanupStarted = CountDownLatch(1)
+        val releaseCleanup = CountDownLatch(1)
+        val cleanupInterrupted = AtomicBoolean(false)
+        val shutdownCompleted = CountDownLatch(1)
+        val shutdownFailure = AtomicReference<Throwable?>()
+        every { manager.killSandbox("near-expiry-id") } answers {
+            cleanupStarted.countDown()
+            try {
+                releaseCleanup.await()
+            } catch (e: InterruptedException) {
+                cleanupInterrupted.set(true)
+                throw e
+            }
+        }
+        val pool =
+            buildDiscardedCleanupPool(
+                store = store,
+                manager = manager,
+                directSandbox = directSandbox,
+                drainTimeout = Duration.ofSeconds(2),
+            )
+
+        var shutdownThread: Thread? = null
+        pool.start()
+        try {
+            assertSame(directSandbox, pool.acquire(policy = AcquirePolicy.DIRECT_CREATE))
+            assertTrue(cleanupStarted.await(5, TimeUnit.SECONDS))
+            assertEquals(1, pool.snapshot().inFlightOperations)
+
+            shutdownThread =
+                Thread {
+                    try {
+                        pool.shutdown(graceful = true)
+                    } catch (t: Throwable) {
+                        shutdownFailure.set(t)
+                    } finally {
+                        shutdownCompleted.countDown()
+                    }
+                }.apply { start() }
+
+            assertEquals(
+                false,
+                shutdownCompleted.await(200, TimeUnit.MILLISECONDS),
+                "graceful shutdown must keep waiting while asynchronous cleanup is running",
+            )
+            releaseCleanup.countDown()
+            assertTrue(shutdownCompleted.await(5, TimeUnit.SECONDS))
+
+            assertEquals(null, shutdownFailure.get())
+            assertEquals(false, cleanupInterrupted.get())
+            assertEquals(0, pool.snapshot().inFlightOperations)
+            assertEquals(PoolLifecycleState.STOPPED, pool.snapshot().lifecycleState)
+            verify(exactly = 1) { manager.killSandbox("near-expiry-id") }
+        } finally {
+            releaseCleanup.countDown()
+            shutdownThread?.join(5_000)
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `shutdown timeout completes drain count for queued discarded sandbox cleanup`() {
+        val store = DiscardingPoolStateStore()
+        val manager = mockk<SandboxManager>(relaxed = true)
+        val directSandbox = mockk<Sandbox>(relaxed = true)
+        val blockerStarted = CountDownLatch(1)
+        val releaseBlocker = CountDownLatch(1)
+        val blockerInterrupted = AtomicBoolean(false)
+        val pool =
+            buildDiscardedCleanupPool(
+                store = store,
+                manager = manager,
+                directSandbox = directSandbox,
+                drainTimeout = Duration.ofMillis(200),
+            )
+
+        pool.start()
+        try {
+            val warmupExecutor = getPrivateField<ExecutorService>(pool, "warmupExecutor")
+            warmupExecutor.execute {
+                blockerStarted.countDown()
+                try {
+                    releaseBlocker.await()
+                } catch (_: InterruptedException) {
+                    blockerInterrupted.set(true)
+                }
+            }
+            assertTrue(blockerStarted.await(5, TimeUnit.SECONDS))
+            assertSame(directSandbox, pool.acquire(policy = AcquirePolicy.DIRECT_CREATE))
+            assertEquals(1, pool.snapshot().inFlightOperations)
+            val shutdownStartedAt = System.nanoTime()
+
+            pool.shutdown(graceful = true)
+
+            val shutdownElapsedMs = Duration.ofNanos(System.nanoTime() - shutdownStartedAt).toMillis()
+            assertTrue(shutdownElapsedMs >= 150, "shutdown should wait for drain timeout before dropping queued cleanup")
+            assertEquals(true, blockerInterrupted.get())
+            assertEquals(0, pool.snapshot().inFlightOperations)
+            verify(exactly = 0) { manager.killSandbox("near-expiry-id") }
+        } finally {
+            releaseBlocker.countDown()
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `rejected discarded sandbox cleanup runs inline without leaking drain count`() {
+        val store = DiscardingPoolStateStore()
+        val manager = mockk<SandboxManager>(relaxed = true)
+        val directSandbox = mockk<Sandbox>(relaxed = true)
+        every { manager.killSandbox("near-expiry-id") } throws RuntimeException("kill failed")
+        val pool =
+            buildDiscardedCleanupPool(
+                store = store,
+                manager = manager,
+                directSandbox = directSandbox,
+                drainTimeout = Duration.ofSeconds(2),
+            )
+
+        pool.start()
+        try {
+            getPrivateField<ExecutorService>(pool, "warmupExecutor").shutdownNow()
+
+            assertSame(directSandbox, pool.acquire(policy = AcquirePolicy.DIRECT_CREATE))
+
+            assertEquals(0, pool.snapshot().inFlightOperations)
+            verify(exactly = 1) { manager.killSandbox("near-expiry-id") }
+        } finally {
+            pool.shutdown(graceful = true)
+        }
     }
 
     @Test
@@ -203,6 +471,297 @@ class SandboxPoolTest {
         } finally {
             pool.shutdown(graceful = false)
         }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE and empty idle throws PoolEmptyException`() {
+        val pool = buildPool()
+        pool.start()
+        try {
+            val ex =
+                assertThrows(PoolEmptyException::class.java) {
+                    pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE)
+                }
+            assertTrue(ex.message?.contains("RETRY_NEXT_IDLE") == true)
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE and all stale idle drains up to maxAcquireRetries and throws`() {
+        val store = InMemoryPoolStateStore()
+        // maxIdle=0 keeps the reconcile loop from creating fresh sandboxes against the (missing)
+        // server; we drive idle membership manually via putIdle so the test only exercises the
+        // acquire retry loop.
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(0)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .drainTimeout(Duration.ofMillis(50))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .maxAcquireRetries(3)
+                .build()
+        // 5 stale IDs in idle; retry policy should try 3, leave 2 behind.
+        repeat(5) { store.putIdle("test-pool", "stale-id-$it") }
+
+        pool.start()
+        try {
+            assertThrows(PoolAcquireFailedException::class.java) {
+                pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE)
+            }
+            assertEquals(2, store.snapshotCounters("test-pool").idleCount)
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE drained mid-loop still throws PoolAcquireFailedException`() {
+        val store = InMemoryPoolStateStore()
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(0)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .drainTimeout(Duration.ofMillis(50))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .maxAcquireRetries(5)
+                .build()
+        // Only 2 stale IDs but budget is 5; loop should exit early after the store empties out
+        // and still surface PoolAcquireFailedException (not PoolEmptyException) because at
+        // least one candidate was attempted.
+        store.putIdle("test-pool", "stale-1")
+        store.putIdle("test-pool", "stale-2")
+
+        pool.start()
+        try {
+            val ex =
+                assertThrows(PoolAcquireFailedException::class.java) {
+                    pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE)
+                }
+            assertTrue(ex.message?.contains("drained") == true)
+            assertEquals(0, store.snapshotCounters("test-pool").idleCount)
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE_THEN_CREATE falls through to direct create after all idle fail`() {
+        val store = InMemoryPoolStateStore()
+        val createdSandbox = mockk<Sandbox>(relaxed = true)
+        every { createdSandbox.id } returns "created-1"
+        val creator = PooledSandboxCreator { createdSandbox }
+
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(0)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(creator)
+                .drainTimeout(Duration.ofMillis(50))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .maxAcquireRetries(3)
+                .build()
+        repeat(3) { store.putIdle("test-pool", "stale-id-$it") }
+
+        pool.start()
+        try {
+            val sandbox = pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE)
+            assertSame(createdSandbox, sandbox)
+            // All three stale entries removed on the way through.
+            assertEquals(0, store.snapshotCounters("test-pool").idleCount)
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE_THEN_CREATE and empty idle falls through immediately`() {
+        val store = InMemoryPoolStateStore()
+        val createdSandbox = mockk<Sandbox>(relaxed = true)
+        every { createdSandbox.id } returns "created-1"
+        val creator = PooledSandboxCreator { createdSandbox }
+
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(0)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(creator)
+                .drainTimeout(Duration.ofMillis(50))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .build()
+
+        pool.start()
+        try {
+            val sandbox = pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE)
+            assertSame(createdSandbox, sandbox)
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE_THEN_CREATE falls through on state store outage`() {
+        // Regression: PoolStateStoreUnavailableException during tryTakeIdle must degrade to
+        // direct-create under RETRY_NEXT_IDLE_THEN_CREATE (and DIRECT_CREATE), per OSEP-0005.
+        // Previously the exception propagated and skipped the fallback branch, making the new
+        // then-create policy strictly less available than documented during store outages.
+        val createdSandbox = mockk<Sandbox>(relaxed = true)
+        every { createdSandbox.id } returns "created-fallback"
+        val creator = PooledSandboxCreator { createdSandbox }
+        val store = OutageStore()
+
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(0)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(creator)
+                .drainTimeout(Duration.ofMillis(50))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .build()
+
+        pool.start()
+        try {
+            val sandbox = pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE)
+            assertSame(createdSandbox, sandbox)
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE surfaces state store outage`() {
+        // Complement: non-fallthrough policies (FAIL_FAST / RETRY_NEXT_IDLE) must NOT degrade
+        // to direct-create on store outage; they must surface the exception so callers can react.
+        val store = OutageStore()
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(0)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .drainTimeout(Duration.ofMillis(50))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .build()
+
+        pool.start()
+        try {
+            assertThrows(
+                com.alibaba.opensandbox.sandbox.domain.exceptions.PoolStateStoreUnavailableException::class.java,
+            ) {
+                pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE)
+            }
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE_THEN_CREATE falls through when full state store outage also fails namespace check`() {
+        // Regression for Codex round-5 P2: previously, when the full state store was down
+        // (Redis outage affecting *all* methods, not just tryTakeIdle), acquire aborted at
+        // the pre-loop ensurePoolNamespaceActive call before the fallthrough branch could
+        // run. RETRY_NEXT_IDLE_THEN_CREATE is documented to degrade to direct-create during
+        // store outages (OSEP-0005); this test proves the namespace check no longer breaks
+        // that guarantee.
+        val createdSandbox = mockk<Sandbox>(relaxed = true)
+        every { createdSandbox.id } returns "created-fallback"
+        val creator = PooledSandboxCreator { createdSandbox }
+        // Start with getDestroyState working so pool.start() succeeds, then flip to outage
+        // mode. This mirrors a real Redis instance that crashes after the pool warms.
+        val store = OutageStoreWithNamespaceFailure()
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(0)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(creator)
+                .drainTimeout(Duration.ofMillis(50))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .build()
+
+        pool.start()
+        store.outage = true
+        try {
+            val sandbox = pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE)
+            assertSame(createdSandbox, sandbox)
+        } finally {
+            store.outage = false
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `acquire with RETRY_NEXT_IDLE surfaces full state store outage that also fails namespace check`() {
+        // Non-fallthrough counterpart: full state-store outage under RETRY_NEXT_IDLE must
+        // still surface PoolStateStoreUnavailableException (fail-closed).
+        val store = OutageStoreWithNamespaceFailure()
+        val pool =
+            SandboxPool.builder()
+                .poolName("test-pool")
+                .ownerId("test-owner")
+                .maxIdle(0)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .drainTimeout(Duration.ofMillis(50))
+                .reconcileInterval(Duration.ofSeconds(30))
+                .build()
+
+        pool.start()
+        store.outage = true
+        try {
+            assertThrows(
+                com.alibaba.opensandbox.sandbox.domain.exceptions.PoolStateStoreUnavailableException::class.java,
+            ) {
+                pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE)
+            }
+        } finally {
+            store.outage = false
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `PoolConfig rejects maxAcquireRetries below 1`() {
+        val ex =
+            assertThrows(IllegalArgumentException::class.java) {
+                com.alibaba.opensandbox.sandbox.domain.pool.PoolConfig.builder()
+                    .poolName("test-pool")
+                    .ownerId("test-owner")
+                    .maxIdle(1)
+                    .stateStore(InMemoryPoolStateStore())
+                    .connectionConfig(ConnectionConfig.builder().build())
+                    .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                    .maxAcquireRetries(0)
+                    .build()
+            }
+        assertTrue(ex.message?.contains("maxAcquireRetries") == true)
     }
 
     @Test
@@ -627,6 +1186,51 @@ class SandboxPoolTest {
             .build()
     }
 
+    private fun buildDiscardedCleanupPool(
+        store: PoolStateStore,
+        manager: SandboxManager,
+        directSandbox: Sandbox,
+        drainTimeout: Duration,
+    ): SandboxPool =
+        SandboxPool(
+            config =
+                PoolConfig.builder()
+                    .poolName("test-pool")
+                    .ownerId("test-owner")
+                    .maxIdle(0)
+                    .stateStore(store)
+                    .connectionConfig(ConnectionConfig.builder().build())
+                    .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                    .sandboxCreator(PooledSandboxCreator { directSandbox })
+                    .acquireMinRemainingTtl(Duration.ofMinutes(1))
+                    .idleTimeout(Duration.ofMinutes(10))
+                    .drainTimeout(drainTimeout)
+                    .reconcileInterval(Duration.ofSeconds(30))
+                    .build(),
+            sandboxManagerFactory = { manager },
+        )
+
+    private class DiscardingPoolStateStore : PoolStateStore by InMemoryPoolStateStore() {
+        override fun tryTakeIdle(
+            poolName: String,
+            minRemainingTtl: Duration,
+        ): TakeIdleResult =
+            TakeIdleResult(
+                sandboxId = null,
+                discardedAliveSandboxIds = listOf("near-expiry-id"),
+            )
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> getPrivateField(
+        target: Any,
+        fieldName: String,
+    ): T {
+        val field = target.javaClass.getDeclaredField(fieldName)
+        field.isAccessible = true
+        return field.get(target) as T
+    }
+
     private fun setPrivateField(
         target: Any,
         fieldName: String,
@@ -635,6 +1239,174 @@ class SandboxPoolTest {
         val field = target.javaClass.getDeclaredField(fieldName)
         field.isAccessible = true
         field.set(target, value)
+    }
+
+    /**
+     * Store that raises [PoolStateStoreUnavailableException] from every take call. Used to
+     * exercise the state-store-outage fallback path in acquire.
+     */
+    private class OutageStore : PoolStateStore {
+        override fun tryTakeIdle(poolName: String): String? {
+            throw com.alibaba.opensandbox.sandbox.domain.exceptions.PoolStateStoreUnavailableException(
+                "tryTakeIdle",
+                RuntimeException("redis unavailable"),
+            )
+        }
+
+        override fun tryTakeIdle(
+            poolName: String,
+            minRemainingTtl: Duration,
+        ): com.alibaba.opensandbox.sandbox.domain.pool.TakeIdleResult {
+            throw com.alibaba.opensandbox.sandbox.domain.exceptions.PoolStateStoreUnavailableException(
+                "tryTakeIdleWithMinTtl",
+                RuntimeException("redis unavailable"),
+            )
+        }
+
+        override fun putIdle(
+            poolName: String,
+            sandboxId: String,
+        ) {}
+
+        override fun removeIdle(
+            poolName: String,
+            sandboxId: String,
+        ) {}
+
+        override fun tryAcquirePrimaryLock(
+            poolName: String,
+            ownerId: String,
+            ttl: Duration,
+        ): Boolean = true
+
+        override fun renewPrimaryLock(
+            poolName: String,
+            ownerId: String,
+            ttl: Duration,
+        ): Boolean = true
+
+        override fun releasePrimaryLock(
+            poolName: String,
+            ownerId: String,
+        ) {}
+
+        override fun reapExpiredIdle(
+            poolName: String,
+            now: Instant,
+        ) {}
+
+        override fun snapshotCounters(poolName: String): StoreCounters = StoreCounters(idleCount = 0)
+
+        override fun snapshotIdleEntries(poolName: String): List<IdleEntry> = emptyList()
+
+        override fun getMaxIdle(poolName: String): Int? = null
+
+        override fun setMaxIdle(
+            poolName: String,
+            maxIdle: Int,
+        ) {}
+    }
+
+    /**
+     * Store that starts healthy, then flips to full outage on demand — every method
+     * (including [getDestroyState]) raises [PoolStateStoreUnavailableException]. Used
+     * to exercise the Codex round-5 regression where the namespace-check on the acquire
+     * path aborted before the fallthrough branch could run.
+     */
+    private class OutageStoreWithNamespaceFailure : PoolStateStore {
+        @Volatile var outage: Boolean = false
+
+        private fun bang(op: String): Nothing =
+            throw com.alibaba.opensandbox.sandbox.domain.exceptions.PoolStateStoreUnavailableException(
+                op,
+                RuntimeException("redis unavailable"),
+            )
+
+        override fun tryTakeIdle(poolName: String): String? {
+            if (outage) bang("tryTakeIdle")
+            return null
+        }
+
+        override fun tryTakeIdle(
+            poolName: String,
+            minRemainingTtl: Duration,
+        ): com.alibaba.opensandbox.sandbox.domain.pool.TakeIdleResult {
+            if (outage) bang("tryTakeIdleWithMinTtl")
+            return com.alibaba.opensandbox.sandbox.domain.pool.TakeIdleResult.of(null)
+        }
+
+        override fun putIdle(
+            poolName: String,
+            sandboxId: String,
+        ) {
+            if (outage) bang("putIdle")
+        }
+
+        override fun removeIdle(
+            poolName: String,
+            sandboxId: String,
+        ) {
+            if (outage) bang("removeIdle")
+        }
+
+        override fun tryAcquirePrimaryLock(
+            poolName: String,
+            ownerId: String,
+            ttl: Duration,
+        ): Boolean {
+            if (outage) bang("tryAcquirePrimaryLock")
+            return true
+        }
+
+        override fun renewPrimaryLock(
+            poolName: String,
+            ownerId: String,
+            ttl: Duration,
+        ): Boolean {
+            if (outage) bang("renewPrimaryLock")
+            return true
+        }
+
+        override fun releasePrimaryLock(
+            poolName: String,
+            ownerId: String,
+        ) {
+            if (outage) bang("releasePrimaryLock")
+        }
+
+        override fun reapExpiredIdle(
+            poolName: String,
+            now: Instant,
+        ) {
+            if (outage) bang("reapExpiredIdle")
+        }
+
+        override fun snapshotCounters(poolName: String): StoreCounters {
+            if (outage) bang("snapshotCounters")
+            return StoreCounters(idleCount = 0)
+        }
+
+        override fun snapshotIdleEntries(poolName: String): List<IdleEntry> {
+            if (outage) bang("snapshotIdleEntries")
+            return emptyList()
+        }
+
+        override fun getMaxIdle(poolName: String): Int? {
+            if (outage) bang("getMaxIdle")
+            return null
+        }
+
+        override fun setMaxIdle(
+            poolName: String,
+            maxIdle: Int,
+        ) {
+            if (outage) bang("setMaxIdle")
+        }
+
+        override fun getDestroyState(poolName: String): PoolDestroyState {
+            if (outage) bang("getDestroyState")
+            return PoolDestroyState.ACTIVE
+        }
     }
 
     private class RecordingPoolStateStore(

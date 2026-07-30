@@ -46,6 +46,9 @@ class SandboxService(ABC):
     Implementations should handle creating, managing, and destroying sandboxes.
     """
 
+    def set_tenant_provider(self, provider: object) -> None:
+        """Inject tenant provider (no-op for non-K8s implementations)."""
+
     @staticmethod
     def generate_sandbox_id() -> str:
         """
@@ -256,7 +259,13 @@ class SandboxService(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def get_sandbox_logs(self, sandbox_id: str, tail: int = 100, since: str | None = None) -> str:
+    def get_sandbox_logs(
+        self,
+        sandbox_id: str,
+        tail: int = 100,
+        since: str | None = None,
+        container: str | None = None,
+    ) -> str:
         """
         Retrieve container logs for a sandbox.
 
@@ -264,6 +273,8 @@ class SandboxService(ABC):
             sandbox_id: Unique sandbox identifier
             tail: Number of trailing log lines to return
             since: Only return logs newer than this duration (e.g. "10m", "1h")
+            container: Optional container name. When omitted, backends select a
+                sensible default (typically the user "sandbox" container).
 
         Returns:
             str: Plain-text log output

@@ -58,6 +58,7 @@ func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.Netw
 			log.Warnf("[dns] add resolved IPs to nft failed for domain %q: %v", domain, err)
 		}
 	})
+	nftMgr.StartConnectionRefresh(ctx)
 }
 
 func parseNftOptions() nftables.Options {

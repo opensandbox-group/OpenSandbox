@@ -14,7 +14,6 @@
 
 from opensandbox_server.services.docker.docker_service import (
     DockerSandboxService,
-    PendingSandbox,
 )
 
-__all__ = ["DockerSandboxService", "PendingSandbox"]
+__all__ = ["DockerSandboxService"]

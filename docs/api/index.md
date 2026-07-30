@@ -23,7 +23,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - **Image Support**: Create sandboxes from public or private registries, including registry auth
 - **Timeout Management**: Optional `timeout` on creation (omit or set to `null` to disable automatic expiration) with explicit renewal via API
 - **Endpoint Access**: Retrieve public access endpoints for services running inside sandboxes, including required headers when secured access is enabled
-- **Snapshot Management**: Create snapshots from sandboxes, list snapshots, and delete snapshots
+- **Snapshot Management**: Create snapshots from sandboxes, list snapshots with source/name filters, and delete snapshots
 
 **Main Endpoints (base path `/v1`):**
 - `POST /sandboxes` - Create a sandbox from an image or snapshot with timeout and resource limits
@@ -31,12 +31,13 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `GET /sandboxes/{sandboxId}` - Get full sandbox details (including startup source and entrypoint)
 - `DELETE /sandboxes/{sandboxId}` - Delete a sandbox
 - `POST /sandboxes/{sandboxId}/snapshots` - Create a snapshot from a sandbox
-- `GET /snapshots` - List snapshots with optional sandbox filtering and pagination
+- `GET /snapshots` - List snapshots with optional source sandbox, exact name, and state filtering plus pagination
 - `GET /snapshots/{snapshotId}` - Get snapshot state and metadata
 - `DELETE /snapshots/{snapshotId}` - Delete a snapshot
 - `POST /sandboxes/{sandboxId}/pause` - Pause a sandbox (asynchronous)
 - `POST /sandboxes/{sandboxId}/resume` - Resume a paused sandbox
 - `POST /sandboxes/{sandboxId}/renew-expiration` - Renew sandbox expiration (TTL)
+- `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
 - `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint for a service port
 
 **Authentication:**
@@ -87,8 +88,13 @@ Defines interfaces for executing code, commands, and file operations within sand
 **Command Execution:**
 - `POST /command` - Execute shell command (streaming output)
 - `DELETE /command` - Interrupt command execution
-- `GET /command/status/{session}` - Get foreground/background command status
-- `GET /command/output/{session}` - Fetch accumulated stdout/stderr for a command
+- `GET /command/status/{id}` - Get foreground/background command status
+- `GET /command/{id}/logs` - Fetch accumulated stdout/stderr for a background command
+
+**Bash Session:**
+- `POST /session` - Create a bash session
+- `POST /session/{sessionId}/run` - Run command in a bash session (streaming output)
+- `DELETE /session/{sessionId}` - Delete a bash session
 
 **Filesystem:**
 - `GET /files/info` - Get metadata for files
@@ -108,6 +114,26 @@ Defines interfaces for executing code, commands, and file operations within sand
 **System Metrics:**
 - `GET /metrics` - Get system resource metrics
 - `GET /metrics/watch` - Watch system metrics in real-time (SSE stream)
+
+**Isolated Execution (base path `/v1/isolated`):**
+- `POST /session` - Create an isolated bash session
+- `GET /capabilities` - Get isolator capabilities
+- `GET /session/{sessionId}` - Get isolated session state
+- `DELETE /session/{sessionId}` - Delete an isolated session
+- `POST /session/{sessionId}/run` - Run code in an isolated session (SSE streaming)
+- `GET /session/{sessionId}/diff` - Download upper directory diff
+- `POST /session/{sessionId}/commit` - Commit upper changes to workspace
+- `GET /session/{sessionId}/files/info` - Get file information
+- `GET /session/{sessionId}/files/download` - Download a file
+- `POST /session/{sessionId}/files/upload` - Upload a file
+- `DELETE /session/{sessionId}/files` - Remove files
+- `POST /session/{sessionId}/files/mv` - Rename or move files
+- `POST /session/{sessionId}/files/permissions` - Change file permissions
+- `POST /session/{sessionId}/files/replace` - Replace file content
+- `GET /session/{sessionId}/files/search` - Search files
+- `GET /session/{sessionId}/directories/list` - List directory contents
+- `POST /session/{sessionId}/directories` - Create directories
+- `DELETE /session/{sessionId}/directories` - Delete directories
 
 ### 4. egress-api.yaml
 

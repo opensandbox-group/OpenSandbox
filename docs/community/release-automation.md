@@ -25,7 +25,6 @@ Script path:
 - `python/code-interpreter`
 - `python/mcp/sandbox`
 - `java/sandbox`
-- `java/code-interpreter`
 - `csharp/sandbox`
 - `csharp/code-interpreter`
 - `sdks/sandbox/go`
@@ -40,6 +39,10 @@ Script path:
 - `helm/opensandbox`
 - `helm` (alias of `helm/opensandbox`)
 
+The `java/sandbox` target publishes the Kotlin/JVM SDK release train, including
+`sandbox`, `sandbox-api`, `sandbox-pool-redis`, `code-interpreter`, and
+`sandbox-bom`.
+
 ## Tag Rules
 
 The script aligns with existing workflow triggers:
@@ -51,6 +54,27 @@ The script aligns with existing workflow triggers:
 - plain suffix tags:
   - `<target>/<version>` for docker/k8s/helm targets
   - examples: `docker/execd/v0.3.0`, `helm/opensandbox/0.1.0`
+
+Release tag namespaces are protected by repository rulesets. Only authorized
+release managers may create matching tags, and an existing release tag cannot
+be updated or deleted.
+
+## Release Approval and Source Verification
+
+Hosted publish workflows run a shared release preflight before publishing:
+
+- the release commit must be reachable from `origin/main`
+- non-dry-run releases require approval through the `release` environment
+- the person who triggered the release cannot approve their own deployment
+
+This implements two-person control: one person initiates the release and a
+different Project Maintainer approves it. GitHub environments require one of
+the configured reviewers; they do not natively support requiring two reviewer
+approvals in addition to the initiator.
+
+The hosted Generic Release workflow does not create or push release tags. An
+authorized release manager must create the tag from a commit on `main` before
+running a non-dry-run Generic Release.
 
 ## Release Notes Format
 
@@ -213,13 +237,11 @@ Inputs exposed in the workflow dispatch form:
 - `version`
 - `from_tag` (optional)
 - `initial_release` (boolean)
-- `push_tag` (boolean)
 - `dry_run` (boolean, default `true`)
 
 Dry-run in GitHub Actions:
 
 - set `dry_run=true`
-- set `push_tag=false`
 - check logs for:
   - computed tag (`New tag`)
   - range (`Computed range`)
@@ -228,9 +250,10 @@ Dry-run in GitHub Actions:
 Recommended first run in UI:
 
 - set `dry_run=true`
-- keep `push_tag=false`
 - verify the generated release notes preview in logs
-- rerun with `dry_run=false` and `push_tag=true` when confirmed
+- have an authorized release manager create and push the release tag from
+  `main`
+- select that tag as the workflow ref and rerun with `dry_run=false`
 
 When `dry_run=false`, `.github/workflows/release-generic.yml` uploads an
 explicit `opensandbox-<tag>.tar.gz` source archive and `SHA256SUMS` file to the

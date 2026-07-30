@@ -22,8 +22,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from attrs import define as _attrs_define
 
 from ..models.custom_headers_credential_auth_type import CustomHeadersCredentialAuthType
+from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.credential_substitution import CredentialSubstitution
     from ..models.custom_header_entry import CustomHeaderEntry
 
 
@@ -36,10 +38,12 @@ class CustomHeadersCredentialAuth:
     Attributes:
         type_ (CustomHeadersCredentialAuthType):
         headers (list[CustomHeaderEntry]):
+        substitutions (list[CredentialSubstitution] | Unset):
     """
 
     type_: CustomHeadersCredentialAuthType
     headers: list[CustomHeaderEntry]
+    substitutions: list[CredentialSubstitution] | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         type_ = self.type_.value
@@ -49,6 +53,13 @@ class CustomHeadersCredentialAuth:
             headers_item = headers_item_data.to_dict()
             headers.append(headers_item)
 
+        substitutions: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.substitutions, Unset):
+            substitutions = []
+            for substitutions_item_data in self.substitutions:
+                substitutions_item = substitutions_item_data.to_dict()
+                substitutions.append(substitutions_item)
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -57,11 +68,14 @@ class CustomHeadersCredentialAuth:
                 "headers": headers,
             }
         )
+        if substitutions is not UNSET:
+            field_dict["substitutions"] = substitutions
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.credential_substitution import CredentialSubstitution
         from ..models.custom_header_entry import CustomHeaderEntry
 
         d = dict(src_dict)
@@ -74,9 +88,19 @@ class CustomHeadersCredentialAuth:
 
             headers.append(headers_item)
 
+        _substitutions = d.pop("substitutions", UNSET)
+        substitutions: list[CredentialSubstitution] | Unset = UNSET
+        if _substitutions is not UNSET:
+            substitutions = []
+            for substitutions_item_data in _substitutions:
+                substitutions_item = CredentialSubstitution.from_dict(substitutions_item_data)
+
+                substitutions.append(substitutions_item)
+
         custom_headers_credential_auth = cls(
             type_=type_,
             headers=headers,
+            substitutions=substitutions,
         )
 
         return custom_headers_credential_auth

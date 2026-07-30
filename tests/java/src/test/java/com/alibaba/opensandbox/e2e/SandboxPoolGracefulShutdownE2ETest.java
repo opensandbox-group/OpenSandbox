@@ -1,0 +1,324 @@
+/*
+ * Copyright 2026 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.opensandbox.e2e;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.alibaba.opensandbox.sandbox.SandboxManager;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter;
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolCreationSpec;
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolLifecycleState;
+import com.alibaba.opensandbox.sandbox.domain.pool.SandboxPreparer;
+import com.alibaba.opensandbox.sandbox.infrastructure.pool.InMemoryPoolStateStore;
+import com.alibaba.opensandbox.sandbox.pool.SandboxPool;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+@Tag("e2e")
+@DisplayName("SandboxPool graceful shutdown leak E2E Tests")
+public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
+    private SandboxManager sandboxManager;
+    private String tag;
+
+    @BeforeEach
+    void setup() {
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+    }
+
+    @AfterEach
+    void teardown() {
+        cleanupTaggedSandboxes();
+        if (sandboxManager != null) {
+            sandboxManager.close();
+        }
+    }
+
+    @Test
+    @DisplayName("graceful shutdown publishes warmup completed before drain timeout")
+    @Timeout(value = 4, unit = TimeUnit.MINUTES)
+    void testGracefulShutdownPublishesWarmupCompletedBeforeDrainTimeout() throws Exception {
+        tag = uniqueTag("graceful-complete");
+        InMemoryPoolStateStore stateStore = new InMemoryPoolStateStore();
+        CountDownLatch warmupEntered = new CountDownLatch(1);
+        CountDownLatch releaseWarmup = new CountDownLatch(1);
+        AtomicReference<String> createdSandboxId = new AtomicReference<>();
+        SandboxPool pool =
+                createPool(
+                        stateStore,
+                        Duration.ofSeconds(5),
+                        sandbox -> {
+                            createdSandboxId.set(sandbox.getId());
+                            warmupEntered.countDown();
+                            awaitLatch(releaseWarmup);
+                        });
+        Thread releaser = null;
+
+        try {
+            pool.start();
+            assertTrue(
+                    warmupEntered.await(2, TimeUnit.MINUTES),
+                    "warmup should create a remote sandbox and enter the preparer");
+            assertNotNull(createdSandboxId.get());
+            eventually(
+                    "created warmup sandbox is visible remotely",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> countTaggedSandboxes() == 1);
+
+            releaser =
+                    new Thread(
+                            () -> {
+                                try {
+                                    Thread.sleep(500);
+                                } catch (InterruptedException exception) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                releaseWarmup.countDown();
+                            },
+                            "sandbox-pool-e2e-warmup-releaser");
+            releaser.start();
+
+            long shutdownStartedAt = System.nanoTime();
+            pool.shutdown(true);
+            long shutdownElapsedMillis =
+                    Duration.ofNanos(System.nanoTime() - shutdownStartedAt).toMillis();
+
+            assertTrue(
+                    shutdownElapsedMillis >= 300,
+                    "graceful shutdown should wait for the in-flight warmup");
+            assertEquals(PoolLifecycleState.STOPPED, pool.snapshot().getLifecycleState());
+            assertEquals(1, pool.snapshot().getIdleCount());
+            assertTrue(
+                    pool.snapshotIdleEntries().stream()
+                            .anyMatch(entry -> createdSandboxId.get().equals(entry.getSandboxId())),
+                    "the completed warmup sandbox must be persisted in the idle store");
+
+            pool.releaseAllIdle();
+            eventually(
+                    "released idle sandbox is deleted remotely",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> countTaggedSandboxes() == 0);
+        } finally {
+            releaseWarmup.countDown();
+            if (releaser != null) {
+                releaser.join(5_000);
+            }
+            shutdownAndRelease(pool);
+        }
+    }
+
+    @Test
+    @DisplayName("forced shutdown deletes interrupted warmup sandbox not persisted as idle")
+    @Timeout(value = 4, unit = TimeUnit.MINUTES)
+    void testForcedShutdownDeletesInterruptedWarmupSandboxNotPersistedAsIdle() throws Exception {
+        tag = uniqueTag("forced-cleanup");
+        InMemoryPoolStateStore stateStore = new InMemoryPoolStateStore();
+        CountDownLatch warmupEntered = new CountDownLatch(1);
+        CountDownLatch blockWarmup = new CountDownLatch(1);
+        AtomicReference<String> createdSandboxId = new AtomicReference<>();
+        AtomicBoolean warmupInterrupted = new AtomicBoolean(false);
+        SandboxPool pool =
+                createPool(
+                        stateStore,
+                        Duration.ofMillis(500),
+                        sandbox -> {
+                            createdSandboxId.set(sandbox.getId());
+                            warmupEntered.countDown();
+                            try {
+                                blockWarmup.await();
+                            } catch (InterruptedException exception) {
+                                warmupInterrupted.set(true);
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException(
+                                        "warmup interrupted during forced shutdown", exception);
+                            }
+                        });
+
+        try {
+            pool.start();
+            assertTrue(
+                    warmupEntered.await(2, TimeUnit.MINUTES),
+                    "warmup should create a remote sandbox and enter the preparer");
+            assertNotNull(createdSandboxId.get());
+            eventually(
+                    "unpersisted warmup sandbox is visible remotely",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> countTaggedSandboxes() == 1);
+
+            long shutdownStartedAt = System.nanoTime();
+            pool.shutdown(true);
+            long shutdownElapsedMillis =
+                    Duration.ofNanos(System.nanoTime() - shutdownStartedAt).toMillis();
+
+            assertTrue(
+                    shutdownElapsedMillis >= 350,
+                    "graceful shutdown should wait for drain timeout before forcing warmup stop");
+            assertTrue(warmupInterrupted.get(), "warmup should be interrupted after drain timeout");
+            assertEquals(PoolLifecycleState.STOPPED, pool.snapshot().getLifecycleState());
+            assertEquals(
+                    0,
+                    pool.snapshot().getIdleCount(),
+                    "failed warmup sandbox must not be persisted as idle");
+            assertFalse(
+                    pool.snapshotIdleEntries().stream()
+                            .anyMatch(entry -> createdSandboxId.get().equals(entry.getSandboxId())),
+                    "failed warmup sandbox ID must not remain in the idle store");
+            eventually(
+                    "interrupted warmup sandbox is deleted remotely",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> countTaggedSandboxes() == 0);
+        } finally {
+            blockWarmup.countDown();
+            shutdownAndRelease(pool);
+        }
+    }
+
+    private SandboxPool createPool(
+            InMemoryPoolStateStore stateStore,
+            Duration drainTimeout,
+            SandboxPreparer preparer) {
+        PoolCreationSpec creationSpec =
+                PoolCreationSpec.builder()
+                        .image(getSandboxImage())
+                        .entrypoint(List.of("tail -f /dev/null"))
+                        .metadata(Map.of("tag", tag, "suite", "sandbox-pool-graceful-shutdown-e2e"))
+                        .env(
+                                Map.of(
+                                        "E2E_TEST",
+                                        "true",
+                                        "EXECD_API_GRACE_SHUTDOWN",
+                                        "3s",
+                                        "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
+                                        "1s"))
+                        .build();
+        return SandboxPool.builder()
+                .poolName("pool-" + tag)
+                .ownerId("owner-" + tag)
+                .maxIdle(1)
+                .warmupConcurrency(1)
+                .stateStore(stateStore)
+                .connectionConfig(sharedConnectionConfig)
+                .creationSpec(creationSpec)
+                .warmupSandboxPreparer(preparer)
+                .reconcileInterval(Duration.ofMinutes(5))
+                .drainTimeout(drainTimeout)
+                .build();
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("warmup interrupted unexpectedly", exception);
+        }
+    }
+
+    private void eventually(
+            String description, Duration timeout, Duration interval, BooleanSupplier condition)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        Throwable lastError = null;
+        while (System.nanoTime() < deadline) {
+            try {
+                if (condition.getAsBoolean()) {
+                    return;
+                }
+            } catch (Throwable throwable) {
+                lastError = throwable;
+            }
+            Thread.sleep(interval.toMillis());
+        }
+        if (lastError != null) {
+            throw new AssertionError(
+                    "Timed out waiting for "
+                            + description
+                            + ", last error: "
+                            + lastError.getMessage(),
+                    lastError);
+        }
+        throw new AssertionError("Timed out waiting for " + description);
+    }
+
+    private int countTaggedSandboxes() {
+        PagedSandboxInfos infos =
+                sandboxManager.listSandboxInfos(
+                        SandboxFilter.builder().metadata(Map.of("tag", tag)).pageSize(20).build());
+        return infos.getSandboxInfos().size();
+    }
+
+    private void cleanupTaggedSandboxes() {
+        if (sandboxManager == null || tag == null || tag.isBlank()) {
+            return;
+        }
+        try {
+            PagedSandboxInfos infos =
+                    sandboxManager.listSandboxInfos(
+                            SandboxFilter.builder()
+                                    .metadata(Map.of("tag", tag))
+                                    .pageSize(20)
+                                    .build());
+            infos.getSandboxInfos()
+                    .forEach(
+                            info -> {
+                                try {
+                                    sandboxManager.killSandbox(info.getId());
+                                } catch (Exception ignored) {
+                                }
+                            });
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void shutdownAndRelease(SandboxPool pool) {
+        if (pool == null) {
+            return;
+        }
+        try {
+            pool.shutdown(false);
+        } catch (Exception ignored) {
+        }
+        try {
+            pool.releaseAllIdle();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String uniqueTag(String scenario) {
+        return "e2e-pool-" + scenario + "-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+}

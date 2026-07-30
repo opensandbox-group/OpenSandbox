@@ -49,8 +49,44 @@ def test_allocate_host_port_probes_docker_publish_address(monkeypatch) -> None:
 
 
 def test_allocate_port_bindings_keep_docker_publish_host(monkeypatch) -> None:
-    monkeypatch.setattr(port_allocator, "allocate_host_port", lambda: 45678)
+    monkeypatch.setattr(port_allocator, "allocate_host_port", lambda min_port=40000, max_port=60000, attempts=50: 45678)
 
     bindings = port_allocator.allocate_port_bindings(["8080"])
 
     assert bindings == {"8080": (port_allocator.DOCKER_PUBLISH_HOST, 45678)}
+
+
+def test_allocate_host_port_respects_custom_range(monkeypatch) -> None:
+    """allocate_host_port uses passed min/max instead of defaults."""
+    monkeypatch.setattr(port_allocator.random, "randint", lambda a, b: 41000)
+    bound_addresses: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        port_allocator.socket,
+        "socket",
+        lambda family, sock_type: _FakeSocket(bound_addresses),
+    )
+
+    port = port_allocator.allocate_host_port(min_port=41000, max_port=41100, attempts=1)
+
+    assert port == 41000
+    assert bound_addresses == [(port_allocator.PORT_PROBE_HOST, 41000)]
+
+
+def test_allocate_port_bindings_passes_custom_range(monkeypatch) -> None:
+    """allocate_port_bindings forwards custom range to allocate_host_port."""
+    calls: list[tuple[int, int]] = []
+
+    def tracked_allocate(min_port=40000, max_port=60000, attempts=50):
+        calls.append((min_port, max_port))
+        return 41000
+
+    monkeypatch.setattr(port_allocator, "allocate_host_port", tracked_allocate)
+
+    bindings = port_allocator.allocate_port_bindings(
+        ["8080"],
+        min_port=41000,
+        max_port=41100,
+    )
+
+    assert calls == [(41000, 41100)]
+    assert bindings == {"8080": (port_allocator.DOCKER_PUBLISH_HOST, 41000)}

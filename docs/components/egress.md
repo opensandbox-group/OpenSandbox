@@ -9,6 +9,10 @@ The **Egress** is a core component of OpenSandbox that provides **FQDN-based egr
 
 It runs alongside the sandbox application container (sharing the same network namespace) and enforces declared network policies.
 
+::: warning Pooled sandboxes
+The lifecycle API cannot add this sidecar to a pod that was already created by a Pool. It therefore rejects per-request `networkPolicy` together with `extensions.poolRef` instead of silently ignoring the policy. Put required egress controls in the Pool pod template before pods are created, or use a non-pooled sandbox for per-request policies.
+:::
+
 ## Features
 
 - **FQDN-based Allowlist**: Control outbound traffic by domain name (e.g., `api.github.com`).
@@ -17,9 +21,9 @@ It runs alongside the sandbox application container (sharing the same network na
 - **Transparent Interception**: Uses transparent DNS proxying; no application configuration required.
 - **Experimental: Transparent HTTPS MITM (mitmproxy)**: Optional transparent TLS interception for outbound `80/443` traffic in the sidecar network namespace.
 - **Dynamic DNS (dns+nft mode)**: When a domain is allowed and the proxy resolves it, the resolved A/AAAA IPs are added to nftables with TTL so that default-deny + domain-allow is enforced at the network layer.
-- **Credential Vault**: Automatic credential injection (bearer, basic, API-key, custom headers) for allowed hosts via transparent mitmproxy. See [Credential Vault](/guides/credential-vault).
+- **Credential Vault**: Automatic credential injection (bearer, basic, API-key, custom headers, and scoped placeholder substitutions) for allowed hosts via transparent mitmproxy. See [Credential Vault](/guides/credential-vault).
 - **Privilege Isolation**: Requires `CAP_NET_ADMIN` only for the sidecar; the application container runs unprivileged.
-- **Fail-Closed Enforcement**: `iptables` setup is required; the sidecar exits on failure to guarantee no traffic leaks without enforcement. Optional subsystems (OpenTelemetry, startup hooks) degrade gracefully.
+- **Fail-Closed Enforcement**: DNS redirect setup is required through `iptables` or the native nft fallback; the sidecar exits if no enforced redirect can be installed. Optional subsystems (OpenTelemetry, startup hooks) degrade gracefully.
 
 ## Architecture
 
@@ -34,6 +38,8 @@ The egress control is implemented as a **Sidecar** that shares the network names
 2.  **Network Filter (Layer 2)** (when `OPENSANDBOX_EGRESS_MODE=dns+nft`):
     - Uses `nftables` to enforce IP-level allow/deny. Resolved IPs for allowed domains are added to dynamic allow sets with TTL (dynamic DNS).
     - At startup, the sidecar whitelists **127.0.0.1** (redirect target for the proxy) and **nameserver IPs** from `/etc/resolv.conf` so DNS resolution and proxy upstream work (including private DNS). Nameserver count is capped and invalid IPs are filtered.
+
+Dynamic entries initially use the DNS TTL plus a short safety margin, clamped to 60–360 seconds. The sidecar polls active TCP connections every 30 seconds and renews only DNS-authorized remote IPs that are still in use. When activity ends, one final six-minute renewal provides a bounded reconnect window before the entry expires normally. This means an active TCP connection can keep an IP authorized beyond its original DNS TTL; UDP and QUIC entries are not connection-tracked and continue to expire according to DNS-driven TTL updates.
 
 ### Kubernetes Service Access Under `defaultAction: deny`
 
@@ -76,7 +82,7 @@ Optional advanced features:
 - DoH/DoT controls: `OPENSANDBOX_EGRESS_BLOCK_DOH_443`, `OPENSANDBOX_EGRESS_DOH_BLOCKLIST`
 - Custom DNS upstream: `OPENSANDBOX_EGRESS_DNS_UPSTREAM` (comma-separated IPs, optional `:port`), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT` (default `5` seconds)
 - DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (enable), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC`
-- Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
+- Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
 - Metrics: `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (extra key=value attributes for OTLP metrics and structured log fields)
 
 ### Always-Rules Files
@@ -157,6 +163,12 @@ APIs, environment variables, and behavior may change.
 
 Optional transparent HTTPS interception for outbound `80/443` traffic in the sidecar network namespace.
 
+Extra ports can be added via the experimental `OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS` env var (comma-separated, e.g. `8080,8443`), which is appended to the always-on `80,443`. The total port count (including 80/443) must not exceed the iptables `multiport` limit of 15; invalid values fail egress startup rather than silently intercept a subset.
+
+::: warning Extra ports limitation
+On extra ports, mitmproxy still decrypts and logs traffic normally, but the Credential Vault's binding matcher currently only fires on the canonical `80/443` — bindings will not match requests to custom ports until follow-up work extends the matcher.
+:::
+
 ### Credential Vault
 
 The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer.
@@ -170,6 +182,31 @@ See [Credential Vault](/guides/credential-vault) for full API usage, binding rul
 ### Observability (OpenTelemetry)
 
 Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). OTLP log export is not used.
+
+#### DNS latency buckets
+
+`egress.dns.query.duration` is recorded in **seconds** and declares its bucket boundaries
+explicitly:
+
+```
+0.001  0.0025  0.005  0.01  0.025  0.05  0.1  0.25  0.5  1  2.5  5  10  15  30  60  120  300  600
+```
+
+The head resolves a cache hit up to one upstream timeout
+(`OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT`, 5s by default). The coarse tail is there because
+the recorded duration covers the **whole resolver chain** — forwarding walks the upstreams
+serially with the full timeout each, so a query can legitimately take
+`timeout x len(upstreams)`. A late **success** lands in the tail too, not only an
+exhausted failure: a query can succeed on the second resolver after the first burned a full
+timeout. Past the last boundary quantile resolution is lost by construction — the chain has no
+finite worst case, since the resolver list is unbounded — and `_count` is what remains.
+
+If you tune these, keep them on a seconds ladder. The SDK default boundaries are the spec's
+millisecond ladder (`0, 5, 10, … 10000`), which would put every realistic DNS latency in the
+single `le=5` bucket and make `histogram_quantile()` return an interpolation rather than a
+measurement.
+
+Full metric inventory and attribute semantics: [egress OpenTelemetry reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/opentelemetry.md).
 
 ## Build & Run
 
@@ -245,7 +282,7 @@ ENTRYPOINT: supervisor --pre-start=cleanup.sh --name=egress --grace-period=20s -
 Egress-specific configuration:
 
 - **`--grace-period=20s`**: Egress needs extra time to drain DNS connections and tear down iptables/nft rules on shutdown (default is 10 s).
-- **Pre-start hook** (`cleanup.sh`): Reaps orphaned `mitmdump` processes from a previous crash so the new egress can bind the MITM listen port. Intentionally does NOT tear down iptables/nft rules -- keeping enforcement active during the backoff window protects the workload.
+- **Pre-start hook** (`cleanup.sh`): Reaps orphaned `mitmdump` processes from a previous crash and removes stale DNS redirect iptables/native nft state that would otherwise point port 53 at a dead proxy. It does not manage the `inet opensandbox` policy table; the nftables manager deletes and recreates that table when policy enforcement starts.
 
 ## Troubleshooting
 

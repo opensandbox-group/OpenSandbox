@@ -167,6 +167,11 @@ def test_proxy_forwards_filtered_headers_and_query(
         "Trailer": "X-Checksum",
         "X-Hop-Temp": "drop-me",
         "X-Trace": "trace-1",
+        "Forwarded": "for=attacker;proto=https",
+        "X-Forwarded-For": "203.0.113.99",
+        "X-Forwarded-Host": "attacker.example",
+        "X-Forwarded-Proto": "https",
+        "X-Real-Ip": "203.0.113.99",
     }
 
     response = client.post(
@@ -195,6 +200,11 @@ def test_proxy_forwards_filtered_headers_and_query(
     assert SANDBOX_API_KEY_HEADER.lower() not in lowered_headers
     assert "x-hop-temp" not in lowered_headers
     assert lowered_headers.get("x-trace") == "trace-1"
+    assert "forwarded" not in lowered_headers
+    assert "x-real-ip" not in lowered_headers
+    assert lowered_headers.get("x-forwarded-proto") == "http"
+    assert lowered_headers.get("x-forwarded-host") != "attacker.example"
+    assert lowered_headers.get("x-forwarded-for") != "203.0.113.99"
     assert fake_client.response.aclose_called is True
 
 
@@ -238,11 +248,12 @@ def test_proxy_root_path_forwards_endpoint_headers_and_query(
     assert lowered_headers["x-trace"] == "trace-root"
 
 
-def test_proxy_does_not_auto_inject_secure_access_header(
+def test_proxy_rejects_missing_secure_access_header(
     client: TestClient,
     auth_headers: dict,
     monkeypatch,
 ) -> None:
+    """Regression test: requests without the required secure-access token are rejected."""
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
@@ -269,19 +280,16 @@ def test_proxy_does_not_auto_inject_secure_access_header(
         headers={**auth_headers, "X-Trace": "trace-root"},
     )
 
-    assert response.status_code == 200
-    lowered_headers = {
-        key.lower(): value for key, value in fake_client.built["headers"].items()
-    }
-    assert lowered_headers["opensandbox-ingress-to"] == "sbx-123-44772"
-    assert OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower() not in lowered_headers
+    assert response.status_code == 401
+    assert fake_client.built is None  # request was never forwarded
 
 
-def test_proxy_forwards_client_supplied_secure_access_header(
+def test_proxy_rejects_mismatched_secure_access_header(
     client: TestClient,
     auth_headers: dict,
     monkeypatch,
 ) -> None:
+    """Regression test: requests with a wrong secure-access token are rejected."""
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
@@ -306,7 +314,45 @@ def test_proxy_forwards_client_supplied_secure_access_header(
         "/v1/sandboxes/sbx-123/proxy/44772",
         headers={
             **auth_headers,
-            OPEN_SANDBOX_SECURE_ACCESS_HEADER: "client-token",
+            OPEN_SANDBOX_SECURE_ACCESS_HEADER: "wrong-token",
+        },
+    )
+
+    assert response.status_code == 401
+    assert fake_client.built is None  # request was never forwarded
+
+
+def test_proxy_allows_valid_secure_access_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """Valid secure-access token passes; header is stripped from forwarded request."""
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+            assert sandbox_id == "sbx-123"
+            assert port == 44772
+            assert resolve_internal is True
+            return Endpoint(
+                endpoint="10.57.1.91:40109/base",
+                headers={
+                    OPEN_SANDBOX_INGRESS_HEADER: "sbx-123-44772",
+                    OPEN_SANDBOX_SECURE_ACCESS_HEADER: "server-side-token",
+                },
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(chunks=[b"root-ok"])
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/44772",
+        headers={
+            **auth_headers,
+            OPEN_SANDBOX_SECURE_ACCESS_HEADER: "server-side-token",
         },
     )
 
@@ -314,7 +360,10 @@ def test_proxy_forwards_client_supplied_secure_access_header(
     lowered_headers = {
         key.lower(): value for key, value in fake_client.built["headers"].items()
     }
-    assert lowered_headers[OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower()] == "client-token"
+    # Token is stripped from forwarded headers — sandbox app should not receive it
+    assert OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower() not in lowered_headers
+    # Other endpoint headers are still forwarded
+    assert lowered_headers["opensandbox-ingress-to"] == "sbx-123-44772"
 
 
 def test_proxy_forwards_get_request_with_query_params(
@@ -537,7 +586,11 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
             assert resolve_internal is True
             return Endpoint(
                 endpoint="10.57.1.91:40109/proxy/44772",
-                headers={OPEN_SANDBOX_INGRESS_HEADER: "sbx-123-44772"},
+                headers={
+                    OPEN_SANDBOX_INGRESS_HEADER: "sbx-123-44772",
+                    "X-Forwarded-Proto": "https",
+                    "X-Forwarded-For": "198.51.100.20",
+                },
             )
 
     monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
@@ -553,6 +606,11 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
             "Cookie": "sid=secret",
             "Origin": "https://ui.example.com",
             "X-Trace": "trace-ws",
+            "Forwarded": "for=attacker;proto=https",
+            "X-Forwarded-For": "203.0.113.99",
+            "X-Forwarded-Host": "attacker.example",
+            "X-Forwarded-Proto": "https",
+            "X-Real-Ip": "203.0.113.99",
         },
         subprotocols=["claw.v1"],
     ) as websocket:
@@ -572,6 +630,11 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
     assert "authorization" not in lowered_headers
     assert "cookie" not in lowered_headers
     assert "origin" not in lowered_headers
+    assert "forwarded" not in lowered_headers
+    assert "x-real-ip" not in lowered_headers
+    assert lowered_headers["x-forwarded-proto"] == "http"
+    assert lowered_headers["x-forwarded-host"] == "testserver"
+    assert lowered_headers["x-forwarded-for"] == "testclient"
     assert lowered_headers["opensandbox-ingress-to"] == "sbx-123-44772"
     assert lowered_headers["x-trace"] == "trace-ws"
 

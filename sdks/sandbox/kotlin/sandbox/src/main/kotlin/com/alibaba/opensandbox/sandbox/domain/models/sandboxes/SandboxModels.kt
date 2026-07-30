@@ -714,6 +714,7 @@ class Volume private constructor(
  * @property image Image specification used to create this sandbox
  * @property platform Effective platform used for sandbox provisioning
  * @property metadata Custom metadata attached to the sandbox
+ * @property extensions Opaque extension data returned by the server
  */
 class SandboxInfo(
     val id: String,
@@ -725,6 +726,7 @@ class SandboxInfo(
     val snapshotId: String? = null,
     val platform: PlatformSpec? = null,
     val metadata: Map<String, String>? = null,
+    val extensions: Map<String, String>? = null,
 )
 
 /**
@@ -747,10 +749,12 @@ class SandboxStatus(
  *
  * @property id Unique identifier of the newly created sandbox
  * @property platform Effective platform used for sandbox provisioning
+ * @property extensions Opaque extension data returned by the server
  */
 class SandboxCreateResponse(
     val id: String,
     val platform: PlatformSpec? = null,
+    val extensions: Map<String, String>? = null,
 )
 
 /**
@@ -794,6 +798,7 @@ class SnapshotInfo(
 
 class SnapshotFilter private constructor(
     val sandboxId: String?,
+    val name: String?,
     val states: List<String>?,
     val pageSize: Int?,
     val page: Int?,
@@ -805,12 +810,18 @@ class SnapshotFilter private constructor(
 
     class Builder {
         private var sandboxId: String? = null
+        private var name: String? = null
         private var states: List<String>? = null
         private var pageSize: Int? = null
         private var page: Int? = null
 
         fun sandboxId(sandboxId: String): Builder {
             this.sandboxId = sandboxId
+            return this
+        }
+
+        fun name(name: String): Builder {
+            this.name = name
             return this
         }
 
@@ -836,7 +847,7 @@ class SnapshotFilter private constructor(
             return this
         }
 
-        fun build(): SnapshotFilter = SnapshotFilter(sandboxId, states, pageSize, page)
+        fun build(): SnapshotFilter = SnapshotFilter(sandboxId, name, states, pageSize, page)
     }
 }
 

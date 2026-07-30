@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import com.alibaba.opensandbox.sandbox.Sandbox;
 import com.alibaba.opensandbox.sandbox.SandboxManager;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolAcquireFailedException;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyedException;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolEmptyException;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest;
@@ -29,8 +30,12 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter;
 import com.alibaba.opensandbox.sandbox.domain.pool.AcquirePolicy;
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolCreationSpec;
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyOptions;
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyResult;
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyState;
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.RedisPoolStateStore;
 import com.alibaba.opensandbox.sandbox.pool.SandboxPool;
+import com.alibaba.opensandbox.sandbox.pool.SandboxPoolManager;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -358,6 +363,123 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
 
         assertEquals(
                 2, acquiredIds.size(), "two concurrent acquires should get two distinct sandboxes");
+    }
+
+    @Test
+    @DisplayName("Redis DESTROYING fence blocks existing and replacement pool nodes")
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void testDestroyingFenceBlocksRedisBackedPoolNodes() throws Exception {
+        tag = "e2e-redis-destroying-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-destroying-" + tag;
+        String ownerA = "owner-a-" + tag;
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
+        RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolA =
+                createPoolBuilder(poolName, ownerA, storeA, 1)
+                        .reconcileInterval(Duration.ofMinutes(5))
+                        .build();
+        SandboxPool poolB =
+                createPoolBuilder(poolName, "owner-b-" + tag, storeB, 1)
+                        .reconcileInterval(Duration.ofMinutes(5))
+                        .build();
+        pools.add(poolA);
+        pools.add(poolB);
+        poolA.start();
+        poolB.start();
+
+        eventually(
+                "Redis-backed DESTROYING fence target warms one shared idle sandbox",
+                AWAIT_TIMEOUT,
+                Duration.ofSeconds(1),
+                () -> storeA.snapshotCounters(poolName).getIdleCount() >= 1);
+
+        storeA.beginDestroy(poolName, "destroyer-" + tag);
+
+        assertEquals(PoolDestroyState.DESTROYING, storeA.getDestroyState(poolName));
+        assertFalse(
+                storeA.tryAcquirePrimaryLock(poolName, "owner-c-" + tag, Duration.ofSeconds(30)));
+        assertFalse(storeA.renewPrimaryLock(poolName, ownerA, Duration.ofSeconds(30)));
+        assertThrows(PoolDestroyedException.class, () -> storeA.putIdle(poolName, "blocked-id"));
+        assertThrows(PoolDestroyedException.class, () -> storeB.setMaxIdle(poolName, 2));
+
+        assertThrows(
+                PoolDestroyedException.class,
+                () -> poolA.acquire(Duration.ofMinutes(5), AcquirePolicy.DIRECT_CREATE));
+        assertThrows(
+                PoolDestroyedException.class,
+                () -> poolB.acquire(Duration.ofMinutes(5), AcquirePolicy.DIRECT_CREATE));
+        assertThrows(PoolDestroyedException.class, () -> poolA.resize(1));
+
+        SandboxPool replacement =
+                createPoolBuilder(poolName, "owner-replacement-" + tag, storeB, 1)
+                        .reconcileInterval(Duration.ofMinutes(5))
+                        .build();
+        assertThrows(PoolDestroyedException.class, replacement::start);
+    }
+
+    @Test
+    @DisplayName("Redis destroy on one node fences all pool nodes and preserves tombstone")
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void testDestroyFencesAllRedisBackedPoolNodes() throws Exception {
+        tag = "e2e-redis-destroy-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-destroy-" + tag;
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
+        RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolA =
+                createPoolBuilder(poolName, "owner-a-" + tag, storeA, 1)
+                        .reconcileInterval(Duration.ofMinutes(5))
+                        .build();
+        SandboxPool poolB =
+                createPoolBuilder(poolName, "owner-b-" + tag, storeB, 1)
+                        .reconcileInterval(Duration.ofMinutes(5))
+                        .build();
+        pools.add(poolA);
+        pools.add(poolB);
+        poolA.start();
+        poolB.start();
+
+        eventually(
+                "Redis-backed destroy target warms one shared idle sandbox",
+                AWAIT_TIMEOUT,
+                Duration.ofSeconds(1),
+                () -> storeA.snapshotCounters(poolName).getIdleCount() >= 1);
+
+        SandboxPoolManager poolManager =
+                SandboxPoolManager.builder()
+                        .stateStore(storeA)
+                        .connectionConfig(sharedConnectionConfig)
+                        .ownerId("manager-" + tag)
+                        .build();
+        PoolDestroyResult result = poolManager.destroy(poolName, new PoolDestroyOptions());
+
+        assertEquals(PoolDestroyState.DESTROYED, result.getState());
+        assertTrue(result.getPersistentStateCleared(), "destroy should clear Redis pool state");
+        assertTrue(result.getDrainedIdleCount() >= 1, "destroy should drain shared idle ids");
+        assertEquals(result.getDrainedIdleCount(), result.getKilledIdleCount());
+        assertEquals(PoolDestroyState.DESTROYED, storeA.getDestroyState(poolName));
+        assertEquals(0, storeA.snapshotCounters(poolName).getIdleCount());
+        assertNull(storeA.getMaxIdle(poolName));
+        assertFalse(
+                storeA.tryAcquirePrimaryLock(poolName, "owner-c-" + tag, Duration.ofSeconds(30)));
+        assertFalse(storeA.renewPrimaryLock(poolName, "owner-a-" + tag, Duration.ofSeconds(30)));
+
+        assertThrows(
+                PoolDestroyedException.class,
+                () -> poolA.acquire(Duration.ofMinutes(5), AcquirePolicy.DIRECT_CREATE));
+        assertThrows(
+                PoolDestroyedException.class,
+                () -> poolB.acquire(Duration.ofMinutes(5), AcquirePolicy.DIRECT_CREATE));
+        assertThrows(PoolDestroyedException.class, () -> poolA.resize(1));
+
+        SandboxPool replacement =
+                createPoolBuilder(poolName, "owner-replacement-" + tag, storeB, 1)
+                        .reconcileInterval(Duration.ofMinutes(5))
+                        .build();
+        assertThrows(PoolDestroyedException.class, replacement::start);
     }
 
     @Test

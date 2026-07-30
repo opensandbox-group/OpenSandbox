@@ -41,6 +41,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.sandboxes import SandboxEndpoint
+from opensandbox.transport import unwrap_retry_transport
 
 from code_interpreter.adapters.converter.code_execution_converter import (
     CodeExecutionConverter,
@@ -130,6 +131,9 @@ class CodesAdapter(Codes):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
+        # SSE bootstraps bypass the retry wrapper: request bodies are
+        # not replayable and a non-idempotent status opt-in would cause
+        # duplicate execution on a resent SSE POST.
         self._sse_client = httpx.AsyncClient(
             headers=sse_headers,
             timeout=httpx.Timeout(
@@ -138,7 +142,7 @@ class CodesAdapter(Codes):
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=self.connection_config.transport,
+            transport=unwrap_retry_transport(self.connection_config.transport),
         )
 
     async def _get_client(self):
@@ -216,7 +220,9 @@ class CodesAdapter(Codes):
             )
             handle_api_error(response_obj, "List code contexts")
             parsed_list = require_parsed(response_obj, list, "List code contexts")
-            return [CodeExecutionConverter.from_api_code_context(c) for c in parsed_list]
+            return [
+                CodeExecutionConverter.from_api_code_context(c) for c in parsed_list
+            ]
         except Exception as e:
             logger.error("Failed to list contexts", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -269,7 +275,11 @@ class CodesAdapter(Codes):
             raise InvalidArgumentException("Code cannot be empty")
 
         try:
-            if context is not None and language is not None and context.language != language:
+            if (
+                context is not None
+                and language is not None
+                and context.language != language
+            ):
                 raise InvalidArgumentException(
                     f"language '{language}' must match context.language '{context.language}'"
                 )
@@ -299,9 +309,7 @@ class CodesAdapter(Codes):
                     await response.aread()
                     error_body = response.text
                     logger.error(
-                        "Failed to run code. Status: %s, Body: %s",
-                        response.status_code,
-                        error_body,
+                        f"Failed to run code. Status: {response.status_code}, Body: {error_body}"
                     )
                     raise SandboxApiException(
                         message=f"Failed to run code. Status code: {response.status_code}",
@@ -325,18 +333,16 @@ class CodesAdapter(Codes):
                         event_node = EventNode(**event_dict)
                         await dispatcher.dispatch(event_node)
                     except json.JSONDecodeError:
-                        logger.debug("Failed to parse SSE line: %s", line)
+                        logger.debug(f"Failed to parse SSE line: {line}")
                         continue
                     except Exception as e:
-                        logger.error("Error processing event: %s", data, exc_info=e)
+                        logger.error(f"Error processing event: {data}", exc_info=e)
                         continue
 
             return execution
 
         except Exception as e:
-            logger.error(
-                "Failed to run code (length: %s)", len(code), exc_info=e
-            )
+            logger.error(f"Failed to run code (length: {len(code)})", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def interrupt(self, execution_id: str) -> None:

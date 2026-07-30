@@ -1,5 +1,20 @@
 #!/bin/bash
-# Smoke test: build execd image, extract execd+bwrap, verify bwrap works.
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Smoke test: build execd image, extract execd+bwrap+the native workload gate,
+# and verify the packaged isolation artifacts work.
 #
 # Prerequisites: docker
 #
@@ -43,16 +58,25 @@ echo ">> Image built."
 # Step 2: Extract binaries from image
 # -------------------------------------------------------------------
 echo ""
-echo ">> Step 2: Extracting execd and bwrap from image..."
+echo ">> Step 2: Extracting execd, bwrap, and workload gate from image..."
 mkdir -p "${SMOKE_DIR}"
 docker run --rm \
   --entrypoint "" \
   -v "${SMOKE_DIR}:/out" \
   "${IMAGE}" \
-  sh -c 'cp /execd /usr/local/bin/bwrap /out/ && chmod +x /out/execd /out/bwrap'
+  sh -c 'cp /execd /usr/local/bin/bwrap /out/ && \
+    cp /usr/local/libexec/opensandbox-session-gate /out/session-gate-source && \
+    cp /opt/opensandbox/opensandbox-session-gate /out/session-gate-runtime && \
+    chmod +x /out/execd /out/bwrap \
+      /out/session-gate-source /out/session-gate-runtime'
 
 echo ">> Extracted:"
-ls -lh "${SMOKE_DIR}/execd" "${SMOKE_DIR}/bwrap"
+ls -lh \
+  "${SMOKE_DIR}/execd" \
+  "${SMOKE_DIR}/bwrap" \
+  "${SMOKE_DIR}/session-gate-source" \
+  "${SMOKE_DIR}/session-gate-runtime"
+cmp "${SMOKE_DIR}/session-gate-source" "${SMOKE_DIR}/session-gate-runtime"
 
 # -------------------------------------------------------------------
 # Step 3: Verify bwrap is static
@@ -156,6 +180,7 @@ echo "========================================="
 echo " Smoke Test PASSED"
 echo "========================================="
 echo "  bwrap: static binary, namespace works"
+echo "  gate: native fail-closed workload gate packaged"
 echo "  execd: starts, serves /ping"
 echo "  image: ${IMAGE}"
 echo ""

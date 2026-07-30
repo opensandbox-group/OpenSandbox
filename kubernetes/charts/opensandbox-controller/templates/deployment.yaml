@@ -1,3 +1,4 @@
+{{- $metrics := .Values.controller.metrics | default dict -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +53,10 @@ spec:
         {{- end }}
         - --health-probe-bind-address=:8081
         - --zap-log-level={{ .Values.controller.logLevel }}
+        {{- if $metrics.enabled }}
+        - --metrics-bind-address=:{{ $metrics.port | default 8080 }}
+        - --metrics-secure={{ $metrics.secure | default false }}
+        {{- end }}
         {{- if and .Values.controller.kubeClient (gt (int .Values.controller.kubeClient.qps) 0) }}
         - --kube-client-qps={{ .Values.controller.kubeClient.qps }}
         {{- end }}
@@ -76,6 +81,9 @@ spec:
         {{- if .Values.controller.snapshot.snapshotPushSecret }}
         - --snapshot-push-secret={{ .Values.controller.snapshot.snapshotPushSecret }}
         {{- end }}
+        {{- if .Values.controller.snapshot.imageCommitterPullSecret }}
+        - --image-committer-pull-secret={{ .Values.controller.snapshot.imageCommitterPullSecret }}
+        {{- end }}
         {{- if .Values.controller.snapshot.resumePullSecret }}
         - --resume-pull-secret={{ .Values.controller.snapshot.resumePullSecret }}
         {{- end }}
@@ -83,6 +91,11 @@ spec:
         - name: health
           containerPort: 8081
           protocol: TCP
+        {{- if $metrics.enabled }}
+        - name: metrics
+          containerPort: {{ $metrics.port | default 8080 }}
+          protocol: TCP
+        {{- end }}
         {{- with .Values.controller.containerSecurityContext }}
         securityContext:
           {{- toYaml . | nindent 10 }}
@@ -115,15 +128,15 @@ spec:
         env:
         {{- toYaml .Values.extraEnv | nindent 8 }}
         {{- end }}
-        volumeMounts:
         {{- with .Values.extraVolumeMounts }}
+        volumeMounts:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- with .Values.extraContainers }}
       {{- toYaml . | nindent 6 }}
       {{- end }}
-      volumes:
       {{- with .Values.extraVolumes }}
+      volumes:
       {{- toYaml . | nindent 6 }}
       {{- end }}
       {{- with .Values.controller.nodeSelector }}

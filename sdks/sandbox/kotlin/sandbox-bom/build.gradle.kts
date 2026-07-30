@@ -23,11 +23,11 @@ dependencies {
         api(project(":sandbox"))
         api(project(":sandbox-api"))
         api(project(":sandbox-pool-redis"))
+        api(project(":code-interpreter"))
 
         api(libs.kotlin.stdlib)
         api(libs.okhttp)
         api(libs.okhttp.logging)
-        api(libs.kotlinx.serialization.json)
         api(libs.slf4j.api)
     }
 }
