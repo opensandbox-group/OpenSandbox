@@ -293,7 +293,11 @@ class FilesystemAdapterSync(FilesystemSync):
 
             multipart_parts.append(("file", (entry.path, content, content_type)))
 
-        return self._httpx_client.post(url, files=multipart_parts)
+        return self._httpx_client.post(
+            url,
+            files=multipart_parts,
+            follow_redirects=False,
+        )
 
     def _write_files_chunked(
         self,

@@ -327,7 +327,11 @@ class FilesystemAdapter(Filesystem):
 
             multipart_parts.append(("file", (entry.path, content, content_type)))
 
-        return await client.post(url, files=multipart_parts)
+        return await client.post(
+            url,
+            files=multipart_parts,
+            follow_redirects=False,
+        )
 
     async def _write_files_chunked(
         self,
