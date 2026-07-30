@@ -233,7 +233,11 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
                 multipart_parts.append(("file", (entry.path, content, content_type)))
 
             url = self._get_url(self.UPLOAD_PATH)
-            response = self._httpx_client.post(url, files=multipart_parts)
+            response = self._httpx_client.post(
+                url,
+                files=multipart_parts,
+                follow_redirects=False,
+            )
             response.raise_for_status()
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e

@@ -19,12 +19,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import IOBase, UnsupportedOperation
+from tempfile import TemporaryFile
 from threading import Thread
 
 import pytest
 
 from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.adapters.health_adapter import HealthAdapter
+from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import SandboxApiException
@@ -32,8 +35,12 @@ from opensandbox.models.filesystem import WriteEntry
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.filesystem_adapter import FilesystemAdapterSync
 from opensandbox.sync.adapters.health_adapter import HealthAdapterSync
+from opensandbox.sync.adapters.isolated_filesystem_adapter import (
+    IsolatedFilesystemAdapterSync,
+)
 
 _PAYLOAD = b"network-upload-payload-" * 4096
+_SESSION_ID = "12345678-1234-5678-1234-567812345678"
 _SENSITIVE_HEADERS = {
     "OPEN-SANDBOX-API-KEY": "api-secret",
     "OPENSANDBOX-EGRESS-AUTH": "egress-secret",
@@ -154,6 +161,36 @@ class _LoopbackServer:
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)
+
+
+class _NonSeekableFile(IOBase):
+    """Known-length file that cannot be rewound after its first send."""
+
+    def __init__(self, data: bytes) -> None:
+        self._file = TemporaryFile()
+        self._file.write(data)
+        self._file.flush()
+        self._file.seek(0)
+
+    def fileno(self) -> int:
+        return self._file.fileno()
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return False
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        del offset, whence
+        raise UnsupportedOperation("stream is not seekable")
+
+    def read(self, size: int = -1) -> bytes:
+        return self._file.read(size)
+
+    def close(self) -> None:
+        self._file.close()
+        super().close()
 
 
 @contextmanager
@@ -288,4 +325,71 @@ def test_sync_chunked_upload_is_not_replayed_over_network() -> None:
         assert request.path == "/files/upload"
         assert request.headers["transfer-encoding"] == "chunked"
         assert "content-length" not in request.headers
+        assert _PAYLOAD in request.body
+
+
+@pytest.mark.asyncio
+async def test_async_isolated_upload_is_not_replayed_over_network() -> None:
+    with _redirect_servers() as (source, destination):
+        adapter = IsolatedFilesystemAdapter(
+            ConnectionConfig(
+                protocol="http",
+                follow_redirects=True,
+            ),
+            SandboxEndpoint(endpoint=source.address),
+            _SESSION_ID,
+        )
+        try:
+            with _NonSeekableFile(_PAYLOAD) as stream:
+                with pytest.raises(SandboxApiException) as exc_info:
+                    await adapter.write_files(
+                        [WriteEntry(path="/tmp/data.bin", data=stream)]
+                    )
+        finally:
+            await adapter._httpx_client.aclose()
+
+        assert exc_info.value.status_code == 307
+        assert len(source.requests) == 1
+        assert destination.requests == []
+        request = source.requests[0]
+        assert request.method == "POST"
+        assert (
+            request.path
+            == f"/v1/isolated/session/{_SESSION_ID}/files/upload"
+        )
+        assert "transfer-encoding" not in request.headers
+        assert "content-length" in request.headers
+        assert _PAYLOAD in request.body
+
+
+def test_sync_isolated_upload_is_not_replayed_over_network() -> None:
+    with _redirect_servers() as (source, destination):
+        adapter = IsolatedFilesystemAdapterSync(
+            ConnectionConfigSync(
+                protocol="http",
+                follow_redirects=True,
+            ),
+            SandboxEndpoint(endpoint=source.address),
+            _SESSION_ID,
+        )
+        try:
+            with _NonSeekableFile(_PAYLOAD) as stream:
+                with pytest.raises(SandboxApiException) as exc_info:
+                    adapter.write_files(
+                        [WriteEntry(path="/tmp/data.bin", data=stream)]
+                    )
+        finally:
+            adapter._httpx_client.close()
+
+        assert exc_info.value.status_code == 307
+        assert len(source.requests) == 1
+        assert destination.requests == []
+        request = source.requests[0]
+        assert request.method == "POST"
+        assert (
+            request.path
+            == f"/v1/isolated/session/{_SESSION_ID}/files/upload"
+        )
+        assert "transfer-encoding" not in request.headers
+        assert "content-length" in request.headers
         assert _PAYLOAD in request.body

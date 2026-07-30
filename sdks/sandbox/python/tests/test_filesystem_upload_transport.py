@@ -22,14 +22,19 @@ import httpx
 import pytest
 
 from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
+from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.filesystem import WriteEntry
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.filesystem_adapter import FilesystemAdapterSync
+from opensandbox.sync.adapters.isolated_filesystem_adapter import (
+    IsolatedFilesystemAdapterSync,
+)
 
 LARGE_PAYLOAD = b"x" * (20 * 1024)
+SESSION_ID = "12345678-1234-5678-1234-567812345678"
 
 
 class _CaptureAsyncTransport(httpx.AsyncBaseTransport):
@@ -287,6 +292,43 @@ async def test_async_server_proxy_upload_does_not_follow_redirects(
     await adapter._httpx_client.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
+async def test_async_isolated_upload_does_not_follow_redirects(
+    status_code: int,
+) -> None:
+    transport = _RedirectAsyncTransport(status_code)
+    adapter = IsolatedFilesystemAdapter(
+        ConnectionConfig(
+            protocol="http",
+            transport=transport,
+            follow_redirects=True,
+        ),
+        SandboxEndpoint(endpoint="localhost:44772"),
+        SESSION_ID,
+    )
+
+    with _NonSeekableFile(LARGE_PAYLOAD) as stream:
+        with pytest.raises(SandboxApiException) as exc_info:
+            await adapter.write_files(
+                [WriteEntry(path="/tmp/large.bin", data=stream)]
+            )
+
+    assert exc_info.value.status_code == status_code
+    assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+    assert len(transport.requests) == 1
+    assert (
+        transport.requests[0].url.path
+        == f"/v1/isolated/session/{SESSION_ID}/files/upload"
+    )
+    headers = _headers(transport.requests[0])
+    assert "transfer-encoding" not in headers
+    assert "content-length" in headers
+    assert LARGE_PAYLOAD in transport.bodies[0]
+
+    await adapter._httpx_client.aclose()
+
+
 def test_sync_write_files_direct_execd_uses_chunked_upload() -> None:
     transport = _CaptureSyncTransport()
     adapter = FilesystemAdapterSync(
@@ -412,6 +454,40 @@ def test_sync_server_proxy_upload_does_not_follow_redirects(
     assert exc_info.value.status_code == status_code
     assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
     assert len(transport.requests) == 1
+    headers = _headers(transport.requests[0])
+    assert "transfer-encoding" not in headers
+    assert "content-length" in headers
+    assert LARGE_PAYLOAD in transport.bodies[0]
+
+    adapter._httpx_client.close()
+
+
+@pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
+def test_sync_isolated_upload_does_not_follow_redirects(status_code: int) -> None:
+    transport = _RedirectSyncTransport(status_code)
+    adapter = IsolatedFilesystemAdapterSync(
+        ConnectionConfigSync(
+            protocol="http",
+            transport=transport,
+            follow_redirects=True,
+        ),
+        SandboxEndpoint(endpoint="localhost:44772"),
+        SESSION_ID,
+    )
+
+    with _NonSeekableFile(LARGE_PAYLOAD) as stream:
+        with pytest.raises(SandboxApiException) as exc_info:
+            adapter.write_files(
+                [WriteEntry(path="/tmp/large.bin", data=stream)]
+            )
+
+    assert exc_info.value.status_code == status_code
+    assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+    assert len(transport.requests) == 1
+    assert (
+        transport.requests[0].url.path
+        == f"/v1/isolated/session/{SESSION_ID}/files/upload"
+    )
     headers = _headers(transport.requests[0])
     assert "transfer-encoding" not in headers
     assert "content-length" in headers
