@@ -174,9 +174,13 @@ func findJobCondition(conditions []batchv1.JobCondition, conditionType batchv1.J
 	return nil
 }
 
-// handleDeletion cleans up the commit job and removes the finalizer.
+// handleDeletion cleans up snapshot images and jobs, then removes the finalizer.
 func (r *SandboxSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if err := r.deleteSnapshotImages(ctx, snapshot); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	jobName := r.getJobName(snapshot)
 	job := &batchv1.Job{}
@@ -202,6 +206,47 @@ func (r *SandboxSnapshotReconciler) handleDeletion(ctx context.Context, snapshot
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *SandboxSnapshotReconciler) deleteSnapshotImages(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) error {
+	if len(snapshot.Status.Containers) == 0 {
+		return nil
+	}
+
+	var registrySecret *corev1.Secret
+	if r.SnapshotPushSecret != "" {
+		registrySecret = &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: r.SnapshotPushSecret}, registrySecret); err != nil {
+			return fmt.Errorf("get snapshot registry secret %s/%s: %w", snapshot.Namespace, r.SnapshotPushSecret, err)
+		}
+	}
+
+	deleter := r.registryImageDeleter
+	if deleter == nil {
+		deleter = remoteRegistryImageDeleter{}
+	}
+	deleted := make(map[string]struct{}, len(snapshot.Status.Containers))
+	for _, container := range snapshot.Status.Containers {
+		if container.ImageURI == "" {
+			continue
+		}
+		imageReference := container.ImageURI
+		if container.ImageDigest != "" {
+			imageReference = strings.SplitN(container.ImageURI, "@", 2)[0]
+			if tagIndex := strings.LastIndex(imageReference, ":"); tagIndex > strings.LastIndex(imageReference, "/") {
+				imageReference = imageReference[:tagIndex]
+			}
+			imageReference += "@" + container.ImageDigest
+		}
+		if _, exists := deleted[imageReference]; exists {
+			continue
+		}
+		if err := deleter.Delete(ctx, imageReference, registrySecret, r.SnapshotRegistryInsecure); err != nil {
+			return fmt.Errorf("delete snapshot image for container %s: %w", container.ContainerName, err)
+		}
+		deleted[imageReference] = struct{}{}
+	}
+	return nil
 }
 
 // findPodForSandbox finds the running pod belonging to a BatchSandbox.

@@ -89,6 +89,10 @@ type SandboxSnapshotReconciler struct {
 
 	// SnapshotRegistryInsecure controls whether image-committer uses insecure registry mode.
 	SnapshotRegistryInsecure bool
+
+	// registryImageDeleter performs remote manifest cleanup. When nil, the
+	// reconciler uses remoteRegistryImageDeleter.
+	registryImageDeleter registryImageDeleter
 }
 
 // +kubebuilder:rbac:groups=sandbox.opensandbox.io,resources=sandboxsnapshots,verbs=get;list;watch;create;update;patch;delete

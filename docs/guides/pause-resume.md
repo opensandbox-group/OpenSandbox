@@ -152,7 +152,7 @@ Configure the controller manager deployment with snapshot flags:
 |-----|------|---------|-------------|
 | `--snapshot-registry` | string | `""` | **Required.** OCI registry prefix. Images are stored as `<registry>/<sandboxName>-<container>:snap-gen<N>`. |
 | `--snapshot-registry-insecure` | bool | `false` | Enables insecure registry mode for snapshot push operations. Use only for HTTP or self-signed local registries. |
-| `--snapshot-push-secret` | string | `""` | Kubernetes Secret name for pushing snapshots. Must be `kubernetes.io/dockerconfigjson` type. |
+| `--snapshot-push-secret` | string | `""` | Kubernetes Secret name for pushing and deleting snapshot images. Must be `kubernetes.io/dockerconfigjson` type, and the credentials must permit manifest deletion. |
 | `--resume-pull-secret` | string | `""` | Kubernetes Secret name injected into resumed sandboxes for pulling snapshot images. Can be the same as push secret. |
 | `--image-committer-image` | string | `"image-committer:dev"` | Image used by commit Jobs. |
 | `--commit-job-timeout` | duration | `"10m"` | Timeout for commit Jobs. |

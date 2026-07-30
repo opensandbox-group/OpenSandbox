@@ -137,7 +137,7 @@ The snapshot controller supports the following command-line flags:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--snapshot-registry` | `""` | OCI registry prefix used for snapshot images |
-| `--snapshot-push-secret` | `""` | Secret name used by commit Jobs to push snapshots |
+| `--snapshot-push-secret` | `""` | Secret name used to push and delete snapshot images |
 | `--resume-pull-secret` | `""` | Secret name injected into resumed sandboxes for image pulls |
 | `--image-committer-image` | `image-committer:dev` | Image used for commit operations (must contain `nerdctl` tool) |
 | `--commit-job-timeout` | `10m` | Timeout duration for commit jobs |
@@ -171,7 +171,7 @@ Then configure the controller manager with:
 ```
 
 ::: info
-Snapshot image retention is registry-managed. Deleting a `SandboxSnapshot` removes the Kubernetes commit/unpause Jobs, but it does not delete pushed OCI images from the registry. Configure registry retention/GC for tags such as `snap-gen<N>` according to your environment.
+Deleting a `SandboxSnapshot` also deletes its pushed OCI images before the controller removes the finalizer. Keep the configured `--snapshot-push-secret` available and grant its registry credentials permission to pull and delete manifests. Registry garbage collection may still be required to reclaim unreferenced blob storage, depending on the registry implementation.
 :::
 
 ## Getting Started

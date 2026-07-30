@@ -218,7 +218,7 @@ func main() {
 	flag.BoolVar(&snapshotRegistryInsecure, "snapshot-registry-insecure", false, "Use insecure registry mode when pushing snapshot images.")
 
 	var snapshotPushSecret string
-	flag.StringVar(&snapshotPushSecret, "snapshot-push-secret", "", "K8s Secret name for pushing snapshots to registry.")
+	flag.StringVar(&snapshotPushSecret, "snapshot-push-secret", "", "K8s Secret name for pushing and deleting snapshots in the registry.")
 
 	var imageCommitterPullSecret string
 	flag.StringVar(&imageCommitterPullSecret, "image-committer-pull-secret", "", "K8s Secret name for pulling the image-committer image in commit Jobs. Required when imageCommitterImage is in a private registry.")
