@@ -99,6 +99,15 @@ val generateExecdApi =
     tasks.register<GenerateTask>("generateExecdApi") {
         configureCommonOptions()
 
+        schemaMappings.putAll(
+            mapOf(
+                "CommandSummary" to "JsonObject",
+                "RunningCommandSummary" to "JsonObject",
+                "TerminalCommandSummary" to "JsonObject",
+            ),
+        )
+        importMappings.put("JsonObject", "kotlinx.serialization.json.JsonObject")
+
         inputSpec.set(rootProject.projectDir.parentFile.parentFile.parentFile.resolve("specs/execd-api.yaml").absolutePath)
         outputDir.set(layout.buildDirectory.dir("generated/api/execd").get().asFile.absolutePath)
         packageName.set("com.alibaba.opensandbox.sandbox.api.execd")

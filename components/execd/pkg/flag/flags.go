@@ -42,4 +42,10 @@ var (
 	// IsolationConfigPath points to the TOML isolation config file.
 	// Empty means use built-in defaults.
 	IsolationConfigPath string
+
+	// CommandRecoveryTTL controls retention of completed command summaries.
+	CommandRecoveryTTL time.Duration
+
+	// CommandRecoveryMaxTerminal caps retained completed command summaries.
+	CommandRecoveryMaxTerminal int
 )

@@ -114,8 +114,18 @@ jobs:
           chmod +x tests/smoke.sh
           ./tests/smoke.sh
 
-          sleep 5
-          python3 tests/smoke_api.py
+      - name: Run command inventory cap retention smoke
+        working-directory: components/execd
+        run: EXECD_COMMAND_RECOVERY_TTL=1h EXECD_COMMAND_RECOVERY_MAX_TERMINAL=2 ./tests/smoke.sh --inventory-cap
+
+      - name: Run command inventory expiry retention smoke
+        working-directory: components/execd
+        run: EXECD_COMMAND_RECOVERY_TTL=2s EXECD_COMMAND_RECOVERY_MAX_TERMINAL=1000 ./tests/smoke.sh --inventory-expiry
+
+      - name: Run Windows command inventory lifecycle tests
+        if: matrix.os == 'windows-latest'
+        working-directory: components/execd
+        run: go test ./pkg/runtime -run '^(TestCommandInventoryWindows|TestCommandInventorySafePoint|TestCommandInventoryStartFailure)$' -count=1
       - name: SIGTERM forward test
         if: matrix.os == 'ubuntu-latest'
         working-directory: components/execd
@@ -215,10 +225,27 @@ jobs:
         working-directory: components/execd
         run: sudo -E env "PATH=$PATH" go test -tags="linux,bwrap" -v -count=1 -timeout=5m ./pkg/runtime/bwrap_test/
 
+  inventory-race:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.9'
+
+      - name: Run command inventory race tests
+        working-directory: components/execd
+        run: go test -race ./pkg/runtime/... -run 'TestCommandInventory'
+
   required:
     name: Execd CI
     if: always()
-    needs: [changes, test, smoke, bwrap-smoke]
+    needs: [changes, test, smoke, bwrap-smoke, inventory-race]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -228,13 +255,14 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
           BWRAP_SMOKE_RESULT: ${{ needs.bwrap-smoke.result }}
+          INVENTORY_RACE_RESULT: ${{ needs.inventory-race.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$TEST_RESULT" == "success" && "$SMOKE_RESULT" == "success" && "$BWRAP_SMOKE_RESULT" == "success" ]]
+            [[ "$TEST_RESULT" == "success" && "$SMOKE_RESULT" == "success" && "$BWRAP_SMOKE_RESULT" == "success" && "$INVENTORY_RACE_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$SMOKE_RESULT" == "skipped" && "$BWRAP_SMOKE_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$SMOKE_RESULT" == "skipped" && "$BWRAP_SMOKE_RESULT" == "skipped" && "$INVENTORY_RACE_RESULT" == "skipped" ]]
           fi

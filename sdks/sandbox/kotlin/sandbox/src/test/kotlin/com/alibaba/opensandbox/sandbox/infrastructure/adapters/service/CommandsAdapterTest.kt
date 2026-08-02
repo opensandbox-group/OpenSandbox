@@ -17,16 +17,26 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.api.models.execd.ListCommandsResponse
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunningCommandSummary
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.TerminalCommandSummary
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
+import com.alibaba.opensandbox.sandbox.domain.services.Commands
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionConverter.toCommandSummary
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseListCommandsPage
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toCommandTimeoutMillis
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -49,6 +59,11 @@ class CommandsAdapterTest {
     private lateinit var mockWebServer: MockWebServer
     private lateinit var commandsAdapter: CommandsAdapter
     private lateinit var httpClientProvider: HttpClientProvider
+
+    @Suppress("UNUSED_PARAMETER", "UNUSED_VARIABLE")
+    private fun assertGeneratedListCommandsResponseUsesJsonObjects(response: ListCommandsResponse) {
+        val commands: List<JsonObject> = response.commands
+    }
 
     @BeforeEach
     fun setUp() {
@@ -74,6 +89,36 @@ class CommandsAdapterTest {
     fun tearDown() {
         mockWebServer.shutdown()
         httpClientProvider.close()
+    }
+
+    @Test
+    fun `legacy Commands implementations use the inventory default`() {
+        val legacy =
+            object : Commands {
+                override fun run(request: RunCommandRequest): Execution = unsupported()
+
+                override fun interrupt(executionId: String) = unsupported()
+
+                override fun getCommandStatus(executionId: String): CommandStatus = unsupported()
+
+                override fun getBackgroundCommandLogs(
+                    executionId: String,
+                    cursor: Long?,
+                ): CommandLogs = unsupported()
+
+                override fun createSession(workingDirectory: String?): String = unsupported()
+
+                override fun runInSession(
+                    sessionId: String,
+                    request: RunInSessionRequest,
+                ): Execution = unsupported()
+
+                override fun deleteSession(sessionId: String) = unsupported()
+            }
+
+        val exception = assertThrows<UnsupportedOperationException> { legacy.listCommands() }
+
+        assertEquals("Command inventory is not supported", exception.message)
     }
 
     @Test
@@ -422,4 +467,308 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
         val ex = assertThrows(InvalidArgumentException::class.java) { commandsAdapter.deleteSession(" ") }
         assertEquals("session_id cannot be empty", ex.message)
     }
+
+    @Test
+    fun `listCommands maps query and mixed command summaries`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    {
+                      "commands": [
+                        {
+                          "session": "running-session",
+                          "running": true,
+                          "background": true,
+                          "started_at": "2026-07-22T01:02:03Z"
+                        },
+                        {
+                          "session": "terminal-session",
+                          "running": false,
+                          "background": false,
+                          "started_at": "2026-07-22T01:01:03Z",
+                          "finished_at": "2026-07-22T01:01:04Z",
+                          "exit_code": null,
+                          "error": "killed"
+                        }
+                      ],
+                      "pagination": {"limit": 2, "nextCursor": "x"}
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        val cursor = "  opaque +/=  "
+        val page = commandsAdapter.listCommands(running = false, limit = 2, cursor = cursor)
+
+        assertTrue(page.commands[0] is RunningCommandSummary)
+        assertTrue(page.commands[1] is TerminalCommandSummary)
+        assertEquals(null, (page.commands[1] as TerminalCommandSummary).exitCode)
+        assertEquals("x", page.pagination.nextCursor)
+        val recordedRequest = mockWebServer.takeRequest()
+        assertEquals(cursor, recordedRequest.requestUrl?.queryParameter("cursor"))
+    }
+
+    @Test
+    fun `listCommands normalizes empty and whitespace cursors to omission`() {
+        listOf("", " \t ").forEach {
+            mockWebServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""{"commands":[],"pagination":{"limit":50}}"""),
+            )
+            commandsAdapter.listCommands(cursor = it)
+            assertEquals("/command?limit=50", mockWebServer.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun `listCommands preserves boundary spaces in a nonblank next cursor`() {
+        val cursor = "  opaque +/=  "
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"commands":[],"pagination":{"limit":50,"nextCursor":"$cursor"}}"""),
+        )
+
+        val page = commandsAdapter.listCommands()
+
+        assertEquals(cursor, page.pagination.nextCursor)
+    }
+
+    @Test
+    fun `listCommands preserves omitted final cursor`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"commands":[],"pagination":{"limit":50}}"""),
+        )
+
+        val page = commandsAdapter.listCommands()
+
+        assertTrue(page.commands.isEmpty())
+        assertEquals(null, page.pagination.nextCursor)
+        assertEquals("/command?limit=50", mockWebServer.takeRequest().path)
+    }
+
+    @Test
+    fun `raw command inventory parser rejects blank next cursors`() {
+        listOf("", "   ").forEach { cursor ->
+            val exception =
+                assertThrows<IllegalArgumentException> {
+                    parseListCommandsPage(
+                        """{"commands":[],"pagination":{"limit":50,"nextCursor":"$cursor"}}""",
+                    )
+                }
+            assertEquals("pagination.nextCursor must not be blank", exception.message)
+        }
+    }
+
+    @Test
+    fun `listCommands accepts terminal success without error`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    {
+                      "commands": [
+                        {
+                          "session": "terminal-session",
+                          "running": false,
+                          "background": false,
+                          "started_at": "2026-07-22T01:01:03Z",
+                          "finished_at": "2026-07-22T01:01:04Z",
+                          "exit_code": 0
+                        }
+                      ],
+                      "pagination": {"limit": 50}
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        val page = commandsAdapter.listCommands()
+
+        val command = page.commands.single() as TerminalCommandSummary
+        assertEquals(0, command.exitCode)
+        assertEquals(null, command.error)
+    }
+
+    @Test
+    fun `raw command inventory parser accepts envelope and pagination extensions`() {
+        val page =
+            parseListCommandsPage(
+                """{"commands":[],"pagination":{"limit":50,"future":"value"},"future":true}""",
+            )
+
+        assertTrue(page.commands.isEmpty())
+        assertEquals(50, page.pagination.limit)
+        assertEquals(null, page.pagination.nextCursor)
+    }
+
+    @Test
+    fun `listCommands sends endpoint headers through raw request`() {
+        val endpointProvider =
+            HttpClientProvider(
+                ConnectionConfig.builder()
+                    .domain("${mockWebServer.hostName}:${mockWebServer.port}")
+                    .protocol("http")
+                    .build(),
+            )
+        try {
+            val adapter =
+                CommandsAdapter(
+                    endpointProvider,
+                    SandboxEndpoint(
+                        "${mockWebServer.hostName}:${mockWebServer.port}",
+                        mapOf(
+                            SECURE_ACCESS_HEADER to "secure-token",
+                            "OpenSandbox-Ingress-To" to "sandbox-44772",
+                        ),
+                    ),
+                )
+            mockWebServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""{"commands":[],"pagination":{"limit":50}}"""),
+            )
+
+            adapter.listCommands()
+
+            val request = mockWebServer.takeRequest()
+            assertEquals("/command?limit=50", request.path)
+            assertEquals("GET", request.method)
+            assertEquals("secure-token", request.getHeader(SECURE_ACCESS_HEADER))
+            assertEquals("sandbox-44772", request.getHeader("OpenSandbox-Ingress-To"))
+        } finally {
+            endpointProvider.close()
+        }
+    }
+
+    @Test
+    fun `terminal command summary rejects omitted exit code`() {
+        val summary =
+            Json.parseToJsonElement(
+                """
+                {
+                  "session": "terminal-session",
+                  "running": false,
+                  "background": false,
+                  "started_at": "2026-07-22T01:01:03Z",
+                  "finished_at": "2026-07-22T01:01:04Z"
+                }
+                """.trimIndent(),
+            ).jsonObject
+
+        assertThrows<IllegalArgumentException> { summary.toCommandSummary() }
+    }
+
+    @Test
+    fun `listCommands maps non-success responses to sandbox api exceptions`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(400)
+                .addHeader("X-Request-ID", "req-command-list")
+                .setBody("""{"code":"INVALID_QUERY","message":"invalid cursor"}"""),
+        )
+
+        val exception = assertThrows<SandboxApiException> { commandsAdapter.listCommands() }
+
+        assertEquals(400, exception.statusCode)
+        assertEquals("INVALID_QUERY", exception.error.code)
+        assertEquals("invalid cursor", exception.error.message)
+        assertEquals("req-command-list", exception.requestId)
+    }
+
+    @Test
+    fun `command summary converter accepts boolean running values`() {
+        val running =
+            Json.parseToJsonElement(
+                """
+                {
+                  "session": "running-session",
+                  "running": true,
+                  "background": true,
+                  "started_at": "2026-07-22T01:02:03Z"
+                }
+                """.trimIndent(),
+            ).jsonObject
+        val terminal =
+            Json.parseToJsonElement(
+                """
+                {
+                  "session": "terminal-session",
+                  "running": false,
+                  "background": false,
+                  "started_at": "2026-07-22T01:01:03Z",
+                  "finished_at": "2026-07-22T01:01:04Z",
+                  "exit_code": 0,
+                  "error": ""
+                }
+                """.trimIndent(),
+            ).jsonObject
+
+        assertTrue(running.toCommandSummary() is RunningCommandSummary)
+        assertTrue(terminal.toCommandSummary() is TerminalCommandSummary)
+    }
+
+    @Test
+    fun `raw command inventory parser rejects malformed contract values`() {
+        val running =
+            """
+            {
+              "session": "running-session",
+              "running": true,
+              "background": true,
+              "started_at": "2026-07-22T01:02:03Z"
+            }
+            """.trimIndent()
+        val terminal =
+            """
+            {
+              "session": "terminal-session",
+              "running": false,
+              "background": false,
+              "started_at": "2026-07-22T01:01:03Z",
+              "finished_at": "2026-07-22T01:01:04Z",
+              "exit_code":0,
+              "error": "failed"
+            }
+            """.trimIndent()
+        val cases =
+            listOf(
+                "quoted boolean" to running.replace("true", "\"true\""),
+                "unknown branch key" to running.dropLast(1) + ",\"unknown\":true}",
+                "terminal field on running" to running.dropLast(1) + ",\"exit_code\":0}",
+                "numeric session" to running.replace("\"running-session\"", "1"),
+                "numeric error" to terminal.replace("\"failed\"", "1"),
+                "null error" to terminal.replace("\"failed\"", "null"),
+                "missing exit code" to terminal.replace("\"exit_code\":0,", ""),
+                "quoted exit code" to terminal.replace("\"exit_code\":0", "\"exit_code\":\"0\""),
+                "fractional exit code" to terminal.replace("\"exit_code\":0", "\"exit_code\":0.5"),
+                "large exit code" to terminal.replace("\"exit_code\":0", "\"exit_code\":2147483648"),
+                "small exit code" to terminal.replace("\"exit_code\":0", "\"exit_code\":-2147483649"),
+                "invalid timestamp" to running.replace("2026-07-22", "2026-02-30"),
+                "invalid pagination limit" to """{"commands":[],"pagination":{"limit":101}}""",
+                "null next cursor" to """{"commands":[],"pagination":{"limit":50,"nextCursor":null}}""",
+                "numeric next cursor" to """{"commands":[],"pagination":{"limit":50,"nextCursor":1}}""",
+                "unquoted object keys" to """{commands:[],pagination:{limit:50}}""",
+                "array envelope" to "[]",
+                "array pagination" to """{"commands":[],"pagination":[]}""",
+            )
+
+        cases.forEach { (name, command) ->
+            val payload =
+                if (command.startsWith("{")) {
+                    if (command.contains("\"commands\"")) command else """{"commands":[$command],"pagination":{"limit":50}}"""
+                } else {
+                    command
+                }
+            assertThrows<IllegalArgumentException>(name) { parseListCommandsPage(payload) }
+        }
+    }
+
+    private fun unsupported(): Nothing = throw AssertionError("not invoked")
 }

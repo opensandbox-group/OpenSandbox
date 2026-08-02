@@ -112,19 +112,19 @@ func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) (
 	return data, currentPos, nil
 }
 
-// markCommandFinished updates bookkeeping when a command exits.
-func (c *Controller) markCommandFinished(session string, exitCode int, errMsg string) {
+// markCommandFinished updates bookkeeping when a command exits and returns a
+// value snapshot after releasing Controller.mu.
+func (c *Controller) markCommandFinished(session string, exitCode int, errMsg string) commandTerminalSnapshot {
 	now := time.Now()
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	var kernel *commandKernel
 	if v, ok := c.commandClientMap.Load(session); ok {
 		kernel, _ = v.(*commandKernel)
 	}
 	if kernel == nil {
-		return
+		c.mu.Unlock()
+		return commandTerminalSnapshot{}
 	}
 
 	kernel.exitCode = &exitCode
@@ -135,4 +135,14 @@ func (c *Controller) markCommandFinished(session string, exitCode int, errMsg st
 	// process. Group-wide kill would otherwise amplify the impact of a
 	// stale-PID hit to every process in the unrelated process group.
 	kernel.pid = 0
+	snapshot := commandTerminalSnapshot{
+		session:    session,
+		startedAt:  kernel.startedAt,
+		finishedAt: now,
+		exitCode:   exitCode,
+		errMsg:     errMsg,
+		background: kernel.isBackground,
+	}
+	c.mu.Unlock()
+	return snapshot
 }

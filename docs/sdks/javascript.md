@@ -72,6 +72,28 @@ try {
 
 ## Usage Examples
 
+### Command Inventory
+
+Call the optional `sandbox.commands.listCommands` entry point to list command
+summaries. The `running` option selects running (`true`) or completed (`false`)
+commands; omit it for both. Treat `nextCursor` as opaque and bound to the exact
+initial `running` filter. Preserve that filter on each subsequent page or
+receive `INVALID_QUERY`; use it only while requests reach the same execd
+controller. After a restart or routing change, begin again without a cursor.
+
+```ts
+const page = await sandbox.commands.listCommands?.({ running: false, limit: 50 });
+if (page?.pagination.nextCursor) {
+  const nextPage = await sandbox.commands.listCommands?.({
+    running: false,
+    cursor: page.pagination.nextCursor,
+  });
+}
+```
+
+Legacy or custom `ExecdCommands` implementations can omit this optional method,
+so retain the optional invocation.
+
 ### 1. Lifecycle Management
 
 Manage the sandbox lifecycle, including renewal, pausing, and resuming.

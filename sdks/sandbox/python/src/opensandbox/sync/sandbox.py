@@ -21,7 +21,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
@@ -49,6 +49,7 @@ from opensandbox.models.sandboxes import (
 )
 from opensandbox.sync.adapters.factory import AdapterFactorySync
 from opensandbox.sync.services import (
+    CommandInventorySync,
     CommandsSync,
     CredentialVaultSync,
     DiagnosticsSync,
@@ -175,6 +176,14 @@ class SandboxSync:
         Supports both one-shot command execution and SSE streaming output.
         """
         return self._command_service
+
+    @property
+    def command_inventory(self) -> CommandInventorySync | None:
+        """Provides optional access to command inventory operations."""
+        candidate = self._command_service
+        if not callable(getattr(candidate, "list_commands", None)):
+            return None
+        return cast(CommandInventorySync, candidate)
 
     @property
     def metrics(self) -> MetricsSync:

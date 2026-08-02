@@ -19,6 +19,7 @@ package com.alibaba.opensandbox.sandbox.domain.services
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ListCommandsPage
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
 import java.time.Duration
@@ -83,6 +84,13 @@ interface Commands {
         executionId: String,
         cursor: Long? = null,
     ): CommandLogs
+
+    /** Lists a weakly consistent page of running and terminal command summaries. */
+    fun listCommands(
+        running: Boolean? = null,
+        limit: Int = 50,
+        cursor: String? = null,
+    ): ListCommandsPage = throw UnsupportedOperationException("Command inventory is not supported")
 
     /**
      * Creates a new bash session with optional working directory.

@@ -17,8 +17,10 @@
 package opensandbox
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -528,6 +530,204 @@ type CommandStatusResponse struct {
 	Error      string     `json:"error,omitempty"`
 	StartedAt  time.Time  `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+// ListCommandsRequest selects a page of command inventory summaries. Running
+// is a pointer so callers can distinguish no filter from an explicit false
+// filter. Cursor is an opaque value supplied by the previous response.
+type ListCommandsRequest struct {
+	Running *bool
+	Limit   int
+	Cursor  string
+}
+
+// ListCommandsResponse is a page of command inventory summaries.
+type ListCommandsResponse struct {
+	Commands   []CommandSummary           `json:"commands"`
+	Pagination CommandInventoryPagination `json:"pagination"`
+}
+
+// CommandInventoryPagination describes traversal of command inventory pages.
+type CommandInventoryPagination struct {
+	Limit      int     `json:"limit"`
+	NextCursor *string `json:"nextCursor,omitempty"`
+}
+
+// CommandSummary describes either a running or terminal command. Terminal
+// summaries always include FinishedAt and ExitCode in their JSON representation;
+// nil values represent explicit JSON null values.
+type CommandSummary struct {
+	Session    string
+	Running    bool
+	Background bool
+	StartedAt  time.Time
+	FinishedAt *time.Time
+	ExitCode   *int32
+	Error      string
+}
+
+// UnmarshalJSON decodes the command-summary discriminated union strictly. A
+// running command cannot contain terminal fields; terminal commands must
+// contain them, including when their values are JSON null.
+func (c *CommandSummary) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("opensandbox: decode command summary: %w", err)
+	}
+	if fields == nil {
+		return fmt.Errorf("opensandbox: decode command summary: expected object")
+	}
+
+	runningRaw, ok := fields["running"]
+	if !ok {
+		return fmt.Errorf("opensandbox: decode command summary: missing running")
+	}
+	if isJSONNull(runningRaw) {
+		return fmt.Errorf("opensandbox: decode command summary: running must not be null")
+	}
+	var running bool
+	if err := json.Unmarshal(runningRaw, &running); err != nil {
+		return fmt.Errorf("opensandbox: decode command summary running: %w", err)
+	}
+
+	allowed := map[string]bool{
+		"session": true, "running": true, "background": true, "started_at": true,
+	}
+	if running {
+		for name := range fields {
+			if !allowed[name] {
+				return fmt.Errorf("opensandbox: decode running command summary: unexpected %s", name)
+			}
+		}
+	} else {
+		allowed["finished_at"] = true
+		allowed["exit_code"] = true
+		allowed["error"] = true
+		for name := range fields {
+			if !allowed[name] {
+				return fmt.Errorf("opensandbox: decode terminal command summary: unexpected %s", name)
+			}
+		}
+		if _, ok := fields["finished_at"]; !ok {
+			return fmt.Errorf("opensandbox: decode terminal command summary: missing finished_at")
+		}
+		if _, ok := fields["exit_code"]; !ok {
+			return fmt.Errorf("opensandbox: decode terminal command summary: missing exit_code")
+		}
+	}
+
+	for _, name := range []string{"session", "background", "started_at"} {
+		raw, ok := fields[name]
+		if !ok {
+			return fmt.Errorf("opensandbox: decode command summary: missing %s", name)
+		}
+		if isJSONNull(raw) {
+			return fmt.Errorf("opensandbox: decode command summary: %s must not be null", name)
+		}
+	}
+	if !running {
+		if isJSONNull(fields["finished_at"]) {
+			return fmt.Errorf("opensandbox: decode terminal command summary: finished_at must not be null")
+		}
+		if errorRaw, ok := fields["error"]; ok && isJSONNull(errorRaw) {
+			return fmt.Errorf("opensandbox: decode terminal command summary: error must not be null")
+		}
+	}
+
+	var decoded struct {
+		Session    string     `json:"session"`
+		Running    bool       `json:"running"`
+		Background bool       `json:"background"`
+		StartedAt  time.Time  `json:"started_at"`
+		FinishedAt *time.Time `json:"finished_at"`
+		ExitCode   *int32     `json:"exit_code"`
+		Error      string     `json:"error"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return fmt.Errorf("opensandbox: decode command summary: %w", err)
+	}
+	*c = CommandSummary(decoded)
+	return nil
+}
+
+// MarshalJSON preserves the command-summary union contract. In particular,
+// terminal fields remain present when their values are nil.
+func (c CommandSummary) MarshalJSON() ([]byte, error) {
+	if c.Running {
+		return json.Marshal(struct {
+			Session    string    `json:"session"`
+			Running    bool      `json:"running"`
+			Background bool      `json:"background"`
+			StartedAt  time.Time `json:"started_at"`
+		}{c.Session, c.Running, c.Background, c.StartedAt})
+	}
+	if c.FinishedAt == nil {
+		return nil, fmt.Errorf("opensandbox: marshal terminal command summary: finished_at is required")
+	}
+	return json.Marshal(struct {
+		Session    string     `json:"session"`
+		Running    bool       `json:"running"`
+		Background bool       `json:"background"`
+		StartedAt  time.Time  `json:"started_at"`
+		FinishedAt *time.Time `json:"finished_at"`
+		ExitCode   *int32     `json:"exit_code"`
+		Error      string     `json:"error,omitempty"`
+	}{c.Session, c.Running, c.Background, c.StartedAt, c.FinishedAt, c.ExitCode, c.Error})
+}
+
+// UnmarshalJSON decodes known command inventory fields strictly while ignoring
+// top-level and pagination extensions for forward compatibility.
+func (r *ListCommandsResponse) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("opensandbox: decode command inventory: %w", err)
+	}
+	commandsRaw, ok := fields["commands"]
+	if !ok {
+		return fmt.Errorf("opensandbox: decode command inventory: missing commands")
+	}
+	paginationRaw, ok := fields["pagination"]
+	if !ok {
+		return fmt.Errorf("opensandbox: decode command inventory: missing pagination")
+	}
+	if isJSONNull(commandsRaw) || isJSONNull(paginationRaw) {
+		return fmt.Errorf("opensandbox: decode command inventory: commands and pagination must not be null")
+	}
+	var commands []CommandSummary
+	if err := json.Unmarshal(commandsRaw, &commands); err != nil {
+		return fmt.Errorf("opensandbox: decode command inventory commands: %w", err)
+	}
+	var paginationFields map[string]json.RawMessage
+	if err := json.Unmarshal(paginationRaw, &paginationFields); err != nil {
+		return fmt.Errorf("opensandbox: decode command inventory pagination: %w", err)
+	}
+	limitRaw, ok := paginationFields["limit"]
+	if !ok {
+		return fmt.Errorf("opensandbox: decode command inventory pagination: missing limit")
+	}
+	if isJSONNull(limitRaw) {
+		return fmt.Errorf("opensandbox: decode command inventory pagination: limit must not be null")
+	}
+	if nextCursorRaw, ok := paginationFields["nextCursor"]; ok && isJSONNull(nextCursorRaw) {
+		return fmt.Errorf("opensandbox: decode command inventory pagination: nextCursor must not be null")
+	}
+	var pagination CommandInventoryPagination
+	if err := json.Unmarshal(paginationRaw, &pagination); err != nil {
+		return fmt.Errorf("opensandbox: decode command inventory pagination: %w", err)
+	}
+	if pagination.Limit < 1 || pagination.Limit > 100 {
+		return fmt.Errorf("opensandbox: decode command inventory pagination: limit must be between 1 and 100")
+	}
+	if pagination.NextCursor != nil && strings.TrimSpace(*pagination.NextCursor) == "" {
+		return fmt.Errorf("opensandbox: decode command inventory pagination: nextCursor must not be blank")
+	}
+	r.Commands = commands
+	r.Pagination = pagination
+	return nil
+}
+
+func isJSONNull(data json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(data), []byte("null"))
 }
 
 // CommandLogsResponse contains the stdout/stderr output and cursor for

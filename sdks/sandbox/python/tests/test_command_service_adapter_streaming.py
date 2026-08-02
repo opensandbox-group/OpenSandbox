@@ -15,6 +15,7 @@
 #
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import timedelta
 
@@ -23,8 +24,31 @@ import pytest
 
 from opensandbox.adapters.command_adapter import CommandsAdapter
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxApiException,
+    SandboxError,
+)
 from opensandbox.models.sandboxes import SandboxEndpoint
+
+
+def test_async_commands_exposes_command_inventory_signature() -> None:
+    from opensandbox.services.command import CommandInventory
+
+    signature = inspect.signature(CommandInventory.list_commands)
+    assert list(signature.parameters) == ["self", "running", "limit", "cursor"]
+    assert signature.parameters["running"].default is None
+    assert signature.parameters["limit"].default == 50
+    assert signature.parameters["cursor"].default is None
+
+
+def _assert_malformed_inventory_response(
+    exception: SandboxApiException, request_id: str
+) -> None:
+    assert exception.status_code == 200
+    assert exception.request_id == request_id
+    assert exception.error.code == SandboxError.UNEXPECTED_RESPONSE
+    assert isinstance(exception.__cause__, ValueError)
 
 
 class _SseTransport(httpx.AsyncBaseTransport):
@@ -33,13 +57,17 @@ class _SseTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.last_request = request
-        body = request.content.decode("utf-8") if isinstance(request.content, (bytes, bytearray)) else ""
+        body = (
+            request.content.decode("utf-8")
+            if isinstance(request.content, (bytes, bytearray))
+            else ""
+        )
         payload = json.loads(body) if body else {}
 
         if request.url.path == "/command" and payload.get("command") == "echo hi":
             sse = (
                 b'data: {"type":"init","text":"exec-1","timestamp":1}\n\n'
-                b'\n'
+                b"\n"
                 b'data: {"type":"stdout","text":"hi","timestamp":2}\n\n'
                 b"not-json\n\n"
                 b'data: {"type":"result","results":{"text":"ok"},"timestamp":3}\n\n'
@@ -52,11 +80,14 @@ class _SseTransport(httpx.AsyncBaseTransport):
                 request=request,
             )
 
-        if request.url.path == "/session/sess-1/run" and payload.get("command") == "pwd":
+        if (
+            request.url.path == "/session/sess-1/run"
+            and payload.get("command") == "pwd"
+        ):
             sse = (
-                b'event: stdout\n'
+                b"event: stdout\n"
                 b'data: {"type":"stdout","text":"/var","timestamp":1}\n\n'
-                b'event: execution_complete\n'
+                b"event: execution_complete\n"
                 b'data: {"type":"execution_complete","timestamp":2,"execution_time":3}\n\n'
             )
             return httpx.Response(
@@ -66,7 +97,10 @@ class _SseTransport(httpx.AsyncBaseTransport):
                 request=request,
             )
 
-        if request.url.path == "/session/sess-2/run" and payload.get("command") == "exit 7":
+        if (
+            request.url.path == "/session/sess-2/run"
+            and payload.get("command") == "exit 7"
+        ):
             sse = (
                 b'data: {"type":"init","text":"sess-exec-2","timestamp":1}\n\n'
                 b'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"7","traceback":["exit status 7"]},"timestamp":2}\n\n'
@@ -149,7 +183,10 @@ async def test_run_command_streaming_tolerates_null_traceback() -> None:
 
     assert execution.id == "exec-null"
     assert execution.error is not None
-    assert execution.error.value == "fork/exec /usr/bin/bash: resource temporarily unavailable"
+    assert (
+        execution.error.value
+        == "fork/exec /usr/bin/bash: resource temporarily unavailable"
+    )
     assert execution.error.traceback == []
     assert execution.complete is None
 
@@ -217,3 +254,326 @@ async def test_run_in_session_non_zero_exit_updates_exit_code() -> None:
     assert execution.error.value == "7"
     assert execution.complete is None
     assert execution.exit_code == 7
+
+
+@pytest.mark.asyncio
+async def test_list_commands_maps_mixed_page_and_optional_query_values() -> None:
+    from opensandbox.models.execd import (
+        RunningCommandSummary,
+        TerminalCommandSummary,
+    )
+
+    class _ListTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.last_request: httpx.Request | None = None
+            self.request_count = 0
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.last_request = request
+            self.request_count += 1
+            return httpx.Response(
+                200,
+                json={
+                    "commands": [
+                        {
+                            "session": "running-session",
+                            "running": True,
+                            "background": True,
+                            "started_at": "2026-07-22T01:02:03Z",
+                        },
+                        {
+                            "session": "terminal-session",
+                            "running": False,
+                            "background": False,
+                            "started_at": "2026-07-22T01:01:03Z",
+                            "finished_at": "2026-07-22T01:01:04Z",
+                            "exit_code": None,
+                            "error": "killed",
+                        },
+                    ],
+                    "pagination": {"limit": 2, "nextCursor": "  opaque +/=  "},
+                },
+                request=request,
+            )
+
+    transport = _ListTransport()
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=transport),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    cursor = "  opaque +/=  "
+    page = await adapter.list_commands(running=False, limit=2, cursor=cursor)
+
+    assert isinstance(page.commands[0], RunningCommandSummary)
+    assert isinstance(page.commands[1], TerminalCommandSummary)
+    assert page.commands[1].exit_code is None
+    assert page.pagination.next_cursor == cursor
+    assert transport.request_count == 1
+    assert transport.last_request is not None
+    assert transport.last_request.url.path == "/command"
+    assert transport.last_request.url.params.get("cursor") == cursor
+
+
+@pytest.mark.asyncio
+async def test_list_commands_normalizes_blank_request_cursors() -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.requests: list[httpx.Request] = []
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            return httpx.Response(
+                200,
+                json={"commands": [], "pagination": {"limit": 50}},
+                request=request,
+            )
+
+    transport = _ListTransport()
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=transport),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    for cursor in (None, "", " \t "):
+        page = await adapter.list_commands(cursor=cursor)
+        assert page.pagination.next_cursor is None
+
+    assert all("cursor" not in request.url.params for request in transport.requests)
+
+
+@pytest.mark.asyncio
+async def test_list_commands_maps_malformed_json_response() -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b'{"commands":',
+                headers={"X-Request-ID": "request-malformed-json"},
+                request=request,
+            )
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=_ListTransport()),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.list_commands()
+
+    _assert_malformed_inventory_response(
+        exc_info.value, "request-malformed-json"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("next_cursor", ["", " \t "])
+async def test_list_commands_rejects_blank_next_cursor(next_cursor: str) -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"commands": [], "pagination": {"limit": 50, "nextCursor": next_cursor}},
+                headers={"X-Request-ID": "request-blank-cursor"},
+                request=request,
+            )
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=_ListTransport()),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.list_commands()
+
+    _assert_malformed_inventory_response(exc_info.value, "request-blank-cursor")
+
+
+@pytest.mark.asyncio
+async def test_list_commands_preserves_final_next_cursor_omission() -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"commands": [], "pagination": {"limit": 50}},
+                request=request,
+            )
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=_ListTransport()),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    page = await adapter.list_commands()
+
+    assert page.commands == []
+    assert page.pagination.next_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_list_commands_rejects_terminal_exit_code_omission() -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "commands": [
+                        {
+                            "session": "terminal-session",
+                            "running": False,
+                            "background": False,
+                            "started_at": "2026-07-22T01:01:03Z",
+                            "finished_at": "2026-07-22T01:01:04Z",
+                        }
+                    ],
+                    "pagination": {"limit": 1},
+                },
+                headers={"X-Request-ID": "request-missing-exit-code"},
+                request=request,
+            )
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=_ListTransport()),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.list_commands()
+
+    _assert_malformed_inventory_response(exc_info.value, "request-missing-exit-code")
+
+
+@pytest.mark.asyncio
+async def test_list_commands_rejects_terminal_exit_code_outside_int32_range() -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "commands": [
+                        {
+                            "session": "terminal-session",
+                            "running": False,
+                            "background": False,
+                            "started_at": "2026-07-22T01:01:03Z",
+                            "finished_at": "2026-07-22T01:01:04Z",
+                            "exit_code": 2_147_483_648,
+                        }
+                    ],
+                    "pagination": {"limit": 1},
+                },
+                headers={"X-Request-ID": "request-invalid-exit-code"},
+                request=request,
+            )
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=_ListTransport()),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.list_commands()
+
+    _assert_malformed_inventory_response(exc_info.value, "request-invalid-exit-code")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        {
+            "session": "running-with-terminal-fields",
+            "running": True,
+            "background": True,
+            "started_at": "2026-07-22T01:02:03Z",
+            "finished_at": "2026-07-22T01:03:03Z",
+        },
+        {
+            "session": "terminal-with-invalid-error",
+            "running": False,
+            "background": False,
+            "started_at": "2026-07-22T01:02:03Z",
+            "finished_at": "2026-07-22T01:03:03Z",
+            "exit_code": None,
+            "error": 1,
+        },
+        {
+            "session": "running-with-extra-field",
+            "running": True,
+            "background": True,
+            "started_at": "2026-07-22T01:02:03Z",
+            "unexpected": True,
+        },
+    ],
+)
+async def test_list_commands_rejects_generated_model_validation_errors(
+    command: dict[str, object],
+) -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"commands": [command], "pagination": {"limit": 1}},
+                headers={"X-Request-ID": "request-invalid-summary"},
+                request=request,
+            )
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=_ListTransport()),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.list_commands()
+
+    _assert_malformed_inventory_response(exc_info.value, "request-invalid-summary")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 500])
+async def test_list_commands_maps_non_json_http_errors(status: int) -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                status,
+                content=b"<html>unexpected error</html>",
+                headers={"X-Request-ID": "request-plain"},
+                request=request,
+            )
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=_ListTransport()),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.list_commands()
+
+    assert exc_info.value.status_code == status
+    assert exc_info.value.request_id == "request-plain"
+    assert exc_info.value.error.code == "UNEXPECTED_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_commands_maps_structured_bad_request_error() -> None:
+    class _ListTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={"code": "invalid_argument", "message": "bad limit"},
+                headers={"X-Request-ID": "request-400"},
+                request=request,
+            )
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(protocol="http", transport=_ListTransport()),
+        SandboxEndpoint(endpoint="localhost:44772", port=44772),
+    )
+
+    with pytest.raises(SandboxApiException) as exc_info:
+        await adapter.list_commands()
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.request_id == "request-400"
+    assert exc_info.value.error.code == "invalid_argument"
+    assert exc_info.value.error.message == "bad limit"

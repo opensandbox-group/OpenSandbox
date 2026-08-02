@@ -255,6 +255,30 @@ For async pools, pass a `redis.asyncio` client to `AsyncRedisPoolStateStore`.
 
 ## Usage Examples
 
+### Command Inventory
+
+Use the optional `sandbox.command_inventory` capability to list command
+summaries. Pass `running=True` or `running=False` to select one state, or omit
+it for both. A cursor is opaque, bound to the exact initial `running` filter,
+and valid only while the issuing execd controller remains active. Preserve the
+filter on each subsequent page or receive `INVALID_QUERY`; after a restart or
+routing change, start again without a cursor.
+
+```python
+inventory = sandbox.command_inventory
+if inventory is not None:
+    page = await inventory.list_commands(running=False, limit=50)
+    if page.pagination.next_cursor is not None:
+        next_page = await inventory.list_commands(
+            running=False,
+            cursor=page.pagination.next_cursor,
+        )
+```
+
+For `SandboxSync`, use `sandbox.command_inventory` and
+`list_commands(...)` without `await`. Legacy or custom adapters can omit this
+capability, so check for `None` before calling it.
+
 ### 1. Lifecycle Management
 
 Manage the sandbox lifecycle, including renewal, pausing, and resuming.

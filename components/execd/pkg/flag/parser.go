@@ -16,8 +16,10 @@ package flag
 
 import (
 	"flag"
+	"fmt"
 	stdlog "log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +33,11 @@ const (
 	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
+	commandRecoveryTTLEnv      = "EXECD_COMMAND_RECOVERY_TTL"
+	commandRecoveryMaxEnv      = "EXECD_COMMAND_RECOVERY_MAX_TERMINAL"
+	defaultCommandRecoveryTTL  = time.Hour
+	defaultCommandRecoveryMax  = 1000
+	maxCommandRecoveryTerminal = 10000
 )
 
 // InitFlags registers CLI flags and env overrides.
@@ -42,6 +49,8 @@ func InitFlags() {
 	ApiGracefulShutdownTimeout = time.Second * 1
 	JupyterIdlePollInterval = 100 * time.Millisecond
 	IsolationConfigPath = ""
+	CommandRecoveryTTL = defaultCommandRecoveryTTL
+	CommandRecoveryMaxTerminal = defaultCommandRecoveryMax
 
 	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
@@ -86,8 +95,15 @@ func InitFlags() {
 		}
 	}
 
+	CommandRecoveryTTL = commandRecoveryTTLFromEnv()
+	CommandRecoveryMaxTerminal = commandRecoveryMaxFromEnv()
+
 	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 1s)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
+	commandRecoveryTTLFlag := commandRecoveryTTLValue{value: &CommandRecoveryTTL}
+	commandRecoveryMaxFlag := commandRecoveryMaxValue{value: &CommandRecoveryMaxTerminal}
+	flag.Var(&commandRecoveryTTLFlag, "command-recovery-ttl", "Retention duration for completed command summaries (default: 1h)")
+	flag.Var(&commandRecoveryMaxFlag, "command-recovery-max-terminal", "Maximum retained completed command summaries (default: 1000)")
 
 	// Isolation config
 	if v := os.Getenv(isolationConfigEnv); v != "" {
@@ -97,6 +113,12 @@ func InitFlags() {
 
 	// Parse flags - these will override environment variables if provided
 	flag.Parse()
+	if commandRecoveryTTLFlag.err != nil {
+		stdlog.Panicf("Invalid --command-recovery-ttl: %v", commandRecoveryTTLFlag.err)
+	}
+	if commandRecoveryMaxFlag.err != nil {
+		stdlog.Panicf("Invalid --command-recovery-max-terminal: %v", commandRecoveryMaxFlag.err)
+	}
 	if JupyterIdlePollInterval <= 0 {
 		stdlog.Printf("Invalid --jupyter-idle-poll-interval=%s; fallback to default %s", JupyterIdlePollInterval, 100*time.Millisecond)
 		JupyterIdlePollInterval = 100 * time.Millisecond
@@ -105,4 +127,87 @@ func InitFlags() {
 	// Log final values
 	log.Info("Jupyter server host is: %s", JupyterServerHost)
 	log.Info("Jupyter server token is: %s", log.MaskToken(JupyterServerToken))
+}
+
+func commandRecoveryTTLFromEnv() time.Duration {
+	value, present := os.LookupEnv(commandRecoveryTTLEnv)
+	if !present {
+		return CommandRecoveryTTL
+	}
+	if value == "" {
+		stdlog.Panicf("Invalid %s: value must not be empty", commandRecoveryTTLEnv)
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration < 0 {
+		stdlog.Panicf("Invalid %s=%q: must be a non-negative duration", commandRecoveryTTLEnv, value)
+	}
+	return duration
+}
+
+func commandRecoveryMaxFromEnv() int {
+	value, present := os.LookupEnv(commandRecoveryMaxEnv)
+	if !present {
+		return CommandRecoveryMaxTerminal
+	}
+	if value == "" {
+		stdlog.Panicf("Invalid %s: value must not be empty", commandRecoveryMaxEnv)
+	}
+	max, err := parseCommandRecoveryMax(value)
+	if err != nil {
+		stdlog.Panicf("Invalid %s=%q: %v", commandRecoveryMaxEnv, value, err)
+	}
+	return max
+}
+
+type commandRecoveryTTLValue struct {
+	value *time.Duration
+	err   error
+}
+
+func (v *commandRecoveryTTLValue) String() string {
+	return v.value.String()
+}
+
+func (v *commandRecoveryTTLValue) Set(value string) error {
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		v.err = err
+		return nil
+	}
+	if duration < 0 {
+		v.err = fmt.Errorf("must be a non-negative duration")
+		return nil
+	}
+	*v.value = duration
+	return nil
+}
+
+type commandRecoveryMaxValue struct {
+	value *int
+	err   error
+}
+
+func (v *commandRecoveryMaxValue) String() string {
+	return strconv.Itoa(*v.value)
+}
+
+func (v *commandRecoveryMaxValue) Set(value string) error {
+	max, err := parseCommandRecoveryMax(value)
+	if err != nil {
+		v.err = err
+		return nil
+	}
+	*v.value = max
+	return nil
+}
+
+func parseCommandRecoveryMax(value string) (int, error) {
+	max, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, err
+	}
+	if max < 0 || max > maxCommandRecoveryTerminal {
+		return 0, fmt.Errorf("must be between 0 and %d", maxCommandRecoveryTerminal)
+	}
+	return max, nil
 }

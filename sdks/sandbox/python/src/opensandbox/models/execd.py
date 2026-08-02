@@ -19,9 +19,10 @@ Execution-related data models.
 Models for code execution, results, and output handling.
 """
 
+import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -347,4 +348,203 @@ class CommandLogs(BaseModel):
     cursor: int | None = Field(
         default=None,
         description="Latest tail cursor for incremental reads",
+    )
+
+
+class RunningCommandSummary(BaseModel):
+    """A command inventory entry that is still running."""
+
+    session: str
+    running: Literal[True]
+    background: bool
+    started_at: datetime
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True)
+
+
+class TerminalCommandSummary(BaseModel):
+    """A completed command inventory entry with explicit terminal fields."""
+
+    session: str
+    running: Literal[False]
+    background: bool
+    started_at: datetime
+    finished_at: datetime
+    exit_code: int | None
+    error: str | None = None
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True)
+
+
+CommandSummary: TypeAlias = RunningCommandSummary | TerminalCommandSummary
+
+
+class CommandPagination(BaseModel):
+    """Pagination metadata for a command inventory page."""
+
+    limit: int
+    next_cursor: str | None = Field(default=None, alias="nextCursor")
+
+    @model_validator(mode="after")
+    def validate_next_cursor(self) -> "CommandPagination":
+        """Reject present cursors that violate the nonblank wire contract."""
+        if self.next_cursor is not None and not self.next_cursor.strip():
+            raise ValueError("pagination.nextCursor must not be blank")
+        return self
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, strict=True)
+
+
+class ListCommandsPage(BaseModel):
+    """A weakly consistent page of command inventory entries."""
+
+    commands: list[CommandSummary]
+    pagination: CommandPagination
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, strict=True)
+
+
+def _require_object(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    return value
+
+
+def _require_string(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    return value
+
+
+def _require_boolean(value: Any, field: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
+def _require_integer(value: Any, field: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{field} must be an integer")
+    return value
+
+
+_INT32_MIN = -2_147_483_648
+_INT32_MAX = 2_147_483_647
+
+
+_RFC3339_TIMESTAMP = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}"
+    r"[Tt]"
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]+)?"
+    r"(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+)
+
+
+def _parse_rfc3339(value: Any, field: str) -> datetime:
+    timestamp = _require_string(value, field)
+    if _RFC3339_TIMESTAMP.fullmatch(timestamp) is None:
+        raise ValueError(f"{field} must be an RFC3339 timestamp")
+    normalized = timestamp[:10] + "T" + timestamp[11:]
+    if normalized.endswith(("Z", "z")):
+        normalized = normalized[:-1] + "+00:00"
+    fraction = re.search(r"\.(\d+)(?=[+-])", normalized)
+    if fraction is not None:
+        normalized = (
+            normalized[: fraction.start(1)]
+            + fraction.group(1)[:6].ljust(6, "0")
+            + normalized[fraction.end(1) :]
+        )
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an RFC3339 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be an RFC3339 timestamp")
+    return parsed
+
+
+def _parse_command_summary(value: Any) -> CommandSummary:
+    command = _require_object(value, "command")
+    running = _require_boolean(command.get("running"), "command.running")
+
+    if running:
+        allowed_fields = {"session", "running", "background", "started_at"}
+        if extra_fields := command.keys() - allowed_fields:
+            raise ValueError(
+                f"running command has unknown fields: {', '.join(sorted(extra_fields))}"
+            )
+        try:
+            return RunningCommandSummary(
+                session=_require_string(command["session"], "command.session"),
+                running=True,
+                background=_require_boolean(
+                    command["background"], "command.background"
+                ),
+                started_at=_parse_rfc3339(command["started_at"], "command.started_at"),
+            )
+        except KeyError as exc:
+            raise ValueError(f"running command missing {exc.args[0]}") from exc
+
+    allowed_fields = {
+        "session",
+        "running",
+        "background",
+        "started_at",
+        "finished_at",
+        "exit_code",
+        "error",
+    }
+    if extra_fields := command.keys() - allowed_fields:
+        raise ValueError(
+            f"terminal command has unknown fields: {', '.join(sorted(extra_fields))}"
+        )
+    try:
+        exit_code = command["exit_code"]
+        if exit_code is not None:
+            exit_code = _require_integer(exit_code, "command.exit_code")
+            if not _INT32_MIN <= exit_code <= _INT32_MAX:
+                raise ValueError("command.exit_code must be an int32")
+        error = command.get("error")
+        if "error" in command:
+            error = _require_string(error, "command.error")
+        return TerminalCommandSummary(
+            session=_require_string(command["session"], "command.session"),
+            running=False,
+            background=_require_boolean(command["background"], "command.background"),
+            started_at=_parse_rfc3339(command["started_at"], "command.started_at"),
+            finished_at=_parse_rfc3339(
+                command["finished_at"], "command.finished_at"
+            ),
+            exit_code=exit_code,
+            error=error,
+        )
+    except KeyError as exc:
+        raise ValueError(f"terminal command missing {exc.args[0]}") from exc
+
+
+def parse_list_commands_page(payload: Any) -> ListCommandsPage:
+    """Parse a command inventory response with strict branch validation.
+
+    Generated OpenAPI models intentionally preserve forward-compatible envelope
+    fields, but do not enforce the command-summary discriminator contract.
+    """
+    response = _require_object(payload, "response")
+    commands_value = response.get("commands")
+    if not isinstance(commands_value, list):
+        raise ValueError("commands must be a list")
+    pagination = _require_object(response.get("pagination"), "pagination")
+    try:
+        limit = _require_integer(pagination["limit"], "pagination.limit")
+    except KeyError as exc:
+        raise ValueError("pagination missing limit") from exc
+    if not 1 <= limit <= 100:
+        raise ValueError("pagination.limit must be between 1 and 100")
+    next_cursor = pagination.get("nextCursor")
+    if "nextCursor" in pagination:
+        next_cursor = _require_string(next_cursor, "pagination.nextCursor")
+
+    return ListCommandsPage(
+        commands=[_parse_command_summary(command) for command in commands_value],
+        pagination=CommandPagination(limit=limit, nextCursor=next_cursor),
     )

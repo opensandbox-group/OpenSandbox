@@ -22,14 +22,19 @@ Core Pydantic models for sandbox operations.
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.execd import (
     CommandLogs,
+    CommandPagination,
     CommandStatus,
+    CommandSummary,
     Execution,
     ExecutionComplete,
     ExecutionError,
     ExecutionInit,
     ExecutionLogs,
     ExecutionResult,
+    ListCommandsPage,
     OutputMessage,
+    RunningCommandSummary,
+    TerminalCommandSummary,
 )
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
@@ -100,6 +105,11 @@ __all__ = [
     "ExecutionInit",
     "CommandStatus",
     "CommandLogs",
+    "RunningCommandSummary",
+    "TerminalCommandSummary",
+    "CommandSummary",
+    "CommandPagination",
+    "ListCommandsPage",
     # Isolated session models
     "BindMount",
     "CreateIsolatedSessionRequest",

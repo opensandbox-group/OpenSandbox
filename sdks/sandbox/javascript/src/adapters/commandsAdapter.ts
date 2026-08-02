@@ -19,6 +19,9 @@ import type { paths as ExecdPaths } from "../api/execd.js";
 import type {
   CommandExecution,
   CommandLogs,
+  CommandSummary,
+  ListCommandsOptions,
+  ListCommandsPage,
   CommandStatus,
   RunCommandOpts,
   ServerStreamEvent,
@@ -109,6 +112,42 @@ function assertNonBlank(value: string, field: string): void {
   }
 }
 
+const runningFields = new Set(["session", "running", "background", "started_at"]);
+const terminalFields = new Set([
+  "session",
+  "running",
+  "background",
+  "started_at",
+  "finished_at",
+  "exit_code",
+  "error",
+]);
+const rfc3339Pattern =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-](\d{2}):(\d{2}))$/i;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireExactKeys(item: Record<string, unknown>, allowed: Set<string>, branch: string): void {
+  for (const key of Object.keys(item)) {
+    if (!allowed.has(key)) throw new Error(`${branch} command has unknown field: ${key}`);
+  }
+}
+
+function requireInt32OrNull(value: unknown, field: string): number | null {
+  if (value === null) return null;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < -2147483648 ||
+    value > 2147483647
+  ) {
+    throw new Error(`Invalid ${field}`);
+  }
+  return value;
+}
+
 function parseOptionalDate(value: unknown, field: string): Date | undefined {
   if (value == null) return undefined;
   if (value instanceof Date) return value;
@@ -120,6 +159,141 @@ function parseOptionalDate(value: unknown, field: string): Date | undefined {
     throw new Error(`Invalid ${field}: ${value}`);
   }
   return parsed;
+}
+
+function parseRequiredRfc3339Date(value: unknown, field: string): Date {
+  if (value == null) throw new Error(`Missing ${field}`);
+  return parseRfc3339Date(value, field);
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function parseRfc3339Date(value: unknown, field: string): Date {
+  if (typeof value !== "string") throw new Error(`Invalid ${field}`);
+  const match = rfc3339Pattern.exec(value);
+  if (!match) throw new Error(`Invalid ${field}: ${value}`);
+
+  const [, year, month, day, hour, minute, second, fraction, timezone, offsetHour, offsetMinute] = match;
+  const numericYear = Number(year);
+  const numericMonth = Number(month);
+  const numericDay = Number(day);
+  const numericHour = Number(hour);
+  const numericMinute = Number(minute);
+  const numericSecond = Number(second);
+  const numericOffsetHour = offsetHour == null ? 0 : Number(offsetHour);
+  const numericOffsetMinute = offsetMinute == null ? 0 : Number(offsetMinute);
+  if (
+    numericMonth < 1 ||
+    numericMonth > 12 ||
+    numericDay < 1 ||
+    numericDay > daysInMonth(numericYear, numericMonth) ||
+    numericHour > 23 ||
+    numericMinute > 59 ||
+    numericSecond > 59 ||
+    numericOffsetHour > 23 ||
+    numericOffsetMinute > 59
+  ) {
+    throw new Error(`Invalid ${field}: ${value}`);
+  }
+
+  const milliseconds = fraction == null ? 0 : Number(`${fraction.slice(0, 3).padEnd(3, "0")}`);
+  const offset =
+    timezone.toUpperCase() === "Z"
+      ? 0
+      : (numericOffsetHour * 60 + numericOffsetMinute) * (timezone.startsWith("+") ? 1 : -1);
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(numericYear, numericMonth - 1, numericDay);
+  parsed.setUTCHours(numericHour, numericMinute, numericSecond, milliseconds);
+  parsed.setTime(parsed.getTime() - offset * 60_000);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid ${field}: ${value}`);
+  return parsed;
+}
+
+function requireString(item: Record<string, unknown>, field: string): string {
+  if (!Object.hasOwn(item, field) || typeof item[field] !== "string") {
+    throw new Error(`Invalid ${field}`);
+  }
+  return item[field];
+}
+
+function toCommandSummary(value: unknown): CommandSummary {
+  if (!isRecord(value)) throw new Error("Invalid command summary");
+  if (!Object.hasOwn(value, "running") || typeof value.running !== "boolean") {
+    throw new Error("Invalid command summary");
+  }
+
+  const branch = value.running ? "running" : "terminal";
+  requireExactKeys(value, value.running ? runningFields : terminalFields, branch);
+  const base = {
+    session: requireString(value, "session"),
+    background: (() => {
+      if (!Object.hasOwn(value, "background") || typeof value.background !== "boolean") {
+        throw new Error("Invalid background");
+      }
+      return value.background;
+    })(),
+    startedAt: (() => {
+      if (!Object.hasOwn(value, "started_at")) throw new Error("Missing started_at");
+      return parseRequiredRfc3339Date(value.started_at, "started_at");
+    })(),
+  };
+
+  if (value.running) return { ...base, running: true };
+  if (!Object.hasOwn(value, "finished_at") || !Object.hasOwn(value, "exit_code")) {
+    throw new Error("Invalid terminal command summary");
+  }
+  const error = value.error;
+  if (Object.hasOwn(value, "error") && typeof error !== "string") {
+    throw new Error("Invalid error");
+  }
+  return {
+    ...base,
+    running: false,
+    finishedAt: parseRequiredRfc3339Date(value.finished_at, "finished_at"),
+    exitCode: requireInt32OrNull(value.exit_code, "exit_code"),
+    ...(typeof error === "string" ? { error } : {}),
+  };
+}
+
+function parseListCommandsPage(value: unknown): ListCommandsPage {
+  if (
+    !isRecord(value) ||
+    !Object.hasOwn(value, "commands") ||
+    !Array.isArray(value.commands) ||
+    !Object.hasOwn(value, "pagination") ||
+    !isRecord(value.pagination)
+  ) {
+    throw new Error("List commands failed: unexpected response shape");
+  }
+  const { pagination } = value;
+  if (
+    !Object.hasOwn(pagination, "limit") ||
+    typeof pagination.limit !== "number" ||
+    !Number.isInteger(pagination.limit) ||
+    pagination.limit < 1 ||
+    pagination.limit > 100
+  ) {
+    throw new Error("Invalid pagination limit");
+  }
+  const nextCursor = pagination.nextCursor;
+  if (Object.hasOwn(pagination, "nextCursor") && typeof nextCursor !== "string") {
+    throw new Error("Invalid nextCursor");
+  }
+  if (typeof nextCursor === "string" && nextCursor.trim() === "") {
+    throw new Error("Invalid nextCursor");
+  }
+  return {
+    commands: value.commands.map(toCommandSummary),
+    pagination: {
+      limit: pagination.limit,
+      ...(typeof nextCursor === "string" ? { nextCursor } : {}),
+    },
+  };
 }
 
 export interface CommandsAdapterOptions {
@@ -263,6 +437,20 @@ export class CommandsAdapter implements ExecdCommands {
       content,
       cursor: Number.isFinite(parsedCursor ?? NaN) ? parsedCursor : undefined,
     };
+  }
+
+  async listCommands(options?: ListCommandsOptions): Promise<ListCommandsPage> {
+    const query: Record<string, boolean | number | string> = {};
+    if (options?.running != null) query.running = options.running;
+    if (options?.limit != null) query.limit = options.limit;
+    if (options?.cursor != null && options.cursor.trim() !== "") {
+      query.cursor = options.cursor;
+    }
+    const { data, error, response } = await this.client.GET("/command", {
+      params: { query },
+    });
+    throwOnOpenApiFetchError({ error, response }, "List commands failed");
+    return parseListCommandsPage(data);
   }
 
   async *runStream(

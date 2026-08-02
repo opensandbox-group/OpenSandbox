@@ -79,6 +79,31 @@ public class QuickStart {
 
 ## Usage Examples
 
+### Command Inventory
+
+Use `sandbox.commands().listCommands(...)` to list command summaries. Set
+`running` to `true` or `false` to select a state, or leave it unset for both.
+Pass `page.pagination.nextCursor` unchanged to retrieve the next page; the
+cursor is opaque, bound to the exact initial `running` filter, and works only
+for the lifetime of the execd controller that issued it. Preserve that filter
+on each subsequent page or receive `INVALID_QUERY`. Start again without a
+cursor after a restart or routing change.
+
+```kotlin
+val page = sandbox.commands().listCommands(running = false, limit = 50)
+val nextCursor = page.pagination.nextCursor
+if (nextCursor != null) {
+    val nextPage = sandbox.commands().listCommands(
+        running = false,
+        cursor = nextCursor,
+    )
+}
+```
+
+The default implementation reports unsupported command inventory for legacy
+adapters by throwing `UnsupportedOperationException`; handle that case when an
+application supplies a custom adapter.
+
 ### 1. Lifecycle Management
 
 Manage the sandbox lifecycle, including renewal, pausing, and resuming.

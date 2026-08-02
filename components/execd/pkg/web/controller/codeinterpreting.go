@@ -35,7 +35,14 @@ import (
 var codeRunner codeExecutionRunner
 
 func InitCodeRunner() *runtime.Controller {
-	ctrl := runtime.NewController(flag.JupyterServerHost, flag.JupyterServerToken)
+	ctrl := runtime.NewController(
+		flag.JupyterServerHost,
+		flag.JupyterServerToken,
+		runtime.WithCommandInventory(runtime.CommandInventoryConfig{
+			RecoveryTTL: flag.CommandRecoveryTTL,
+			MaxTerminal: flag.CommandRecoveryMaxTerminal,
+		}),
+	)
 	codeRunner = ctrl
 	return ctrl
 }
@@ -50,6 +57,7 @@ type codeExecutionRunner interface {
 	Execute(request *runtime.ExecuteCodeRequest) error
 	GetContext(session string) (runtime.CodeContext, error)
 	GetCommandStatus(session string) (*runtime.CommandStatus, error)
+	ListCommands(request runtime.ListCommandsRequest) (runtime.ListCommandsResponse, error)
 	ListContext(language string) ([]runtime.CodeContext, error)
 	DeleteLanguageContext(language runtime.Language) error
 	DeleteContext(session string) error

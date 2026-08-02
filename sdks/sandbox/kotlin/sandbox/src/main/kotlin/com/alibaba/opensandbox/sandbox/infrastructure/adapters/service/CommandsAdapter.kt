@@ -33,6 +33,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLog
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ListCommandsPage
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -41,6 +42,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Executi
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionConverter.toCommandStatus
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseListCommandsPage
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toCommandTimeoutMillis
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
@@ -168,6 +170,48 @@ internal class CommandsAdapter(
             CommandLogs(content = content, cursor = nextCursor)
         } catch (e: Exception) {
             logger.error("Failed to get command logs", e)
+            throw e.toSandboxException()
+        }
+    }
+
+    override fun listCommands(
+        running: Boolean?,
+        limit: Int,
+        cursor: String?,
+    ): ListCommandsPage {
+        return try {
+            val urlBuilder =
+                execdBaseUrl
+                    .toHttpUrlOrNull()!!
+                    .newBuilder()
+                    .addPathSegment("command")
+            if (running != null) {
+                urlBuilder.addQueryParameter("running", running.toString())
+            }
+            urlBuilder.addQueryParameter("limit", limit.toString())
+            cursor?.takeIf { it.isNotBlank() }?.let {
+                urlBuilder.addQueryParameter("cursor", it)
+            }
+            val request =
+                Request.Builder()
+                    .url(urlBuilder.build())
+                    .get()
+                    .headers(execdEndpoint.headers.toHeaders())
+                    .build()
+            execdApiClient.newCall(request).execute().use { response ->
+                val responseBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw SandboxApiException(
+                        message = "Failed to list commands. Status code: ${response.code}, Body: $responseBody",
+                        statusCode = response.code,
+                        error = parseSandboxError(responseBody) ?: SandboxError(UNEXPECTED_RESPONSE),
+                        requestId = response.header("X-Request-ID"),
+                    )
+                }
+                parseListCommandsPage(responseBody)
+            }
+        } catch (e: Exception) {
+            logger.error("Failed to list commands", e)
             throw e.toSandboxException()
         }
     }

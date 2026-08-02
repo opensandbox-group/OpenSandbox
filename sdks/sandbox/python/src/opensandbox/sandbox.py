@@ -22,7 +22,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 from opensandbox.adapters.factory import AdapterFactory
 from opensandbox.config import ConnectionConfig
@@ -50,6 +50,7 @@ from opensandbox.models.sandboxes import (
     Volume,
 )
 from opensandbox.services import (
+    CommandInventory,
     Commands,
     CredentialVault,
     Diagnostics,
@@ -169,6 +170,14 @@ class Sandbox:
         Allows running shell commands, capturing output, and managing processes.
         """
         return self._command_service
+
+    @property
+    def command_inventory(self) -> CommandInventory | None:
+        """Provides optional access to command inventory operations."""
+        candidate = self._command_service
+        if not callable(getattr(candidate, "list_commands", None)):
+            return None
+        return cast(CommandInventory, candidate)
 
     @property
     def metrics(self) -> Metrics:

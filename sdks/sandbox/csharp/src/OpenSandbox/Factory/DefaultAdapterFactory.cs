@@ -90,6 +90,7 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
         return new ExecdStack
         {
             Commands = commands,
+            CommandInventory = commands,
             Files = files,
             Health = health,
             Metrics = metrics,

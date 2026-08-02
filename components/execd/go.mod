@@ -15,6 +15,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.2
 	github.com/shirou/gopsutil v3.21.11+incompatible
 	github.com/stretchr/testify v1.11.1
+	github.com/tidwall/btree v1.8.1
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
 	go.uber.org/automaxprocs v1.6.0
