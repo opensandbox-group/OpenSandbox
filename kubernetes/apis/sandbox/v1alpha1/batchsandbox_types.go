@@ -82,6 +82,11 @@ type BatchSandboxCondition struct {
 }
 
 // BatchSandboxSpec defines the desired state of BatchSandbox.
+// spec.poolRef may only be set on an unbound sandbox ("" or "*"), or cleared to
+// detach; re-pointing a bound sandbox to a different pool is rejected because
+// the previous pool would recycle the in-use pods while the stale allocation
+// record blocks the new pool from supplying replacements.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.poolRef) || size(oldSelf.poolRef) == 0 || oldSelf.poolRef == '*' || !has(self.poolRef) || size(self.poolRef) == 0 || self.poolRef == oldSelf.poolRef",message="spec.poolRef cannot be re-pointed to a different pool; clear it first to detach"
 type BatchSandboxSpec struct {
 	// Replicas is the number of desired replicas.
 	// +kubebuilder:validation:Required
