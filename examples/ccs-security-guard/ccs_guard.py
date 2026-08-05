@@ -104,7 +104,7 @@ def demo():
     
     allowed, reason = verify_command(command)
     if allowed:
-        execution = sandbox.commands.execute(command)
+        execution = sandbox.commands.run(command)
         print(execution.stdout)
     else:
         print(f"Command blocked: {reason}")
