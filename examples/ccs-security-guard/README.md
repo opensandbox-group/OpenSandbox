@@ -40,7 +40,7 @@ result = verifier.verify(cmd)
 
 if result.verdict.value == "allow":
     # Safe to execute in sandbox
-    execution = sandbox.commands.execute("ls -la")
+    execution = sandbox.commands.run("ls -la")
     print(execution.stdout)
 else:
     print(f"Command blocked: {result.reason}")
