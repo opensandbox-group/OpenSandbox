@@ -31,6 +31,7 @@ from opensandbox.adapters.isolated_adapter import (
     _build_attach_info,
     _build_session_state,
 )
+from opensandbox.adapters.sse import iter_sse_lines
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution
@@ -274,7 +275,7 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
                     raise build_api_exception_from_httpx(
                         response, "run in isolated session"
                     )
-                for line in response.iter_lines():
+                for line in iter_sse_lines(response.iter_bytes()):
                     event_node = _decode_sse_event_line(line)
                     if event_node is None:
                         continue

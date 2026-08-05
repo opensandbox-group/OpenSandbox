@@ -42,6 +42,7 @@ from opensandbox.adapters.converter.response_handler import (
     build_api_exception_from_httpx,
     handle_api_error,
 )
+from opensandbox.adapters.sse import aiter_sse_lines
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import (
@@ -238,7 +239,7 @@ class CommandsAdapter(Commands):
                 raise build_api_exception_from_httpx(response, failure_message)
 
             dispatcher = ExecutionEventDispatcher(execution, handlers)
-            async for line in response.aiter_lines():
+            async for line in aiter_sse_lines(response.aiter_bytes()):
                 event_node = _decode_sse_event_line(line)
                 if event_node is None:
                     continue
