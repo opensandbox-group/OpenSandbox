@@ -15,37 +15,87 @@
 #
 from __future__ import annotations
 
+import gzip
+from collections.abc import AsyncIterator, Iterator
+
+import httpx
 import pytest
 
-from opensandbox.adapters.sse import aiter_sse_lines, iter_sse_lines
+from opensandbox.adapters.sse import aiter_sse_events, iter_sse_events
 
 _UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
-_SSE_CONTENT = f"data: {_UNICODE_SEPARATORS}\r\ndata: second\r\n\r\ndata: final"
 
 
-def _chunks() -> list[bytes]:
-    content = _SSE_CONTENT.encode()
-    return [content[index : index + 1] for index in range(len(content))]
+class _OneByteStream(httpx.SyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    def __iter__(self) -> Iterator[bytes]:
+        for byte in self._content:
+            yield bytes([byte])
 
 
-def test_iter_sse_lines_only_splits_protocol_line_endings() -> None:
-    assert list(iter_sse_lines(_chunks())) == [
-        f"data: {_UNICODE_SEPARATORS}",
-        "data: second",
-        "",
-        "data: final",
-    ]
+class _AsyncOneByteStream(httpx.AsyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for byte in self._content:
+            yield bytes([byte])
+
+
+def _response(stream: httpx.SyncByteStream | httpx.AsyncByteStream) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        request=httpx.Request("GET", "http://localhost/events"),
+        stream=stream,
+    )
+
+
+def test_iter_sse_events_uses_standard_parser() -> None:
+    content = (
+        f"event: stdout\r\ndata: {_UNICODE_SEPARATORS}\r\ndata: second line\r\n\r\n"
+    ).encode()
+
+    events = list(iter_sse_events(_response(_OneByteStream(content))))
+
+    assert len(events) == 1
+    assert events[0].event == "stdout"
+    assert events[0].data == f"{_UNICODE_SEPARATORS}\nsecond line"
+
+
+def test_iter_sse_events_does_not_decode_compressed_content_twice() -> None:
+    content = f'data: {{"text":"{_UNICODE_SEPARATORS}"}}\n\n'.encode()
+    response = httpx.Response(
+        200,
+        headers={
+            "Content-Type": "text/event-stream",
+            "Content-Encoding": "gzip",
+            "Content-Length": str(len(gzip.compress(content))),
+        },
+        request=httpx.Request("GET", "http://localhost/events"),
+        stream=_OneByteStream(gzip.compress(content)),
+    )
+
+    events = list(iter_sse_events(response))
+
+    assert [event.data for event in events] == [f'{{"text":"{_UNICODE_SEPARATORS}"}}']
 
 
 @pytest.mark.asyncio
-async def test_aiter_sse_lines_only_splits_protocol_line_endings() -> None:
-    async def chunks():
-        for chunk in _chunks():
-            yield chunk
+async def test_aiter_sse_events_accepts_legacy_bare_json() -> None:
+    content = (
+        f'{{"type":"stdout","text":"{_UNICODE_SEPARATORS}"}}\n\n'
+        '{"type":"execution_complete"}\n\n'
+    ).encode()
 
-    assert [line async for line in aiter_sse_lines(chunks())] == [
-        f"data: {_UNICODE_SEPARATORS}",
-        "data: second",
-        "",
-        "data: final",
+    events = [
+        event
+        async for event in aiter_sse_events(_response(_AsyncOneByteStream(content)))
+    ]
+
+    assert [event.data for event in events] == [
+        f'{{"type":"stdout","text":"{_UNICODE_SEPARATORS}"}}',
+        '{"type":"execution_complete"}',
     ]

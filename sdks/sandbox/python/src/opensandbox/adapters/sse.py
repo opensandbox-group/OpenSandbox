@@ -13,76 +13,117 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""SSE framing helpers shared by synchronous and asynchronous adapters."""
+"""SSE parsing with compatibility for execd's legacy bare-JSON frames."""
 
-import codecs
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
 
+import httpx
+from httpx_sse import EventSource, ServerSentEvent
 
-class _SseLineDecoder:
-    """Incrementally split UTF-8 SSE content on CR, LF, or CRLF only.
 
-    ``httpx`` line iterators implement Python's universal ``splitlines``
-    semantics, which also split on Unicode separators such as U+0085, U+2028,
-    and U+2029. Those characters are valid inside a JSON string and are not
-    SSE line endings, so streaming adapters need protocol-specific framing.
+class _LegacyJsonSseNormalizer:
+    """Turn legacy ``JSON\n\n`` frames into standard SSE data events.
+
+    Current and older execd versions write one bare JSON object followed by
+    two LF bytes. Standard SSE streams are passed through byte-for-byte and
+    parsed entirely by ``httpx-sse``.
     """
 
     def __init__(self) -> None:
-        self._decoder = codecs.getincrementaldecoder("utf-8")()
-        self._buffer = ""
+        self._legacy: bool | None = None
+        self._buffer = bytearray()
 
-    def decode(self, chunk: bytes) -> list[str]:
-        self._buffer += self._decoder.decode(chunk)
-        return self._drain(final=False)
+    def decode(self, chunk: bytes) -> list[bytes]:
+        if self._legacy is False:
+            return [chunk]
 
-    def flush(self) -> list[str]:
-        self._buffer += self._decoder.decode(b"", final=True)
-        return self._drain(final=True)
+        self._buffer.extend(chunk)
+        if self._legacy is None:
+            first = bytes(self._buffer).lstrip()[:1]
+            if not first:
+                return []
+            self._legacy = first in (b"{", b"[")
+            if not self._legacy:
+                data = bytes(self._buffer)
+                self._buffer.clear()
+                return [data]
 
-    def _drain(self, *, final: bool) -> list[str]:
-        lines: list[str] = []
-        start = 0
-        index = 0
+        output: list[bytes] = []
+        separator = b"\n\n"
+        while True:
+            boundary = self._buffer.find(separator)
+            if boundary < 0:
+                break
+            frame = bytes(self._buffer[:boundary])
+            del self._buffer[: boundary + len(separator)]
+            output.append(b"data: " + frame + separator)
+        return output
 
-        while index < len(self._buffer):
-            character = self._buffer[index]
-            if character == "\n":
-                lines.append(self._buffer[start:index])
-                index += 1
-                start = index
-                continue
-            if character == "\r":
-                if index + 1 == len(self._buffer) and not final:
-                    break
-                lines.append(self._buffer[start:index])
-                index += 1
-                if index < len(self._buffer) and self._buffer[index] == "\n":
-                    index += 1
-                start = index
-                continue
-            index += 1
-
-        self._buffer = self._buffer[start:]
-        if final and self._buffer:
-            lines.append(self._buffer)
-            self._buffer = ""
-        return lines
+    def flush(self) -> list[bytes]:
+        if not self._buffer:
+            return []
+        data = bytes(self._buffer)
+        self._buffer.clear()
+        if self._legacy:
+            return [b"data: " + data + b"\n\n"]
+        return [data]
 
 
-def iter_sse_lines(chunks: Iterable[bytes]) -> Iterator[str]:
-    """Yield SSE lines from byte chunks without splitting Unicode separators."""
-    decoder = _SseLineDecoder()
-    for chunk in chunks:
-        yield from decoder.decode(chunk)
-    yield from decoder.flush()
+class _SyncSseStream(httpx.SyncByteStream):
+    def __init__(self, chunks: Iterable[bytes]) -> None:
+        self._chunks = chunks
+
+    def __iter__(self) -> Iterator[bytes]:
+        normalizer = _LegacyJsonSseNormalizer()
+        for chunk in self._chunks:
+            yield from normalizer.decode(chunk)
+        yield from normalizer.flush()
 
 
-async def aiter_sse_lines(chunks: AsyncIterable[bytes]) -> AsyncIterator[str]:
-    """Yield SSE lines asynchronously without splitting Unicode separators."""
-    decoder = _SseLineDecoder()
-    async for chunk in chunks:
-        for line in decoder.decode(chunk):
-            yield line
-    for line in decoder.flush():
-        yield line
+class _AsyncSseStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: AsyncIterable[bytes]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        normalizer = _LegacyJsonSseNormalizer()
+        async for chunk in self._chunks:
+            for data in normalizer.decode(chunk):
+                yield data
+        for data in normalizer.flush():
+            yield data
+
+
+def _copy_response(
+    response: httpx.Response, stream: httpx.SyncByteStream | httpx.AsyncByteStream
+) -> httpx.Response:
+    headers = response.headers.copy()
+    # ``iter_bytes``/``aiter_bytes`` already apply HTTP content decoding. The
+    # synthetic response must not try to decode the normalized bytes again.
+    headers.pop("content-encoding", None)
+    headers.pop("content-length", None)
+    return httpx.Response(
+        status_code=response.status_code,
+        headers=headers,
+        request=response.request,
+        extensions=response.extensions,
+        stream=stream,
+    )
+
+
+def iter_sse_events(response: httpx.Response) -> Iterator[ServerSentEvent]:
+    """Parse sync SSE events, accepting standard and legacy execd framing."""
+    compatible_response = _copy_response(
+        response, _SyncSseStream(response.iter_bytes())
+    )
+    yield from EventSource(compatible_response).iter_sse()
+
+
+async def aiter_sse_events(
+    response: httpx.Response,
+) -> AsyncIterator[ServerSentEvent]:
+    """Parse async SSE events, accepting standard and legacy execd framing."""
+    compatible_response = _copy_response(
+        response, _AsyncSseStream(response.aiter_bytes())
+    )
+    async for event in EventSource(compatible_response).aiter_sse():
+        yield event

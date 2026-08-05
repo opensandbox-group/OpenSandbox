@@ -46,6 +46,7 @@ dependencies = [
     "python-dateutil>=2.8.2,<3.0",
     "attrs>=21.3.0",
     "httpx>=0.27.0,<1.0",
+    "httpx-sse>=0.4.3,<0.5",
 ]
 
 [project.optional-dependencies]

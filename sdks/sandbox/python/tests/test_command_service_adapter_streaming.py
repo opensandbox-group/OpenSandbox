@@ -68,7 +68,7 @@ class _SseTransport(httpx.AsyncBaseTransport):
                 },
             ]
             sse = b"".join(
-                f"data: {json.dumps(event, ensure_ascii=False)}\r\n\r\n".encode()
+                f"{json.dumps(event, ensure_ascii=False)}\n\n".encode()
                 for event in events
             )
             return httpx.Response(
