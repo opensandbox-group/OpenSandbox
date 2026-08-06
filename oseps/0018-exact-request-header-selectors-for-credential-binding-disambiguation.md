@@ -61,7 +61,7 @@ Some legitimate clients need two credentials for the same destination shape. Two
 
 | ID | Requirement | Priority |
 | --- | --- | --- |
-| R1 | `CredentialMatch` may contain at most eight AND-combined exact request-header predicates. | Must Have |
+| R1 | `CredentialMatch` may contain at most four AND-combined exact request-header predicates. | Must Have |
 | R2 | Header names match case-insensitively. Values match case-sensitively after trimming only outer HTTP optional whitespace (SP and HTAB). | Must Have |
 | R3 | Each selected request header must occur exactly once; missing or repeated headers do not satisfy a predicate. | Must Have |
 | R4 | Selectors permit ordinary end-to-end headers, including `Authorization`, and reject routing, framing, hop-by-hop, and proxy-control headers. | Must Have |
@@ -166,7 +166,7 @@ The egress OpenAPI contract is the source of truth. Supported SDKs must preserve
 
 ### Unit and schema tests
 
-- Accept valid exact conjunctions; reject more than eight entries, blank values, duplicate normalized names, invalid names, and forbidden names.
+- Accept valid exact conjunctions; reject more than four entries, blank values, duplicate normalized names, invalid names, and forbidden names.
 - Verify case-insensitive names, case-sensitive values, outer-OWS trimming, and no normalization of internal whitespace or value casing.
 - Verify missing or duplicate selected headers do not match.
 - Verify distinct values for the same header coexist; generic/selector overlap, identical selectors, and different-header selectors are rejected when base scopes overlap.
