@@ -64,7 +64,7 @@ Some legitimate clients need two credentials for the same destination shape. Two
 | R1 | `CredentialMatch` may contain at most four AND-combined exact request-header predicates. | Must Have |
 | R2 | Header names match case-insensitively. Values match case-sensitively after trimming only outer HTTP optional whitespace (SP and HTAB). | Must Have |
 | R3 | Each selected request header must occur exactly once; missing or repeated headers do not satisfy a predicate. | Must Have |
-| R4 | Selectors permit ordinary end-to-end headers, including `Authorization`, and reject routing, framing, hop-by-hop, and proxy-control headers. | Must Have |
+| R4 | Selectors permit ordinary end-to-end headers, including `Authorization`, but reject HTTP/2 pseudo-headers and these case-insensitive names: `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Proxy-Authorization`, `Proxy-Authenticate`, `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`. | Must Have |
 | R5 | Overlapping destination scopes are valid only when selectors prove the bindings cannot both match one request. | Must Have |
 | R6 | Public reads return selector header names and `valueConfigured: true`, never selector values. | Must Have |
 | R7 | Unsupported selector fields are rejected, never silently removed or broadened. | Must Have |
@@ -100,7 +100,7 @@ No eligible binding preserves current behavior: inject no credential and let ord
 
 | Risk | Mitigation |
 | --- | --- |
-| A selector value leaks. | Treat it as non-secret, write-only input and exclude it from public reads, logs, metrics, diagnostics, errors, and examples. |
+| A selector value leaks. | Treat it as non-secret, write-only input and exclude configured values from public reads, logs, metrics, diagnostics, and errors. Documentation may use clearly fictional placeholders only. |
 | Proxy and upstream interpret repeated headers differently. | Require exactly one occurrence and reject routing/framing/proxy-control names. |
 | Two bindings select different credentials for one request. | Preserve fail-closed ambiguous matching and allow overlap only when static validation proves predicates disjoint. |
 | A mixed egress/SDK deployment broadens a binding. | Add the field additively and require older runtimes to reject it rather than ignore it. |
@@ -125,7 +125,7 @@ requestHeaders:
     additionalProperties: false
 ```
 
-After trimming outer HTTP optional whitespace, names and values must be non-empty. A binding must not repeat a header name after case-insensitive normalization. This prevents unsatisfiable predicates.
+`name` must be a non-empty HTTP field-name token as defined by RFC 9110; it is not whitespace-trimmed. After trimming only outer HTTP optional whitespace, `value` must be non-empty. A binding must not repeat a header name after case-insensitive normalization. This prevents unsatisfiable predicates.
 
 Public binding reads return a sanitized match shape:
 
@@ -156,7 +156,7 @@ The rule is deliberately conservative. Failed validation or proxy acknowledgemen
 
 ### Privacy and observability
 
-Do not include selector values in serialized metadata, API errors, structured logs, metrics labels, tracing attributes, diagnostics, test failure output, or documentation examples. Secret-free audit output may include binding name, decision (`matched`, `no_match`, or `ambiguous`), and selected header names.
+Do not include configured selector values in serialized metadata, API errors, structured logs, metrics labels, tracing attributes, diagnostics, or test failure output. Documentation and tests may use clearly fictional placeholder values, never values copied from a real binding. Secret-free audit output may include binding name, decision (`matched`, `no_match`, or `ambiguous`), and selected header names.
 
 ### SDKs, CLI, and documentation
 
