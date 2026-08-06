@@ -34,6 +34,7 @@ from opensandbox.adapters.converter.response_handler import (
     build_api_exception_from_httpx,
 )
 from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
+from opensandbox.adapters.sse import aiter_sse_events
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution, ExecutionHandlers
@@ -57,19 +58,14 @@ from opensandbox.transport import unwrap_retry_transport
 logger = logging.getLogger(__name__)
 
 
-def _decode_sse_event_line(line: str) -> EventNode | None:
-    if not line.strip():
-        return None
-    if line.startswith((":", "event:", "id:", "retry:")):
-        return None
-    data = line[5:].strip() if line.startswith("data:") else line
-    if not data:
+def _decode_sse_event_data(data: str) -> EventNode | None:
+    if not data.strip():
         return None
     try:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
+        logger.error(f"Failed to parse SSE event data: {data}", exc_info=e)
         return None
 
 
@@ -335,8 +331,8 @@ class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
                     )
 
                 dispatcher = ExecutionEventDispatcher(execution, handlers)
-                async for line in response.aiter_lines():
-                    event_node = _decode_sse_event_line(line)
+                async for event in aiter_sse_events(response):
+                    event_node = _decode_sse_event_data(event.data)
                     if event_node is None:
                         continue
                     await dispatcher.dispatch(event_node)

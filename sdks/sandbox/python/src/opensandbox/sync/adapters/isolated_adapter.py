@@ -32,6 +32,7 @@ from opensandbox.adapters.isolated_adapter import (
     _build_attach_info,
     _build_session_state,
 )
+from opensandbox.adapters.sse import iter_sse_events
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution
@@ -58,19 +59,14 @@ from opensandbox.transport import unwrap_retry_transport
 logger = logging.getLogger(__name__)
 
 
-def _decode_sse_event_line(line: str) -> EventNode | None:
-    if not line or not line.strip():
-        return None
-    if line.startswith((":", "event:", "id:", "retry:")):
-        return None
-    data = line[5:].strip() if line.startswith("data:") else line
-    if not data:
+def _decode_sse_event_data(data: str) -> EventNode | None:
+    if not data.strip():
         return None
     try:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
+        logger.error(f"Failed to parse SSE event data: {data}", exc_info=e)
         return None
 
 
@@ -277,8 +273,8 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
                     raise build_api_exception_from_httpx(
                         response, "run in isolated session"
                     )
-                for line in response.iter_lines():
-                    event_node = _decode_sse_event_line(line)
+                for event in iter_sse_events(response):
+                    event_node = _decode_sse_event_data(event.data)
                     if event_node is None:
                         continue
                     dispatcher.dispatch(event_node)

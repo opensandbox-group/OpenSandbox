@@ -59,7 +59,8 @@ public abstract class BaseE2ETest {
     }
 
     protected static String getSandboxImage() {
-        return configValue(PROP_IMG_DEFAULT, ENV_IMG_DEFAULT, "opensandbox/code-interpreter:latest");
+        return configValue(
+                PROP_IMG_DEFAULT, ENV_IMG_DEFAULT, "opensandbox/code-interpreter:latest");
     }
 
     protected static ConnectionConfig createConnectionConfig(boolean useServerProxy) {

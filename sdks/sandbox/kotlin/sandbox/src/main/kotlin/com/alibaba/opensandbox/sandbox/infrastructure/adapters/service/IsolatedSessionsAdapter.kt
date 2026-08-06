@@ -18,9 +18,6 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
@@ -37,7 +34,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationSession
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -443,14 +440,9 @@ internal class IsolatedSessionsAdapter(
         operation: String,
     ) {
         if (response.isSuccessful) return
-        val errorBody = response.body?.string()
-        val sandboxError = parseSandboxError(errorBody)
-        throw SandboxApiException(
-            message = "$operation failed. Status: ${response.code}, Body: $errorBody",
-            statusCode = response.code,
-            error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-            requestId = response.header("X-Request-ID"),
-        )
+        throw response.toSandboxApiException { statusCode, body ->
+            "$operation failed. Status: $statusCode, Body: $body"
+        }
     }
 
     private fun decodeEventLine(line: String): EventNode? {

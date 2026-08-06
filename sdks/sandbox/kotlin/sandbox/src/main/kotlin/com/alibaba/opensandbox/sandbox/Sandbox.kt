@@ -46,6 +46,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.Metrics
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import com.alibaba.opensandbox.sandbox.infrastructure.factory.AdapterFactory
 import com.alibaba.opensandbox.sandbox.internal.LifecycleMetricsReporter
+import com.alibaba.opensandbox.sandbox.internal.isCausedByInterruption
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.OffsetDateTime
@@ -270,28 +271,47 @@ class Sandbox internal constructor(
                 }
 
                 return sandbox
-            } catch (e: Exception) {
-                if (initResult is InitializationResult.NewSandbox && sandboxService != null) {
+            } catch (failure: Throwable) {
+                // InterruptedException clears the thread flag when thrown. Keep cleanup RPCs
+                // usable by restoring the flag only after remote/local resources are released.
+                val restoreInterrupt = Thread.interrupted() || failure.isCausedByInterruption()
+                try {
+                    if (initResult is InitializationResult.NewSandbox && sandboxService != null) {
+                        try {
+                            logger.warn(
+                                "Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {}",
+                                initResult.id,
+                            )
+                            sandboxService.killSandbox(initResult.id)
+                        } catch (cleanupFailure: Throwable) {
+                            logger.error(
+                                "Failed to clean up sandbox {} after creation failure",
+                                initResult.id,
+                                cleanupFailure,
+                            )
+                            failure.addSuppressed(cleanupFailure)
+                        }
+                    }
+
                     try {
-                        logger.warn(
-                            "Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {}",
-                            initResult.id,
-                        )
-                        sandboxService.killSandbox(initResult.id)
-                    } catch (cleanupEx: Exception) {
-                        logger.error("Failed to clean up sandbox {} after creation failure", initResult.id, cleanupEx)
-                        e.addSuppressed(cleanupEx)
+                        httpClientProvider.close()
+                    } catch (cleanupFailure: Throwable) {
+                        failure.addSuppressed(cleanupFailure)
+                    }
+                } finally {
+                    if (restoreInterrupt) {
+                        Thread.currentThread().interrupt()
                     }
                 }
 
-                httpClientProvider.close()
-                when (e) {
-                    is SandboxException -> throw e
+                when (failure) {
+                    is Error -> throw failure
+                    is SandboxException -> throw failure
                     else -> {
-                        logger.error("Unexpected exception during {}", operationName, e)
+                        logger.error("Unexpected exception during {}", operationName, failure)
                         throw SandboxInternalException(
-                            message = "Failed to $operationName: ${e.message}",
-                            cause = e,
+                            message = "Failed to $operationName: ${failure.message}",
+                            cause = failure,
                         )
                     }
                 }
@@ -666,6 +686,10 @@ class Sandbox internal constructor(
                 try {
                     isHealthy()
                 } catch (e: Exception) {
+                    if (Thread.currentThread().isInterrupted || e.isCausedByInterruption()) {
+                        Thread.currentThread().interrupt()
+                        throw e
+                    }
                     lastException = e
                     logger.debug("Health check attempt #{} failed with exception: {}", attempt, e.message)
                     false

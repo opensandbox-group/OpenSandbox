@@ -33,6 +33,7 @@ import com.alibaba.opensandbox.sandbox.domain.pool.PoolCreationSpec;
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyOptions;
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyResult;
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyState;
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolLifecycleState;
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.RedisPoolStateStore;
 import com.alibaba.opensandbox.sandbox.pool.SandboxPool;
 import com.alibaba.opensandbox.sandbox.pool.SandboxPoolManager;
@@ -50,6 +51,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -228,6 +231,229 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
                 Duration.ofSeconds(1),
                 () -> poolB.snapshot().getIdleCount() >= 1);
         assertTrue(beforeShutdown >= 1, "poolA should have warmed idle before shutdown");
+    }
+
+    @Test
+    @DisplayName("Redis primary heartbeat survives a warmup blocked beyond the lock TTL")
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void testPrimaryHeartbeatSurvivesBlockedWarmup() throws Exception {
+        tag = "e2e-redis-heartbeat-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-heartbeat-" + tag;
+        String ownerA = "owner-a-" + tag;
+        String ownerB = "owner-b-" + tag;
+        String lockKey = poolKey(poolName, "lock");
+        Duration lockTtl = Duration.ofSeconds(3);
+        Duration reconcileInterval = Duration.ofMillis(250);
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        CountDownLatch leaderWarmupEntered = new CountDownLatch(1);
+        CountDownLatch releaseLeaderWarmup = new CountDownLatch(1);
+        AtomicInteger followerWarmupCalls = new AtomicInteger();
+        RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
+        RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolA =
+                createPoolBuilder(poolName, ownerA, storeA, 1)
+                        .reconcileInterval(reconcileInterval)
+                        .primaryLockTtl(lockTtl)
+                        .warmupSandboxPreparer(
+                                sandbox -> {
+                                    leaderWarmupEntered.countDown();
+                                    awaitLatch(releaseLeaderWarmup);
+                                })
+                        .build();
+        SandboxPool poolB =
+                createPoolBuilder(poolName, ownerB, storeB, 1)
+                        .reconcileInterval(reconcileInterval)
+                        .primaryLockTtl(lockTtl)
+                        .warmupSandboxPreparer(sandbox -> followerWarmupCalls.incrementAndGet())
+                        .build();
+        pools.add(poolA);
+        pools.add(poolB);
+
+        try {
+            poolA.start();
+            assertTrue(
+                    leaderWarmupEntered.await(2, TimeUnit.MINUTES),
+                    "leader should create a remote sandbox and block in its preparer");
+            eventually(
+                    "first node owns the Redis primary lock",
+                    Duration.ofSeconds(10),
+                    Duration.ofMillis(100),
+                    () -> ownerA.equals(redis.get(lockKey)));
+
+            poolB.start();
+            long stableUntil = System.nanoTime() + lockTtl.multipliedBy(2).toNanos();
+            while (System.nanoTime() < stableUntil) {
+                assertEquals(
+                        ownerA,
+                        redis.get(lockKey),
+                        "blocked warmup must not let the primary lock expire or change owner");
+                assertTrue(redis.pttl(lockKey) > 0, "primary lock must retain a positive TTL");
+                assertEquals(
+                        0,
+                        followerWarmupCalls.get(),
+                        "follower must not start warmup while the leader heartbeat is healthy");
+                Thread.sleep(200);
+            }
+            assertEquals(
+                    1,
+                    countTaggedSandboxes(tag),
+                    "healthy heartbeat must prevent split-brain over-provisioning");
+
+            releaseLeaderWarmup.countDown();
+            eventually(
+                    "leader warmup enters idle after the blocking preparer is released",
+                    AWAIT_TIMEOUT,
+                    Duration.ofMillis(500),
+                    () ->
+                            ownerA.equals(redis.get(lockKey))
+                                    && poolA.snapshot().getIdleCount() == 1);
+            assertEquals(0, followerWarmupCalls.get());
+            assertEquals(1, countTaggedSandboxes(tag));
+        } finally {
+            releaseLeaderWarmup.countDown();
+        }
+    }
+
+    @Test
+    @DisplayName("Redis failover fences an in-flight warmup from the retired primary")
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void testFailoverFencesInflightWarmupFromRetiredPrimary() throws Exception {
+        tag = "e2e-redis-inflight-failover-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-inflight-failover-" + tag;
+        String ownerA = "owner-a-" + tag;
+        String ownerB = "owner-b-" + tag;
+        String lockKey = poolKey(poolName, "lock");
+        Duration lockTtl = Duration.ofSeconds(3);
+        Duration reconcileInterval = Duration.ofMillis(250);
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        CountDownLatch leaderWarmupEntered = new CountDownLatch(1);
+        CountDownLatch releaseLeaderWarmup = new CountDownLatch(1);
+        CountDownLatch followerWarmupEntered = new CountDownLatch(1);
+        AtomicBoolean leaderWarmupInterrupted = new AtomicBoolean(false);
+        AtomicReference<String> leaderSandboxId = new AtomicReference<>();
+        AtomicReference<String> followerSandboxId = new AtomicReference<>();
+        AtomicReference<Throwable> leaderShutdownFailure = new AtomicReference<>();
+        RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
+        RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolA =
+                createPoolBuilder(poolName, ownerA, storeA, 1)
+                        .reconcileInterval(reconcileInterval)
+                        .primaryLockTtl(lockTtl)
+                        .drainTimeout(Duration.ofMillis(300))
+                        .warmupSandboxPreparer(
+                                sandbox -> {
+                                    leaderSandboxId.set(sandbox.getId());
+                                    leaderWarmupEntered.countDown();
+                                    awaitIgnoringInterrupt(
+                                            releaseLeaderWarmup, leaderWarmupInterrupted);
+                                })
+                        .build();
+        SandboxPool poolB =
+                createPoolBuilder(poolName, ownerB, storeB, 1)
+                        .reconcileInterval(reconcileInterval)
+                        .primaryLockTtl(lockTtl)
+                        .warmupSandboxPreparer(
+                                sandbox -> {
+                                    followerSandboxId.set(sandbox.getId());
+                                    followerWarmupEntered.countDown();
+                                })
+                        .build();
+        pools.add(poolA);
+        pools.add(poolB);
+        Thread leaderShutdownThread = null;
+
+        try {
+            poolA.start();
+            assertTrue(
+                    leaderWarmupEntered.await(2, TimeUnit.MINUTES),
+                    "the first primary should enter its deliberately blocked warmup");
+            assertNotNull(leaderSandboxId.get());
+            eventually(
+                    "first node owns the Redis primary lock",
+                    Duration.ofSeconds(10),
+                    Duration.ofMillis(100),
+                    () -> ownerA.equals(redis.get(lockKey)));
+
+            poolB.start();
+            leaderShutdownThread =
+                    new Thread(
+                            () -> {
+                                try {
+                                    poolA.shutdown(true);
+                                } catch (Throwable throwable) {
+                                    leaderShutdownFailure.set(throwable);
+                                }
+                            },
+                            "sandbox-pool-e2e-inflight-primary-shutdown");
+            leaderShutdownThread.start();
+
+            eventually(
+                    "old primary lifecycle retires while its warmup remains blocked",
+                    Duration.ofSeconds(10),
+                    Duration.ofMillis(100),
+                    () -> poolA.snapshot().getLifecycleState() == PoolLifecycleState.STOPPED);
+            assertEquals(
+                    1L,
+                    releaseLeaderWarmup.getCount(),
+                    "the old-primary warmup must still be blocked after retirement");
+
+            assertTrue(
+                    followerWarmupEntered.await(2, TimeUnit.MINUTES),
+                    "the follower should take over and start replacement warmup");
+            eventually(
+                    "new primary publishes its replacement while old warmup remains in flight",
+                    AWAIT_TIMEOUT,
+                    Duration.ofMillis(250),
+                    () ->
+                            ownerB.equals(redis.get(lockKey))
+                                    && followerSandboxId.get() != null
+                                    && poolB.snapshot().getIdleCount() == 1
+                                    && poolB.snapshotIdleEntries().stream()
+                                            .allMatch(
+                                                    entry ->
+                                                            followerSandboxId
+                                                                    .get()
+                                                                    .equals(entry.getSandboxId())));
+            eventually(
+                    "old and replacement sandboxes overlap before old completion",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> countTaggedSandboxes(tag) == 2);
+
+            releaseLeaderWarmup.countDown();
+            if (leaderShutdownThread != null) {
+                leaderShutdownThread.join(15_000);
+                assertFalse(
+                        leaderShutdownThread.isAlive(),
+                        "old primary shutdown should finish after releasing its warmup");
+            }
+            assertNull(leaderShutdownFailure.get(), "old primary shutdown should not fail");
+
+            eventually(
+                    "late old-primary sandbox is deleted and shared idle remains bounded",
+                    Duration.ofSeconds(60),
+                    Duration.ofMillis(500),
+                    () ->
+                            !taggedSandboxExists(tag, leaderSandboxId.get())
+                                    && taggedSandboxExists(tag, followerSandboxId.get())
+                                    && countTaggedSandboxes(tag) == 1
+                                    && poolB.snapshot().getIdleCount() == 1);
+            assertTrue(
+                    poolB.snapshotIdleEntries().stream()
+                            .allMatch(
+                                    entry -> followerSandboxId.get().equals(entry.getSandboxId())),
+                    "retired primary result must never enter shared Redis idle membership");
+            assertTrue(
+                    leaderWarmupInterrupted.get(),
+                    "old primary shutdown should interrupt the uncooperative preparer");
+        } finally {
+            releaseLeaderWarmup.countDown();
+            if (leaderShutdownThread != null) {
+                leaderShutdownThread.join(15_000);
+            }
+        }
     }
 
     @Test
@@ -755,12 +981,45 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         return infos.getSandboxInfos().size();
     }
 
+    private boolean taggedSandboxExists(String queryTag, String sandboxId) {
+        if (sandboxManager == null || queryTag == null || queryTag.isBlank() || sandboxId == null) {
+            return false;
+        }
+        PagedSandboxInfos infos =
+                sandboxManager.listSandboxInfos(
+                        SandboxFilter.builder()
+                                .metadata(Map.of("tag", queryTag))
+                                .pageSize(50)
+                                .build());
+        return infos.getSandboxInfos().stream().anyMatch(info -> sandboxId.equals(info.getId()));
+    }
+
     private String poolKey(String poolName, String suffix) {
         String tag =
                 java.util.Base64.getUrlEncoder()
                         .withoutPadding()
                         .encodeToString(poolName.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         return keyPrefix + ":{" + tag + "}:" + suffix;
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("warmup interrupted unexpectedly", exception);
+        }
+    }
+
+    private static void awaitIgnoringInterrupt(CountDownLatch latch, AtomicBoolean interrupted) {
+        while (true) {
+            try {
+                latch.await();
+                return;
+            } catch (InterruptedException exception) {
+                interrupted.set(true);
+            }
+        }
     }
 
     private void cleanupRedisKeys() {
