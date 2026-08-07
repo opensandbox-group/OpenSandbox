@@ -6,6 +6,7 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 
 |                            OSEP                            |                   Title                    |    Status     | Last Updated |
 |:----------------------------------------------------------:|:------------------------------------------:|:-------------:|:------------:|
+| [OSEP-0018](0018-exact-request-header-selectors-for-credential-binding-disambiguation.md) | Exact Request-Header Selectors for Credential Binding Disambiguation | draft | 2026-08-06 |
 |       [OSEP-0001](0001-fqdn-based-egress-control.md)       |         FQDN-based Egress Control          |  implemented  |  2026-01-22  |
 | [OSEP-0002](0002-kubernetes-sigs-agent-sandbox-support.md) |   kubernetes-sigs/agent-sandbox Support    |  implemented  |  2026-01-23  |
 |   [OSEP-0003](0003-volume-and-volumebinding-support.md)    |               Volume Support               | implementing  |  2026-02-11  |
