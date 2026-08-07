@@ -65,7 +65,7 @@ Some legitimate clients need two credentials for the same destination shape. Two
 | R2 | Header names match case-insensitively. Values match case-sensitively after trimming only outer HTTP optional whitespace (SP and HTAB). | Must Have |
 | R3 | Each selected request header must occur exactly once; missing or repeated headers do not satisfy a predicate. | Must Have |
 | R4 | Selectors permit ordinary end-to-end headers, including `Authorization`, but reject HTTP/2 pseudo-headers and these case-insensitive names: `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Proxy-Authorization`, `Proxy-Authenticate`, `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`. | Must Have |
-| R5 | Overlapping destination scopes are valid only when selectors prove the bindings cannot both match one request. | Must Have |
+| R5 | Bindings whose destination scopes can match a request at the same host precedence are valid only when selectors prove they cannot both match that request. | Must Have |
 | R6 | Public reads return selector header names and `valueConfigured: true`, never selector values. | Must Have |
 | R7 | Unsupported selector fields are rejected, never silently removed or broadened. | Must Have |
 | R8 | Selectors are non-secret routing hints, not an authorization boundary. | Must Have |
@@ -170,7 +170,17 @@ Existing host precedence is unchanged. At the selected host precedence, zero eli
 
 ### Candidate validation
 
-Vault creation and mutation validate the complete post-mutation binding set. For bindings with overlapping base scopes, both bindings must declare selectors. They may coexist only if they share a normalized header name whose configured exact values differ, proving no request can satisfy both conjunctions. Otherwise the candidate is rejected. In particular, a selector-bound binding cannot overlap a generic binding, and predicates on different header names do not prove disjointness because a request can carry both headers.
+Vault creation and mutation validate the complete post-mutation binding set. For
+each pair whose base scopes can match a request at the same host precedence,
+both bindings must declare selectors. They may coexist only if they share a
+normalized header name whose configured exact values differ, proving no request
+can satisfy both conjunctions. Otherwise the candidate is rejected. In
+particular, a selector-bound binding cannot overlap a generic binding at the
+same host precedence, and predicates on different header names do not prove
+disjointness because a request can carry both headers. An exact-host binding
+and an overlapping wildcard-host binding remain valid without selectors:
+existing host precedence selects the exact-host binding rather than treating
+the pair as ambiguous.
 
 The rule is deliberately conservative. Failed validation or proxy acknowledgement leaves the previous acknowledged revision active.
 
@@ -194,7 +204,11 @@ output.
 - Accept valid exact conjunctions; reject more than four entries, blank values, duplicate normalized names, invalid names, and forbidden names.
 - Verify case-insensitive names, case-sensitive values, outer-OWS trimming, and no normalization of internal whitespace or value casing.
 - Verify missing or duplicate selected headers do not match.
-- Verify distinct values for the same header coexist; generic/selector overlap, identical selectors, and different-header selectors are rejected when base scopes overlap.
+- Verify distinct values for the same header coexist; generic/selector overlap,
+  identical selectors, and different-header selectors are rejected when base
+  scopes can match at the same host precedence. Verify an exact-host binding
+  and overlapping wildcard-host binding remain valid without selectors and the
+  exact-host binding is selected.
 - Verify create/patch payloads validate `RequestHeaderSelectorInput`, while
   get/list payloads validate `RequestHeaderSelectorMetadata` and expose names
   and `valueConfigured: true`, never values. Verify values cannot appear in
