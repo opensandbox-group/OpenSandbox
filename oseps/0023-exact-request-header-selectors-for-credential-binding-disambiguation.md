@@ -110,10 +110,11 @@ No eligible binding preserves current behavior: inject no credential and let ord
 
 ### Data model and API
 
-Define separate input and metadata schemas. `CredentialBinding.match` uses
-`CredentialMatch`; `CredentialBindingMetadata.match` uses
-`CredentialMatchMetadata`. Both retain the existing base match fields, but
-their request-header selector shapes are deliberately distinct:
+Define separate input and metadata schemas:
+- `CredentialBinding.match` uses `CredentialMatch`
+- `CredentialBindingMetadata.match` uses `CredentialMatchMetadata`. 
+
+Both schema types retain the existing base match fields, but their request-header selector shapes are deliberately seperate:
 
 ```yaml
 CredentialMatch:
@@ -154,10 +155,7 @@ requestHeaders:
     valueConfigured: true
 ```
 
-The egress sidecar's private active snapshot retains exact values for matching;
-public binding metadata never does. The OpenAPI schemas and generated SDK
-models must preserve this input/read distinction rather than treating a
-metadata response as a `CredentialMatch` write payload.
+The egress sidecar's private active snapshot retains exact values for matching; public binding metadata never does. The OpenAPI schemas and generated SDK models must preserve this input/read distinction rather than treating a metadata response as a `CredentialMatch` write payload.
 
 ### Matching and selection
 
