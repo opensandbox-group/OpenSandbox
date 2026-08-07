@@ -3,11 +3,11 @@ title: Exact Request-Header Selectors for Credential Binding Disambiguation
 authors:
   - "@andreweacott"
 creation-date: 2026-08-06
-last-updated: 2026-08-06
+last-updated: 2026-08-07
 status: draft
 ---
 
-# OSEP-0018: Exact Request-Header Selectors for Credential Binding Disambiguation
+# OSEP-0023: Exact Request-Header Selectors for Credential Binding Disambiguation
 
 <!-- toc -->
 - [Summary](#summary)
