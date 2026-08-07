@@ -115,7 +115,7 @@ Add `requestHeaders` to the public `CredentialMatch` request schema:
 ```yaml
 requestHeaders:
   type: array
-  maxItems: 8
+  maxItems: 4
   items:
     type: object
     required: [name, value]
