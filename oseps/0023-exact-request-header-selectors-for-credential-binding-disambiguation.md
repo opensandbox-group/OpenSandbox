@@ -110,24 +110,43 @@ No eligible binding preserves current behavior: inject no credential and let ord
 
 ### Data model and API
 
-Add `requestHeaders` to the public `CredentialMatch` request schema:
+Define separate input and metadata schemas. `CredentialBinding.match` uses
+`CredentialMatch`; `CredentialBindingMetadata.match` uses
+`CredentialMatchMetadata`. Both retain the existing base match fields, but
+their request-header selector shapes are deliberately distinct:
 
 ```yaml
-requestHeaders:
-  type: array
-  maxItems: 4
-  items:
-    type: object
-    required: [name, value]
-    properties:
-      name: {type: string}
-      value: {type: string, maxLength: 4096, writeOnly: true}
-    additionalProperties: false
+CredentialMatch:
+  properties:
+    requestHeaders:
+      type: array
+      maxItems: 4
+      items: {$ref: "#/components/schemas/RequestHeaderSelectorInput"}
+RequestHeaderSelectorInput:
+  type: object
+  required: [name, value]
+  properties:
+    name: {type: string}
+    value: {type: string, maxLength: 4096, writeOnly: true}
+  additionalProperties: false
+
+CredentialMatchMetadata:
+  properties:
+    requestHeaders:
+      type: array
+      items: {$ref: "#/components/schemas/RequestHeaderSelectorMetadata"}
+RequestHeaderSelectorMetadata:
+  type: object
+  required: [name, valueConfigured]
+  properties:
+    name: {type: string}
+    valueConfigured: {type: boolean, enum: [true], readOnly: true}
+  additionalProperties: false
 ```
 
 `name` must be a non-empty HTTP field-name token as defined by RFC 9110; it is not whitespace-trimmed. After trimming only outer HTTP optional whitespace, `value` must be non-empty. A binding must not repeat a header name after case-insensitive normalization. This prevents unsatisfiable predicates.
 
-Public binding reads return a sanitized match shape:
+Public binding reads therefore return a sanitized metadata shape:
 
 ```yaml
 requestHeaders:
@@ -135,7 +154,10 @@ requestHeaders:
     valueConfigured: true
 ```
 
-The egress sidecar's private active snapshot retains exact values for matching; public binding metadata never does.
+The egress sidecar's private active snapshot retains exact values for matching;
+public binding metadata never does. The OpenAPI schemas and generated SDK
+models must preserve this input/read distinction rather than treating a
+metadata response as a `CredentialMatch` write payload.
 
 ### Matching and selection
 
@@ -160,7 +182,12 @@ Do not include configured selector values in serialized metadata, API errors, st
 
 ### SDKs, CLI, and documentation
 
-The egress OpenAPI contract is the source of truth. Supported SDKs must preserve `requestHeaders` on create and patch and expose the sanitized read shape. They must not fabricate selector values from a read response. CLI and documentation must identify selector values as write-only non-secret inputs and must not render them in normal inspect/list output.
+The egress OpenAPI contract is the source of truth. Supported SDKs must expose
+the input selector shape on create and patch and the distinct sanitized
+metadata shape on get and list. They must not fabricate selector values from a
+read response. CLI and documentation must identify selector values as
+write-only non-secret inputs and must not render them in normal inspect/list
+output.
 
 ## Test Plan
 
@@ -170,7 +197,10 @@ The egress OpenAPI contract is the source of truth. Supported SDKs must preserve
 - Verify case-insensitive names, case-sensitive values, outer-OWS trimming, and no normalization of internal whitespace or value casing.
 - Verify missing or duplicate selected headers do not match.
 - Verify distinct values for the same header coexist; generic/selector overlap, identical selectors, and different-header selectors are rejected when base scopes overlap.
-- Verify reads expose names and `valueConfigured: true`, never values, and that values cannot appear in errors, logs, metrics, or diagnostics.
+- Verify create/patch payloads validate `RequestHeaderSelectorInput`, while
+  get/list payloads validate `RequestHeaderSelectorMetadata` and expose names
+  and `valueConfigured: true`, never values. Verify values cannot appear in
+  errors, logs, metrics, or diagnostics.
 
 ### Integration and end-to-end tests
 
