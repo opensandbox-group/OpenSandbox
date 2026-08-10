@@ -184,6 +184,7 @@ Any OCI-compatible registry works (Docker Hub, GitHub Container Registry, Harbor
 
 - **Reachable from cluster nodes** (for the commit Job to push)
 - **Reachable from the Kubernetes API server / kubelet** (for image pull on resume)
+- **Configured to allow manifest deletion** (for snapshot cleanup)
 
 ### Step 2: Create the push secret
 
@@ -215,6 +216,9 @@ For development with a cluster-internal `registry:2` deployment:
 # Create a registry deployment
 kubectl create deployment docker-registry \
   --image=registry:2 --port=5000
+
+kubectl set env deployment/docker-registry \
+  REGISTRY_STORAGE_DELETE_ENABLED=true
 
 kubectl expose deployment docker-registry --port=5000
 
