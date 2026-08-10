@@ -101,13 +101,20 @@ func TestSandboxSnapshotHandleDeletion_DeletesRegistryImagesBeforeRemovingFinali
 		},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "registry-secret", Namespace: "default"}}
+	commitJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot-commit", Namespace: "default"}}
+	unpauseJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot-unpause", Namespace: "default"}}
 	deleter := &recordingRegistryImageDeleter{}
-	r := newTestSnapshotReconciler(snapshot, secret)
+	r := newTestSnapshotReconciler(snapshot, secret, commitJob, unpauseJob)
 	r.SnapshotPushSecret = secret.Name
 	r.SnapshotRegistryInsecure = true
 	r.registryImageDeleter = deleter
 
 	result, err := r.handleDeletion(context.Background(), snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, result.RequeueAfter)
+	assert.Empty(t, deleter.calls, "registry cleanup must wait for jobs to terminate")
+
+	result, err = r.handleDeletion(context.Background(), snapshot)
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 	require.Len(t, deleter.calls, 2)
@@ -119,6 +126,24 @@ func TestSandboxSnapshotHandleDeletion_DeletesRegistryImagesBeforeRemovingFinali
 	updated := &sandboxv1alpha1.SandboxSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: snapshot.Name, Namespace: snapshot.Namespace}, updated))
 	assert.NotContains(t, updated.Finalizers, SandboxSnapshotFinalizer)
+}
+
+func TestSandboxSnapshotHandleDeletion_WaitsForJobPods(t *testing.T) {
+	now := metav1.Now()
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot", Namespace: "default", Finalizers: []string{SandboxSnapshotFinalizer}},
+		Status:     sandboxv1alpha1.SandboxSnapshotStatus{Containers: []sandboxv1alpha1.ContainerSnapshot{{ContainerName: "main", ImageURI: "registry.example.com/snapshots/main:tag"}}},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot-commit", Namespace: "default", DeletionTimestamp: &now, Finalizers: []string{"foregroundDeletion"}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot-commit-pod", Namespace: "default", Labels: map[string]string{"job-name": "test-snapshot-commit"}}}
+	deleter := &recordingRegistryImageDeleter{}
+	r := newTestSnapshotReconciler(snapshot, job, pod)
+	r.registryImageDeleter = deleter
+
+	result, err := r.handleDeletion(context.Background(), snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, result.RequeueAfter)
+	assert.Empty(t, deleter.calls)
 }
 
 func TestSandboxSnapshotHandleDeletion_KeepsFinalizerWhenRegistryDeleteFails(t *testing.T) {
@@ -140,6 +165,25 @@ func TestSandboxSnapshotHandleDeletion_KeepsFinalizerWhenRegistryDeleteFails(t *
 
 	_, err := r.handleDeletion(context.Background(), snapshot)
 	require.ErrorContains(t, err, "registry unavailable")
+
+	updated := &sandboxv1alpha1.SandboxSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: snapshot.Name, Namespace: snapshot.Namespace}, updated))
+	assert.Contains(t, updated.Finalizers, SandboxSnapshotFinalizer)
+}
+
+func TestSandboxSnapshotHandleDeletion_KeepsFinalizerWhenRegistrySecretIsMissing(t *testing.T) {
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot", Namespace: "default", Finalizers: []string{SandboxSnapshotFinalizer}},
+		Status:     sandboxv1alpha1.SandboxSnapshotStatus{Containers: []sandboxv1alpha1.ContainerSnapshot{{ContainerName: "main", ImageURI: "registry.example.com/snapshots/main:tag"}}},
+	}
+	deleter := &recordingRegistryImageDeleter{}
+	r := newTestSnapshotReconciler(snapshot)
+	r.SnapshotPushSecret = "missing-registry-secret"
+	r.registryImageDeleter = deleter
+
+	_, err := r.handleDeletion(context.Background(), snapshot)
+	require.ErrorContains(t, err, "missing-registry-secret")
+	assert.Empty(t, deleter.calls)
 
 	updated := &sandboxv1alpha1.SandboxSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: snapshot.Name, Namespace: snapshot.Namespace}, updated))

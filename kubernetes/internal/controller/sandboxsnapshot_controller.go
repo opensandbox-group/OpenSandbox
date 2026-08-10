@@ -80,7 +80,7 @@ type SandboxSnapshotReconciler struct {
 	// SnapshotRegistry is the OCI registry for snapshot images (from Controller Manager startup params)
 	SnapshotRegistry string
 
-	// SnapshotPushSecret is the K8s Secret name for pushing to registry (from Controller Manager startup params)
+	// SnapshotPushSecret is the K8s Secret name for pushing and deleting snapshot images (from Controller Manager startup params)
 	SnapshotPushSecret string
 
 	// ImageCommitterPullSecret is the K8s Secret name used to pull the image-committer image in commit Jobs.

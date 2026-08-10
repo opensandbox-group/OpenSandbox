@@ -137,7 +137,7 @@ The snapshot controller supports the following command-line flags:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--snapshot-registry` | `""` | OCI registry prefix used for snapshot images |
-| `--snapshot-push-secret` | `""` | Secret name used to push and delete snapshot images |
+| `--snapshot-push-secret` | `""` | Secret name used to push and delete snapshot images; must contain inline `auths` credentials with manifest delete permission |
 | `--resume-pull-secret` | `""` | Secret name injected into resumed sandboxes for image pulls |
 | `--image-committer-image` | `image-committer:dev` | Image used for commit operations (must contain `nerdctl` tool) |
 | `--commit-job-timeout` | `10m` | Timeout duration for commit jobs |
@@ -171,7 +171,7 @@ Then configure the controller manager with:
 ```
 
 ::: info
-Deleting a `SandboxSnapshot` also deletes its pushed OCI images before the controller removes the finalizer. Keep the configured `--snapshot-push-secret` available and grant its registry credentials permission to pull and delete manifests. Registry garbage collection may still be required to reclaim unreferenced blob storage, depending on the registry implementation.
+Deleting a `SandboxSnapshot` stops its commit/unpause Jobs and deletes its pushed OCI images before the controller removes the finalizer. Keep the configured `--snapshot-push-secret` available during cleanup. If the registry is permanently unavailable, remove the finalizer manually with `kubectl patch sandboxsnapshot <name> -n <namespace> --type=merge -p '{"metadata":{"finalizers":[]}}'`, then clean up the registry image separately. Registry garbage collection may still be required to reclaim unreferenced blob storage.
 :::
 
 ## Getting Started

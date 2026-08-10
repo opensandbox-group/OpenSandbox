@@ -59,6 +59,8 @@ func (remoteRegistryImageDeleter) Delete(
 
 	// Registry implementations commonly require deletion by digest. Resolve
 	// legacy snapshots that do not have imageDigest recorded before deleting.
+	// This compatibility path can only delete the manifest currently behind the
+	// tag; snapshots with a recorded digest are protected from tag reuse.
 	if _, ok := ref.(name.Digest); !ok {
 		descriptor, headErr := remote.Head(ref, remoteOptions...)
 		if isRegistryNotFound(headErr) {
@@ -82,15 +84,21 @@ func registryAuthenticator(secret *corev1.Secret, registry string) (authn.Authen
 	}
 
 	var auths map[string]authn.AuthConfig
+	var credentialHelpers map[string]string
+	var credentialStore string
 	switch {
 	case len(secret.Data[corev1.DockerConfigJsonKey]) > 0:
 		var config struct {
-			Auths map[string]authn.AuthConfig `json:"auths"`
+			Auths       map[string]authn.AuthConfig `json:"auths"`
+			CredHelpers map[string]string           `json:"credHelpers"`
+			CredsStore  string                      `json:"credsStore"`
 		}
 		if err := json.Unmarshal(secret.Data[corev1.DockerConfigJsonKey], &config); err != nil {
 			return nil, fmt.Errorf("parse registry secret %s/%s: %w", secret.Namespace, secret.Name, err)
 		}
 		auths = config.Auths
+		credentialHelpers = config.CredHelpers
+		credentialStore = config.CredsStore
 	case len(secret.Data[corev1.DockerConfigKey]) > 0:
 		if err := json.Unmarshal(secret.Data[corev1.DockerConfigKey], &auths); err != nil {
 			return nil, fmt.Errorf("parse registry secret %s/%s: %w", secret.Namespace, secret.Name, err)
@@ -103,6 +111,14 @@ func registryAuthenticator(secret *corev1.Secret, registry string) (authn.Authen
 		if normalizeRegistry(server) == normalizeRegistry(registry) {
 			return authn.FromConfig(config), nil
 		}
+	}
+	for server, helper := range credentialHelpers {
+		if normalizeRegistry(server) == normalizeRegistry(registry) {
+			return nil, fmt.Errorf("registry secret %s/%s uses credential helper %q for %s; controller requires inline auths credentials", secret.Namespace, secret.Name, helper, registry)
+		}
+	}
+	if credentialStore != "" && len(auths) == 0 {
+		return nil, fmt.Errorf("registry secret %s/%s uses credential store %q; controller requires inline auths credentials", secret.Namespace, secret.Name, credentialStore)
 	}
 	return nil, fmt.Errorf("registry secret %s/%s has no credentials for %s", secret.Namespace, secret.Name, registry)
 }

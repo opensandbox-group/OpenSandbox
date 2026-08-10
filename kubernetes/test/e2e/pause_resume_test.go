@@ -18,6 +18,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -261,6 +263,12 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("Succeed"), "Internal pause snapshot should be ready after pause")
 
+			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
+				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.containers[0].imageUri}")
+			snapshotImageURI, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snapshotImageURI).NotTo(BeEmpty())
+
 			// --- Step 4: Resume - patch spec.pause=false ---
 			By("triggering resume by patching spec.pause=false")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
@@ -283,6 +291,9 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				"-n", pauseResumeNamespace, "-o", "name")
 			output, err = utils.Run(cmd)
 			Expect(err).To(HaveOccurred(), "Internal pause snapshot should be deleted after successful resume")
+
+			By("verifying the deleted snapshot manifest is absent from the registry")
+			expectRegistryManifestMissing(snapshotImageURI)
 
 			// --- Step 5: Verify rootfs data persistence ---
 			By("getting resumed pod name")
@@ -1068,4 +1079,46 @@ func createDockerRegistrySecrets(namespace string) error {
 	}
 
 	return nil
+}
+
+func expectRegistryManifestMissing(imageURI string) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+	port := listener.Addr().(*net.TCPAddr).Port
+	Expect(listener.Close()).To(Succeed())
+
+	portForward := exec.Command("kubectl", "port-forward", "-n", pauseResumeNamespace,
+		"service/docker-registry", fmt.Sprintf("%d:5000", port))
+	Expect(portForward.Start()).To(Succeed())
+	defer func() {
+		_ = portForward.Process.Kill()
+		_ = portForward.Wait()
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	registryURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	Eventually(func(g Gomega) {
+		request, requestErr := http.NewRequest(http.MethodGet, registryURL+"/v2/", nil)
+		g.Expect(requestErr).NotTo(HaveOccurred())
+		request.SetBasicAuth(registryUsername, registryPassword)
+		response, requestErr := client.Do(request)
+		g.Expect(requestErr).NotTo(HaveOccurred())
+		defer response.Body.Close()
+		g.Expect(response.StatusCode).To(Equal(http.StatusOK))
+	}, 30*time.Second).Should(Succeed())
+
+	repositoryAndTag := strings.TrimPrefix(imageURI, registryServiceAddr+"/")
+	tagSeparator := strings.LastIndex(repositoryAndTag, ":")
+	Expect(tagSeparator).To(BeNumerically(">", 0), "snapshot image must include a tag")
+	manifestURL := fmt.Sprintf("%s/v2/%s/manifests/%s", registryURL, repositoryAndTag[:tagSeparator], repositoryAndTag[tagSeparator+1:])
+
+	for range 2 {
+		request, requestErr := http.NewRequest(http.MethodHead, manifestURL, nil)
+		Expect(requestErr).NotTo(HaveOccurred())
+		request.SetBasicAuth(registryUsername, registryPassword)
+		response, requestErr := client.Do(request)
+		Expect(requestErr).NotTo(HaveOccurred())
+		response.Body.Close()
+		Expect(response.StatusCode).To(Equal(http.StatusNotFound))
+	}
 }

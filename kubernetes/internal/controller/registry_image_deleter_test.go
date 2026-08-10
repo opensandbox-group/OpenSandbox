@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/stretchr/testify/assert"
@@ -52,7 +53,27 @@ func TestRemoteRegistryImageDeleter_ResolvesTagAndDeletesDigest(t *testing.T) {
 	imageReference := strings.TrimPrefix(registry.URL, "http://") + "/snapshots/test:tag"
 	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, nil, true)
 	require.NoError(t, err)
-	assert.Equal(t, "/v2/snapshots/test/manifests/"+digest, <-deletedPath)
+	select {
+	case path := <-deletedPath:
+		assert.Equal(t, "/v2/snapshots/test/manifests/"+digest, path)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for registry DELETE request")
+	}
+}
+
+func TestRemoteRegistryImageDeleter_TreatsMissingManifestAsSuccess(t *testing.T) {
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v2/" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, request)
+	}))
+	defer registry.Close()
+
+	imageReference := strings.TrimPrefix(registry.URL, "http://") + "/snapshots/missing@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, nil, true)
+	require.NoError(t, err)
 }
 
 func TestRegistryAuthenticator_ReadsDockerConfigJSON(t *testing.T) {
@@ -87,4 +108,16 @@ func TestRegistryAuthenticator_AllowsAnonymousRegistry(t *testing.T) {
 	authenticator, err := registryAuthenticator(nil, "registry.example.com")
 	require.NoError(t, err)
 	assert.Equal(t, authn.Anonymous, authenticator)
+}
+
+func TestRegistryAuthenticator_RejectsCredentialHelpers(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "registry-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			corev1.DockerConfigJsonKey: []byte(`{"credHelpers":{"registry.example.com":"osxkeychain"}}`),
+		},
+	}
+
+	_, err := registryAuthenticator(secret, "registry.example.com")
+	require.ErrorContains(t, err, "requires inline auths credentials")
 }
