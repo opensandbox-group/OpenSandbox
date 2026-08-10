@@ -206,6 +206,38 @@ millisecond ladder (`0, 5, 10, … 10000`), which would put every realistic DNS 
 single `le=5` bucket and make `histogram_quantile()` return an interpolation rather than a
 measurement.
 
+#### Resource usage: node vs sidecar
+
+Two pairs of gauges look interchangeable and are not:
+
+| Metric | Unit | Scope |
+|---|---|---|
+| `egress.system.memory.usage_bytes` | `By` | the **node** |
+| `egress.system.cpu.utilization` | `1` | the **node** |
+| `egress.process.memory.usage_bytes` | `By` | this **sidecar** |
+| `egress.process.cpu.time` | `s` | this **sidecar** |
+
+The `system` pair comes from `/proc/meminfo` and `/proc/stat`, which inside a container
+describe the node. Since the sidecar runs **per sandbox**, every sandbox on a node reports
+the same node figure under its own `sandbox_id` — do not chart these "by sandbox", because
+the series look per-sandbox and are N copies of one number. Use kubelet/cAdvisor or a node
+exporter for node-level data.
+
+The `process` pair is read from the sidecar's own cgroup, so it really is per sandbox.
+`egress.process.cpu.time` is a **cumulative counter of consumed seconds** — query it with
+`rate()`. A sampled ratio would depend on the export interval and could not be compared
+across deployments.
+
+Per-sandbox attribution needs `OPENSANDBOX_EGRESS_SANDBOX_ID` to be set, since that is what
+becomes the `sandbox_id` attribute. Without it every sidecar exports the same attribute set
+and the series from different sandboxes collide in the backend — which makes the `process`
+metrics look flat or flapping rather than absent. Set it when launching the sidecar.
+
+Both `process` metrics are **only present when the sidecar's cgroup is readable** (cgroup v2
+`memory.current` / `cpu.stat`, or v1 `memory.usage_in_bytes` / `cpuacct.usage`). Under a
+runtime that does not expose cgroupfs the series are absent rather than zero, so a flat zero
+is never mistaken for an idle sidecar.
+
 Full metric inventory and attribute semantics: [egress OpenTelemetry reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/opentelemetry.md).
 
 ## Build & Run
