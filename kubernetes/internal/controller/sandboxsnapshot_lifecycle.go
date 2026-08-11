@@ -256,16 +256,12 @@ func (r *SandboxSnapshotReconciler) deleteSnapshotImages(ctx context.Context, sn
 		}
 		imageReference := container.ImageURI
 		if container.ImageDigest != "" {
-			imageReference = strings.SplitN(container.ImageURI, "@", 2)[0]
-			if tagIndex := strings.LastIndex(imageReference, ":"); tagIndex > strings.LastIndex(imageReference, "/") {
-				imageReference = imageReference[:tagIndex]
-			}
 			imageReference += "@" + container.ImageDigest
 		}
 		if _, exists := deleted[imageReference]; exists {
 			continue
 		}
-		if err := deleter.Delete(ctx, imageReference, registrySecret, r.SnapshotRegistryInsecure); err != nil {
+		if err := deleter.Delete(ctx, container.ImageURI, container.ImageDigest, registrySecret, r.SnapshotRegistryInsecure); err != nil {
 			return fmt.Errorf("delete snapshot image for container %s: %w", container.ContainerName, err)
 		}
 		deleted[imageReference] = struct{}{}

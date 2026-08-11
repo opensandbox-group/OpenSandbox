@@ -51,7 +51,7 @@ func TestRemoteRegistryImageDeleter_ResolvesTagAndDeletesDigest(t *testing.T) {
 	defer registry.Close()
 
 	imageReference := strings.TrimPrefix(registry.URL, "http://") + "/snapshots/test:tag"
-	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, nil, true)
+	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, "", nil, true)
 	require.NoError(t, err)
 	select {
 	case path := <-deletedPath:
@@ -72,8 +72,45 @@ func TestRemoteRegistryImageDeleter_TreatsMissingManifestAsSuccess(t *testing.T)
 	defer registry.Close()
 
 	imageReference := strings.TrimPrefix(registry.URL, "http://") + "/snapshots/missing@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, nil, true)
+	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, "", nil, true)
 	require.NoError(t, err)
+}
+
+func TestRemoteRegistryImageDeleter_FallsBackToTagAfterRecordedDigestMiss(t *testing.T) {
+	const recordedDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const registryDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	deletedPaths := make(chan string, 2)
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/v2/":
+			w.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodHead && request.URL.Path == "/v2/snapshots/test/manifests/tag":
+			w.Header().Set("Docker-Content-Digest", registryDigest)
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Header().Set("Content-Length", "2")
+			w.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/"+recordedDigest):
+			deletedPaths <- request.URL.Path
+			http.NotFound(w, request)
+		case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/"+registryDigest):
+			deletedPaths <- request.URL.Path
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer registry.Close()
+
+	imageReference := strings.TrimPrefix(registry.URL, "http://") + "/snapshots/test:tag"
+	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, recordedDigest, nil, true)
+	require.NoError(t, err)
+	assert.Equal(t, "/v2/snapshots/test/manifests/"+recordedDigest, <-deletedPaths)
+	select {
+	case path := <-deletedPaths:
+		assert.Equal(t, "/v2/snapshots/test/manifests/"+registryDigest, path)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for fallback registry DELETE request")
+	}
 }
 
 func TestRegistryAuthenticator_ReadsDockerConfigJSON(t *testing.T) {

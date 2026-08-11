@@ -39,6 +39,7 @@ import (
 
 type registryDeleteCall struct {
 	imageReference string
+	imageDigest    string
 	secretName     string
 	insecure       bool
 }
@@ -51,6 +52,7 @@ type recordingRegistryImageDeleter struct {
 func (d *recordingRegistryImageDeleter) Delete(
 	_ context.Context,
 	imageReference string,
+	imageDigest string,
 	secret *corev1.Secret,
 	insecure bool,
 ) error {
@@ -60,6 +62,7 @@ func (d *recordingRegistryImageDeleter) Delete(
 	}
 	d.calls = append(d.calls, registryDeleteCall{
 		imageReference: imageReference,
+		imageDigest:    imageDigest,
 		secretName:     secretName,
 		insecure:       insecure,
 	})
@@ -118,7 +121,8 @@ func TestSandboxSnapshotHandleDeletion_DeletesRegistryImagesBeforeRemovingFinali
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 	require.Len(t, deleter.calls, 2)
-	assert.Equal(t, "registry.example.com/snapshots/main@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", deleter.calls[0].imageReference)
+	assert.Equal(t, "registry.example.com/snapshots/main:tag", deleter.calls[0].imageReference)
+	assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", deleter.calls[0].imageDigest)
 	assert.Equal(t, "registry.example.com/snapshots/sidecar:tag", deleter.calls[1].imageReference)
 	assert.Equal(t, "registry-secret", deleter.calls[0].secretName)
 	assert.True(t, deleter.calls[0].insecure)
