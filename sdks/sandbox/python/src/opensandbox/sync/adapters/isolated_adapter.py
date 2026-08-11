@@ -28,6 +28,7 @@ from opensandbox.adapters.converter.response_handler import (
     build_api_exception_from_httpx,
 )
 from opensandbox.adapters.isolated_adapter import (
+    TAIL_CURSOR_HEADER,
     _build_attach_info,
     _build_session_state,
 )
@@ -38,8 +39,11 @@ from opensandbox.models.execd import Execution
 from opensandbox.models.execd_sync import ExecutionHandlersSync
 from opensandbox.models.isolated import (
     CreateIsolatedSessionRequest,
+    IsolatedBackgroundRun,
     IsolatedCapabilities,
+    IsolatedRunLogs,
     IsolatedRunOpts,
+    IsolatedRunStatus,
     IsolatedSessionInfo,
     IsolatedSessionState,
     IsolatedSessionSummary,
@@ -123,6 +127,24 @@ class IsolationSessionHandleSync(IsolationSessionSync):
             self._info.session_id, code, opts=opts, handlers=handlers
         )
 
+    def run_background(
+        self,
+        code: str,
+        *,
+        opts: IsolatedRunOpts | None = None,
+    ) -> IsolatedBackgroundRun:
+        return self._adapter._run_background(
+            self._info.session_id, code, opts=opts
+        )
+
+    def run_status(self, run_id: str) -> IsolatedRunStatus:
+        return self._adapter._run_status(self._info.session_id, run_id)
+
+    def run_logs(self, run_id: str, cursor: int = 0) -> IsolatedRunLogs:
+        return self._adapter._run_logs(
+            self._info.session_id, run_id, cursor=cursor
+        )
+
     def get(self) -> IsolatedSessionState:
         return self._adapter._get(self._info.session_id)
 
@@ -140,6 +162,8 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
     CREATE_PATH = "/v1/isolated/session"
     SESSION_PATH = "/v1/isolated/session/{session_id}"
     RUN_PATH = "/v1/isolated/session/{session_id}/run"
+    RUN_STATUS_PATH = "/v1/isolated/session/{session_id}/runs/{run_id}"
+    RUN_LOGS_PATH = "/v1/isolated/session/{session_id}/runs/{run_id}/logs"
     SESSIONS_PATH = "/v1/isolated/sessions"
     CAPABILITIES_PATH = "/v1/isolated/capabilities"
 
@@ -278,6 +302,91 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
 
             execution.exit_code = _infer_exit_code(execution)
             return execution
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def _run_background(
+        self,
+        session_id: str,
+        code: str,
+        *,
+        opts: IsolatedRunOpts | None = None,
+    ) -> IsolatedBackgroundRun:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        if not (code and code.strip()):
+            raise InvalidArgumentException("code cannot be empty")
+
+        opts = opts or IsolatedRunOpts()
+        json_body: dict = {"code": code, "background": True}
+        if opts.envs:
+            json_body["envs"] = opts.envs
+        # timeout_seconds is foreground-only and deliberately not sent.
+
+        url = self._get_url(self.RUN_PATH.format(session_id=session_id))
+
+        try:
+            response = self._httpx_client.post(url, json=json_body)
+            if response.status_code != 202:
+                raise build_api_exception_from_httpx(
+                    response, "run background in isolated session"
+                )
+            return IsolatedBackgroundRun(**response.json())
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def _run_status(
+        self, session_id: str, run_id: str
+    ) -> IsolatedRunStatus:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        if not (run_id and run_id.strip()):
+            raise InvalidArgumentException("run_id cannot be empty")
+        try:
+            url = self._get_url(
+                self.RUN_STATUS_PATH.format(session_id=session_id, run_id=run_id)
+            )
+            response = self._httpx_client.get(url)
+            if response.status_code != 200:
+                raise build_api_exception_from_httpx(
+                    response, "get isolated run status"
+                )
+            return IsolatedRunStatus(**response.json())
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def _run_logs(
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        cursor: int = 0,
+    ) -> IsolatedRunLogs:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        if not (run_id and run_id.strip()):
+            raise InvalidArgumentException("run_id cannot be empty")
+        if cursor < 0:
+            raise InvalidArgumentException("cursor cannot be negative")
+        try:
+            url = self._get_url(
+                self.RUN_LOGS_PATH.format(session_id=session_id, run_id=run_id)
+            )
+            params = {"cursor": cursor} if cursor else None
+            response = self._httpx_client.get(url, params=params)
+            if response.status_code != 200:
+                raise build_api_exception_from_httpx(
+                    response, "get isolated run logs"
+                )
+            next_cursor = response.headers.get(TAIL_CURSOR_HEADER)
+            if next_cursor is not None:
+                try:
+                    cursor_value = int(next_cursor)
+                except (TypeError, ValueError):
+                    cursor_value = cursor + len(response.content)
+            else:
+                cursor_value = cursor + len(response.content)
+            return IsolatedRunLogs(text=response.text, cursor=cursor_value)
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 

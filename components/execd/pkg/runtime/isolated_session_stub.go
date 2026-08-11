@@ -81,6 +81,37 @@ func (r *IsolatedRunner) RunInIsolatedSession(_ context.Context, _ string, _ str
 	return ErrContextNotFound
 }
 
+// RunInIsolatedSessionBackground returns an error on Windows.
+func (r *IsolatedRunner) RunInIsolatedSessionBackground(_ string, _ string, _ map[string]string) (string, time.Time, error) {
+	return "", time.Time{}, ErrContextNotFound
+}
+
+// IsolatedBackgroundRunSnapshot describes a background run (Windows stub —
+// kept in sync with the non-Windows build so controller code compiles on both).
+type IsolatedBackgroundRunSnapshot struct {
+	RunID      string
+	SessionID  string
+	Running    bool
+	ExitCode   *int
+	Error      string
+	StartedAt  time.Time
+	FinishedAt *time.Time
+}
+
+// GetIsolatedBackgroundRun returns an error on Windows.
+func (r *IsolatedRunner) GetIsolatedBackgroundRun(_ string, _ string) (*IsolatedBackgroundRunSnapshot, error) {
+	return nil, ErrContextNotFound
+}
+
+// SeekIsolatedBackgroundOutput returns an error on Windows.
+func (r *IsolatedRunner) SeekIsolatedBackgroundOutput(_ string, _ string, _ int64) ([]byte, int64, error) {
+	return nil, -1, ErrContextNotFound
+}
+
+// removeSessionBackgroundRuns is a no-op on Windows.
+// (Takes the session ID rather than the !windows-only isolatedSession type.)
+func (r *IsolatedRunner) removeSessionBackgroundRuns(_ string) {}
+
 // DeleteIsolatedSession returns an error on Windows.
 func (r *IsolatedRunner) DeleteIsolatedSession(_ string) error {
 	return ErrContextNotFound

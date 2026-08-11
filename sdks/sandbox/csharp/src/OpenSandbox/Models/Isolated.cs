@@ -96,6 +96,27 @@ public record IsolatedRunOpts(
     [property: JsonPropertyName("timeout_seconds")] int? TimeoutSeconds = null
 );
 
+public record IsolatedBackgroundRun(
+    [property: JsonPropertyName("session_id")] string SessionId,
+    [property: JsonPropertyName("run_id")] string RunId,
+    [property: JsonPropertyName("started_at")] DateTimeOffset? StartedAt = null
+);
+
+public record IsolatedRunStatus(
+    [property: JsonPropertyName("session_id")] string SessionId,
+    [property: JsonPropertyName("run_id")] string RunId,
+    [property: JsonPropertyName("running")] bool Running = false,
+    [property: JsonPropertyName("exit_code")] int? ExitCode = null,
+    [property: JsonPropertyName("error")] string? Error = null,
+    [property: JsonPropertyName("started_at")] DateTimeOffset? StartedAt = null,
+    [property: JsonPropertyName("finished_at")] DateTimeOffset? FinishedAt = null
+);
+
+public record RunLogs(
+    string Text,
+    long Cursor
+);
+
 public record IsolatedCapabilities(
     [property: JsonPropertyName("available")] bool Available = false,
     [property: JsonPropertyName("isolator")] string? Isolator = null,

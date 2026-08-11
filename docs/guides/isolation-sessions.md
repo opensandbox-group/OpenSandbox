@@ -221,12 +221,70 @@ an access token configured.
 | `POST` | `/session` | Create; returns `{session_id, created_at}`. |
 | `GET` | `/sessions` | List active sessions. |
 | `GET` | `/session/{id}` | Full state; echoes creation params so a stateless client can rebuild the handle. |
-| `POST` | `/session/{id}/run` | SSE stream: `stdout` / `error` / `complete`. Runs on the same session are serialized. |
+| `POST` | `/session/{id}/run` | Foreground (default): SSE stream `stdout` / `error` / `complete`. Background (`"background": true`): returns `202` with a run handle. Runs on the same session are serialized. |
+| `GET` | `/session/{id}/runs/{runId}` | Background run status: `running`, `exit_code`, `error`, timestamps. |
+| `GET` | `/session/{id}/runs/{runId}/logs` | Background run combined output as plain text, with byte-cursor pagination. |
 | `DELETE` | `/session/{id}` | Destroy. |
 | `GET` | `/capabilities` | Probe. |
 
 `idle_timeout_seconds > 0` destroys idle sessions automatically; set to `0`
 to disable idle GC and always `DELETE` explicitly.
+
+---
+
+## Background Runs
+
+A background run starts code detached inside the session and returns
+immediately; the run's combined stdout/stderr and exit code are captured by
+execd, and the client polls them while other work continues on the session.
+
+```bash
+# Start detached; 202 returns {"session_id", "run_id", "started_at"}.
+RUN=$(curl -s -X POST "http://localhost:44772/v1/isolated/session/$SESSION/run" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "sleep 5 && echo done", "background": true}' | jq -r .run_id)
+
+# Poll status until running=false.
+curl -s "http://localhost:44772/v1/isolated/session/$SESSION/runs/$RUN"
+
+# Read output (plain text). The response header EXECD-ISOLATED-TAIL-CURSOR
+# carries the next byte offset for incremental reads.
+curl -s "http://localhost:44772/v1/isolated/session/$SESSION/runs/$RUN/logs"
+curl -s "http://localhost:44772/v1/isolated/session/$SESSION/runs/$RUN/logs?cursor=123"
+```
+
+Python SDK:
+
+```python
+session = await sandbox.isolation.create(CreateIsolatedSessionRequest(
+    workspace=IsolatedWorkspaceSpec(path="/workspace", mode="rw"),
+))
+
+run = await session.run_background("sleep 5 && echo done")
+while (status := await session.run_status(run.run_id)).running:
+    await asyncio.sleep(0.2)
+print(status.exit_code)
+logs = await session.run_logs(run.run_id)   # .text + .cursor for pagination
+```
+
+Background run semantics:
+
+- `timeout_seconds` is foreground-only; background runs are not time-limited.
+- Idle GC is suspended while a background run is active; after it finishes,
+  the normal idle window applies. Deleting the session kills the run.
+- Background runs require a writable log location, so sessions with a
+  read-only (`ro`) workspace reject them with `400`; `rw` and `overlay`
+  workspaces are supported.
+- Runs share the session's process group, so session-level signals (e.g. the
+  `SIGINT` sent when a foreground run times out or is cancelled) also reach
+  them.
+- Each `logs` request returns at most 16 MiB; page through large output with
+  the returned cursor. Per-run log retention is capped at 16 MiB — output
+  beyond the cap is discarded when the run completes, so drain incrementally
+  while the run is active if you need more than the first page.
+- A run whose session dies mid-flight reports `running: false` with
+  `error: "session terminated"`; run records and their logs are removed when
+  the session is deleted or garbage-collected.
 
 ---
 

@@ -15,11 +15,16 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -211,4 +216,264 @@ func (unavailableTestIsolator) Capabilities() isolation.Capabilities {
 
 func (unavailableTestIsolator) Wrap(*exec.Cmd, isolation.WrapOptions) error {
 	return fmt.Errorf("unavailable")
+}
+
+// lifecycleTestIsolator is a happy-path isolator for tests needing real sessions.
+type lifecycleTestIsolator struct{}
+
+func (lifecycleTestIsolator) Name() string { return "lifecycle-test" }
+func (lifecycleTestIsolator) Available() bool {
+	return true
+}
+func (lifecycleTestIsolator) Capabilities() isolation.Capabilities {
+	return isolation.Capabilities{
+		Available:              true,
+		SetprivAvailable:       true,
+		SetprivSwitchAvailable: true,
+		UsernsAvailable:        true,
+	}
+}
+func (lifecycleTestIsolator) Wrap(*exec.Cmd, isolation.WrapOptions) error { return nil }
+func (lifecycleTestIsolator) WrapWithLifecycle(
+	cmd *exec.Cmd,
+	opts isolation.WrapOptions,
+) (isolation.WorkloadLifecycle, error) {
+	if err := (lifecycleTestIsolator{}).Wrap(cmd, opts); err != nil {
+		return nil, err
+	}
+	return &lifecycleTestLifecycle{done: make(chan struct{})}, nil
+}
+
+type lifecycleTestLifecycle struct {
+	done chan struct{}
+}
+
+func (*lifecycleTestLifecycle) WaitForIdentity(context.Context) (isolation.WorkloadIdentity, error) {
+	return isolation.WorkloadIdentity{PID: 2, SandboxPID: 1}, nil
+}
+func (*lifecycleTestLifecycle) MarkReady() error             { return nil }
+func (l *lifecycleTestLifecycle) Abort()                     { close(l.done) }
+func (l *lifecycleTestLifecycle) DrainDone() <-chan struct{} { return l.done }
+func (*lifecycleTestLifecycle) DrainError() error            { return nil }
+func (*lifecycleTestLifecycle) ExitCode() (int, bool)        { return 0, true }
+func (l *lifecycleTestLifecycle) Close() error               { return nil }
+
+// Exercises the background run endpoints end to end: start, poll status, read logs.
+func TestBackgroundRun_HTTPFlow(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+	runCtx, runRecorder := newTestContext(
+		http.MethodPost,
+		"/v1/isolated/session/"+sessionID+"/run",
+		[]byte(`{"code":"echo http-background","background":true}`),
+	)
+	runCtx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+	NewIsolatedSessionController(runCtx).Run()
+
+	if runRecorder.Code != http.StatusAccepted {
+		t.Fatalf("run status = %d, want 202; body: %s", runRecorder.Code, runRecorder.Body.String())
+	}
+	var startResp model.IsolatedBackgroundRunResponse
+	if err := json.Unmarshal(runRecorder.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if startResp.SessionID != sessionID || startResp.RunID == "" {
+		t.Fatalf("start response = %+v, want session %s and a run ID", startResp, sessionID)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := runner.GetIsolatedBackgroundRun(sessionID, startResp.RunID)
+		if err != nil {
+			t.Fatalf("GetIsolatedBackgroundRun: %v", err)
+		}
+		if !snapshot.Running {
+			if snapshot.ExitCode == nil || *snapshot.ExitCode != 0 {
+				t.Fatalf("exit code = %v, want 0", snapshot.ExitCode)
+			}
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	statusCtx, statusRecorder := newTestContext(http.MethodGet, "/v1/isolated/session/"+sessionID+"/runs/"+startResp.RunID, nil)
+	statusCtx.Params = gin.Params{
+		{Key: "sessionId", Value: sessionID},
+		{Key: "runId", Value: startResp.RunID},
+	}
+	NewIsolatedSessionController(statusCtx).GetRunStatus()
+
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200; body: %s", statusRecorder.Code, statusRecorder.Body.String())
+	}
+	var runStatus model.IsolatedRunStatus
+	if err := json.Unmarshal(statusRecorder.Body.Bytes(), &runStatus); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if runStatus.Running || runStatus.ExitCode == nil || *runStatus.ExitCode != 0 {
+		t.Errorf("run status = %+v, want finished with exit code 0", runStatus)
+	}
+	if runStatus.FinishedAt == nil {
+		t.Error("FinishedAt missing for finished run")
+	}
+
+	logCtx, logRecorder := newTestContext(
+		http.MethodGet,
+		"/v1/isolated/session/"+sessionID+"/runs/"+startResp.RunID+"/logs",
+		nil,
+	)
+	logCtx.Params = gin.Params{
+		{Key: "sessionId", Value: sessionID},
+		{Key: "runId", Value: startResp.RunID},
+	}
+	NewIsolatedSessionController(logCtx).GetRunLogs()
+
+	if logRecorder.Code != http.StatusOK {
+		t.Fatalf("logs code = %d, want 200; body: %s", logRecorder.Code, logRecorder.Body.String())
+	}
+	if !strings.Contains(logRecorder.Body.String(), "http-background") {
+		t.Errorf("log body = %q, want to contain http-background", logRecorder.Body.String())
+	}
+	cursorRaw := logRecorder.Header().Get("EXECD-ISOLATED-TAIL-CURSOR")
+	if cursorRaw == "" || cursorRaw == "0" {
+		t.Errorf("tail cursor header = %q, want > 0", cursorRaw)
+	}
+
+	cursor, err := strconv.ParseInt(cursorRaw, 10, 64)
+	if err != nil {
+		t.Fatalf("parse cursor %q: %v", cursorRaw, err)
+	}
+	incCtx, incRecorder := newTestContext(
+		http.MethodGet,
+		"/v1/isolated/session/"+sessionID+"/runs/"+startResp.RunID+"/logs?cursor="+cursorRaw,
+		nil,
+	)
+	incCtx.Params = gin.Params{
+		{Key: "sessionId", Value: sessionID},
+		{Key: "runId", Value: startResp.RunID},
+	}
+	NewIsolatedSessionController(incCtx).GetRunLogs()
+	if incRecorder.Code != http.StatusOK || incRecorder.Body.Len() != 0 {
+		t.Errorf("incremental logs = (code %d, body %q), want (200, empty)", incRecorder.Code, incRecorder.Body.String())
+	}
+	_ = cursor
+}
+
+// Unknown sessions and run IDs 404 on the background run endpoints.
+func TestBackgroundRun_Endpoints404(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	runCtx, runRecorder := newTestContext(
+		http.MethodPost,
+		"/v1/isolated/session/nope/run",
+		[]byte(`{"code":"echo hi","background":true}`),
+	)
+	runCtx.Params = gin.Params{{Key: "sessionId", Value: "nope"}}
+	NewIsolatedSessionController(runCtx).Run()
+	if runRecorder.Code != http.StatusNotFound {
+		t.Errorf("run unknown session: status = %d, want 404", runRecorder.Code)
+	}
+
+	statusCtx, statusRecorder := newTestContext(http.MethodGet, "/v1/isolated/session/nope/runs/nope", nil)
+	statusCtx.Params = gin.Params{{Key: "sessionId", Value: "nope"}, {Key: "runId", Value: "nope"}}
+	NewIsolatedSessionController(statusCtx).GetRunStatus()
+	if statusRecorder.Code != http.StatusNotFound {
+		t.Errorf("status unknown run: status = %d, want 404", statusRecorder.Code)
+	}
+
+	logsCtx, logsRecorder := newTestContext(http.MethodGet, "/v1/isolated/session/nope/runs/nope/logs", nil)
+	logsCtx.Params = gin.Params{{Key: "sessionId", Value: "nope"}, {Key: "runId", Value: "nope"}}
+	NewIsolatedSessionController(logsCtx).GetRunLogs()
+	if logsRecorder.Code != http.StatusNotFound {
+		t.Errorf("logs unknown run: status = %d, want 404", logsRecorder.Code)
+	}
+}
+
+// TestGetRunLogs_RejectsMalformedCursor verifies non-integer and negative
+// cursor values are rejected with 400 instead of silently reading from 0.
+func TestGetRunLogs_RejectsMalformedCursor(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+	runID, _, err := runner.RunInIsolatedSessionBackground(sessionID, "echo hi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, cursor := range []string{"abc", "-1"} {
+		logsCtx, logsRecorder := newTestContext(
+			http.MethodGet,
+			"/v1/isolated/session/"+sessionID+"/runs/"+runID+"/logs?cursor="+cursor,
+			nil,
+		)
+		logsCtx.Params = gin.Params{{Key: "sessionId", Value: sessionID}, {Key: "runId", Value: runID}}
+		NewIsolatedSessionController(logsCtx).GetRunLogs()
+		if logsRecorder.Code != http.StatusBadRequest {
+			t.Errorf("cursor=%q: status = %d, want 400", cursor, logsRecorder.Code)
+		}
+	}
 }

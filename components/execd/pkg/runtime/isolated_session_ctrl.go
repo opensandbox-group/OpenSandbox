@@ -49,11 +49,14 @@ type IsolatedRunner struct {
 	allowedWritable []string
 	namespacePinner sessionNamespacePinner
 	stopGC          chan struct{}
-	gcDone          chan struct{}
-	stopGCOnce      sync.Once
-	admissionMu     sync.RWMutex
-	closeMu         sync.Mutex
-	closed          bool
+	// bgRuns tracks detached background runs (map[runID]*IsolatedBackgroundRun),
+	// swept when the owning session is deleted or GC'd.
+	bgRuns      sync.Map
+	gcDone      chan struct{}
+	stopGCOnce  sync.Once
+	admissionMu sync.RWMutex
+	closeMu     sync.Mutex
+	closed      bool
 	// pendingStartupCleanup owns failed creates whose workload did not reap
 	// within the bounded startup rollback. These sessions are deliberately
 	// kept out of the public controller map and retried by the collector.
@@ -151,8 +154,13 @@ func (r *IsolatedRunner) CollectIdle() {
 			timeout := time.Duration(s.opts.IdleTimeoutSeconds) * time.Second
 			idle := time.Since(s.lastRunAt)
 			s.mu.RUnlock()
-			if !dead && (timeout <= 0 || idle <= timeout) {
-				return
+			if !dead {
+				if s.activeBackgroundRuns.Load() > 0 {
+					return // background run in flight; session is deliberately busy
+				}
+				if timeout <= 0 || idle <= timeout {
+					return
+				}
 			}
 
 			if dead {
@@ -733,6 +741,10 @@ func (r *IsolatedRunner) DeleteIsolatedSession(id string) error {
 	}
 
 	r.ctrl.isolatedSessionMap.CompareAndDelete(id, s)
+	// Run logs are gone with the upper layer; drop the session's run records.
+	// Swept even when a non-fatal cleanup error remains: the session is out
+	// of the public map, so nothing else would ever sweep them.
+	r.removeSessionBackgroundRuns(s)
 	if cleanupErr != nil {
 		return cleanupErr
 	}
