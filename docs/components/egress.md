@@ -185,7 +185,7 @@ See [Credential Vault](/guides/credential-vault) for full API usage, binding rul
 
 ### Observability (OpenTelemetry)
 
-Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). OTLP log export is not used.
+Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). The credential proxy's log lines from mitmdump are piped into the same zap sink at warn level, so they land in the egress log file when `OPENSANDBOX_LOG_OUTPUT` points at one; mitmproxy's own flow logs are not forwarded. OTLP log export is not used.
 
 #### DNS latency buckets
 
