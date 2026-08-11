@@ -22,17 +22,18 @@
 #      immediately, bypassing the stream_large_bodies=1m buffer set in config.yaml
 #      (which otherwise stalls LLM-style small-chunk streams).
 #   2. Acts as Credential Proxy when the egress sidecar has an active
-#      Credential Vault revision. The active revision is stored in the Go
-#      sidecar process and read over an egress-container-private Unix socket.
-#      Credential values are not logged, and response header values containing
-#      credentials are redacted. Response bodies are not rewritten by default.
-#   3. Implements SNI-aware ignore_hosts for transparent mode. mitmproxy's
-#      built-in ignore_hosts check in transparent mode matches against the
-#      destination IP first; the SNI hostname is only available inside the TLS
-#      ClientHello, which arrives after the initial check. This addon re-checks
-#      the same ignore_hosts patterns against the SNI hostname at the
-#      tls_clienthello layer and sets ignore_connection=True when a match is
-#      found, ensuring domain-based TLS pass-through works reliably.
+#      Credential Vault revision, read from the Go sidecar over a private Unix
+#      socket. Credential values are never logged; response header values
+#      containing them are redacted. Response bodies are not rewritten.
+#      Processing is split across hooks because stream_large_bodies=1m streams
+#      bodies above 1 MiB upstream before the `request` hook fires: binding
+#      match, path/query/header rewrites and header injection run in
+#      `requestheaders` (before the upstream connection is made); only body
+#      substitutions, which need the full body, run in `request` and are
+#      skipped for streamed requests.
+#   3. Implements SNI-aware ignore_hosts for transparent mode: the built-in
+#      check runs against the destination IP before the SNI hostname is known,
+#      so this addon re-checks the same patterns at the tls_clienthello layer.
 #
 # User-defined addons can be loaded alongside this script via
 # OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT (comma-separated for multiple scripts).
@@ -56,6 +57,7 @@ DEFAULT_CREDENTIAL_PROXY_SOCKET = "/run/opensandbox/credential-proxy/active.sock
 ACTIVE_VAULT_PATH = "/credential-vault/_active"
 VAULT_CACHE_TTL_SECONDS = 0.5
 FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
+FLOW_BINDING_KEY = "opensandbox_credential_binding"
 HEADER_SUBSTITUTION_DENYLIST = {
     "host",
     "content-length",
@@ -102,13 +104,8 @@ class UnixSocketHTTPConnection(http_client.HTTPConnection):
 
 
 def tls_clienthello(data: ClientHelloData) -> None:
-    """Re-check ignore_hosts patterns against SNI hostname.
-
-    In transparent mode, mitmproxy checks ignore_hosts against the
-    destination IP:port before the TLS handshake.  If the check fails at
-    that stage (SNI not yet available), we get a second chance here with
-    the actual hostname from the ClientHello SNI extension.
-    """
+    """Re-check ignore_hosts against the SNI hostname, which the built-in
+    transparent-mode check cannot see (it runs before the ClientHello)."""
     sni = data.client_hello.sni
     if not sni:
         return
@@ -192,28 +189,17 @@ _DOT_SEGMENT_RE = re.compile(r"/\.\.(/|$)")
 
 
 def _path_is_ambiguous(raw_path: str, *, allow_single_encoded_slash: bool = False) -> bool:
-    """Return True if the raw request path contains ambiguous segments.
+    """Return True if the raw request path could decode to a different path
+    than the one used for binding match (dot-segments, encoded separators).
+    Legitimate clients resolve dot segments before sending, so ``..`` on the
+    wire is an attempt to confuse path-based authorization.
 
-    Legitimate HTTP clients resolve dot segments before sending. Raw ``..``
-    or percent-encoded separators on the wire indicate an attempt to confuse
-    path-based authorization checks because the canonical path seen by the
-    upstream server may differ from the raw prefix matched here.
-
-    ``allow_single_encoded_slash`` toggles how a single-layer ``%2f`` on the
-    wire is treated:
-
-    * ``False`` (default) — historical strict behavior. Suitable for paths
-      produced by our own substitution pipeline, where the credential proxy
-      injects a ``%2f`` on the fly. Such a rewrite always shifts the
-      canonical path relative to what the client sent, so it is treated as
-      ambiguous.
-    * ``True`` — used when checking the raw path the client sent. Legit
-      ecosystems require a single ``%2f`` (npm scoped package registry paths
-      like ``/@scope%2fname``). Nested encodings (``%252f`` etc.) and raw
-      backslash / dot-segments are still rejected. The complementary
-      :func:`_path_encoded_slash_changes_binding` check rejects a
-      single-layer ``%2f`` if decoding it would cross an authorization
-      boundary.
+    ``allow_single_encoded_slash`` tolerates a single-layer ``%2f`` (legit
+    for npm scoped package registry paths like ``/@scope%2fname``) on the
+    raw wire path; nested encodings, backslashes and dot-segments are always
+    rejected. The complementary
+    :func:`_path_encoded_slash_changes_binding` check rejects a ``%2f`` that
+    would cross an authorization boundary.
     """
     path = raw_path.split("?", 1)[0]
 
@@ -226,11 +212,8 @@ def _path_is_ambiguous(raw_path: str, *, allow_single_encoded_slash: bool = Fals
     for _ in range(10):
         lower = decoded.lower()
         if "%2f" in lower:
-            # A single-layer ``%2f`` on the wire is legitimate for some
-            # ecosystems (e.g. npm scoped package registry paths use
-            # ``/@scope%2fname``). Tolerate it on the first pass when the
-            # caller opts in; a nested ``%252f`` still trips this check on
-            # the next iteration because it decodes back to ``%2f``.
+            # Tolerate a single-layer ``%2f`` on the first pass only; a nested
+            # ``%252f`` decodes back to ``%2f`` and still trips this check.
             if not (allow_single_encoded_slash and decoded is path):
                 return True
         if "%5c" in lower:
@@ -251,15 +234,11 @@ def _path_encoded_slash_changes_binding(
     flow: http.HTTPFlow, vault: ActiveVault
 ) -> bool:
     """Return True if decoding ``%2f`` in the raw path would change which
-    credential binding matches.
-
-    Called only when the raw request path contains ``%2f``. Legitimate uses
-    (e.g. npm scoped package registry paths ``/@scope%2fname``) decode to a
-    path that still matches the same binding, so this returns False and the
-    request proceeds. A crafted path such as
-    ``/api/v8/projects/123%2f..%2f456/variables`` decodes to a different
-    scope and this returns True so the caller can respond 403 before
-    injecting credentials.
+    credential binding matches (i.e. the encoded slash crosses an
+    authorization boundary). Legit uses like npm scoped packages decode to a
+    path matching the same binding, so they pass; crafted paths like
+    ``/api/v8/projects/123%2f..%2f456/variables`` are rejected before
+    credential injection.
     """
     raw_path = _request_path(flow)
     if "%2f" not in raw_path.lower():
@@ -561,7 +540,8 @@ def _apply_body_substitutions(
     return applied
 
 
-def _apply_substitutions(flow: http.HTTPFlow, binding: dict[str, Any]) -> list[str]:
+def _apply_requestheaders_substitutions(flow: http.HTTPFlow, binding: dict[str, Any]) -> list[str]:
+    """Path/query/header substitutions (body not read yet at this stage)."""
     substitutions = binding.get("substitutions") or []
     if not substitutions:
         return []
@@ -571,23 +551,34 @@ def _apply_substitutions(flow: http.HTTPFlow, binding: dict[str, Any]) -> list[s
     if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
         return applied
     applied.extend(_apply_header_substitutions(flow, substitutions))
-    applied.extend(_apply_body_substitutions(flow, substitutions))
     return applied
 
 
-def request(flow: http.HTTPFlow) -> None:
+def _has_substitutions_on(binding: dict[str, Any], surfaces: set[str]) -> bool:
+    return any(
+        surface in surfaces
+        for substitution in (binding.get("substitutions") or [])
+        for surface in (substitution.get("in") or [])
+    )
+
+
+def requestheaders(flow: http.HTTPFlow) -> None:
+    """Credential proxy phase 1: binding match and request metadata rewrite.
+
+    Header injection must happen here, before the upstream connection is
+    made: with ``stream_large_bodies=1m`` the ``request`` hook fires only
+    after a body above 1 MiB has been streamed upstream.
+    """
     vault = _load_active_vault()
     if vault is None:
         return
 
-    # Reject requests with ambiguous path segments before credential injection.
-    # Raw dot-segments or encoded variants on the wire are not produced by
-    # legitimate HTTP clients and can trick prefix-based path matching into
-    # injecting credentials for a scope the canonical path does not belong to.
-    # A single-layer ``%2f`` is tolerated at this stage because some legit
-    # ecosystems require it (npm scoped packages send ``/@scope%2fname``);
-    # the follow-up ``_path_encoded_slash_changes_binding`` check rejects any
-    # ``%2f`` whose decoded form would cross a credential binding boundary.
+    # Reject ambiguous paths before injecting credentials: dot-segments or
+    # encoded separators on the wire are not produced by legit clients and
+    # could redirect credentials to a scope the canonical path does not match.
+    # A single-layer ``%2f`` is tolerated here (npm scoped packages send
+    # ``/@scope%2fname``); the next check rejects it if it crosses a binding
+    # boundary.
     raw_path = flow.request.path or "/"
     if _path_is_ambiguous(raw_path, allow_single_encoded_slash=True):
         flow.response = http.Response.make(
@@ -601,12 +592,9 @@ def request(flow: http.HTTPFlow) -> None:
         )
         return
 
-    # A single-layer ``%2f`` is tolerated by ``_path_is_ambiguous`` (legit
-    # ecosystems like npm scoped packages require it). Reject it here only
-    # when decoding the ``%2f`` would change which credential binding
-    # matches, i.e. the encoded slash actually crosses an authorization
-    # boundary. This keeps ``/@scope%2fname`` requests working while still
-    # stopping crafted paths such as ``/api/v8/projects/123%2f..%2f456/...``.
+    # Reject a ``%2f`` only when decoding it changes the binding match, so
+    # ``/@scope%2fname`` stays working while crafted paths like
+    # ``/api/v8/projects/123%2f..%2f456/...`` are stopped.
     if _path_encoded_slash_changes_binding(flow, vault):
         flow.response = http.Response.make(
             403,
@@ -623,8 +611,9 @@ def request(flow: http.HTTPFlow) -> None:
     binding = _select_binding(flow, vault)
     if not binding:
         return
+    flow.metadata[FLOW_BINDING_KEY] = binding
 
-    substituted_surfaces = _apply_substitutions(flow, binding)
+    substituted_surfaces = _apply_requestheaders_substitutions(flow, binding)
     if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
         return
 
@@ -650,11 +639,45 @@ def request(flow: http.HTTPFlow) -> None:
             f"headers={','.join(injected_names)} "
             f"substitutions={','.join(sorted(set(substituted_surfaces)))}"
         )
-    elif binding.get("substitutions"):
+    elif _has_substitutions_on(binding, {"path", "query", "header"}):
         ctx.log.info(
             "credential proxy: substitution miss binding="
             f"{binding.get('name')} revision={vault.revision} "
             f"host={_request_host(flow)} method={flow.request.method}"
+        )
+
+
+def request(flow: http.HTTPFlow) -> None:
+    """Credential proxy phase 2: body substitutions.
+
+    Needs the full body, so it cannot run in ``requestheaders``. Streamed
+    requests are skipped: the body was already forwarded upstream and is no
+    longer available or modifiable.
+    """
+    binding = flow.metadata.get(FLOW_BINDING_KEY)
+    if binding is None:
+        return
+    if getattr(flow.request, "stream", False):
+        return
+
+    applied = _apply_body_substitutions(flow, binding.get("substitutions") or [])
+    if applied:
+        if FLOW_REDACTIONS_KEY not in flow.metadata:
+            vault = _load_active_vault()
+            if vault is not None:
+                flow.metadata[FLOW_REDACTIONS_KEY] = list(vault.redactions)
+        ctx.log.info(
+            "credential proxy: applied body substitutions binding="
+            f"{binding.get('name')} host={_request_host(flow)} "
+            f"method={flow.request.method}"
+        )
+    elif FLOW_REDACTIONS_KEY not in flow.metadata and _has_substitutions_on(
+        binding, {"body"}
+    ):
+        ctx.log.info(
+            "credential proxy: substitution miss binding="
+            f"{binding.get('name')} host={_request_host(flow)} "
+            f"method={flow.request.method}"
         )
 
 

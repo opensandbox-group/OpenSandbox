@@ -138,6 +138,24 @@ class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlsplit(self.path)
+        if parsed.path == "/large-body":
+            length = int(self.headers.get("content-length", "0") or "0")
+            raw_body = self.rfile.read(length)
+            received = {name.lower(): value for name, value in self.headers.items()}
+            expected_value = EXPECTED_HEADERS["/api-key"]["x-api-key"]
+            ok = received.get("x-api-key") == expected_value
+            self._write_json(
+                HTTPStatus.OK if ok else HTTPStatus.UNAUTHORIZED,
+                {
+                    "ok": ok,
+                    "case": "large-body",
+                    "contentLength": length,
+                    "bodyReceivedLength": len(raw_body),
+                    "missingOrInvalid": [] if ok else ["x-api-key"],
+                },
+            )
+            return
+
         if parsed.path != "/body-substitution":
             self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown path"})
             return

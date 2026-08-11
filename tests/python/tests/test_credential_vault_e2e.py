@@ -441,6 +441,51 @@ def test_credential_vault_runtime_mutation_adds_replaces_and_deletes_binding(
         _close_sandbox(cfg, sandbox)
 
 
+def test_credential_vault_large_bodies_across_streaming_threshold(
+    credential_vault_target_ip: str,
+) -> None:
+    """Regression for the stream_large_bodies=1m header-injection bug.
+
+    mitmproxy streams request bodies above 1 MiB upstream and the credential
+    proxy used to inject auth headers in the request hook, which fires only
+    after a streamed body has been forwarded — so large requests reached the
+    upstream without credentials and returned 403. Injection now happens in
+    the requestheaders hook; 1 MiB - 1, exactly 1 MiB, 1 MiB + 1 and 2 MiB
+    must all reach the upstream with the API key injected.
+    """
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
+    try:
+        sandbox.credential_vault.create(
+            credentials=[
+                Credential(
+                    name="api-key-token",
+                    source={"value": SECRET_VALUES["api-key-token"]},
+                )
+            ],
+            bindings=[
+                _binding(
+                    "large-body",
+                    "/large-body",
+                    {
+                        "type": "apiKey",
+                        "name": "X-Api-Key",
+                        "credential": "api-key-token",
+                    },
+                    methods=["POST"],
+                ),
+            ],
+        )
+
+        for size in [1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 1, 2 * 1024 * 1024]:
+            response = _curl_json_file(sandbox, credential_vault_target_ip, "/large-body", size)
+            assert response["ok"] is True
+            assert response["case"] == "large-body"
+            assert response["missingOrInvalid"] == []
+            assert response["bodyReceivedLength"] == size
+    finally:
+        _close_sandbox(cfg, sandbox)
+
+
 def _create_credential_proxy_sandbox(target_ip: str) -> tuple[object, SandboxSync]:
     cfg = create_connection_config_sync()
     sandbox = SandboxSync.create(
@@ -528,3 +573,31 @@ def _curl_json(
 
 def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _curl_json_file(
+    sandbox: SandboxSync,
+    target_ip: str,
+    path: str,
+    size: int,
+) -> dict[str, object]:
+    payload_path = f"/tmp/credential-vault-large-{size}.bin"
+    create = sandbox.commands.run(
+        f"head -c {size} /dev/zero | tr '\\000' 'x' > {payload_path}"
+    )
+    assert create.error is None, create.error
+    command = (
+        "curl --fail --silent --show-error --connect-timeout 5 --max-time 60 "
+        f"--request POST --header 'content-type: text/plain' "
+        f"--data-binary @{payload_path} "
+        f"--resolve {TARGET_HOST}:80:{target_ip} "
+        f"http://{TARGET_HOST}{path}"
+    )
+    for secret in SECRET_VALUES.values():
+        assert secret not in command
+
+    result = sandbox.commands.run(command)
+    assert result.error is None, result.error
+    stdout = "".join(part.text for part in result.logs.stdout)
+    assert stdout
+    return json.loads(stdout)
