@@ -104,7 +104,12 @@ func TestRemoteRegistryImageDeleter_FallsBackToTagAfterRecordedDigestMiss(t *tes
 	imageReference := strings.TrimPrefix(registry.URL, "http://") + "/snapshots/test:tag"
 	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, recordedDigest, nil, true)
 	require.NoError(t, err)
-	assert.Equal(t, "/v2/snapshots/test/manifests/"+recordedDigest, <-deletedPaths)
+	select {
+	case path := <-deletedPaths:
+		assert.Equal(t, "/v2/snapshots/test/manifests/"+recordedDigest, path)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for recorded-digest DELETE request")
+	}
 	select {
 	case path := <-deletedPaths:
 		assert.Equal(t, "/v2/snapshots/test/manifests/"+registryDigest, path)
