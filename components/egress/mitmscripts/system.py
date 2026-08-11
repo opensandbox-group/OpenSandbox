@@ -31,9 +31,20 @@
 #      `requestheaders` (before the upstream connection is made); only body
 #      substitutions, which need the full body, run in `request` and are
 #      skipped for streamed requests.
-#   3. Implements SNI-aware ignore_hosts for transparent mode: the built-in
-#      check runs against the destination IP before the SNI hostname is known,
-#      so this addon re-checks the same patterns at the tls_clienthello layer.
+#   3. Implements SNI-aware ignore_hosts for transparent mode. mitmproxy's
+#      built-in ignore_hosts check in transparent mode matches against the
+#      destination IP first; the SNI hostname is only available inside the TLS
+#      ClientHello, which arrives after the initial check. This addon re-checks
+#      the same ignore_hosts patterns against the SNI hostname at the
+#      tls_clienthello layer and sets ignore_connection=True when a match is
+#      found, ensuring domain-based TLS pass-through works reliably.
+#   4. Passes through TLS connections that carry no SNI. Without a hostname,
+#      upstream hostname verification falls back to the destination IP, which
+#      fails for any public certificate lacking an IP SAN (hostname mismatch),
+#      so every no-SNI connection would otherwise become a broken MITM attempt.
+#      Pass-through is skipped when ssl_insecure is enabled, keeping the
+#      explicit insecure-MITM escape hatch working for no-SNI clients.
+#      TCP-layer enforcement (deny/allow rules) still applies to these flows.
 #
 # User-defined addons can be loaded alongside this script via
 # OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT (comma-separated for multiple scripts).
@@ -105,10 +116,27 @@ class UnixSocketHTTPConnection(http_client.HTTPConnection):
 
 
 def tls_clienthello(data: ClientHelloData) -> None:
-    """Re-check ignore_hosts against the SNI hostname, which the built-in
-    transparent-mode check cannot see (it runs before the ClientHello)."""
+    """Re-check ignore_hosts patterns against SNI hostname.
+
+    In transparent mode, mitmproxy checks ignore_hosts against the
+    destination IP:port before the TLS handshake.  If the check fails at
+    that stage (SNI not yet available), we get a second chance here with
+    the actual hostname from the ClientHello SNI extension.
+
+    Connections without SNI cannot be matched against hostname patterns and
+    cannot be safely MITM'd: with no hostname available, upstream hostname
+    verification falls back to the destination IP, which fails for any public
+    certificate without an IP SAN (hostname mismatch), turning every no-SNI
+    connection into a broken MITM attempt. Such connections are passed through
+    untouched, unless the operator explicitly opted into insecure upstream
+    verification (OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE), in which case
+    MITM remains possible and the escape hatch keeps working. TCP-layer
+    enforcement (deny/allow rules) still applies.
+    """
     sni = data.client_hello.sni
     if not sni:
+        if not ctx.options.ssl_insecure:
+            data.ignore_connection = True
         return
 
     patterns = ctx.options.ignore_hosts
