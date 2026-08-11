@@ -128,6 +128,8 @@ func TestRemoteRegistryImageDeleter_RemovesTagDigestAfterRecordedDeleteAccepted(
 			w.WriteHeader(http.StatusOK)
 		case request.Method == http.MethodHead && request.URL.Path == "/v2/snapshots/test/manifests/tag":
 			w.Header().Set("Docker-Content-Digest", registryDigest)
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Header().Set("Content-Length", "2")
 			w.WriteHeader(http.StatusOK)
 		case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/"+recordedDigest):
 			deletedPaths <- request.URL.Path
