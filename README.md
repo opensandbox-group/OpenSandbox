@@ -293,3 +293,7 @@ and how roadmap items are managed.
 - Issues: Submit bugs, feature requests, or design discussions through GitHub Issues
 - Discord: Join the [OpenSandbox Discord community](https://discord.gg/g7FuPs8YeD)
 - DingTalk: Join the [OpenSandbox technical discussion group](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11)
+
+## Star History
+
+[![Star History Chart](https://star-history.dera.page/svg?repos=opensandbox-group/OpenSandbox&type=date&legend=top-left)](https://star-history.dera.page/#opensandbox-group/OpenSandbox&type=date&legend=top-left)

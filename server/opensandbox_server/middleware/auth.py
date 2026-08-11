@@ -46,7 +46,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """
 
     # Paths that don't require authentication
-    EXEMPT_PATHS = ["/health", "/docs", "/redoc", "/openapi.json"]
+    EXEMPT_PATHS = ["/health", "/version", "/docs", "/redoc", "/openapi.json"]
 
     # Strict pattern for proxy-to-sandbox: /sandboxes/{id}/proxy/{port}/... with numeric port only.
     # Matches the actual route in proxy.py; rejects path traversal (..) and malformed port.

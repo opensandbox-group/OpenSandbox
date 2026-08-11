@@ -14,8 +14,24 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Sandbox } from "@alibaba-group/opensandbox";
-import type { OutputMessage } from "@alibaba-group/opensandbox";
+import type { IsolationSession, IsolatedRunStatus, OutputMessage } from "@alibaba-group/opensandbox";
 import { createConnectionConfig, getSandboxImage } from "./base_e2e.js";
+
+async function waitForBackgroundRun(
+  session: IsolationSession,
+  runId: string,
+  timeoutMs = 30_000,
+): Promise<IsolatedRunStatus> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = await session.getRunStatus(runId);
+    if (!status.running) {
+      return status;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`background run ${runId} did not finish within ${timeoutMs}ms`);
+}
 
 describe("IsolatedSession E2E", () => {
   let sandbox: Sandbox;
@@ -745,6 +761,93 @@ describe("IsolatedSession E2E", () => {
       },
     );
     expect(output).toContain("step1");
+  });
+
+  // ── Background run tests ──────────────────────────────────────
+
+  it("test_background_run_completes", async () => {
+    const session = await sandbox.isolation.create({
+      workspace: { path: "/tmp", mode: "rw" },
+    });
+    try {
+      const run = await session.runBackground("echo hello-background");
+      expect(run.run_id).toBeTruthy();
+      expect(run.session_id).toBe(session.sessionId);
+
+      const status = await waitForBackgroundRun(session, run.run_id);
+      expect(status.running).toBe(false);
+      expect(status.exit_code).toBe(0);
+      expect(status.finished_at).toBeTruthy();
+
+      const logs = await session.getRunLogs(run.run_id);
+      expect(logs.text).toContain("hello-background");
+      expect(logs.cursor).toBeGreaterThan(0);
+
+      // Incremental read from the returned cursor returns the remainder.
+      const tail = await session.getRunLogs(run.run_id, logs.cursor);
+      expect(tail.text).toBe("");
+    } finally {
+      await session.delete();
+    }
+  });
+
+  it("test_background_run_exit_code", async () => {
+    const session = await sandbox.isolation.create({
+      workspace: { path: "/tmp", mode: "rw" },
+    });
+    try {
+      const run = await session.runBackground("exit 7");
+      const status = await waitForBackgroundRun(session, run.run_id);
+      expect(status.exit_code).toBe(7);
+      expect(status.error).toBeUndefined();
+    } finally {
+      await session.delete();
+    }
+  });
+
+  it("test_background_run_envs", async () => {
+    const session = await sandbox.isolation.create({
+      workspace: { path: "/tmp", mode: "rw" },
+    });
+    try {
+      const run = await session.runBackground(
+        "echo $BG_E2E_VAR",
+        { envs: { BG_E2E_VAR: "background-env" } }
+      );
+      await waitForBackgroundRun(session, run.run_id);
+      const logs = await session.getRunLogs(run.run_id);
+      expect(logs.text).toContain("background-env");
+    } finally {
+      await session.delete();
+    }
+  });
+
+  it("test_background_run_does_not_pollute_foreground", async () => {
+    const session = await sandbox.isolation.create({
+      workspace: { path: "/tmp", mode: "rw" },
+    });
+    try {
+      const run = await session.runBackground("echo bg-output-line");
+      await waitForBackgroundRun(session, run.run_id);
+
+      const result = await session.run("echo fg-output-line");
+      const output = result.logs.stdout.map(m => m.text).join("");
+      expect(output).toContain("fg-output-line");
+      expect(output).not.toContain("bg-output-line");
+    } finally {
+      await session.delete();
+    }
+  });
+
+  it("test_background_run_status_not_found", async () => {
+    const session = await sandbox.isolation.create({
+      workspace: { path: "/tmp", mode: "rw" },
+    });
+    try {
+      await expect(session.getRunStatus("no-such-run")).rejects.toThrow(/404/);
+    } finally {
+      await session.delete();
+    }
   });
 
   // Bind mount tests (explicit source->dest binds)

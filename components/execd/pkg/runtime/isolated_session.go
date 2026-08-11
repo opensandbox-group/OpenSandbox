@@ -29,6 +29,7 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/sessionresource"
 )
 
 // IsolatedSessionOptions bundles the parameters for creating an isolated session.
@@ -46,6 +47,19 @@ type IsolatedSessionOptions struct {
 	UidMode            string // "setpriv" (default) or "userns"
 	IdleTimeoutSeconds int
 }
+
+type sessionNamespacePins interface {
+	Directory() string
+	NetPath() string
+	UserPath() string
+	Identity() sessionresource.NamespaceIdentity
+	Close() error
+}
+
+type sessionNamespacePinner func(
+	context.Context,
+	isolation.WorkloadIdentity,
+) (sessionNamespacePins, error)
 
 // isolatedSession holds a long-running shell process inside a bwrap namespace.
 type isolatedSession struct {
@@ -74,6 +88,12 @@ type isolatedSession struct {
 	isolator             isolation.Isolator
 	lifecycle            isolation.WorkloadLifecycle
 	identity             isolation.WorkloadIdentity
+	// activeBackgroundRuns: in-flight detached runs. While non-zero, idle GC
+	// must not collect the session (background processes die with the bwrap
+	// process group).
+	activeBackgroundRuns atomic.Int64
+	namespacePinner      sessionNamespacePinner
+	namespacePins        sessionNamespacePins
 }
 
 const isolatedSessionStartupTimeout = 10 * time.Second
@@ -85,15 +105,21 @@ var (
 	}
 )
 
-func newIsolatedSession(id string, opts *IsolatedSessionOptions, iso isolation.Isolator) *isolatedSession {
+func newIsolatedSession(
+	id string,
+	opts *IsolatedSessionOptions,
+	iso isolation.Isolator,
+	namespacePinner sessionNamespacePinner,
+) *isolatedSession {
 	return &isolatedSession{
-		id:            id,
-		opts:          opts,
-		isolator:      iso,
-		processWaited: make(chan struct{}),
-		doneCh:        make(chan struct{}),
-		createdAt:     time.Now(),
-		lastRunAt:     time.Now(),
+		id:              id,
+		opts:            opts,
+		isolator:        iso,
+		namespacePinner: namespacePinner,
+		processWaited:   make(chan struct{}),
+		doneCh:          make(chan struct{}),
+		createdAt:       time.Now(),
+		lastRunAt:       time.Now(),
 	}
 }
 
@@ -222,12 +248,15 @@ func (s *isolatedSession) start() error {
 		context.Background(),
 		isolatedSessionStartupTimeout,
 	)
-	identity, err := lifecycle.WaitForIdentity(startupCtx)
+	prepareErr := s.prepareStartupIdentity(
+		startupCtx,
+		lifecycle,
+		wrapOpts,
+	)
 	cancelStartup()
-	if err != nil {
-		return s.failStartup(fmt.Errorf("wait for isolated workload identity: %w", err))
+	if prepareErr != nil {
+		return s.failStartup(prepareErr)
 	}
-	s.identity = identity
 
 	if err := lifecycle.MarkReady(); err != nil {
 		return s.failStartup(fmt.Errorf("release isolated workload gate: %w", err))
@@ -261,6 +290,53 @@ func (s *isolatedSession) start() error {
 	}
 
 	return nil
+}
+
+func (s *isolatedSession) prepareStartupIdentity(
+	ctx context.Context,
+	lifecycle isolation.WorkloadLifecycle,
+	wrapOpts isolation.WrapOptions,
+) error {
+	identity, err := lifecycle.WaitForIdentity(ctx)
+	if err != nil {
+		return fmt.Errorf("wait for isolated workload identity: %w", err)
+	}
+	s.identity = identity
+
+	if !s.requiresNamespacePins(wrapOpts) {
+		return nil
+	}
+	if s.namespacePinner == nil {
+		return ErrSessionNamespaceUnavailable
+	}
+
+	pins, err := s.namespacePinner(ctx, identity)
+	if pins != nil {
+		// A pinner can return ownership with an error when its rollback was
+		// incomplete. Retain it so failStartup and later GC retries can finish
+		// cleanup after the workload has stopped.
+		s.namespacePins = pins
+	}
+	if err != nil {
+		return errors.Join(
+			ErrSessionNamespaceUnavailable,
+			fmt.Errorf("pin isolated session namespaces: %w", err),
+		)
+	}
+	if pins == nil {
+		return ErrSessionNamespaceUnavailable
+	}
+	return nil
+}
+
+func (s *isolatedSession) requiresNamespacePins(
+	wrapOpts isolation.WrapOptions,
+) bool {
+	// This phase preserves the legacy share_net default. Every explicitly
+	// private NetNS is pinned, including the legacy setpriv loopback-only
+	// topology. A later network-profile PR will make private+userns the secure
+	// default and reject setpriv for the network backend.
+	return !wrapOpts.ShareNet
 }
 
 func (s *isolatedSession) startupTerminalError(
@@ -323,7 +399,9 @@ func (s *isolatedSession) stop() error {
 		// transient signal error must not turn a successful delete into 500.
 		log.Warn("%v; session process and lifecycle are fully reaped", processGroupKillErr)
 	}
-	return s.closeLifecycle()
+	namespaceErr := s.closeNamespacePins()
+	lifecycleErr := s.closeLifecycle()
+	return errors.Join(namespaceErr, lifecycleErr)
 }
 
 func (s *isolatedSession) stopProcess(hasProcess bool) (bool, error) {
@@ -403,6 +481,20 @@ func (s *isolatedSession) closeLifecycle() error {
 		s.lifecycle = nil
 	}
 	return cleanupErr
+}
+
+func (s *isolatedSession) closeNamespacePins() error {
+	if s.namespacePins == nil {
+		return nil
+	}
+	if err := s.namespacePins.Close(); err != nil {
+		return errors.Join(
+			ErrSessionNamespaceCleanup,
+			fmt.Errorf("close isolated session namespace pins: %w", err),
+		)
+	}
+	s.namespacePins = nil
+	return nil
 }
 
 // markProcessExitedBeforeReap publishes the Linux WNOWAIT exit barrier before

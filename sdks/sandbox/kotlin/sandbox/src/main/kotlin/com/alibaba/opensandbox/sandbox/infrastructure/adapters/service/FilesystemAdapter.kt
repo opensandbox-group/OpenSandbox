@@ -19,9 +19,6 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.execd.FilesystemApi
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceResult
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo
@@ -37,7 +34,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Filesys
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toEntryInfo
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toEntryInfoMap
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.isFileNotFound
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -97,15 +94,9 @@ internal class FilesystemAdapter(
             val request = buildDownloadRequest(path, range, offset, limit)
             httpClientProvider.httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to read file. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "Failed to read file. Status code: $statusCode, Body: $body"
+                    }
                 }
 
                 val charset = getCharsetFromEncoding(encoding)
@@ -127,15 +118,9 @@ internal class FilesystemAdapter(
             val request = buildDownloadRequest(path, range, offset, limit)
             httpClientProvider.httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to read file. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "Failed to read file. Status code: $statusCode, Body: $body"
+                    }
                 }
                 return response.body?.bytes() ?: ByteArray(0)
             }
@@ -157,15 +142,9 @@ internal class FilesystemAdapter(
 
             if (!response.isSuccessful) {
                 try {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to read file. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "Failed to read file. Status code: $statusCode, Body: $body"
+                    }
                 } catch (e: Exception) {
                     response.close()
                     throw e
@@ -240,15 +219,9 @@ internal class FilesystemAdapter(
 
             httpClientProvider.httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to write files. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "Failed to write files. Status code: $statusCode, Body: $body"
+                    }
                 }
             }
         } catch (e: Exception) {

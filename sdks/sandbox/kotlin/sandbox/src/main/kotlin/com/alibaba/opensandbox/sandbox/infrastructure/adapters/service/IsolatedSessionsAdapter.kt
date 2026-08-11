@@ -18,15 +18,16 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.EnvPassthroughSpec
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedBackgroundRun
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunLogs
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunOpts
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionState
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionSummary
@@ -37,11 +38,12 @@ import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationSession
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.Headers.Companion.toHeaders
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -82,6 +84,25 @@ private data class IsolatedRunBody(
     val code: String,
     val envs: Map<String, String>? = null,
     val timeout_seconds: Int? = null,
+    val background: Boolean? = null,
+)
+
+@Serializable
+private data class IsolatedBackgroundRunResponse(
+    val session_id: String,
+    val run_id: String,
+    val started_at: String? = null,
+)
+
+@Serializable
+private data class IsolatedRunStatusResponse(
+    val session_id: String,
+    val run_id: String,
+    val running: Boolean = false,
+    val exit_code: Int? = null,
+    val error: String? = null,
+    val started_at: String? = null,
+    val finished_at: String? = null,
 )
 
 @Serializable
@@ -137,6 +158,8 @@ private data class IsolatedCapabilitiesResponse(
 
 private val json = Json { ignoreUnknownKeys = true }
 
+private const val TAIL_CURSOR_HEADER = "EXECD-ISOLATED-TAIL-CURSOR"
+
 private class IsolationSessionHandle(
     override val info: IsolatedSessionInfo,
     private val adapter: IsolatedSessionsAdapter,
@@ -148,6 +171,18 @@ private class IsolationSessionHandle(
     }
 
     override fun run(request: IsolatedRunRequest): Execution = adapter.runInternal(info.sessionId, request)
+
+    override fun runBackground(
+        code: String,
+        opts: IsolatedRunOpts?,
+    ): IsolatedBackgroundRun = adapter.runBackgroundInternal(info.sessionId, code, opts)
+
+    override fun getRunStatus(runId: String): IsolatedRunStatus = adapter.getRunStatusInternal(info.sessionId, runId)
+
+    override fun getRunLogs(
+        runId: String,
+        cursor: Long,
+    ): IsolatedRunLogs = adapter.getRunLogsInternal(info.sessionId, runId, cursor)
 
     override fun get(): IsolatedSessionState = adapter.getInternal(info.sessionId)
 
@@ -357,6 +392,126 @@ internal class IsolatedSessionsAdapter(
         }
     }
 
+    internal fun runBackgroundInternal(
+        sessionId: String,
+        code: String,
+        opts: IsolatedRunOpts? = null,
+    ): IsolatedBackgroundRun {
+        require(sessionId.isNotBlank()) { "sessionId cannot be empty" }
+        require(code.isNotBlank()) { "code cannot be empty" }
+        try {
+            val body =
+                IsolatedRunBody(
+                    code = code,
+                    envs = opts?.envs,
+                    // timeout_seconds is foreground-only and deliberately not sent.
+                    timeout_seconds = null,
+                    background = true,
+                )
+            val httpRequest =
+                Request.Builder()
+                    .url("$execdBaseUrl/v1/isolated/session/$sessionId/run")
+                    .post(
+                        json
+                            .encodeToString(IsolatedRunBody.serializer(), body)
+                            .toRequestBody("application/json".toMediaType()),
+                    )
+                    .headers(execdEndpoint.headers.toHeaders())
+                    .build()
+
+            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+                if (response.code != 202) {
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "run background in isolated session failed. Status: $statusCode, Body: $body"
+                    }
+                }
+                val resp =
+                    json.decodeFromString(
+                        IsolatedBackgroundRunResponse.serializer(),
+                        response.body!!.string(),
+                    )
+                return IsolatedBackgroundRun(
+                    sessionId = resp.session_id,
+                    runId = resp.run_id,
+                    startedAt = resp.started_at?.let { parseDateTime(it) },
+                )
+            }
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
+    internal fun getRunStatusInternal(
+        sessionId: String,
+        runId: String,
+    ): IsolatedRunStatus {
+        require(sessionId.isNotBlank()) { "sessionId cannot be empty" }
+        require(runId.isNotBlank()) { "runId cannot be empty" }
+        try {
+            val httpRequest =
+                Request.Builder()
+                    .url("$execdBaseUrl/v1/isolated/session/$sessionId/runs/$runId")
+                    .get()
+                    .headers(execdEndpoint.headers.toHeaders())
+                    .build()
+
+            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+                ensureSuccess(response, "get isolated run status")
+                val resp =
+                    json.decodeFromString(
+                        IsolatedRunStatusResponse.serializer(),
+                        response.body!!.string(),
+                    )
+                return IsolatedRunStatus(
+                    sessionId = resp.session_id,
+                    runId = resp.run_id,
+                    running = resp.running,
+                    exitCode = resp.exit_code,
+                    error = resp.error,
+                    startedAt = resp.started_at?.let { parseDateTime(it) },
+                    finishedAt = resp.finished_at?.let { parseDateTime(it) },
+                )
+            }
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
+    internal fun getRunLogsInternal(
+        sessionId: String,
+        runId: String,
+        cursor: Long = 0,
+    ): IsolatedRunLogs {
+        require(sessionId.isNotBlank()) { "sessionId cannot be empty" }
+        require(runId.isNotBlank()) { "runId cannot be empty" }
+        require(cursor >= 0) { "cursor cannot be negative" }
+        try {
+            val urlBuilder =
+                "$execdBaseUrl/v1/isolated/session/$sessionId/runs/$runId/logs".toHttpUrl().newBuilder()
+            if (cursor > 0) {
+                urlBuilder.addQueryParameter("cursor", cursor.toString())
+            }
+            val httpRequest =
+                Request.Builder()
+                    .url(urlBuilder.build())
+                    .get()
+                    .headers(execdEndpoint.headers.toHeaders())
+                    .build()
+
+            httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
+                ensureSuccess(response, "get isolated run logs")
+                val bytes = response.body!!.bytes()
+                val text = bytes.toString(Charsets.UTF_8)
+                val nextCursor =
+                    response.header(TAIL_CURSOR_HEADER)?.toLongOrNull()
+                        ?: (cursor + bytes.size)
+                return IsolatedRunLogs(text = text, cursor = nextCursor)
+            }
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
     internal fun deleteInternal(sessionId: String) {
         require(sessionId.isNotBlank()) { "sessionId cannot be empty" }
         try {
@@ -443,14 +598,9 @@ internal class IsolatedSessionsAdapter(
         operation: String,
     ) {
         if (response.isSuccessful) return
-        val errorBody = response.body?.string()
-        val sandboxError = parseSandboxError(errorBody)
-        throw SandboxApiException(
-            message = "$operation failed. Status: ${response.code}, Body: $errorBody",
-            statusCode = response.code,
-            error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-            requestId = response.header("X-Request-ID"),
-        )
+        throw response.toSandboxApiException { statusCode, body ->
+            "$operation failed. Status: $statusCode, Body: $body"
+        }
     }
 
     private fun decodeEventLine(line: String): EventNode? {

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
+	"github.com/alibaba/opensandbox/execd/pkg/sessionresource"
 )
 
 type lifecycleHarness struct {
@@ -221,6 +222,30 @@ func (i *legacyRuntimeIsolator) Wrap(*exec.Cmd, isolation.WrapOptions) error {
 	return nil
 }
 
+type lifecycleNamespacePins struct {
+	mu       sync.Mutex
+	closeErr error
+	closed   int
+}
+
+func (*lifecycleNamespacePins) Directory() string { return "/run/execd/namespaces/test" }
+func (*lifecycleNamespacePins) NetPath() string   { return "/run/execd/namespaces/test/net" }
+func (*lifecycleNamespacePins) UserPath() string  { return "/run/execd/namespaces/test/user" }
+func (*lifecycleNamespacePins) Identity() sessionresource.NamespaceIdentity {
+	return sessionresource.NamespaceIdentity{
+		PID:                   2,
+		ProcessStartTimeTicks: 1,
+		NetInode:              1,
+		OwningUserInode:       2,
+	}
+}
+func (p *lifecycleNamespacePins) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed++
+	return p.closeErr
+}
+
 func newLifecycleRuntimeSession(
 	t *testing.T,
 	isolator isolation.Isolator,
@@ -235,6 +260,12 @@ func newLifecycleRuntimeSession(
 			ShareNet:      shareNet,
 		},
 		isolator,
+		func(
+			context.Context,
+			isolation.WorkloadIdentity,
+		) (sessionNamespacePins, error) {
+			return &lifecycleNamespacePins{}, nil
+		},
 	)
 }
 
@@ -334,6 +365,142 @@ func TestIsolatedSessionPreservesShareNetSemantics(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestPrivateSessionPinsNamespacesBeforeReady(t *testing.T) {
+	useDirectProcessKill(t)
+
+	privateNetwork := false
+	lifecycle := newLifecycleHarness()
+	isolator := &lifecycleHarnessIsolator{lifecycle: lifecycle}
+	session := newLifecycleRuntimeSession(t, isolator, &privateNetwork)
+	pins := &lifecycleNamespacePins{}
+	pinned := false
+	session.namespacePinner = func(
+		_ context.Context,
+		identity isolation.WorkloadIdentity,
+	) (sessionNamespacePins, error) {
+		if identity.PID != 2 || identity.NetNamespaceID != 1 {
+			t.Fatalf("namespace pinner identity = %+v", identity)
+		}
+		pinned = true
+		return pins, nil
+	}
+	lifecycle.onReady = func() {
+		if !pinned {
+			t.Fatal("workload gate was released before namespaces were pinned")
+		}
+	}
+
+	if err := session.start(); err != nil {
+		t.Fatal(err)
+	}
+	if session.namespacePins != pins {
+		t.Fatal("session did not retain namespace ownership")
+	}
+	if err := session.stop(); err != nil {
+		t.Fatal(err)
+	}
+	pins.mu.Lock()
+	defer pins.mu.Unlock()
+	if pins.closed != 1 {
+		t.Fatalf("namespace pin Close calls = %d, want 1", pins.closed)
+	}
+}
+
+func TestSharedSessionDoesNotPinNamespaces(t *testing.T) {
+	useDirectProcessKill(t)
+
+	trueValue := true
+	for _, shareNet := range []*bool{nil, &trueValue} {
+		lifecycle := newLifecycleHarness()
+		isolator := &lifecycleHarnessIsolator{lifecycle: lifecycle}
+		session := newLifecycleRuntimeSession(t, isolator, shareNet)
+		session.namespacePinner = func(
+			context.Context,
+			isolation.WorkloadIdentity,
+		) (sessionNamespacePins, error) {
+			t.Fatal("shared session invoked namespace pinner")
+			return nil, nil
+		}
+
+		if err := session.start(); err != nil {
+			t.Fatal(err)
+		}
+		if err := session.stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestPrivateSessionPinFailureNeverReleasesGate(t *testing.T) {
+	useDirectProcessKill(t)
+
+	privateNetwork := false
+	pinErr := errors.New("namespace pin failed")
+	lifecycle := newLifecycleHarness()
+	isolator := &lifecycleHarnessIsolator{lifecycle: lifecycle}
+	session := newLifecycleRuntimeSession(t, isolator, &privateNetwork)
+	session.namespacePinner = func(
+		context.Context,
+		isolation.WorkloadIdentity,
+	) (sessionNamespacePins, error) {
+		return nil, pinErr
+	}
+
+	err := session.start()
+	if !errors.Is(err, ErrSessionNamespaceUnavailable) ||
+		!errors.Is(err, pinErr) {
+		t.Fatalf("start error = %v", err)
+	}
+	lifecycle.mu.Lock()
+	ready := lifecycle.ready
+	lifecycle.mu.Unlock()
+	if ready {
+		t.Fatal("namespace pin failure released workload gate")
+	}
+	assertHarnessCleaned(t, lifecycle)
+	if isolator.cmd == nil || isolator.cmd.ProcessState == nil {
+		t.Fatal("namespace pin failure returned before reaping workload")
+	}
+}
+
+func TestPrivateSessionRetainsIncompletePinRollback(t *testing.T) {
+	useDirectProcessKill(t)
+
+	privateNetwork := false
+	pinErr := errors.New("namespace pin failed")
+	closeErr := errors.New("namespace cleanup busy")
+	pins := &lifecycleNamespacePins{closeErr: closeErr}
+	lifecycle := newLifecycleHarness()
+	isolator := &lifecycleHarnessIsolator{lifecycle: lifecycle}
+	session := newLifecycleRuntimeSession(t, isolator, &privateNetwork)
+	session.namespacePinner = func(
+		context.Context,
+		isolation.WorkloadIdentity,
+	) (sessionNamespacePins, error) {
+		return pins, pinErr
+	}
+
+	err := session.start()
+	if !errors.Is(err, pinErr) ||
+		!errors.Is(err, ErrSessionNamespaceCleanup) ||
+		!errors.Is(err, closeErr) {
+		t.Fatalf("start error = %v", err)
+	}
+	if session.namespacePins != pins {
+		t.Fatal("failed startup discarded namespace cleanup ownership")
+	}
+
+	pins.mu.Lock()
+	pins.closeErr = nil
+	pins.mu.Unlock()
+	if err := session.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if session.namespacePins != nil {
+		t.Fatal("cleanup retry retained namespace ownership")
 	}
 }
 

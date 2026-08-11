@@ -24,6 +24,11 @@ opensandbox-server:
   server:
     replicaCount: 2
 
+# Optional node-level sandbox log collection. Configure the target in the
+# sub-chart values before enabling it.
+opensandbox-node-agent:
+  enabled: false
+
 # Global values (passed to both sub-charts)
 global:
   # Example: shared image pull secrets

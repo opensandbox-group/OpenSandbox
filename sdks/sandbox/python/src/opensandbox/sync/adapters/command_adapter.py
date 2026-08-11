@@ -34,6 +34,7 @@ from opensandbox.adapters.converter.response_handler import (
     build_api_exception_from_httpx,
     handle_api_error,
 )
+from opensandbox.adapters.sse import iter_sse_events
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import (
@@ -96,22 +97,15 @@ def _build_run_in_session_request_body(
     )
 
 
-def _decode_sse_event_line(line: str) -> EventNode | None:
-    if not line or not line.strip():
-        return None
-
-    if line.startswith((":", "event:", "id:", "retry:")):
-        return None
-
-    data = line[5:].strip() if line.startswith("data:") else line
-    if not data:
+def _decode_sse_event_data(data: str) -> EventNode | None:
+    if not data.strip():
         return None
 
     try:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
+        logger.error(f"Failed to parse SSE event data: {data}", exc_info=e)
         return None
 
 
@@ -205,8 +199,8 @@ class CommandsAdapterSync(CommandsSync):
                 response.read()
                 raise build_api_exception_from_httpx(response, failure_message)
 
-            for line in response.iter_lines():
-                event_node = _decode_sse_event_line(line)
+            for event in iter_sse_events(response):
+                event_node = _decode_sse_event_data(event.data)
                 if event_node is None:
                     continue
                 dispatcher.dispatch(event_node)

@@ -1267,7 +1267,7 @@ spec:
         assert result.endpoint == "10.0.0.1:8080"
         assert result.headers is None
 
-    def test_get_endpoint_info_uses_first_ip(self):
+    def test_get_internal_endpoint_uses_first_ip(self):
         provider = BatchSandboxProvider(MagicMock())
         workload = {
             "metadata": {
@@ -1275,34 +1275,34 @@ spec:
             }
         }
 
-        result = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+        result = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
 
         assert result.endpoint == "10.0.0.1:8080"
         assert result.headers is None
 
-    def test_get_endpoint_info_returns_none_when_missing(self):
+    def test_get_internal_endpoint_returns_none_when_missing(self):
         provider = BatchSandboxProvider(MagicMock())
         workload = {"metadata": {"annotations": {}}}
 
-        result = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+        result = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
 
         assert result is None
 
-    def test_get_endpoint_info_returns_none_on_invalid_json(self):
+    def test_get_internal_endpoint_returns_none_on_invalid_json(self):
         provider = BatchSandboxProvider(MagicMock())
         workload = {
             "metadata": {"annotations": {"sandbox.opensandbox.io/endpoints": "invalid-json"}}
         }
 
-        result = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+        result = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
 
         assert result is None
 
-    def test_get_endpoint_info_returns_none_on_empty_array(self):
+    def test_get_internal_endpoint_returns_none_on_empty_array(self):
         provider = BatchSandboxProvider(MagicMock())
         workload = {"metadata": {"annotations": {"sandbox.opensandbox.io/endpoints": "[]"}}}
 
-        result = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+        result = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
 
         assert result is None
 
@@ -3066,8 +3066,11 @@ spec:
         assert all(mount["name"] == "skills" for mount in mounts)
         assert all(mount["readOnly"] is False for mount in mounts)
 
-    def test_apply_volumes_to_pod_spec_same_pvc_mixed_read_only_raises(self, mock_k8s_client):
-        """Shared PVC mounts with mixed read_only values should fail fast."""
+    @pytest.mark.parametrize("read_only_order", [(True, False), (False, True)])
+    def test_apply_volumes_to_pod_spec_same_pvc_mixed_read_only(
+        self, mock_k8s_client, read_only_order
+    ):
+        """Shared PVC mounts should preserve independent mount-level read-only policies."""
         from opensandbox_server.api.schema import Volume, PVC
 
         pod_spec = {
@@ -3079,15 +3082,40 @@ spec:
                 name="skills",
                 pvc=PVC(claim_name="oss-pvc-mixed"),
                 mount_path="/path/to/skills",
-                read_only=False,
+                sub_path="common/skills",
+                read_only=read_only_order[0],
             ),
             Volume(
-                name="draft",
+                name="user",
                 pvc=PVC(claim_name="oss-pvc-mixed"),
-                mount_path="/path/to/draft",
-                read_only=True,
+                mount_path="/path/to/user",
+                sub_path="user1",
+                read_only=read_only_order[1],
             ),
         ]
 
-        with pytest.raises(ValueError, match="mixed read_only values"):
-            apply_volumes_to_pod_spec(pod_spec, volumes)
+        apply_volumes_to_pod_spec(pod_spec, volumes)
+
+        assert pod_spec["volumes"] == [
+            {
+                "name": "skills",
+                "persistentVolumeClaim": {
+                    "claimName": "oss-pvc-mixed",
+                    "readOnly": False,
+                },
+            }
+        ]
+        assert pod_spec["containers"][0]["volumeMounts"] == [
+            {
+                "name": "skills",
+                "mountPath": "/path/to/skills",
+                "readOnly": read_only_order[0],
+                "subPath": "common/skills",
+            },
+            {
+                "name": "skills",
+                "mountPath": "/path/to/user",
+                "readOnly": read_only_order[1],
+                "subPath": "user1",
+            },
+        ]

@@ -20,6 +20,7 @@ import com.alibaba.opensandbox.codeinterpreter.domain.models.execd.executions.Ru
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import okhttp3.mockwebserver.MockResponse
@@ -30,6 +31,7 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -225,5 +227,27 @@ class CodesAdapterTest {
 
         assertEquals(500, ex.statusCode)
         assertEquals("req-kotlin-code-123", ex.requestId)
+    }
+
+    @Test
+    fun `run should map unstructured rate limit response metadata`() {
+        val responseBody = "slow down"
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(429)
+                .addHeader("X-Request-ID", "req-kotlin-code-rate-limit")
+                .addHeader("Retry-After", "2")
+                .setBody(responseBody),
+        )
+
+        val request = RunCodeRequest.builder().code("print('slow')").build()
+        val ex = assertThrows(SandboxRateLimitException::class.java) { codesAdapter.run(request) }
+
+        assertEquals(429, ex.statusCode)
+        assertEquals("RATE_LIMIT", ex.error.code)
+        assertEquals("req-kotlin-code-rate-limit", ex.requestId)
+        assertEquals(Duration.ofSeconds(2), ex.retryAfter)
+        assertEquals(responseBody, ex.responseBody)
+        assertTrue(ex.isRetryable)
     }
 }

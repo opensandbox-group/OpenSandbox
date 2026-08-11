@@ -254,7 +254,12 @@ class IsolatedSessionSummary(BaseModel):
 
 
 class IsolatedRunOpts(BaseModel):
-    """Options for running code in an isolated session."""
+    """Options for running code in an isolated session.
+
+    Background execution is only available through
+    :meth:`IsolationSession.run_background`; this opts type carries no
+    background flag because :meth:`IsolationSession.run` is foreground-only.
+    """
 
     envs: dict[str, str] | None = Field(
         default=None,
@@ -262,7 +267,57 @@ class IsolatedRunOpts(BaseModel):
     )
     timeout_seconds: int | None = Field(
         default=None,
-        description="Maximum execution time in seconds",
+        description="Maximum execution time in seconds (foreground runs only)",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class IsolatedBackgroundRun(BaseModel):
+    """Handle returned when a run is started with background: true.
+
+    Background runs require a writable log location, so sessions with a
+    read-only (``ro``) workspace reject them with an error.
+    """
+
+    session_id: str = Field(description="Session the run was started in")
+    run_id: str = Field(description="Run ID for status and logs polling")
+    started_at: datetime | None = Field(
+        default=None, description="Run start timestamp"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class IsolatedRunStatus(BaseModel):
+    """Lifecycle state of an isolated background run."""
+
+    session_id: str = Field(description="Session the run belongs to")
+    run_id: str = Field(description="Run identifier")
+    running: bool = Field(description="Whether the run is still executing")
+    exit_code: int | None = Field(
+        default=None, description="Exit code if the run has finished"
+    )
+    error: str | None = Field(
+        default=None, description="Error message if the run failed"
+    )
+    started_at: datetime | None = Field(
+        default=None, description="Run start timestamp"
+    )
+    finished_at: datetime | None = Field(
+        default=None,
+        description="Run finish timestamp (null while still running)",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class IsolatedRunLogs(BaseModel):
+    """Incremental log read of an isolated background run."""
+
+    text: str = Field(description="Log content from the requested cursor")
+    cursor: int = Field(
+        description="Next byte cursor for incremental reads (pass to the next run_logs call)"
     )
 
     model_config = ConfigDict(populate_by_name=True)

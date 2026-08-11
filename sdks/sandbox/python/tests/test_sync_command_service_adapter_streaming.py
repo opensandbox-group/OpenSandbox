@@ -24,6 +24,8 @@ from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
 
+_UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
+
 
 class _SseTransport(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -35,6 +37,30 @@ class _SseTransport(httpx.BaseTransport):
                 b'data: {"type":"init","text":"exec-1","timestamp":1}\n\n'
                 b'data: {"type":"stdout","text":"hi","timestamp":2}\n\n'
                 b'data: {"type":"execution_complete","timestamp":4,"execution_time":5}\n\n'
+            )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=sse,
+                request=request,
+            )
+
+        if (
+            request.url.path == "/command"
+            and payload.get("command") == "unicode separators"
+        ):
+            events = [
+                {"type": "init", "text": "exec-unicode", "timestamp": 1},
+                {"type": "stdout", "text": _UNICODE_SEPARATORS, "timestamp": 2},
+                {
+                    "type": "execution_complete",
+                    "timestamp": 3,
+                    "execution_time": 4,
+                },
+            ]
+            sse = b"".join(
+                f"{json.dumps(event, ensure_ascii=False)}\n\n".encode()
+                for event in events
             )
             return httpx.Response(
                 200,
@@ -103,6 +129,18 @@ def test_sync_run_command_streaming_happy_path_updates_execution() -> None:
     assert execution.logs.stdout[0].text == "hi"
     assert execution.complete is not None
     assert execution.complete.execution_time_in_millis == 5
+    assert execution.exit_code == 0
+
+
+def test_sync_run_command_streaming_preserves_unicode_separators() -> None:
+    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport())
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    execution = adapter.run("unicode separators")
+
+    assert execution.logs.stdout[0].text == _UNICODE_SEPARATORS
+    assert execution.complete is not None
     assert execution.exit_code == 0
 
 

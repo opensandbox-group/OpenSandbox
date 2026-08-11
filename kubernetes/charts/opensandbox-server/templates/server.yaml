@@ -132,6 +132,21 @@ spec:
           env:
             - name: SANDBOX_CONFIG_PATH
               value: "/etc/opensandbox/config.toml"
+            {{- if and .Values.server.gateway.enabled .Values.server.gateway.secureAccess.existingSecret }}
+            # The server builds [ingress.secure_access] from these at startup
+            # (OPENSANDBOX_SECURE_ACCESS_* env override), keeping key material
+            # out of the config ConfigMap.
+            - name: OPENSANDBOX_SECURE_ACCESS_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.gateway.secureAccess.existingSecret | quote }}
+                  key: keys
+            - name: OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.gateway.secureAccess.existingSecret | quote }}
+                  key: active-key
+            {{- end }}
             {{- with .Values.server.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

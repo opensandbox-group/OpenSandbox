@@ -83,6 +83,36 @@ export interface IsolatedRunOpts {
   timeout_seconds?: number;
 }
 
+/**
+ * Handle returned when a run is started with `background: true`.
+ */
+export interface IsolatedBackgroundRun {
+  session_id: string;
+  run_id: string;
+  started_at?: string;
+}
+
+/**
+ * Lifecycle state of an isolated background run.
+ */
+export interface IsolatedRunStatus {
+  session_id: string;
+  run_id: string;
+  running: boolean;
+  exit_code?: number | null;
+  error?: string;
+  started_at?: string;
+  finished_at?: string | null;
+}
+
+/**
+ * Incremental log read of an isolated background run.
+ */
+export interface IsolatedRunLogs {
+  text: string;
+  cursor: number;
+}
+
 export interface IsolatedCapabilities {
   available: boolean;
   isolator?: string;

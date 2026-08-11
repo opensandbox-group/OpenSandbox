@@ -27,7 +27,6 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 class PoolReconcilerStateTest {
@@ -67,142 +66,15 @@ class PoolReconcilerStateTest {
     }
 
     @Test
-    fun `reconcile batch failures only advance backoff once`() {
-        val stateStore = InMemoryPoolStateStore()
-        val config =
-            PoolConfig.builder()
-                .poolName("pool-batch-failure-test")
-                .ownerId("owner-1")
-                .maxIdle(10)
-                .warmupConcurrency(10)
-                .stateStore(stateStore)
-                .connectionConfig(ConnectionConfig.builder().build())
-                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
-                .build()
+    fun `rolling failures advance backoff once while current window is active`() {
         val state = ReconcileState(degradedThreshold = 3)
-        val warmupExecutor = Executors.newFixedThreadPool(10)
 
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = { throw RuntimeException("boom") },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
+        repeat(10) { state.recordAsyncFailure("boom-$it") }
 
         assertEquals(10, state.failureCount)
+        assertEquals(PoolState.DEGRADED, state.state)
         assertEquals(true, state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(29))))
         assertFalse(state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(31))))
-    }
-
-    @Test
-    fun `reconcile create exception increments failure count once per task`() {
-        val stateStore = InMemoryPoolStateStore()
-        val config =
-            PoolConfig.builder()
-                .poolName("pool-reconcile-test")
-                .ownerId("owner-1")
-                .maxIdle(1)
-                .warmupConcurrency(1)
-                .stateStore(stateStore)
-                .connectionConfig(ConnectionConfig.builder().build())
-                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
-                .build()
-        val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(1)
-
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = { throw RuntimeException("boom") },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
-
-        assertEquals(1, state.failureCount)
-    }
-
-    @Test
-    fun `reconcile stops putIdle and cleans orphaned sandboxes after lock renew failure`() {
-        val stateStore = RenewFailAfterSecondPutStore()
-        val config =
-            PoolConfig.builder()
-                .poolName("pool-lock-window-test")
-                .ownerId("owner-1")
-                .maxIdle(2)
-                .warmupConcurrency(2)
-                .stateStore(stateStore)
-                .connectionConfig(ConnectionConfig.builder().build())
-                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
-                .build()
-        val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(2)
-        val idGen = AtomicInteger(0)
-        val orphaned = mutableListOf<String>()
-
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = { "id-${idGen.incrementAndGet()}" },
-                onDiscardSandbox = { orphaned += it },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
-
-        assertEquals(1, stateStore.putIdleIds.size)
-        assertEquals(1, orphaned.size)
-        val idle = stateStore.putIdleIds.first()
-        val dropped = orphaned.first()
-        assertFalse(idle == dropped)
-        assertEquals(setOf("id-1", "id-2"), setOf(idle, dropped))
-    }
-
-    @Test
-    fun `reconcile putIdle failure records failure and cleans remaining created sandboxes`() {
-        val stateStore = PutIdleFailStore()
-        val config =
-            PoolConfig.builder()
-                .poolName("pool-put-failure-test")
-                .ownerId("owner-1")
-                .maxIdle(2)
-                .warmupConcurrency(2)
-                .stateStore(stateStore)
-                .connectionConfig(ConnectionConfig.builder().build())
-                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
-                .build()
-        val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(2)
-        val idGen = AtomicInteger(0)
-        val orphaned = mutableListOf<String>()
-
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = { "id-${idGen.incrementAndGet()}" },
-                onDiscardSandbox = { orphaned += it },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
-
-        assertEquals(1, state.failureCount)
-        assertEquals(2, orphaned.size)
-        assertEquals(setOf("id-1", "id-2"), orphaned.toSet())
     }
 
     @Test
@@ -219,87 +91,64 @@ class PoolReconcilerStateTest {
                 .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
                 .build()
         val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(1)
-        val createCalls = AtomicInteger(0)
+        val submitted = AtomicInteger(0)
 
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = {
-                    createCalls.incrementAndGet()
-                    "id-1"
-                },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
+        PoolReconciler.runReconcileTick(
+            config = config,
+            stateStore = stateStore,
+            reconcileState = state,
+            warmingCount = 0,
+            submitWarmups = { submitted.addAndGet(it) },
+        )
 
-        assertEquals(0, createCalls.get())
+        assertEquals(0, submitted.get())
         assertEquals(emptyList<String>(), stateStore.putIdleIds)
     }
 
     @Test
-    fun `only primary owner can reconcile create for same pool`() {
+    fun `only primary owner can submit warmups for same pool`() {
         val stateStore = OwnerLockingStore()
         val primaryConfig = buildConfig(ownerId = "owner-primary", maxIdle = 1, stateStore = stateStore, poolName = "pool-owner-lock")
         val secondaryConfig = buildConfig(ownerId = "owner-secondary", maxIdle = 1, stateStore = stateStore, poolName = "pool-owner-lock")
         val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(1)
-        val secondaryCreateCalls = AtomicInteger(0)
+        val primarySubmissions = AtomicInteger(0)
+        val secondarySubmissions = AtomicInteger(0)
 
-        try {
-            PoolReconciler.runReconcileTick(
-                config = primaryConfig,
-                stateStore = stateStore,
-                createOne = { "id-primary-1" },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-            PoolReconciler.runReconcileTick(
-                config = secondaryConfig,
-                stateStore = stateStore,
-                createOne = {
-                    secondaryCreateCalls.incrementAndGet()
-                    "id-secondary-1"
-                },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
+        PoolReconciler.runReconcileTick(
+            config = primaryConfig,
+            stateStore = stateStore,
+            reconcileState = state,
+            warmingCount = 0,
+            submitWarmups = { primarySubmissions.addAndGet(it) },
+        )
+        PoolReconciler.runReconcileTick(
+            config = secondaryConfig,
+            stateStore = stateStore,
+            reconcileState = state,
+            warmingCount = 0,
+            submitWarmups = { secondarySubmissions.addAndGet(it) },
+        )
 
-        assertEquals(0, secondaryCreateCalls.get())
-        assertEquals(listOf("id-primary-1"), stateStore.putIdleIds)
+        assertEquals(1, primarySubmissions.get())
+        assertEquals(0, secondarySubmissions.get())
     }
 
     @Test
-    fun `reconcile does not create when initial renew fails`() {
+    fun `reconcile does not submit warmups when initial renew fails`() {
         val stateStore = RenewFailsOnFirstCallStore()
         val config = buildConfig(ownerId = "owner-1", maxIdle = 1, stateStore = stateStore, poolName = "pool-renew-first-fail")
         val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(1)
-        val createCalls = AtomicInteger(0)
+        val submitted = AtomicInteger(0)
 
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = {
-                    createCalls.incrementAndGet()
-                    "id-1"
-                },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
+        PoolReconciler.runReconcileTick(
+            config = config,
+            stateStore = stateStore,
+            reconcileState = state,
+            warmingCount = 0,
+            submitWarmups = { submitted.addAndGet(it) },
+        )
 
-        assertEquals(0, createCalls.get())
+        assertEquals(0, submitted.get())
         assertEquals(emptyList<String>(), stateStore.putIdleIds)
     }
 
@@ -317,27 +166,19 @@ class PoolReconcilerStateTest {
                 .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
                 .build()
         val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(1)
         val discarded = mutableListOf<String>()
-        val createCalls = AtomicInteger(0)
+        val submitted = AtomicInteger(0)
 
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = {
-                    createCalls.incrementAndGet()
-                    "new-id"
-                },
-                onDiscardSandbox = { discarded += it },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
+        PoolReconciler.runReconcileTick(
+            config = config,
+            stateStore = stateStore,
+            onDiscardSandbox = { discarded += it },
+            reconcileState = state,
+            warmingCount = 0,
+            submitWarmups = { submitted.addAndGet(it) },
+        )
 
-        assertEquals(0, createCalls.get())
+        assertEquals(0, submitted.get())
         assertEquals(listOf("id-1", "id-2"), discarded)
         assertEquals(listOf("id-3", "id-4", "id-5"), stateStore.idleIds)
     }
@@ -347,21 +188,16 @@ class PoolReconcilerStateTest {
         val stateStore = SecondaryShrinkStore(idleIds = listOf("id-1", "id-2", "id-3"))
         val config = buildConfig(ownerId = "owner-2", maxIdle = 1, stateStore = stateStore, poolName = "pool-secondary-shrink")
         val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(1)
         val discarded = mutableListOf<String>()
 
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = { "new-id" },
-                onDiscardSandbox = { discarded += it },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
+        PoolReconciler.runReconcileTick(
+            config = config,
+            stateStore = stateStore,
+            onDiscardSandbox = { discarded += it },
+            reconcileState = state,
+            warmingCount = 0,
+            submitWarmups = { error("secondary must not submit warmups: $it") },
+        )
 
         assertEquals(emptyList<String>(), discarded)
         assertEquals(listOf("id-1", "id-2", "id-3"), stateStore.idleIds)
@@ -381,21 +217,16 @@ class PoolReconcilerStateTest {
                 .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
                 .build()
         val state = ReconcileState(degradedThreshold = 10)
-        val warmupExecutor = Executors.newFixedThreadPool(1)
         val discarded = mutableListOf<String>()
 
-        try {
-            PoolReconciler.runReconcileTick(
-                config = config,
-                stateStore = stateStore,
-                createOne = { "new-id" },
-                onDiscardSandbox = { discarded += it },
-                reconcileState = state,
-                warmupExecutor = warmupExecutor,
-            )
-        } finally {
-            warmupExecutor.shutdownNow()
-        }
+        PoolReconciler.runReconcileTick(
+            config = config,
+            stateStore = stateStore,
+            onDiscardSandbox = { discarded += it },
+            reconcileState = state,
+            warmingCount = 0,
+            submitWarmups = { error("shrink must not submit warmups: $it") },
+        )
 
         assertEquals(listOf("id-1"), discarded)
         assertEquals(listOf("id-2", "id-3"), stateStore.idleIds)
@@ -416,118 +247,6 @@ class PoolReconcilerStateTest {
             .connectionConfig(ConnectionConfig.builder().build())
             .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
             .build()
-    }
-
-    private class RenewFailAfterSecondPutStore : PoolStateStore {
-        private val renewCalls = AtomicInteger(0)
-        val putIdleIds = mutableListOf<String>()
-
-        override fun tryTakeIdle(poolName: String): String? = null
-
-        override fun putIdle(
-            poolName: String,
-            sandboxId: String,
-        ) {
-            putIdleIds += sandboxId
-        }
-
-        override fun removeIdle(
-            poolName: String,
-            sandboxId: String,
-        ) {
-        }
-
-        override fun tryAcquirePrimaryLock(
-            poolName: String,
-            ownerId: String,
-            ttl: Duration,
-        ): Boolean = true
-
-        override fun renewPrimaryLock(
-            poolName: String,
-            ownerId: String,
-            ttl: Duration,
-        ): Boolean {
-            val call = renewCalls.incrementAndGet()
-            return call < 3
-        }
-
-        override fun releasePrimaryLock(
-            poolName: String,
-            ownerId: String,
-        ) {
-        }
-
-        override fun reapExpiredIdle(
-            poolName: String,
-            now: Instant,
-        ) {
-        }
-
-        override fun snapshotCounters(poolName: String): StoreCounters = StoreCounters(idleCount = 0)
-
-        override fun snapshotIdleEntries(poolName: String) = emptyList<com.alibaba.opensandbox.sandbox.domain.pool.IdleEntry>()
-
-        override fun getMaxIdle(poolName: String): Int? = null
-
-        override fun setMaxIdle(
-            poolName: String,
-            maxIdle: Int,
-        ) {
-        }
-    }
-
-    private class PutIdleFailStore : PoolStateStore {
-        override fun tryTakeIdle(poolName: String): String? = null
-
-        override fun putIdle(
-            poolName: String,
-            sandboxId: String,
-        ) {
-            throw RuntimeException("put failed")
-        }
-
-        override fun removeIdle(
-            poolName: String,
-            sandboxId: String,
-        ) {
-        }
-
-        override fun tryAcquirePrimaryLock(
-            poolName: String,
-            ownerId: String,
-            ttl: Duration,
-        ): Boolean = true
-
-        override fun renewPrimaryLock(
-            poolName: String,
-            ownerId: String,
-            ttl: Duration,
-        ): Boolean = true
-
-        override fun releasePrimaryLock(
-            poolName: String,
-            ownerId: String,
-        ) {
-        }
-
-        override fun reapExpiredIdle(
-            poolName: String,
-            now: Instant,
-        ) {
-        }
-
-        override fun snapshotCounters(poolName: String): StoreCounters = StoreCounters(idleCount = 0)
-
-        override fun snapshotIdleEntries(poolName: String) = emptyList<com.alibaba.opensandbox.sandbox.domain.pool.IdleEntry>()
-
-        override fun getMaxIdle(poolName: String): Int? = null
-
-        override fun setMaxIdle(
-            poolName: String,
-            maxIdle: Int,
-        ) {
-        }
     }
 
     private class AlwaysSecondaryStore : PoolStateStore {

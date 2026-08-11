@@ -20,12 +20,14 @@ on:
           - cli
           - server
           - docker/execd
+          - docker/nodeagent
           - docker/code-interpreter
           - docker/ingress
           - docker/egress
           - k8s/controller
           - k8s/task-executor
           - helm/opensandbox
+          - helm/opensandbox-node-agent
           - helm
       version:
         description: "Version to release (e.g. 1.0.5 or v0.3.0)"

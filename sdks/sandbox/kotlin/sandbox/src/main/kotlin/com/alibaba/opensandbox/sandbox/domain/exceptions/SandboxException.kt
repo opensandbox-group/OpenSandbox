@@ -16,20 +16,27 @@
 
 package com.alibaba.opensandbox.sandbox.domain.exceptions
 
+import java.time.Duration
+
 /**
  * Base exception class for all sandbox-related errors.
  *
  * Inherits from [RuntimeException] (Unchecked Exception) to avoid forcing
  * Java callers to implement verbose try-catch blocks while still allowing
  * specific error handling when needed.
+ *
+ * [isRetryable] reflects whether the SDK actually decided to retry this failure:
+ * budget exhaustion, deadline expiry, and caller cancellation all force it to
+ * `false` even for transient causes.
  */
 open class SandboxException(
     message: String? = null,
     cause: Throwable? = null,
     val error: SandboxError,
     val requestId: String? = null,
+    open val isRetryable: Boolean = false,
 ) : RuntimeException(message, cause) {
-    // Keep the old constructor signature for binary compatibility with already-compiled clients.
+    // Keep the old constructor signature for binary compatibility.
     constructor(
         message: String?,
         cause: Throwable?,
@@ -49,34 +56,138 @@ open class SandboxException(
 }
 
 /**
- * Thrown when the Sandbox API returns an error response (e.g., HTTP 4xx or 5xx) or meet unexpected error when calling api.
+ * Thrown when the Sandbox API returns an error response (e.g., HTTP 4xx or 5xx)
+ * or meets an unexpected error when calling the API.
+ *
+ * [responseBody] carries the raw response body from the server so callers can
+ * inspect payloads the SDK could not parse into a structured [SandboxError].
  */
-class SandboxApiException(
+open class SandboxApiException(
     message: String? = null,
     cause: Throwable? = null,
     val statusCode: Int? = null,
     error: SandboxError = SandboxError(SandboxError.UNEXPECTED_RESPONSE),
     requestId: String? = null,
-) : SandboxException(message, cause, error, requestId) {
-    // Keep the old constructor signature for binary compatibility with already-compiled clients.
+    val responseBody: String? = null,
+    isRetryable: Boolean = false,
+) : SandboxException(
+        message = message,
+        cause = cause,
+        error = error,
+        requestId = requestId,
+    ) {
+    @Suppress("LeakingThis")
+    override val isRetryable: Boolean = isRetryable
+
+    // Keep the old constructor signature for binary compatibility.
+    @Suppress("unused", "LongLine")
     constructor(
         message: String?,
         cause: Throwable?,
         statusCode: Int?,
         error: SandboxError,
-    ) : this(message = message, cause = cause, statusCode = statusCode, error = error, requestId = null)
+    ) : this(
+        message = message,
+        cause = cause,
+        statusCode = statusCode,
+        error = error,
+        requestId = null,
+        responseBody = null,
+        isRetryable = false,
+    )
+
+    // Keep the five-arg signature for binary compatibility.
+    @Suppress("unused", "LongLine")
+    constructor(
+        message: String?,
+        cause: Throwable?,
+        statusCode: Int?,
+        error: SandboxError,
+        requestId: String?,
+    ) : this(
+        message = message,
+        cause = cause,
+        statusCode = statusCode,
+        error = error,
+        requestId = requestId,
+        responseBody = null,
+        isRetryable = false,
+    )
 }
+
+/**
+ * Thrown when the API returns HTTP 429 (Too Many Requests).
+ *
+ * [retryAfter] carries the server-supplied `Retry-After` header value as a
+ * [Duration] when present, so fast-fail callers can still act on it.
+ */
+class SandboxRateLimitException
+    @JvmOverloads
+    constructor(
+        message: String? = null,
+        cause: Throwable? = null,
+        statusCode: Int? = 429,
+        error: SandboxError = SandboxError(SandboxError.RATE_LIMIT, message),
+        requestId: String? = null,
+        val retryAfter: Duration? = null,
+        responseBody: String? = null,
+        isRetryable: Boolean = false,
+    ) : SandboxApiException(
+            message = message,
+            cause = cause,
+            statusCode = statusCode,
+            error = error,
+            requestId = requestId,
+            responseBody = responseBody,
+            isRetryable = isRetryable,
+        )
 
 /**
  * Thrown when an unexpected internal error occurs within the SDK
  */
-class SandboxInternalException(
+open class SandboxInternalException(
     message: String? = null,
     cause: Throwable? = null,
 ) : SandboxException(
         message = message,
         cause = cause,
         error = SandboxError(SandboxError.INTERNAL_UNKNOWN_ERROR),
+    ) {
+    @Suppress("LeakingThis")
+    open override val isRetryable: Boolean = false
+}
+
+/**
+ * Thrown when a per-attempt timeout or overall retry deadline fires.
+ *
+ * Distinct from [SandboxReadyTimeoutException], which is the health-poll timeout
+ * during sandbox startup.
+ */
+class SandboxTimeoutException(
+    message: String? = null,
+    cause: Throwable? = null,
+    isRetryable: Boolean = false,
+) : SandboxException(
+        message = message,
+        cause = cause,
+        error = SandboxError(SandboxError.TIMEOUT, message),
+        requestId = null,
+        isRetryable = isRetryable,
+    )
+
+/**
+ * Transport-layer failure: DNS, TCP connect, TLS, or connection reset.
+ */
+class SandboxConnectionException(
+    message: String? = null,
+    cause: Throwable? = null,
+    isRetryable: Boolean = false,
+) : SandboxException(
+        message = message,
+        cause = cause,
+        error = SandboxError(SandboxError.CONNECTION, message),
+        requestId = null,
+        isRetryable = isRetryable,
     )
 
 /**
@@ -216,6 +327,15 @@ data class SandboxError(
         const val UNHEALTHY = "UNHEALTHY"
         const val INVALID_ARGUMENT = "INVALID_ARGUMENT"
         const val UNEXPECTED_RESPONSE = "UNEXPECTED_RESPONSE"
+
+        /** A per-attempt timeout or overall retry deadline fired. */
+        const val TIMEOUT = "TIMEOUT"
+
+        /** Transport-layer failure: DNS, TCP connect, TLS, or connection reset. */
+        const val CONNECTION = "CONNECTION"
+
+        /** The API returned HTTP 429 (Too Many Requests). */
+        const val RATE_LIMIT = "RATE_LIMIT"
 
         /** A snapshot reached the `Failed` state while waiting for it to become ready. */
         const val SNAPSHOT_FAILED = "SNAPSHOT_FAILED"

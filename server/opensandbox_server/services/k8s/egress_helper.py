@@ -29,6 +29,7 @@ from opensandbox_server.services.constants import (
     EGRESS_RULES_ENV,
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
@@ -77,10 +78,13 @@ def apply_egress_to_spec(
     egress_mode: str = EGRESS_MODE_DNS,
     credential_proxy_enabled: bool = False,
     extra_env: Optional[Dict[str, Optional[str]]] = None,
+    sandbox_id: Optional[str] = None,
 ) -> None:
     """
     Append the egress sidecar to ``containers``. When ``egress.disable_ipv6`` is enabled,
     IPv6 is handled in execd init (``prep_execd_init_for_egress``); Pod-level sysctls are not modified.
+
+    ``sandbox_id`` is injected as ``OPENSANDBOX_EGRESS_SANDBOX_ID`` when provided.
     """
     if not network_policy or not egress_image:
         return
@@ -91,6 +95,8 @@ def apply_egress_to_spec(
         {"name": EGRESS_RULES_ENV, "value": policy_payload},
         {"name": EGRESS_MODE_ENV, "value": egress_mode},
     ]
+    if sandbox_id:
+        env.append({"name": OPENSANDBOX_EGRESS_SANDBOX_ID, "value": sandbox_id})
     if credential_proxy_enabled:
         env.append({"name": OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT, "value": "true"})
     if egress_auth_token:

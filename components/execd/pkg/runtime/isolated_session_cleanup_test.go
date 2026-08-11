@@ -213,6 +213,55 @@ func TestDeleteTimeoutRetainsSessionAndUpperForRetry(t *testing.T) {
 	}
 }
 
+func TestDeleteNamespaceCleanupFailureRetainsSessionAndUpperForRetry(
+	t *testing.T,
+) {
+	runner := newTestRunner(t)
+	upperID, upperDir, workDir, err := runner.upperMgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinErr := errors.New("namespace pin is busy")
+	pins := &lifecycleNamespacePins{closeErr: pinErr}
+	session := &isolatedSession{
+		id:            "delete-namespace-retry",
+		opts:          &IsolatedSessionOptions{},
+		processWaited: make(chan struct{}),
+		doneCh:        make(chan struct{}),
+		upperID:       upperID,
+		upperDir:      upperDir,
+		workDir:       workDir,
+		namespacePins: pins,
+	}
+	runner.ctrl.isolatedSessionMap.Store(session.id, session)
+	upperParent := filepath.Dir(upperDir)
+
+	err = runner.DeleteIsolatedSession(session.id)
+	if !errors.Is(err, ErrSessionNamespaceCleanup) ||
+		!errors.Is(err, pinErr) {
+		t.Fatalf("Delete error = %v", err)
+	}
+	if runner.lookup(session.id) != session {
+		t.Fatal("failed namespace cleanup discarded session ownership")
+	}
+	if _, err := os.Stat(upperParent); err != nil {
+		t.Fatalf("failed namespace cleanup discarded upper: %v", err)
+	}
+
+	pins.mu.Lock()
+	pins.closeErr = nil
+	pins.mu.Unlock()
+	if err := runner.DeleteIsolatedSession(session.id); err != nil {
+		t.Fatal(err)
+	}
+	if runner.lookup(session.id) != nil {
+		t.Fatal("successful retry retained session")
+	}
+	if _, err := os.Stat(upperParent); !os.IsNotExist(err) {
+		t.Fatalf("successful retry retained upper %s: %v", upperParent, err)
+	}
+}
+
 func TestFilesystemOperationLeaseRetainsUpperUntilIdleGCRetry(t *testing.T) {
 	runner := newTestRunner(t)
 	upperID, upperDir, workDir, err := runner.upperMgr.Allocate()

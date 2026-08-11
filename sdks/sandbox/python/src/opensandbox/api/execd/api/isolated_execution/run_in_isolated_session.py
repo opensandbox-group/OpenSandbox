@@ -24,6 +24,7 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
+from ...models.isolated_background_run_response import IsolatedBackgroundRunResponse
 from ...models.isolated_run_request import IsolatedRunRequest
 from ...models.server_stream_event import ServerStreamEvent
 from ...types import Response
@@ -53,11 +54,16 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | ServerStreamEvent | None:
+) -> ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent | None:
     if response.status_code == 200:
         response_200 = ServerStreamEvent.from_dict(response.text)
 
         return response_200
+
+    if response.status_code == 202:
+        response_202 = IsolatedBackgroundRunResponse.from_dict(response.json())
+
+        return response_202
 
     if response.status_code == 400:
         response_400 = ErrorResponse.from_dict(response.json())
@@ -82,7 +88,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | ServerStreamEvent]:
+) -> Response[ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -96,8 +102,15 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: IsolatedRunRequest,
-) -> Response[ErrorResponse | ServerStreamEvent]:
-    """Run code in an isolated session (SSE streaming)
+) -> Response[ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent]:
+    """Run code in an isolated session
+
+     Runs code inside an existing isolated session. Foreground mode (default) streams output via SSE
+    (200). Background mode (`background: true`) starts the command detached and returns a JSON run
+    handle with 202 Accepted for polling status and logs via
+    `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds`
+    applies to foreground runs only; background runs are not time-limited (idle GC is suspended while
+    one is active) and are bounded by the session lifetime.
 
     Args:
         session_id (UUID):
@@ -108,7 +121,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | ServerStreamEvent]
+        Response[ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent]
     """
 
     kwargs = _get_kwargs(
@@ -128,8 +141,15 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     body: IsolatedRunRequest,
-) -> ErrorResponse | ServerStreamEvent | None:
-    """Run code in an isolated session (SSE streaming)
+) -> ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent | None:
+    """Run code in an isolated session
+
+     Runs code inside an existing isolated session. Foreground mode (default) streams output via SSE
+    (200). Background mode (`background: true`) starts the command detached and returns a JSON run
+    handle with 202 Accepted for polling status and logs via
+    `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds`
+    applies to foreground runs only; background runs are not time-limited (idle GC is suspended while
+    one is active) and are bounded by the session lifetime.
 
     Args:
         session_id (UUID):
@@ -140,7 +160,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | ServerStreamEvent
+        ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent
     """
 
     return sync_detailed(
@@ -155,8 +175,15 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: IsolatedRunRequest,
-) -> Response[ErrorResponse | ServerStreamEvent]:
-    """Run code in an isolated session (SSE streaming)
+) -> Response[ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent]:
+    """Run code in an isolated session
+
+     Runs code inside an existing isolated session. Foreground mode (default) streams output via SSE
+    (200). Background mode (`background: true`) starts the command detached and returns a JSON run
+    handle with 202 Accepted for polling status and logs via
+    `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds`
+    applies to foreground runs only; background runs are not time-limited (idle GC is suspended while
+    one is active) and are bounded by the session lifetime.
 
     Args:
         session_id (UUID):
@@ -167,7 +194,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | ServerStreamEvent]
+        Response[ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent]
     """
 
     kwargs = _get_kwargs(
@@ -185,8 +212,15 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     body: IsolatedRunRequest,
-) -> ErrorResponse | ServerStreamEvent | None:
-    """Run code in an isolated session (SSE streaming)
+) -> ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent | None:
+    """Run code in an isolated session
+
+     Runs code inside an existing isolated session. Foreground mode (default) streams output via SSE
+    (200). Background mode (`background: true`) starts the command detached and returns a JSON run
+    handle with 202 Accepted for polling status and logs via
+    `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds`
+    applies to foreground runs only; background runs are not time-limited (idle GC is suspended while
+    one is active) and are bounded by the session lifetime.
 
     Args:
         session_id (UUID):
@@ -197,7 +231,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | ServerStreamEvent
+        ErrorResponse | IsolatedBackgroundRunResponse | ServerStreamEvent
     """
 
     return (
