@@ -73,6 +73,7 @@ class _Request:
         self.raw_content: bytes | None = None
         self.content = b""
         self.stream = False
+        self.http_version = "HTTP/1.1"
 
 
 class _Response:
@@ -100,6 +101,16 @@ class _Flow:
         self.request = _Request()
         self.response = _Response()
         self.metadata: dict[str, Any] = {}
+        self.error = None
+        self.live = True
+        self.killable = True
+        self.killed = False
+
+    def kill(self) -> None:
+        self.killed = True
+        self.error = "Killed"
+        self.live = False
+        self.killable = False
 
 
 def _load_system_module() -> Any:
@@ -1047,6 +1058,62 @@ class SystemAddonStreamingTest(unittest.TestCase):
 
         self.assertEqual(b'{"client_secret":"__body_secret__"}', flow.request.content)
         self.assertNotIn(system.FLOW_BINDING_KEY, flow.metadata)
+
+    def test_streamed_request_with_ambiguous_path_is_killed_not_403(self) -> None:
+        """Regression: setting a 403 on a >1 MiB request crashes mitmproxy
+        11.0.2 (start_request_stream raises NotImplementedError). A streamed
+        request must be killed instead, and must never receive credentials."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: self._make_vault_with_large_body_binding(
+            system
+        )
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/v1/chat/completions/../admin"
+        flow.request.headers["content-length"] = str(1024 * 1024 + 1)
+        flow.request.stream = True
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.killed)
+        self.assertIsNone(getattr(flow.response, "status_code", None))
+        self.assertNotIn("x-api-key", flow.request.headers._values)
+
+    def test_unknown_length_request_with_ambiguous_path_is_killed_not_403(self) -> None:
+        """Chunked bodies can cross 1 MiB after requestheaders, which enables
+        streaming mid-upload; a 403 would crash there, so kill instead."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: self._make_vault_with_large_body_binding(
+            system
+        )
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/v1/chat/completions/../admin"
+        flow.request.headers["transfer-encoding"] = "chunked"
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.killed)
+        self.assertIsNone(getattr(flow.response, "status_code", None))
+        self.assertNotIn("x-api-key", flow.request.headers._values)
+
+    def test_small_known_body_with_ambiguous_path_still_403(self) -> None:
+        """Bodies fully known to be under stream_large_bodies can never be
+        streamed, so the 403 response is still safe."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: self._make_vault_with_large_body_binding(
+            system
+        )
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/v1/chat/completions/../admin"
+        flow.request.headers["content-length"] = "100"
+
+        system.requestheaders(flow)
+
+        self.assertFalse(flow.killed)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("x-api-key", flow.request.headers._values)
 
 
 if __name__ == "__main__":

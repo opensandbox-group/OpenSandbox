@@ -330,6 +330,52 @@ def _binding_matches(flow: http.HTTPFlow, binding: dict[str, Any]) -> tuple[bool
     return best_precedence > 0, best_precedence
 
 
+def _request_may_be_streamed(flow: http.HTTPFlow) -> bool:
+    """True if mitmproxy may enable request-body streaming for this flow.
+
+    Streaming is enabled whenever the body is expected to exceed
+    ``stream_large_bodies`` (1 MiB), either up front (known Content-Length)
+    or mid-upload once buffered bytes cross the threshold (chunked or
+    HTTP/2 bodies without Content-Length). A 403 response cannot be served
+    for such flows (mitmproxy 11.0.2 raises ``NotImplementedError``), so
+    they must be killed instead.
+    """
+    if getattr(flow.request, "stream", False):
+        return True
+    if "content-length" in flow.request.headers:
+        return False
+    if (flow.request.http_version or "").upper().startswith("HTTP/2"):
+        return True
+    return "transfer-encoding" in flow.request.headers
+
+
+def _reject_request(flow: http.HTTPFlow, body: bytes) -> None:
+    """Terminate a request before it is forwarded upstream.
+
+    mitmproxy 11.0.2 refuses to serve a locally-set response while a request
+    body is being streamed: ``start_request_stream`` raises
+    ``NotImplementedError`` once ``flow.response`` is set, and streaming is
+    enabled as soon as a body is known to exceed ``stream_large_bodies``
+    (1 MiB) — either up front via Content-Length or mid-upload for chunked
+    bodies. A 403 response is therefore only safe when the body size is
+    fully known; otherwise the flow is killed, which closes the client
+    connection without forwarding anything.
+    """
+    if _request_may_be_streamed(flow):
+        if flow.killable:
+            flow.kill()
+        return
+    flow.response = http.Response.make(403, body, {"content-type": "text/plain"})
+
+
+def _flow_rejected(flow: http.HTTPFlow) -> bool:
+    """True if the flow was terminated by :func:`_reject_request` (403
+    response or killed flow)."""
+    if flow.error is not None:
+        return True
+    return flow.response is not None and getattr(flow.response, "status_code", None) == 403
+
+
 def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] | None:
     matches: list[tuple[int, dict[str, Any]]] = []
     for binding in vault.bindings:
@@ -342,11 +388,7 @@ def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] |
     highest = max(precedence for precedence, _ in matches)
     selected = [binding for precedence, binding in matches if precedence == highest]
     if len(selected) != 1:
-        flow.response = http.Response.make(
-            403,
-            b"credential binding ambiguous\n",
-            {"content-type": "text/plain"},
-        )
+        _reject_request(flow, b"credential binding ambiguous\n")
         ctx.log.warn(
             "credential proxy: ambiguous binding match for "
             f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
@@ -476,10 +518,8 @@ def _apply_path_query_substitutions(
         if query_part is not None:
             candidate_path = f"{candidate_path}?{query_part}"
         if _path_is_ambiguous(candidate_path):
-            flow.response = http.Response.make(
-                403,
-                b"request path contains ambiguous substituted segments\n",
-                {"content-type": "text/plain"},
+            _reject_request(
+                flow, b"request path contains ambiguous substituted segments\n"
             )
             ctx.log.warn(
                 "credential proxy: rejected request after path substitution: "
@@ -549,7 +589,7 @@ def _apply_requestheaders_substitutions(flow: http.HTTPFlow, binding: dict[str, 
 
     applied = []
     applied.extend(_apply_path_query_substitutions(flow, substitutions))
-    if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
+    if _flow_rejected(flow):
         return applied
     applied.extend(_apply_header_substitutions(flow, substitutions))
     return applied
@@ -582,11 +622,7 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     # boundary.
     raw_path = flow.request.path or "/"
     if _path_is_ambiguous(raw_path, allow_single_encoded_slash=True):
-        flow.response = http.Response.make(
-            403,
-            b"request path contains ambiguous segments\n",
-            {"content-type": "text/plain"},
-        )
+        _reject_request(flow, b"request path contains ambiguous segments\n")
         ctx.log.warn(
             "credential proxy: rejected request with ambiguous path: "
             f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
@@ -597,11 +633,7 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     # ``/@scope%2fname`` stays working while crafted paths like
     # ``/api/v8/projects/123%2f..%2f456/...`` are stopped.
     if _path_encoded_slash_changes_binding(flow, vault):
-        flow.response = http.Response.make(
-            403,
-            b"request path contains ambiguous segments\n",
-            {"content-type": "text/plain"},
-        )
+        _reject_request(flow, b"request path contains ambiguous segments\n")
         ctx.log.warn(
             "credential proxy: rejected request whose encoded slash crosses "
             "the credential binding boundary: "
@@ -620,7 +652,7 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     flow.metadata[FLOW_VAULT_REDACTIONS_KEY] = list(vault.redactions)
 
     substituted_surfaces = _apply_requestheaders_substitutions(flow, binding)
-    if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
+    if _flow_rejected(flow):
         return
 
     injected_names: list[str] = []
