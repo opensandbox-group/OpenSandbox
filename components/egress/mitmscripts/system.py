@@ -58,6 +58,7 @@ ACTIVE_VAULT_PATH = "/credential-vault/_active"
 VAULT_CACHE_TTL_SECONDS = 0.5
 FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
 FLOW_BINDING_KEY = "opensandbox_credential_binding"
+FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
 HEADER_SUBSTITUTION_DENYLIST = {
     "host",
     "content-length",
@@ -612,6 +613,11 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     if not binding:
         return
     flow.metadata[FLOW_BINDING_KEY] = binding
+    # Persist the redactions of the matched revision: body substitutions run
+    # later in the request hook, and reloading the vault there could return a
+    # different revision (0.5s cache TTL), leaving substituted credentials
+    # unredactable in response headers.
+    flow.metadata[FLOW_VAULT_REDACTIONS_KEY] = list(vault.redactions)
 
     substituted_surfaces = _apply_requestheaders_substitutions(flow, binding)
     if flow.response is not None and getattr(flow.response, "status_code", None) == 403:
@@ -631,7 +637,7 @@ def requestheaders(flow: http.HTTPFlow) -> None:
         injected_names.append(name)
 
     if injected_names or substituted_surfaces:
-        flow.metadata[FLOW_REDACTIONS_KEY] = list(vault.redactions)
+        flow.metadata[FLOW_REDACTIONS_KEY] = list(flow.metadata[FLOW_VAULT_REDACTIONS_KEY])
         ctx.log.info(
             "credential proxy: applied binding="
             f"{binding.get('name')} revision={vault.revision} "
@@ -663,9 +669,9 @@ def request(flow: http.HTTPFlow) -> None:
     applied = _apply_body_substitutions(flow, binding.get("substitutions") or [])
     if applied:
         if FLOW_REDACTIONS_KEY not in flow.metadata:
-            vault = _load_active_vault()
-            if vault is not None:
-                flow.metadata[FLOW_REDACTIONS_KEY] = list(vault.redactions)
+            flow.metadata[FLOW_REDACTIONS_KEY] = list(
+                flow.metadata.get(FLOW_VAULT_REDACTIONS_KEY, [])
+            )
         ctx.log.info(
             "credential proxy: applied body substitutions binding="
             f"{binding.get('name')} host={_request_host(flow)} "

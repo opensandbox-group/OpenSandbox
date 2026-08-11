@@ -962,12 +962,59 @@ class SystemAddonStreamingTest(unittest.TestCase):
 
         system.requestheaders(flow)
         self.assertNotIn(system.FLOW_REDACTIONS_KEY, flow.metadata)
+        self.assertIn(system.FLOW_VAULT_REDACTIONS_KEY, flow.metadata)
 
         system.request(flow)
 
         body = flow.request.content.decode("utf-8")
         self.assertEqual({"client_secret": "body secret value"}, json.loads(body))
         self.assertIn(system.FLOW_REDACTIONS_KEY, flow.metadata)
+
+    def test_body_substitution_redactions_from_matched_revision(self) -> None:
+        """Redactions must come from the vault revision matched at
+        requestheaders time, not from a later reload (0.5s cache TTL)."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "body-only",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/token"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__body_secret__",
+                            "value": "body secret value",
+                            "in": ["body"],
+                        }
+                    ],
+                }
+            ],
+            ["__body_secret__", "body secret value"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"client_secret":"__body_secret__"}'
+
+        system.requestheaders(flow)
+        # Vault changes (e.g. cache TTL expiry) before the body arrives.
+        system._load_active_vault = lambda: system.ActiveVault(2, [], ["new-secret"])
+
+        system.request(flow)
+
+        body = flow.request.content.decode("utf-8")
+        self.assertEqual({"client_secret": "body secret value"}, json.loads(body))
+        self.assertEqual(
+            ["__body_secret__", "body secret value"],
+            flow.metadata[system.FLOW_REDACTIONS_KEY],
+        )
+        self.assertNotIn("new-secret", flow.metadata[system.FLOW_REDACTIONS_KEY])
 
     def test_request_alone_is_noop_without_requestheaders(self) -> None:
         """Phase 2 must not do anything without phase 1 having matched a
