@@ -118,6 +118,46 @@ func TestRemoteRegistryImageDeleter_FallsBackToTagAfterRecordedDigestMiss(t *tes
 	}
 }
 
+func TestRemoteRegistryImageDeleter_RemovesTagDigestAfterRecordedDeleteAccepted(t *testing.T) {
+	const recordedDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const registryDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	deletedPaths := make(chan string, 2)
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/v2/":
+			w.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodHead && request.URL.Path == "/v2/snapshots/test/manifests/tag":
+			w.Header().Set("Docker-Content-Digest", registryDigest)
+			w.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/"+recordedDigest):
+			deletedPaths <- request.URL.Path
+			w.WriteHeader(http.StatusAccepted)
+		case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/"+registryDigest):
+			deletedPaths <- request.URL.Path
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer registry.Close()
+
+	imageReference := strings.TrimPrefix(registry.URL, "http://") + "/snapshots/test:tag"
+	err := (remoteRegistryImageDeleter{}).Delete(context.Background(), imageReference, recordedDigest, nil, true)
+	require.NoError(t, err)
+	select {
+	case path := <-deletedPaths:
+		assert.Equal(t, "/v2/snapshots/test/manifests/"+recordedDigest, path)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for recorded-digest DELETE request")
+	}
+	select {
+	case path := <-deletedPaths:
+		assert.Equal(t, "/v2/snapshots/test/manifests/"+registryDigest, path)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for registry-digest DELETE request")
+	}
+}
+
 func TestRegistryAuthenticator_ReadsDockerConfigJSON(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "registry-secret", Namespace: "default"},

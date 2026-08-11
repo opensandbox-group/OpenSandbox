@@ -60,14 +60,20 @@ func (remoteRegistryImageDeleter) Delete(
 
 	if imageDigest != "" {
 		digestRef := ref.Context().Digest(imageDigest)
-		if err := remote.Delete(digestRef, remoteOptions...); err == nil {
-			return nil
-		} else if !isRegistryNotFound(err) {
-			return fmt.Errorf("delete image %q by digest %q: %w", imageReference, imageDigest, err)
+		deleteErr := remote.Delete(digestRef, remoteOptions...)
+		if deleteErr != nil && !isRegistryNotFound(deleteErr) {
+			return fmt.Errorf("delete image %q by digest %q: %w", imageReference, imageDigest, deleteErr)
 		}
-		// nerdctl can convert the pushed manifest media type, so the local
-		// content-store digest may differ from the registry digest. Resolve the
-		// tag after a digest miss and delete the registry's current manifest.
+		// nerdctl can convert the pushed manifest media type, and some registries
+		// report a successful DELETE even when the supplied digest is not the
+		// digest currently referenced by the tag. Resolve the tag after every
+		// digest attempt and remove a different registry manifest when present.
+		if _, ok := ref.(name.Digest); !ok {
+			if err := deleteRegistryTagIfDifferent(ctx, ref, imageDigest, remoteOptions, imageReference); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	if _, ok := ref.(name.Digest); ok {
@@ -78,6 +84,24 @@ func (remoteRegistryImageDeleter) Delete(
 	}
 
 	return deleteRegistryTag(ctx, ref, remoteOptions, imageReference)
+}
+
+func deleteRegistryTagIfDifferent(ctx context.Context, ref name.Reference, imageDigest string, remoteOptions []remote.Option, imageReference string) error {
+	descriptor, err := remote.Head(ref, remoteOptions...)
+	if isRegistryNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve image digest for %q: %w", imageReference, err)
+	}
+	if descriptor.Digest.String() == imageDigest {
+		return nil
+	}
+	registryRef := ref.Context().Digest(descriptor.Digest.String())
+	if err := remote.Delete(registryRef, remoteOptions...); err != nil && !isRegistryNotFound(err) {
+		return fmt.Errorf("delete image %q by registry digest %q: %w", imageReference, descriptor.Digest, err)
+	}
+	return nil
 }
 
 func deleteRegistryTag(ctx context.Context, ref name.Reference, remoteOptions []remote.Option, imageReference string) error {
