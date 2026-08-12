@@ -117,6 +117,18 @@ def apply_egress_to_spec(
             "periodSeconds": 1,
             "failureThreshold": 30,
         },
+        # A cold arm64 pull can start the egress container before its DNS/nft
+        # initialization has opened :18080. Without a startup probe, Kubernetes
+        # records an immediate readiness failure; OpenSandbox treats that as a
+        # terminal provisioning failure and deletes an otherwise healthy pod.
+        "startupProbe": {
+            "httpGet": {
+                "path": "/healthz",
+                "port": 18080,
+            },
+            "periodSeconds": 1,
+            "failureThreshold": 60,
+        },
     }
     sidecar["volumeMounts"] = [
         {

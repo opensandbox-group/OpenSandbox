@@ -262,6 +262,11 @@ class TestEgressSidecarViaApply:
         assert "command" not in container
         assert container["ports"] == [{"name": "egress-api", "containerPort": 18080}]
         assert container["readinessProbe"]["httpGet"]["path"] == "/healthz"
+        assert container["startupProbe"] == {
+            "httpGet": {"path": "/healthz", "port": 18080},
+            "periodSeconds": 1,
+            "failureThreshold": 60,
+        }
 
     def test_handles_wildcard_domains(self):
         """Test that wildcard domains in egress rules are handled correctly."""
