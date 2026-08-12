@@ -125,11 +125,30 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 	})
 
 	AfterAll(func() {
-		By("cleaning up Docker Registry")
-		cmd := exec.Command("kubectl", "delete", "deployment", "docker-registry", "-n", pauseResumeNamespace, "--ignore-not-found=true")
+		By("cleaning up any remaining batchsandboxes")
+		cmd := exec.Command("kubectl", "delete", "batchsandboxes", "--all", "-n", pauseResumeNamespace,
+			"--ignore-not-found=true", "--wait=false")
 		utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "service", "docker-registry", "-n", pauseResumeNamespace, "--ignore-not-found=true")
+
+		By("requesting cleanup of any remaining sandboxsnapshots")
+		cmd = exec.Command("kubectl", "delete", "sandboxsnapshots", "--all", "-n", pauseResumeNamespace,
+			"--ignore-not-found=true", "--wait=false")
 		utils.Run(cmd)
+
+		// Failure-path tests can intentionally leave snapshots whose image URI
+		// cannot be cleaned up. Exercise the documented operator escape hatch so
+		// teardown cannot block forever on their strict cleanup finalizers.
+		By("removing finalizers from snapshots that could not be cleaned up")
+		cmd = exec.Command("kubectl", "get", "sandboxsnapshots", "-n", pauseResumeNamespace,
+			"-o", "jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}")
+		remainingSnapshots, err := utils.Run(cmd)
+		if err == nil {
+			for _, snapshotName := range strings.Fields(remainingSnapshots) {
+				cmd = exec.Command("kubectl", "patch", "sandboxsnapshot", snapshotName, "-n", pauseResumeNamespace,
+					"--type=merge", "-p", `{"metadata":{"finalizers":[]}}`)
+				utils.Run(cmd)
+			}
+		}
 
 		By("cleaning up secrets")
 		for _, secret := range []string{"registry-auth", "registry-snapshot-push-secret", "registry-pull-secret"} {
@@ -137,12 +156,10 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			utils.Run(cmd)
 		}
 
-		By("cleaning up any remaining sandboxsnapshots")
-		cmd = exec.Command("kubectl", "delete", "sandboxsnapshots", "--all", "-n", pauseResumeNamespace, "--ignore-not-found=true")
+		By("cleaning up Docker Registry")
+		cmd = exec.Command("kubectl", "delete", "deployment", "docker-registry", "-n", pauseResumeNamespace, "--ignore-not-found=true")
 		utils.Run(cmd)
-
-		By("cleaning up any remaining batchsandboxes")
-		cmd = exec.Command("kubectl", "delete", "batchsandboxes", "--all", "-n", pauseResumeNamespace, "--ignore-not-found=true")
+		cmd = exec.Command("kubectl", "delete", "service", "docker-registry", "-n", pauseResumeNamespace, "--ignore-not-found=true")
 		utils.Run(cmd)
 
 		By("undeploying the controller-manager")
