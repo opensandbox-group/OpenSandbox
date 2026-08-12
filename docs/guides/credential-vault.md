@@ -428,6 +428,12 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 - Scope bindings by path whenever possible, for example `/v1/*`.
 - Avoid overlapping bindings at the same precedence; ambiguous matches are
   rejected.
+- Rejected requests (ambiguous paths, encoded separators crossing a binding
+  boundary) return `403` when the request body is small and fully known.
+  Requests with bodies above the mitmproxy streaming threshold (~1 MiB) or
+  with unknown length (chunked) cannot be answered with a `403` while the
+  body is being streamed, so the sidecar drops the connection instead —
+  either way the request is never forwarded upstream.
 - Do not put real secrets in sandbox `env`, command arguments, files, or
   metadata.
 - Keep fake environment variables when a CLI refuses to start without a key; the

@@ -53,6 +53,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
@@ -1149,6 +1150,125 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
 
     @Test
     @Order(18)
+    @DisplayName("slow warmup does not block rolling slot replenishment")
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void testSlowWarmupDoesNotBlockRollingSlotReplenishment() throws Exception {
+        pool.resize(0);
+        pool.releaseAllIdle();
+        pool.shutdown(false);
+
+        String rollingTag =
+                "e2e-pool-rolling-warmup-" + UUID.randomUUID().toString().substring(0, 8);
+        CountDownLatch slowWarmupEntered = new CountDownLatch(1);
+        CountDownLatch releaseSlowWarmup = new CountDownLatch(1);
+        CountDownLatch laterWarmupsEntered = new CountDownLatch(3);
+        AtomicInteger warmupSequence = new AtomicInteger();
+        AtomicInteger activePreparers = new AtomicInteger();
+        AtomicInteger maxActivePreparers = new AtomicInteger();
+        SandboxPool rollingPool = null;
+        try {
+            rollingPool =
+                    SandboxPool.builder()
+                            .poolName("pool-rolling-warmup-" + rollingTag)
+                            .ownerId("owner-rolling-warmup-" + rollingTag)
+                            .maxIdle(4)
+                            .warmupConcurrency(2)
+                            .stateStore(new InMemoryPoolStateStore())
+                            .connectionConfig(sharedConnectionConfig)
+                            .creationSpec(
+                                    PoolCreationSpec.builder()
+                                            .image(getSandboxImage())
+                                            .entrypoint(List.of("tail -f /dev/null"))
+                                            .metadata(
+                                                    Map.of(
+                                                            "tag",
+                                                            rollingTag,
+                                                            "suite",
+                                                            "sandbox-pool-e2e"))
+                                            .env(
+                                                    Map.of(
+                                                            "E2E_TEST",
+                                                            "true",
+                                                            "EXECD_API_GRACE_SHUTDOWN",
+                                                            "3s",
+                                                            "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
+                                                            "1s"))
+                                            .build())
+                            .warmupSandboxPreparer(
+                                    sandbox -> {
+                                        int active = activePreparers.incrementAndGet();
+                                        maxActivePreparers.accumulateAndGet(active, Math::max);
+                                        int sequence = warmupSequence.incrementAndGet();
+                                        try {
+                                            if (sequence == 1) {
+                                                slowWarmupEntered.countDown();
+                                                awaitLatch(releaseSlowWarmup);
+                                            } else {
+                                                laterWarmupsEntered.countDown();
+                                            }
+                                        } finally {
+                                            activePreparers.decrementAndGet();
+                                        }
+                                    })
+                            // The test must prove completion-driven refill, not a periodic tick.
+                            .reconcileInterval(Duration.ofMinutes(5))
+                            .drainTimeout(Duration.ofSeconds(10))
+                            .build();
+            rollingPool.start();
+
+            assertTrue(
+                    slowWarmupEntered.await(2, TimeUnit.MINUTES),
+                    "one warmup should enter the deliberately slow preparer");
+            assertTrue(
+                    laterWarmupsEntered.await(2, TimeUnit.MINUTES),
+                    "three later warmups should reuse the free slot while the first stays blocked");
+
+            SandboxPool finalRollingPool = rollingPool;
+            eventually(
+                    "three fast warmups become idle before the slow tail completes",
+                    Duration.ofMinutes(2),
+                    Duration.ofMillis(500),
+                    () -> finalRollingPool.snapshot().getIdleCount() == 3);
+            assertEquals(
+                    1L,
+                    releaseSlowWarmup.getCount(),
+                    "the first warmup must still be blocked when later slots refill");
+            assertTrue(
+                    maxActivePreparers.get() <= 2,
+                    "rolling replenishment must respect warmupConcurrency");
+            assertTrue(
+                    countTaggedSandboxes(rollingTag) <= 4,
+                    "rolling replenishment must not create beyond maxIdle");
+
+            releaseSlowWarmup.countDown();
+            eventually(
+                    "rolling pool converges after the slow tail completes",
+                    Duration.ofMinutes(1),
+                    Duration.ofMillis(500),
+                    () -> finalRollingPool.snapshot().getIdleCount() == 4);
+            assertEquals(4, warmupSequence.get(), "exactly maxIdle warmups should be admitted");
+            assertTrue(
+                    countTaggedSandboxes(rollingTag) <= 4,
+                    "remote sandbox count must remain bounded by maxIdle");
+        } finally {
+            releaseSlowWarmup.countDown();
+            if (rollingPool != null) {
+                try {
+                    rollingPool.resize(0);
+                    rollingPool.releaseAllIdle();
+                } catch (Exception ignored) {
+                }
+                try {
+                    rollingPool.shutdown(false);
+                } catch (Exception ignored) {
+                }
+            }
+            cleanupTaggedSandboxes(rollingTag);
+        }
+    }
+
+    @Test
+    @Order(19)
     @DisplayName("snapshot exposes lifecycle maxIdle and idle entry details")
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
     void testSnapshotExposesLifecycleAndIdleEntries() throws InterruptedException {
@@ -1194,7 +1314,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
     }
 
     @Test
-    @Order(19)
+    @Order(20)
     @DisplayName("RETRY_NEXT_IDLE skips stale idle candidate and returns healthy warm sandbox")
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
     void testRetryNextIdleSkipsStaleAndReturnsHealthyWarm() throws Exception {
@@ -1300,7 +1420,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
     }
 
     @Test
-    @Order(20)
+    @Order(21)
     @DisplayName(
             "RETRY_NEXT_IDLE_THEN_CREATE falls through to direct-create when all idle are stale")
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
@@ -1403,7 +1523,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
     }
 
     @Test
-    @Order(21)
+    @Order(22)
     @DisplayName(
             "RETRY_NEXT_IDLE raises PoolAcquireFailedException after bounded retries on all-stale queue")
     @Timeout(value = 3, unit = TimeUnit.MINUTES)
@@ -1541,6 +1661,15 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                             + lastError.getMessage());
         } else {
             fail("Timed out waiting for " + description);
+        }
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("warmup interrupted unexpectedly", exception);
         }
     }
 

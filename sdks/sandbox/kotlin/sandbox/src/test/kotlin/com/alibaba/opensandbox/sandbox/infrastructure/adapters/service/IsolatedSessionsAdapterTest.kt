@@ -21,9 +21,11 @@ import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunOpts
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -31,6 +33,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -466,5 +469,384 @@ class IsolatedSessionsAdapterTest {
         val request = mockWebServer.takeRequest()
         assertEquals("GET", request.method)
         assertEquals("/v1/isolated/session/missing-sess", request.path)
+    }
+
+    @Test
+    fun `runBackground posts background flag without timeout and parses 202 handle`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(202)
+                .setBody(
+                    """
+                    {
+                      "session_id": "sess-1",
+                      "run_id": "run-1",
+                      "started_at": "2026-01-02T03:04:05Z"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        val run =
+            adapter.runBackgroundInternal(
+                "sess-1",
+                "echo hi",
+                IsolatedRunOpts(envs = mapOf("A" to "b"), timeoutSeconds = 30),
+            )
+
+        val request = mockWebServer.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/v1/isolated/session/sess-1/run", request.path)
+        assertEquals("route-token", request.getHeader("X-Execd-Token"))
+        val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("echo hi", body["code"]!!.jsonPrimitive.content)
+        assertEquals("b", body["envs"]!!.jsonObject["A"]!!.jsonPrimitive.content)
+        assertEquals(true, body["background"]!!.jsonPrimitive.boolean)
+        assertNull(body["timeout_seconds"])
+
+        assertEquals("sess-1", run.sessionId)
+        assertEquals("run-1", run.runId)
+        assertNotNull(run.startedAt)
+        assertEquals(2026, run.startedAt?.year)
+    }
+
+    @Test
+    fun `runBackground defaults opts to empty`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(202)
+                .setBody(
+                    """
+                    {
+                      "session_id": "sess-1",
+                      "run_id": "run-1"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        val run = adapter.runBackgroundInternal("sess-1", "echo hi")
+
+        val request = mockWebServer.takeRequest()
+        val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals(true, body["background"]!!.jsonPrimitive.boolean)
+        assertNull(body["envs"])
+        assertNull(body["timeout_seconds"])
+        assertEquals("run-1", run.runId)
+        assertNull(run.startedAt)
+    }
+
+    @Test
+    fun `runBackground propagates http error`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(404)
+                .setBody(
+                    """
+                    {
+                      "code": "SESSION_NOT_FOUND",
+                      "message": "isolated session not found"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        val ex =
+            assertThrows(SandboxApiException::class.java) {
+                adapter.runBackgroundInternal("missing-sess", "echo hi")
+            }
+        assertEquals(404, ex.statusCode)
+        assertTrue(ex.message!!.contains("run background in isolated session"))
+        assertEquals("/v1/isolated/session/missing-sess/run", mockWebServer.takeRequest().path)
+    }
+
+    @Test
+    fun `runBackground validates blank code`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            adapter.runBackgroundInternal("sess-1", "   ")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            adapter.runBackgroundInternal("", "echo hi")
+        }
+    }
+
+    @Test
+    fun `getRunStatus parses running and finished statuses`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody(
+                    """
+                    {
+                      "session_id": "sess-1",
+                      "run_id": "run-1",
+                      "running": true,
+                      "started_at": "2026-01-02T03:04:05Z"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody(
+                    """
+                    {
+                      "session_id": "sess-1",
+                      "run_id": "run-1",
+                      "running": false,
+                      "exit_code": 7,
+                      "error": "session terminated",
+                      "started_at": "2026-01-02T03:04:05Z",
+                      "finished_at": "2026-01-02T03:04:09Z"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        val running = adapter.getRunStatusInternal("sess-1", "run-1")
+        val finished = adapter.getRunStatusInternal("sess-1", "run-1")
+
+        assertEquals("GET", mockWebServer.takeRequest().method)
+        assertEquals("/v1/isolated/session/sess-1/runs/run-1", mockWebServer.takeRequest().path)
+
+        assertTrue(running.running)
+        assertNull(running.exitCode)
+        assertNull(running.error)
+        assertNotNull(running.startedAt)
+        assertNull(running.finishedAt)
+
+        assertFalse(finished.running)
+        assertEquals(7, finished.exitCode)
+        assertEquals("session terminated", finished.error)
+        assertNotNull(finished.finishedAt)
+        assertEquals(9, finished.finishedAt?.second)
+    }
+
+    @Test
+    fun `getRunStatus propagates http error`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(404)
+                .setBody("""{"code": "RUN_NOT_FOUND"}"""),
+        )
+
+        val ex =
+            assertThrows(SandboxApiException::class.java) {
+                adapter.getRunStatusInternal("sess-1", "run-missing")
+            }
+        assertEquals(404, ex.statusCode)
+        assertEquals("/v1/isolated/session/sess-1/runs/run-missing", mockWebServer.takeRequest().path)
+    }
+
+    @Test
+    fun `getRunStatus validates blank runId`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            adapter.getRunStatusInternal("sess-1", "")
+        }
+    }
+
+    @Test
+    fun `getRunLogs sends cursor param and uses header cursor`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody("line1\nline2\n")
+                .addHeader("EXECD-ISOLATED-TAIL-CURSOR", "12"),
+        )
+
+        val logs = adapter.getRunLogsInternal("sess-1", "run-1", cursor = 4)
+
+        val request = mockWebServer.takeRequest()
+        assertEquals("GET", request.method)
+        assertEquals("/v1/isolated/session/sess-1/runs/run-1/logs", request.requestUrl?.encodedPath)
+        assertEquals("4", request.requestUrl?.queryParameter("cursor"))
+
+        assertEquals("line1\nline2\n", logs.text)
+        assertEquals(12L, logs.cursor)
+    }
+
+    @Test
+    fun `getRunLogs omits cursor param at zero`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody("hello")
+                .addHeader("EXECD-ISOLATED-TAIL-CURSOR", "5"),
+        )
+
+        val logs = adapter.getRunLogsInternal("sess-1", "run-1")
+
+        assertNull(mockWebServer.takeRequest().requestUrl?.queryParameter("cursor"))
+        assertEquals("hello", logs.text)
+        assertEquals(5L, logs.cursor)
+    }
+
+    @Test
+    fun `getRunLogs falls back to cursor plus bytes when header absent`() {
+        mockWebServer.enqueue(MockResponse().setBody("hello"))
+
+        val logs = adapter.getRunLogsInternal("sess-1", "run-1", cursor = 0)
+
+        assertEquals("hello", logs.text)
+        assertEquals(5L, logs.cursor)
+    }
+
+    @Test
+    fun `getRunLogs falls back when header cursor unparseable`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody("hello")
+                .addHeader("EXECD-ISOLATED-TAIL-CURSOR", "not-a-number"),
+        )
+
+        val logs = adapter.getRunLogsInternal("sess-1", "run-1", cursor = 10)
+
+        assertEquals("hello", logs.text)
+        assertEquals(15L, logs.cursor)
+    }
+
+    @Test
+    fun `getRunLogs counts bytes not characters`() {
+        // 6 UTF-8 bytes for the two CJK characters.
+        mockWebServer.enqueue(MockResponse().setBody("你好"))
+
+        val logs = adapter.getRunLogsInternal("sess-1", "run-1", cursor = 2)
+
+        assertEquals("你好", logs.text)
+        assertEquals(8L, logs.cursor)
+    }
+
+    @Test
+    fun `getRunLogs propagates http error`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(404)
+                .setBody("""{"code": "RUN_NOT_FOUND"}"""),
+        )
+
+        val ex =
+            assertThrows(SandboxApiException::class.java) {
+                adapter.getRunLogsInternal("sess-1", "run-missing")
+            }
+        assertEquals(404, ex.statusCode)
+        assertEquals(
+            "/v1/isolated/session/sess-1/runs/run-missing/logs",
+            mockWebServer.takeRequest().path,
+        )
+    }
+
+    @Test
+    fun `getRunLogs validates negative cursor`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            adapter.getRunLogsInternal("sess-1", "run-1", cursor = -1)
+        }
+    }
+
+    @Test
+    fun `background run full lifecycle with incremental logs and exit code`() {
+        // create session
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody(
+                    """
+                    {
+                      "session_id": "sess-1",
+                      "created_at": "2026-01-02T03:04:05Z"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+        // run background
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(202)
+                .setBody(
+                    """
+                    {
+                      "session_id": "sess-1",
+                      "run_id": "run-1",
+                      "started_at": "2026-01-02T03:04:05Z"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+        // status: still running
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody(
+                    """
+                    {
+                      "session_id": "sess-1",
+                      "run_id": "run-1",
+                      "running": true,
+                      "started_at": "2026-01-02T03:04:05Z"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+        // status: finished with exit code 0
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody(
+                    """
+                    {
+                      "session_id": "sess-1",
+                      "run_id": "run-1",
+                      "running": false,
+                      "exit_code": 0,
+                      "started_at": "2026-01-02T03:04:05Z",
+                      "finished_at": "2026-01-02T03:04:07Z"
+                    }
+                    """.trimIndent(),
+                ),
+        )
+        // logs page 1
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody("first line\n")
+                .addHeader("EXECD-ISOLATED-TAIL-CURSOR", "11"),
+        )
+        // logs page 2
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody("second line\n")
+                .addHeader("EXECD-ISOLATED-TAIL-CURSOR", "23"),
+        )
+
+        val session =
+            adapter.create(
+                CreateIsolatedSessionRequest(
+                    workspace = IsolatedWorkspaceSpec(path = "/workspace"),
+                ),
+            )
+        assertEquals("/v1/isolated/session", mockWebServer.takeRequest().path)
+
+        val run = session.runBackground("echo background")
+        val runRequest = mockWebServer.takeRequest()
+        assertEquals("POST", runRequest.method)
+        assertEquals("/v1/isolated/session/sess-1/run", runRequest.path)
+        val runBody = Json.parseToJsonElement(runRequest.body.readUtf8()).jsonObject
+        assertEquals("echo background", runBody["code"]!!.jsonPrimitive.content)
+        assertEquals(true, runBody["background"]!!.jsonPrimitive.boolean)
+        assertEquals("run-1", run.runId)
+
+        val running = session.getRunStatus(run.runId)
+        assertEquals("/v1/isolated/session/sess-1/runs/run-1", mockWebServer.takeRequest().path)
+        assertTrue(running.running)
+
+        val finished = session.getRunStatus(run.runId)
+        assertEquals("/v1/isolated/session/sess-1/runs/run-1", mockWebServer.takeRequest().path)
+        assertFalse(finished.running)
+        assertEquals(0, finished.exitCode)
+        assertNotNull(finished.finishedAt)
+
+        val page1 = session.getRunLogs(run.runId)
+        val page1Request = mockWebServer.takeRequest()
+        assertEquals("/v1/isolated/session/sess-1/runs/run-1/logs", page1Request.requestUrl?.encodedPath)
+        assertNull(page1Request.requestUrl?.queryParameter("cursor"))
+        assertEquals("first line\n", page1.text)
+        assertEquals(11L, page1.cursor)
+
+        val page2 = session.getRunLogs(run.runId, cursor = page1.cursor)
+        assertEquals("second line\n", page2.text)
+        assertEquals(23L, page2.cursor)
+        assertEquals("11", mockWebServer.takeRequest().requestUrl?.queryParameter("cursor"))
     }
 }

@@ -211,6 +211,15 @@ jobs:
             -run '^TestBwrapLifecycleEndToEnd$' \
             ./pkg/isolation
 
+      - name: Run namespace pin lifecycle integration test
+        working-directory: components/execd
+        run: |
+          # Pinning must not depend on CAP_SYS_PTRACE in either uid mode.
+          sudo -E setpriv --bounding-set=-sys_ptrace env "PATH=$PATH" go test \
+            -tags="linux,bwrap" -v -count=1 -timeout=2m \
+            -run '^TestPrivateSessionPinsNamespacesBeforeMarkReady$' \
+            ./pkg/runtime
+
       - name: Run bwrap integration tests
         working-directory: components/execd
         run: sudo -E env "PATH=$PATH" go test -tags="linux,bwrap" -v -count=1 -timeout=5m ./pkg/runtime/bwrap_test/

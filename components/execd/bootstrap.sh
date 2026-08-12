@@ -19,10 +19,27 @@ set -e
 _forward_signal() {
 	sig="$1"
 	pid="$2"
+	if [ -z "$pid" ]; then
+		return
+	fi
 	kill "-$sig" "$pid" 2>/dev/null || true
-	wait "$pid" 2>/dev/null || true
+}
+
+_shutdown_children() {
+	sig="$1"
+	_forward_signal "$sig" "${CMD_PID:-}"
+	_forward_signal "$sig" "${EXECD_PID:-}"
+	if [ -n "${CMD_PID:-}" ]; then
+		wait "$CMD_PID" 2>/dev/null || true
+	fi
+	if [ -n "${EXECD_PID:-}" ]; then
+		wait "$EXECD_PID" 2>/dev/null || true
+	fi
 	exit 0
 }
+
+trap '_shutdown_children TERM' TERM
+trap '_shutdown_children INT' INT
 
 # Returns 0 if the value looks like a boolean "true" (1, true, yes, on).
 is_truthy() {
@@ -294,6 +311,7 @@ fi
 
 echo "starting OpenSandbox Execd daemon at $EXECD."
 $EXECD &
+EXECD_PID=$!
 
 # Allow chained shell commands (e.g., /test1.sh && /test2.sh)
 # Usage:
@@ -330,7 +348,10 @@ else
 	CMD_PID=$!
 fi
 
-trap '_forward_signal TERM "$CMD_PID"' TERM
-
+set +e
 wait "$CMD_PID" 2>/dev/null
-exit $?
+CMD_STATUS=$?
+set -e
+_forward_signal TERM "$EXECD_PID"
+wait "$EXECD_PID" 2>/dev/null || true
+exit "$CMD_STATUS"

@@ -400,6 +400,16 @@ spec:
 Pool pods are created before allocation. The lifecycle API therefore rejects `networkPolicy` together with `extensions.poolRef`; it cannot inject an egress sidecar into an existing pool pod. Configure required network controls in the Pool pod template before pods are created, or use a non-pooled sandbox for per-request policies.
 :::
 
+::: tip Shared storage in Pool mode
+Static shared storage follows the same rule: pre-create a PVC (normally with a
+`ReadWriteMany`-capable storage class) and mount it in the Pool pod template as
+shown in the complete example linked below. The Kubernetes controller preserves
+these static mounts when it creates warm pods from the Pool template.
+Per-sandbox `volumes` cannot be combined with `extensions.poolRef`, because an
+allocated warm pod cannot gain new volumes. See the
+[Kubernetes PVC guide](/examples/kubernetes-pvc-volume-mount#pool-mode-pre-mount-a-shared-pvc).
+:::
+
 #### Pooled Sandbox with Heterogeneous Tasks
 Create a batch of sandboxes with process-based heterogeneous tasks. For task execution to work properly, the task-executor must be deployed as a sidecar container in the pool template and share the process namespace with the sandbox container:
 

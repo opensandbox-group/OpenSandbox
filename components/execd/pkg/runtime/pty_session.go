@@ -53,6 +53,7 @@ type PTYSession interface {
 	WriteStdin(p []byte) (int, error)
 	AttachOutput() (io.Reader, io.Reader, func())
 	AttachOutputWithSnapshot(since int64) (io.Reader, io.Reader, func(), []byte, int64)
+	ReadOutput(since int64) ([]byte, int64, <-chan struct{})
 	SendSignal(name string)
 	ResizePTY(cols, rows uint16) error
 }
@@ -84,6 +85,7 @@ type ptySession struct {
 	pid          int           // PID of the running bash process (0 = not running)
 	lastExitCode int           // exit code; -1 until process exits
 	doneCh       chan struct{} // closed when process exits (non-nil after Start*)
+	outputDoneCh chan struct{} // closed after output broadcasters finish writing to replay
 
 	// Stdin (PTY master in PTY mode; write end of os.Pipe in pipe mode)
 	stdin io.WriteCloser
@@ -214,9 +216,24 @@ func (s *ptySession) Done() <-chan struct{} {
 	return s.doneCh
 }
 
+// OutputDone closes after all output broadcasters have written their final
+// bytes to the replay buffer. It is non-nil after StartPTY or StartPipe.
+func (s *ptySession) OutputDone() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.outputDoneCh
+}
+
 // ReplayBuffer returns the session's replay buffer (thread-safe).
 func (s *ptySession) ReplayBuffer() *replayBuffer {
 	return s.replay
+}
+
+// ReadOutput returns replay bytes starting at since and a notification channel
+// that closes when more output is appended. Snapshot and subscription are
+// atomic, so read-only viewers cannot miss output between the two operations.
+func (s *ptySession) ReadOutput(since int64) ([]byte, int64, <-chan struct{}) {
+	return s.replay.ReadFromAndSubscribe(since)
 }
 
 // buildPTYCommand selects Bash when available and otherwise falls back to sh.
@@ -260,9 +277,14 @@ func (s *ptySession) StartPTY() error {
 	s.isPTY = true
 	s.pid = cmd.Process.Pid
 	s.doneCh = make(chan struct{})
+	outputDoneCh := make(chan struct{})
+	s.outputDoneCh = outputDoneCh
 	s.stdin = ptmx // write to the PTY master to feed stdin
 
-	safego.Go(func() { s.broadcastPTY() })
+	safego.Go(func() {
+		defer close(outputDoneCh)
+		s.broadcastPTY(ptmx)
+	})
 	safego.Go(func() { s.waitAndExit(cmd, ptmx) })
 
 	return nil
@@ -328,20 +350,34 @@ func (s *ptySession) StartPipe() error {
 	s.isPTY = false
 	s.pid = cmd.Process.Pid
 	s.doneCh = make(chan struct{})
+	outputDoneCh := make(chan struct{})
+	s.outputDoneCh = outputDoneCh
 	s.stdin = stdinW
 
-	safego.Go(func() { s.broadcastPipe(stdoutR, true) })
-	safego.Go(func() { s.broadcastPipe(stderrR, false) })
+	var outputWg sync.WaitGroup
+	outputWg.Add(2)
+	safego.Go(func() {
+		defer outputWg.Done()
+		s.broadcastPipe(stdoutR, true)
+	})
+	safego.Go(func() {
+		defer outputWg.Done()
+		s.broadcastPipe(stderrR, false)
+	})
+	safego.Go(func() {
+		outputWg.Wait()
+		close(outputDoneCh)
+	})
 	safego.Go(func() { s.waitAndExitPipe(cmd, stdinW, stdoutR, stderrR) })
 
 	return nil
 }
 
 // broadcastPTY reads from the PTY master and fans out to replay + active WS client.
-func (s *ptySession) broadcastPTY() {
+func (s *ptySession) broadcastPTY(ptmx *os.File) {
 	buf := make([]byte, 32*1024)
 	for {
-		n, err := s.ptmx.Read(buf)
+		n, err := ptmx.Read(buf)
 		if n > 0 {
 			s.writeAndFanout(buf[:n], true)
 		}

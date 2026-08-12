@@ -113,6 +113,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 				}
 			}
 		}
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
 		return err
 	}
 	m.tracker.clear()
@@ -135,11 +136,16 @@ func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 	}
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(ips), script)
 	_, err := m.run(ctx, script)
-	if err == nil {
-		m.tracker.setDynamicIPs(ips)
-		telemetry.RecordNftablesUpdate()
+	if err != nil {
+		// The policy allows these destinations but the kernel does not know it yet, so
+		// the chain's final rule drops them. Indistinguishable from a policy denial
+		// inside the sandbox, hence its own counter.
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
+		return err
 	}
-	return err
+	m.tracker.setDynamicIPs(ips)
+	telemetry.RecordNftablesUpdate()
+	return nil
 }
 
 // StartConnectionRefresh keeps DNS-learned IPs authorized while a TCP
@@ -172,6 +178,7 @@ func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 		if strings.Contains(msg, "no such file") || strings.Contains(msg, "does not exist") {
 			return nil
 		}
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpRemove)
 		return err
 	}
 	m.tracker.clear()

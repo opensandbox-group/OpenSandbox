@@ -24,28 +24,17 @@ from opensandbox_server.api.schema import Volume
 logger = logging.getLogger(__name__)
 
 
-def _raise_mixed_pvc_read_only_policy(pvc_claim_name: str) -> None:
-    raise ValueError(
-        f"PVC claim '{pvc_claim_name}' is mounted with mixed read_only values. "
-        "All mounts sharing the same PVC must use the same read_only policy."
-    )
-
-
-def ensure_shared_pvc_read_only_policy(volumes: List[Volume]) -> None:
-    """Ensure every mount that references the same PVC uses the same read_only policy."""
-    pvc_to_read_only: Dict[str, bool] = {}
-
+def _get_pvc_source_read_only_policies(volumes: List[Volume]) -> Dict[str, bool]:
+    """Keep a PVC source read-only only when every mount of that claim is read-only."""
+    policies: Dict[str, bool] = {}
     for vol in volumes:
         if vol.pvc is None:
             continue
 
-        pvc_claim_name = vol.pvc.claim_name
-        if pvc_claim_name in pvc_to_read_only:
-            if pvc_to_read_only[pvc_claim_name] != vol.read_only:
-                _raise_mixed_pvc_read_only_policy(pvc_claim_name)
-            continue
+        claim_name = vol.pvc.claim_name
+        policies[claim_name] = policies.get(claim_name, True) and vol.read_only
 
-        pvc_to_read_only[pvc_claim_name] = vol.read_only
+    return policies
 
 
 def apply_volumes_to_pod_spec(
@@ -62,10 +51,9 @@ def apply_volumes_to_pod_spec(
     mounts = main_container.get("volumeMounts", [])
     pod_volumes = pod_spec.get("volumes", [])
 
-    ensure_shared_pvc_read_only_policy(volumes)
-
     existing_volume_names = {v.get("name") for v in pod_volumes if isinstance(v, dict)}
     pvc_to_volume_name: Dict[str, str] = {}
+    pvc_source_read_only = _get_pvc_source_read_only_policies(volumes)
 
     for vol in volumes:
         vol_name = vol.name
@@ -84,7 +72,7 @@ def apply_volumes_to_pod_spec(
                     "name": vol_name,
                     "persistentVolumeClaim": {
                         "claimName": pvc_claim_name,
-                        "readOnly": vol.read_only,
+                        "readOnly": pvc_source_read_only[pvc_claim_name],
                     },
                 })
                 pvc_to_volume_name[pvc_claim_name] = vol_name

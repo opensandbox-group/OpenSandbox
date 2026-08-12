@@ -96,6 +96,28 @@ func TestPTYSession_BasicExecution(t *testing.T) {
 		"expected 'hello_pty' in PTY replay buffer")
 }
 
+func TestPTYSession_OutputDoneAfterPipeReplay(t *testing.T) {
+	requireBash(t)
+
+	s := newPTYSession(uuidString(), "", "printf output_done_marker")
+	require.NoError(t, s.StartPipe())
+	t.Cleanup(func() { s.close() })
+
+	select {
+	case <-s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipe session did not exit")
+	}
+	select {
+	case <-s.OutputDone():
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipe output broadcasters did not finish")
+	}
+
+	data, _ := s.replay.ReadFrom(0)
+	require.Contains(t, string(data), "output_done_marker")
+}
+
 func TestPTYSession_IsRunning(t *testing.T) {
 	requireBash(t)
 

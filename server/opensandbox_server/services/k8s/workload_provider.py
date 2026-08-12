@@ -185,6 +185,15 @@ class WorkloadProvider(ABC):
         """
         pass
 
+    def get_internal_endpoint(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
+        """Get the workload endpoint used by the server-side proxy.
+
+        Providers with ingress-aware endpoint resolution should override this
+        method to return an address that bypasses ingress. The default preserves
+        compatibility for custom providers that only implement get_endpoint_info.
+        """
+        return self.get_endpoint_info(workload, port, sandbox_id)
+
     def pause_sandbox(self, sandbox_id: str, namespace: str) -> None:
         """
         Pause a running sandbox.

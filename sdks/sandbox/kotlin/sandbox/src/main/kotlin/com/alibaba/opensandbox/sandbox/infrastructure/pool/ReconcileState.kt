@@ -61,6 +61,28 @@ internal class ReconcileState(
         recordFailures(1, errorMessage)
     }
 
+    /**
+     * Records one independently completed rolling-window warmup failure.
+     *
+     * Unlike batch failure accounting, multiple tasks that finish while the same backoff window
+     * is active must not advance the exponential delay once per completion. The first failure
+     * that reaches the threshold opens (or, after expiry, advances) one backoff window; remaining
+     * in-flight failures only update counters and the last error.
+     */
+    @Synchronized
+    fun recordAsyncFailure(errorMessage: String?) {
+        failureCount++
+        lastError = errorMessage
+        if (failureCount < degradedThreshold) return
+
+        val now = Instant.now()
+        val activeUntil = backoffUntil
+        if (state == PoolState.DEGRADED && activeUntil != null && now.isBefore(activeUntil)) {
+            return
+        }
+        activateNextBackoff(now)
+    }
+
     @Synchronized
     fun recordFailures(
         count: Int,
@@ -70,17 +92,21 @@ internal class ReconcileState(
         failureCount += count
         lastError = errorMessage
         if (failureCount >= degradedThreshold) {
-            state = PoolState.DEGRADED
-            backoffAttempts++
-            val exponent = (backoffAttempts - 1).coerceAtMost(30)
-            val delaySeconds = backoffBase.seconds * (1L shl exponent)
-            val delayMs =
-                minOf(
-                    Duration.ofSeconds(delaySeconds).toMillis(),
-                    backoffMax.toMillis(),
-                )
-            backoffUntil = Instant.now().plusMillis(delayMs)
+            activateNextBackoff(Instant.now())
         }
+    }
+
+    private fun activateNextBackoff(now: Instant) {
+        state = PoolState.DEGRADED
+        backoffAttempts++
+        val exponent = (backoffAttempts - 1).coerceAtMost(30)
+        val delaySeconds = backoffBase.seconds * (1L shl exponent)
+        val delayMs =
+            minOf(
+                Duration.ofSeconds(delaySeconds).toMillis(),
+                backoffMax.toMillis(),
+            )
+        backoffUntil = now.plusMillis(delayMs)
     }
 
     /** True if reconciler should skip create attempts this tick (in backoff window). */

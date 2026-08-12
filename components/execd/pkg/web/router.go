@@ -98,6 +98,8 @@ func NewRouter(accessToken string) *gin.Engine {
 		isolated.GET("/sessions", withIsolated(func(c *controller.IsolatedSessionController) { c.List() }))
 		isolated.GET("/session/:sessionId", withIsolated(func(c *controller.IsolatedSessionController) { c.Get() }))
 		isolated.POST("/session/:sessionId/run", withIsolated(func(c *controller.IsolatedSessionController) { c.Run() }))
+		isolated.GET("/session/:sessionId/runs/:runId", withIsolated(func(c *controller.IsolatedSessionController) { c.GetRunStatus() }))
+		isolated.GET("/session/:sessionId/runs/:runId/logs", withIsolated(func(c *controller.IsolatedSessionController) { c.GetRunLogs() }))
 		isolated.DELETE("/session/:sessionId", withIsolated(func(c *controller.IsolatedSessionController) { c.Delete() }))
 		isolated.GET("/session/:sessionId/diff", withIsolated(func(c *controller.IsolatedSessionController) { c.Diff() }))
 		isolated.POST("/session/:sessionId/commit", withIsolated(func(c *controller.IsolatedSessionController) { c.Commit() }))

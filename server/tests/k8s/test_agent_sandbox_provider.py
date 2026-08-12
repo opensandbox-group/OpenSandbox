@@ -657,6 +657,59 @@ spec:
         assert result["state"] == "Pending"
         assert result["reason"] in {"POD_SCHEDULED", "POD_PENDING"}
 
+    def test_get_internal_endpoint_uses_first_valid_status_pod_ip(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client)
+        workload = {"status": {"podIPs": ["10.0.0.9", "fd00::9"]}}
+
+        endpoint = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "10.0.0.9:8080"
+        assert endpoint.headers is None
+        mock_k8s_client.list_pods.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "workload",
+        [
+            {},
+            {"status": {}},
+            {"status": None},
+            {"status": []},
+            {"status": {"podIPs": []}},
+            {"status": {"podIPs": "10.0.0.9"}},
+            {"status": {"podIPs": [None]}},
+            {"status": {"podIPs": [""]}},
+        ],
+    )
+    def test_get_internal_endpoint_returns_none_without_valid_primary_pod_ip(
+        self, mock_k8s_client, workload
+    ):
+        provider = AgentSandboxProvider(mock_k8s_client)
+
+        endpoint = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
+
+        assert endpoint is None
+        mock_k8s_client.list_pods.assert_not_called()
+
+    def test_get_internal_endpoint_skips_invalid_pod_ip_entries(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client)
+        workload = {"status": {"podIPs": [None, "", "10.0.0.10"]}}
+
+        endpoint = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "10.0.0.10:8080"
+        assert endpoint.headers is None
+        mock_k8s_client.list_pods.assert_not_called()
+
+    def test_get_internal_endpoint_brackets_ipv6_pod_ip(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client)
+        workload = {"status": {"podIPs": ["fd00::9"]}}
+
+        endpoint = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "[fd00::9]:8080"
+        assert endpoint.headers is None
+        mock_k8s_client.list_pods.assert_not_called()
+
     def test_get_endpoint_info_prefers_running_pod(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.return_value = [

@@ -18,9 +18,6 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.egress.PolicyApi
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Credential
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialAuth
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialAuthMetadata
@@ -46,7 +43,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toApiEgressNetworkRule
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toDomainEgressNetworkPolicy
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -264,12 +261,9 @@ internal class EgressAdapter(
             if (response.isSuccessful) {
                 return if (response.code == 204 || responseBody.isBlank()) null else responseBody
             }
-            throw SandboxApiException(
-                message = "$operation failed. Status code: ${response.code}, Body: $responseBody",
-                statusCode = response.code,
-                error = parseSandboxError(responseBody) ?: SandboxError(UNEXPECTED_RESPONSE, responseBody.takeIf { it.isNotBlank() }),
-                requestId = response.header("X-Request-ID"),
-            )
+            throw response.toSandboxApiException(responseBody) { statusCode, body ->
+                "$operation failed. Status code: $statusCode, Body: $body"
+            }
         }
     }
 

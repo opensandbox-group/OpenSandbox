@@ -21,3 +21,12 @@ class TestHealthCheck:
         response = client.get("/health")
         assert response.status_code == 200
         assert response.json() == {"status": "healthy"}
+
+
+class TestVersionInfo:
+
+    def test_version_endpoint(self, client: TestClient):
+        response = client.get("/version")
+        assert response.status_code == 200
+        assert isinstance(response.json()["version"], str)
+        assert response.json()["version"]

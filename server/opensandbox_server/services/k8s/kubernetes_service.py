@@ -20,7 +20,6 @@ using Kubernetes resources for sandbox lifecycle management.
 """
 
 import asyncio
-import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -60,7 +59,6 @@ from opensandbox_server.services.k8s.error_helpers import _build_k8s_api_error, 
 from opensandbox_server.services.k8s.k8s_diagnostics import K8sDiagnosticsMixin
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
 from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
-from opensandbox_server.services.k8s.volume_helper import ensure_shared_pvc_read_only_policy
 from opensandbox_server.services.k8s.status_helpers import (
     _is_unschedulable_status,
     _normalize_create_status,
@@ -838,11 +836,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             if has_pool_ref and pool_ref != POOL_AUTO_ASSIGN_REF:
                 await asyncio.to_thread(self._ensure_pool_ref_exists, pool_ref)
 
-            # Kubernetes applies PVC readOnly at the source volume level, so
-            # shared PVC mounts must agree before any auto-provisioning side effect.
-            if request.volumes:
-                ensure_shared_pvc_read_only_policy(request.volumes)
-
             # Auto-create PVCs that don't exist yet
             if request.volumes:
                 managed_pvcs_may_exist = True
@@ -1429,7 +1422,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         Args:
             sandbox_id: Unique sandbox identifier
             port: Port number
-            resolve_internal: Ignored for Kubernetes (always returns Pod IP)
+            resolve_internal: If True, bypass ingress and return the provider's
+                internal workload endpoint for use by the server-side proxy.
             expires: Unix epoch seconds for a signed route token.
                 Requires ingress gateway mode with secure_access keys configured.
 
@@ -1479,19 +1473,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             if expires is not None:
                 endpoint = self._build_signed_endpoint(sandbox_id, port, expires)
             elif resolve_internal:
-                annotations = workload.get("metadata", {}).get("annotations", {})
-                raw_endpoints = annotations.get("sandbox.opensandbox.io/endpoints")
-                pod_ip = None
-                if raw_endpoints:
-                    try:
-                        endpoints = json.loads(raw_endpoints)
-                        if isinstance(endpoints, list) and endpoints:
-                            first_endpoint = endpoints[0]
-                            if isinstance(first_endpoint, str) and first_endpoint:
-                                pod_ip = first_endpoint
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        pod_ip = None
-                endpoint = Endpoint(endpoint=f"{pod_ip}:{port}") if pod_ip else None
+                endpoint = self.workload_provider.get_internal_endpoint(
+                    workload, port, sandbox_id
+                )
             else:
                 endpoint = self.workload_provider.get_endpoint_info(workload, port, sandbox_id)
 

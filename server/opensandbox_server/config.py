@@ -43,6 +43,12 @@ DEFAULT_CONFIG_PATH = Path.home() / ".sandbox.toml"
 
 API_KEY_ENV_VAR = "OPENSANDBOX_SERVER_API_KEY"
 
+# OSEP-0011 secure-access keys may be injected via environment instead of the
+# [ingress.secure_access] TOML block, so key material can come from a Secret
+# rather than a plaintext config file.
+SECURE_ACCESS_KEYS_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_KEYS"
+SECURE_ACCESS_ACTIVE_KEY_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY"
+
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?:\.(?!-)[A-Za-z0-9-]{1,63})*$")
 _WILDCARD_DOMAIN_RE = re.compile(r"^\*\.(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$")
 _IPV4_WITH_PORT_RE = re.compile(r"^(?P<ip>(?:\d{1,3}\.){3}\d{1,3})(?::(?P<port>\d{1,5}))?$")
@@ -351,7 +357,9 @@ class IngressConfig(BaseModel):
             "OSEP-0011 secure access signing configuration. "
             "When set, the server can issue signed route tokens and static "
             "SecureAccessTokens for sandbox endpoints. "
-            "Requires ingress.mode = 'gateway'."
+            "Requires ingress.mode = 'gateway'. "
+            "May also be injected via the OPENSANDBOX_SECURE_ACCESS_KEYS and "
+            "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY environment variables."
         ),
     )
 
@@ -1053,6 +1061,44 @@ def _apply_env_overrides(config: AppConfig) -> None:
     """Apply environment variable overrides to parsed configuration."""
     if API_KEY_ENV_VAR in os.environ:
         config.server.api_key = os.environ[API_KEY_ENV_VAR]
+    _apply_secure_access_env_overrides(config)
+
+
+def _apply_secure_access_env_overrides(config: AppConfig) -> None:
+    """Build ingress.secure_access from OPENSANDBOX_SECURE_ACCESS_* env vars.
+
+    OPENSANDBOX_SECURE_ACCESS_KEYS is a comma-separated key ring in
+    "key_id=base64" form; OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY names the
+    signing key. Both must be set together, and env wins over any
+    [ingress.secure_access] block from the config file.
+    """
+    keys_env = os.environ.get(SECURE_ACCESS_KEYS_ENV_VAR)
+    active_key_env = os.environ.get(SECURE_ACCESS_ACTIVE_KEY_ENV_VAR)
+    if keys_env is None and active_key_env is None:
+        return
+    if not keys_env or not active_key_env:
+        raise ValueError(
+            f"{SECURE_ACCESS_KEYS_ENV_VAR} and {SECURE_ACCESS_ACTIVE_KEY_ENV_VAR} "
+            "must be set together."
+        )
+    if config.ingress is None or config.ingress.mode != INGRESS_MODE_GATEWAY:
+        raise ValueError(
+            f"{SECURE_ACCESS_KEYS_ENV_VAR} requires ingress.mode = "
+            f"'{INGRESS_MODE_GATEWAY}' in the config file."
+        )
+    keys: list[SecureAccessKey] = []
+    for pair in keys_env.split(","):
+        key_id, sep, b64 = pair.partition("=")
+        if not sep or not key_id:
+            raise ValueError(
+                f"{SECURE_ACCESS_KEYS_ENV_VAR} entries must be in "
+                f"key_id=base64 form, got {pair!r}"
+            )
+        keys.append(SecureAccessKey(key_id=key_id, key=b64))
+    config.ingress.secure_access = SecureAccessConfig(
+        active_key=active_key_env,
+        keys=keys,
+    )
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

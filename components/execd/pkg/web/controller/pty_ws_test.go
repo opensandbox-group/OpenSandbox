@@ -211,6 +211,181 @@ func TestPTYWS_AlreadyConnectedReturns409(t *testing.T) {
 	require.Equal(t, http.StatusConflict, code)
 }
 
+func TestPTYWS_ViewerRequiresRunningSession(t *testing.T) {
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	code := wsDialExpectHTTP(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer")
+	require.Equal(t, http.StatusConflict, code)
+}
+
+func TestPTYWS_ConcurrentViewersReceiveReplayAndLiveOutput(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	holder := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "")
+	ptyWaitFrame(t, holder, "connected", 10*time.Second)
+	ptyWriteStdin(t, holder, "echo viewer_replay_marker\n")
+	ptyOutputContains(t, holder, "viewer_replay_marker", 8*time.Second)
+
+	viewer1 := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer&since=0")
+	viewer2 := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer&since=0")
+	for _, viewer := range []*websocket.Conn{viewer1, viewer2} {
+		ptyOutputContains(t, viewer, "viewer_replay_marker", 8*time.Second)
+		f := ptyWaitFrame(t, viewer, "connected", 8*time.Second)
+		require.Equal(t, "viewer", f.Role)
+	}
+
+	// Viewers do not release or replace the exclusive read/write holder.
+	code := wsDialExpectHTTP(t, srv.URL, "/pty/"+id+"/ws", "")
+	require.Equal(t, http.StatusConflict, code)
+
+	ptyWriteStdin(t, holder, "echo viewer_live_marker\n")
+	ptyOutputContains(t, viewer1, "viewer_live_marker", 8*time.Second)
+	ptyOutputContains(t, viewer2, "viewer_live_marker", 8*time.Second)
+}
+
+func TestPTYWS_ViewerRejectsMutatingFrames(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	holder := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "")
+	ptyWaitFrame(t, holder, "connected", 10*time.Second)
+	viewer := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer")
+	ptyWaitFrame(t, viewer, "connected", 8*time.Second)
+
+	markerPath := "/tmp/opensandbox-viewer-read-only-" + id
+	ptyWriteStdin(t, viewer, "touch "+markerPath+"\n")
+	f := ptyWaitFrame(t, viewer, "error", 5*time.Second)
+	require.Equal(t, model.WSErrCodeReadOnly, f.Code)
+
+	require.NoError(t, viewer.WriteJSON(model.ClientFrame{
+		Type: "stdin",
+		Data: "touch " + markerPath + "\n",
+	}))
+	f = ptyWaitFrame(t, viewer, "error", 5*time.Second)
+	require.Equal(t, model.WSErrCodeReadOnly, f.Code)
+
+	require.NoError(t, viewer.WriteJSON(model.ClientFrame{Type: "signal", Signal: "SIGTERM"}))
+	f = ptyWaitFrame(t, viewer, "error", 5*time.Second)
+	require.Equal(t, model.WSErrCodeReadOnly, f.Code)
+
+	require.NoError(t, viewer.WriteJSON(model.ClientFrame{Type: "resize", Cols: 120, Rows: 40}))
+	f = ptyWaitFrame(t, viewer, "error", 5*time.Second)
+	require.Equal(t, model.WSErrCodeReadOnly, f.Code)
+
+	require.NoError(t, viewer.WriteJSON(model.ClientFrame{Type: "ping"}))
+	f = ptyWaitFrame(t, viewer, "pong", 5*time.Second)
+	require.Equal(t, "pong", f.Type)
+
+	// The blocked stdin and signal did not mutate or terminate the shell.
+	ptyWriteStdin(t, holder, "test ! -e "+markerPath+" && echo viewer_read_only_ok\n")
+	ptyOutputContains(t, holder, "viewer_read_only_ok", 8*time.Second)
+
+	// The blocked resize did not change the initial PTY size.
+	ptyWriteStdin(t, holder, "stty size\n")
+	ptyOutputContains(t, holder, "24 80", 8*time.Second)
+}
+
+func TestPTYWS_ViewerClosesAfterReadOnlyViolationLimit(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	holder := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "")
+	ptyWaitFrame(t, holder, "connected", 10*time.Second)
+	viewer := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer")
+	ptyWaitFrame(t, viewer, "connected", 8*time.Second)
+
+	for range ptyViewerReadOnlyViolationLimit {
+		ptyWriteStdin(t, viewer, "ignored\n")
+		f := ptyWaitFrame(t, viewer, "error", 5*time.Second)
+		require.Equal(t, model.WSErrCodeReadOnly, f.Code)
+	}
+
+	_ = viewer.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _, err := viewer.ReadMessage()
+	require.Error(t, err, "viewer should close after repeated read-only violations")
+}
+
+func TestPTYWS_ViewerFlushesOutputBeforeExit(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	holder := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "pty=0")
+	ptyWaitFrame(t, holder, "connected", 10*time.Second)
+	viewer := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer")
+	ptyWaitFrame(t, viewer, "connected", 8*time.Second)
+
+	ptyWriteStdin(t, holder, "printf viewer_exit_marker; exit\n")
+	ptyOutputContains(t, viewer, "viewer_exit_marker", 8*time.Second)
+	f := ptyWaitFrame(t, viewer, "exit", 8*time.Second)
+	require.Equal(t, "exit", f.Type)
+}
+
+func TestPTYWS_ViewerDisconnectDoesNotAffectSessionOrOtherViewers(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	holder := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "")
+	ptyWaitFrame(t, holder, "connected", 10*time.Second)
+
+	viewer1 := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer")
+	ptyWaitFrame(t, viewer1, "connected", 8*time.Second)
+	require.NoError(t, viewer1.Close())
+
+	viewer2 := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer")
+	ptyWaitFrame(t, viewer2, "connected", 8*time.Second)
+	ptyWriteStdin(t, holder, "echo viewer_disconnect_ok\n")
+	ptyOutputContains(t, viewer2, "viewer_disconnect_ok", 8*time.Second)
+}
+
+func TestPTYWS_ViewerSurvivesHolderTakeover(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	holder := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "")
+	ptyWaitFrame(t, holder, "connected", 10*time.Second)
+	viewer := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer")
+	ptyWaitFrame(t, viewer, "connected", 8*time.Second)
+
+	successor := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "takeover=1")
+	ptyWaitFrame(t, successor, "connected", 8*time.Second)
+	ptyWriteStdin(t, successor, "echo viewer_after_takeover\n")
+	ptyOutputContains(t, viewer, "viewer_after_takeover", 8*time.Second)
+}
+
+func TestPTYWS_ViewerPipeModeReceivesCombinedOutput(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	holder := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "pty=0")
+	f := ptyWaitFrame(t, holder, "connected", 10*time.Second)
+	require.Equal(t, "pipe", f.Mode)
+
+	viewer := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "mode=viewer")
+	f = ptyWaitFrame(t, viewer, "connected", 8*time.Second)
+	require.Equal(t, "pipe", f.Mode)
+	require.Equal(t, "viewer", f.Role)
+
+	ptyWriteStdin(t, holder, "echo viewer_pipe_output\n")
+	ptyOutputContains(t, viewer, "viewer_pipe_output", 8*time.Second)
+}
+
 func TestPTYWS_ConnectedFramePTYMode(t *testing.T) {
 	requireBash(t)
 	srv := newPTYTestServer(t)
@@ -223,6 +398,7 @@ func TestPTYWS_ConnectedFramePTYMode(t *testing.T) {
 	require.Equal(t, "connected", f.Type)
 	require.Equal(t, id, f.SessionID)
 	require.Equal(t, "pty", f.Mode)
+	require.Equal(t, "holder", f.Role)
 }
 
 func TestPTYWS_StdinForwarding(t *testing.T) {

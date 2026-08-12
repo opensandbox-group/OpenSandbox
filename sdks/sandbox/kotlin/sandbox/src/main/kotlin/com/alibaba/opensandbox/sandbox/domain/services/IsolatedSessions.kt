@@ -19,8 +19,12 @@ package com.alibaba.opensandbox.sandbox.domain.services
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.BindMount
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedBackgroundRun
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunLogs
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunOpts
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionState
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionSummary
@@ -37,6 +41,38 @@ interface IsolationSession {
     fun run(request: IsolatedRunRequest): Execution
 
     fun run(code: String): Execution = run(IsolatedRunRequest(code = code))
+
+    /**
+     * Start [code] detached inside the session and return a run handle.
+     *
+     * The run's combined output and exit code are captured by execd; poll
+     * them with [getRunStatus] and [getRunLogs]. The run is not time-limited
+     * and idle GC is suspended while it is active. Background runs require a
+     * writable log location, so sessions with a read-only (`ro`) workspace
+     * reject them.
+     */
+    fun runBackground(
+        code: String,
+        opts: IsolatedRunOpts? = null,
+    ): IsolatedBackgroundRun
+
+    /**
+     * Return the lifecycle state of a background run started with [runBackground].
+     */
+    fun getRunStatus(runId: String): IsolatedRunStatus
+
+    /**
+     * Return the background run's log from [cursor] plus the next cursor.
+     *
+     * Each call returns at most 16 MiB; pass the returned cursor to fetch the
+     * remainder. Per-run log retention is capped at 16 MiB (output beyond it is
+     * discarded when the run finishes), so drain incrementally while the run is
+     * active if more than one page is needed.
+     */
+    fun getRunLogs(
+        runId: String,
+        cursor: Long = 0,
+    ): IsolatedRunLogs
 
     fun get(): IsolatedSessionState
 

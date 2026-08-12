@@ -31,6 +31,20 @@ var ErrSessionTeardownTimeout = errors.New("isolated session teardown timed out"
 // provide a fail-closed startup gate and verified host workload identity.
 var ErrSessionLifecycleUnavailable = errors.New("isolated session lifecycle is unavailable")
 
+// ErrSessionNamespaceUnavailable indicates that a private-network session
+// could not install stable NetNS and owning UserNS pins before its workload
+// gate was released.
+var ErrSessionNamespaceUnavailable = errors.New("isolated session namespace pinning is unavailable")
+
+// ErrSessionNamespaceCleanup indicates that namespace pins are still owned by
+// the session. The caller must retain the session and retry cleanup rather than
+// releasing its upper directory or forgetting the bind mounts.
+var ErrSessionNamespaceCleanup = errors.New("isolated session namespace cleanup is incomplete")
+
+// ErrIsolatedRunnerClosed indicates that shutdown has stopped admission of new
+// isolated sessions. Existing sessions may still be undergoing cleanup.
+var ErrIsolatedRunnerClosed = errors.New("isolated session runner is closed")
+
 // ErrSessionNotActive indicates that a terminal or stopping session no longer
 // accepts run or filesystem operations. Cleanup may still be retried through
 // Delete while the controller retains ownership of the session resources.

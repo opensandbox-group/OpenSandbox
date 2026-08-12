@@ -26,6 +26,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
 // createNftManager is non-nil only when mode includes the nft token (e.g. dns+nft).
@@ -48,6 +49,14 @@ func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.Netw
 	merged := policy.MergeAlwaysOverlay(initialPolicy, alwaysDeny, alwaysAllow)
 	policyWithNS := merged.WithExtraAllowIPs(nameserverIPs)
 	if err := nftMgr.ApplyStatic(ctx, policyWithNS); err != nil {
+		// ApplyStatic recorded the failure, but Fatalf calls os.Exit and the periodic
+		// reader would never export it, nor would main's deferred shutdown run. Flush
+		// first, so the one sample explaining why the sidecar died actually leaves.
+		flushCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if flushErr := telemetry.ForceFlush(flushCtx); flushErr != nil {
+			log.Warnf("failed to flush telemetry before exit: %v", flushErr)
+		}
+		cancel()
 		log.Fatalf("nftables static apply failed: %v", err)
 	}
 	log.Infof("nftables static policy applied (table inet opensandbox); DNS-resolved IPs will be added to dynamic allow sets")

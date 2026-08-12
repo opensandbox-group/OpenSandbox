@@ -78,7 +78,7 @@ Most deployments only need these settings:
 Optional advanced features:
 
 - Nameserver bypass: `OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT`
-- Denied hostname webhook: `OPENSANDBOX_EGRESS_DENY_WEBHOOK`, `OPENSANDBOX_EGRESS_SANDBOX_ID`
+- Denied hostname webhook: `OPENSANDBOX_EGRESS_DENY_WEBHOOK` (server injects `OPENSANDBOX_EGRESS_SANDBOX_ID` automatically; not user-settable)
 - DoH/DoT controls: `OPENSANDBOX_EGRESS_BLOCK_DOH_443`, `OPENSANDBOX_EGRESS_DOH_BLOCKLIST`
 - Custom DNS upstream: `OPENSANDBOX_EGRESS_DNS_UPSTREAM` (comma-separated IPs, optional `:port`), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT` (default `5` seconds)
 - DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (enable), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC`
@@ -169,9 +169,13 @@ Extra ports can be added via the experimental `OPENSANDBOX_EGRESS_MITMPROXY_EXTR
 On extra ports, mitmproxy still decrypts and logs traffic normally, but the Credential Vault's binding matcher currently only fires on the canonical `80/443` — bindings will not match requests to custom ports until follow-up work extends the matcher.
 :::
 
+::: warning Known issue: large SSE chunks truncated
+mitmproxy can truncate the tail of large streamed bodies (e.g. LLM SSE events > ~1 MB) when the upstream serves over TLS HTTP/1.1 and closes the connection right after the body. See [Egress: SSE Truncation (mitmproxy)](/components/egress-mitmproxy-sse-truncation) for root cause, reproduction, and status.
+::: 
+
 ### Credential Vault
 
-The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer.
+The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer. Injection happens when request headers are read, so it applies to request bodies of any size, including large bodies that mitmproxy streams upstream.
 
 Prerequisites: transparent mitmproxy enabled (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`), egress API auth token set (`OPENSANDBOX_EGRESS_TOKEN`).
 
@@ -181,7 +185,7 @@ See [Credential Vault](/guides/credential-vault) for full API usage, binding rul
 
 ### Observability (OpenTelemetry)
 
-Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). OTLP log export is not used.
+Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). The credential proxy's log lines from mitmdump are piped into the same zap sink at warn level, so they land in the egress log file when `OPENSANDBOX_LOG_OUTPUT` points at one; mitmproxy's own flow logs are not forwarded. OTLP log export is not used.
 
 #### DNS latency buckets
 
@@ -205,6 +209,33 @@ If you tune these, keep them on a seconds ladder. The SDK default boundaries are
 millisecond ladder (`0, 5, 10, … 10000`), which would put every realistic DNS latency in the
 single `le=5` bucket and make `histogram_quantile()` return an interpolation rather than a
 measurement.
+
+#### Denied vs failed
+
+Two counters look similar and mean opposite things. Reading one for the other inverts the
+diagnosis:
+
+| Metric | Meaning | Expected in a healthy system? |
+|---|---|---|
+| `egress.policy.denied_total` | the policy did its job — the workload asked for something it may not reach | **yes** |
+| `egress.dns.query.failed_total` | the sidecar could not do its job — an allowed lookup returned `SERVFAIL` | **no** |
+
+So the alert for "DNS is broken inside sandboxes" is the second one:
+
+```promql
+rate(egress_dns_query_failed_total[5m]) > 0
+```
+
+`reason` comes from a closed set — `no_upstreams`, `upstream_error`, `empty_response`,
+`rcode` — so the counter's cardinality does not depend on what the workload queries. Neither
+the queried name nor the error text is ever attached as a label.
+
+`egress.nftables.updates.failed_total{operation}` covers the other silent failure, with
+`operation` one of `static_apply`, `dynamic_add`, `remove`. **`dynamic_add` is the one to
+alert on**: it adds the IPs behind an allowed domain to the dynamic allow set, so a failure
+means the kernel never learned about destinations the policy permits and the chain drops
+them. From inside the sandbox that is indistinguishable from a denial, while
+`egress.policy.denied_total` stays flat — a fail-closed outage with no other signal.
 
 Full metric inventory and attribute semantics: [egress OpenTelemetry reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/opentelemetry.md).
 

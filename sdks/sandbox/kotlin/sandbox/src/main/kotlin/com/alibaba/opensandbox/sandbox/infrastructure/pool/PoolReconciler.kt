@@ -20,52 +20,59 @@ import com.alibaba.opensandbox.sandbox.domain.pool.PoolConfig
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolStateStore
 import org.slf4j.LoggerFactory
 import java.time.Instant
-import java.util.concurrent.Callable
-import java.util.concurrent.ExecutorService
 
 /**
  * Runs one reconcile tick: leader-gated replenish/shrink and TTL reap.
  *
  * Only the current primary lock holder performs idle maintenance writes.
  * Leader does not voluntarily release the lock; it is only lost when renew fails or TTL expires.
- * Call from a periodic scheduler; [createOne] should call lifecycle create and return the new sandbox ID or null on failure.
+ * Call from a periodic or completion-driven scheduler. Warmup submission is non-blocking; completed
+ * warmups are committed independently by the owning pool.
  */
 internal object PoolReconciler {
     private val logger = LoggerFactory.getLogger(PoolReconciler::class.java)
 
     /**
      * Runs a single reconcile tick. If this node does not hold the primary lock, returns immediately.
-     * Otherwise: reaps expired idle, snapshots counters, then shrinks excess idle or creates up to
-     * min(deficit, warmupConcurrency) sandboxes via [createOne] concurrently using [warmupExecutor].
+     * Otherwise: reaps expired idle, snapshots counters, then shrinks excess idle or requests enough
+     * warmups to fill the currently available rolling-window slots.
      * Lock is not released at end of tick (distributed implementations rely on TTL or renew failure to release).
      */
     fun runReconcileTick(
         config: PoolConfig,
         stateStore: PoolStateStore,
-        createOne: () -> String?,
         onDiscardSandbox: (String) -> Unit = {},
         reconcileState: ReconcileState,
-        warmupExecutor: ExecutorService,
-    ) {
+        warmingCount: Int,
+        submitWarmups: (Int) -> Unit,
+    ): Boolean {
         val poolName = config.poolName
         val ownerId = config.ownerId
         val ttl = config.primaryLockTtl
 
         if (!stateStore.tryAcquirePrimaryLock(poolName, ownerId, ttl)) {
             logger.trace("Reconcile skip (not primary): pool_name={}", poolName)
-            return
+            return false
         }
-        runPrimaryReplenishOnce(config, stateStore, createOne, onDiscardSandbox, reconcileState, warmupExecutor)
+        runPrimaryReplenishOnce(
+            config = config,
+            stateStore = stateStore,
+            onDiscardSandbox = onDiscardSandbox,
+            reconcileState = reconcileState,
+            warmingCount = warmingCount,
+            submitWarmups = submitWarmups,
+        )
         // Do not release primary lock here; leader holds until renew fails or TTL expires.
+        return true
     }
 
     private fun runPrimaryReplenishOnce(
         config: PoolConfig,
         stateStore: PoolStateStore,
-        createOne: () -> String?,
         onDiscardSandbox: (String) -> Unit,
         reconcileState: ReconcileState,
-        warmupExecutor: ExecutorService,
+        warmingCount: Int,
+        submitWarmups: (Int) -> Unit,
     ) {
         val poolName = config.poolName
         val ownerId = config.ownerId
@@ -86,121 +93,41 @@ internal object PoolReconciler {
             return
         }
 
-        val deficit = (config.maxIdle - counters.idleCount).coerceAtLeast(0)
-        val toCreate = minOf(deficit, config.warmupConcurrency)
+        val plan =
+            WarmupPlan.calculate(
+                idleCount = counters.idleCount,
+                warmingCount = warmingCount,
+                maxIdle = config.maxIdle,
+                warmupConcurrency = config.warmupConcurrency,
+            )
 
-        if (toCreate == 0 || reconcileState.isBackoffActive(now)) {
+        if (plan.toSubmit == 0 || reconcileState.isBackoffActive(now)) {
             stateStore.renewPrimaryLock(poolName, ownerId, ttl)
             logger.debug(
-                "Reconcile tick: pool_name={} idle={} deficit={} toCreate=0 (backoff={})",
+                "Reconcile tick: pool_name={} idle={} warming={} deficit={} available_slots={} " +
+                    "to_submit=0 backoff={}",
                 poolName,
                 counters.idleCount,
-                deficit,
+                warmingCount,
+                plan.deficit,
+                plan.availableSlots,
                 reconcileState.isBackoffActive(now),
             )
             return
         }
 
         logger.debug(
-            "Reconcile tick: pool_name={} idle={} deficit={} toCreate={}",
+            "Reconcile tick: pool_name={} idle={} warming={} deficit={} available_slots={} to_submit={}",
             poolName,
             counters.idleCount,
-            deficit,
-            toCreate,
+            warmingCount,
+            plan.deficit,
+            plan.availableSlots,
+            plan.toSubmit,
         )
 
         if (!stateStore.renewPrimaryLock(poolName, ownerId, ttl)) return
-        val tasks = List(toCreate) { Callable { createOne() } }
-        val results: List<Pair<String?, String?>> =
-            try {
-                warmupExecutor.invokeAll(tasks).map { f ->
-                    try {
-                        f.get() to null
-                    } catch (e: Exception) {
-                        null to e.message
-                    }
-                }
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                logger.info("Reconcile interrupted while waiting warmup tasks: pool_name={}", poolName)
-                return
-            }
-
-        val createdSandboxIds = mutableListOf<String>()
-        var failureCount = 0
-        var lastError: String? = null
-        for ((newId, errorMessage) in results) {
-            if (newId != null) {
-                createdSandboxIds += newId
-            } else {
-                failureCount++
-                lastError = errorMessage
-            }
-        }
-        reconcileState.recordFailures(failureCount, lastError)
-
-        var created = 0
-        for (index in createdSandboxIds.indices) {
-            val sandboxId = createdSandboxIds[index]
-            if (!stateStore.renewPrimaryLock(poolName, ownerId, ttl)) {
-                val orphanedCount = createdSandboxIds.size - index
-                for (orphanedIndex in index until createdSandboxIds.size) {
-                    try {
-                        onDiscardSandbox(createdSandboxIds[orphanedIndex])
-                    } catch (e: Exception) {
-                        logger.warn(
-                            "Reconcile orphaned sandbox cleanup failed: pool_name={} sandbox_id={} error={}",
-                            poolName,
-                            createdSandboxIds[orphanedIndex],
-                            e.message,
-                        )
-                    }
-                }
-                logger.warn(
-                    "Reconcile lost primary lock before putIdle; dropped {} newly created sandbox(es): pool_name={}",
-                    orphanedCount,
-                    poolName,
-                )
-                return
-            }
-            try {
-                stateStore.putIdle(poolName, sandboxId)
-                created++
-                reconcileState.recordSuccess()
-            } catch (e: Exception) {
-                reconcileState.recordFailure(e.message)
-                val orphanedCount = createdSandboxIds.size - index
-                for (orphanedIndex in index until createdSandboxIds.size) {
-                    val orphanedId = createdSandboxIds[orphanedIndex]
-                    try {
-                        stateStore.removeIdle(poolName, orphanedId)
-                    } catch (_: Exception) {
-                        // best-effort remove; continue cleanup path
-                    }
-                    try {
-                        onDiscardSandbox(orphanedId)
-                    } catch (cleanupError: Exception) {
-                        logger.warn(
-                            "Reconcile orphaned sandbox cleanup failed after putIdle error: pool_name={} sandbox_id={} error={}",
-                            poolName,
-                            orphanedId,
-                            cleanupError.message,
-                        )
-                    }
-                }
-                logger.warn(
-                    "Reconcile putIdle failed; dropped {} newly created sandbox(es): pool_name={} error={}",
-                    orphanedCount,
-                    poolName,
-                    e.message,
-                )
-                return
-            }
-        }
-
-        if (created > 0) {
-            logger.debug("Reconcile created {} sandboxes: pool_name={}", created, poolName)
-        }
+        submitWarmups(plan.toSubmit)
     }
 
     private fun shrinkExcessIdle(

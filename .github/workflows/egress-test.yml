@@ -36,6 +36,9 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Install mitmproxy
+        run: pip install mitmproxy==11.0.2
+
       - name: Check gofmt
         working-directory: components/egress
         run: |
@@ -56,7 +59,7 @@ jobs:
         run: |
           go test ./...
 
-      - name: Run mitmscripts unit tests
+      - name: Run mitmscripts unit and runtime tests
         working-directory: components/egress
         run: |
           python -m unittest discover -v -s tests -p "test_*.py"

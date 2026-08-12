@@ -89,6 +89,19 @@ server:
       # List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }.
       # key_id must be exactly one character in [0-9a-z].
       keys: []
+      # -- Name of an existing Secret holding the signing keys, as an
+      # alternative to plaintext `keys` above (mutually exclusive). The Secret
+      # must carry two entries:
+      #   keys:       the key ring, "a=<base64-secret>[,b=<base64-secret>...]"
+      #   active-key: the active signing key id, one character in [0-9a-z]
+      # The chart wires it into both containers as environment variables
+      # (server: OPENSANDBOX_SECURE_ACCESS_*; gateway: $(...) expansion in the
+      # --secure-access-keys arg), so key material never appears in values,
+      # the server ConfigMap, or pod args.
+      # Env-sourced Secrets are read once at container start: after updating
+      # the Secret in place, `kubectl rollout restart` the server and gateway
+      # Deployments (or version the Secret name to get a spec-driven rollout).
+      existingSecret: ""
     # -- Node selector for the ingress gateway pod.
     nodeSelector: {}
     # -- Pod-level security context for the ingress gateway pod.

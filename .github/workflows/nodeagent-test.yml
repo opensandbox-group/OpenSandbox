@@ -1,0 +1,132 @@
+name: Node Agent Tests
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: nodeagent
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.9'
+          cache-dependency-path: |
+            components/nodeagent/go.sum
+            components/internal/go.sum
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Check formatting
+        working-directory: components/nodeagent
+        run: make fmt-check
+      - name: Vet, test, and build
+        working-directory: components/nodeagent
+        run: |
+          make vet
+          make test
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -exec=/bin/true ./...
+          make integration-compile
+          make build
+      - name: Validate Helm chart
+        run: |
+          helm lint kubernetes/charts/opensandbox-node-agent
+          helm template nodeagent kubernetes/charts/opensandbox-node-agent >/dev/null
+          helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+            --set sink.type=oss \
+            --set sink.oss.endpoint=https://oss-cn-hangzhou.aliyuncs.com \
+            --set sink.oss.bucket=test-bucket \
+            --set sink.oss.keyPrefix=nodeagent-test \
+            --set sink.oss.existingSecret=oss-credentials >/dev/null
+          nodeagent_bucket_error=""
+          if nodeagent_bucket_error="$(helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+            --set sink.type=oss \
+            --set sink.oss.endpoint=https://oss-cn-hangzhou.aliyuncs.com \
+            --set sink.oss.bucket= \
+            --set sink.oss.keyPrefix=nodeagent-test \
+            --set sink.oss.existingSecret=oss-credentials 2>&1)"; then
+            echo "OSS configuration without a bucket passed schema validation"
+            exit 1
+          fi
+          if ! grep -Eiq '(/sink/oss/bucket|sink\.oss\.bucket).*(minLength|length must be)' <<<"$nodeagent_bucket_error"; then
+            echo "OSS configuration failed for an unexpected reason: $nodeagent_bucket_error" >&2
+            exit 1
+          fi
+          helm dependency build kubernetes/charts/opensandbox
+          helm template opensandbox kubernetes/charts/opensandbox \
+            --set opensandbox-node-agent.enabled=true \
+            --show-only charts/opensandbox-node-agent/templates/daemonset.yaml \
+            > /tmp/opensandbox-nodeagent-umbrella.yaml
+          grep -q '^kind: DaemonSet$' /tmp/opensandbox-nodeagent-umbrella.yaml
+          grep -q 'app.kubernetes.io/component: node-agent' /tmp/opensandbox-nodeagent-umbrella.yaml
+          helm template opensandbox kubernetes/charts/opensandbox \
+            > /tmp/opensandbox-default.yaml
+          if grep -q 'app.kubernetes.io/component: node-agent' /tmp/opensandbox-default.yaml; then
+            echo "node-agent rendered while disabled by default"
+            exit 1
+          fi
+
+  kind-smoke:
+    needs: [changes, test]
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.34.0
+      - name: Install Kind
+        run: |
+          curl --retry 3 -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          echo '517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  /tmp/kind' | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+      - name: Run file-sink restart smoke test
+        run: bash components/nodeagent/test/kind-smoke.sh
+
+  required:
+    name: Node Agent CI
+    if: always()
+    needs: [changes, test, kind-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          KIND_RESULT: ${{ needs.kind-smoke.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          echo "relevant=$RELEVANT test=$TEST_RESULT kind-smoke=$KIND_RESULT"
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$TEST_RESULT" == "success" && "$KIND_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$KIND_RESULT" == "skipped" ]]
+          fi

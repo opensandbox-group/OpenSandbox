@@ -26,9 +26,6 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Success
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
@@ -41,8 +38,8 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Executi
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionConverter.toCommandStatus
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toCommandTimeoutMillis
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -282,14 +279,7 @@ internal class CommandsAdapter(
             return
         }
 
-        val errorBodyString = response.body?.string()
-        val sandboxError = parseSandboxError(errorBodyString)
-        throw SandboxApiException(
-            message = failureMessage(response.code, errorBodyString),
-            statusCode = response.code,
-            error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-            requestId = response.header("X-Request-ID"),
-        )
+        throw response.toSandboxApiException(message = failureMessage)
     }
 
     private fun decodeEventLine(line: String): EventNode? {

@@ -56,7 +56,8 @@ jobs:
               kubernetes: (path) =>
                 workflowChanged(path, "kubernetes-test.yml") ||
                 (path.startsWith("kubernetes/") &&
-                  !path.startsWith("kubernetes/docs/")),
+                  !path.startsWith("kubernetes/docs/") &&
+                  !path.startsWith("kubernetes/charts/opensandbox-node-agent/")),
               "real-e2e": (path) =>
                 workflowChanged(path, "real-e2e.yml") ||
                 path.startsWith("server/opensandbox_server/") ||
@@ -82,6 +83,14 @@ jobs:
                 workflowChanged(path, "execd-test.yml") ||
                 path.startsWith("components/execd/") ||
                 path.startsWith("components/internal/"),
+              nodeagent: (path) =>
+                workflowChanged(path, "nodeagent-test.yml") ||
+                path.startsWith("components/nodeagent/") ||
+                path.startsWith("components/internal/") ||
+                path.startsWith("kubernetes/charts/opensandbox-node-agent/") ||
+                path === "kubernetes/charts/opensandbox/Chart.yaml" ||
+                path === "kubernetes/charts/opensandbox/Chart.lock" ||
+                path === "kubernetes/charts/opensandbox/values.yaml",
               sdk: (path) =>
                 workflowChanged(path, "sdk-tests.yml") ||
                 path.startsWith("cli/") ||

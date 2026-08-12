@@ -35,14 +35,34 @@ T = TypeVar("T", bound="IsolatedRunRequest")
 class IsolatedRunRequest:
     """
     Attributes:
-        code (str):
-        envs (IsolatedRunRequestEnvs | Unset):
-        timeout_seconds (int | Unset):
+        code (str): Shell code to execute inside the session Example: echo hello.
+        envs (IsolatedRunRequestEnvs | Unset): Environment variables exported into the shell before the code runs
+        timeout_seconds (int | Unset): Foreground-only timeout. The run is interrupted after this many
+            seconds. Ignored for background runs: a background run is not
+            time-limited, and idle GC is suspended while it is active, so a
+            long-running background command keeps the session alive until it
+            finishes (then the normal idle window applies) or the session is
+            deleted.
+             Example: 60.
+        background (bool | Unset): When true (default false), start the code detached inside the
+            session and return a 202 run handle instead of streaming output.
+            The run's combined stdout/stderr is captured to a log file that
+            can be polled via the run logs endpoint; its lifecycle is tracked
+            via the run status endpoint.
+            Background runs share the session's process group, so session-
+            level signals (for example the SIGINT sent when a foreground run
+            times out or is cancelled) also reach them; execd cannot signal
+            individual in-namespace processes.
+            Background runs require a writable log location, so sessions with
+            a read-only (`ro`) workspace reject them with 400: there is no
+            host-visible writable location for the run's log and exit-code
+            files. rw and overlay workspaces are supported.
     """
 
     code: str
     envs: IsolatedRunRequestEnvs | Unset = UNSET
     timeout_seconds: int | Unset = UNSET
+    background: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +73,8 @@ class IsolatedRunRequest:
             envs = self.envs.to_dict()
 
         timeout_seconds = self.timeout_seconds
+
+        background = self.background
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -65,6 +87,8 @@ class IsolatedRunRequest:
             field_dict["envs"] = envs
         if timeout_seconds is not UNSET:
             field_dict["timeout_seconds"] = timeout_seconds
+        if background is not UNSET:
+            field_dict["background"] = background
 
         return field_dict
 
@@ -84,10 +108,13 @@ class IsolatedRunRequest:
 
         timeout_seconds = d.pop("timeout_seconds", UNSET)
 
+        background = d.pop("background", UNSET)
+
         isolated_run_request = cls(
             code=code,
             envs=envs,
             timeout_seconds=timeout_seconds,
+            background=background,
         )
 
         isolated_run_request.additional_properties = d

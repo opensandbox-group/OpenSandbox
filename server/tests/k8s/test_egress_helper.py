@@ -24,6 +24,7 @@ from opensandbox_server.services.constants import (
     EGRESS_RULES_ENV,
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
@@ -472,6 +473,41 @@ class TestApplyEgressToSpec:
         env_names = {e["name"] for e in containers[0]["env"]}
         assert env_names == {EGRESS_RULES_ENV, EGRESS_MODE_ENV}
 
+    def test_sandbox_id_injected_as_env(self):
+        """sandbox_id is injected as OPENSANDBOX_EGRESS_SANDBOX_ID."""
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            network_policy,
+            "opensandbox/egress:v1.1.4",
+            sandbox_id="sbx-abc123",
+        )
+
+        env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
+        assert env_by_name[OPENSANDBOX_EGRESS_SANDBOX_ID] == "sbx-abc123"
+
+    def test_sandbox_id_omitted_when_not_provided(self):
+        """When sandbox_id is None/empty, OPENSANDBOX_EGRESS_SANDBOX_ID is not set."""
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            network_policy,
+            "opensandbox/egress:v1.1.4",
+        )
+
+        env_names = {e["name"] for e in containers[0]["env"]}
+        assert OPENSANDBOX_EGRESS_SANDBOX_ID not in env_names
+
 
 class TestPrepExecdInitForEgress:
     def test_returns_privileged_security_dict_and_prefixed_script(self):
@@ -532,6 +568,11 @@ class TestSplitEgressEnv:
     def test_rejects_disallowed_nameserver_exempt(self):
         with pytest.raises(ValueError, match="not allowed"):
             split_egress_env({"OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT": "1.1.1.1"})
+
+    def test_rejects_disallowed_sandbox_id(self):
+        """OPENSANDBOX_EGRESS_SANDBOX_ID is server-injected; users must not set it."""
+        with pytest.raises(ValueError, match="not allowed"):
+            split_egress_env({"OPENSANDBOX_EGRESS_SANDBOX_ID": "spoofed"})
 
     def test_allows_mitmproxy_transparent(self):
         env = {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}

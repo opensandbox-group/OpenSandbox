@@ -35,12 +35,14 @@ Required:
                         cli
                         server
                         docker/execd
+                        docker/nodeagent
                         docker/code-interpreter
                         docker/ingress
                         docker/egress
                         k8s/controller
                         k8s/task-executor
                         helm/opensandbox
+                        helm/opensandbox-node-agent
                         helm
   --version <version>   Release version string. For v-prefixed targets, script normalizes
                         to tags like <target>/v<version> automatically.
@@ -391,6 +393,11 @@ case "$TARGET" in
     WORKFLOW_HINT=".github/workflows/publish-components.yml"
     TARGET_PATH_FILTERS=("components/execd")
     ;;
+  docker/nodeagent)
+    DISPLAY_NAME="Component Image nodeagent"
+    WORKFLOW_HINT=".github/workflows/publish-components.yml"
+    TARGET_PATH_FILTERS=("components/nodeagent" "components/internal")
+    ;;
   docker/code-interpreter)
     DISPLAY_NAME="Component Image code-interpreter"
     WORKFLOW_HINT=".github/workflows/publish-components.yml"
@@ -421,6 +428,11 @@ case "$TARGET" in
     DISPLAY_NAME="Helm opensandbox"
     WORKFLOW_HINT=".github/workflows/publish-helm-chart.yml"
     TARGET_PATH_FILTERS=("kubernetes/charts/opensandbox")
+    ;;
+  helm/opensandbox-node-agent)
+    DISPLAY_NAME="Helm opensandbox-node-agent"
+    WORKFLOW_HINT=".github/workflows/publish-helm-chart.yml"
+    TARGET_PATH_FILTERS=("kubernetes/charts/opensandbox-node-agent")
     ;;
   *)
     die "Unsupported target '$TARGET'. Run with --help for supported target list."

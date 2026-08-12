@@ -107,6 +107,63 @@ python examples/kubernetes-pvc-volume-mount/main.py
 
 The script creates a sandbox, writes a marker file under `/mnt/data`, kills it, then creates a second sandbox bound to the same PVC and confirms the marker is still there.
 
+## Pool mode: pre-mount a shared PVC
+
+Pool pods are created before a sandbox is allocated, so storage shared by a
+pool must be part of the Pool pod template. Create the PVC first, then mount it
+in every warm pod through `Pool.spec.template`:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-workspace-pvc
+  namespace: opensandbox
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: <your-rwx-storage-class>
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: shared-workspace-pool
+  namespace: opensandbox
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox-container
+          image: python:3.11
+          command: ["sleep", "3600"]
+          volumeMounts:
+            - name: shared-workspace
+              mountPath: /workspace
+      volumes:
+        - name: shared-workspace
+          persistentVolumeClaim:
+            claimName: shared-workspace-pvc
+  capacitySpec:
+    bufferMax: 10
+    bufferMin: 2
+    poolMax: 20
+    poolMin: 5
+```
+
+Apply the Pool manifest to the cluster before allocating sandboxes from it.
+Sandboxes then select the preconfigured Pool with `extensions.poolRef` and do
+not pass a per-sandbox `volumes` list.
+
+::: warning Static pool storage only
+The PVC must already exist, and its access mode and storage backend must allow
+all scheduled warm pods to mount it. OpenSandbox does not create, mutate, or
+delete PVCs referenced by a Pool template. A sandbox creation request cannot
+add `volumes` while also using `extensions.poolRef`, because the selected warm
+pod already exists.
+:::
+
 ## Mode 2: Server-managed PVC
 
 Use this when the sandbox should own its storage. The server creates the PVC on demand the first time the claim name is referenced. You control whether the claim survives sandbox termination through `deleteOnSandboxTermination`.
@@ -184,7 +241,9 @@ Both paths only match server-labeled PVCs, so BYO and opted-out claims are never
 ## Important notes
 
 ::: warning
-- **Pool mode does not support volumes.** Use template mode instead.
+- Per-sandbox `volumes` cannot be combined with `extensions.poolRef`. For Pool
+  mode, pre-mount an existing shared PVC in `Pool.spec.template` as described
+  above.
 - Multiple sandboxes can mount the same PVC if the access mode allows (e.g. `ReadWriteMany`) — but only when the PVC is **not** opted into auto-cleanup. PVCs created with `deleteOnSandboxTermination=true` are owned exclusively by the creating sandbox; the server rejects attempts by other sandboxes to mount them with `409 CONFLICT`.
 - All mounts of the same `claimName` in a single request must agree on `createIfNotExists` and `deleteOnSandboxTermination`; mismatches are rejected with `400 INVALID_PARAMETER`.
 :::
