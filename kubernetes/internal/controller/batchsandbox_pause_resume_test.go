@@ -1940,6 +1940,27 @@ func TestBuildRuntimeView_IgnoresRestartHistoryFromNewPodReusingEndpoint(t *test
 	assertRestartHistoryIgnored(t, view, readyAt, true)
 }
 
+func TestBuildRuntimeView_DetectsExistingPodRestartDuringScaleUp(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	restartedAt := metav1.NewTime(readyAt.Add(time.Minute))
+	createdBeforeReady := metav1.NewTime(readyAt.Add(-time.Minute))
+	bs := restartTestSandbox(readyAt, "10.0.0.10")
+
+	view := buildRuntimeView(bs, []*corev1.Pod{
+		restartTestPod("existing-restarted", "10.0.0.10", createdBeforeReady, restartedAt),
+		restartTestPod("new-prewarmed", "10.0.0.11", createdBeforeReady, restartedAt),
+	})
+
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+	for _, condition := range view.status.Conditions {
+		if condition.Type == sandboxv1alpha1.BatchSandboxConditionPodFailed {
+			assert.Equal(t, "1/2 observed pods failed; primary reason=OOMKilled; sample pod=existing-restarted", condition.Message)
+			return
+		}
+	}
+	t.Fatal("expected PodFailed condition")
+}
+
 func TestBuildRuntimeView_AggregatesResumeFailures(t *testing.T) {
 	bs := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{

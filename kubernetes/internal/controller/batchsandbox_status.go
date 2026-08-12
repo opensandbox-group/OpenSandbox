@@ -147,30 +147,64 @@ func getPodFailureReasonAndMessage(pod *corev1.Pod, readySince *metav1.Time) (st
 	return "", "", false
 }
 
-func restartDetectionBaseline(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod, currentReplicas int32, endpointIPs []string) *metav1.Time {
+type restartDetectionBaseline struct {
+	readySince          *metav1.Time
+	previousEndpointIPs map[string]struct{}
+	resetReadyCondition bool
+}
+
+func (b restartDetectionBaseline) forPod(pod *corev1.Pod) *metav1.Time {
+	if b.readySince == nil || pod.Status.PodIP == "" {
+		return nil
+	}
+	if _, existedWhenReady := b.previousEndpointIPs[pod.Status.PodIP]; !existedWhenReady {
+		return nil
+	}
+	if !pod.CreationTimestamp.IsZero() && pod.CreationTimestamp.After(b.readySince.Time) {
+		return nil
+	}
+	return b.readySince
+}
+
+func buildRestartDetectionBaseline(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod, endpointIPs []string) restartDetectionBaseline {
 	status := batchSbx.Status
-	if status.Phase != sandboxv1alpha1.BatchSandboxPhaseSucceed || status.Replicas != currentReplicas {
-		return nil
+	baseline := restartDetectionBaseline{resetReadyCondition: true}
+	if status.Phase != sandboxv1alpha1.BatchSandboxPhaseSucceed {
+		return baseline
 	}
-	var previousIPs []string
-	// Reset the baseline when pod membership changes so restart history from a
-	// newly allocated pre-warmed pod is not attributed to this sandbox.
-	if batchSbx.Annotations == nil || json.Unmarshal([]byte(batchSbx.Annotations[AnnotationSandboxEndpoints]), &previousIPs) != nil || !slices.Equal(previousIPs, endpointIPs) {
-		return nil
-	}
+
 	for i := range status.Conditions {
 		condition := &status.Conditions[i]
 		if condition.Type == sandboxv1alpha1.BatchSandboxConditionReady && condition.Status == sandboxv1alpha1.ConditionTrue &&
 			condition.LastTransitionTime != nil && !condition.LastTransitionTime.IsZero() {
-			for _, pod := range pods {
-				if !pod.CreationTimestamp.IsZero() && pod.CreationTimestamp.After(condition.LastTransitionTime.Time) {
-					return nil
-				}
-			}
-			return condition.LastTransitionTime
+			baseline.readySince = condition.LastTransitionTime
+			break
 		}
 	}
-	return nil
+	if baseline.readySince == nil {
+		return baseline
+	}
+
+	var previousIPs []string
+	if batchSbx.Annotations == nil || json.Unmarshal([]byte(batchSbx.Annotations[AnnotationSandboxEndpoints]), &previousIPs) != nil {
+		baseline.readySince = nil
+		return baseline
+	}
+
+	baseline.previousEndpointIPs = make(map[string]struct{}, len(previousIPs))
+	for _, ip := range previousIPs {
+		if ip != "" {
+			baseline.previousEndpointIPs[ip] = struct{}{}
+		}
+	}
+	baseline.resetReadyCondition = status.Replicas != int32(len(pods)) || !slices.Equal(previousIPs, endpointIPs)
+	for _, pod := range pods {
+		if !pod.CreationTimestamp.IsZero() && pod.CreationTimestamp.After(baseline.readySince.Time) {
+			baseline.resetReadyCondition = true
+			break
+		}
+	}
+	return baseline
 }
 
 type podFailureSummary struct {
@@ -180,13 +214,17 @@ type podFailureSummary struct {
 	samplePod     string
 }
 
-func summarizePodFailures(pods []*corev1.Pod, readySince *metav1.Time) (podFailureSummary, bool) {
+func summarizePodFailures(pods []*corev1.Pod, baseline *restartDetectionBaseline) (podFailureSummary, bool) {
 	summary := podFailureSummary{observed: len(pods)}
 	reasonCounts := make(map[string]int)
 	firstPodByReason := make(map[string]string)
 	primaryCount := 0
 
 	for _, pod := range pods {
+		var readySince *metav1.Time
+		if baseline != nil {
+			readySince = baseline.forPod(pod)
+		}
 		reason, _, failed := getPodFailureReasonAndMessage(pod, readySince)
 		if !failed {
 			continue
@@ -240,9 +278,9 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 	case sandboxv1alpha1.BatchSandboxPhaseResuming:
 		applyResumingRuntimePhase(newStatus, pods)
 	default:
-		readySince := restartDetectionBaseline(batchSbx, pods, newStatus.Replicas, ipList)
-		applySteadyRuntimePhase(batchSbx, newStatus, pods, readySince)
-		if readySince == nil && newStatus.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
+		baseline := buildRestartDetectionBaseline(batchSbx, pods, ipList)
+		applySteadyRuntimePhase(batchSbx, newStatus, pods, &baseline)
+		if baseline.resetReadyCondition && newStatus.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
 			setConditionInStatus(newStatus, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionFalse, "", "")
 		}
 	}
@@ -269,8 +307,8 @@ func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods 
 	}
 }
 
-func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod, readySince *metav1.Time) {
-	if summary, hasFailures := summarizePodFailures(pods, readySince); hasFailures {
+func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod, baseline *restartDetectionBaseline) {
+	if summary, hasFailures := summarizePodFailures(pods, baseline); hasFailures {
 		if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseFailed {
 			setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
 			status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
