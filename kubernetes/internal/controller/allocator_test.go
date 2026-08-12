@@ -350,14 +350,25 @@ func newTestSyncer(sandbox *sandboxv1alpha1.BatchSandbox) (*annoAllocationSyncer
 
 func TestSetAllocation_AddsFinalizer(t *testing.T) {
 	sandbox := &sandboxv1alpha1.BatchSandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "sbx1", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx1", Namespace: "default", Generation: 7},
 		Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: "pool1"},
 	}
 	syncer, sbx := newTestSyncer(sandbox)
 
-	err := syncer.SetAllocation(context.Background(), sbx, &SandboxAllocation{Pods: []string{"pod1"}})
+	err := syncer.SetAllocation(context.Background(), sbx, &SandboxAllocation{
+		Pods:       []string{"pod1"},
+		PoolRef:    "pool1",
+		Generation: 7,
+	})
 	assert.NoError(t, err)
 	assert.Contains(t, sbx.Finalizers, FinalizerPoolAllocation)
+
+	var persisted SandboxAllocation
+	err = json.Unmarshal([]byte(sbx.Annotations[AnnoAllocStatusKey]), &persisted)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"pod1"}, persisted.Pods)
+	assert.Equal(t, "pool1", persisted.PoolRef)
+	assert.EqualValues(t, 7, persisted.Generation)
 }
 
 func TestSetReleased_FinalizerBehavior(t *testing.T) {
@@ -444,7 +455,7 @@ func TestSyncSandboxAllocation_Success(t *testing.T) {
 
 	allocator, store, syncer := newTestAllocator(ctrl)
 	sandbox := &sandboxv1alpha1.BatchSandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "sbx1", Namespace: "ns1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx1", Namespace: "ns1", Generation: 11},
 		Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: "pool1"},
 	}
 	newPods := []string{"pod1", "pod2"}
@@ -456,6 +467,8 @@ func TestSyncSandboxAllocation_Success(t *testing.T) {
 	syncer.EXPECT().SetAllocation(gomock.Any(), sandbox, gomock.Any()).DoAndReturn(
 		func(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, alloc *SandboxAllocation) error {
 			assert.Equal(t, newPods, alloc.Pods)
+			assert.Equal(t, sandbox.Spec.PoolRef, alloc.PoolRef)
+			assert.Equal(t, sandbox.Generation, alloc.Generation)
 			return nil
 		}).Times(1)
 

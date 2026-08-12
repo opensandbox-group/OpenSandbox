@@ -14,15 +14,105 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
-from opensandbox_server.api.schema import ImageSpec, PlatformSpec, Sandbox, SandboxStatus
+from opensandbox_server.api.schema import (
+    AllocationSummary,
+    ImageSpec,
+    PlatformSpec,
+    Sandbox,
+    SandboxStatus,
+)
 from opensandbox_server.extensions import extract_extensions_from_mapping
 from opensandbox_server.services.constants import SANDBOX_ID_LABEL, SANDBOX_SNAPSHOT_ID_LABEL
 
 
+_ALLOCATION_STATUS_ANNOTATION = "sandbox.opensandbox.io/alloc-status"
+_POOL_ALLOCATION_FINALIZER = "pool.sandbox.opensandbox.io/pool-allocation"
+
+
 def _is_opensandbox_label(label_key: str) -> bool:
     return label_key.split("/", 1)[0] == "opensandbox.io"
+
+
+def _get_workload_value(value: Any, mapping_key: str, attribute_name: Optional[str] = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(mapping_key)
+    return getattr(value, attribute_name or mapping_key, None)
+
+
+def _extract_confirmed_pool_allocation(workload: Any) -> Optional[AllocationSummary]:
+    """Return a public allocation only when controller state confirms it is current."""
+    metadata = _get_workload_value(workload, "metadata")
+    spec = _get_workload_value(workload, "spec")
+    status = _get_workload_value(workload, "status")
+
+    pool_ref = _get_workload_value(spec, "poolRef", "pool_ref")
+    if (
+        not isinstance(pool_ref, str)
+        or not pool_ref.strip()
+        or pool_ref == "*"
+    ):
+        return None
+
+    if _get_workload_value(metadata, "deletionTimestamp", "deletion_timestamp") is not None:
+        return None
+
+    finalizers = _get_workload_value(metadata, "finalizers")
+    if not isinstance(finalizers, list) or _POOL_ALLOCATION_FINALIZER not in finalizers:
+        return None
+
+    annotations = _get_workload_value(metadata, "annotations")
+    if not isinstance(annotations, dict):
+        return None
+    allocation_raw = annotations.get(_ALLOCATION_STATUS_ANNOTATION)
+    if not isinstance(allocation_raw, str):
+        return None
+    try:
+        allocation_status = json.loads(allocation_raw)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(allocation_status, dict):
+        return None
+
+    allocation_pool_ref = allocation_status.get("poolRef")
+    allocation_generation = allocation_status.get("generation")
+    generation = _get_workload_value(metadata, "generation")
+    if (
+        not isinstance(allocation_pool_ref, str)
+        or allocation_pool_ref != pool_ref
+        or isinstance(allocation_generation, bool)
+        or not isinstance(allocation_generation, int)
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or allocation_generation != generation
+    ):
+        return None
+
+    pods = allocation_status.get("pods")
+    if (
+        not isinstance(pods, list)
+        or not pods
+        or any(not isinstance(pod, str) or not pod.strip() for pod in pods)
+        or len(set(pods)) != len(pods)
+    ):
+        return None
+
+    allocated = _get_workload_value(status, "allocated")
+    observed_generation = _get_workload_value(status, "observedGeneration", "observed_generation")
+    if (
+        isinstance(allocated, bool)
+        or not isinstance(allocated, int)
+        or allocated != len(pods)
+        or isinstance(observed_generation, bool)
+        or not isinstance(observed_generation, int)
+        or observed_generation != generation
+    ):
+        return None
+
+    return AllocationSummary(mode="pool", poolRef=pool_ref, state="allocated")
 
 
 def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandbox:
@@ -83,6 +173,7 @@ def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandb
         snapshotId=snapshot_id,
         entrypoint=entrypoint,
         platform=platform_spec,
+        allocation=_extract_confirmed_pool_allocation(workload),
     )
 
 

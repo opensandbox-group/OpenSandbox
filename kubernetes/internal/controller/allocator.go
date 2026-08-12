@@ -651,7 +651,11 @@ func (allocator *defaultAllocator) SyncSandboxAllocation(ctx context.Context, sa
 	allocator.store.UpdateAllocation(ctx, sandbox.Namespace, poolRef, sandbox.Name, pods)
 
 	// Phase 2: persist to sandbox annotation.
-	allocation := &SandboxAllocation{Pods: pods}
+	allocation := &SandboxAllocation{
+		Pods:       pods,
+		PoolRef:    sandbox.Spec.PoolRef,
+		Generation: sandbox.Generation,
+	}
 	if err := allocator.syncer.SetAllocation(ctx, sandbox, allocation); err != nil {
 		// Rollback in-memory store to the previous state.
 		log.Error(err, "Rollback sandbox allocation", "sandbox", sandbox.Name, "pods", oldState.Pods)

@@ -388,6 +388,27 @@ class SandboxStatus(BaseModel):
 # Sandbox Models
 # ============================================================================
 
+class AllocationSummary(BaseModel):
+    """Current runtime-confirmed allocation summary for a pooled sandbox."""
+
+    mode: Literal["pool"] = Field(
+        ...,
+        description="Allocation mode. This initial contract supports only pool allocation.",
+    )
+    pool_ref: str = Field(
+        ...,
+        alias="poolRef",
+        description="Effective concrete Pool reference confirmed by the current runtime allocation.",
+    )
+    state: Literal["allocated"] = Field(
+        ...,
+        description="Current confirmed allocation state. This initial contract always returns allocated.",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
 class CreateSandboxRequest(BaseModel):
     """
     Request to create a new sandbox from either a container image or a snapshot.
@@ -584,6 +605,15 @@ class Sandbox(BaseModel):
         description=(
             "Platform constraint echoed from request or workload template. "
             "Null when no scheduling constraint is provided."
+        ),
+    )
+    allocation: Optional[AllocationSummary] = Field(
+        None,
+        description=(
+            "Current runtime-confirmed Pool allocation summary. Omitted unless the "
+            "Kubernetes workload has a confirmed concrete Pool allocation; this is "
+            "not a request echo, allocation history, lifecycle readiness, or generic "
+            "Kubernetes introspection."
         ),
     )
     status: SandboxStatus = Field(..., description="Current lifecycle status and detailed state information")

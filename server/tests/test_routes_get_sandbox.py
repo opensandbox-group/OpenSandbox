@@ -18,7 +18,7 @@ from fastapi.exceptions import HTTPException
 from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
-from opensandbox_server.api.schema import ImageSpec, Sandbox, SandboxStatus
+from opensandbox_server.api.schema import AllocationSummary, ImageSpec, Sandbox, SandboxStatus
 
 
 def test_get_sandbox_returns_service_payload(
@@ -80,6 +80,37 @@ def test_get_sandbox_propagates_not_found(
     }
 
 
+def test_get_sandbox_serializes_pool_allocation(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+
+    class StubService:
+        @staticmethod
+        def get_sandbox(sandbox_id: str) -> Sandbox:
+            return Sandbox(
+                id=sandbox_id,
+                image=ImageSpec(uri="python:3.11"),
+                status=SandboxStatus(state="Running"),
+                allocation=AllocationSummary(mode="pool", poolRef="pool-runc", state="allocated"),
+                entrypoint=["python", "-V"],
+                createdAt=now,
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.get("/v1/sandboxes/sbx-pool", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert response.json()["allocation"] == {
+        "mode": "pool",
+        "poolRef": "pool-runc",
+        "state": "allocated",
+    }
+
+
 def test_get_sandbox_omits_none_fields(
     client: TestClient,
     auth_headers: dict,
@@ -108,6 +139,7 @@ def test_get_sandbox_omits_none_fields(
     payload = response.json()
     assert "expiresAt" not in payload
     assert "metadata" not in payload
+    assert "allocation" not in payload
     assert "reason" not in payload["status"]
     assert "message" not in payload["status"]
     assert "lastTransitionAt" not in payload["status"]

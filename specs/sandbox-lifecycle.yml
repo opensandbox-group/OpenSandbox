@@ -1035,6 +1035,28 @@ components:
       required: [state]
       additionalProperties: false
 
+    AllocationSummary:
+      type: object
+      description: |
+        Current runtime-confirmed Pool allocation summary for a sandbox. This field is
+        not a request echo, allocation history, lifecycle readiness signal, or generic
+        Kubernetes introspection. It is omitted unless the current Kubernetes workload
+        has a confirmed concrete Pool allocation.
+      properties:
+        mode:
+          type: string
+          enum: [pool]
+          description: Allocation mode. This initial contract supports only Pool allocation.
+        poolRef:
+          type: string
+          description: Effective concrete Pool reference confirmed by the current runtime allocation.
+        state:
+          type: string
+          enum: [allocated]
+          description: Current confirmed allocation state. This initial contract always returns allocated.
+      required: [mode, poolRef, state]
+      additionalProperties: false
+
     Sandbox:
       type: object
       description: Runtime execution environment provisioned from a container image or restored from a snapshot
@@ -1062,6 +1084,14 @@ components:
           description: |
             Platform constraint echoed from request or workload template.
             Null when no scheduling constraint is provided.
+
+        allocation:
+          $ref: '#/components/schemas/AllocationSummary'
+          description: |
+            Current runtime-confirmed Pool allocation summary. Omitted unless the
+            Kubernetes workload has a confirmed concrete Pool allocation; it is not a
+            request echo, allocation history, lifecycle readiness signal, or generic
+            Kubernetes introspection.
 
         status:
           $ref: '#/components/schemas/SandboxStatus'

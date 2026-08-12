@@ -27,6 +27,7 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.allocation_summary import AllocationSummary
     from ..models.image_spec import ImageSpec
     from ..models.platform_spec import PlatformSpec
     from ..models.sandbox_extensions import SandboxExtensions
@@ -67,6 +68,11 @@ class Sandbox:
               is injected unless provided by request or workload template.
             - If provided and cannot be satisfied by runtime/template/pool constraints,
               request must fail explicitly.
+        allocation (AllocationSummary | Unset): Current runtime-confirmed Pool allocation summary for a sandbox. This
+            field is
+            not a request echo, allocation history, lifecycle readiness signal, or generic
+            Kubernetes introspection. It is omitted unless the current Kubernetes workload
+            has a confirmed concrete Pool allocation.
         metadata (SandboxMetadata | Unset): Custom metadata from creation request
         extensions (SandboxExtensions | Unset): Opaque extension data restored from provider-specific storage
         expires_at (datetime.datetime | Unset): Timestamp when sandbox will auto-terminate. Omitted when manual cleanup
@@ -80,6 +86,7 @@ class Sandbox:
     image: ImageSpec | Unset = UNSET
     snapshot_id: str | Unset = UNSET
     platform: PlatformSpec | Unset = UNSET
+    allocation: AllocationSummary | Unset = UNSET
     metadata: SandboxMetadata | Unset = UNSET
     extensions: SandboxExtensions | Unset = UNSET
     expires_at: datetime.datetime | Unset = UNSET
@@ -103,6 +110,10 @@ class Sandbox:
         platform: dict[str, Any] | Unset = UNSET
         if not isinstance(self.platform, Unset):
             platform = self.platform.to_dict()
+
+        allocation: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.allocation, Unset):
+            allocation = self.allocation.to_dict()
 
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
@@ -132,6 +143,8 @@ class Sandbox:
             field_dict["snapshotId"] = snapshot_id
         if platform is not UNSET:
             field_dict["platform"] = platform
+        if allocation is not UNSET:
+            field_dict["allocation"] = allocation
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
         if extensions is not UNSET:
@@ -143,6 +156,7 @@ class Sandbox:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.allocation_summary import AllocationSummary
         from ..models.image_spec import ImageSpec
         from ..models.platform_spec import PlatformSpec
         from ..models.sandbox_extensions import SandboxExtensions
@@ -174,6 +188,13 @@ class Sandbox:
         else:
             platform = PlatformSpec.from_dict(_platform)
 
+        _allocation = d.pop("allocation", UNSET)
+        allocation: AllocationSummary | Unset
+        if isinstance(_allocation, Unset):
+            allocation = UNSET
+        else:
+            allocation = AllocationSummary.from_dict(_allocation)
+
         _metadata = d.pop("metadata", UNSET)
         metadata: SandboxMetadata | Unset
         if isinstance(_metadata, Unset):
@@ -203,6 +224,7 @@ class Sandbox:
             image=image,
             snapshot_id=snapshot_id,
             platform=platform,
+            allocation=allocation,
             metadata=metadata,
             extensions=extensions,
             expires_at=expires_at,
