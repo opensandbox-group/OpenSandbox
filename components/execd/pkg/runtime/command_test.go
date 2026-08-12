@@ -17,7 +17,6 @@ package runtime
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -182,9 +181,7 @@ func TestRunCommand_Echo(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("bash not available on windows")
 	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	c := NewController("", "")
 
@@ -236,9 +233,7 @@ func TestRunCommand_Error(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("bash not available on windows")
 	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	c := NewController("", "")
 
@@ -291,9 +286,7 @@ func TestRunCommand_ExpandsHomeInCwd(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("bash not available on windows")
 	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	home := t.TempDir()
 	target := filepath.Join(home, "workspace")
@@ -349,9 +342,7 @@ func TestRunCommand_ExpandsCwdFromRequestEnvWithHigherPriority(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("bash not available on windows")
 	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	processDir := t.TempDir()
 	requestDir := t.TempDir()
@@ -412,9 +403,7 @@ func TestRunCommand_StartErrorIncludesTraceback(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("bash not available on windows")
 	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not found in PATH")
-	}
+	requireBash(t)
 
 	c := NewController("", "")
 

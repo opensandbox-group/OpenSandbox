@@ -34,8 +34,16 @@ jobs:
         with:
           version: "latest"
 
+      - name: Parse tag and set variables
+        id: parse_tag
+        run: |
+          IMAGE_TAG="${GITHUB_REF_NAME#server/}"   # e.g. v0.2.2
+          echo "pkg_version=${IMAGE_TAG#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build package
         working-directory: server
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.parse_tag.outputs.pkg_version }}
         run: |
           uv build
 
@@ -104,6 +112,7 @@ jobs:
             fi
 
             echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+            echo "pkg_version=${IMAGE_TAG#v}" >> $GITHUB_OUTPUT
           else
             echo "cannot parse tag"
             exit 1
@@ -114,6 +123,7 @@ jobs:
         working-directory: server
         env:
           TAG: ${{ steps.parse_tag.outputs.image_tag }}
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.parse_tag.outputs.pkg_version }}
           BUILD_METADATA_FILE: ${{ runner.temp }}/opensandbox-server-image-metadata.json
         run: |
           export GHCR_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opensandbox"
@@ -211,7 +221,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git add kubernetes/charts/opensandbox-server/values.yaml
+          git add kubernetes/charts/opensandbox-server/values.yaml kubernetes/charts/opensandbox-server/Chart.yaml
           git diff --staged --quiet && echo "No changes to commit" && exit 0
           git commit -m "chore(chart): bump opensandbox-server image to ${VERSION}"
           git push origin "$BRANCH"

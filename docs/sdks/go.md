@@ -231,6 +231,19 @@ func main() {
 }
 ```
 
+::: tip AcquirePolicy
+`AcquirePolicy` controls what happens when the idle buffer is empty **or** the first idle candidate fails its readiness check:
+
+| Policy | Retry across idles | Fallback on exhaustion |
+|---|---|---|
+| `AcquirePolicyFailFast` | no | return `*PoolEmptyError` / `*PoolAcquireFailedError` |
+| `AcquirePolicyDirectCreate` (default) | no | create a new sandbox via lifecycle API |
+| `AcquirePolicyRetryNextIdle` | up to `MaxAcquireRetries` idles | return error |
+| `AcquirePolicyRetryNextIdleThenCreate` | up to `MaxAcquireRetries` idles | create a new sandbox |
+
+Use the `RetryNextIdle*` variants when the pool may contain a mix of healthy and stale idle sandboxes (custom templates with long cold-start; network flap left a few unreachable idles). Each failed candidate still pays up to `AcquireReadyTimeout`, so bound the retry with `MaxAcquireRetries` (default `3`) via `builder.MaxAcquireRetries(n)` or `PoolConfig.MaxAcquireRetries`.
+:::
+
 For distributed deployment with multiple processes or pods, use `RedisPoolStateStore`.
 The store accepts a caller-managed `redis.Client` and does not create or close Redis
 connections.

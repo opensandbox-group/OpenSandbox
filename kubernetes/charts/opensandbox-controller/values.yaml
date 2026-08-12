@@ -37,6 +37,17 @@ controller:
   # -- Log level for zap logger (debug, info, error)
   logLevel: info
 
+  # -- controller-runtime metrics endpoint (Prometheus). Disabled by default to
+  # preserve the current behavior (the binary defaults to --metrics-bind-address=0).
+  metrics:
+    # -- Expose the controller-runtime /metrics endpoint (sets --metrics-bind-address)
+    enabled: false
+    # -- Port for the metrics endpoint
+    port: 8080
+    # -- Serve metrics over HTTPS with authn/authz (--metrics-secure). Set to false
+    # to serve plain HTTP for scraping without TLS/RBAC (e.g. PodMonitoring).
+    secure: false
+
   # -- Kubernetes client rate limiter configuration
   kubeClient:
     # -- QPS for Kubernetes client rate limiter.

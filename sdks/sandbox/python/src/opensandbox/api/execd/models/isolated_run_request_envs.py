@@ -27,7 +27,7 @@ T = TypeVar("T", bound="IsolatedRunRequestEnvs")
 
 @_attrs_define
 class IsolatedRunRequestEnvs:
-    """ """
+    """Environment variables exported into the shell before the code runs"""
 
     additional_properties: dict[str, str] = _attrs_field(init=False, factory=dict)
 

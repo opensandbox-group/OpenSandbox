@@ -16,6 +16,7 @@
 
 package com.alibaba.opensandbox.sandbox.config
 
+import com.alibaba.opensandbox.sandbox.transport.RetryPolicy
 import okhttp3.ConnectionPool
 import java.time.Duration
 
@@ -52,6 +53,20 @@ class ConnectionConfig private constructor(
     val endpointCacheSize: Int = 1024,
     /** Disable endpoint caching entirely. */
     val endpointCacheDisabled: Boolean = false,
+    /**
+     * Disable best-effort SDK telemetry (sandbox.create latency reports).
+     *
+     * Also honored via the `OPENSANDBOX_DISABLE_METRICS=1` environment variable.
+     */
+    val disableMetrics: Boolean = false,
+    /**
+     * Retry policy applied to non-streaming requests. Enabled by default; pass
+     * [RetryPolicy.disabled] to disable SDK-policy retries and fall back to
+     * OkHttp's built-in connection recovery. SSE / streaming requests bypass
+     * the SDK retry policy and disable built-in connection recovery regardless
+     * of this value because they cannot be safely replayed.
+     */
+    val retryPolicy: RetryPolicy = RetryPolicy(),
 ) {
     /**
      * Creates a copy of this ConnectionConfig without copying the connectionPool.
@@ -72,6 +87,8 @@ class ConnectionConfig private constructor(
             endpointCacheTtl = this.endpointCacheTtl,
             endpointCacheSize = this.endpointCacheSize,
             endpointCacheDisabled = this.endpointCacheDisabled,
+            disableMetrics = this.disableMetrics,
+            retryPolicy = this.retryPolicy,
         )
 
     companion object {
@@ -79,12 +96,24 @@ class ConnectionConfig private constructor(
         private const val DEFAULT_PROTOCOL = "http"
         private const val ENV_API_KEY = "OPEN_SANDBOX_API_KEY"
         private const val ENV_DOMAIN = "OPEN_SANDBOX_DOMAIN"
+        internal const val ENV_DISABLE_METRICS = "OPENSANDBOX_DISABLE_METRICS"
 
-        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.16"
+        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.18"
         private const val API_VERSION = "v1"
 
         @JvmStatic
         fun builder(): Builder = Builder()
+    }
+
+    /**
+     * Returns whether SDK telemetry (sandbox.create latency reports) should
+     * be skipped. Honors both the [disableMetrics] flag and the
+     * `OPENSANDBOX_DISABLE_METRICS=1` environment variable.
+     */
+    fun isMetricsDisabled(): Boolean {
+        if (disableMetrics) return true
+        val envValue = System.getenv(ENV_DISABLE_METRICS)?.trim()
+        return envValue == "1"
     }
 
     fun getApiKey(): String {
@@ -158,6 +187,8 @@ class ConnectionConfig private constructor(
         private var endpointCacheTtl: Duration = Duration.ofSeconds(600)
         private var endpointCacheSize: Int = 1024
         private var endpointCacheDisabled: Boolean = false
+        private var disableMetrics: Boolean = false
+        private var retryPolicy: RetryPolicy = RetryPolicy()
 
         /**
          * Use sandbox server as proxy for process execd requests.
@@ -183,6 +214,17 @@ class ConnectionConfig private constructor(
         /** Disable endpoint caching. */
         fun endpointCacheDisabled(disabled: Boolean): Builder {
             this.endpointCacheDisabled = disabled
+            return this
+        }
+
+        /**
+         * Disable best-effort SDK telemetry (sandbox.create latency reports).
+         *
+         * Also honored via `OPENSANDBOX_DISABLE_METRICS=1`.
+         */
+        @JvmOverloads
+        fun disableMetrics(disabled: Boolean = true): Builder {
+            this.disableMetrics = disabled
             return this
         }
 
@@ -249,6 +291,20 @@ class ConnectionConfig private constructor(
         fun connectionPool(connectionPool: ConnectionPool): Builder {
             this.connectionPool = connectionPool
             this.connectionPoolManagedByUser = true
+            return this
+        }
+
+        /**
+         * Set the retry policy applied to non-streaming requests.
+         *
+         * Retries are enabled by default (idempotent methods only). Pass
+         * [RetryPolicy.disabled] to disable SDK-policy retries and fall back to
+         * OkHttp's built-in connection recovery. SSE / streaming requests bypass
+         * the SDK retry policy and disable built-in connection recovery because
+         * they cannot be safely replayed.
+         */
+        fun retryPolicy(retryPolicy: RetryPolicy): Builder {
+            this.retryPolicy = retryPolicy
             return this
         }
 
@@ -326,6 +382,8 @@ class ConnectionConfig private constructor(
                 endpointCacheTtl = endpointCacheTtl,
                 endpointCacheSize = endpointCacheSize,
                 endpointCacheDisabled = endpointCacheDisabled,
+                disableMetrics = disableMetrics,
+                retryPolicy = retryPolicy,
             )
         }
     }

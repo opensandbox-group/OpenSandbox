@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using OpenSandbox.Core;
+using OpenSandbox.Internal;
 
 namespace OpenSandbox.Config;
 
@@ -84,6 +85,13 @@ public class ConnectionConfigOptions
     /// Gets or sets whether to disable endpoint caching entirely.
     /// </summary>
     public bool? EndpointCacheDisabled { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether to disable best-effort SDK telemetry
+    /// (sandbox.create latency reports). Also honored via
+    /// OPENSANDBOX_DISABLE_METRICS=1 environment variable.
+    /// </summary>
+    public bool? DisableMetrics { get; set; }
 }
 
 /// <summary>
@@ -141,6 +149,13 @@ public sealed class ConnectionConfig
     public bool EndpointCacheDisabled { get; }
 
     /// <summary>
+    /// Gets whether best-effort SDK telemetry (sandbox.create latency reports)
+    /// is disabled. Honors the OPENSANDBOX_DISABLE_METRICS=1 environment
+    /// variable in addition to the explicit option.
+    /// </summary>
+    public bool DisableMetrics { get; }
+
+    /// <summary>
     /// Gets the user agent string.
     /// </summary>
     public string UserAgent { get; } = Constants.DefaultUserAgent;
@@ -170,6 +185,10 @@ public sealed class ConnectionConfig
         EndpointCacheTtlSeconds = options.EndpointCacheTtlSeconds ?? 600;
         EndpointCacheSize = options.EndpointCacheSize ?? 1024;
         EndpointCacheDisabled = options.EndpointCacheDisabled ?? false;
+
+        var envDisableMetrics = Environment.GetEnvironmentVariable(Constants.EnvDisableMetrics);
+        var envDisableMetricsFlag = string.Equals(envDisableMetrics?.Trim(), "1", StringComparison.Ordinal);
+        DisableMetrics = (options.DisableMetrics ?? false) || envDisableMetricsFlag;
 
         var headers = new Dictionary<string, string>(options.Headers ?? new Dictionary<string, string>());
 
@@ -252,6 +271,8 @@ public sealed class ConnectionConfig
             }
         }
 
+        ApplyClientIpDefaultHeader(client);
+
         return client;
     }
 
@@ -280,7 +301,33 @@ public sealed class ConnectionConfig
             client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value);
         }
 
+        ApplyClientIpDefaultHeader(client);
+
         return client;
+    }
+
+    /// <summary>
+    /// Best-effort: add the SDK host's own IP as a default request header so the
+    /// server can see the client's self-reported address. Applied on every client
+    /// (normal and SSE) so all request paths — including raw/streaming sends that
+    /// bypass <c>HttpClientWrapper</c> — carry it. A custom (non-standard) header
+    /// name is used on purpose: standard forwarded headers such as X-Forwarded-For
+    /// are rewritten or stripped by intermediaries. Never overrides a value the
+    /// caller already supplied via <see cref="Headers"/>, and is skipped silently
+    /// when the IP cannot be determined.
+    /// </summary>
+    private static void ApplyClientIpDefaultHeader(HttpClient client)
+    {
+        if (client.DefaultRequestHeaders.Contains(Constants.ClientIpHeader))
+        {
+            return;
+        }
+
+        var clientIp = ClientIpDetector.ClientIp();
+        if (!string.IsNullOrEmpty(clientIp))
+        {
+            client.DefaultRequestHeaders.TryAddWithoutValidation(Constants.ClientIpHeader, clientIp);
+        }
     }
 
     private static (ConnectionProtocol?, string) NormalizeDomainBase(string input)

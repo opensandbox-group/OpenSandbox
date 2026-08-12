@@ -333,14 +333,22 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 	jobName := r.getJobName(snapshot)
 	imageCommitterImage := r.imageCommitterImage()
 
+	fifoDirType := corev1.HostPathDirectoryOrCreate
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "containerd-sock", MountPath: ContainerdSocketPath},
+		{Name: "containerd-fifo", MountPath: ContainerdFIFODir},
 	}
 	volumes := []corev1.Volume{
 		{
 			Name: "containerd-sock",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{Path: r.containerdSocketPath()},
+			},
+		},
+		{
+			Name: "containerd-fifo",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: ContainerdFIFODir, Type: &fifoDirType},
 			},
 		},
 	}

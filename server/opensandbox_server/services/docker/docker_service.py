@@ -152,6 +152,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._execd_archive_cache: Dict[str, bytes] = {}
         self._bootstrap_script_cache: Dict[str, bytes] = {}
         self._bwrap_archive_cache: Dict[str, bytes] = {}
+        self._session_gate_archive_cache: Dict[str, bytes] = {}
         self._windows_profile_cache: Dict[str, bytes] = {}
         self._daemon_platform: Optional[PlatformSpec] = None
         self._metadata_store = DockerMetadataStore()
@@ -244,6 +245,17 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         """Helper to fetch the Docker container associated with a sandbox ID."""
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
+            try:
+                container = self.docker_client.containers.get(f"sandbox-{sandbox_id}")
+            except DockerNotFound:
+                container = None
+
+            if container is not None:
+                labels = container.attrs.get("Config", {}).get("Labels") or {}
+                if labels.get(SANDBOX_ID_LABEL) == sandbox_id:
+                    return container
+
+            # Preserve lookup for managed containers with a nonstandard name.
             containers = self.docker_client.containers.list(
                 all=True, filters={"label": label_selector}
             )

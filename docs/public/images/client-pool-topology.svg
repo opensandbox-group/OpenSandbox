@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="720" viewBox="0 0 1400 720" role="img" aria-labelledby="title desc">
+  <title id="title">Single-Node vs Distributed Deployment</title>
+  <desc id="desc">Side-by-side comparison of the two deployment topologies. On the left with the in-memory pool state store, each process owns its own idle buffer and pools do not share warmups. On the right with a Redis-backed store, multiple pods share one logical pool: exactly one pod holds the primary lock at any time and drives reconcile, while all pods can acquire from the shared idle buffer.</desc>
+  <defs>
+    <marker id="a5-arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1e3a5f"/>
+    </marker>
+    <marker id="a5-arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 26px; font-weight: 700; fill: #1e40af; }
+      .panel-title { font-size: 18px; font-weight: 700; }
+      .box-title { font-size: 14px; font-weight: 700; fill: #0f172a; }
+      .box-text { font-size: 12px; fill: #334155; }
+      .edge-label { font-size: 11px; fill: #475569; }
+      .warn { font-size: 12px; fill: #b91c1c; font-weight: 700; }
+      .ok { font-size: 12px; fill: #047857; font-weight: 700; }
+      .caption { font-size: 12px; fill: #475569; font-style: italic; }
+      .badge-leader { font-size: 11px; font-weight: 700; fill: #ffffff; }
+      .badge-follower { font-size: 11px; font-weight: 700; fill: #ffffff; }
+    </style>
+  </defs>
+
+  <text x="700" y="38" class="title" text-anchor="middle">Single-node vs Distributed Deployment</text>
+
+  <!-- LEFT: Single-node -->
+  <g>
+    <rect x="30" y="80" width="620" height="580" fill="#fef2f2" stroke="#b91c1c" stroke-width="2" rx="10"/>
+    <text x="340" y="112" class="panel-title" fill="#b91c1c" text-anchor="middle">Single-node · InMemoryPoolStateStore</text>
+    <text x="340" y="134" class="caption" text-anchor="middle">Buffer lives in process memory; not shared across processes</text>
+
+    <!-- Process 1 -->
+    <rect x="60" y="170" width="260" height="220" fill="#ffffff" stroke="#334155" stroke-width="1.5" rx="8"/>
+    <text x="190" y="200" class="box-title" text-anchor="middle">Process 1</text>
+    <rect x="90" y="220" width="200" height="60" fill="#eff6ff" stroke="#1e3a5f" stroke-width="1.2" rx="5"/>
+    <text x="190" y="240" class="box-text" text-anchor="middle">SandboxPool</text>
+    <text x="190" y="258" class="box-text" text-anchor="middle" font-style="italic">owner_id=p1</text>
+    <rect x="90" y="300" width="200" height="70" fill="#fff7ed" stroke="#c2410c" stroke-width="1.2" rx="5"/>
+    <text x="190" y="322" class="box-text" text-anchor="middle" font-weight="700">in-process idle buffer</text>
+    <text x="190" y="342" class="box-text" text-anchor="middle">[id_a, id_b]</text>
+    <text x="190" y="360" class="box-text" text-anchor="middle" font-style="italic">max_idle=2</text>
+
+    <!-- Process 2 -->
+    <rect x="360" y="170" width="260" height="220" fill="#ffffff" stroke="#334155" stroke-width="1.5" rx="8"/>
+    <text x="490" y="200" class="box-title" text-anchor="middle">Process 2</text>
+    <rect x="390" y="220" width="200" height="60" fill="#eff6ff" stroke="#1e3a5f" stroke-width="1.2" rx="5"/>
+    <text x="490" y="240" class="box-text" text-anchor="middle">SandboxPool</text>
+    <text x="490" y="258" class="box-text" text-anchor="middle" font-style="italic">owner_id=p2</text>
+    <rect x="390" y="300" width="200" height="70" fill="#fff7ed" stroke="#c2410c" stroke-width="1.2" rx="5"/>
+    <text x="490" y="322" class="box-text" text-anchor="middle" font-weight="700">in-process idle buffer</text>
+    <text x="490" y="342" class="box-text" text-anchor="middle">[id_c, id_d]</text>
+    <text x="490" y="360" class="box-text" text-anchor="middle" font-style="italic">max_idle=2</text>
+
+    <!-- Barrier / no sharing -->
+    <line x1="340" y1="180" x2="340" y2="385" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="340" y="405" class="warn" text-anchor="middle">unaware of each other</text>
+
+    <!-- Warnings -->
+    <rect x="60" y="430" width="560" height="200" fill="#ffffff" stroke="#b91c1c" stroke-width="1.5" rx="8"/>
+    <text x="340" y="458" class="box-title" fill="#b91c1c" text-anchor="middle">Common pitfalls</text>
+    <text x="80" y="486" class="box-text">· gunicorn / uvicorn workers: one pool per worker, each with its own max_idle</text>
+    <text x="80" y="508" class="box-text">· Kubernetes replicas: one pool per Pod, actual sandbox count = replicas × max_idle</text>
+    <text x="80" y="530" class="box-text">· Celery workers: tasks land on different workers, no shared warm buffer</text>
+    <text x="80" y="558" class="warn">→ suitable only for dev, tests, and single-instance workers</text>
+    <text x="80" y="586" class="box-text">· Need a truly cross-process / cross-Pod pool?</text>
+    <text x="80" y="608" class="ok">→ switch to the Redis-backed store (see right)</text>
+  </g>
+
+  <!-- RIGHT: Distributed -->
+  <g>
+    <rect x="710" y="80" width="660" height="580" fill="#ecfdf5" stroke="#047857" stroke-width="2" rx="10"/>
+    <text x="1040" y="112" class="panel-title" fill="#047857" text-anchor="middle">Distributed · RedisPoolStateStore</text>
+    <text x="1040" y="134" class="caption" text-anchor="middle">All nodes share one idle buffer and one primary lock</text>
+
+    <!-- Pod A (leader) -->
+    <rect x="740" y="170" width="180" height="140" fill="#ffffff" stroke="#334155" stroke-width="1.5" rx="8"/>
+    <text x="830" y="198" class="box-title" text-anchor="middle">Pod A</text>
+    <rect x="765" y="218" width="130" height="24" fill="#047857" rx="4"/>
+    <text x="830" y="235" class="badge-leader" text-anchor="middle">LEADER</text>
+    <text x="830" y="264" class="box-text" text-anchor="middle">owner_id=a-uuid</text>
+    <text x="830" y="286" class="box-text" text-anchor="middle">acquire + reconcile</text>
+
+    <!-- Pod B -->
+    <rect x="950" y="170" width="180" height="140" fill="#ffffff" stroke="#334155" stroke-width="1.5" rx="8"/>
+    <text x="1040" y="198" class="box-title" text-anchor="middle">Pod B</text>
+    <rect x="975" y="218" width="130" height="24" fill="#6b7280" rx="4"/>
+    <text x="1040" y="235" class="badge-follower" text-anchor="middle">FOLLOWER</text>
+    <text x="1040" y="264" class="box-text" text-anchor="middle">owner_id=b-uuid</text>
+    <text x="1040" y="286" class="box-text" text-anchor="middle">acquire only</text>
+
+    <!-- Pod C -->
+    <rect x="1160" y="170" width="180" height="140" fill="#ffffff" stroke="#334155" stroke-width="1.5" rx="8"/>
+    <text x="1250" y="198" class="box-title" text-anchor="middle">Pod C</text>
+    <rect x="1185" y="218" width="130" height="24" fill="#6b7280" rx="4"/>
+    <text x="1250" y="235" class="badge-follower" text-anchor="middle">FOLLOWER</text>
+    <text x="1250" y="264" class="box-text" text-anchor="middle">owner_id=c-uuid</text>
+    <text x="1250" y="286" class="box-text" text-anchor="middle">acquire only</text>
+
+    <!-- Redis -->
+    <rect x="810" y="380" width="460" height="150" fill="#fff7ed" stroke="#c2410c" stroke-width="2" rx="10"/>
+    <text x="1040" y="410" class="box-title" fill="#c2410c" text-anchor="middle">Redis</text>
+    <text x="1040" y="432" class="box-text" text-anchor="middle" font-style="italic">key_prefix = opensandbox:pool:prod</text>
+    <text x="1040" y="452" class="box-text" text-anchor="middle" font-style="italic">pool_name  = demo-pool</text>
+    <line x1="820" y1="464" x2="1260" y2="464" stroke="#c2410c" stroke-width="1" stroke-dasharray="4,4"/>
+    <text x="1040" y="486" class="box-text" text-anchor="middle" font-weight="700">shared idle buffer: [id_a, id_b, id_c, id_d, ...]</text>
+    <text x="1040" y="508" class="box-text" text-anchor="middle" font-weight="700">primary lock: holder = a-uuid, TTL 60s</text>
+
+    <!-- Edges Pod A -> Redis (acquire + reconcile) -->
+    <path d="M 830 310 L 950 378" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a5-arrow-purple)" stroke-dasharray="6,4"/>
+    <text x="820" y="360" class="edge-label" fill="#047857" text-anchor="end">acquire + lock + replenish</text>
+
+    <!-- Pod B -> Redis (acquire only) -->
+    <path d="M 1040 310 L 1040 378" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a5-arrow-blue)" stroke-dasharray="6,4"/>
+    <text x="1075" y="345" class="edge-label" text-anchor="start">acquire</text>
+
+    <!-- Pod C -> Redis -->
+    <path d="M 1250 310 L 1130 378" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a5-arrow-blue)" stroke-dasharray="6,4"/>
+    <text x="1250" y="360" class="edge-label" text-anchor="start">acquire</text>
+
+    <!-- Notes -->
+    <rect x="740" y="555" width="600" height="90" fill="#ffffff" stroke="#047857" stroke-width="1.5" rx="8"/>
+    <text x="760" y="580" class="box-text">· All nodes share the same pool_name + key_prefix + creation_spec</text>
+    <text x="760" y="600" class="box-text">· Each process needs a unique owner_id (identifies the lock holder, not the pool)</text>
+    <text x="760" y="620" class="box-text">· Only the leader replenishes; if it dies, another node takes over after primary_lock_ttl</text>
+    <text x="760" y="640" class="ok">→ the only correct choice for production (multi-process / multi-Pod)</text>
+  </g>
+</svg>

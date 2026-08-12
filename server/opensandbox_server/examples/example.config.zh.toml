@@ -66,7 +66,7 @@ seccomp_profile = ""
 mode = "direct"
 
 [egress]
-image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.4"
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.5"
 mode = "dns"
 
 # 按访问续期。默认关闭 — 见 server/README_zh.md。

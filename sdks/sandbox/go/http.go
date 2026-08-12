@@ -174,6 +174,10 @@ func NewClient(baseURL, apiKey, authHeader string, opts ...Option) *Client {
 	if c.timeout != nil {
 		c.httpClient.Timeout = *c.timeout
 	}
+	// Best-effort: attach the SDK host's own IP so the server can see the
+	// client's self-reported address. Never overrides a user-supplied value
+	// and is skipped silently when the IP cannot be determined.
+	c.headers = applyClientIP(c.headers, detectedClientIP())
 	return c
 }
 

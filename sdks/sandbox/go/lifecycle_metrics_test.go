@@ -65,6 +65,30 @@ func TestReportSandboxCreateMetricPostsEvent(t *testing.T) {
 	t.Fatal("metrics POST was not received")
 }
 
+func TestReportSandboxCreateMetricCarriesClientIPHeader(t *testing.T) {
+	withStubbedClientIP(t, "10.9.8.7")
+
+	var gotIP atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIP.Store(r.Header.Get(clientIPHeader))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cfg := ConnectionConfig{Domain: server.URL, Protocol: "http", APIKey: "k"}
+	reportSandboxCreateMetric(cfg, "sbx", "python:3.12", 42, true)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := gotIP.Load().(string); ok {
+			require.Equal(t, "10.9.8.7", v)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("metrics POST was not received")
+}
+
 func TestReportSandboxCreateMetricIgnoresFailure(t *testing.T) {
 	cfg := ConnectionConfig{Domain: "http://127.0.0.1:1", Protocol: "http"}
 	// Should not panic or block.

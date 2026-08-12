@@ -1217,7 +1217,16 @@ paths:
 
   /v1/isolated/session/{sessionId}/run:
     post:
-      summary: Run code in an isolated session (SSE streaming)
+      summary: Run code in an isolated session
+      description: >-
+        Runs code inside an existing isolated session. Foreground mode
+        (default) streams output via SSE (200). Background mode
+        (`background: true`) starts the command detached and returns a JSON
+        run handle with 202 Accepted for polling status and logs via
+        `/v1/isolated/session/{sessionId}/runs/{runId}` and
+        `.../runs/{runId}/logs`. `timeout_seconds` applies to foreground
+        runs only; background runs are not time-limited (idle GC is suspended
+        while one is active) and are bounded by the session lifetime.
       operationId: runInIsolatedSession
       tags:
         - IsolatedExecution
@@ -1236,11 +1245,130 @@ paths:
               $ref: "#/components/schemas/IsolatedRunRequest"
       responses:
         "200":
-          description: SSE stream of execution output
+          description: SSE stream of execution events (foreground runs only)
           content:
             text/event-stream:
               schema:
                 $ref: "#/components/schemas/ServerStreamEvent"
+        "202":
+          description: >-
+            JSON run handle for background runs (background: true). The run
+            was accepted and started detached; poll status and logs via
+            `/v1/isolated/session/{sessionId}/runs/{runId}`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IsolatedBackgroundRunResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/runs/{runId}:
+    get:
+      summary: Get isolated background run status
+      description: |
+        Returns the lifecycle state of a background run started with
+        `background: true` on the run endpoint. Includes the running flag,
+        exit code (when finished), error (if any), and start/finish timestamps.
+        Run records live as long as their session; they are removed when the
+        session is deleted or garbage-collected.
+      operationId: getIsolatedRunStatus
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: runId
+          in: path
+          required: true
+          description: Run ID returned by the background run endpoint
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Background run status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IsolatedRunStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/runs/{runId}/logs:
+    get:
+      summary: Get isolated background run logs (non-streamed)
+      description: |
+        Returns the combined stdout/stderr of a background run as plain text.
+        Supports incremental reads similar to a file seek: pass a byte offset
+        via the `cursor` query parameter to fetch output after that position
+        and receive the latest tail cursor via the
+        `EXECD-ISOLATED-TAIL-CURSOR` response header for the next poll.
+        When no cursor is provided, the log is returned from the start. At
+        most 16 MiB are returned per request; use the returned cursor to
+        fetch the remainder.
+        Per-run log retention is capped at 16 MiB: output beyond the cap is
+        discarded when the run completes, so clients that need more than the
+        first page should drain incrementally while the run is active.
+        Response body is plain text so it can be rendered directly in browsers.
+      operationId: getIsolatedRunLogs
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: runId
+          in: path
+          required: true
+          description: Run ID returned by the background run endpoint
+          schema:
+            type: string
+            format: uuid
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Optional byte offset (behaves like a file seek). When provided,
+            only log bytes after this offset are returned. The response
+            includes the latest offset (`EXECD-ISOLATED-TAIL-CURSOR`) so the
+            client can request incremental output on subsequent calls.
+            At most 16 MiB are returned per request.
+            If omitted, the log is returned from the start.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+          example: 120
+      responses:
+        "200":
+          description: Background run log (plain text) and tail cursor via header
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                line1
+                line2
+                warn: something on stderr
+          headers:
+            EXECD-ISOLATED-TAIL-CURSOR:
+              description: Highest available byte offset after applying the request cursor (use as the next cursor for incremental reads)
+              schema:
+                type: integer
+                format: int64
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -2185,13 +2313,103 @@ components:
       properties:
         code:
           type: string
+          description: Shell code to execute inside the session
+          example: echo hello
         envs:
           type: object
           additionalProperties:
             type: string
+          description: Environment variables exported into the shell before the code runs
         timeout_seconds:
           type: integer
           minimum: 0
+          description: |
+            Foreground-only timeout. The run is interrupted after this many
+            seconds. Ignored for background runs: a background run is not
+            time-limited, and idle GC is suspended while it is active, so a
+            long-running background command keeps the session alive until it
+            finishes (then the normal idle window applies) or the session is
+            deleted.
+          example: 60
+        background:
+          type: boolean
+          description: |
+            When true (default false), start the code detached inside the
+            session and return a 202 run handle instead of streaming output.
+            The run's combined stdout/stderr is captured to a log file that
+            can be polled via the run logs endpoint; its lifecycle is tracked
+            via the run status endpoint.
+            Background runs share the session's process group, so session-
+            level signals (for example the SIGINT sent when a foreground run
+            times out or is cancelled) also reach them; execd cannot signal
+            individual in-namespace processes.
+            Background runs require a writable log location, so sessions with
+            a read-only (`ro`) workspace reject them with 400: there is no
+            host-visible writable location for the run's log and exit-code
+            files. rw and overlay workspaces are supported.
+          example: false
+
+    IsolatedBackgroundRunResponse:
+      type: object
+      description: "Handle returned when a run is started with background: true"
+      required:
+        - session_id
+        - run_id
+        - started_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          description: Session the run was started in
+        run_id:
+          type: string
+          format: uuid
+          description: Run ID for status and logs polling
+        started_at:
+          type: string
+          format: date-time
+          description: Run start time in RFC3339 format
+
+    IsolatedRunStatus:
+      type: object
+      description: Lifecycle state of an isolated background run
+      required:
+        - session_id
+        - run_id
+        - running
+        - started_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+        running:
+          type: boolean
+          description: Whether the run is still executing
+          example: false
+        exit_code:
+          type: integer
+          format: int32
+          nullable: true
+          description: Exit code of the code if the run has finished
+          example: 0
+        error:
+          type: string
+          description: Error message if the run failed (e.g. session terminated)
+          example: session terminated
+        started_at:
+          type: string
+          format: date-time
+          description: Run start time in RFC3339 format
+          example: "2025-12-22T09:08:05Z"
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Run finish time in RFC3339 format (null if still running)
+          example: "2025-12-22T09:08:09Z"
 
     SessionState:
       type: object

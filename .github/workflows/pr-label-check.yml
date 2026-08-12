@@ -21,6 +21,93 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
+            // Ignore glob-like patterns for size accounting only. Matches the
+            // full path; "**" matches any path segments, "*" matches within a
+            // single segment.
+            const SIZE_IGNORE = [
+              // Lock files and other generated dependency manifests.
+              "**/go.sum",
+              "**/uv.lock",
+              "**/pnpm-lock.yaml",
+              "**/package-lock.json",
+              "**/yarn.lock",
+              "**/Cargo.lock",
+              "kubernetes/charts/opensandbox/Chart.lock",
+              "sdks/sandbox/kotlin/sandbox-api/src/main/kotlin/com/alibaba/opensandbox/sandbox/api/openapitools.json",
+
+              // Unit / integration / e2e test sources and fixtures. Kept out
+              // of the size label because they don't reflect production code
+              // complexity that reviewers need to reason about.
+              // Go
+              "**/*_test.go",
+              "**/testdata/**",
+              // Python (pytest layout: tests/ package or test_*.py)
+              "**/tests/**",
+              "**/test_*.py",
+              "**/conftest.py",
+              // JS / TS
+              "**/*.test.js",
+              "**/*.test.jsx",
+              "**/*.test.mjs",
+              "**/*.test.ts",
+              "**/*.test.tsx",
+              "**/*.spec.js",
+              "**/*.spec.jsx",
+              "**/*.spec.mjs",
+              "**/*.spec.ts",
+              "**/*.spec.tsx",
+              // Kotlin / Java (Gradle/Maven convention)
+              "**/src/test/kotlin/**",
+              "**/src/test/java/**",
+              "**/src/test/resources/**",
+              // C# (xUnit projects live under tests/ dirs; also match *.Tests.cs
+              // and Test.csproj)
+              "**/*.Tests.cs",
+              "**/*Tests.csproj",
+              // Top-level cross-language e2e suite
+              "tests/**",
+              // Kubernetes controller e2e suite (kubebuilder layout puts the
+              // whole suite under test/, including helper packages).
+              "kubernetes/test/**",
+            ];
+
+            function globToRegex(glob) {
+              let re = "^";
+              for (let i = 0; i < glob.length; i++) {
+                const c = glob[i];
+                if (c === "*" && glob[i + 1] === "*") {
+                  re += ".*";
+                  i++;
+                  if (glob[i + 1] === "/") i++;
+                } else if (c === "*") {
+                  re += "[^/]*";
+                } else if (c === "?") {
+                  re += "[^/]";
+                } else if (".+^$(){}|[]\\".includes(c)) {
+                  re += "\\" + c;
+                } else {
+                  re += c;
+                }
+              }
+              return new RegExp(re + "$");
+            }
+            const IGNORE_REGEXES = SIZE_IGNORE.map(globToRegex);
+
+            function isIgnoredForSize(filename) {
+              return IGNORE_REGEXES.some((r) => r.test(filename));
+            }
+
+            // Kubernetes/Prow size thresholds (additions + deletions).
+            // See https://github.com/kubernetes-sigs/prow/blob/main/pkg/plugins/size/size.go
+            function sizeLabel(changed) {
+              if (changed < 10) return "size/XS";
+              if (changed < 30) return "size/S";
+              if (changed < 100) return "size/M";
+              if (changed < 500) return "size/L";
+              if (changed < 1000) return "size/XL";
+              return "size/XXL";
+            }
+
             function inferLabels(files) {
               const dirs = new Set();
               for (const f of files) {
@@ -30,6 +117,13 @@ jobs:
                 }
               }
               const s = [];
+
+              let changed = 0;
+              for (const f of files) {
+                if (isIgnoredForSize(f.filename)) continue;
+                changed += (f.additions || 0) + (f.deletions || 0);
+              }
+              s.push(sizeLabel(changed));
 
               if (dirs.has("docs") || dirs.has("oseps") || dirs.has("specs") ||
                   dirs.has("examples")) {
@@ -82,21 +176,41 @@ jobs:
             }
 
             const existing = new Set(pr.labels.map(l => l.name));
+            const inferredSet = new Set(inferred);
+
+            // Size labels are mutually exclusive: drop any stale size/* labels
+            // that don't match the newly-inferred one.
+            const staleSizeLabels = [...existing].filter(
+              (l) => l.startsWith("size/") && !inferredSet.has(l),
+            );
+
             const toAdd = inferred.filter(l => !existing.has(l));
 
-            if (toAdd.length === 0) {
+            if (toAdd.length === 0 && staleSizeLabels.length === 0) {
               core.info("All inferred labels already present.");
               return;
             }
 
-            const { data: repoLabels } = await github.rest.issues.listLabelsForRepo({
-              owner, repo,
-            });
+            const repoLabels = await github.paginate(
+              github.rest.issues.listLabelsForRepo,
+              { owner, repo },
+            );
             const repoLabelNames = new Set(repoLabels.map(l => l.name));
             const valid = toAdd.filter(l => repoLabelNames.has(l));
 
+            for (const stale of staleSizeLabels) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner, repo, issue_number: prNumber, name: stale,
+                });
+                core.info(`Removed stale label: ${stale}`);
+              } catch (e) {
+                core.warning(`Failed to remove ${stale}: ${e.message}`);
+              }
+            }
+
             if (valid.length === 0) {
-              core.info("Inferred labels don't exist in repo, skipping.");
+              core.info("No new labels to add.");
               return;
             }
 

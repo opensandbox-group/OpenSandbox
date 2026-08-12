@@ -83,6 +83,12 @@ func reportSandboxCreateMetric(cfg ConnectionConfig, sandboxID, image string, du
 				req.Header.Set(k, v)
 			}
 		}
+		// This raw request bypasses NewClient (where the client IP is injected
+		// into Client.headers), so attach it here too. req.Header.Get is
+		// case-insensitive, so a user-supplied value above still wins.
+		if ip := detectedClientIP(); ip != "" && req.Header.Get(clientIPHeader) == "" {
+			req.Header.Set(clientIPHeader, ip)
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			return

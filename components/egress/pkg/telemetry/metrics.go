@@ -32,11 +32,29 @@ import (
 var (
 	meter metric.Meter
 
-	dnsQueryDur  metric.Float64Histogram
-	policyDenied metric.Int64Counter
-	nftUpdates   metric.Int64Counter
+	dnsQueryDur     metric.Float64Histogram
+	dnsQueryFailed  metric.Int64Counter
+	policyDenied    metric.Int64Counter
+	nftUpdates      metric.Int64Counter
+	nftUpdateFailed metric.Int64Counter
 
 	lastNftRuleCount atomic.Int64
+)
+
+// Bounded reason values for RecordDNSQueryFailed. A closed set keeps the counter's
+// cardinality fixed: error strings and queried names must never reach an attribute.
+const (
+	DNSFailureNoUpstreams   = "no_upstreams"
+	DNSFailureUpstreamError = "upstream_error"
+	DNSFailureEmptyResponse = "empty_response"
+	DNSFailureRcode         = "rcode"
+)
+
+// Bounded operation values for RecordNftablesUpdateFailed.
+const (
+	NftOpStaticApply = "static_apply"
+	NftOpDynamicAdd  = "dynamic_add"
+	NftOpRemove      = "remove"
 )
 
 var egressSharedAttrs = sync.OnceValue(func() []attribute.KeyValue {
@@ -50,6 +68,18 @@ var egressSharedAttrs = sync.OnceValue(func() []attribute.KeyValue {
 var egressMetricOpt = sync.OnceValue(func() metric.MeasurementOption {
 	return metric.WithAttributes(egressSharedAttrs()...)
 })
+
+// egressMetricOptWith adds one attribute to the shared set. It copies rather than
+// appending to the slice returned by egressSharedAttrs: that slice is shared by every
+// caller and may have spare capacity, so append would write into the backing array and
+// let one call's attribute leak into another's.
+func egressMetricOptWith(kv attribute.KeyValue) metric.MeasurementOption {
+	shared := egressSharedAttrs()
+	attrs := make([]attribute.KeyValue, 0, len(shared)+1)
+	attrs = append(attrs, shared...)
+	attrs = append(attrs, kv)
+	return metric.WithAttributes(attrs...)
+}
 
 func EgressLogFields() []slogger.Field {
 	kvs := egressSharedAttrs()
@@ -74,6 +104,32 @@ func registerEgressMetrics() error {
 		"egress.dns.query.duration",
 		metric.WithDescription("DNS forward latency"),
 		metric.WithUnit("s"),
+		// Explicit boundaries: this instrument records seconds, but the SDK default
+		// boundaries are the spec's millisecond ladder (0, 5, 10, ... 10000), so every
+		// realistic DNS latency lands in the same bucket and the quantiles are noise.
+		//
+		// The head spans a cache hit (sub-ms) to one upstream timeout
+		// (DefaultDNSUpstreamTimeoutSec = 5s). The coarse tail covers the retry chain:
+		// forward() walks the resolvers serially, each with the full timeout, and the
+		// recorded duration is the whole chain — so a query can legitimately take
+		// timeout x len(upstreams), and a late *success* lands there too, not just an
+		// exhausted failure. 15s is three resolvers at the default; 600s covers the 120s
+		// per-exchange cap across a handful of them. The chain has no finite worst case
+		// (OPENSANDBOX_EGRESS_DNS_UPSTREAM takes an unbounded resolver list), so past the
+		// last boundary quantile resolution is lost by construction and _count is what
+		// remains — a configuration that gets there has bigger problems than a percentile.
+		metric.WithExplicitBucketBoundaries(
+			0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
+			15, 30, 60, 120, 300, 600,
+		),
+	)
+	if err != nil {
+		return err
+	}
+	dnsQueryFailed, err = meter.Int64Counter(
+		"egress.dns.query.failed_total",
+		metric.WithDescription("DNS queries the proxy could not resolve, by reason. "+
+			"Distinct from egress.policy.denied_total, which counts deliberate policy denials."),
 	)
 	if err != nil {
 		return err
@@ -88,6 +144,14 @@ func registerEgressMetrics() error {
 	nftUpdates, err = meter.Int64Counter(
 		"egress.nftables.updates.count",
 		metric.WithDescription("nft static apply and dynamic IP adds"),
+	)
+	if err != nil {
+		return err
+	}
+	nftUpdateFailed, err = meter.Int64Counter(
+		"egress.nftables.updates.failed_total",
+		metric.WithDescription("nft updates that failed, by operation. A failed dynamic_add "+
+			"means an allowed destination is unreachable while the policy says otherwise."),
 	)
 	if err != nil {
 		return err
@@ -131,6 +195,13 @@ func registerEgressMetrics() error {
 	return err
 }
 
+// ForceFlush exports pending metrics immediately. Callers that are about to terminate the
+// process must use it: metrics leave through a periodic reader, and the deferred shutdown in
+// main does not run past os.Exit.
+func ForceFlush(ctx context.Context) error {
+	return inttelemetry.ForceFlush(ctx)
+}
+
 func NftRuleCountFromPolicy(p *policy.NetworkPolicy) int64 {
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
@@ -145,6 +216,15 @@ func RecordDNSForward(seconds float64) {
 	}
 	opt := egressMetricOpt()
 	dnsQueryDur.Record(context.Background(), seconds, opt)
+}
+
+// RecordDNSQueryFailed counts a lookup the proxy could not answer. reason must be one of
+// the DNSFailure* constants.
+func RecordDNSQueryFailed(reason string) {
+	if dnsQueryFailed == nil {
+		return
+	}
+	dnsQueryFailed.Add(context.Background(), 1, egressMetricOptWith(attribute.String("reason", reason)))
 }
 
 func RecordDNSDenied() {
@@ -163,4 +243,13 @@ func RecordNftablesUpdate() {
 		return
 	}
 	nftUpdates.Add(context.Background(), 1, egressMetricOpt())
+}
+
+// RecordNftablesUpdateFailed counts an update that did not reach the kernel. operation
+// must be one of the NftOp* constants.
+func RecordNftablesUpdateFailed(operation string) {
+	if nftUpdateFailed == nil {
+		return
+	}
+	nftUpdateFailed.Add(context.Background(), 1, egressMetricOptWith(attribute.String("operation", operation)))
 }

@@ -20,12 +20,29 @@ from opensandbox import Sandbox
 from opensandbox.config import ConnectionConfig
 from opensandbox.models.execd import RunCommandOpts
 
+from novnc_url import (
+    browser_proxy_auth_warning,
+    build_novnc_url,
+    normalize_domain,
+    parse_bool,
+    resolve_novnc_protocol,
+    resolve_protocol,
+    validate_connection_mode,
+)
+
 
 def _required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
         raise RuntimeError(f"{name} is required")
     return value
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return parse_bool(value, name)
 
 
 async def _print_logs(label: str, execution) -> None:
@@ -38,7 +55,10 @@ async def _print_logs(label: str, execution) -> None:
 
 
 async def main() -> None:
-    domain = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
+    domain = normalize_domain(os.getenv("SANDBOX_DOMAIN", "localhost:8080"))
+    protocol = resolve_protocol(domain, os.getenv("SANDBOX_PROTOCOL"))
+    use_server_proxy = _bool_env("SANDBOX_USE_SERVER_PROXY")
+    validate_connection_mode(protocol, use_server_proxy)
     api_key = os.getenv("SANDBOX_API_KEY")
     image = os.getenv(
         "SANDBOX_IMAGE",
@@ -49,8 +69,10 @@ async def main() -> None:
 
     config = ConnectionConfig(
         domain=domain,
+        protocol=protocol,
         api_key=api_key,
         request_timeout=timedelta(seconds=60),
+        use_server_proxy=use_server_proxy,
     )
 
     sandbox = await Sandbox.create(
@@ -79,9 +101,7 @@ async def main() -> None:
         await _print_logs("xfce", xfce_exec)
 
         vnc_exec = await sandbox.commands.run(
-            "x11vnc -display :0 "
-            "-passwd \"$VNC_PASSWORD\" "
-            "-forever -shared -rfbport 5900",
+            'x11vnc -display :0 -passwd "$VNC_PASSWORD" -forever -shared -rfbport 5900',
             opts=RunCommandOpts(background=True),
         )
         await _print_logs("x11vnc", vnc_exec)
@@ -93,24 +113,26 @@ async def main() -> None:
         )
         await _print_logs("novnc", novnc_exec)
 
-        endpoint_vnc = await sandbox.get_endpoint(5900)
         endpoint_novnc = await sandbox.get_endpoint(6080)
 
-        # Build noVNC URL with host/port/path for routed endpoint, e.g., host:port/proxy/6080
-        novnc_host_port, novnc_path = endpoint_novnc.endpoint.split("/", 1)
-        novnc_host, novnc_port = novnc_host_port.split(":")
-        novnc_url = (
-            f"http://{endpoint_novnc.endpoint}/vnc.html"
-            f"?host={novnc_host}&port={novnc_port}&path={novnc_path}"
-        )
+        # noVNC uses the page's scheme to select ws:// or wss://. Only server
+        # proxy endpoints inherit the management API's TLS origin; direct
+        # websockify endpoints do not terminate TLS.
+        novnc_protocol = resolve_novnc_protocol(config.protocol, use_server_proxy)
+        novnc_url = build_novnc_url(endpoint_novnc.endpoint, novnc_protocol)
+        auth_warning = browser_proxy_auth_warning(use_server_proxy, api_key)
 
-        print("\nVNC endpoint (native clients):")
-        print(f"  {endpoint_vnc.endpoint}")
-        print(f"Password: {vnc_password}")
+        if not use_server_proxy:
+            endpoint_vnc = await sandbox.get_endpoint(5900)
+            print("\nVNC endpoint (native clients):")
+            print(f"  {endpoint_vnc.endpoint}")
+            print(f"Password: {vnc_password}")
 
         print("\nnoVNC (browser):")
         print(f"  {novnc_url}")
         print(f"Password: {vnc_password}")
+        if auth_warning:
+            print(f"Authentication note: {auth_warning}")
 
         print("\nKeeping sandbox alive for 5 minutes. Press Ctrl+C to exit sooner.")
         try:

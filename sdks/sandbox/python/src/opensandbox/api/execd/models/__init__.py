@@ -34,6 +34,7 @@ from .file_info import FileInfo
 from .file_info_type import FileInfoType
 from .file_metadata import FileMetadata
 from .get_files_info_response_200 import GetFilesInfoResponse200
+from .isolated_background_run_response import IsolatedBackgroundRunResponse
 from .isolated_chmod_files_body import IsolatedChmodFilesBody
 from .isolated_create_session_response import IsolatedCreateSessionResponse
 from .isolated_get_files_info_response_200 import IsolatedGetFilesInfoResponse200
@@ -42,6 +43,7 @@ from .isolated_replace_content_body import IsolatedReplaceContentBody
 from .isolated_replace_content_response_200 import IsolatedReplaceContentResponse200
 from .isolated_run_request import IsolatedRunRequest
 from .isolated_run_request_envs import IsolatedRunRequestEnvs
+from .isolated_run_status import IsolatedRunStatus
 from .isolated_session_summary import IsolatedSessionSummary
 from .isolated_session_summary_status import IsolatedSessionSummaryStatus
 from .isolated_upload_file_body import IsolatedUploadFileBody
@@ -89,6 +91,7 @@ __all__ = (
     "FileInfoType",
     "FileMetadata",
     "GetFilesInfoResponse200",
+    "IsolatedBackgroundRunResponse",
     "IsolatedChmodFilesBody",
     "IsolatedCreateSessionResponse",
     "IsolatedGetFilesInfoResponse200",
@@ -97,6 +100,7 @@ __all__ = (
     "IsolatedReplaceContentResponse200",
     "IsolatedRunRequest",
     "IsolatedRunRequestEnvs",
+    "IsolatedRunStatus",
     "IsolatedSessionSummary",
     "IsolatedSessionSummaryStatus",
     "IsolatedUploadFileBody",

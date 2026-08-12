@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +61,10 @@ func NewIsolatedSessionController(ctx *gin.Context) *IsolatedSessionController {
 
 func (c *IsolatedSessionController) probed() bool {
 	return isolatedRunner != nil && isolatedRunner.Available()
+}
+
+func (c *IsolatedSessionController) initialized() bool {
+	return isolatedRunner != nil
 }
 
 // Create handles POST /v1/isolated/session.
@@ -120,6 +125,10 @@ func classifyIsolatedCreateError(err error) (int, model.ErrorCode) {
 	if errors.Is(err, runtime.ErrUidModeUnavailable) {
 		return http.StatusServiceUnavailable, model.ErrorCodeNotSupported
 	}
+	if errors.Is(err, runtime.ErrSessionNamespaceUnavailable) ||
+		errors.Is(err, runtime.ErrIsolatedRunnerClosed) {
+		return http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable
+	}
 	if strings.Contains(err.Error(), "not in allowlist") ||
 		strings.Contains(err.Error(), "not allowed") ||
 		strings.Contains(err.Error(), "unknown isolation profile") ||
@@ -133,7 +142,7 @@ func classifyIsolatedCreateError(err error) (int, model.ErrorCode) {
 
 // Get handles GET /v1/isolated/session/:sessionId.
 func (c *IsolatedSessionController) Get() {
-	if !c.probed() {
+	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
 		return
 	}
@@ -196,7 +205,7 @@ func (c *IsolatedSessionController) Get() {
 
 // List handles GET /v1/isolated/sessions.
 func (c *IsolatedSessionController) List() {
-	if !c.probed() {
+	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
 		return
 	}
@@ -218,7 +227,7 @@ func (c *IsolatedSessionController) List() {
 
 // Run handles POST /v1/isolated/session/:sessionId/run (SSE streaming).
 func (c *IsolatedSessionController) Run() {
-	if !c.probed() {
+	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
 		return
 	}
@@ -243,6 +252,25 @@ func (c *IsolatedSessionController) Run() {
 		ctx, cancel = context.WithCancel(c.ctx.Request.Context())
 	}
 	defer cancel()
+
+	// Background mode: submit detached, return a run handle, let the client
+	// poll status/logs. Deliberately independent of this request's context so
+	// a client disconnect cannot cancel detached work. 202 Accepted keeps the
+	// JSON handle distinguishable from the foreground SSE 200 stream in
+	// generated clients.
+	if req.Background {
+		runID, startedAt, err := isolatedRunner.RunInIsolatedSessionBackground(sessionID, req.Code, req.Envs)
+		if err != nil {
+			c.respondRunError(err)
+			return
+		}
+		c.ctx.JSON(http.StatusAccepted, model.IsolatedBackgroundRunResponse{
+			SessionID: sessionID,
+			RunID:     runID,
+			StartedAt: startedAt,
+		})
+		return
+	}
 
 	// SSE stdout callback.
 	onStdout := func(line string) {
@@ -293,24 +321,114 @@ func (c *IsolatedSessionController) Run() {
 	c.writeSingleEvent("IsolatedComplete", event.ToJSON(), true, event.Summary())
 }
 
+// respondRunError maps background-run start and query errors to HTTP responses.
+func (c *IsolatedSessionController) respondRunError(err error) {
+	if errors.Is(err, runtime.ErrContextNotFound) {
+		c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
+		return
+	}
+	if errors.Is(err, runtime.ErrSessionNotActive) {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
+		return
+	}
+	c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
+}
+
+// GetRunStatus handles GET /v1/isolated/session/:sessionId/runs/:runId.
+func (c *IsolatedSessionController) GetRunStatus() {
+	if !c.initialized() {
+		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
+		return
+	}
+
+	sessionID := c.ctx.Param("sessionId")
+	runID := c.ctx.Param("runId")
+	snapshot, err := isolatedRunner.GetIsolatedBackgroundRun(sessionID, runID)
+	if err != nil {
+		c.respondRunError(err)
+		return
+	}
+
+	resp := model.IsolatedRunStatus{
+		SessionID: snapshot.SessionID,
+		RunID:     snapshot.RunID,
+		Running:   snapshot.Running,
+		ExitCode:  snapshot.ExitCode,
+		Error:     snapshot.Error,
+		StartedAt: snapshot.StartedAt,
+	}
+	if snapshot.FinishedAt != nil {
+		resp.FinishedAt = snapshot.FinishedAt
+	}
+	c.RespondSuccess(resp)
+}
+
+// GetRunLogs handles GET /v1/isolated/session/:sessionId/runs/:runId/logs.
+// The body is the combined stdout/stderr of the run as plain text; the
+// EXECD-ISOLATED-TAIL-CURSOR response header carries the next byte cursor for
+// incremental polling.
+func (c *IsolatedSessionController) GetRunLogs() {
+	if !c.initialized() {
+		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
+		return
+	}
+
+	sessionID := c.ctx.Param("sessionId")
+	runID := c.ctx.Param("runId")
+	cursorRaw := c.ctx.Query("cursor")
+	var cursor int64
+	if cursorRaw != "" {
+		parsed, err := strconv.ParseInt(cursorRaw, 10, 64)
+		if err != nil {
+			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "cursor must be an integer")
+			return
+		}
+		cursor = parsed
+	}
+	if cursor < 0 {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "cursor cannot be negative")
+		return
+	}
+	output, lastCursor, err := isolatedRunner.SeekIsolatedBackgroundOutput(sessionID, runID, cursor)
+	if err != nil {
+		c.respondRunError(err)
+		return
+	}
+
+	c.ctx.Header("EXECD-ISOLATED-TAIL-CURSOR", strconv.FormatInt(lastCursor, 10))
+	c.ctx.Header("Content-Type", "text/plain; charset=utf-8")
+	c.ctx.String(http.StatusOK, "%s", output)
+}
+
 // Delete handles DELETE /v1/isolated/session/:sessionId.
 func (c *IsolatedSessionController) Delete() {
-	if !c.probed() {
+	if !c.initialized() {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
 		return
 	}
 
 	sessionID := c.ctx.Param("sessionId")
 	if err := isolatedRunner.DeleteIsolatedSession(sessionID); err != nil {
-		if errors.Is(err, runtime.ErrContextNotFound) {
+		status, code := classifyIsolatedDeleteError(err)
+		if status == http.StatusNotFound {
 			c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
 			return
 		}
-		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
+		c.RespondError(status, code, err.Error())
 		return
 	}
 
 	c.RespondSuccess(nil)
+}
+
+func classifyIsolatedDeleteError(err error) (int, model.ErrorCode) {
+	if errors.Is(err, runtime.ErrContextNotFound) {
+		return http.StatusNotFound, model.ErrorCodeSessionNotFound
+	}
+	if errors.Is(err, runtime.ErrSessionNamespaceCleanup) {
+		return http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable
+	}
+	return http.StatusInternalServerError, model.ErrorCodeRuntimeError
 }
 
 // Diff handles GET /v1/isolated/session/:sessionId/diff.

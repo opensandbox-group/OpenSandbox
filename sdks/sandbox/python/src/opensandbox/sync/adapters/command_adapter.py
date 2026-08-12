@@ -31,9 +31,10 @@ from opensandbox.adapters.converter.execution_converter import (
     ExecutionConverter,
 )
 from opensandbox.adapters.converter.response_handler import (
-    extract_request_id,
+    build_api_exception_from_httpx,
     handle_api_error,
 )
+from opensandbox.adapters.sse import iter_sse_events
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import (
@@ -48,6 +49,7 @@ from opensandbox.sync.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcherSync,
 )
 from opensandbox.sync.services.command import CommandsSync
+from opensandbox.transport import unwrap_retry_transport
 
 logger = logging.getLogger(__name__)
 
@@ -95,22 +97,15 @@ def _build_run_in_session_request_body(
     )
 
 
-def _decode_sse_event_line(line: str) -> EventNode | None:
-    if not line or not line.strip():
-        return None
-
-    if line.startswith((":", "event:", "id:", "retry:")):
-        return None
-
-    data = line[5:].strip() if line.startswith("data:") else line
-    if not data:
+def _decode_sse_event_data(data: str) -> EventNode | None:
+    if not data.strip():
         return None
 
     try:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
+        logger.error(f"Failed to parse SSE event data: {data}", exc_info=e)
         return None
 
 
@@ -167,6 +162,9 @@ class CommandsAdapterSync(CommandsSync):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
+        # SSE bootstraps bypass the retry wrapper: request bodies are
+        # not replayable and a non-idempotent status opt-in would cause
+        # duplicate execution on a resent SSE POST.
         self._sse_client = httpx.Client(
             headers=sse_headers,
             timeout=httpx.Timeout(
@@ -175,7 +173,7 @@ class CommandsAdapterSync(CommandsSync):
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=self.connection_config.transport,
+            transport=unwrap_retry_transport(self.connection_config.transport),
         )
 
     def _get_execd_url(self, path: str) -> str:
@@ -199,14 +197,10 @@ class CommandsAdapterSync(CommandsSync):
         with self._sse_client.stream("POST", url, json=json_body) as response:
             if response.status_code != 200:
                 response.read()
-                raise SandboxApiException(
-                    message=f"{failure_message}. Status code: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
-                )
+                raise build_api_exception_from_httpx(response, failure_message)
 
-            for line in response.iter_lines():
-                event_node = _decode_sse_event_line(line)
+            for event in iter_sse_events(response):
+                event_node = _decode_sse_event_data(event.data)
                 if event_node is None:
                     continue
                 dispatcher.dispatch(event_node)

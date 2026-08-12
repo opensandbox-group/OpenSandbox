@@ -27,8 +27,11 @@ import type {
 } from "../services/isolatedSessions.js";
 import type {
   CreateIsolatedSessionRequest,
+  IsolatedBackgroundRun,
   IsolatedCapabilities,
+  IsolatedRunLogs,
   IsolatedRunOpts,
+  IsolatedRunStatus,
   IsolatedSessionInfo,
   IsolatedSessionState,
   IsolatedSessionSummary,
@@ -36,6 +39,8 @@ import type {
 } from "../models/isolated.js";
 
 type SessionStateWire = ExecdComponents["schemas"]["SessionState"];
+
+const TAIL_CURSOR_HEADER = "EXECD-ISOLATED-TAIL-CURSOR";
 
 function joinUrl(baseUrl: string, pathname: string): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -47,6 +52,10 @@ function assertNonBlank(value: string, field: string): void {
   if (!value.trim()) {
     throw new Error(`${field} cannot be empty`);
   }
+}
+
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
 }
 
 function inferExitCode(execution: CommandExecution): number | null {
@@ -97,6 +106,15 @@ class IsolationSessionHandle implements IsolationSession {
 
   run(code: string, opts?: IsolatedRunOpts, handlers?: ExecutionHandlers, signal?: AbortSignal): Promise<CommandExecution> {
     return this.adapter._run(this._info.session_id, code, opts, handlers, signal);
+  }
+  runBackground(code: string, opts?: IsolatedRunOpts): Promise<IsolatedBackgroundRun> {
+    return this.adapter._runBackground(this._info.session_id, code, opts);
+  }
+  getRunStatus(runId: string): Promise<IsolatedRunStatus> {
+    return this.adapter._getRunStatus(this._info.session_id, runId);
+  }
+  getRunLogs(runId: string, cursor?: number): Promise<IsolatedRunLogs> {
+    return this.adapter._getRunLogs(this._info.session_id, runId, cursor);
   }
   get(): Promise<IsolatedSessionState> {
     return this.adapter._get(this._info.session_id);
@@ -238,6 +256,86 @@ export class IsolatedSessionsAdapter implements IsolationService {
       "DELETE",
       `/v1/isolated/session/${encodeURIComponent(sessionId)}`,
     );
+  }
+
+  async _runBackground(
+    sessionId: string,
+    code: string,
+    opts?: IsolatedRunOpts,
+  ): Promise<IsolatedBackgroundRun> {
+    assertNonBlank(sessionId, "sessionId");
+    assertNonBlank(code, "code");
+
+    const body: Record<string, unknown> = { code, background: true };
+    if (opts?.envs) body.envs = opts.envs;
+    // timeout_seconds is foreground-only and deliberately not sent.
+
+    const pathname = `/v1/isolated/session/${encodeURIComponent(sessionId)}/run`;
+    const res = await this.fetch(joinUrl(this.opts.baseUrl, pathname), {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        ...(this.opts.headers ?? {}),
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.status !== 202) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`POST ${pathname} failed: ${res.status} ${text}`);
+    }
+    const raw = await res.text();
+    return JSON.parse(raw) as IsolatedBackgroundRun;
+  }
+
+  async _getRunStatus(
+    sessionId: string,
+    runId: string,
+  ): Promise<IsolatedRunStatus> {
+    assertNonBlank(sessionId, "sessionId");
+    assertNonBlank(runId, "runId");
+    return this.jsonRequest<IsolatedRunStatus>(
+      "GET",
+      `/v1/isolated/session/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}`,
+    );
+  }
+
+  async _getRunLogs(
+    sessionId: string,
+    runId: string,
+    cursor = 0,
+  ): Promise<IsolatedRunLogs> {
+    assertNonBlank(sessionId, "sessionId");
+    assertNonBlank(runId, "runId");
+    if (cursor < 0) {
+      throw new Error("cursor cannot be negative");
+    }
+
+    const pathname = `/v1/isolated/session/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/logs`;
+    const url = new URL(joinUrl(this.opts.baseUrl, pathname));
+    if (cursor > 0) {
+      url.searchParams.set("cursor", String(cursor));
+    }
+    const res = await this.fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        accept: "text/plain",
+        ...(this.opts.headers ?? {}),
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`GET ${pathname} failed: ${res.status} ${text}`);
+    }
+
+    const text = await res.text();
+    const headerValue = res.headers.get(TAIL_CURSOR_HEADER);
+    const parsedHeader = headerValue != null ? Number(headerValue) : NaN;
+    const nextCursor =
+      Number.isInteger(parsedHeader) && parsedHeader >= 0
+        ? parsedHeader
+        : cursor + utf8ByteLength(text);
+    return { text, cursor: nextCursor };
   }
 
   async capabilities(): Promise<IsolatedCapabilities> {

@@ -45,6 +45,8 @@ import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.Metrics
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
 import com.alibaba.opensandbox.sandbox.infrastructure.factory.AdapterFactory
+import com.alibaba.opensandbox.sandbox.internal.LifecycleMetricsReporter
+import com.alibaba.opensandbox.sandbox.internal.isCausedByInterruption
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.OffsetDateTime
@@ -269,28 +271,47 @@ class Sandbox internal constructor(
                 }
 
                 return sandbox
-            } catch (e: Exception) {
-                if (initResult is InitializationResult.NewSandbox && sandboxService != null) {
+            } catch (failure: Throwable) {
+                // InterruptedException clears the thread flag when thrown. Keep cleanup RPCs
+                // usable by restoring the flag only after remote/local resources are released.
+                val restoreInterrupt = Thread.interrupted() || failure.isCausedByInterruption()
+                try {
+                    if (initResult is InitializationResult.NewSandbox && sandboxService != null) {
+                        try {
+                            logger.warn(
+                                "Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {}",
+                                initResult.id,
+                            )
+                            sandboxService.killSandbox(initResult.id)
+                        } catch (cleanupFailure: Throwable) {
+                            logger.error(
+                                "Failed to clean up sandbox {} after creation failure",
+                                initResult.id,
+                                cleanupFailure,
+                            )
+                            failure.addSuppressed(cleanupFailure)
+                        }
+                    }
+
                     try {
-                        logger.warn(
-                            "Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {}",
-                            initResult.id,
-                        )
-                        sandboxService.killSandbox(initResult.id)
-                    } catch (cleanupEx: Exception) {
-                        logger.error("Failed to clean up sandbox {} after creation failure", initResult.id, cleanupEx)
-                        e.addSuppressed(cleanupEx)
+                        httpClientProvider.close()
+                    } catch (cleanupFailure: Throwable) {
+                        failure.addSuppressed(cleanupFailure)
+                    }
+                } finally {
+                    if (restoreInterrupt) {
+                        Thread.currentThread().interrupt()
                     }
                 }
 
-                httpClientProvider.close()
-                when (e) {
-                    is SandboxException -> throw e
+                when (failure) {
+                    is Error -> throw failure
+                    is SandboxException -> throw failure
                     else -> {
-                        logger.error("Unexpected exception during {}", operationName, e)
+                        logger.error("Unexpected exception during {}", operationName, failure)
                         throw SandboxInternalException(
-                            message = "Failed to $operationName: ${e.message}",
-                            cause = e,
+                            message = "Failed to $operationName: ${failure.message}",
+                            cause = failure,
                         )
                     }
                 }
@@ -340,33 +361,62 @@ class Sandbox internal constructor(
             resourceRequests: Map<String, String>? = null,
         ): Sandbox {
             val timeoutLabel = if (timeout != null) "${timeout.seconds}s" else "manual-cleanup"
-            return initializeSandbox(
-                operationName = "create sandbox with startup source ${imageSpec?.image ?: snapshotId} (timeout: $timeoutLabel)",
-                connectionConfig = connectionConfig,
-                healthCheck = healthCheck,
-                timeout = readyTimeout,
-                healthCheckPollingInterval = healthCheckPollingInterval,
-                skipHealthCheck = skipHealthCheck,
-            ) { sandboxService ->
-                val response =
-                    sandboxService.createSandbox(
-                        spec = imageSpec,
-                        entrypoint = entrypoint,
-                        env = env,
-                        metadata = metadata,
-                        timeout = timeout,
-                        resource = resource,
-                        networkPolicy = networkPolicy,
-                        credentialProxy = credentialProxy,
-                        extensions = extensions,
-                        volumes = volumes,
-                        platform = platform,
-                        secureAccess = secureAccess,
-                        snapshotId = snapshotId,
-                        resourceRequests = resourceRequests,
-                    )
-                InitializationResult.NewSandbox(response.id)
+            val startupSource = imageSpec?.image ?: snapshotId
+            val started = System.nanoTime()
+            var createdSandboxId: String? = null
+            try {
+                val sandbox =
+                    initializeSandbox(
+                        operationName = "create sandbox with startup source $startupSource (timeout: $timeoutLabel)",
+                        connectionConfig = connectionConfig,
+                        healthCheck = healthCheck,
+                        timeout = readyTimeout,
+                        healthCheckPollingInterval = healthCheckPollingInterval,
+                        skipHealthCheck = skipHealthCheck,
+                    ) { sandboxService ->
+                        val response =
+                            sandboxService.createSandbox(
+                                spec = imageSpec,
+                                entrypoint = entrypoint,
+                                env = env,
+                                metadata = metadata,
+                                timeout = timeout,
+                                resource = resource,
+                                networkPolicy = networkPolicy,
+                                credentialProxy = credentialProxy,
+                                extensions = extensions,
+                                volumes = volumes,
+                                platform = platform,
+                                secureAccess = secureAccess,
+                                snapshotId = snapshotId,
+                                resourceRequests = resourceRequests,
+                            )
+                        createdSandboxId = response.id
+                        InitializationResult.NewSandbox(response.id)
+                    }
+                LifecycleMetricsReporter.reportSandboxCreate(
+                    connectionConfig = connectionConfig,
+                    sandboxId = sandbox.id,
+                    image = startupSource,
+                    createDurationMs = elapsedMillis(started),
+                    success = true,
+                )
+                return sandbox
+            } catch (e: Throwable) {
+                LifecycleMetricsReporter.reportSandboxCreate(
+                    connectionConfig = connectionConfig,
+                    sandboxId = createdSandboxId,
+                    image = startupSource,
+                    createDurationMs = elapsedMillis(started),
+                    success = false,
+                )
+                throw e
             }
+        }
+
+        private fun elapsedMillis(startNanos: Long): Long {
+            val elapsed = (System.nanoTime() - startNanos) / 1_000_000L
+            return if (elapsed < 0L) 0L else elapsed
         }
 
         /**
@@ -636,6 +686,10 @@ class Sandbox internal constructor(
                 try {
                     isHealthy()
                 } catch (e: Exception) {
+                    if (Thread.currentThread().isInterrupted || e.isCausedByInterruption()) {
+                        Thread.currentThread().interrupt()
+                        throw e
+                    }
                     lastException = e
                     logger.debug("Health check attempt #{} failed with exception: {}", attempt, e.message)
                     false

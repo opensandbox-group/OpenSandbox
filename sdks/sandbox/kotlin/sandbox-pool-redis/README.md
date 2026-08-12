@@ -76,10 +76,10 @@ try {
 - `releaseAllIdle()` is best-effort in distributed mode. It drains idle IDs visible during the call,
   but a concurrent primary may put new idle sandboxes unless the shared `maxIdle` target has been
   reduced first.
-- Configure `primaryLockTtl` greater than `warmupReadyTimeout` plus the expected
-  `warmupSandboxPreparer` duration and operational buffer. If warmup takes longer than
-  the primary lock TTL, another node may take leadership while the old leader discards
-  the sandboxes it created.
+- Primary-lock heartbeat is independent from warmup execution and runs at an internal
+  interval no greater than `primaryLockTtl / 3`. A slow warmup therefore does not block
+  lock renewal. Configure the TTL with enough margin for Redis latency, process pauses,
+  and scheduling jitter.
 - Redis outages are surfaced as `PoolStateStoreUnavailableException`; the pool does not silently bypass shared state.
 
 TODO: If production deployments need stronger protection against accidental mixed pool definitions,

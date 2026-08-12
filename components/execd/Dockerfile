@@ -76,6 +76,9 @@ RUN CGO_ENABLED=0 GOOS=windows go build ${GOFLAGS} -trimpath -buildvcs=false \
 # Build static bubblewrap with musl.
 FROM alpine:latest AS bwrap-builder
 RUN apk add --no-cache git musl-dev meson ninja gcc libcap-dev libcap-static pkgconfig bash
+COPY components/execd/native/session-gate.c /build/session-gate.c
+RUN gcc -Os -static -s -Wall -Wextra -Werror \
+    -o /build/opensandbox-session-gate /build/session-gate.c
 RUN git clone --depth 1 --branch v0.11.2 \
     https://github.com/containers/bubblewrap /build/bwrap
 WORKDIR /build/bwrap
@@ -93,6 +96,8 @@ RUN rm /usr/lib/libcap.so /usr/lib/libcap.so.2 && \
 FROM alpine:latest
 
 COPY --from=bwrap-builder /build/bwrap/bwrap /usr/local/bin/bwrap
+COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/opensandbox-session-gate /usr/local/libexec/opensandbox-session-gate
+COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/opensandbox-session-gate /opt/opensandbox/opensandbox-session-gate
 COPY --from=builder /build/execd .
 COPY --from=builder /build/execd.exe ./execd.exe
 COPY --from=builder /build/opensandbox-supervisor ./opensandbox-supervisor

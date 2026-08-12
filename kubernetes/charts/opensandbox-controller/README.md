@@ -73,6 +73,9 @@ kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 | `controller.resources.requests.cpu` | CPU resource requests | `10m` |
 | `controller.resources.requests.memory` | Memory resource requests | `64Mi` |
 | `controller.logLevel` | Can be one of 'debug', 'info', 'error' | `info` |
+| `controller.metrics.enabled` | Expose the controller-runtime `/metrics` endpoint (sets `--metrics-bind-address`) | `false` |
+| `controller.metrics.port` | Port for the metrics endpoint | `8080` |
+| `controller.metrics.secure` | Serve metrics over HTTPS with authn/authz (`--metrics-secure`); set `false` for plain HTTP scraping | `false` |
 | `controller.kubeClient.qps` | QPS for Kubernetes client rate limiter | `100` |
 | `controller.kubeClient.burst` | Burst for Kubernetes client rate limiter | `200` |
 | `controller.snapshot.imageCommitterImage` | Image used by snapshot commit Jobs | `image-committer:dev` |

@@ -108,7 +108,7 @@ RUN apt-get update \
 RUN useradd -r -u 10042 -d /var/lib/mitmproxy -s /usr/sbin/nologin mitmproxy \
     && mkdir -p /var/lib/mitmproxy/.mitmproxy \
     && chown -R mitmproxy:mitmproxy /var/lib/mitmproxy \
-    && pip3 install --no-cache-dir --break-system-packages 'mitmproxy>=10,<11' \
+    && pip3 install --no-cache-dir --break-system-packages 'mitmproxy==11.0.2' \
     && (command -v mitmdump && mitmdump --version) \
     && mkdir -p /var/egress/mitmscripts
 

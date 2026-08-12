@@ -310,6 +310,43 @@ class SandboxTest {
     }
 
     @Test
+    fun `checkReady should propagate wrapped interruption and restore interrupt status`() {
+        val interrupted = InterruptedException("acquire cancelled")
+        val wrapped = RuntimeException("health check interrupted", interrupted)
+        val sandboxWithInterruptingHealthCheck =
+            Sandbox(
+                id = sandboxId,
+                sandboxService = sandboxService,
+                fileSystemService = fileSystemService,
+                commandService = commandService,
+                healthService = healthService,
+                metricsService = metricsService,
+                egressService = egressService,
+                credentialVaultService = credentialVaultService,
+                isolatedService = mockk(),
+                customHealthCheck = { throw wrapped },
+                httpClientProvider = httpClientProvider,
+                diagnosticsService = diagnosticsService,
+            )
+
+        Thread.interrupted()
+        try {
+            val actual =
+                assertThrows(RuntimeException::class.java) {
+                    sandboxWithInterruptingHealthCheck.checkReady(
+                        Duration.ofSeconds(1),
+                        Duration.ofMillis(10),
+                    )
+                }
+
+            assertSame(wrapped, actual)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+    }
+
+    @Test
     fun `checkReady should throw exception when timeout`() {
         every { healthService.ping(sandboxId) } returns false
 

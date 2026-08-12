@@ -24,6 +24,7 @@ from opensandbox_server.services.constants import (
     EGRESS_RULES_ENV,
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
@@ -62,7 +63,7 @@ class TestEgressSidecarViaApply:
 
     def test_builds_container_with_basic_config(self):
         """Test that container is built with correct basic configuration."""
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[
@@ -79,7 +80,7 @@ class TestEgressSidecarViaApply:
 
     def test_contains_egress_rules_environment_variable(self):
         """Test that container includes OPENSANDBOX_EGRESS_RULES environment variable."""
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[NetworkRule(action="allow", target="example.com")],
@@ -95,7 +96,7 @@ class TestEgressSidecarViaApply:
 
     def test_always_mounts_runtime_volume(self):
         container = _egress_container(
-            "opensandbox/egress:v1.1.4",
+            "opensandbox/egress:v1.1.5",
             NetworkPolicy(default_action="deny", egress=[]),
         )
         assert container["volumeMounts"] == [
@@ -106,7 +107,7 @@ class TestEgressSidecarViaApply:
         ]
 
     def test_contains_transparent_mitm_env_when_credential_proxy_enabled(self):
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[NetworkRule(action="allow", target="example.com")],
@@ -128,7 +129,7 @@ class TestEgressSidecarViaApply:
         ]
 
     def test_contains_egress_token_when_provided(self):
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[NetworkRule(action="allow", target="example.com")],
@@ -148,7 +149,7 @@ class TestEgressSidecarViaApply:
         ]
 
     def test_egress_mode_dns_nft(self):
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[NetworkRule(action="allow", target="example.com")],
@@ -165,7 +166,7 @@ class TestEgressSidecarViaApply:
 
     def test_serializes_network_policy_correctly(self):
         """Test that network policy is correctly serialized to JSON."""
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[
@@ -190,7 +191,7 @@ class TestEgressSidecarViaApply:
 
     def test_handles_empty_egress_rules(self):
         """Test that empty egress rules are handled correctly."""
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="allow",
             egress=[],
@@ -206,7 +207,7 @@ class TestEgressSidecarViaApply:
 
     def test_handles_missing_default_action(self):
         """Test that missing default_action is handled (exclude_none=True)."""
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             egress=[NetworkRule(action="allow", target="example.com")],
         )
@@ -221,7 +222,7 @@ class TestEgressSidecarViaApply:
 
     def test_security_context_adds_net_admin_not_privileged(self):
         """Egress sidecar uses NET_ADMIN only (IPv6 is disabled in execd init when egress is on)."""
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[],
@@ -235,14 +236,14 @@ class TestEgressSidecarViaApply:
 
     def test_no_command_uses_image_entrypoint(self):
         container = _egress_container(
-            "opensandbox/egress:v1.1.4",
+            "opensandbox/egress:v1.1.5",
             NetworkPolicy(default_action="deny", egress=[]),
         )
         assert "command" not in container
 
     def test_container_spec_is_valid_kubernetes_format(self):
         """Test that returned container spec is in valid Kubernetes format."""
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[NetworkRule(action="allow", target="example.com")],
@@ -270,7 +271,7 @@ class TestEgressSidecarViaApply:
 
     def test_handles_wildcard_domains(self):
         """Test that wildcard domains in egress rules are handled correctly."""
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
         network_policy = NetworkPolicy(
             default_action="deny",
             egress=[
@@ -312,7 +313,7 @@ class TestApplyEgressToSpec:
             default_action="deny",
             egress=[NetworkRule(action="allow", target="example.com")],
         )
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
 
         apply_egress_to_spec(
             containers,
@@ -331,7 +332,7 @@ class TestApplyEgressToSpec:
             default_action="deny",
             egress=[NetworkRule(action="allow", target="example.com")],
         )
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
 
         apply_egress_to_spec(
             containers,
@@ -356,7 +357,7 @@ class TestApplyEgressToSpec:
             default_action="deny",
             egress=[NetworkRule(action="allow", target="example.com")],
         )
-        egress_image = "opensandbox/egress:v1.1.4"
+        egress_image = "opensandbox/egress:v1.1.5"
 
         apply_egress_to_spec(
             containers,
@@ -378,7 +379,7 @@ class TestApplyEgressToSpec:
         apply_egress_to_spec(
             containers,
             None,
-            "opensandbox/egress:v1.1.4",
+            "opensandbox/egress:v1.1.5",
         )
 
         assert len(containers) == 0
@@ -413,7 +414,7 @@ class TestApplyEgressToSpec:
         apply_egress_to_spec(
             containers,
             network_policy,
-            "opensandbox/egress:v1.1.4",
+            "opensandbox/egress:v1.1.5",
             extra_env=extra,
         )
 
@@ -431,7 +432,7 @@ class TestApplyEgressToSpec:
         apply_egress_to_spec(
             containers,
             network_policy,
-            "opensandbox/egress:v1.1.4",
+            "opensandbox/egress:v1.1.5",
             extra_env={"OPENSANDBOX_EGRESS_LOG_LEVEL": None},
         )
 
@@ -448,7 +449,7 @@ class TestApplyEgressToSpec:
         apply_egress_to_spec(
             containers,
             network_policy,
-            "opensandbox/egress:v1.1.4",
+            "opensandbox/egress:v1.1.5",
             credential_proxy_enabled=True,
             extra_env={"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "false"},
         )
@@ -470,12 +471,47 @@ class TestApplyEgressToSpec:
         apply_egress_to_spec(
             containers,
             network_policy,
-            "opensandbox/egress:v1.1.4",
+            "opensandbox/egress:v1.1.5",
             extra_env={},
         )
 
         env_names = {e["name"] for e in containers[0]["env"]}
         assert env_names == {EGRESS_RULES_ENV, EGRESS_MODE_ENV}
+
+    def test_sandbox_id_injected_as_env(self):
+        """sandbox_id is injected as OPENSANDBOX_EGRESS_SANDBOX_ID."""
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            network_policy,
+            "opensandbox/egress:v1.1.4",
+            sandbox_id="sbx-abc123",
+        )
+
+        env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
+        assert env_by_name[OPENSANDBOX_EGRESS_SANDBOX_ID] == "sbx-abc123"
+
+    def test_sandbox_id_omitted_when_not_provided(self):
+        """When sandbox_id is None/empty, OPENSANDBOX_EGRESS_SANDBOX_ID is not set."""
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            network_policy,
+            "opensandbox/egress:v1.1.4",
+        )
+
+        env_names = {e["name"] for e in containers[0]["env"]}
+        assert OPENSANDBOX_EGRESS_SANDBOX_ID not in env_names
 
 
 class TestPrepExecdInitForEgress:
@@ -538,11 +574,22 @@ class TestSplitEgressEnv:
         with pytest.raises(ValueError, match="not allowed"):
             split_egress_env({"OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT": "1.1.1.1"})
 
+    def test_rejects_disallowed_sandbox_id(self):
+        """OPENSANDBOX_EGRESS_SANDBOX_ID is server-injected; users must not set it."""
+        with pytest.raises(ValueError, match="not allowed"):
+            split_egress_env({"OPENSANDBOX_EGRESS_SANDBOX_ID": "spoofed"})
+
     def test_allows_mitmproxy_transparent(self):
         env = {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
         sandbox_env, egress_env = split_egress_env(env)
         assert sandbox_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
         assert egress_env == {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}
+
+    def test_allows_mitmproxy_extra_ports(self):
+        env = {"OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS": "8080,8443"}
+        sandbox_env, egress_env = split_egress_env(env)
+        assert sandbox_env == {}
+        assert egress_env == {"OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS": "8080,8443"}
 
     def test_allows_policy_file(self):
         env = {"OPENSANDBOX_EGRESS_POLICY_FILE": "/var/egress/policy.json"}

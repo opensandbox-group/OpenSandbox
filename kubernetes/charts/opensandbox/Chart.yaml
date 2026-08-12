@@ -45,6 +45,10 @@ dependencies:
   - name: opensandbox-server
     version: "0.1.0"
     repository: "file://../opensandbox-server"
+  - name: opensandbox-node-agent
+    version: "0.1.0"
+    repository: "file://../opensandbox-node-agent"
+    condition: opensandbox-node-agent.enabled
 
 annotations:
   artifacthub.io/category: integration-delivery

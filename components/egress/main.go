@@ -50,6 +50,11 @@ func main() {
 	ctx = withLogger(ctx)
 	defer log.Logger.Sync()
 
+	// Erase any stale mitmproxy CA left on the shared volume by a previous
+	// egress generation so the agent's bootstrap wait-loop blocks for this
+	// generation's export. See PurgeStaleExportedCA / upstream issue #1370.
+	mitmproxy.PurgeStaleExportedCA()
+
 	otelShutdown, err := telemetry.Init(ctx)
 	if err != nil {
 		log.Warnf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)

@@ -18,6 +18,7 @@ package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
+import com.alibaba.opensandbox.sandbox.transport.RetryInterceptor
 import okhttp3.ConnectionPool
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -48,12 +49,14 @@ class HttpClientProvider(
                 .connectionPool(connectionPool)
                 .addInterceptor(UserAgentInterceptor(config.userAgent))
                 .addInterceptor(ExtraHeadersInterceptor(config.headers))
+                .addInterceptor(ClientIpInterceptor { ClientIpDetector.clientIp() })
 
     // 1. Explicit lazy definition to allow checking initialization status
     private val httpClientLazy =
         lazy {
             baseBuilder
                 .applyStandardTimeouts()
+                .addRetryInterceptor()
                 .addLoggingInterceptor()
                 .build()
         }
@@ -65,6 +68,7 @@ class HttpClientProvider(
         lazy {
             baseBuilder
                 .applyStandardTimeouts()
+                .addRetryInterceptor()
                 .addInterceptor(AuthenticationInterceptor(config.getApiKey())) // Add auth before logging
                 .addLoggingInterceptor()
                 .build()
@@ -73,6 +77,10 @@ class HttpClientProvider(
     val authenticatedClient: OkHttpClient by authenticatedClientLazy
 
     // 3. Explicit lazy definition for SSE client
+    //
+    // The SSE client deliberately disables all automatic retries: streaming
+    // command POSTs are not safely replayable and could start a command twice
+    // if the connection fails after the server accepts the request.
     private val sseClientLazy =
         lazy {
             baseBuilder
@@ -80,6 +88,7 @@ class HttpClientProvider(
                 .readTimeout(0, TimeUnit.MILLISECONDS)
                 .writeTimeout(config.requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
                 .callTimeout(0, TimeUnit.MILLISECONDS)
+                .retryOnConnectionFailure(false)
                 .addInterceptor(ExtraHeadersInterceptor(getSseHeaders()))
                 .addLoggingInterceptor()
                 .build()
@@ -88,6 +97,22 @@ class HttpClientProvider(
     val sseClient: OkHttpClient by sseClientLazy
 
     // --- Helper Extensions ---
+
+    /**
+     * Installs [RetryInterceptor] and disables OkHttp's built-in connection
+     * recovery, so the SDK is the single owner of retry behaviour (matching
+     * the Python transport wrapper single-owner model).
+     *
+     * When the policy does not require the interceptor (wrapsTransport() is
+     * false), this is a no-op — the caller relies on OkHttp defaults.
+     */
+    private fun OkHttpClient.Builder.addRetryInterceptor(): OkHttpClient.Builder {
+        if (config.retryPolicy.wrapsTransport()) {
+            retryOnConnectionFailure(false)
+            addInterceptor(RetryInterceptor(config.retryPolicy))
+        }
+        return this
+    }
 
     private fun OkHttpClient.Builder.applyStandardTimeouts(): OkHttpClient.Builder {
         val timeout = config.requestTimeout.toMillis()
@@ -138,6 +163,28 @@ class HttpClientProvider(
             return chain.proceed(
                 chain.request().newBuilder()
                     .header("OPEN-SANDBOX-API-KEY", apiKey)
+                    .build(),
+            )
+        }
+    }
+
+    // Best-effort: attach the SDK host's own IP so the server can see the
+    // client's self-reported address. Runs after ExtraHeadersInterceptor so a
+    // user-supplied value (matched case-insensitively by OkHttp) is preserved,
+    // and is skipped silently when the IP cannot be determined.
+    private class ClientIpInterceptor(private val ipSupplier: () -> String) : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            if (request.header(ClientIpDetector.CLIENT_IP_HEADER) != null) {
+                return chain.proceed(request)
+            }
+            val ip = ipSupplier()
+            if (ip.isEmpty()) {
+                return chain.proceed(request)
+            }
+            return chain.proceed(
+                request.newBuilder()
+                    .header(ClientIpDetector.CLIENT_IP_HEADER, ip)
                     .build(),
             )
         }

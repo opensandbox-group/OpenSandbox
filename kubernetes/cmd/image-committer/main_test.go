@@ -19,6 +19,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,12 +93,15 @@ func TestGetContainerIDByNerdctlReturnsRunningContainer(t *testing.T) {
 		return []byte("container-running\n"), nil
 	}
 
-	containerID, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	container, err := getContainerByNerdctl("pod-1", "default", "sandbox")
 	if err != nil {
 		t.Fatalf("expected running container lookup to succeed, got %v", err)
 	}
-	if containerID != "container-running" {
-		t.Fatalf("unexpected container ID %q", containerID)
+	if container.ID != "container-running" {
+		t.Fatalf("unexpected container ID %q", container.ID)
+	}
+	if !container.Running {
+		t.Fatal("expected container to be reported as running")
 	}
 }
 
@@ -122,12 +126,15 @@ func TestGetContainerIDByNerdctlFallsBackToStoppedContainers(t *testing.T) {
 		}
 	}
 
-	containerID, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	container, err := getContainerByNerdctl("pod-1", "default", "sandbox")
 	if err != nil {
 		t.Fatalf("expected stopped container fallback to succeed, got %v", err)
 	}
-	if containerID != "container-stopped" {
-		t.Fatalf("unexpected container ID %q", containerID)
+	if container.ID != "container-stopped" {
+		t.Fatalf("unexpected container ID %q", container.ID)
+	}
+	if container.Running {
+		t.Fatal("expected stopped container to be reported as stopped")
 	}
 	if len(calls) != 2 {
 		t.Fatalf("expected two nerdctl lookups, got %d", len(calls))
@@ -164,6 +171,51 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func TestSyncRunningContainerFilesystemsSyncsEveryRunningContainerAndSkipsStopped(t *testing.T) {
+	original := commandCombinedOutput
+	t.Cleanup(func() { commandCombinedOutput = original })
+	t.Setenv("CONTAINERD_SOCKET", "/test/containerd.sock")
+	t.Setenv("CONTAINERD_NAMESPACE", "test-ns")
+
+	var calls [][]string
+	commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		if name != "nerdctl" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		calls = append(calls, append([]string(nil), args...))
+		if contains(args, "container-main") {
+			return []byte("guest sync failed"), errors.New("exit status 1")
+		}
+		return nil, nil
+	}
+
+	err := syncRunningContainerFilesystems(
+		[]ContainerSpec{{Name: "main"}, {Name: "sidecar"}, {Name: "stopped"}},
+		map[string]discoveredContainer{
+			"main":    {ID: "container-main", Running: true},
+			"sidecar": {ID: "container-sidecar", Running: true},
+			"stopped": {ID: "container-stopped"},
+		},
+	)
+
+	if err == nil {
+		t.Fatal("expected a running container sync failure to be reported")
+	}
+	if !strings.Contains(err.Error(), `container "main"`) || !strings.Contains(err.Error(), "guest sync failed") {
+		t.Fatalf("expected contextual sync failure, got %q", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected every running container and no stopped containers to be synced, got %d calls", len(calls))
+	}
+	wantMain := []string{"--address", "/test/containerd.sock", "--namespace", "test-ns", "exec", "container-main", "sync"}
+	wantSidecar := []string{"--address", "/test/containerd.sock", "--namespace", "test-ns", "exec", "container-sidecar", "sync"}
+	for i, want := range [][]string{wantMain, wantSidecar} {
+		if strings.Join(calls[i], "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("unexpected nerdctl call %d: got %v, want %v", i+1, calls[i], want)
+		}
+	}
 }
 
 func TestWriteSnapshotResultWritesTerminationMessage(t *testing.T) {

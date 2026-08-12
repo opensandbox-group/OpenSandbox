@@ -91,6 +91,9 @@ def _timeout_seconds(config: _MetricsConnection) -> float:
 
 
 def _post_sync(config: _MetricsConnection, payload: dict[str, Any]) -> None:
+    # Deliberately does not reuse the SDK's shared transport: closing the
+    # httpx.Client below would also close that shared transport and break
+    # every other adapter on this connection_config.
     url = f"{config.get_base_url().rstrip('/')}/metrics/events"
     with httpx.Client(timeout=_timeout_seconds(config)) as client:
         client.post(url, json=payload, headers=_headers(config))
@@ -110,35 +113,48 @@ def report_sandbox_create_metric(
     create_duration_ms: int,
     success: bool,
 ) -> None:
-    """Fire-and-forget create latency report. Never raises or blocks callers."""
+    """Fire-and-forget create latency report. Never raises or blocks callers.
+
+    This function is also called from Sandbox.create's failure path; if this
+    reporter were to raise (e.g. payload construction fails, or the thread /
+    event-loop scheduling primitives fail), the telemetry exception would
+    replace the original create failure. Guard the whole body — including
+    payload construction and task/thread scheduling — with a top-level
+    try/except so every telemetry failure is swallowed.
+    """
     if _metrics_disabled(config):
         return
 
-    payload = _build_payload(
-        sandbox_id=sandbox_id,
-        image=image,
-        create_duration_ms=create_duration_ms,
-        success=success,
-    )
-
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        def _thread_run() -> None:
+        payload = _build_payload(
+            sandbox_id=sandbox_id,
+            image=image,
+            create_duration_ms=create_duration_ms,
+            success=success,
+        )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            def _thread_run() -> None:
+                try:
+                    _post_sync(config, payload)
+                except Exception:
+                    logger.debug("Failed to report sandbox.create metrics", exc_info=True)
+
+            threading.Thread(target=_thread_run, daemon=True).start()
+            return
+
+        async def _run() -> None:
             try:
-                _post_sync(config, payload)
+                await _post_async(config, payload)
             except Exception:
                 logger.debug("Failed to report sandbox.create metrics", exc_info=True)
 
-        threading.Thread(target=_thread_run, daemon=True).start()
-        return
-
-    async def _run() -> None:
-        try:
-            await _post_async(config, payload)
-        except Exception:
-            logger.debug("Failed to report sandbox.create metrics", exc_info=True)
-
-    task = loop.create_task(_run())
-    _pending.add(task)
-    task.add_done_callback(_pending.discard)
+        task = loop.create_task(_run())
+        _pending.add(task)
+        task.add_done_callback(_pending.discard)
+    except Exception:
+        logger.debug(
+            "Failed to schedule sandbox.create metrics report", exc_info=True
+        )

@@ -161,6 +161,65 @@ jobs:
           sudo cp builddir/bwrap /usr/local/bin/bwrap
           bwrap --version
 
+      - name: Build and install native session workload gate
+        working-directory: components/execd
+        run: |
+          install_root="${RUNNER_TEMP}/execd-session-gate-root"
+          make build-session-gate
+          mkdir -p \
+            "${install_root}/usr/local/libexec" \
+            "${install_root}/opt/opensandbox"
+          chmod 0777 \
+            "${install_root}/usr/local/libexec" \
+            "${install_root}/opt/opensandbox"
+          make install-session-gate DESTDIR="${install_root}"
+          test -x bin/opensandbox-session-gate
+          test -x "${install_root}/usr/local/libexec/opensandbox-session-gate"
+          test -x "${install_root}/opt/opensandbox/opensandbox-session-gate"
+          test "$(stat -c '%a' "${install_root}/usr/local/libexec")" = "755"
+          test "$(stat -c '%a' "${install_root}/opt/opensandbox")" = "755"
+          cmp \
+            bin/opensandbox-session-gate \
+            "${install_root}/usr/local/libexec/opensandbox-session-gate"
+          cmp \
+            bin/opensandbox-session-gate \
+            "${install_root}/opt/opensandbox/opensandbox-session-gate"
+          test "$(stat -c '%a' "${install_root}/usr/local/libexec/opensandbox-session-gate")" = "555"
+          test "$(stat -c '%a' "${install_root}/opt/opensandbox/opensandbox-session-gate")" = "555"
+          file bin/opensandbox-session-gate | grep -q 'statically linked'
+
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0777 /opt/opensandbox
+          sudo make install-session-gate
+          test -x /usr/local/bin/bwrap
+          test -x /usr/local/libexec/opensandbox-session-gate
+          test -x /opt/opensandbox/opensandbox-session-gate
+          test "$(stat -c '%U:%G' /usr/local/libexec)" = "root:root"
+          test "$(stat -c '%U:%G' /opt/opensandbox)" = "root:root"
+          test "$(stat -c '%U:%G' /usr/local/libexec/opensandbox-session-gate)" = "root:root"
+          test "$(stat -c '%U:%G' /opt/opensandbox/opensandbox-session-gate)" = "root:root"
+          test "$(stat -c '%a' /usr/local/libexec)" = "755"
+          test "$(stat -c '%a' /opt/opensandbox)" = "755"
+          test "$(stat -c '%a' /usr/local/libexec/opensandbox-session-gate)" = "555"
+          test "$(stat -c '%a' /opt/opensandbox/opensandbox-session-gate)" = "555"
+
+      - name: Run workload lifecycle integration test
+        working-directory: components/execd
+        run: |
+          # Execd must authenticate a non-root workload without CAP_SYS_PTRACE.
+          sudo -E setpriv --bounding-set=-sys_ptrace env "PATH=$PATH" go test \
+            -v -count=1 -timeout=2m \
+            -run '^TestBwrapLifecycleEndToEnd$' \
+            ./pkg/isolation
+
+      - name: Run namespace pin lifecycle integration test
+        working-directory: components/execd
+        run: |
+          # Pinning must not depend on CAP_SYS_PTRACE in either uid mode.
+          sudo -E setpriv --bounding-set=-sys_ptrace env "PATH=$PATH" go test \
+            -tags="linux,bwrap" -v -count=1 -timeout=2m \
+            -run '^TestPrivateSessionPinsNamespacesBeforeMarkReady$' \
+            ./pkg/runtime
+
       - name: Run bwrap integration tests
         working-directory: components/execd
         run: sudo -E env "PATH=$PATH" go test -tags="linux,bwrap" -v -count=1 -timeout=5m ./pkg/runtime/bwrap_test/

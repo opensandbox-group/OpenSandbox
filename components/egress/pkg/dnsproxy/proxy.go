@@ -184,10 +184,11 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	start := time.Now()
-	resp, err := p.forward(r)
+	resp, failure, err := p.forward(r)
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
 		telemetry.RecordDNSForward(elapsed)
+		telemetry.RecordDNSQueryFailed(failure)
 		logOutboundDNS(host, nil, "", err.Error())
 		fail := new(dns.Msg)
 		fail.SetRcode(r, dns.RcodeServerFailure)
@@ -230,9 +231,13 @@ func (p *Proxy) maybeNotifyResolved(domain string, resp *dns.Msg) {
 	p.onResolved(domain, ips)
 }
 
-func (p *Proxy) forward(r *dns.Msg) (*dns.Msg, error) {
+// forward returns the response, or the bounded failure reason (a telemetry.DNSFailure*
+// constant) alongside the error. The reason is what the last attempted upstream failed
+// with: the loop keeps trying, so only the final outcome is reported.
+func (p *Proxy) forward(r *dns.Msg) (*dns.Msg, string, error) {
 	list := p.forwardUpstreams()
 	var lastErr error
+	lastFailure := telemetry.DNSFailureNoUpstreams
 	for _, upstream := range list {
 		const upstreamUDPSize = 4096
 		query := r.Copy()
@@ -247,24 +252,27 @@ func (p *Proxy) forward(r *dns.Msg) (*dns.Msg, error) {
 		resp, _, err := c.Exchange(query, upstream)
 		if err != nil {
 			lastErr = err
+			lastFailure = telemetry.DNSFailureUpstreamError
 			log.Warnf("[dns] upstream %s exchange error: %v", upstream, err)
 			continue
 		}
 		if resp == nil {
 			lastErr = fmt.Errorf("nil response from %s", upstream)
+			lastFailure = telemetry.DNSFailureEmptyResponse
 			continue
 		}
 		if tryNext, reason := p.shouldFailoverAfterResponse(resp); tryNext {
 			lastErr = fmt.Errorf("%s from %s", reason, upstream)
+			lastFailure = telemetry.DNSFailureRcode
 			log.Warnf("[dns] upstream %s: %s; trying next", upstream, reason)
 			continue
 		}
-		return resp, nil
+		return resp, "", nil
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, lastFailure, lastErr
 	}
-	return nil, fmt.Errorf("no upstream resolvers configured")
+	return nil, telemetry.DNSFailureNoUpstreams, fmt.Errorf("no upstream resolvers configured")
 }
 
 // shouldFailoverAfterResponse: treat NXDOMAIN and NOERROR as final (no retry). Other rcodes may

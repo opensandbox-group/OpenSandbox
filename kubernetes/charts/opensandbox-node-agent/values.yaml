@@ -1,0 +1,89 @@
+enabled: true
+
+nameOverride: ""
+fullnameOverride: ""
+namespaceOverride: ""
+
+image:
+  repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/nodeagent
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+
+config:
+  clusterID: dev-cluster
+  stateDir: /var/lib/opensandbox/nodeagent
+  stateMaxBytes: 1073741824
+  memoryBudgetBytes: 268435456
+  perSandboxQueueBytes: 16777216
+  perSandboxRateLimit: 0
+  maxLineBytes: 1048576
+  partialTimeout: 5s
+  dropPolicy: block
+  sinkTimeout: 30s
+  retryMaxInterval: 30s
+  endedStateRetention: 24h
+  serverAddr: :8080
+  pprofAddr: ""
+
+sink:
+  type: file
+  file:
+    path: /var/lib/opensandbox/nodeagent-data
+    maxBytes: 1073741824
+    maxFiles: 16
+    maxTotalBytes: 10737418240
+    retention: 24h
+  oss:
+    endpoint: ""
+    bucket: ""
+    keyPrefix: logs
+    existingSecret: ""
+    accessKeyIDKey: access-key-id
+    accessKeySecretKey: access-key-secret
+    sessionTokenKey: session-token
+
+hostPaths:
+  logs: /var/log/pods
+  state: /var/lib/opensandbox/nodeagent
+  fileData: /var/lib/opensandbox/nodeagent-data
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 1
+    memory: 512Mi
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+terminationGracePeriodSeconds: 60
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsUser: 0
+  runAsGroup: 0
+
+extraEnv: []

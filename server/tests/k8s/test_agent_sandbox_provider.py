@@ -657,6 +657,59 @@ spec:
         assert result["state"] == "Pending"
         assert result["reason"] in {"POD_SCHEDULED", "POD_PENDING"}
 
+    def test_get_internal_endpoint_uses_first_valid_status_pod_ip(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client)
+        workload = {"status": {"podIPs": ["10.0.0.9", "fd00::9"]}}
+
+        endpoint = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "10.0.0.9:8080"
+        assert endpoint.headers is None
+        mock_k8s_client.list_pods.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "workload",
+        [
+            {},
+            {"status": {}},
+            {"status": None},
+            {"status": []},
+            {"status": {"podIPs": []}},
+            {"status": {"podIPs": "10.0.0.9"}},
+            {"status": {"podIPs": [None]}},
+            {"status": {"podIPs": [""]}},
+        ],
+    )
+    def test_get_internal_endpoint_returns_none_without_valid_primary_pod_ip(
+        self, mock_k8s_client, workload
+    ):
+        provider = AgentSandboxProvider(mock_k8s_client)
+
+        endpoint = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
+
+        assert endpoint is None
+        mock_k8s_client.list_pods.assert_not_called()
+
+    def test_get_internal_endpoint_skips_invalid_pod_ip_entries(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client)
+        workload = {"status": {"podIPs": [None, "", "10.0.0.10"]}}
+
+        endpoint = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "10.0.0.10:8080"
+        assert endpoint.headers is None
+        mock_k8s_client.list_pods.assert_not_called()
+
+    def test_get_internal_endpoint_brackets_ipv6_pod_ip(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client)
+        workload = {"status": {"podIPs": ["fd00::9"]}}
+
+        endpoint = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "[fd00::9]:8080"
+        assert endpoint.headers is None
+        mock_k8s_client.list_pods.assert_not_called()
+
     def test_get_endpoint_info_prefers_running_pod(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.return_value = [
@@ -711,6 +764,11 @@ class TestAgentSandboxProviderExecdInit:
         init_containers = body["spec"]["podTemplate"]["spec"]["initContainers"]
         assert len(init_containers) == 1
         assert "resources" not in init_containers[0]
+        init_script = init_containers[0]["args"][0]
+        assert (
+            "cp /usr/local/libexec/opensandbox-session-gate "
+            "/opt/opensandbox/opensandbox-session-gate"
+        ) in init_script
 
     def test_init_container_has_resources_when_configured(self, mock_k8s_client):
         provider = AgentSandboxProvider(
@@ -807,7 +865,7 @@ class TestAgentSandboxProviderEgress:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.4",
+            egress_image="opensandbox/egress:v1.1.5",
             credential_proxy_enabled=True,
         )
 
@@ -821,7 +879,7 @@ class TestAgentSandboxProviderEgress:
         # Find sidecar container
         sidecar = next((c for c in containers if c["name"] == "egress"), None)
         assert sidecar is not None
-        assert sidecar["image"] == "opensandbox/egress:v1.1.4"
+        assert sidecar["image"] == "opensandbox/egress:v1.1.5"
 
         # Verify sidecar has environment variable
         env_vars = {e["name"]: e["value"] for e in sidecar.get("env", [])}
@@ -881,7 +939,7 @@ class TestAgentSandboxProviderEgress:
             expires_at=None,
             execd_image="execd:latest",
             network_policy=NetworkPolicy(default_action="deny", egress=[]),
-            egress_image="opensandbox/egress:v1.1.4",
+            egress_image="opensandbox/egress:v1.1.5",
             annotations={SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY: "egress-token"},
             egress_auth_token="egress-token",
         )
@@ -919,7 +977,7 @@ class TestAgentSandboxProviderEgress:
             expires_at=None,
             execd_image="execd:latest",
             network_policy=NetworkPolicy(default_action="deny", egress=[]),
-            egress_image="opensandbox/egress:v1.1.4",
+            egress_image="opensandbox/egress:v1.1.5",
             egress_mode=EGRESS_MODE_DNS_NFT,
         )
 
@@ -958,7 +1016,7 @@ class TestAgentSandboxProviderEgress:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.4",
+            egress_image="opensandbox/egress:v1.1.5",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -1002,7 +1060,7 @@ class TestAgentSandboxProviderEgress:
             expires_at=None,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.4",
+            egress_image="opensandbox/egress:v1.1.5",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -1037,7 +1095,7 @@ class TestAgentSandboxProviderEgress:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.4",
+            egress_image="opensandbox/egress:v1.1.5",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
@@ -1114,7 +1172,7 @@ class TestAgentSandboxProviderEgress:
             expires_at=expires_at,
             execd_image="execd:latest",
             network_policy=network_policy,
-            egress_image="opensandbox/egress:v1.1.4",
+            egress_image="opensandbox/egress:v1.1.5",
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]

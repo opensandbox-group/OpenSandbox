@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import {DEFAULT_USER_AGENT} from "../core/constants.js";
+import {ensureClientIpReady, withClientIp} from "./clientIp.js";
 
 export type ConnectionProtocol = "http" | "https";
 
@@ -235,16 +236,33 @@ function createTimedFetch(opts: {
         init.signal.addEventListener("abort", onAbort, { once: true } as any);
     }
 
+    // Best-effort: attach the SDK host's own IP so the server can see the
+    // client's self-reported address. Applied per request (never overriding a
+    // caller-supplied value or dropping existing headers) and skipped silently
+    // when the IP is unavailable. Await the one-time detection so even the very
+    // first request carries the header (bounded by the probe timeout).
+    await ensureClientIpReady();
+    const withIp = withClientIp(input, init);
+    const reqInput = withIp.input;
     const mergedInit: RequestInit = {
-      ...init,
+      ...(withIp.init ?? {}),
       signal: ac.signal,
     };
 
     if (debug) {
-      const mergedHeaders = {
-        ...defaultHeaders,
-        ...((init?.headers ?? {}) as any),
-      };
+      // Log the headers actually being sent: prefer the merged headers produced
+      // by withClientIp (which include the client-IP header), falling back to
+      // the request input's headers when it is a Request object.
+      const outgoing = new Headers(
+        withIp.init?.headers ??
+          (typeof Request !== "undefined" && reqInput instanceof Request
+            ? reqInput.headers
+            : undefined)
+      );
+      const mergedHeaders: Record<string, string> = { ...defaultHeaders };
+      outgoing.forEach((value, key) => {
+        mergedHeaders[key] = value;
+      });
       // eslint-disable-next-line no-console
       console.log(
         `[opensandbox:${label}] ->`,
@@ -255,7 +273,7 @@ function createTimedFetch(opts: {
     }
 
     try {
-      const res = await baseFetch(input, mergedInit);
+      const res = await baseFetch(reqInput, mergedInit);
       if (debug) {
         // eslint-disable-next-line no-console
         console.log(`[opensandbox:${label}] <-`, method, url, res.status);

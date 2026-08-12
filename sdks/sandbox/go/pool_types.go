@@ -66,12 +66,23 @@ func (s PoolHealthState) String() string {
 	}
 }
 
-// AcquirePolicy determines behavior when the pool is empty.
+// AcquirePolicy determines behavior on idle-empty / stale-idle during Acquire.
+//
+//   - AcquirePolicyDirectCreate / AcquirePolicyFailFast: try at most one idle candidate; on
+//     failure DirectCreate falls through to lifecycle-create, FailFast returns an error.
+//   - AcquirePolicyRetryNextIdle / AcquirePolicyRetryNextIdleThenCreate: try up to
+//     PoolConfig.MaxAcquireRetries idle candidates, skipping stale/unhealthy ones. On
+//     exhaustion, ThenCreate falls through to lifecycle-create; the retry-only variant returns
+//     PoolAcquireFailedError.
 type AcquirePolicy int
 
+// The iota order MUST stay append-only; existing zero-value defaults rely on
+// AcquirePolicyDirectCreate == 0.
 const (
 	AcquirePolicyDirectCreate AcquirePolicy = iota
 	AcquirePolicyFailFast
+	AcquirePolicyRetryNextIdle
+	AcquirePolicyRetryNextIdleThenCreate
 )
 
 func (p AcquirePolicy) String() string {
@@ -80,6 +91,10 @@ func (p AcquirePolicy) String() string {
 		return "DIRECT_CREATE"
 	case AcquirePolicyFailFast:
 		return "FAIL_FAST"
+	case AcquirePolicyRetryNextIdle:
+		return "RETRY_NEXT_IDLE"
+	case AcquirePolicyRetryNextIdleThenCreate:
+		return "RETRY_NEXT_IDLE_THEN_CREATE"
 	default:
 		return "UNKNOWN"
 	}
@@ -222,6 +237,15 @@ type PoolConfig struct {
 	IdleTimeout            time.Duration
 	DrainTimeout           time.Duration
 	Logger                 PoolLogger
+
+	// MaxAcquireRetries caps how many idle candidates a single Acquire may attempt when the
+	// effective policy is AcquirePolicyRetryNextIdle or AcquirePolicyRetryNextIdleThenCreate.
+	// Counts total attempts, not additional retries: 1 disables retry (same behavior as
+	// FailFast / DirectCreate), 3 (default) tries up to three idles before giving up or
+	// falling through. Ignored under FailFast / DirectCreate, which always try at most one
+	// idle. Must be >= 1. Increasing this trades acquire latency (each failed candidate pays
+	// up to AcquireReadyTimeout) for a higher chance of returning a warm sandbox.
+	MaxAcquireRetries int
 }
 
 // AcquireOptions configures a single Acquire call.

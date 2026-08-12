@@ -39,6 +39,7 @@ from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcherSync,
 )
+from opensandbox.transport import unwrap_retry_transport
 
 from code_interpreter.models.code_sync import CodeContextSync, SupportedLanguageSync
 from code_interpreter.sync.services.code import CodesSync
@@ -118,12 +119,15 @@ class CodesAdapterSync(CodesSync):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
+        # SSE bootstraps bypass the retry wrapper: request bodies are
+        # not replayable and a non-idempotent status opt-in would cause
+        # duplicate execution on a resent SSE POST.
         self._sse_client = httpx.Client(
             headers=sse_headers,
             timeout=httpx.Timeout(
                 connect=timeout_seconds, read=None, write=timeout_seconds, pool=None
             ),
-            transport=self.connection_config.transport,
+            transport=unwrap_retry_transport(self.connection_config.transport),
         )
 
     def _get_execd_url(self, path: str) -> str:

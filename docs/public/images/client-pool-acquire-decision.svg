@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="920" viewBox="0 0 1400 920" role="img" aria-labelledby="title desc">
+  <title id="title">Acquire Decision Flow</title>
+  <desc id="desc">Decision flow of pool.acquire. Pop one idle sandbox ID from the store; if the remaining TTL is too small, discard and treat as empty; otherwise connect, run optional health check, renew to the caller-supplied timeout, and return. On empty buffer or candidate failure, FAIL_FAST raises and DIRECT_CREATE falls back to creating a new sandbox via the lifecycle API.</desc>
+  <defs>
+    <marker id="a3-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1e3a5f"/>
+    </marker>
+    <marker id="a3-arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b91c1c"/>
+    </marker>
+    <marker id="a3-arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 26px; font-weight: 700; fill: #1e40af; }
+      .subtitle { font-size: 13px; fill: #475569; }
+      .step-title { font-size: 13px; font-weight: 700; fill: #0f172a; }
+      .step-body { font-size: 11px; fill: #334155; }
+      .decision-text { font-size: 13px; font-weight: 700; fill: #92400e; }
+      .edge-label { font-size: 11px; fill: #475569; font-weight: 600; }
+      .success-label { font-size: 13px; font-weight: 700; fill: #047857; }
+      .fail-label { font-size: 13px; font-weight: 700; fill: #b91c1c; }
+      .caption { font-size: 12px; fill: #475569; font-style: italic; }
+    </style>
+  </defs>
+
+  <text x="700" y="36" class="title" text-anchor="middle">Acquire Decision: FAIL_FAST vs DIRECT_CREATE</text>
+  <text x="700" y="58" class="subtitle" text-anchor="middle">Execution flow of pool.acquire(sandbox_timeout, policy)</text>
+
+  <!-- Start -->
+  <ellipse cx="700" cy="100" rx="150" ry="26" fill="#eff6ff" stroke="#1e3a5f" stroke-width="2"/>
+  <text x="700" y="105" class="step-title" text-anchor="middle">pool.acquire(timeout, policy)</text>
+
+  <!-- Step: pop from store (decision) -->
+  <polygon points="700,160 900,215 700,270 500,215" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="700" y="205" class="decision-text" text-anchor="middle">pop one idle ID</text>
+  <text x="700" y="225" class="decision-text" text-anchor="middle">from the store</text>
+  <text x="700" y="245" class="step-body" text-anchor="middle">buffer empty?</text>
+
+  <!-- edge Start -> pop -->
+  <path d="M 700 126 L 700 158" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#a3-arrow)"/>
+
+  <!-- Decision: TTL check -->
+  <polygon points="700,320 940,375 700,430 460,375" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="700" y="365" class="decision-text" text-anchor="middle">remaining TTL ≥</text>
+  <text x="700" y="385" class="decision-text" text-anchor="middle">acquire_min_remaining_ttl?</text>
+
+  <!-- edge pop -> TTL (got id) -->
+  <path d="M 700 270 L 700 318" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a3-arrow-green)"/>
+  <text x="770" y="298" class="edge-label">got id</text>
+
+  <!-- Discard branch (TTL too small) -->
+  <rect x="1000" y="330" width="290" height="90" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.5" rx="6"/>
+  <text x="1145" y="358" class="step-title" text-anchor="middle">discard + best-effort kill</text>
+  <text x="1145" y="378" class="step-body" text-anchor="middle">avoid returning a soon-to-expire</text>
+  <text x="1145" y="396" class="step-body" text-anchor="middle">sandbox; fall through to policy</text>
+
+  <path d="M 940 375 L 998 375" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a3-arrow-red)"/>
+  <text x="965" y="365" class="edge-label" fill="#b91c1c">no</text>
+
+  <!-- Connect + health -->
+  <rect x="530" y="470" width="340" height="130" fill="#ffffff" stroke="#1e3a5f" stroke-width="2" rx="6"/>
+  <text x="700" y="500" class="step-title" text-anchor="middle">Sandbox.connect(id)</text>
+  <text x="700" y="525" class="step-body" text-anchor="middle">acquire_health_check (skippable)</text>
+  <text x="700" y="545" class="step-body" text-anchor="middle">poll within acquire_ready_timeout</text>
+  <text x="700" y="575" class="step-body" text-anchor="middle" font-weight="700">renew(sandbox_timeout)</text>
+
+  <!-- edge TTL -> Connect (yes) -->
+  <path d="M 700 430 L 700 468" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a3-arrow-green)"/>
+  <text x="720" y="452" class="edge-label" fill="#047857">yes</text>
+
+  <!-- Success -->
+  <ellipse cx="700" cy="660" rx="200" ry="30" fill="#ecfdf5" stroke="#047857" stroke-width="2.5"/>
+  <text x="700" y="666" class="success-label" text-anchor="middle">✓ return Sandbox to caller</text>
+
+  <path d="M 700 600 L 700 628" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a3-arrow-green)"/>
+
+  <!-- Fail branch: candidate failed -->
+  <text x="475" y="530" class="fail-label" text-anchor="end">connect fails /</text>
+  <text x="475" y="548" class="fail-label" text-anchor="end">health check times out</text>
+  <path d="M 530 535 Q 260 535 260 375" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a3-arrow-red)"/>
+
+  <!-- Empty branch: policy decision -->
+  <polygon points="200,215 400,275 200,335 60,275" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="200" y="270" class="decision-text" text-anchor="middle">policy?</text>
+  <text x="200" y="290" class="step-body" text-anchor="middle">(buffer empty or candidate failed)</text>
+
+  <!-- edge pop -> policy (empty) -->
+  <path d="M 500 215 L 402 250" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a3-arrow-red)"/>
+  <text x="450" y="220" class="edge-label" fill="#b91c1c">empty</text>
+
+  <!-- edge discard -> policy -->
+  <path d="M 1145 420 Q 1145 720 300 720 Q 200 720 200 336" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a3-arrow-red)" stroke-dasharray="6,4"/>
+  <text x="700" y="740" class="edge-label" fill="#b91c1c" text-anchor="middle">back to policy decision after discard</text>
+
+  <!-- FAIL_FAST branch -->
+  <rect x="40" y="400" width="320" height="120" fill="#fee2e2" stroke="#b91c1c" stroke-width="2" rx="6"/>
+  <text x="200" y="428" class="step-title" text-anchor="middle" fill="#b91c1c">FAIL_FAST</text>
+  <text x="200" y="454" class="step-body" text-anchor="middle">raise PoolEmptyException /</text>
+  <text x="200" y="472" class="step-body" text-anchor="middle">PoolAcquireFailedException</text>
+  <text x="200" y="500" class="step-body" text-anchor="middle" font-style="italic">← caller decides retry / fallback</text>
+
+  <path d="M 160 335 L 160 398" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a3-arrow-red)"/>
+  <text x="120" y="370" class="edge-label" fill="#b91c1c" text-anchor="middle">FAIL_FAST</text>
+
+  <!-- DIRECT_CREATE branch -->
+  <rect x="40" y="560" width="320" height="180" fill="#ecfdf5" stroke="#047857" stroke-width="2" rx="6"/>
+  <text x="200" y="588" class="step-title" text-anchor="middle" fill="#047857">DIRECT_CREATE (default)</text>
+  <text x="200" y="614" class="step-body" text-anchor="middle">create a new sandbox via</text>
+  <text x="200" y="634" class="step-body" text-anchor="middle">create(creation_spec)</text>
+  <text x="200" y="654" class="step-body" text-anchor="middle">→ wait for ready</text>
+  <text x="200" y="674" class="step-body" text-anchor="middle">→ renew(sandbox_timeout)</text>
+  <text x="200" y="702" class="step-body" text-anchor="middle" font-style="italic">← does not count toward max_idle</text>
+
+  <path d="M 240 335 L 240 558" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a3-arrow-green)"/>
+  <text x="280" y="450" class="edge-label" fill="#047857" text-anchor="middle">DIRECT_CREATE</text>
+
+  <!-- Direct create -> Success -->
+  <path d="M 360 660 L 500 660" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#a3-arrow-green)"/>
+
+  <!-- footer -->
+  <text x="700" y="810" class="caption" text-anchor="middle">Each acquire tries one idle candidate. A failed candidate still pays up to acquire_ready_timeout.</text>
+  <text x="700" y="832" class="caption" text-anchor="middle">DIRECT_CREATE fallback does not consume max_idle; max_idle only bounds the warm buffer size.</text>
+</svg>

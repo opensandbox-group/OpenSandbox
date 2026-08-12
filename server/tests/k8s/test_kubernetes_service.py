@@ -96,7 +96,7 @@ class TestKubernetesSandboxServiceCreate:
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
         create_sandbox_request.credential_proxy = CredentialProxyConfig(enabled=True)
         k8s_service.app_config.egress = EgressConfig(
-            image="opensandbox/egress:v1.1.4", mode=EGRESS_MODE_DNS
+            image="opensandbox/egress:v1.1.5", mode=EGRESS_MODE_DNS
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -323,7 +323,7 @@ class TestKubernetesSandboxServiceCreate:
         self, k8s_service, create_sandbox_request
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
-        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.1.4")
+        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.1.5")
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-id", "uid": "uid-1"
         }
@@ -397,7 +397,7 @@ class TestKubernetesSandboxServiceCreate:
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
         k8s_service.app_config.egress = EgressConfig(
-            image="opensandbox/egress:v1.1.4",
+            image="opensandbox/egress:v1.1.5",
             mode=EGRESS_MODE_DNS_NFT,
         )
         k8s_service.workload_provider.create_workload.return_value = {
@@ -544,13 +544,11 @@ class TestKubernetesSandboxServiceCreate:
     def test_get_endpoint_resolve_internal_uses_pod_ip_even_in_gateway_mode(
         self, k8s_service
     ):
-        k8s_service.workload_provider.get_workload.return_value = {
-            "metadata": {
-                "annotations": {
-                    "sandbox.opensandbox.io/endpoints": '["10.0.0.1"]',
-                }
-            }
-        }
+        workload = {"metadata": {"annotations": {}}}
+        k8s_service.workload_provider.get_workload.return_value = workload
+        k8s_service.workload_provider.get_internal_endpoint.return_value = Endpoint(
+            endpoint="10.0.0.1:44772"
+        )
         k8s_service.workload_provider.get_endpoint_info.return_value = Endpoint(
             endpoint="gateway.example.com",
             headers={"OpenSandbox-Ingress-To": "sbx-123-44772"},
@@ -560,7 +558,10 @@ class TestKubernetesSandboxServiceCreate:
 
         assert endpoint.endpoint == "10.0.0.1:44772"
         assert endpoint.headers is None
-
+        k8s_service.workload_provider.get_internal_endpoint.assert_called_once_with(
+            workload, 44772, "sbx-123"
+        )
+        k8s_service.workload_provider.get_endpoint_info.assert_not_called()
 
     def test_get_endpoint_keeps_instance_egress_auth_header_private_for_workload_ports(
         self, k8s_service
@@ -1369,6 +1370,26 @@ class TestEnsurePvcVolumes:
         assert exc_info.value.status_code == 500
         k8s_service.k8s_client.create_pvc.assert_not_called()
 
+    def test_pvc_create_server_error_returns_internal_error(self, k8s_service):
+        """Unexpected PVC create errors must stay structured HTTP failures."""
+        from kubernetes.client import ApiException
+
+        k8s_service.k8s_client.get_pvc.return_value = None
+        k8s_service.k8s_client.create_pvc.side_effect = ApiException(
+            status=500, reason="Internal Server Error"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            k8s_service._ensure_pvc_volumes(
+                [self._make_volume("data-claim")], sandbox_id="sandbox-xyz"
+            )
+
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.detail == {
+            "code": SandboxErrorCodes.INTERNAL_ERROR,
+            "message": "Failed to auto-create PVC 'data-claim': Internal Server Error",
+        }
+
     def test_create_race_409_fails_closed_when_winner_pvc_already_gone(
         self, k8s_service
     ):
@@ -1542,6 +1563,68 @@ class TestCreateSandboxPvcFailureCleanup:
         )
 
     @pytest.mark.asyncio
+    async def test_shared_pvc_mixed_read_only_mounts_are_allowed(
+        self, k8s_service, mock_workload
+    ):
+        from opensandbox_server.api.schema import (
+            CreateSandboxRequest,
+            ImageSpec,
+            PVC,
+            ResourceLimits,
+            Volume,
+        )
+
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash", "-c", "sleep 3600"],
+            timeout=3600,
+            resourceLimits=ResourceLimits(root={"cpu": "1", "memory": "1Gi"}),
+            volumes=[
+                Volume(
+                    name="shared-skills",
+                    mountPath="/data/skills",
+                    subPath="common/skills",
+                    readOnly=True,
+                    pvc=PVC(
+                        claimName="auto-data",
+                        createIfNotExists=True,
+                        deleteOnSandboxTermination=True,
+                    ),
+                ),
+                Volume(
+                    name="shared-user",
+                    mountPath="/data/user",
+                    subPath="user1",
+                    readOnly=False,
+                    pvc=PVC(
+                        claimName="auto-data",
+                        createIfNotExists=True,
+                        deleteOnSandboxTermination=True,
+                    ),
+                ),
+            ],
+        )
+        k8s_service.k8s_client.get_pvc.return_value = None
+        k8s_service.k8s_client.create_pvc.return_value = None
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-id",
+            "uid": "abc",
+        }
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with patch.object(k8s_service, "_wait_for_sandbox_ready", return_value=mock_workload):
+            response = await k8s_service.create_sandbox(request)
+
+        assert response.id is not None
+        k8s_service.k8s_client.create_pvc.assert_called_once()
+        k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_pool_ref_with_volumes_rejected_before_pvc_creation(
         self, k8s_service
     ):
@@ -1582,56 +1665,6 @@ class TestCreateSandboxPvcFailureCleanup:
 
         assert exc_info.value.status_code == 400
         # No PVC was created, no workload was attempted, no cleanup needed.
-        k8s_service.k8s_client.create_pvc.assert_not_called()
-        k8s_service.workload_provider.create_workload.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_shared_pvc_mixed_read_only_rejected_before_pvc_creation(
-        self, k8s_service
-    ):
-        from opensandbox_server.api.schema import (
-            CreateSandboxRequest,
-            ImageSpec,
-            PVC,
-            ResourceLimits,
-            Volume,
-        )
-
-        request = CreateSandboxRequest(
-            image=ImageSpec(uri="python:3.11"),
-            entrypoint=["/bin/bash", "-c", "sleep 3600"],
-            timeout=3600,
-            resourceLimits=ResourceLimits(root={"cpu": "1", "memory": "1Gi"}),
-            volumes=[
-                Volume(
-                    name="shared-rw",
-                    mountPath="/data/rw",
-                    readOnly=False,
-                    pvc=PVC(
-                        claimName="auto-data",
-                        createIfNotExists=True,
-                        deleteOnSandboxTermination=True,
-                    ),
-                ),
-                Volume(
-                    name="shared-ro",
-                    mountPath="/data/ro",
-                    readOnly=True,
-                    pvc=PVC(
-                        claimName="auto-data",
-                        createIfNotExists=True,
-                        deleteOnSandboxTermination=True,
-                    ),
-                ),
-            ],
-        )
-
-        with pytest.raises(HTTPException) as exc_info:
-            await k8s_service.create_sandbox(request)
-
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
-        assert "mixed read_only values" in exc_info.value.detail["message"]
         k8s_service.k8s_client.create_pvc.assert_not_called()
         k8s_service.workload_provider.create_workload.assert_not_called()
 

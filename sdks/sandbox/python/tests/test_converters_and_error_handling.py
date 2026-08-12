@@ -104,6 +104,253 @@ def test_handle_api_error_noop_on_success() -> None:
     handle_api_error(Resp(), "Op")
 
 
+def test_handle_api_error_raises_rate_limit_on_429() -> None:
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    class Resp:
+        status_code = 429
+        parsed = None
+        headers = {"X-Request-ID": "req-abc", "Retry-After": "12"}
+
+    with pytest.raises(SandboxRateLimitException) as ei:
+        handle_api_error(Resp(), "Op")
+    assert ei.value.status_code == 429
+    assert ei.value.retry_after == timedelta(seconds=12)
+    assert ei.value.request_id == "req-abc"
+    # 429 is a transient class; is_retryable is machine-checkable.
+    assert ei.value.is_retryable is True
+    # Backward-compatible: still catchable as SandboxApiException.
+    assert isinstance(ei.value, SandboxApiException)
+
+
+def test_handle_api_error_sets_is_retryable_by_status() -> None:
+    from opensandbox.exceptions import SandboxApiException
+
+    # 502/503 are transient -> is_retryable True; 500/4xx -> False.
+    for code, expected in [(502, True), (503, True), (500, False), (404, False)]:
+
+        class Resp:
+            status_code = code
+            parsed = None
+            headers: dict[str, str] = {}
+
+        with pytest.raises(SandboxApiException) as ei:
+            handle_api_error(Resp(), "Op")
+        assert ei.value.is_retryable is expected, f"status {code}"
+
+
+def test_to_sandbox_exception_connection_is_retryable() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import (
+        ExceptionConverter,
+    )
+    from opensandbox.exceptions import SandboxConnectionException
+
+    mapped = ExceptionConverter.to_sandbox_exception(
+        httpx.ConnectError("dns down")
+    )
+    assert isinstance(mapped, SandboxConnectionException)
+    assert mapped.is_retryable is True
+
+
+def test_handle_api_error_rate_limit_without_retry_after_header() -> None:
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    class Resp:
+        status_code = 429
+        parsed = None
+        headers: dict[str, str] = {}
+
+    with pytest.raises(SandboxRateLimitException) as ei:
+        handle_api_error(Resp(), "Op")
+    assert ei.value.retry_after is None
+
+
+def test_handle_api_error_attaches_raw_response_body() -> None:
+    body = b'{"whatever": "server text"}'
+
+    class Resp:
+        status_code = 500
+        parsed = None
+        headers: dict[str, str] = {}
+        content = body
+
+    with pytest.raises(SandboxApiException) as ei:
+        handle_api_error(Resp(), "Op")
+    # Raw body preserved untruncated on the exception.
+    assert ei.value.response_body == body
+    # And spliced into str() so logs surface the server's own message.
+    assert "server text" in str(ei.value)
+
+
+def test_handle_api_error_rate_limit_preserves_raw_body_when_unparsed() -> None:
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    body = b"quota exhausted for tenant foo"
+
+    class Resp:
+        status_code = 429
+        parsed = None
+        headers: dict[str, str] = {"Retry-After": "5"}
+        content = body
+
+    with pytest.raises(SandboxRateLimitException) as ei:
+        handle_api_error(Resp(), "Acquire")
+    assert ei.value.response_body == body
+    assert ei.value.retry_after == timedelta(seconds=5)
+    assert "quota exhausted for tenant foo" in str(ei.value)
+
+
+def test_handle_api_error_truncates_long_raw_body_in_message() -> None:
+    body = b"x" * 2000
+
+    class Resp:
+        status_code = 502
+        parsed = None
+        headers: dict[str, str] = {}
+        content = body
+
+    with pytest.raises(SandboxApiException) as ei:
+        handle_api_error(Resp(), "Op")
+    # Full body still available on the exception field.
+    assert ei.value.response_body == body
+    # str() is truncated with an ellipsis marker.
+    assert "…" in str(ei.value)
+    assert len(str(ei.value)) < 1500
+
+
+def test_handle_api_error_prefers_parsed_message_over_raw_body() -> None:
+    class Parsed:
+        code = "BAD_REQUEST"
+        message = "structured message"
+
+    class Resp:
+        status_code = 400
+        parsed = Parsed()
+        headers: dict[str, str] = {}
+        content = b"{unparsed raw body}"
+
+    with pytest.raises(SandboxApiException) as ei:
+        handle_api_error(Resp(), "Op")
+    # Structured message wins; raw body is not spliced.
+    assert "structured message" in str(ei.value)
+    assert "unparsed raw body" not in str(ei.value)
+    # But the raw body is still attached for callers that want it.
+    assert ei.value.response_body == b"{unparsed raw body}"
+
+
+def test_build_api_exception_from_httpx_maps_429_to_rate_limit() -> None:
+    from opensandbox.adapters.converter.response_handler import (
+        build_api_exception_from_httpx,
+    )
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    class Resp:
+        status_code = 429
+        headers = {"Retry-After": "3", "X-Request-ID": "req-xyz"}
+        content = b'{"code":"QUOTA","message":"too many"}'
+
+    exc = build_api_exception_from_httpx(Resp(), "Isolated create")
+    assert isinstance(exc, SandboxRateLimitException)
+    assert exc.status_code == 429
+    assert exc.retry_after == timedelta(seconds=3)
+    assert exc.request_id == "req-xyz"
+    assert exc.response_body == b'{"code":"QUOTA","message":"too many"}'
+    assert "too many" in str(exc)
+
+
+def test_build_api_exception_from_httpx_500_is_api_exception() -> None:
+    from opensandbox.adapters.converter.response_handler import (
+        build_api_exception_from_httpx,
+    )
+    from opensandbox.exceptions import (
+        SandboxApiException,
+        SandboxRateLimitException,
+    )
+
+    class Resp:
+        status_code = 500
+        headers: dict[str, str] = {}
+        content = b"internal explosion"
+
+    exc = build_api_exception_from_httpx(Resp(), "Isolated attach")
+    assert isinstance(exc, SandboxApiException)
+    assert not isinstance(exc, SandboxRateLimitException)
+    assert exc.response_body == b"internal explosion"
+    assert "internal explosion" in str(exc)
+
+
+def test_exception_converter_maps_read_timeout_to_timeout_exception() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.exceptions import SandboxTimeoutException
+
+    exc = ExceptionConverter.to_sandbox_exception(httpx.ReadTimeout("slow"))
+    assert isinstance(exc, SandboxTimeoutException)
+    assert "slow" in str(exc)
+
+
+def test_exception_converter_maps_connect_error_to_connection_exception() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.exceptions import SandboxConnectionException
+
+    exc = ExceptionConverter.to_sandbox_exception(httpx.ConnectError("boom"))
+    assert isinstance(exc, SandboxConnectionException)
+    assert "boom" in str(exc)
+
+
+def test_exception_converter_maps_connect_timeout_to_connection_exception() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.exceptions import (
+        SandboxConnectionException,
+        SandboxTimeoutException,
+    )
+
+    exc = ExceptionConverter.to_sandbox_exception(httpx.ConnectTimeout("dial"))
+    # ConnectTimeout is dispatched to Connection, not Timeout, because
+    # it happens before any bytes are on the wire.
+    assert isinstance(exc, SandboxConnectionException)
+    assert not isinstance(exc, SandboxTimeoutException)
+
+
+def test_exception_converter_maps_unexpected_status_429_to_rate_limit() -> None:
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.api.execd.errors import UnexpectedStatus
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    exc = ExceptionConverter.to_sandbox_exception(
+        UnexpectedStatus(status_code=429, content=b'{"code":"QUOTA"}')
+    )
+    assert isinstance(exc, SandboxRateLimitException)
+    assert exc.status_code == 429
+    assert exc.response_body == b'{"code":"QUOTA"}'
+
+
+def test_exception_converter_maps_httpx_status_error_429_to_rate_limit() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    response = httpx.Response(
+        status_code=429,
+        headers={"Retry-After": "7", "X-Request-ID": "req-1"},
+        content=b'{"code":"QUOTA"}',
+        request=httpx.Request("GET", "http://x"),
+    )
+    err = httpx.HTTPStatusError("429", request=response.request, response=response)
+    exc = ExceptionConverter.to_sandbox_exception(err)
+    assert isinstance(exc, SandboxRateLimitException)
+    assert exc.retry_after == timedelta(seconds=7)
+    assert exc.request_id == "req-1"
+
+
 def test_require_parsed_includes_request_id_on_invalid_payload() -> None:
     class Resp:
         status_code = 200

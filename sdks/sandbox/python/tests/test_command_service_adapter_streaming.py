@@ -26,6 +26,8 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.sandboxes import SandboxEndpoint
 
+_UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
+
 
 class _SseTransport(httpx.AsyncBaseTransport):
     def __init__(self) -> None:
@@ -44,6 +46,30 @@ class _SseTransport(httpx.AsyncBaseTransport):
                 b"not-json\n\n"
                 b'data: {"type":"result","results":{"text":"ok"},"timestamp":3}\n\n'
                 b'data: {"type":"execution_complete","timestamp":4,"execution_time":5}\n\n'
+            )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=sse,
+                request=request,
+            )
+
+        if (
+            request.url.path == "/command"
+            and payload.get("command") == "unicode separators"
+        ):
+            events = [
+                {"type": "init", "text": "exec-unicode", "timestamp": 1},
+                {"type": "stdout", "text": _UNICODE_SEPARATORS, "timestamp": 2},
+                {
+                    "type": "execution_complete",
+                    "timestamp": 3,
+                    "execution_time": 4,
+                },
+            ]
+            sse = b"".join(
+                f"{json.dumps(event, ensure_ascii=False)}\n\n".encode()
+                for event in events
             )
             return httpx.Response(
                 200,
@@ -110,6 +136,19 @@ async def test_run_command_streaming_happy_path_updates_execution() -> None:
 
     assert transport.last_request is not None
     assert transport.last_request.headers.get("accept") == "text/event-stream"
+
+
+@pytest.mark.asyncio
+async def test_run_command_streaming_preserves_unicode_separators() -> None:
+    cfg = ConnectionConfig(protocol="http", transport=_SseTransport())
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    execution = await adapter.run("unicode separators")
+
+    assert execution.logs.stdout[0].text == _UNICODE_SEPARATORS
+    assert execution.complete is not None
+    assert execution.exit_code == 0
 
 
 @pytest.mark.asyncio

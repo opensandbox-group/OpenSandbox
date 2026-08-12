@@ -18,6 +18,22 @@ cd components/execd
 make build
 ```
 
+On Linux, `make build` uses the native C compiler and static libc to produce
+`bin/opensandbox-session-gate`. The published execd image already installs
+this helper. If you run execd from a source build and need isolated sessions,
+install it at the fixed trusted runtime path first:
+
+```bash
+make build-session-gate
+sudo make install-session-gate
+# /opt/opensandbox/opensandbox-session-gate (mode 0555)
+```
+
+Compilation runs before privilege escalation; the install target only copies
+the built helper. Keep `/opt/opensandbox` and the helper root-owned and not
+group- or world-writable. Other execd APIs still work without it, but
+isolated-session capability probing and creation fail closed.
+
 ### 2) Start Jupyter Server
 
 ```bash
@@ -50,12 +66,52 @@ curl -v http://localhost:44772/ping
   - PTY over WebSocket (`/pty`)
   - Local metrics endpoints (`/metrics`, `/metrics/watch`)
 
+Shell-backed sessions use Bash when it is available and fall back to `sh` on
+minimal images that do not include Bash. This applies to PTY sessions, the
+Bash session API (which keeps its existing name for compatibility), and
+isolated sessions. Commands submitted to a fallback session must use syntax
+supported by that image's `sh` implementation.
+
+## PTY WebSocket access
+
+The first WebSocket attached to `/pty/{session_id}/ws` is the exclusive
+read/write holder. A second read/write connection receives `409 Conflict`
+unless it uses `?takeover=1` to replace that holder.
+
+After the read/write holder has started the shell, any number of read-only
+clients can attach with:
+
+```text
+ws://localhost:44772/pty/{session_id}/ws?mode=viewer&since=0
+```
+
+Viewer connections receive the retained replay followed by live output, but
+they never acquire or evict the read/write holder. The JSON `connected` frame
+sets `role` to `viewer` (holders receive `role: "holder"`) so clients can use
+the appropriate binary-frame decoder. Holders receive `0x01` stdout and, in
+pipe mode, `0x02` stderr frames. Viewers receive `0x03` replay frames for both
+retained and live output: an 8-byte big-endian offset followed by raw bytes.
+
+Binary stdin and JSON `stdin`, `signal`, or `resize` frames are rejected with
+a `READ_ONLY` error; `ping` remains available. The server closes a viewer after
+five rejected mutating frames to bound error traffic from a misbehaving client.
+WebSocket backpressure from a slow or disconnected viewer does not block the
+interactive holder's live output pipe. In pipe mode, viewer output uses the
+combined replay stream because replay does not preserve stdout/stderr channel
+boundaries.
+
+A viewer can attach only while the shell is running. When the shell exits,
+viewers receive the `exit` frame and close. If a holder later starts the same
+session again, its bounded replay buffer is retained, so a viewer reconnecting
+with `since=0` can receive retained output from the preceding shell lifetime.
+
 ## Isolated Sessions
 
-Isolated sessions run a bash process inside a per-execution
+Isolated sessions run a shell inside a per-execution
 [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) namespace,
-created via `POST /v1/isolated/session`. Beyond the workspace, callers can
-expose additional host paths into the namespace.
+created via `POST /v1/isolated/session`. Bash is preferred, with `sh` used as a
+fallback. Beyond the workspace, callers can expose additional host paths into
+the namespace.
 
 ### UID modes and capabilities
 
@@ -79,6 +135,13 @@ binary), while `userns` applies the UID/GID mapping and the setuid-aware
 execd's own is checked against a separate startup identity-switch probe and
 returns `503 NOT_SUPPORTED` before session side effects when that switch is not
 available.
+
+For a private-network Session (`share_net: false`), execd fixes the
+authenticated network namespace and its owning user namespace before the
+native workload gate is released. The two namespace bind mounts use an
+execd-owned, unpredictable directory below `/run/execd/namespaces` and stay
+owned by the Session until synchronous teardown. This applies to both UID
+modes; shared-network Sessions do not create namespace pins.
 
 ### Bind mounts
 

@@ -113,12 +113,20 @@ func NewBwrapWithProbe(cfg Config, probe ProbeResult) Isolator {
 func (b *bwrapImpl) Name() string { return "bwrap" }
 
 func (b *bwrapImpl) Available() bool {
-	return b.probe.Available
+	if !b.probe.Available {
+		return false
+	}
+	gate, err := openSessionGate()
+	if err != nil {
+		return false
+	}
+	_ = gate.Close()
+	return true
 }
 
 func (b *bwrapImpl) Capabilities() Capabilities {
 	return Capabilities{
-		Available:              b.probe.Available,
+		Available:              b.Available(),
 		Isolator:               b.probe.Isolator,
 		Version:                b.probe.Version,
 		SetprivAvailable:       b.probe.SetprivAvailable,
@@ -143,28 +151,152 @@ func (b *bwrapImpl) Wrap(cmd *exec.Cmd, opts WrapOptions) error {
 		return fmt.Errorf("bwrap: binary not found")
 	}
 
-	// Wire up seccomp BPF via memfd, if available.
-	var seccompFd string
-	if len(seccompBPF) > 0 {
-		fd, err := createMemfdWithData(seccompBPF)
-		if err != nil {
-			return fmt.Errorf("bwrap: seccomp memfd: %w", err)
-		}
-		// ExtraFiles are assigned fds starting at 3 in the child process.
-		seccompFd = strconv.Itoa(3 + len(cmd.ExtraFiles))
-		cmd.ExtraFiles = append(cmd.ExtraFiles, os.NewFile(uintptr(fd), "seccomp"))
+	firstAddedFile := len(cmd.ExtraFiles)
+	seccompFd, err := appendSeccompFile(cmd)
+	if err != nil {
+		return err
 	}
 
 	argv, err := buildArgv(opts, seccompFd)
 	if err != nil {
-		for _, f := range cmd.ExtraFiles {
-			f.Close()
-		}
+		closeExtraFilesFrom(cmd, firstAddedFile)
 		return fmt.Errorf("bwrap: %w", err)
 	}
 
 	wrapWithArgv(cmd, bwrapPath, argv)
 	return nil
+}
+
+// WrapWithLifecycle installs the native fail-closed workload gate and exposes
+// bubblewrap's host-visible child/network identity. The returned lifecycle
+// must be aborted and closed if cmd.Start is not called. Once cmd.Start
+// returns, the caller must close the parent copies in cmd.ExtraFiles.
+func (b *bwrapImpl) WrapWithLifecycle(
+	cmd *exec.Cmd,
+	opts WrapOptions,
+) (WorkloadLifecycle, error) {
+	if bwrapPath == "" {
+		bwrapPath = findBwrap()
+	}
+	if bwrapPath == "" {
+		return nil, fmt.Errorf("bwrap: binary not found")
+	}
+	if err := validateWrapOptions(opts); err != nil {
+		return nil, fmt.Errorf("bwrap: %w", err)
+	}
+
+	firstAddedFile := len(cmd.ExtraFiles)
+	cleanupExtraFiles := true
+	defer func() {
+		if cleanupExtraFiles {
+			closeExtraFilesFrom(cmd, firstAddedFile)
+		}
+	}()
+
+	seccompFD, err := appendSeccompFile(cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	gateFile, err := openSessionGate()
+	if err != nil {
+		return nil, fmt.Errorf("bwrap: %w", err)
+	}
+	gateExecFD := appendExtraFile(cmd, gateFile)
+
+	statusReader, statusWriter, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("bwrap: create status pipe: %w", err)
+	}
+	parentFiles := []*os.File{statusReader}
+	defer func() {
+		if cleanupExtraFiles {
+			for _, file := range parentFiles {
+				_ = file.Close()
+			}
+		}
+	}()
+	statusFD := appendExtraFile(cmd, statusWriter)
+
+	setupReader, setupWriter, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("bwrap: create setup gate: %w", err)
+	}
+	parentFiles = append(parentFiles, setupWriter)
+	setupFD := appendExtraFile(cmd, setupReader)
+
+	controlParent, controlChild, controlSocketInode, err := newGateSocketpair()
+	if err != nil {
+		return nil, fmt.Errorf("bwrap: %w", err)
+	}
+	closeControlParent := true
+	defer func() {
+		if closeControlParent {
+			_ = controlParent.Close()
+		}
+	}()
+	controlFD := appendExtraFile(cmd, controlChild)
+	controlChildFD, err := strconv.Atoi(controlFD)
+	if err != nil {
+		return nil, fmt.Errorf("bwrap: parse native workload gate descriptor: %w", err)
+	}
+
+	argv, err := buildArgvWithLifecycle(
+		opts,
+		seccompFD,
+		&bwrapLifecycleArgv{
+			gateExecFD: gateExecFD,
+			controlFD:  controlFD,
+			blockFD:    setupFD,
+			statusFD:   statusFD,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("bwrap: %w", err)
+	}
+	wrapWithArgv(cmd, bwrapPath, argv)
+
+	lifecycle := newBwrapLifecycle(
+		statusReader,
+		setupWriter,
+		controlParent,
+		controlChildFD,
+		controlSocketInode,
+		!opts.ShareNet,
+	)
+	cleanupExtraFiles = false
+	closeControlParent = false
+	return lifecycle, nil
+}
+
+func appendSeccompFile(cmd *exec.Cmd) (string, error) {
+	if len(seccompBPF) == 0 {
+		return "", nil
+	}
+	fd, err := createMemfdWithData(seccompBPF)
+	if err != nil {
+		return "", fmt.Errorf("bwrap: seccomp memfd: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), "seccomp")
+	if file == nil {
+		_ = unix.Close(fd)
+		return "", fmt.Errorf("bwrap: seccomp memfd: invalid descriptor")
+	}
+	return appendExtraFile(cmd, file), nil
+}
+
+func appendExtraFile(cmd *exec.Cmd, file *os.File) string {
+	// ExtraFiles are assigned descriptors starting at 3 in the child.
+	childFD := strconv.Itoa(3 + len(cmd.ExtraFiles))
+	cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+	return childFD
+}
+
+func closeExtraFilesFrom(cmd *exec.Cmd, first int) {
+	for _, file := range cmd.ExtraFiles[first:] {
+		_ = file.Close()
+	}
+	cmd.ExtraFiles = cmd.ExtraFiles[:first]
 }
 
 // createMemfdWithData creates an anonymous memfd, writes data to it, and
@@ -189,3 +321,4 @@ func createMemfdWithData(data []byte) (int, error) {
 
 // Ensure bwrapImpl satisfies Isolator.
 var _ Isolator = (*bwrapImpl)(nil)
+var _ LifecycleIsolator = (*bwrapImpl)(nil)

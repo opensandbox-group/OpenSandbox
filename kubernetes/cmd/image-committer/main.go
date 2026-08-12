@@ -17,6 +17,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 var commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
@@ -57,6 +59,11 @@ func nerdctlBaseArgs() []string {
 type ContainerSpec struct {
 	Name string
 	URI  string
+}
+
+type discoveredContainer struct {
+	ID      string
+	Running bool
 }
 
 type snapshotResult struct {
@@ -148,24 +155,32 @@ func main() {
 
 	// Step 1: Find container IDs via nerdctl (direct containerd API, no CRI dependency)
 	fmt.Println("\n=== Step 1: Find container IDs via nerdctl ===")
-	containerMap := make(map[string]string) // Maps container name to container ID
+	containers := make(map[string]discoveredContainer) // Maps container name to runtime metadata
 	for _, spec := range containerSpecs {
-		containerID, err := getContainerIDByNerdctl(podName, namespace, spec.Name)
+		container, err := getContainerByNerdctl(podName, namespace, spec.Name)
 		if err != nil {
 			resumeAllPausedContainers()
 			fmt.Fprintf(os.Stderr, "ERROR: Failed to find container '%s': %v\n", spec.Name, err)
 			os.Exit(1)
 		}
 
-		fmt.Printf("Container '%s' -> ID: %s\n", spec.Name, containerID)
-		containerMap[spec.Name] = containerID
+		fmt.Printf("Container '%s' -> ID: %s (running: %t)\n", spec.Name, container.ID, container.Running)
+		containers[spec.Name] = container
 	}
 
-	// Step 2: Pause all containers
-	fmt.Println("\n=== Step 2: Pause all containers ===")
+	// Step 2: Flush each running container's filesystem from inside its runtime.
+	// This is required for VM-isolated runtimes such as Kata, where host-side
+	// sync does not flush the guest kernel's page cache.
+	fmt.Println("\n=== Step 2: Sync all running containers (best effort) ===")
+	if err := syncRunningContainerFilesystems(containerSpecs, containers); err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: Filesystem sync failed; continuing snapshot as best effort. Recent guest filesystem writes may be missing: %v\n", err)
+	}
+
+	// Step 3: Pause all containers
+	fmt.Println("\n=== Step 3: Pause all containers ===")
 	pauseErrors := 0
 	for _, spec := range containerSpecs {
-		containerID := containerMap[spec.Name]
+		containerID := containers[spec.Name].ID
 		if err := pauseContainer(containerID); err != nil {
 			// On pause failure, we still try to continue since commit might work anyway (as in shell script)
 			fmt.Fprintf(os.Stderr, "WARNING: Could not pause '%s'. Will attempt commit anyway (container may be stopped).\n", spec.Name)
@@ -176,12 +191,12 @@ func main() {
 		}
 	}
 
-	// Step 3: Commit all containers
-	fmt.Println("\n=== Step 3: Commit all containers ===")
+	// Step 4: Commit all containers
+	fmt.Println("\n=== Step 4: Commit all containers ===")
 	committedImages := make(map[string]string) // Maps container name to committed image URI
 	commitErrors := 0
 	for _, spec := range containerSpecs {
-		containerID := containerMap[spec.Name]
+		containerID := containers[spec.Name].ID
 		if err := commitContainer(containerID, spec.URI); err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: Failed to commit container '%s': %v\n", spec.Name, err)
 			commitErrors++
@@ -191,8 +206,8 @@ func main() {
 		}
 	}
 
-	// Step 4: Resume all paused containers (regardless of commit success/failure)
-	fmt.Println("\n=== Step 4: Resume all paused containers ===")
+	// Step 5: Resume all paused containers (regardless of commit success/failure)
+	fmt.Println("\n=== Step 5: Resume all paused containers ===")
 	resumeAllPausedContainers()
 
 	// If there were commit errors, exit with failure after cleanup
@@ -201,8 +216,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Step 5: Push all committed images
-	fmt.Println("\n=== Step 5: Push all images ===")
+	// Step 6: Push all committed images
+	fmt.Println("\n=== Step 6: Push all images ===")
 	pushErrors := 0
 	for _, spec := range containerSpecs {
 		if _, ok := committedImages[spec.Name]; ok {
@@ -220,8 +235,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Step 6: Extract digests and output results
-	fmt.Println("\n=== Step 6: Extract digests ===")
+	// Step 7: Extract digests and output results
+	fmt.Println("\n=== Step 7: Extract digests ===")
 	digests := make(map[string]string) // Maps container name to digest
 	firstDigest := ""
 
@@ -335,23 +350,31 @@ func parseContainerSpec(specStr string) (ContainerSpec, error) {
 //   - io.kubernetes.pod.namespace
 //   - io.kubernetes.container.name
 func getContainerIDByNerdctl(podName, podNamespace, containerName string) (string, error) {
+	container, err := getContainerByNerdctl(podName, podNamespace, containerName)
+	return container.ID, err
+}
+
+// getContainerByNerdctl returns the matching container metadata. Stopped
+// containers remain discoverable for commit, but cannot be synchronized with
+// nerdctl exec.
+func getContainerByNerdctl(podName, podNamespace, containerName string) (discoveredContainer, error) {
 	containerID, err := lookupContainerIDByNerdctl(podName, podNamespace, containerName, false)
 	if err != nil {
-		return "", err
+		return discoveredContainer{}, err
 	}
 	if containerID != "" {
-		return containerID, nil
+		return discoveredContainer{ID: containerID, Running: true}, nil
 	}
 
 	containerID, err = lookupContainerIDByNerdctl(podName, podNamespace, containerName, true)
 	if err != nil {
-		return "", err
+		return discoveredContainer{}, err
 	}
 	if containerID != "" {
-		return containerID, nil
+		return discoveredContainer{ID: containerID}, nil
 	}
 
-	return "", fmt.Errorf(
+	return discoveredContainer{}, fmt.Errorf(
 		"container '%s' not found in pod %s/%s (nerdctl ps and nerdctl ps -a returned empty)",
 		containerName,
 		podNamespace,
@@ -395,6 +418,46 @@ func lookupContainerIDByNerdctl(podName, podNamespace, containerName string, inc
 	// nerdctl ps -q may return multiple lines; take the first (most recently started)
 	lines := strings.Split(containerID, "\n")
 	return strings.TrimSpace(lines[0]), nil
+}
+
+// syncRunningContainerFilesystems attempts to sync every running container,
+// collecting failures so one broken container does not prevent the others from
+// being flushed. Stopped containers cannot be targeted by nerdctl exec and are
+// left on the existing stopped-container commit path.
+func syncRunningContainerFilesystems(containerSpecs []ContainerSpec, containers map[string]discoveredContainer) error {
+	phaseStarted := time.Now()
+	syncCount := 0
+	var syncErrors []error
+	for _, spec := range containerSpecs {
+		container := containers[spec.Name]
+		if !container.Running {
+			fmt.Printf("Skipping filesystem sync for stopped container '%s'.\n", spec.Name)
+			continue
+		}
+		syncCount++
+		if err := syncContainerFilesystem(container.ID); err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("container %q: %w", spec.Name, err))
+		}
+	}
+	fmt.Printf("Filesystem sync phase completed for %d running container(s) in %s.\n", syncCount, time.Since(phaseStarted))
+	return errors.Join(syncErrors...)
+}
+
+// syncContainerFilesystem runs sync inside a running container so VM-isolated
+// runtimes flush the guest kernel's filesystem page cache before pause/commit.
+// TODO: Move guest filesystem synchronization to execd and invoke sync(2)
+// directly so snapshots do not depend on a sync binary in the guest image.
+func syncContainerFilesystem(containerID string) error {
+	started := time.Now()
+	fmt.Printf("Syncing filesystem in container %s...\n", containerID)
+	args := append(nerdctlBaseArgs(), "exec", containerID, "sync")
+	output, err := commandCombinedOutput("nerdctl", args...)
+	duration := time.Since(started)
+	if err != nil {
+		return fmt.Errorf("failed to sync container %s after %s: %v, output: %s", containerID, duration, err, strings.TrimSpace(string(output)))
+	}
+	fmt.Printf("Filesystem synced successfully: %s (duration: %s)\n", containerID, duration)
+	return nil
 }
 
 // pauseContainer uses nerdctl to pause a container

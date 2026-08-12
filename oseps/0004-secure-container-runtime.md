@@ -111,7 +111,7 @@ Server Config                              Backend
 
 1. **Infrastructure Dependency**: Secure runtimes must be pre-installed and configured on the host (Docker) or cluster (Kubernetes) before use
 
-2. **Performance Overhead**: Secure runtimes add latency and resource overhead compared to runc:
+2. **Performance Overhead**: Secure runtimes add latency and resource overhead compared to runc. The **Startup Overhead** column is the incremental runtime-initialization latency relative to an equivalent runc sandbox:
 
      | Runtime | Isolation Mechanism | Startup Overhead | Memory Overhead | Best For |
      |---------|---------------------|------------------|-----------------|----------|
@@ -121,7 +121,7 @@ Server Config                              Backend
      | **Kata (Firecracker)** | MicroVM with Firecracker hypervisor | ~125ms | ~5MB | High density, minimal footprint |
      | **Kata (CLH)** | Cloud Hypervisor | ~200ms | ~10-20MB | Balanced performance and isolation |
 
-     Warm start performance (from pre-warmed Pool):
+     Estimated cold and warm start performance:
 
      | Runtime | Cold Start | Warm Start (from Pool) | Memory per Sandbox |
      |---------|-----------|------------------------|-------------------|
@@ -129,6 +129,8 @@ Server Config                              Backend
      | gVisor | ~550ms | ~100ms | ~50MB |
      | Kata (QEMU) | ~1000ms | ~200ms | ~20-50MB |
      | Kata (Firecracker) | ~625ms | ~125ms | ~5MB |
+
+     **Measurement model:** Cold Start is the approximate time from creating a sandbox without a Pool to a ready sandbox. The Cold Start estimates are illustrative totals: the runc cold-start baseline (~500ms) plus the runtime's incremental Startup Overhead. Warm Start is the approximate time to allocate an already-ready sandbox from a pre-warmed Pool; it avoids creating the underlying sandbox. These figures are planning estimates, not an API metric contract or performance guarantee: observed end-to-end latency varies with the host, RuntimeClass, image availability, and readiness checks.
 
      The actual hypervisor is determined by the `RuntimeClass` handler configured by the SRE administrator (e.g., `kata-qemu`, `kata-clh`, `kata-fc`).
 
