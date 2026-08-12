@@ -64,9 +64,9 @@ Some legitimate clients need two credentials for the same destination shape. Two
 | R1 | `CredentialMatch` may contain one to four AND-combined exact request-header predicates. | Must Have |
 | R2 | Header names match case-insensitively. Configured values and request values match case-sensitively after trimming only outer HTTP optional whitespace (SP and HTAB). | Must Have |
 | R3 | Each selected request header must occur exactly once; missing or repeated header fields do not satisfy a predicate. | Must Have |
-| R4 | Selectors permit ordinary end-to-end headers, including `Authorization`, but reject HTTP/2 pseudo-headers and these case-insensitive names: `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Cookie`, `Proxy-Authorization`, `Proxy-Authenticate`, `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`. The egress API contract is the maintained source for this fixed denylist; changes are reviewed public-contract changes. | Must Have |
+| R4 | Selectors permit ordinary end-to-end headers, including `Authorization` and `Content-Type`, but reject HTTP/2 pseudo-headers and these case-insensitive names: `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Cookie`, `Proxy-Authorization`, `Proxy-Authenticate`, `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`. `Cookie` is excluded because clients and intermediaries can combine or reorder cookie fields, making exact raw-header matching unreliable. The egress API contract is the maintained source for this fixed denylist; changes are reviewed public-contract changes. | Must Have |
 | R5 | Bindings whose destination scopes can match a request at the same host precedence are valid only when selectors prove they cannot both match that request. | Must Have |
-| R6 | Public reads return selector header names and `valueConfigured: true`, never selector values. | Must Have |
+| R6 | Public reads return selector header names, never selector values. | Must Have |
 | R7 | `CredentialMatch` keeps `additionalProperties: false`; runtimes reject unknown properties such as `requestHeaders` rather than silently ignoring them. | Must Have |
 | R8 | Selectors are non-secret routing hints, not an authorization boundary; any process in the sandbox can construct a selector that chooses any eligible binding for a destination it can reach. | Must Have |
 
@@ -87,7 +87,7 @@ match:
 
 Existing scheme, host, method, and path checks determine the highest matching host precedence before selectors are evaluated. A binding at that precedence is eligible only when every `requestHeaders` predicate matches the original intercepted request. Credential Proxy injects a credential only when exactly one binding is eligible.
 
-When no binding is eligible at the highest base host precedence, current behavior is preserved: inject no credential and let ordinary egress policy decide whether traffic may continue. Credential Proxy does not fall back to a lower-precedence binding. Multiple eligible bindings retain the current ambiguous-binding denial.
+When no binding is selector-eligible at the highest base host precedence, Credential Proxy denies the request with a `403` selector-mismatch response. It does not fall back to a lower-precedence binding or allow unauthenticated traffic to continue. Multiple eligible bindings retain the current ambiguous-binding denial.
 
 ### Notes/Constraints/Caveats
 
@@ -111,31 +111,48 @@ When no binding is eligible at the highest base host precedence, current behavio
 
 ### Data model and API
 
-Extend the existing `CredentialMatch` schema in place. Both `CredentialBinding.match` and `CredentialBindingMetadata.match` continue to use `CredentialMatch`, preserving the existing public property type in supported SDKs. The selector schema models both directional representations:
+Extend the existing read-facing `CredentialMatch` schema in place. `CredentialBindingMetadata.match` continues to use `CredentialMatch`, preserving the existing public property type in supported SDKs. Create and patch request models use `CredentialMatchInput`, so OpenAPI validates the write shape without changing the stable read-facing type:
 
 ```yaml
 CredentialMatch:
+  type: object
+  # Existing schemes, hosts, methods, and paths remain unchanged.
   properties:
     requestHeaders:
       type: array
       minItems: 1
       maxItems: 4
       items: {$ref: "#/components/schemas/RequestHeaderSelector"}
+  additionalProperties: false
 
 RequestHeaderSelector:
   type: object
   required: [name]
   properties:
     name: {type: string}
+  additionalProperties: false
+
+CredentialMatchInput:
+  type: object
+  # Same schemes, hosts, methods, and paths as CredentialMatch.
+  properties:
+    requestHeaders:
+      type: array
+      minItems: 1
+      maxItems: 4
+      items: {$ref: "#/components/schemas/RequestHeaderSelectorInput"}
+  additionalProperties: false
+
+RequestHeaderSelectorInput:
+  type: object
+  required: [name, value]
+  properties:
+    name: {type: string}
     value: {type: string, writeOnly: true}
-    valueConfigured: {type: boolean, enum: [true], readOnly: true}
-  oneOf:
-    - required: [value]
-    - required: [valueConfigured]
   additionalProperties: false
 ```
 
-The `oneOf` rejects representations that contain neither directional field or both directional fields. It does not choose the correct operation direction. Create and patch handlers require `name` and `value` and reject `valueConfigured`; get and list serializers require `name` and `valueConfigured` and must never emit `value`. Operation-level schema and conformance tests enforce those directional rules.
+`CredentialBindingInput.match` uses `CredentialMatchInput`; get and list serializers use `CredentialMatch` and emit only `name` for each selector. They must never emit `value`. Operation-level schema and conformance tests enforce those directional rules.
 
 `name` must be a non-empty HTTP field-name token as defined by RFC 9110; it is not whitespace-trimmed. On input, the server trims only outer SP and HTAB from `value`, then rejects an empty result and stores the trimmed value as the canonical value used for matching and ambiguity validation. A binding must not repeat a header name after case-insensitive normalization. These rules prevent unsatisfiable or semantically duplicate predicates.
 
@@ -146,7 +163,6 @@ Public binding reads return a sanitized metadata shape:
 ```yaml
 requestHeaders:
   - name: Authorization
-    valueConfigured: true
 ```
 
 The egress sidecar's private active snapshot retains canonical values for matching; public binding metadata never does. Adding `requestHeaders` must not change the type of `CredentialBindingMetadata.match` in any supported SDK.
@@ -162,9 +178,11 @@ Credential Proxy uses this selection order:
    - A selected header must have exactly one received field occurrence before library coalescing. Two field lines do not match; one field line containing a comma remains one occurrence whose entire value is compared.
    - After trimming only outer SP and HTAB, the request value must exactly equal the canonical configured value.
    - Values otherwise receive no case folding, decoding, internal-whitespace normalization, prefix matching, or expression evaluation.
-4. Zero eligible bindings yields no injection. Exactly one is selected. Two or more retain the current ambiguous-binding denial.
+4. Zero eligible bindings yields a `403` selector-mismatch denial. Exactly one is selected. Two or more retain the current ambiguous-binding denial.
 
 Selector count is not a precedence dimension, and a selector miss never falls through to a lower host precedence.
+
+The existing encoded-slash safety check compares selector-eligible bindings, not base matches alone. For both the raw path and its single-decoded form, Credential Proxy applies the same scheme, host, method, path, host-precedence, and request-header-selector rules. It rejects the request only when decoding changes the resulting eligible binding set or selection outcome. A binding introduced only by decoding that fails its selectors does not itself make the path ambiguous.
 
 ### Candidate validation
 
@@ -178,7 +196,7 @@ Do not include configured selector values in serialized metadata, API errors, st
 
 ### SDKs, CLI, and documentation
 
-The egress OpenAPI contract is the source of truth. Supported SDKs add the optional `requestHeaders` property to the existing `CredentialMatch` model and preserve `CredentialBindingMetadata.match` as `CredentialMatch`. SDK and CLI write paths accept `name` and `value`; get, list, and inspect surfaces expose only `name` and `valueConfigured`. They must not fabricate selector values from a read response. CLI and documentation must identify selector values as write-only non-secret inputs and must not render them in normal inspect/list output.
+The egress OpenAPI contract is the source of truth. Supported SDKs add the optional `requestHeaders` property to the existing `CredentialMatch` model and preserve `CredentialBindingMetadata.match` as `CredentialMatch`. SDK and CLI write paths accept `name` and `value`; get, list, and inspect surfaces expose only `name`. They must not fabricate selector values from a read response. CLI and documentation must identify selector values as write-only non-secret inputs and must not render them in normal inspect/list output.
 
 ## Test Plan
 
@@ -189,8 +207,9 @@ The egress OpenAPI contract is the source of truth. Supported SDKs add the optio
 - Verify a selected header with two received field lines does not match, while one comma-containing field is one occurrence whose entire value is compared.
 - Verify distinct values for the same header coexist; generic/selector overlap, identical selectors, and different-header selectors are rejected when base scopes can match at the same host precedence.
 - Verify an exact-host binding and overlapping wildcard-host binding remain valid without selectors and the exact-host binding is selected.
-- Verify an exact-host selector miss yields no injection and does not fall through to an overlapping generic wildcard-host binding.
-- Verify selector representations containing neither `value` nor `valueConfigured`, or both, fail schema validation. Verify create/patch rejects `valueConfigured`, while get/list never exposes `value` and requires `valueConfigured: true`.
+- Verify an exact-host selector miss returns a `403` selector-mismatch denial and does not fall through to an overlapping generic wildcard-host binding.
+- Verify create/patch selector payloads require `name` and `value`, while get/list responses expose only `name` and never expose `value`.
+- Verify encoded-slash safety remains fail-closed when decoding changes the selected binding or makes the request ambiguous. Verify it does not reject a request merely because decoding adds a base-matching binding whose request-header selectors are not satisfied.
 - Verify configured selector values cannot appear in errors, logs, metrics, diagnostics, or test failure output.
 - Across supported SDKs, compile existing selector-free constructors/builders and verify their serialized `CredentialMatch` representation is unchanged. Preserve `CredentialMatch` as the type of `CredentialBindingMetadata.match`.
 - Verify `bindings.replace` replaces the complete binding: omitting `requestHeaders` removes the previous selectors. Verify a mutation that does not name an existing binding leaves it unchanged.
@@ -200,7 +219,7 @@ The egress OpenAPI contract is the source of truth. Supported SDKs add the optio
 
 - Create two bindings for one destination with distinct fake `Authorization` values and verify each request receives only its selected credential.
 - Repeat with multiple predicates and verify every predicate is required.
-- Verify unmatched traffic continues without injection under normal egress policy.
+- Verify a selector mismatch is denied without injection or lower-precedence fallback.
 - Verify an ambiguous candidate revision is rejected without replacing the previous acknowledged revision.
 - Run the same request and sanitized-read assertions through all supported SDKs and CLI surfaces that expose Credential Vault.
 
@@ -229,9 +248,9 @@ These add parsing, privacy, or authorization semantics beyond credential disambi
 
 This preserves current behavior but cannot solve issue #1373's legitimate same-destination credential cases.
 
-### Fork `CredentialMatch` into distinct write/read types
+### Fork the public SDK-facing `CredentialMatch` type
 
-Mirroring `CredentialAuth`/`CredentialAuthMetadata` would give SDKs compile-time enforcement of the write/read shape split. It is rejected because `CredentialBindingMetadata.match` has always been typed as `CredentialMatch`, unlike `auth`, which was split from the start. Forking it now would break existing selector-free consumers across supported SDKs and belongs only in an explicit, versioned breaking migration.
+Mirroring `CredentialAuth`/`CredentialAuthMetadata` would give SDKs compile-time enforcement of the write/read shape split. It is rejected because `CredentialBindingMetadata.match` has always been typed as `CredentialMatch`, unlike `auth`, which was split from the start. Forking that public read-facing type now would break existing selector-free consumers across supported SDKs and belongs only in an explicit, versioned breaking migration. `CredentialMatchInput` is an OpenAPI request shape, not a replacement for that public read-facing type.
 
 ## Infrastructure Needed
 
