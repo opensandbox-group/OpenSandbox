@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -107,7 +108,7 @@ func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus
 	}
 }
 
-func getPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
+func getPodFailureReasonAndMessage(pod *corev1.Pod, readySince *metav1.Time) (string, string, bool) {
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Waiting == nil {
 			continue
@@ -117,7 +118,59 @@ func getPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
 			return cs.State.Waiting.Reason, fmt.Sprintf("Pod %s: %s - %s", pod.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message), true
 		}
 	}
+
+	if readySince == nil {
+		return "", "", false
+	}
+	if len(pod.Spec.Containers) == 0 {
+		return "", "", false
+	}
+	// OpenSandbox treats the first regular container as the stateful sandbox workload;
+	// later containers are supporting sidecars such as egress.
+	mainContainerName := pod.Spec.Containers[0].Name
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == mainContainerName {
+			terminated := cs.State.Terminated
+			if terminated == nil && cs.RestartCount > 0 {
+				terminated = cs.LastTerminationState.Terminated
+			}
+			if terminated == nil || !terminated.FinishedAt.After(readySince.Time) {
+				return "", "", false
+			}
+			reason := terminated.Reason
+			if reason == "" {
+				reason = "ContainerRestarted"
+			}
+			return reason, fmt.Sprintf("Pod %s container %s terminated after the sandbox became ready", pod.Name, cs.Name), true
+		}
+	}
 	return "", "", false
+}
+
+func restartDetectionBaseline(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod, currentReplicas int32, endpointIPs []string) *metav1.Time {
+	status := batchSbx.Status
+	if status.Phase != sandboxv1alpha1.BatchSandboxPhaseSucceed || status.Replicas != currentReplicas {
+		return nil
+	}
+	var previousIPs []string
+	// Reset the baseline when pod membership changes so restart history from a
+	// newly allocated pre-warmed pod is not attributed to this sandbox.
+	if batchSbx.Annotations == nil || json.Unmarshal([]byte(batchSbx.Annotations[AnnotationSandboxEndpoints]), &previousIPs) != nil || !slices.Equal(previousIPs, endpointIPs) {
+		return nil
+	}
+	for i := range status.Conditions {
+		condition := &status.Conditions[i]
+		if condition.Type == sandboxv1alpha1.BatchSandboxConditionReady && condition.Status == sandboxv1alpha1.ConditionTrue &&
+			condition.LastTransitionTime != nil && !condition.LastTransitionTime.IsZero() {
+			for _, pod := range pods {
+				if !pod.CreationTimestamp.IsZero() && pod.CreationTimestamp.After(condition.LastTransitionTime.Time) {
+					return nil
+				}
+			}
+			return condition.LastTransitionTime
+		}
+	}
+	return nil
 }
 
 type podFailureSummary struct {
@@ -127,14 +180,14 @@ type podFailureSummary struct {
 	samplePod     string
 }
 
-func summarizePodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
+func summarizePodFailures(pods []*corev1.Pod, readySince *metav1.Time) (podFailureSummary, bool) {
 	summary := podFailureSummary{observed: len(pods)}
 	reasonCounts := make(map[string]int)
 	firstPodByReason := make(map[string]string)
 	primaryCount := 0
 
 	for _, pod := range pods {
-		reason, _, failed := getPodFailureReasonAndMessage(pod)
+		reason, _, failed := getPodFailureReasonAndMessage(pod, readySince)
 		if !failed {
 			continue
 		}
@@ -187,7 +240,11 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 	case sandboxv1alpha1.BatchSandboxPhaseResuming:
 		applyResumingRuntimePhase(newStatus, pods)
 	default:
-		applySteadyRuntimePhase(batchSbx, newStatus, pods)
+		readySince := restartDetectionBaseline(batchSbx, pods, newStatus.Replicas, ipList)
+		applySteadyRuntimePhase(batchSbx, newStatus, pods, readySince)
+		if readySince == nil && newStatus.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
+			setConditionInStatus(newStatus, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionFalse, "", "")
+		}
 	}
 
 	applyBatchSandboxPhaseConditions(newStatus)
@@ -200,7 +257,7 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 }
 
 func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod) {
-	if summary, hasFailures := summarizePodFailures(pods); hasFailures {
+	if summary, hasFailures := summarizePodFailures(pods, nil); hasFailures {
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
@@ -212,8 +269,8 @@ func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods 
 	}
 }
 
-func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod) {
-	if summary, hasFailures := summarizePodFailures(pods); hasFailures {
+func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod, readySince *metav1.Time) {
+	if summary, hasFailures := summarizePodFailures(pods, readySince); hasFailures {
 		if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseFailed {
 			setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
 			status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed

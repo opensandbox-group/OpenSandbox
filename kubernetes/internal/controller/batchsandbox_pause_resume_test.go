@@ -1807,6 +1807,139 @@ func TestBuildRuntimeView_AggregatesPodFailuresInSteadyState(t *testing.T) {
 	assert.Equal(t, "3/4 observed pods failed; primary reason=ErrImagePull; sample pod=err-image-0", podFailed.Message)
 }
 
+func restartTestSandbox(readyAt metav1.Time, endpoint string) *sandboxv1alpha1.BatchSandbox {
+	return &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationSandboxEndpoints: fmt.Sprintf(`[%q]`, endpoint)}},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:    sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			Replicas: 1,
+			Conditions: []sandboxv1alpha1.BatchSandboxCondition{{
+				Type:               sandboxv1alpha1.BatchSandboxConditionReady,
+				Status:             sandboxv1alpha1.ConditionTrue,
+				Reason:             "PodsReady",
+				Message:            "Sandbox is running",
+				LastTransitionTime: &readyAt,
+			}},
+		},
+	}
+}
+
+func restartTestPod(name, endpoint string, createdAt, restartedAt metav1.Time) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: createdAt},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sandbox"}}},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      endpoint,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "sandbox",
+				RestartCount: 1,
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					Reason:     "OOMKilled",
+					FinishedAt: restartedAt,
+				}},
+			}},
+		},
+	}
+}
+
+func assertRestartHistoryIgnored(t *testing.T, view runtimeView, readyAt metav1.Time, baselineReset bool) {
+	t.Helper()
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, view.status.Phase)
+	for _, condition := range view.status.Conditions {
+		assert.NotEqual(t, sandboxv1alpha1.BatchSandboxConditionPodFailed, condition.Type)
+		if baselineReset && condition.Type == sandboxv1alpha1.BatchSandboxConditionReady {
+			require.NotNil(t, condition.LastTransitionTime)
+			assert.True(t, condition.LastTransitionTime.After(readyAt.Time))
+		}
+	}
+}
+
+func TestBuildRuntimeView_FailsWhenContainerRestartsAfterReady(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	restartedAt := metav1.NewTime(readyAt.Add(30 * time.Second))
+	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.10"), []*corev1.Pod{
+		restartTestPod("oom-restarted", "10.0.0.10", metav1.Time{}, restartedAt),
+	})
+
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+	for _, condition := range view.status.Conditions {
+		if condition.Type == sandboxv1alpha1.BatchSandboxConditionPodFailed {
+			assert.Equal(t, "OOMKilled", condition.Reason)
+			return
+		}
+	}
+	t.Fatal("expected PodFailed condition")
+}
+
+func TestBuildRuntimeView_DetectsRestartAcrossSpecOnlyUpdate(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	restartedAt := metav1.NewTime(readyAt.Add(30 * time.Second))
+	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	bs.Generation = 2
+	bs.Status.ObservedGeneration = 1
+
+	view := buildRuntimeView(bs, []*corev1.Pod{
+		restartTestPod("oom-restarted", "10.0.0.10", metav1.Time{}, restartedAt),
+	})
+
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+}
+
+func TestBuildRuntimeView_FailsWhenMainContainerTerminatesAfterReady(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	terminatedAt := metav1.NewTime(readyAt.Add(30 * time.Second))
+	pod := restartTestPod("oom-terminated", "10.0.0.10", metav1.Time{}, terminatedAt)
+	pod.Status.ContainerStatuses[0].RestartCount = 0
+	pod.Status.ContainerStatuses[0].State.Terminated = pod.Status.ContainerStatuses[0].LastTerminationState.Terminated
+	pod.Status.ContainerStatuses[0].LastTerminationState = corev1.ContainerState{}
+
+	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.10"), []*corev1.Pod{pod})
+
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+}
+
+func TestGetPodFailureReasonAndMessage_IgnoresSidecarRestart(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	pod := restartTestPod("sidecar-restarted", "10.0.0.10", metav1.Time{}, metav1.NewTime(readyAt.Add(30*time.Second)))
+	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "egress"})
+	pod.Status.ContainerStatuses[0].Name = "egress"
+
+	reason, message, failed := getPodFailureReasonAndMessage(pod, &readyAt)
+	assert.False(t, failed)
+	assert.Empty(t, reason)
+	assert.Empty(t, message)
+}
+
+func TestBuildRuntimeView_IgnoresContainerRestartBeforeReady(t *testing.T) {
+	restartedAt := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	readyAt := metav1.NewTime(restartedAt.Add(time.Minute))
+	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.10"), []*corev1.Pod{
+		restartTestPod("prewarmed", "10.0.0.10", metav1.Time{}, restartedAt),
+	})
+	assertRestartHistoryIgnored(t, view, readyAt, false)
+}
+
+func TestBuildRuntimeView_IgnoresRestartHistoryWhenPodMembershipChanges(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	restartedAt := metav1.NewTime(readyAt.Add(time.Minute))
+	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.9"), []*corev1.Pod{
+		restartTestPod("new-prewarmed-pod", "10.0.0.10", metav1.Time{}, restartedAt),
+	})
+	assertRestartHistoryIgnored(t, view, readyAt, true)
+}
+
+func TestBuildRuntimeView_IgnoresRestartHistoryFromNewPodReusingEndpoint(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	createdAt := metav1.NewTime(readyAt.Add(30 * time.Second))
+	restartedAt := metav1.NewTime(createdAt.Add(30 * time.Second))
+	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.10"), []*corev1.Pod{
+		restartTestPod("replacement-pod", "10.0.0.10", createdAt, restartedAt),
+	})
+	assertRestartHistoryIgnored(t, view, readyAt, true)
+}
+
 func TestBuildRuntimeView_AggregatesResumeFailures(t *testing.T) {
 	bs := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1882,9 +2015,14 @@ func TestBuildRuntimeView_PreservesConditionTransitionTimeWhenUnchanged(t *testi
 			Name:       "test-bs",
 			Namespace:  "default",
 			Generation: 3,
+			Annotations: map[string]string{
+				AnnotationSandboxEndpoints: `["10.0.0.10"]`,
+			},
 		},
 		Status: sandboxv1alpha1.BatchSandboxStatus{
-			Phase: sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			ObservedGeneration: 3,
+			Phase:              sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			Replicas:           1,
 			Conditions: []sandboxv1alpha1.BatchSandboxCondition{
 				{
 					Type:               sandboxv1alpha1.BatchSandboxConditionReady,
