@@ -2005,23 +2005,30 @@ func TestBuildRuntimeView_DetectsNewPodRestartAfterEndpointExposure(t *testing.T
 	readyAt := metav1.NewTime(time.Now().Add(-3 * time.Minute))
 	preExposureRestart := metav1.NewTime(readyAt.Add(time.Minute))
 	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	bs.UID = "test-bs-uid"
 	newPod := restartTestPod("new-prewarmed", "10.0.0.11", metav1.Time{}, preExposureRestart)
 
 	firstView := buildRuntimeView(bs, []*corev1.Pod{newPod})
 	assertRestartHistoryIgnored(t, firstView, readyAt)
-	exposedAtNanos, exists := firstView.restartDetectionBaseline[newPod.Name]
+	pending, exists := firstView.restartDetectionBaseline[newPod.Name]
+	require.True(t, exists)
+	assert.Zero(t, pending)
+	setRestartBaselineAnnotation(t, newPod, bs.UID, 0)
+
+	endpointRaw, err := json.Marshal(firstView.endpointIPs)
+	require.NoError(t, err)
+	bs.Annotations[AnnotationSandboxEndpoints] = string(endpointRaw)
+	publishedView := buildRuntimeView(bs, []*corev1.Pod{newPod})
+	exposedAtNanos, exists := publishedView.restartDetectionBaseline[newPod.Name]
 	require.True(t, exists)
 	exposedAt := time.Unix(0, exposedAtNanos)
 	assert.True(t, exposedAt.After(preExposureRestart.Time))
 
-	bs.Status = *firstView.status
-	endpointRaw, err := json.Marshal(firstView.endpointIPs)
-	require.NoError(t, err)
-	bs.Annotations[AnnotationSandboxEndpoints] = string(endpointRaw)
 	setRestartBaselineAnnotation(t, newPod, bs.UID, exposedAtNanos)
 
 	postExposureRestart := metav1.NewTime(exposedAt.Add(time.Second))
 	newPod = restartTestPod("new-prewarmed", "10.0.0.11", metav1.Time{}, postExposureRestart)
+	setRestartBaselineAnnotation(t, newPod, bs.UID, exposedAtNanos)
 	secondView := buildRuntimeView(bs, []*corev1.Pod{newPod})
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, secondView.status.Phase)
 }
@@ -2038,7 +2045,7 @@ func TestBuildRuntimeView_ReassignedPodDoesNotReusePriorSandboxBaseline(t *testi
 	assertRestartHistoryIgnored(t, view, readyAt)
 	desired, exists := view.restartDetectionBaseline[pod.Name]
 	require.True(t, exists)
-	assert.Greater(t, desired, preExposureRestart.UnixNano())
+	assert.Zero(t, desired)
 }
 
 func TestBuildRuntimeView_InitialPodsUseReadyTransitionWithoutPodBaseline(t *testing.T) {
@@ -2152,6 +2159,107 @@ func TestPersistRuntimeView_DoesNotPublishEndpointsWhenPodBaselinePatchFails(t *
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, updated))
 	assert.Equal(t, `["10.0.0.10"]`, updated.Annotations[AnnotationSandboxEndpoints])
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, updated.Status.Phase)
+}
+
+func TestPersistRuntimeView_KeepsPodBaselinePendingWhenEndpointPatchFails(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-3 * time.Minute))
+	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	bs.Name = "test-bs"
+	bs.Namespace = "default"
+	bs.UID = "test-bs-uid"
+	newPod := restartTestPod("new", "10.0.0.11", metav1.Time{}, metav1.NewTime(time.Now().Add(-time.Second)))
+	newPod.UID = "new-uid"
+	setRestartBaselineAnnotation(t, newPod, bs.UID, 0)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testscheme).
+		WithStatusSubresource(&sandboxv1alpha1.BatchSandbox{}).
+		WithObjects(bs.DeepCopy(), newPod.DeepCopy()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, isBatchSandbox := obj.(*sandboxv1alpha1.BatchSandbox); isBatchSandbox {
+					return fmt.Errorf("injected endpoint patch failure")
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+	r := &BatchSandboxReconciler{
+		Client:              fakeClient,
+		Scheme:              testscheme,
+		Recorder:            record.NewFakeRecorder(10),
+		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
+	}
+
+	view := buildRuntimeView(bs.DeepCopy(), []*corev1.Pod{newPod})
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, view.status.Phase)
+	_, errs := r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "injected endpoint patch failure")
+
+	updated := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, updated))
+	assert.Equal(t, `["10.0.0.10"]`, updated.Annotations[AnnotationSandboxEndpoints])
+	persistedPod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: newPod.Namespace, Name: newPod.Name}, persistedPod))
+	pendingRecord, exists := restartBaselineRecordFromPod(persistedPod, bs.UID)
+	require.True(t, exists)
+	assert.Zero(t, pendingRecord.StartedAt)
+}
+
+func TestPersistRuntimeView_IgnoresRestartBeforeEndpointPublication(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-3 * time.Minute))
+	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	bs.Name = "test-bs"
+	bs.Namespace = "default"
+	bs.UID = "test-bs-uid"
+	bs.ResourceVersion = "1"
+	prePublicationRestart := metav1.NewTime(time.Now().Add(-time.Second))
+	newPod := restartTestPod("new", "10.0.0.11", metav1.Time{}, prePublicationRestart)
+	newPod.UID = "new-uid"
+	newPod.Status.ContainerStatuses[0].RestartCount = 0
+	newPod.Status.ContainerStatuses[0].LastTerminationState = corev1.ContainerState{}
+	r := newTestReconciler(bs.DeepCopy(), newPod.DeepCopy())
+
+	// First persist a pending marker without exposing the new endpoint.
+	view := buildRuntimeView(bs.DeepCopy(), []*corev1.Pod{newPod})
+	requeue, errs := r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
+	require.Empty(t, errs)
+	assert.Equal(t, time.Second, requeue)
+	pendingPod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: newPod.Namespace, Name: newPod.Name}, pendingPod))
+	pendingRecord, exists := restartBaselineRecordFromPod(pendingPod, bs.UID)
+	require.True(t, exists)
+	assert.Zero(t, pendingRecord.StartedAt)
+
+	intermediate := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, intermediate))
+	assert.Equal(t, `["10.0.0.10"]`, intermediate.Annotations[AnnotationSandboxEndpoints])
+
+	// A restart observed while pending is ignored. Endpoint publication then
+	// activates the baseline using a timestamp captured after the patch succeeds.
+	restartedPod := restartTestPod("new", "10.0.0.11", metav1.Time{}, prePublicationRestart)
+	pendingPod.Status = restartedPod.Status
+	view = buildRuntimeView(bs.DeepCopy(), []*corev1.Pod{pendingPod})
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, view.status.Phase)
+	requeue, errs = r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
+	require.Empty(t, errs)
+	assert.Equal(t, time.Second, requeue)
+
+	updated := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, updated))
+	assert.Equal(t, `["10.0.0.11"]`, updated.Annotations[AnnotationSandboxEndpoints])
+	activePod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: newPod.Namespace, Name: newPod.Name}, activePod))
+	activeBaseline, exists := restartBaselineFromPod(activePod, bs.UID)
+	require.True(t, exists)
+	assert.Greater(t, activeBaseline, prePublicationRestart.UnixNano())
+
+	activePod.Status = restartedPod.Status
+	postPublicationRestart := metav1.NewTime(time.Unix(0, activeBaseline).Add(time.Second))
+	activePod.Status.ContainerStatuses[0].LastTerminationState.Terminated.FinishedAt = postPublicationRestart
+	postPublicationView := buildRuntimeView(updated, []*corev1.Pod{activePod})
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, postPublicationView.status.Phase)
 }
 
 func TestPersistRuntimeView_DoesNotExposeEndpointsFromStaleRuntimeView(t *testing.T) {

@@ -42,7 +42,8 @@ type runtimeView struct {
 
 type podRestartBaselineRecord struct {
 	BatchSandboxUID types.UID `json:"batchSandboxUID"`
-	StartedAt       int64     `json:"startedAt"`
+	// StartedAt is zero while endpoint publication is pending.
+	StartedAt int64 `json:"startedAt"`
 }
 
 func setConditionInStatus(
@@ -211,15 +212,23 @@ func podRestartBaselineKey(pod *corev1.Pod) string {
 }
 
 func restartBaselineFromPod(pod *corev1.Pod, batchSandboxUID types.UID) (int64, bool) {
-	if pod == nil || pod.Annotations == nil {
-		return 0, false
-	}
-	record := podRestartBaselineRecord{}
-	if json.Unmarshal([]byte(pod.Annotations[AnnoRestartBaselineKey]), &record) != nil ||
-		record.BatchSandboxUID != batchSandboxUID || record.StartedAt <= 0 {
+	record, exists := restartBaselineRecordFromPod(pod, batchSandboxUID)
+	if !exists || record.StartedAt <= 0 {
 		return 0, false
 	}
 	return record.StartedAt, true
+}
+
+func restartBaselineRecordFromPod(pod *corev1.Pod, batchSandboxUID types.UID) (podRestartBaselineRecord, bool) {
+	if pod == nil || pod.Annotations == nil {
+		return podRestartBaselineRecord{}, false
+	}
+	record := podRestartBaselineRecord{}
+	if json.Unmarshal([]byte(pod.Annotations[AnnoRestartBaselineKey]), &record) != nil ||
+		record.BatchSandboxUID != batchSandboxUID || record.StartedAt < 0 {
+		return podRestartBaselineRecord{}, false
+	}
+	return record, true
 }
 
 func buildRestartDetectionBaseline(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod, endpointIPs []string) restartDetectionBaseline {
@@ -261,7 +270,15 @@ func buildRestartDetectionBaseline(batchSbx *sandboxv1alpha1.BatchSandbox, pods 
 		if key == "" {
 			continue
 		}
-		if _, exists := restartBaselineFromPod(pod, batchSbx.UID); exists {
+		if record, exists := restartBaselineRecordFromPod(pod, batchSbx.UID); exists {
+			if record.StartedAt == 0 {
+				// A zero baseline marks a new or replacement Pod whose endpoint has
+				// not been published yet. Once its endpoint is visible, use the current
+				// reconcile time so all observed pre-publication restarts are ignored.
+				if _, published := baseline.previousEndpointIPs[pod.Status.PodIP]; published {
+					baseline.desiredPerPod[key] = now
+				}
+			}
 			continue
 		}
 		if persisted, exists := baseline.legacyPerPod[key]; exists && persisted > 0 {
@@ -269,11 +286,12 @@ func buildRestartDetectionBaseline(batchSbx *sandboxv1alpha1.BatchSandbox, pods 
 			continue
 		}
 		// Pods already covered by the Ready transition need no annotation. New or
-		// replacement Pods get a dedicated baseline before their endpoint is exposed.
+		// replacement Pods first get a pending marker; persistRuntimeView activates
+		// it with a timestamp only after endpoint publication succeeds.
 		if baseline.forPod(pod) != nil || status.Phase != sandboxv1alpha1.BatchSandboxPhaseSucceed {
 			continue
 		}
-		baseline.desiredPerPod[key] = now
+		baseline.desiredPerPod[key] = 0
 	}
 	return baseline
 }
@@ -458,6 +476,17 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 			aggErrors = append(aggErrors, err)
 			return 0, aggErrors
 		}
+		publishedAt := time.Now().UnixNano()
+		patched, err := r.activatePublishedPodRestartBaselines(ctx, batchSbx.UID, publishedAt, view)
+		if err != nil {
+			aggErrors = append(aggErrors, err)
+			return 0, aggErrors
+		}
+		if patched {
+			// The activation timestamp was captured after endpoint publication.
+			// Wait for the informer to observe it before evaluating restart history.
+			return time.Second, aggErrors
+		}
 	}
 	if statusChanged {
 		if err := r.updateStatus(ctx, batchSbx, view.status); err != nil {
@@ -489,10 +518,10 @@ func endpointsNeedPatch(batchSbx *sandboxv1alpha1.BatchSandbox, endpointIPs []st
 func podBaselinesNeedPatch(batchSandboxUID types.UID, view runtimeView) bool {
 	for _, pod := range view.pods {
 		desired, exists := view.restartDetectionBaseline[podRestartBaselineKey(pod)]
-		if !exists || desired <= 0 {
+		if !exists {
 			continue
 		}
-		if persisted, exists := restartBaselineFromPod(pod, batchSandboxUID); !exists || persisted != desired {
+		if record, exists := restartBaselineRecordFromPod(pod, batchSandboxUID); !exists || record.StartedAt != desired {
 			return true
 		}
 	}
@@ -503,10 +532,10 @@ func (r *BatchSandboxReconciler) persistPodRestartBaselines(ctx context.Context,
 	patched := false
 	for _, pod := range view.pods {
 		desired, exists := view.restartDetectionBaseline[podRestartBaselineKey(pod)]
-		if !exists || desired <= 0 {
+		if !exists {
 			continue
 		}
-		if persisted, exists := restartBaselineFromPod(pod, batchSandboxUID); exists && persisted == desired {
+		if record, exists := restartBaselineRecordFromPod(pod, batchSandboxUID); exists && record.StartedAt == desired {
 			continue
 		}
 		record, err := json.Marshal(podRestartBaselineRecord{BatchSandboxUID: batchSandboxUID, StartedAt: desired})
@@ -531,6 +560,23 @@ func (r *BatchSandboxReconciler) persistPodRestartBaselines(ctx context.Context,
 	return patched, nil
 }
 
+func (r *BatchSandboxReconciler) activatePublishedPodRestartBaselines(ctx context.Context, batchSandboxUID types.UID, publishedAt int64, view runtimeView) (bool, error) {
+	desired := make(map[string]int64)
+	for i, pod := range view.pods {
+		if i >= len(view.endpointIPs) || view.endpointIPs[i] == "" {
+			continue
+		}
+		if record, exists := restartBaselineRecordFromPod(pod, batchSandboxUID); exists && record.StartedAt == 0 {
+			desired[podRestartBaselineKey(pod)] = publishedAt
+		}
+	}
+	if len(desired) == 0 {
+		return false, nil
+	}
+	view.restartDetectionBaseline = desired
+	return r.persistPodRestartBaselines(ctx, batchSandboxUID, view)
+}
+
 func (r *BatchSandboxReconciler) patchBatchSandboxEndpoints(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, endpointIPs []string) error {
 	endpointRaw, _ := json.Marshal(endpointIPs)
 	log := logf.FromContext(ctx)
@@ -547,8 +593,7 @@ func (r *BatchSandboxReconciler) patchBatchSandboxEndpoints(ctx context.Context,
 	if err := r.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData)); err != nil {
 		return err
 	}
-	// Prevent a stale informer view from regenerating a later baseline and
-	// overwriting the timestamp that was atomically exposed with the endpoint.
+	// Prevent a stale informer view from republishing an obsolete endpoint set.
 	r.StatusRVExpectation.Expect(obj)
 	return nil
 }
