@@ -138,8 +138,8 @@ func newTestPool(t *testing.T, serverURL string, opts ...func(*SandboxPoolBuilde
 
 func TestPoolBuilder_Defaults(t *testing.T) {
 	b := NewSandboxPoolBuilder()
-	if b.config.ReconcileInterval != 30*time.Second {
-		t.Errorf("ReconcileInterval = %v, want 30s", b.config.ReconcileInterval)
+	if b.config.ReconcileInterval != 5*time.Second {
+		t.Errorf("ReconcileInterval = %v, want 5s", b.config.ReconcileInterval)
 	}
 	if b.config.PrimaryLockTTL != 60*time.Second {
 		t.Errorf("PrimaryLockTTL = %v, want 60s", b.config.PrimaryLockTTL)

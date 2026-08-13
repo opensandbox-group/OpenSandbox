@@ -338,7 +338,7 @@ class PoolConfig:
     owner_id: str | None = None
     warmup_concurrency: int | None = None
     primary_lock_ttl: timedelta = timedelta(seconds=60)
-    reconcile_interval: timedelta = timedelta(seconds=30)
+    reconcile_interval: timedelta = timedelta(seconds=5)
     degraded_threshold: int = 3
     acquire_ready_timeout: timedelta = timedelta(seconds=30)
     acquire_health_check_polling_interval: timedelta = timedelta(milliseconds=200)
@@ -416,7 +416,7 @@ class AsyncPoolConfig:
     owner_id: str | None = None
     warmup_concurrency: int | None = None
     primary_lock_ttl: timedelta = timedelta(seconds=60)
-    reconcile_interval: timedelta = timedelta(seconds=30)
+    reconcile_interval: timedelta = timedelta(seconds=5)
     degraded_threshold: int = 3
     acquire_ready_timeout: timedelta = timedelta(seconds=30)
     acquire_health_check_polling_interval: timedelta = timedelta(milliseconds=200)

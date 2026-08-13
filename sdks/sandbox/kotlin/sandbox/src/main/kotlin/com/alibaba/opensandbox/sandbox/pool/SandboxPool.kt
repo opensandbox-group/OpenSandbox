@@ -865,11 +865,14 @@ class SandboxPool internal constructor(
         // Completion-driven ticks are a latency optimization, not the correctness loop (the
         // periodic tick is). Coalesce them into a minimum interval so bursts of fast
         // completions cannot drive reconcile ticks — each of which costs several state-store
-        // round-trips — at unbounded frequency.
+        // round-trips — at unbounded frequency. The floor advances from the later of the last
+        // request and the previous floor so it applies between tick executions, not merely
+        // between requests: a completion that lands right after a scheduled tick must still
+        // wait out the full window.
         val nowNanos = System.nanoTime()
         val nextAllowedNanos = run.nextCompletionReconcileAtNanos
         run.nextCompletionReconcileAtNanos =
-            nowNanos + TimeUnit.MILLISECONDS.toNanos(COMPLETION_RECONCILE_MIN_INTERVAL_MS)
+            maxOf(nextAllowedNanos, nowNanos) + TimeUnit.MILLISECONDS.toNanos(COMPLETION_RECONCILE_MIN_INTERVAL_MS)
         val delayMs = TimeUnit.NANOSECONDS.toMillis(nextAllowedNanos - nowNanos).coerceAtLeast(0L)
         val tick =
             Runnable {
