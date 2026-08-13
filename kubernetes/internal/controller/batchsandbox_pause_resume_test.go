@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -1959,6 +1960,46 @@ func TestBuildRuntimeView_DetectsExistingPodRestartDuringScaleUp(t *testing.T) {
 		}
 	}
 	t.Fatal("expected PodFailed condition")
+}
+
+func TestBuildRuntimeView_DetectsDelayedRestartAfterPodOrderChanges(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	createdBeforeReady := metav1.NewTime(readyAt.Add(-time.Minute))
+	preReadyRestart := metav1.NewTime(readyAt.Add(-30 * time.Second))
+	bs := restartTestSandbox(readyAt, "10.0.0.1")
+	bs.Annotations[AnnotationSandboxEndpoints] = `["10.0.0.1","10.0.0.2"]`
+	bs.Status.Replicas = 2
+
+	// A Pod list reorder must not advance the Ready baseline while the
+	// endpoint membership is unchanged and restart status is still stale.
+	firstView := buildRuntimeView(bs, []*corev1.Pod{
+		restartTestPod("pod-2", "10.0.0.2", createdBeforeReady, preReadyRestart),
+		restartTestPod("pod-1", "10.0.0.1", createdBeforeReady, preReadyRestart),
+	})
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, firstView.status.Phase)
+	var preservedReadyAt *metav1.Time
+	for i := range firstView.status.Conditions {
+		condition := &firstView.status.Conditions[i]
+		if condition.Type == sandboxv1alpha1.BatchSandboxConditionReady {
+			preservedReadyAt = condition.LastTransitionTime
+			break
+		}
+	}
+	require.NotNil(t, preservedReadyAt)
+	assert.Equal(t, readyAt.Time, preservedReadyAt.Time)
+
+	// A later informer update exposes a restart that happened after the
+	// original Ready transition. It must still fail the sandbox.
+	bs.Status = *firstView.status
+	reorderedEndpoints, err := json.Marshal(firstView.endpointIPs)
+	require.NoError(t, err)
+	bs.Annotations[AnnotationSandboxEndpoints] = string(reorderedEndpoints)
+	delayedRestart := metav1.NewTime(readyAt.Add(time.Minute))
+	secondView := buildRuntimeView(bs, []*corev1.Pod{
+		restartTestPod("pod-2", "10.0.0.2", createdBeforeReady, preReadyRestart),
+		restartTestPod("pod-1", "10.0.0.1", createdBeforeReady, delayedRestart),
+	})
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, secondView.status.Phase)
 }
 
 func TestBuildRuntimeView_AggregatesResumeFailures(t *testing.T) {

@@ -18,7 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
+	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -153,6 +153,16 @@ type restartDetectionBaseline struct {
 	resetReadyCondition bool
 }
 
+func endpointMembership(endpointIPs []string) map[string]struct{} {
+	membership := make(map[string]struct{}, len(endpointIPs))
+	for _, ip := range endpointIPs {
+		if ip != "" {
+			membership[ip] = struct{}{}
+		}
+	}
+	return membership
+}
+
 func (b restartDetectionBaseline) forPod(pod *corev1.Pod) *metav1.Time {
 	if b.readySince == nil || pod.Status.PodIP == "" {
 		return nil
@@ -191,13 +201,9 @@ func buildRestartDetectionBaseline(batchSbx *sandboxv1alpha1.BatchSandbox, pods 
 		return baseline
 	}
 
-	baseline.previousEndpointIPs = make(map[string]struct{}, len(previousIPs))
-	for _, ip := range previousIPs {
-		if ip != "" {
-			baseline.previousEndpointIPs[ip] = struct{}{}
-		}
-	}
-	baseline.resetReadyCondition = status.Replicas != int32(len(pods)) || !slices.Equal(previousIPs, endpointIPs)
+	baseline.previousEndpointIPs = endpointMembership(previousIPs)
+	baseline.resetReadyCondition = status.Replicas != int32(len(pods)) ||
+		!maps.Equal(baseline.previousEndpointIPs, endpointMembership(endpointIPs))
 	for _, pod := range pods {
 		if !pod.CreationTimestamp.IsZero() && pod.CreationTimestamp.After(baseline.readySince.Time) {
 			baseline.resetReadyCondition = true
