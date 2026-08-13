@@ -165,3 +165,5 @@ async def test_run_code_non_200_raises_api_exception() -> None:
     with pytest.raises(SandboxApiException) as ei:
         await adapter.run("other")
     assert ei.value.request_id == "req-code-123"
+    # The server's error body is spliced into the message so logs carry the reason.
+    assert "bad" in str(ei.value)

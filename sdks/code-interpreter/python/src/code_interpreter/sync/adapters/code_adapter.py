@@ -291,8 +291,9 @@ class CodesAdapterSync(CodesSync):
             with self._sse_client.stream("POST", url, json=api_request) as response:
                 if response.status_code != 200:
                     response.read()
+                    error_body = response.text
                     raise SandboxApiException(
-                        message=f"Failed to run code. Status code: {response.status_code}",
+                        message=f"Failed to run code. Status code: {response.status_code}, Body: {error_body}",
                         status_code=response.status_code,
                         request_id=extract_request_id(response.headers),
                     )

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CommandsAdapter } from "../dist/internal.js";
+import { CommandsAdapter, createExecdClient } from "../dist/internal.js";
+import { SandboxApiException } from "../dist/index.js";
 
 function createAdapter(responseBody, opts = {}) {
   const fetchImpl = async () =>
@@ -128,4 +129,27 @@ test("CommandsAdapter.runInSession infers non-zero exitCode from final error sta
   assert.equal(execution.error?.value, "7");
   assert.equal(execution.complete, undefined);
   assert.equal(execution.exitCode, 7);
+});
+
+test("execd client error message carries unstructured JSON error body", async () => {
+  const adapter = new CommandsAdapter(
+    createExecdClient({
+      baseUrl: "http://127.0.0.1:8080",
+      fetch: async () =>
+        new Response(JSON.stringify({ error: "invalid parameter" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+    }),
+    {},
+  );
+
+  await assert.rejects(
+    () => adapter.getCommandStatus("exec-1"),
+    (err) => {
+      assert.ok(err instanceof SandboxApiException);
+      assert.match(err.message, /invalid parameter/);
+      return true;
+    },
+  );
 });

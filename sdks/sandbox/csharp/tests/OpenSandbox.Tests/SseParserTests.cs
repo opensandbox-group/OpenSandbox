@@ -207,7 +207,28 @@ data: {""type"":""stderr"",""text"":""also valid""}
         });
 
         exception.StatusCode.Should().Be(500);
-        exception.Message.Should().Be("Custom fallback");
+        // The raw body is spliced into the message so logs carry the server's reason.
+        exception.Message.Should().Be("Custom fallback: Internal Server Error");
+    }
+
+    [Fact]
+    public async Task ParseJsonEventStreamAsync_WithUnstructuredJsonBody_ShouldSpliceBodyIntoMessage()
+    {
+        // Arrange
+        var errorContent = @"{""error"":""invalid parameter""}";
+        var response = CreateMockResponse(HttpStatusCode.BadRequest, errorContent);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<SandboxApiException>(async () =>
+        {
+            await foreach (var _ in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response, "Run code failed"))
+            {
+                // Should not reach here
+            }
+        });
+
+        exception.StatusCode.Should().Be(400);
+        exception.Message.Should().Be(@"Run code failed: {""error"":""invalid parameter""}");
     }
 
     [Fact]
