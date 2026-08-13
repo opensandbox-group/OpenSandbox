@@ -144,6 +144,11 @@ class AgentSandboxProvider(WorkloadProvider):
         egress_env: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
         """Create an agent-sandbox Sandbox CRD workload."""
+        if any(volume.ensure_sub_path_directory for volume in volumes or []):
+            raise ValueError(
+                "ensureSubPathDirectory is supported only by the Kubernetes "
+                "BatchSandbox provider in template mode."
+            )
         if is_windows_profile(platform):
             raise ValueError("agent-sandbox does not support platform.os=windows.")
 

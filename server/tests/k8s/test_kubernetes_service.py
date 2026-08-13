@@ -35,6 +35,8 @@ from opensandbox_server.api.schema import (
     ListSandboxesRequest,
     NetworkPolicy,
     PlatformSpec,
+    PVC,
+    Volume,
 )
 from opensandbox_server.config import (
     EGRESS_MODE_DNS,
@@ -89,6 +91,41 @@ class TestKubernetesSandboxServiceInit:
             assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_INITIALIZATION_ERROR
 
 class TestKubernetesSandboxServiceCreate:
+
+    def test_ensure_subpath_directory_rejects_non_batchsandbox_provider(
+        self, k8s_service, create_sandbox_request
+    ):
+        create_sandbox_request.volumes = [
+            Volume(
+                name="workspace",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace",
+                sub_path="jobs/123",
+                ensure_sub_path_directory=True,
+            )
+        ]
+        k8s_service.workload_provider.supports_ensure_sub_path_directory.return_value = False
+
+        with pytest.raises(HTTPException, match="BatchSandbox provider") as exc_info:
+            k8s_service._ensure_sub_path_initializer_support(create_sandbox_request)
+
+        assert exc_info.value.status_code == 400
+
+    def test_ensure_subpath_directory_allows_batchsandbox_provider(
+        self, k8s_service, create_sandbox_request
+    ):
+        create_sandbox_request.volumes = [
+            Volume(
+                name="workspace",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace",
+                sub_path="jobs/123",
+                ensure_sub_path_directory=True,
+            )
+        ]
+        k8s_service.workload_provider.supports_ensure_sub_path_directory.return_value = True
+
+        k8s_service._ensure_sub_path_initializer_support(create_sandbox_request)
 
     def test_credential_proxy_requires_dns_nft_mode(
         self, k8s_service, create_sandbox_request

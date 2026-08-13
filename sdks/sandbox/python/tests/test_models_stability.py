@@ -301,6 +301,21 @@ def test_volume_with_pvc_backend() -> None:
     assert vol.sub_path == "v1"
 
 
+def test_volume_ensure_subpath_directory_serializes_with_alias() -> None:
+    vol = Volume(
+        name="workspace",
+        pvc=PVC(claimName="shared-workspace"),
+        mountPath="/workspace",
+        subPath="unseeded",
+        ensureSubPathDirectory=True,
+    )
+
+    dumped = vol.model_dump(by_alias=True, mode="json")
+
+    assert vol.ensure_sub_path_directory is True
+    assert dumped["ensureSubPathDirectory"] is True
+
+
 def test_volume_rejects_blank_name() -> None:
     with pytest.raises(ValueError, match="blank"):
         Volume(

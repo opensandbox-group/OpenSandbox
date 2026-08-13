@@ -140,9 +140,9 @@ class TestBatchSandboxProvider:
             expires_at=expires_at,
             execd_image="execd:latest",
         )
-        
+
         assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
         # Verify API call
         call_args = mock_k8s_client.create_custom_object.call_args
         body = call_args.kwargs["body"]
@@ -880,7 +880,7 @@ spec:
         )
 
         assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-    
+
     # ===== Workload List Tests =====
 
     def test_list_workloads_returns_items(self, mock_k8s_client, mock_batchsandbox_list_response):
@@ -1335,7 +1335,7 @@ spec:
 
         # Should succeed and return workload info
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1367,7 +1367,7 @@ spec:
 
         # Should succeed and return workload info
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1435,9 +1435,9 @@ spec:
             execd_image="execd:latest",
             extensions={"poolRef": "my-pool"},
         )
-        
+
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
         # Verify the call
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -2796,6 +2796,107 @@ spec:
         data_mount = next((m for m in mounts if m["name"] == "data-volume"), None)
         assert data_mount is not None
         assert data_mount.get("subPath") == "task-001"
+        assert [container["name"] for container in pod_spec["initContainers"]] == [
+            "execd-installer"
+        ]
+
+    def test_create_workload_initializes_multiple_subpaths_for_one_pvc(self, mock_k8s_client):
+        """The initializer receives one root PVC mount and a safe JSON plan."""
+        from opensandbox_server.api.schema import PVC, Volume
+        import json
+
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+        volumes = [
+            Volume(
+                name="workspace-a",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace/a",
+                sub_path="jobs/a",
+                ensure_sub_path_directory=True,
+            ),
+            Volume(
+                name="workspace-b",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace/b",
+                sub_path="jobs/b",
+                ensure_sub_path_directory=True,
+            ),
+        ]
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+            volumes=volumes,
+        )
+
+        pod_spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"][
+            "template"
+        ]["spec"]
+        assert [container["name"] for container in pod_spec["initContainers"]] == [
+            "execd-installer",
+            "volume-subpath-initializer",
+        ]
+        initializer = pod_spec["initContainers"][1]
+        assert initializer["image"] == "execd:latest"
+        assert initializer["command"] == ["/opensandbox-subpath-initializer"]
+        assert initializer["volumeMounts"] == [
+            {"name": "workspace-a", "mountPath": "/opensandbox-subpath-pvcs/0"}
+        ]
+        assert json.loads(initializer["args"][1]) == [
+            {"mountPath": "/opensandbox-subpath-pvcs/0", "subPaths": ["jobs/a", "jobs/b"]}
+        ]
+        main_mounts = pod_spec["containers"][0]["volumeMounts"]
+        assert {mount["subPath"] for mount in main_mounts if mount["name"] == "workspace-a"} == {
+            "jobs/a",
+            "jobs/b",
+        }
+
+    def test_create_workload_rejects_template_initializer_name_collision(
+        self, mock_k8s_client, tmp_path
+    ):
+        from opensandbox_server.api.schema import PVC, Volume
+
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n  template:\n    spec:\n      initContainers:\n        - name: volume-subpath-initializer\n"
+        )
+        config = _app_config_with_template(str(template_file))
+        provider = BatchSandboxProvider(mock_k8s_client, config)
+        volumes = [
+            Volume(
+                name="workspace",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace",
+                sub_path="jobs/123",
+                ensure_sub_path_directory=True,
+            )
+        ]
+
+        with pytest.raises(ValueError, match="reserved init container"):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+                volumes=volumes,
+            )
+
+        mock_k8s_client.create_custom_object.assert_not_called()
 
     def test_create_workload_with_host_volume(self, mock_k8s_client):
         """

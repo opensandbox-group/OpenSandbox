@@ -1551,7 +1551,7 @@ components:
         Storage mount definition for a sandbox. Each volume entry contains:
         - A unique name identifier
         - Exactly one backend struct (host, pvc, ossfs, etc.) with backend-specific fields
-        - Common mount settings (mountPath, readOnly, subPath)
+        - Common mount settings (mountPath, readOnly, subPath, ensureSubPathDirectory)
       required: [name, mountPath]
       properties:
         name:
@@ -1584,6 +1584,16 @@ components:
             Optional subdirectory under the backend path to mount.
             For `ossfs` backend, this field is used as the bucket prefix.
             Must be a relative path without '..' components.
+        ensureSubPathDirectory:
+          type: boolean
+          default: false
+          description: |
+            When true, Kubernetes BatchSandbox template-mode creation ensures that
+            `subPath` exists before the main container starts using the fixed trusted
+            initializer bundled with the configured execd image. It supports only
+            writable PVC mounts with a non-empty normalized relative `subPath`; it is
+            not supported for host or ossfs backends, read-only mounts, Docker, other
+            Kubernetes providers, or pool mode.
       additionalProperties: false
 
     Host:

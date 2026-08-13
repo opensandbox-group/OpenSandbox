@@ -37,7 +37,7 @@ class Volume:
     """Storage mount definition for a sandbox. Each volume entry contains:
     - A unique name identifier
     - Exactly one backend struct (host, pvc, ossfs, etc.) with backend-specific fields
-    - Common mount settings (mountPath, readOnly, subPath)
+    - Common mount settings (mountPath, readOnly, subPath, ensureSubPathDirectory)
 
         Attributes:
             name (str): Unique identifier for the volume within the sandbox.
@@ -67,6 +67,13 @@ class Volume:
             sub_path (str | Unset): Optional subdirectory under the backend path to mount.
                 For `ossfs` backend, this field is used as the bucket prefix.
                 Must be a relative path without '..' components.
+            ensure_sub_path_directory (bool | Unset): When true, Kubernetes BatchSandbox template-mode creation ensures that
+                `subPath` exists before the main container starts using the fixed trusted
+                initializer bundled with the configured execd image. It supports only
+                writable PVC mounts with a non-empty normalized relative `subPath`; it is
+                not supported for host or ossfs backends, read-only mounts, Docker, other
+                Kubernetes providers, or pool mode.
+                 Default: False.
     """
 
     name: str
@@ -76,6 +83,7 @@ class Volume:
     ossfs: OSSFS | Unset = UNSET
     read_only: bool | Unset = False
     sub_path: str | Unset = UNSET
+    ensure_sub_path_directory: bool | Unset = False
 
     def to_dict(self) -> dict[str, Any]:
         name = self.name
@@ -98,6 +106,8 @@ class Volume:
 
         sub_path = self.sub_path
 
+        ensure_sub_path_directory = self.ensure_sub_path_directory
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -116,6 +126,8 @@ class Volume:
             field_dict["readOnly"] = read_only
         if sub_path is not UNSET:
             field_dict["subPath"] = sub_path
+        if ensure_sub_path_directory is not UNSET:
+            field_dict["ensureSubPathDirectory"] = ensure_sub_path_directory
 
         return field_dict
 
@@ -155,6 +167,8 @@ class Volume:
 
         sub_path = d.pop("subPath", UNSET)
 
+        ensure_sub_path_directory = d.pop("ensureSubPathDirectory", UNSET)
+
         volume = cls(
             name=name,
             mount_path=mount_path,
@@ -163,6 +177,7 @@ class Volume:
             ossfs=ossfs,
             read_only=read_only,
             sub_path=sub_path,
+            ensure_sub_path_directory=ensure_sub_path_directory,
         )
 
         return volume

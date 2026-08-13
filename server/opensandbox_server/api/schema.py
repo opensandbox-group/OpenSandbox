@@ -338,6 +338,14 @@ class Volume(BaseModel):
         alias="subPath",
         description="Optional subdirectory under the backend path to mount.",
     )
+    ensure_sub_path_directory: bool = Field(
+        False,
+        alias="ensureSubPathDirectory",
+        description=(
+            "Ensure a PVC subPath directory exists before the sandbox starts. "
+            "Supported only for writable Kubernetes BatchSandbox template-mode PVC mounts."
+        ),
+    )
 
     class Config:
         populate_by_name = True
@@ -351,6 +359,24 @@ class Volume(BaseModel):
             raise ValueError("Exactly one backend (host, pvc, ossfs) must be specified, but none was provided.")
         if len(specified) > 1:
             raise ValueError("Exactly one backend (host, pvc, ossfs) must be specified, but multiple were provided.")
+
+        if self.ensure_sub_path_directory:
+            if self.pvc is None:
+                raise ValueError("ensureSubPathDirectory is supported only for PVC volumes.")
+            if self.read_only:
+                raise ValueError("ensureSubPathDirectory cannot be used with readOnly=true.")
+            if not self.sub_path or not self.sub_path.strip():
+                raise ValueError("ensureSubPathDirectory requires a non-empty subPath.")
+            if (
+                self.sub_path.startswith("/")
+                or "\\" in self.sub_path
+                or "\x00" in self.sub_path
+                or any(segment in {"", ".", ".."} for segment in self.sub_path.split("/"))
+            ):
+                raise ValueError(
+                    "ensureSubPathDirectory requires a normalized relative subPath "
+                    "without empty, '.', or '..' segments."
+                )
         return self
 
 

@@ -123,6 +123,15 @@ wheels = [
 ]
 
 [[package]]
+name = "httpx-sse"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/4c/751061ffa58615a32c31b2d82e8482be8dd4a89154f003147acee90f2be9/httpx_sse-0.4.3.tar.gz", hash = "sha256:9b1ed0127459a66014aec3c56bebd93da3c1bc8bb6618c8082039a44889a755d", size = 15943, upload-time = "2025-10-10T21:48:22.271Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/fd/6668e5aec43ab844de6fc74927e155a3b37bf40d7c3790e49fc0406b6578/httpx_sse-0.4.3-py3-none-any.whl", hash = "sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc", size = 8960, upload-time = "2025-10-10T21:48:21.158Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.15"
 source = { registry = "https://pypi.org/simple" }
@@ -155,6 +164,7 @@ source = { editable = "../../sdks/sandbox/python" }
 dependencies = [
     { name = "attrs" },
     { name = "httpx" },
+    { name = "httpx-sse" },
     { name = "pydantic" },
     { name = "python-dateutil" },
 ]
@@ -163,6 +173,7 @@ dependencies = [
 requires-dist = [
     { name = "attrs", specifier = ">=21.3.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
+    { name = "httpx-sse", specifier = ">=0.4.3,<0.5" },
     { name = "pydantic", specifier = ">=2.4.2,<3.0" },
     { name = "pyjwt", marker = "extra == 'pool-redis'", specifier = ">=2.13.0" },
     { name = "python-dateutil", specifier = ">=2.8.2,<3.0" },

@@ -66,6 +66,10 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /build/execd ./main.go
 
+RUN CGO_ENABLED=0 go build ${GOFLAGS} -trimpath -buildvcs=false \
+    -ldflags "${LDFLAGS} -buildid= -B none" \
+    -o /build/opensandbox-subpath-initializer ./cmd/subpath-initializer
+
 RUN CGO_ENABLED=0 GOOS=windows go build ${GOFLAGS} -trimpath -buildvcs=false \
     -ldflags "${LDFLAGS} -buildid= -B none \
               -X 'github.com/alibaba/opensandbox/internal/version.Version=${VERSION}' \
@@ -99,6 +103,7 @@ COPY --from=bwrap-builder /build/bwrap/bwrap /usr/local/bin/bwrap
 COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/opensandbox-session-gate /usr/local/libexec/opensandbox-session-gate
 COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/opensandbox-session-gate /opt/opensandbox/opensandbox-session-gate
 COPY --from=builder /build/execd .
+COPY --from=builder /build/opensandbox-subpath-initializer ./opensandbox-subpath-initializer
 COPY --from=builder /build/execd.exe ./execd.exe
 COPY --from=builder /build/opensandbox-supervisor ./opensandbox-supervisor
 COPY components/execd/bootstrap.sh ./bootstrap.sh

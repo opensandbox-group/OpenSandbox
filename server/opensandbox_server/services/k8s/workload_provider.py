@@ -243,6 +243,10 @@ class WorkloadProvider(ABC):
         """
         return False
 
+    def supports_ensure_sub_path_directory(self) -> bool:
+        """Whether the provider safely initializes requested PVC subpaths."""
+        return False
+
     def legacy_resource_name(self, sandbox_id: str) -> str:
         """
         Convert a sandbox_id to the legacy resource name with prefix.

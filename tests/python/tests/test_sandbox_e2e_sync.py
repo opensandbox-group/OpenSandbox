@@ -21,6 +21,7 @@ This mirrors `test_sandbox_e2e.py` but uses the synchronous SDK.
 
 import logging
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from io import BytesIO
@@ -778,6 +779,70 @@ class TestSandboxE2ESync:
                 pass
 
         logger.info("TEST 1f PASSED: PVC subPath named volume mount test completed successfully")
+
+    @pytest.mark.timeout(120)
+    @pytest.mark.order(1)
+    def test_01g_pvc_unseeded_subpath_initializer(self) -> None:
+        """Create and use a previously unseeded PVC subPath through the lifecycle API."""
+        if not is_kubernetes_runtime():
+            pytest.skip("ensureSubPathDirectory is covered only in the Kubernetes runtime suite")
+
+        logger.info("=" * 80)
+        logger.info("TEST 1g: Creating sandbox with an unseeded PVC subPath initializer")
+        logger.info("=" * 80)
+
+        pvc_volume_name = get_test_pvc_name()
+        container_mount_path = "/mnt/ensure-subpath"
+        unseeded_sub_path = f"ensure-subpath-initializer-{uuid.uuid4().hex}"
+        cfg = create_connection_config_sync()
+        sandbox = SandboxSync.create(
+            image=SandboxImageSpec(get_sandbox_image()),
+            resource=get_e2e_sandbox_resource(),
+            connection_config=cfg,
+            timeout=timedelta(minutes=5),
+            ready_timeout=timedelta(seconds=30),
+            volumes=[
+                Volume(
+                    name="test-pvc-unseeded-subpath",
+                    pvc=PVC(claimName=pvc_volume_name),
+                    mountPath=container_mount_path,
+                    readOnly=False,
+                    subPath=unseeded_sub_path,
+                    ensureSubPathDirectory=True,
+                ),
+            ],
+        )
+        try:
+            info = sandbox.get_info()
+            assert info.status.state == "Running"
+
+            result = sandbox.commands.run(
+                f"test -d {container_mount_path} && "
+                f"test ! -e {container_mount_path}/marker.txt && "
+                f"test ! -e {container_mount_path}/datasets"
+            )
+            assert result.error is None, "business container did not receive only the exact subPath"
+
+            result = sandbox.commands.run(
+                f"printf '%s\\n' 'ensure-subpath-write-test' > "
+                f"{container_mount_path}/output.txt && "
+                f"cat {container_mount_path}/output.txt"
+            )
+            assert result.error is None, f"Failed to write initialized subPath: {result.error}"
+            assert len(result.logs.stdout) == 1
+            assert result.logs.stdout[0].text == "ensure-subpath-write-test"
+        finally:
+            try:
+                sandbox.kill()
+            except Exception:
+                pass
+            sandbox.close()
+            try:
+                cfg.transport.close()
+            except Exception:
+                pass
+
+        logger.info("TEST 1g PASSED: Unseeded PVC subPath initializer test completed successfully")
 
     @pytest.mark.timeout(120)
     @pytest.mark.order(2)

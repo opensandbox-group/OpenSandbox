@@ -644,6 +644,17 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     "message": "poolRef is not supported by the Docker provider. Use Kubernetes BatchSandbox provider instead.",
                 },
             )
+        if any(volume.ensure_sub_path_directory for volume in request.volumes or []):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "ensureSubPathDirectory is supported only by the Kubernetes "
+                        "BatchSandbox provider in template mode."
+                    ),
+                },
+            )
         request = resolve_sandbox_image_from_request(request)
         ensure_entrypoint(request.entrypoint or [])
         ensure_metadata_labels(request.metadata)
