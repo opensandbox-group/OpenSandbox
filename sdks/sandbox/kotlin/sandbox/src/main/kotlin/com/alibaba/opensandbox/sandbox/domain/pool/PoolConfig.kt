@@ -36,7 +36,7 @@ import kotlin.math.ceil
  * @property creationSpec Template for creating sandboxes (replenish and direct-create) (required).
  * @property sandboxCreator Optional custom creator for pool-created sandboxes. When absent, the pool uses
  * [creationSpec] and the standard sandbox lifecycle API.
- * @property reconcileInterval Interval between reconcile ticks (default: 30s).
+ * @property reconcileInterval Interval between reconcile ticks (default: 5s).
  * @property degradedThreshold Consecutive create failures required to transition to DEGRADED (default: 3).
  * @property acquireReadyTimeout Max time to wait for a sandbox returned by acquire to become ready (default: 30s).
  * @property acquireHealthCheckPollingInterval Poll interval while waiting for a sandbox returned by acquire to become
@@ -124,7 +124,7 @@ class PoolConfig private constructor(
     }
 
     companion object {
-        private val DEFAULT_RECONCILE_INTERVAL = Duration.ofSeconds(30)
+        private val DEFAULT_RECONCILE_INTERVAL = Duration.ofSeconds(5)
         private val DEFAULT_PRIMARY_LOCK_TTL = Duration.ofSeconds(60)
         private const val DEFAULT_DEGRADED_THRESHOLD = 3
         private val DEFAULT_ACQUIRE_READY_TIMEOUT = Duration.ofSeconds(30)
