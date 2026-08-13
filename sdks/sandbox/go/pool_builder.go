@@ -35,7 +35,7 @@ func NewSandboxPoolBuilder() *SandboxPoolBuilder {
 	return &SandboxPoolBuilder{
 		config: PoolConfig{
 			PrimaryLockTTL:                    60 * time.Second,
-			ReconcileInterval:                 5 * time.Second,
+			ReconcileInterval:                 30 * time.Second,
 			DegradedThreshold:                 3,
 			AcquireReadyTimeout:               30 * time.Second,
 			WarmupReadyTimeout:                30 * time.Second,
