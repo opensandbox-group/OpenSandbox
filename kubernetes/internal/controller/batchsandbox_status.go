@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -34,9 +33,10 @@ import (
 )
 
 type runtimeView struct {
-	status          *sandboxv1alpha1.BatchSandboxStatus
-	endpointIPs     []string
-	resumeCompleted bool
+	status                   *sandboxv1alpha1.BatchSandboxStatus
+	endpointIPs              []string
+	restartDetectionBaseline map[string]int64
+	resumeCompleted          bool
 }
 
 func setConditionInStatus(
@@ -150,7 +150,10 @@ func getPodFailureReasonAndMessage(pod *corev1.Pod, readySince *metav1.Time) (st
 type restartDetectionBaseline struct {
 	readySince          *metav1.Time
 	previousEndpointIPs map[string]struct{}
-	resetReadyCondition bool
+	perPod              map[string]int64
+	hasPerPodBaseline   bool
+	detectRestarts      bool
+	desiredPerPod       map[string]int64
 }
 
 func endpointMembership(endpointIPs []string) map[string]struct{} {
@@ -164,7 +167,14 @@ func endpointMembership(endpointIPs []string) map[string]struct{} {
 }
 
 func (b restartDetectionBaseline) forPod(pod *corev1.Pod) *metav1.Time {
-	if b.readySince == nil || pod.Status.PodIP == "" {
+	if !b.detectRestarts {
+		return nil
+	}
+	if baseline, exists := b.perPod[podRestartBaselineKey(pod)]; exists && baseline > 0 {
+		persisted := metav1.NewTime(time.Unix(0, baseline))
+		return &persisted
+	}
+	if b.hasPerPodBaseline || b.readySince == nil || pod.Status.PodIP == "" {
 		return nil
 	}
 	if _, existedWhenReady := b.previousEndpointIPs[pod.Status.PodIP]; !existedWhenReady {
@@ -176,38 +186,71 @@ func (b restartDetectionBaseline) forPod(pod *corev1.Pod) *metav1.Time {
 	return b.readySince
 }
 
+func podRestartBaselineKey(pod *corev1.Pod) string {
+	if pod.UID != "" {
+		return string(pod.UID)
+	}
+	// Pods returned by the API server always have a UID. Falling back to the
+	// name keeps direct unit fixtures useful without weakening production keys.
+	return pod.Name
+}
+
 func buildRestartDetectionBaseline(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod, endpointIPs []string) restartDetectionBaseline {
 	status := batchSbx.Status
-	baseline := restartDetectionBaseline{resetReadyCondition: true}
-	if status.Phase != sandboxv1alpha1.BatchSandboxPhaseSucceed {
-		return baseline
+	baseline := restartDetectionBaseline{
+		detectRestarts: status.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed,
+		desiredPerPod:  make(map[string]int64, len(pods)),
 	}
 
-	for i := range status.Conditions {
-		condition := &status.Conditions[i]
-		if condition.Type == sandboxv1alpha1.BatchSandboxConditionReady && condition.Status == sandboxv1alpha1.ConditionTrue &&
-			condition.LastTransitionTime != nil && !condition.LastTransitionTime.IsZero() {
-			baseline.readySince = condition.LastTransitionTime
-			break
+	if baseline.detectRestarts {
+		for i := range status.Conditions {
+			condition := &status.Conditions[i]
+			if condition.Type == sandboxv1alpha1.BatchSandboxConditionReady && condition.Status == sandboxv1alpha1.ConditionTrue &&
+				condition.LastTransitionTime != nil && !condition.LastTransitionTime.IsZero() {
+				baseline.readySince = condition.LastTransitionTime
+				break
+			}
 		}
 	}
-	if baseline.readySince == nil {
-		return baseline
+
+	if batchSbx.Annotations != nil {
+		if raw := batchSbx.Annotations[AnnoRestartBaselineKey]; raw != "" {
+			if err := json.Unmarshal([]byte(raw), &baseline.perPod); err == nil {
+				baseline.hasPerPodBaseline = true
+			} else {
+				baseline.perPod = nil
+			}
+			if baseline.hasPerPodBaseline && baseline.perPod == nil {
+				baseline.perPod = map[string]int64{}
+			}
+		}
 	}
 
 	var previousIPs []string
-	if batchSbx.Annotations == nil || json.Unmarshal([]byte(batchSbx.Annotations[AnnotationSandboxEndpoints]), &previousIPs) != nil {
-		baseline.readySince = nil
-		return baseline
+	if batchSbx.Annotations != nil && json.Unmarshal([]byte(batchSbx.Annotations[AnnotationSandboxEndpoints]), &previousIPs) == nil {
+		baseline.previousEndpointIPs = endpointMembership(previousIPs)
 	}
 
-	baseline.previousEndpointIPs = endpointMembership(previousIPs)
-	baseline.resetReadyCondition = status.Replicas != int32(len(pods)) ||
-		!maps.Equal(baseline.previousEndpointIPs, endpointMembership(endpointIPs))
-	for _, pod := range pods {
-		if !pod.CreationTimestamp.IsZero() && pod.CreationTimestamp.After(baseline.readySince.Time) {
-			baseline.resetReadyCondition = true
-			break
+	now := time.Now().UnixNano()
+	for i, pod := range pods {
+		if i >= len(endpointIPs) || endpointIPs[i] == "" {
+			continue
+		}
+		key := podRestartBaselineKey(pod)
+		if key == "" {
+			continue
+		}
+		if persisted, exists := baseline.perPod[key]; exists && persisted > 0 {
+			baseline.desiredPerPod[key] = persisted
+			continue
+		}
+		// Migrate Pods that were already exposed before this annotation existed
+		// to the original Ready transition. New and replacement Pods start at the
+		// timestamp that will be atomically published with their endpoint.
+		if legacy := baseline.forPod(pod); legacy != nil {
+			baseline.desiredPerPod[key] = legacy.UnixNano()
+		} else {
+			baseline.desiredPerPod[key] = now
 		}
 	}
 	return baseline
@@ -260,6 +303,7 @@ func (s podFailureSummary) message(duringResume bool) string {
 }
 
 func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod) runtimeView {
+	view := runtimeView{}
 	newStatus := batchSbx.Status.DeepCopy()
 	newStatus.ObservedGeneration = batchSbx.Generation
 	newStatus.Replicas = 0
@@ -278,25 +322,40 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 		}
 	}
 
+	baseline := buildRestartDetectionBaseline(batchSbx, pods, ipList)
 	switch batchSbx.Status.Phase {
 	case sandboxv1alpha1.BatchSandboxPhasePausing, sandboxv1alpha1.BatchSandboxPhasePaused:
 		// Keep lifecycle-owned stable phases unchanged.
 	case sandboxv1alpha1.BatchSandboxPhaseResuming:
 		applyResumingRuntimePhase(newStatus, pods)
 	default:
-		baseline := buildRestartDetectionBaseline(batchSbx, pods, ipList)
 		applySteadyRuntimePhase(batchSbx, newStatus, pods, &baseline)
-		if baseline.resetReadyCondition && newStatus.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
-			setConditionInStatus(newStatus, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionFalse, "", "")
-		}
 	}
 
 	applyBatchSandboxPhaseConditions(newStatus)
+	if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseSucceed &&
+		newStatus.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
+		alignRestartBaselinesWithReadyTransition(newStatus, baseline.desiredPerPod)
+	}
 
-	return runtimeView{
-		status:          newStatus,
-		endpointIPs:     ipList,
-		resumeCompleted: batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseResuming && newStatus.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed,
+	view.status = newStatus
+	view.endpointIPs = ipList
+	view.restartDetectionBaseline = baseline.desiredPerPod
+	view.resumeCompleted = batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseResuming && newStatus.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed
+	return view
+}
+
+func alignRestartBaselinesWithReadyTransition(status *sandboxv1alpha1.BatchSandboxStatus, baselines map[string]int64) {
+	for i := range status.Conditions {
+		condition := &status.Conditions[i]
+		if condition.Type != sandboxv1alpha1.BatchSandboxConditionReady || condition.Status != sandboxv1alpha1.ConditionTrue ||
+			condition.LastTransitionTime == nil || condition.LastTransitionTime.IsZero() {
+			continue
+		}
+		for key := range baselines {
+			baselines[key] = condition.LastTransitionTime.UnixNano()
+		}
+		return
 	}
 }
 
@@ -349,29 +408,39 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 ) (time.Duration, []error) {
 	var aggErrors []error
 	log := logf.FromContext(ctx)
-	if err := r.patchBatchSandboxEndpoints(ctx, batchSbx, view.endpointIPs); err != nil {
-		aggErrors = append(aggErrors, err)
+	if isInitialUnallocatedSandbox(batchSbx, view) {
+		return 0, aggErrors
 	}
-	if !equality.Semantic.DeepEqual(*view.status, batchSbx.Status) {
-		if isInitialUnallocatedSandbox(batchSbx, view) {
-			return 0, aggErrors
-		}
+	statusChanged := !equality.Semantic.DeepEqual(*view.status, batchSbx.Status)
+	metadataChanged := runtimeMetadataNeedsPatch(batchSbx, view)
+	if statusChanged || metadataChanged {
 		// Skip redundant status writes caused by informer cache lag: if we recently
-		// patched status but the informer hasn't seen the new RV yet, the diff is a
-		// false positive. Allow a 10s safety valve in case the cache never catches up.
+		// patched status but the informer hasn't seen the new RV yet, the runtime
+		// view may also contain stale endpoint baselines. Allow a 10s safety valve
+		// in case the cache never catches up.
 		if satisfied, dur := r.StatusRVExpectation.IsSatisfied(batchSbx); !satisfied {
 			if dur < 10*time.Second {
-				log.Info("Skipping status update: informer cache is stale", "unsatisfiedDuration", dur.String())
+				log.Info("Skipping runtime view update: informer cache is stale", "unsatisfiedDuration", dur.String())
 				return time.Second, aggErrors
 			}
-			log.Info("Proceeding with status update despite stale cache (timeout exceeded)", "unsatisfiedDuration", dur.String())
+			log.Info("Proceeding with runtime view update despite stale cache (timeout exceeded)", "unsatisfiedDuration", dur.String())
 			// Fetch the latest object so lifecycle conditions (PauseFailed/ResumeFailed)
-			// written by pause/resume handlers are not overwritten by the stale cache.
+			// and restart baselines are not overwritten by the stale cache.
 			latest := &sandboxv1alpha1.BatchSandbox{}
 			if err := r.Get(ctx, types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}, latest); err == nil {
 				batchSbx = latest
+				preservePersistedRestartBaselines(batchSbx, view.restartDetectionBaseline)
+				statusChanged = !equality.Semantic.DeepEqual(*view.status, batchSbx.Status)
+				metadataChanged = runtimeMetadataNeedsPatch(batchSbx, view)
 			}
 		}
+	}
+	if metadataChanged {
+		if err := r.patchBatchSandboxRuntimeMetadata(ctx, batchSbx, view); err != nil {
+			aggErrors = append(aggErrors, err)
+		}
+	}
+	if statusChanged {
 		if err := r.updateStatus(ctx, batchSbx, view.status); err != nil {
 			aggErrors = append(aggErrors, err)
 			return 0, aggErrors
@@ -387,28 +456,62 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 	return 0, aggErrors
 }
 
-func (r *BatchSandboxReconciler) patchBatchSandboxEndpoints(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, endpointIPs []string) error {
-	raw, _ := json.Marshal(endpointIPs)
-	if batchSbx.Annotations[AnnotationSandboxEndpoints] == string(raw) {
-		return nil
+func preservePersistedRestartBaselines(batchSbx *sandboxv1alpha1.BatchSandbox, desired map[string]int64) {
+	if desired == nil || batchSbx.Annotations == nil {
+		return
 	}
-	// Skip writing empty endpoints when annotation doesn't exist yet (e.g. sandbox just created, no pods assigned).
-	// Still allow clearing endpoints when annotation was previously set (e.g. pause scenario).
-	_, annotationExists := batchSbx.Annotations[AnnotationSandboxEndpoints]
-	if !annotationExists && string(raw) == "[]" {
-		return nil
+	persisted := map[string]int64{}
+	if json.Unmarshal([]byte(batchSbx.Annotations[AnnoRestartBaselineKey]), &persisted) != nil {
+		return
+	}
+	for key := range desired {
+		if baseline, exists := persisted[key]; exists && baseline > 0 {
+			desired[key] = baseline
+		}
+	}
+}
+
+func runtimeMetadataNeedsPatch(batchSbx *sandboxv1alpha1.BatchSandbox, view runtimeView) bool {
+	endpointRaw, _ := json.Marshal(view.endpointIPs)
+	_, endpointExists := batchSbx.Annotations[AnnotationSandboxEndpoints]
+	endpointChanged := batchSbx.Annotations[AnnotationSandboxEndpoints] != string(endpointRaw)
+	if !endpointExists && string(endpointRaw) == "[]" {
+		endpointChanged = false
+	}
+	if view.restartDetectionBaseline == nil {
+		return endpointChanged
+	}
+	baselineRaw, _ := json.Marshal(view.restartDetectionBaseline)
+	_, baselineExists := batchSbx.Annotations[AnnoRestartBaselineKey]
+	baselineChanged := batchSbx.Annotations[AnnoRestartBaselineKey] != string(baselineRaw)
+	if !endpointExists && !baselineExists && string(endpointRaw) == "[]" && len(view.restartDetectionBaseline) == 0 {
+		baselineChanged = false
+	}
+	return endpointChanged || baselineChanged
+}
+
+func (r *BatchSandboxReconciler) patchBatchSandboxRuntimeMetadata(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, view runtimeView) error {
+	endpointRaw, _ := json.Marshal(view.endpointIPs)
+	annotations := map[string]string{AnnotationSandboxEndpoints: string(endpointRaw)}
+	if view.restartDetectionBaseline != nil {
+		baselineRaw, _ := json.Marshal(view.restartDetectionBaseline)
+		annotations[AnnoRestartBaselineKey] = string(baselineRaw)
 	}
 	log := logf.FromContext(ctx)
 	patchData, _ := json.Marshal(map[string]any{
 		"metadata": map[string]any{
-			"annotations": map[string]string{
-				AnnotationSandboxEndpoints: string(raw),
-			},
+			"annotations": annotations,
 		},
 	})
-	log.Info("Patching BatchSandbox endpoints", "resourceVersion", batchSbx.ResourceVersion, "patchData", string(patchData))
+	log.Info("Patching BatchSandbox runtime metadata", "resourceVersion", batchSbx.ResourceVersion, "patchData", string(patchData))
 	obj := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Namespace: batchSbx.Namespace, Name: batchSbx.Name}}
-	return r.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData))
+	if err := r.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData)); err != nil {
+		return err
+	}
+	// Prevent a stale informer view from regenerating a later baseline and
+	// overwriting the timestamp that was atomically exposed with the endpoint.
+	r.StatusRVExpectation.Expect(obj)
+	return nil
 }
 
 func (r *BatchSandboxReconciler) updateStatus(ctx context.Context, batchSandbox *sandboxv1alpha1.BatchSandbox, newStatus *sandboxv1alpha1.BatchSandboxStatus) error {
