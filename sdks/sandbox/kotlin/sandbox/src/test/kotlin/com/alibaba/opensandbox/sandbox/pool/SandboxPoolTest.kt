@@ -1600,6 +1600,106 @@ class SandboxPoolTest {
     }
 
     @Test
+    fun `releaseAllIdle bounds kills and cleans up before store failure`() {
+        val delegate = InMemoryPoolStateStore()
+        repeat(55) { delegate.putIdle("test-pool", "id-$it") }
+        val store =
+            object : PoolStateStore by delegate {
+                var takes = 0
+
+                override fun tryTakeIdle(poolName: String): String? {
+                    if (takes == 55) throw RuntimeException("injected store failure")
+                    takes++
+                    return delegate.tryTakeIdle(poolName)
+                }
+            }
+        val active = AtomicInteger()
+        val maxActive = AtomicInteger()
+        val ready = CountDownLatch(50)
+        val killed = AtomicInteger()
+        val temporaryManager = mockk<SandboxManager>()
+        every { temporaryManager.killSandbox(any()) } answers {
+            val current = active.incrementAndGet()
+            maxActive.updateAndGet { maxOf(it, current) }
+            ready.countDown()
+            assertTrue(ready.await(2, TimeUnit.SECONDS))
+            killed.incrementAndGet()
+            active.decrementAndGet()
+            if (firstArg<String>() == "id-0") throw RuntimeException("injected kill failure")
+        }
+        every { temporaryManager.close() } just runs
+        val pool =
+            SandboxPool(
+                config =
+                    PoolConfig.builder()
+                        .poolName("test-pool")
+                        .ownerId("test-owner")
+                        .maxIdle(0)
+                        .stateStore(store)
+                        .connectionConfig(ConnectionConfig.builder().build())
+                        .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                        .build(),
+                sandboxManagerFactory = { temporaryManager },
+            )
+
+        assertThrows(IllegalArgumentException::class.java) { pool.releaseAllIdle(0) }
+        val failure = assertThrows(RuntimeException::class.java) { pool.releaseAllIdle(50) }
+
+        assertEquals("injected store failure", failure.message)
+        assertEquals(50, maxActive.get())
+        assertEquals(55, killed.get())
+        assertEquals(0, store.snapshotCounters("test-pool").idleCount)
+        verify(exactly = 1) { temporaryManager.close() }
+    }
+
+    @Test
+    fun `releaseAllIdle waits for kills before closing manager when caller is interrupted`() {
+        val store = InMemoryPoolStateStore()
+        store.putIdle("test-pool", "id-1")
+        val killStarted = CountDownLatch(1)
+        val releaseKill = CountDownLatch(1)
+        val temporaryManager = mockk<SandboxManager>()
+        every { temporaryManager.killSandbox("id-1") } answers {
+            killStarted.countDown()
+            releaseKill.await()
+        }
+        every { temporaryManager.close() } just runs
+        val pool =
+            SandboxPool(
+                config =
+                    PoolConfig.builder()
+                        .poolName("test-pool")
+                        .ownerId("test-owner")
+                        .maxIdle(0)
+                        .stateStore(store)
+                        .connectionConfig(ConnectionConfig.builder().build())
+                        .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                        .build(),
+                sandboxManagerFactory = { temporaryManager },
+            )
+        val released = AtomicInteger()
+        val interruptRestored = AtomicBoolean()
+        val caller =
+            Thread {
+                released.set(pool.releaseAllIdle(1))
+                interruptRestored.set(Thread.currentThread().isInterrupted)
+            }
+
+        caller.start()
+        assertTrue(killStarted.await(2, TimeUnit.SECONDS))
+        caller.interrupt()
+        Thread.sleep(20)
+        assertTrue(caller.isAlive)
+        verify(exactly = 0) { temporaryManager.close() }
+        releaseKill.countDown()
+        caller.join(2_000)
+
+        assertEquals(1, released.get())
+        assertTrue(interruptRestored.get())
+        verify(exactly = 1) { temporaryManager.close() }
+    }
+
+    @Test
     fun `releaseAllIdle drains store even when temporary sandbox manager creation fails`() {
         val store = InMemoryPoolStateStore()
         val pool =
