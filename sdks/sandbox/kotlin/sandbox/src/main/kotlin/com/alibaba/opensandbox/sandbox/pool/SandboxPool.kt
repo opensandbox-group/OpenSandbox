@@ -485,6 +485,100 @@ class SandboxPool internal constructor(
     }
 
     /**
+     * Takes all idle sandbox IDs from the store and terminates them with bounded concurrency.
+     * This method blocks until every ID taken from the store has received a best-effort kill attempt.
+     *
+     * @param concurrency Maximum number of concurrent kill requests. Must be positive.
+     * @return Number of idle sandboxes taken from the store.
+     */
+    fun releaseAllIdle(concurrency: Int): Int {
+        require(concurrency > 0) { "concurrency must be positive" }
+        val poolName = config.poolName
+        val sandboxIds = mutableListOf<String>()
+        var drainFailure: Exception? = null
+        var temporaryManager: SandboxManager? = null
+        try {
+            while (true) {
+                val sandboxId =
+                    try {
+                        stateStore.tryTakeIdle(poolName)
+                    } catch (e: Exception) {
+                        drainFailure = e
+                        break
+                    } ?: break
+                sandboxIds.add(sandboxId)
+            }
+
+            if (sandboxIds.isNotEmpty()) {
+                val manager =
+                    sandboxManager ?: try {
+                        createSandboxManager().also { temporaryManager = it }
+                    } catch (e: Exception) {
+                        logger.warn(
+                            "releaseAllIdle(concurrency): failed to create sandbox manager; " +
+                                "draining idle ids without remote kill: " +
+                                "pool_name={} error={}",
+                            poolName,
+                            e.message,
+                        )
+                        null
+                    }
+                if (manager != null) {
+                    val threadIndex = AtomicInteger()
+                    val executor =
+                        Executors.newFixedThreadPool(minOf(concurrency, sandboxIds.size)) { runnable ->
+                            Thread(
+                                runnable,
+                                "sandbox-pool-release-$poolName-${threadIndex.incrementAndGet()}",
+                            ).apply { isDaemon = true }
+                        }
+                    try {
+                        sandboxIds.forEach { sandboxId ->
+                            executor.submit {
+                                try {
+                                    manager.killSandbox(sandboxId)
+                                } catch (e: Exception) {
+                                    logger.warn(
+                                        "releaseAllIdle(concurrency): failed to kill sandbox (best-effort): " +
+                                            "pool_name={} sandbox_id={} error={}",
+                                        poolName,
+                                        sandboxId,
+                                        e.message,
+                                    )
+                                }
+                            }
+                        }
+                    } finally {
+                        executor.shutdown()
+                        var interrupted = false
+                        while (!executor.isTerminated) {
+                            try {
+                                executor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+                            } catch (_: InterruptedException) {
+                                interrupted = true
+                            }
+                        }
+                        if (interrupted) {
+                            Thread.currentThread().interrupt()
+                        }
+                    }
+                }
+            }
+        } finally {
+            temporaryManager?.close()
+        }
+        drainFailure?.let { throw it }
+        if (sandboxIds.isNotEmpty()) {
+            logger.info(
+                "releaseAllIdle(concurrency): released {} idle sandbox(es): pool_name={}",
+                sandboxIds.size,
+                poolName,
+            )
+        }
+        return sandboxIds.size
+    }
+
+    /**
      * Returns a point-in-time snapshot of pool state for observability.
      */
     fun snapshot(): PoolSnapshot {

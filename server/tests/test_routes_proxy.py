@@ -18,6 +18,8 @@ from typing import Any, cast
 
 import httpx
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
+from starlette.types import Message
 from websockets.typing import Origin
 
 import opensandbox_server.api.proxy as proxy_api
@@ -55,7 +57,19 @@ class _FakeStreamingResponse:
             yield chunk
 
     async def aclose(self):
+        await asyncio.sleep(0)
         self.aclose_called = True
+
+
+class _BlockingStreamingResponse(_FakeStreamingResponse):
+    def __init__(self) -> None:
+        super().__init__()
+        self.body_started = asyncio.Event()
+
+    async def aiter_raw(self):
+        self.body_started.set()
+        await asyncio.Future()
+        yield b"unreachable"
 
 
 class _FakeAsyncClient:
@@ -395,6 +409,7 @@ def test_proxy_allows_valid_secure_access_header(
     )
 
     assert response.status_code == 200
+    assert fake_client.built is not None
     lowered_headers = {
         key.lower(): value for key, value in fake_client.built["headers"].items()
     }
@@ -564,6 +579,79 @@ def test_proxy_streams_raw_body_for_content_encoded_response(
     assert fake_client.response.aiter_raw_called is True
     assert fake_client.response.aiter_bytes_called is False
     assert fake_client.response.aclose_called is True
+
+
+def test_proxy_closes_backend_response_when_downstream_rejects_headers() -> None:
+    """A disconnect before body iteration must not retain the backend connection."""
+
+    async def run() -> None:
+        backend_response = _FakeStreamingResponse()
+        response = proxy_api._ProxyStreamingResponse(
+            cast(httpx.Response, backend_response),
+            status_code=200,
+            headers={},
+        )
+
+        async def receive() -> Message:
+            return {"type": "http.disconnect"}
+
+        async def reject_response_start(message: Message) -> None:
+            assert message["type"] == "http.response.start"
+            raise ConnectionError("downstream disconnected")
+
+        try:
+            await response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}},
+                receive,
+                reject_response_start,
+            )
+        except ClientDisconnect:
+            pass
+        else:
+            raise AssertionError("expected the downstream send to fail")
+
+        assert backend_response.aclose_called is True
+
+    asyncio.run(run())
+
+
+def test_proxy_closes_backend_response_when_stream_is_cancelled() -> None:
+    """Task cancellation must not interrupt returning the backend connection."""
+
+    async def run() -> None:
+        backend_response = _BlockingStreamingResponse()
+        response = proxy_api._ProxyStreamingResponse(
+            cast(httpx.Response, backend_response),
+            status_code=200,
+            headers={},
+        )
+
+        async def send(message: Message) -> None:
+            return None
+
+        async def receive() -> Message:
+            return {"type": "http.disconnect"}
+
+        task = asyncio.create_task(
+            response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}},
+                receive,
+                send,
+            )
+        )
+        await backend_response.body_started.wait()
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("expected stream task cancellation")
+
+        assert backend_response.aclose_called is True
+
+    asyncio.run(run())
 
 
 def test_proxy_rejects_websocket_upgrade(

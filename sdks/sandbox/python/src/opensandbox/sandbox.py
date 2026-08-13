@@ -482,22 +482,9 @@ class Sandbox:
             f"ConnectionConfig(domain={self.connection_config.get_domain()}, "
             f"use_server_proxy={self.connection_config.use_server_proxy})"
         )
-        if self.connection_config.use_server_proxy:
-            hint = (
-                "Hint: server proxy mode is enabled. Check server-to-sandbox connectivity "
-                "and server API key/auth configuration."
-            )
-        else:
-            hint = (
-                "Hint: direct sandbox endpoint access is enabled. If the SDK cannot directly "
-                "reach sandbox network/ports, set ConnectionConfig(use_server_proxy=True). "
-                "For Docker bridge deployments where server runs in a container, also configure "
-                "server [docker].host_ip to a host-reachable address."
-            )
-
         final_message = (
             f"Sandbox health check timed out after {timeout.total_seconds()}s "
-            f"({attempt} attempts). {error_detail}. {connection_detail}. {hint}"
+            f"({attempt} attempts). {error_detail}. {connection_detail}."
         )
 
         logger.error(final_message)

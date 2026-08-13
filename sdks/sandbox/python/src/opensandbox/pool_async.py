@@ -58,6 +58,7 @@ from opensandbox.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 _WARMUP_TERMINATION_TIMEOUT_SECONDS = 5.0
+_RELEASE_ALL_IDLE_CONCURRENCY = 50
 
 
 class SandboxPoolAsync:
@@ -387,6 +388,86 @@ class SandboxPoolAsync:
             if temporary_manager is not None:
                 await temporary_manager.close()
         return count
+
+    async def release_all_idle_parallel(
+        self, max_workers: int = _RELEASE_ALL_IDLE_CONCURRENCY
+    ) -> int:
+        if max_workers <= 0:
+            raise ValueError("max_workers must be positive")
+
+        cleanup_task = asyncio.create_task(
+            self._release_all_idle_parallel(max_workers)
+        )
+        cancellation: asyncio.CancelledError | None = None
+        cleanup_failure: BaseException | None = None
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+            except BaseException as exc:
+                cleanup_failure = exc
+
+        if cancellation is not None:
+            if cleanup_failure is None and cleanup_task.done():
+                try:
+                    cleanup_failure = cleanup_task.exception()
+                except asyncio.CancelledError:
+                    pass
+            if cleanup_failure is not None:
+                raise cancellation from cleanup_failure
+            raise cancellation
+        if cleanup_failure is not None:
+            raise cleanup_failure
+        return cleanup_task.result()
+
+    async def _release_all_idle_parallel(self, max_workers: int) -> int:
+        pool_name = self._config.pool_name
+        sandbox_ids: list[str] = []
+        drain_error: Exception | None = None
+        temporary_manager: SandboxManager | None = None
+        try:
+            while True:
+                try:
+                    sandbox_id = await self._state_store.try_take_idle(pool_name)
+                except Exception as exc:
+                    drain_error = exc
+                    break
+                if sandbox_id is None:
+                    break
+                sandbox_ids.append(sandbox_id)
+
+            if sandbox_ids:
+                manager = self._sandbox_manager
+                if manager is None:
+                    try:
+                        manager = await self._create_sandbox_manager()
+                        temporary_manager = manager
+                    except Exception as exc:
+                        logger.warning(
+                            f"release_all_idle_parallel: failed to create sandbox manager; draining idle ids without remote kill: pool_name={pool_name} error={exc}"
+                        )
+
+                semaphore = asyncio.Semaphore(max_workers)
+
+                async def kill(sandbox_id: str) -> None:
+                    if manager is None:
+                        return
+                    async with semaphore:
+                        try:
+                            await manager.kill_sandbox(sandbox_id)
+                        except Exception as exc:
+                            logger.warning(
+                                f"release_all_idle_parallel: failed to kill sandbox: pool_name={pool_name} sandbox_id={sandbox_id} error={exc}"
+                            )
+
+                await asyncio.gather(*(kill(sandbox_id) for sandbox_id in sandbox_ids))
+        finally:
+            if temporary_manager is not None:
+                await temporary_manager.close()
+        if drain_error is not None:
+            raise drain_error
+        return len(sandbox_ids)
 
     async def snapshot(self) -> PoolSnapshot:
         lifecycle_state = self._lifecycle_state

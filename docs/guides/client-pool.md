@@ -287,6 +287,15 @@ Every SDK exposes read-only accessors:
   so it is not a safe way to swap creation templates on the same `pool_name`. For that
   case, retire the whole namespace under a new `pool_name` (see below).
 
+The existing cleanup methods retain their original execution behavior. For opt-in
+bounded parallel cleanup, use Python's
+`release_all_idle_parallel(max_workers=50)`, Kotlin's
+`releaseAllIdle(concurrency)`, or Go's concrete
+`(*DefaultSandboxPool).ReleaseAllIdleParallel(ctx, maxWorkers)`. These methods
+validate a positive concurrency value and wait for every drained ID to receive a
+best-effort kill attempt. The Go method is intentionally outside the
+`SandboxPool` interface to preserve compatibility with third-party implementors.
+
 ### Retiring an old pool namespace
 
 The retirement procedure differs across SDKs because Go does not currently ship a

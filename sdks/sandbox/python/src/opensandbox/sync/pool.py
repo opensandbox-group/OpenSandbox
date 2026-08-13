@@ -57,6 +57,7 @@ from opensandbox.sync.sandbox import SandboxSync
 logger = logging.getLogger(__name__)
 
 _WARMUP_TERMINATION_TIMEOUT_SECONDS = 5.0
+_RELEASE_ALL_IDLE_CONCURRENCY = 50
 
 
 class SandboxPoolSync:
@@ -402,6 +403,59 @@ class SandboxPoolSync:
             if temporary_manager is not None:
                 temporary_manager.close()
         return count
+
+    def release_all_idle_parallel(
+        self, max_workers: int = _RELEASE_ALL_IDLE_CONCURRENCY
+    ) -> int:
+        if max_workers <= 0:
+            raise ValueError("max_workers must be positive")
+        pool_name = self._config.pool_name
+        sandbox_ids: list[str] = []
+        drain_error: Exception | None = None
+        temporary_manager: SandboxManagerSync | None = None
+        try:
+            while True:
+                try:
+                    sandbox_id = self._state_store.try_take_idle(pool_name)
+                except Exception as exc:
+                    drain_error = exc
+                    break
+                if sandbox_id is None:
+                    break
+                sandbox_ids.append(sandbox_id)
+
+            if sandbox_ids:
+                manager = self._sandbox_manager
+                if manager is None:
+                    try:
+                        manager = self._create_sandbox_manager()
+                        temporary_manager = manager
+                    except Exception as exc:
+                        logger.warning(
+                            f"release_all_idle_parallel: failed to create sandbox manager; draining idle ids without remote kill: pool_name={pool_name} error={exc}"
+                        )
+
+                def kill(sandbox_id: str) -> None:
+                    if manager is None:
+                        return
+                    try:
+                        manager.kill_sandbox(sandbox_id)
+                    except Exception as exc:
+                        logger.warning(
+                            f"release_all_idle_parallel: failed to kill sandbox: pool_name={pool_name} sandbox_id={sandbox_id} error={exc}"
+                        )
+
+                with ThreadPoolExecutor(
+                    max_workers=min(max_workers, len(sandbox_ids)),
+                    thread_name_prefix="sandbox-pool-release",
+                ) as executor:
+                    list(executor.map(kill, sandbox_ids))
+        finally:
+            if temporary_manager is not None:
+                temporary_manager.close()
+        if drain_error is not None:
+            raise drain_error
+        return len(sandbox_ids)
 
     def snapshot(self) -> PoolSnapshot:
         lifecycle_state = self._lifecycle_state
