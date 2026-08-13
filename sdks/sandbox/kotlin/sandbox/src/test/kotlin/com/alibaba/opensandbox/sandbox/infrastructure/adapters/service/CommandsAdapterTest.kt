@@ -17,6 +17,8 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.api.execd.CommandApi
+import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
@@ -316,6 +318,45 @@ class CommandsAdapterTest {
         assertEquals(Duration.ofSeconds(2), ex.retryAfter)
         assertEquals(responseBody, ex.responseBody)
         assertTrue(ex.isRetryable)
+    }
+
+    @Test
+    fun `getBackgroundCommandLogs should include response body in client error`() {
+        val responseBody = """{"code":"INVALID_ARGUMENT","message":"cursor must be positive"}"""
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(400)
+                .setBody(responseBody),
+        )
+
+        val ex =
+            assertThrows(SandboxApiException::class.java) {
+                commandsAdapter.getBackgroundCommandLogs("exec-1")
+            }
+
+        assertEquals(400, ex.statusCode)
+        assertTrue(ex.message!!.contains(responseBody))
+        assertEquals(responseBody, ex.responseBody)
+    }
+
+    @Test
+    fun `generated client error message should include response body`() {
+        val responseBody = """{"code":"QUOTA_EXCEEDED","message":"sandbox quota exceeded"}"""
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(400)
+                .setBody(responseBody),
+        )
+
+        val api =
+            CommandApi(
+                "http://${mockWebServer.hostName}:${mockWebServer.port}",
+                httpClientProvider.httpClient,
+            )
+
+        val ex = assertThrows(ClientException::class.java) { api.getCommandStatus("exec-1") }
+
+        assertTrue(ex.message!!.contains(responseBody))
     }
 
     @Test

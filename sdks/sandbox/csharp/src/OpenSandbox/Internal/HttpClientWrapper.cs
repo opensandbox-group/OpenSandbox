@@ -382,7 +382,8 @@ internal sealed class HttpClientWrapper
             }
         }
 
-        var message = errorMessage ?? $"Request failed with status code {(int)response.StatusCode}";
+        var message = errorMessage ?? $"Request failed with status code {(int)response.StatusCode}" +
+            (string.IsNullOrEmpty(content) ? string.Empty : $": {content}");
         var sandboxErrorCode = errorCode ?? SandboxErrorCodes.UnexpectedResponse;
 
         throw new SandboxApiException(

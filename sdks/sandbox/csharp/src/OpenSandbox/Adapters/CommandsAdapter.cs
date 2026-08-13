@@ -371,7 +371,8 @@ internal sealed class CommandsAdapter : IExecdCommands
             }
         }
 
-        var message = errorMessage ?? $"Request failed with status code {(int)response.StatusCode}";
+        var message = errorMessage ?? $"Request failed with status code {(int)response.StatusCode}" +
+            (string.IsNullOrEmpty(content) ? string.Empty : $": {content}");
         return new SandboxApiException(
             message: message,
             statusCode: (int)response.StatusCode,

@@ -85,3 +85,26 @@ test("DefaultAdapterFactory exposes context CRUD and interrupt operations", asyn
     assert.equal(entry.headers["x-endpoint"], "endpoint");
   }
 });
+
+test("code context error message carries unstructured error body", async () => {
+  const factory = new DefaultAdapterFactory();
+  const codes = factory.createCodes({
+    sandbox: {
+      connectionConfig: {
+        headers: {},
+        fetch: async () => new Response("context not found", { status: 404 }),
+        sseFetch: async () => new Response("", { status: 200 }),
+      },
+    },
+    execdBaseUrl: "http://sandbox.internal:3456",
+    endpointHeaders: {},
+  });
+
+  await assert.rejects(
+    () => codes.getContext("ctx-1"),
+    (err) => {
+      assert.match(err.message, /context not found/);
+      return true;
+    },
+  );
+});
