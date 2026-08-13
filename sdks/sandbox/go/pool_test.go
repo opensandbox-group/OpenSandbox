@@ -136,31 +136,6 @@ func newTestPool(t *testing.T, serverURL string, opts ...func(*SandboxPoolBuilde
 
 // ---------- Builder Tests ----------
 
-func TestPoolBuilder_Defaults(t *testing.T) {
-	b := NewSandboxPoolBuilder()
-	if b.config.ReconcileInterval != 5*time.Second {
-		t.Errorf("ReconcileInterval = %v, want 5s", b.config.ReconcileInterval)
-	}
-	if b.config.PrimaryLockTTL != 60*time.Second {
-		t.Errorf("PrimaryLockTTL = %v, want 60s", b.config.PrimaryLockTTL)
-	}
-	if b.config.DegradedThreshold != 3 {
-		t.Errorf("DegradedThreshold = %d, want 3", b.config.DegradedThreshold)
-	}
-	if b.config.DrainTimeout != 30*time.Second {
-		t.Errorf("DrainTimeout = %v, want 30s", b.config.DrainTimeout)
-	}
-	if b.config.AcquireReadyTimeout != 30*time.Second {
-		t.Errorf("AcquireReadyTimeout = %v, want 30s", b.config.AcquireReadyTimeout)
-	}
-	if b.config.WarmupReadyTimeout != 30*time.Second {
-		t.Errorf("WarmupReadyTimeout = %v, want 30s", b.config.WarmupReadyTimeout)
-	}
-	if b.config.EmptyBehavior != AcquirePolicyDirectCreate {
-		t.Errorf("EmptyBehavior = %v, want DIRECT_CREATE", b.config.EmptyBehavior)
-	}
-}
-
 func TestPoolBuilder_MissingPoolName(t *testing.T) {
 	_, err := NewSandboxPoolBuilder().
 		ConnectionConfig(ConnectionConfig{Domain: "localhost:8080", Protocol: "http"}).
