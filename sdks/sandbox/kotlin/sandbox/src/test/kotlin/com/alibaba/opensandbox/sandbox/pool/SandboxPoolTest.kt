@@ -1424,7 +1424,9 @@ class SandboxPoolTest {
         pool.start()
         try {
             awaitCondition {
-                pool.snapshot().inFlightOperations == 0 && currentRunWarming(pool).get() == 0
+                pool.snapshot().failureCount >= 1 &&
+                    pool.snapshot().inFlightOperations == 0 &&
+                    currentRunWarming(pool).get() == 0
             }
 
             assertEquals(1, created.get(), "failed warmup must not be retried before the periodic tick")

@@ -96,7 +96,7 @@ canonical reference; refer to the per-language builder or constructor for exact 
 | `sandbox_creator`                     | `null`                             | Optional callback that overrides `creation_spec` at runtime. Python and Kotlin still require `creation_spec` to be supplied (it is unused when the creator is set); only Go allows a creator-only pool. Receives a `PooledSandboxCreateContext` whose `reason` field is `WARMUP` for warmup and `DIRECT_CREATE` (Python / Kotlin) or `CreateReasonAcquire` / `"ACQUIRE"` (Go) for the acquire-fallback path. |
 | `warmup_concurrency`                  | `max(1, ceil(max_idle * 0.2))`     | Warmup worker pool size                                                          |
 | `primary_lock_ttl`                    | `60 s`                             | Leader-lock TTL; must exceed `warmup_ready_timeout` + preparer time              |
-| `reconcile_interval`                  | `30 s`                             | Interval between reconcile ticks                                                 |
+| `reconcile_interval`                  | `5 s`                              | Interval between reconcile ticks                                                 |
 | `degraded_threshold`                  | `3`                                | Consecutive create failures before entering `DEGRADED` with backoff              |
 | `acquire_ready_timeout`               | `30 s`                             | Max wait for the returned sandbox to become ready                                |
 | `acquire_health_check_polling_interval` | `200 ms`                         | Ready-poll interval during acquire                                               |
