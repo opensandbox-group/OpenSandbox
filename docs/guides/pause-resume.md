@@ -73,7 +73,7 @@ The Lifecycle API exposes only the coarse-grained sandbox states above. For deta
 |--|-----------|
 | Root filesystem contents | ✅ Yes — committed as OCI image |
 | Environment variables | ✅ Yes — from BatchSandbox template |
-| Running processes / memory | ❌ No — process state is not checkpointed |
+| Running processes / memory | Rootfs mode: no. Opt-in QEMU-in-runc mode: the QEMU process and Guest memory are restored; other outer processes restart. See [QEMU VMState Snapshots](/kubernetes/qemu-vmstate-snapshots). |
 | Explicit volume mounts | Depends on volume type |
 | Credential Vault entries | No - stored only in egress sidecar memory; re-inject from a trusted control plane after resume |
 

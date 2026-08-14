@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -189,9 +190,10 @@ func TestDispatchPauseResume_Case2_PauseFalse(t *testing.T) {
 		},
 		Spec: sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: "test-bs"},
 		Status: sandboxv1alpha1.SandboxSnapshotStatus{
-			Phase: sandboxv1alpha1.SandboxSnapshotPhaseSucceed,
+			Phase:  sandboxv1alpha1.SandboxSnapshotPhaseSucceed,
+			Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
 			Containers: []sandboxv1alpha1.ContainerSnapshot{
-				{ContainerName: "main", ImageURI: "registry/test-bs-main:snap-gen1"},
+				{ContainerName: "main", ImageURI: "registry/test-bs-main:snap-gen1", ImageDigest: "sha256:" + strings.Repeat("a", 64)},
 			},
 		},
 	}
@@ -796,9 +798,10 @@ func TestContinueResume_NormalFlow(t *testing.T) {
 		},
 		Spec: sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: "test-bs"},
 		Status: sandboxv1alpha1.SandboxSnapshotStatus{
-			Phase: sandboxv1alpha1.SandboxSnapshotPhaseSucceed,
+			Phase:  sandboxv1alpha1.SandboxSnapshotPhaseSucceed,
+			Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
 			Containers: []sandboxv1alpha1.ContainerSnapshot{
-				{ContainerName: "main", ImageURI: "registry/test-bs-main:snap-gen1"},
+				{ContainerName: "main", ImageURI: "registry/test-bs-main:snap-gen1", ImageDigest: "sha256:" + strings.Repeat("a", 64)},
 			},
 		},
 	}
@@ -833,7 +836,7 @@ func TestContinueResume_NormalFlow(t *testing.T) {
 	// Verify images replaced
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
-	assert.Equal(t, "registry/test-bs-main:snap-gen1", updated.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, "registry/test-bs-main@sha256:"+strings.Repeat("a", 64), updated.Spec.Template.Spec.Containers[0].Image)
 	// Verify replicas are preserved.
 	assert.Equal(t, int32(1), *updated.Spec.Replicas)
 	// Verify controller does not clear spec.pause
@@ -2724,6 +2727,54 @@ func TestAckPauseWithPhase_DoesNotMutateSpecPause(t *testing.T) {
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePausing, updated.Status.Phase)
 	require.NotNil(t, updated.Spec.Pause)
 	assert.True(t, *updated.Spec.Pause)
+}
+
+func TestInjectQEMURestorePreservesUserInitContainersAndIsIdempotent(t *testing.T) {
+	template := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			"sandbox.opensandbox.io/qemu-container": "main",
+		}},
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: "download-ubuntu", Image: "ubuntu-seed:test"}},
+			Containers:     []corev1.Container{{Name: "main", Image: "qemu:test"}},
+		},
+	}
+	snapshotObject := &sandboxv1alpha1.SandboxSnapshot{Status: sandboxv1alpha1.SandboxSnapshotStatus{
+		Format: sandboxv1alpha1.SandboxSnapshotFormatQEMUV1,
+		VirtualMachine: &sandboxv1alpha1.VirtualMachineSnapshot{
+			ImageURI:       "registry.example/sandbox-vmstate:snapshot",
+			ImageDigest:    "sha256:" + strings.Repeat("1", 64),
+			PayloadDigest:  "sha256:" + strings.Repeat("2", 64),
+			SizeBytes:      1024,
+			Compression:    "zstd",
+			ManifestDigest: "sha256:" + strings.Repeat("3", 64),
+			Compatibility: sandboxv1alpha1.QEMUCompatibility{
+				Architecture:      "amd64",
+				QEMUVersion:       "9.1.0",
+				MachineType:       "pc-q35-9.1",
+				CPUModel:          "host",
+				VCPUs:             2,
+				MemoryBytes:       1 << 30,
+				QEMUConfigDigest:  "sha256:config",
+				RequiredNodeClass: "shenlong-v1",
+			},
+		},
+	}}
+
+	require.NoError(t, injectQEMURestore(template, snapshotObject))
+	require.NoError(t, injectQEMURestore(template, snapshotObject))
+	require.Len(t, template.Spec.InitContainers, 2)
+	assert.Equal(t, "download-ubuntu", template.Spec.InitContainers[0].Name)
+	restore := template.Spec.InitContainers[1]
+	assert.Equal(t, vmStateRestoreInitName, restore.Name)
+	assert.Equal(t, "registry.example/sandbox-vmstate@sha256:"+strings.Repeat("1", 64), restore.Image)
+	assert.Contains(t, restore.Args, "sha256:"+strings.Repeat("3", 64))
+	assert.Equal(t, "shenlong-v1", template.Spec.NodeSelector["sandbox.opensandbox.io/qemu-node-class"])
+	require.Len(t, template.Spec.Volumes, 1)
+	require.Len(t, template.Spec.Containers[0].VolumeMounts, 1)
+	assert.Equal(t, vmStateRestoreMountPath, template.Spec.Containers[0].VolumeMounts[0].MountPath)
+	assert.Contains(t, template.Spec.Containers[0].Env, corev1.EnvVar{Name: "OPENSANDBOX_RESTORE_MODE", Value: "qemu-v1"})
+	assert.Contains(t, template.Spec.Containers[0].Env, corev1.EnvVar{Name: "OPENSANDBOX_VMSTATE_DIR", Value: vmStateRestoreMountPath})
 }
 
 // Ensure ctrl.Result type is used

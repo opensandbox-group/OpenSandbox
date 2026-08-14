@@ -134,6 +134,14 @@ spec:
                   - imageUri
                   type: object
                 type: array
+              format:
+                description: |-
+                  Format identifies the snapshot representation. Empty means rootfs-v1 for
+                  backward compatibility with snapshots created before this field existed.
+                enum:
+                - rootfs-v1
+                - qemu-v1
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the most recent spec generation
                   observed by the Controller.
@@ -155,6 +163,89 @@ spec:
                 description: SourcePodName is the name of the source Pod (resolved
                   by Controller).
                 type: string
+              virtualMachine:
+                description: VirtualMachine contains the QEMU VM state artifact for
+                  qemu-v1 snapshots.
+                properties:
+                  compatibility:
+                    description: Compatibility contains the restore compatibility
+                      summary.
+                    properties:
+                      architecture:
+                        description: Architecture is the guest host architecture,
+                          for example amd64.
+                        type: string
+                      cpuModel:
+                        description: CPUModel is the configured virtual CPU model.
+                        type: string
+                      machineType:
+                        description: MachineType is the versioned QEMU machine type.
+                        type: string
+                      memoryBytes:
+                        description: MemoryBytes is the configured guest RAM in bytes.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      qemuConfigDigest:
+                        description: QEMUConfigDigest identifies the normalized QEMU
+                          launch configuration.
+                        type: string
+                      qemuVersion:
+                        description: QEMUVersion is the source QEMU version string.
+                        type: string
+                      requiredNodeClass:
+                        description: RequiredNodeClass optionally constrains restore
+                          to a compatible node class.
+                        type: string
+                      vcpus:
+                        description: VCPUs is the number of virtual CPUs.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                    - architecture
+                    - cpuModel
+                    - machineType
+                    - memoryBytes
+                    - qemuConfigDigest
+                    - qemuVersion
+                    - vcpus
+                    type: object
+                  compression:
+                    description: Compression identifies the payload compression algorithm.
+                    enum:
+                    - zstd
+                    type: string
+                  imageDigest:
+                    description: ImageDigest is the digest of the pushed standard
+                      container image.
+                    type: string
+                  imageUri:
+                    description: ImageURI is the repository and tag used when the
+                      VM state image was pushed.
+                    type: string
+                  manifestDigest:
+                    description: ManifestDigest identifies the compatibility manifest
+                      stored in the image.
+                    type: string
+                  payloadDigest:
+                    description: PayloadDigest is the digest of the compressed VM
+                      state payload.
+                    type: string
+                  sizeBytes:
+                    description: SizeBytes is the compressed VM state payload size.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                required:
+                - compatibility
+                - compression
+                - imageDigest
+                - imageUri
+                - manifestDigest
+                - payloadDigest
+                - sizeBytes
+                type: object
             type: object
         type: object
     served: true

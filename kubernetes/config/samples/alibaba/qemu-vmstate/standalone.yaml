@@ -1,0 +1,70 @@
+# Experimental private sample: QEMU runs inside a privileged runc container.
+# This is a workload contract, not a RuntimeClass-based virtualized runtime.
+#
+# Snapshot layout:
+#   1. The committed container image preserves the outer runc rootfs.
+#   2. /vm/state.qcow2 is the writable Guest disk and is embedded in (1).
+#   3. A second VMState image stores compressed Guest RAM/vCPU/device state.
+# Therefore the Registry receives two OCI image references for three logical
+# state domains. See README.md in this directory for the full lifecycle.
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: qemu-standalone
+  namespace: qemu-manual
+spec:
+  replicas: 1
+  # Intentionally omit spec.pause on creation. Add pause: true to checkpoint;
+  # set it to false only when resuming an already-paused sandbox.
+  template:
+    metadata:
+      annotations:
+        # Select the QEMU-aware checkpoint provider. OpenSandbox does not infer
+        # this mode from the container image or process name.
+        sandbox.opensandbox.io/checkpoint-provider: qemu
+        # Container in which the image-committer finds QEMU and the two files
+        # named by the annotations below.
+        sandbox.opensandbox.io/qemu-container: qemu
+        # QMP migration exports Guest RAM, vCPU, and device state.
+        sandbox.opensandbox.io/qemu-qmp-socket: /run/qemu-e2e/qmp.sock
+        # The launch manifest pins QEMU compatibility and declares
+        # /vm/state.qcow2 with capture: rootfs.
+        sandbox.opensandbox.io/qemu-launch-manifest: /run/qemu-e2e/launch.json
+    spec:
+      containers:
+      - name: qemu
+        # The entrypoint starts QEMU normally or with -incoming when the
+        # controller injects OPENSANDBOX_RESTORE_MODE=qemu-v1.
+        image: opensandbox/qemu-vmstate-e2e:dev
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: 500m
+            memory: 768Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        # Port 18080 is QEMU hostfwd to the PID 1 HTTP service in the Guest.
+        # Readiness after resume proves that the restored Guest serves again.
+        readinessProbe:
+          exec:
+            command:
+            - curl
+            - --fail
+            - --silent
+            - --show-error
+            - http://127.0.0.1:18080/healthz
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          timeoutSeconds: 3
+          failureThreshold: 60
+        volumeMounts:
+        - name: kvm
+          mountPath: /dev/kvm
+      volumes:
+      - name: kvm
+        hostPath:
+          path: /dev/kvm
+          type: CharDevice

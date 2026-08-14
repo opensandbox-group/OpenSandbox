@@ -40,6 +40,16 @@ const (
 	SandboxSnapshotConditionFailed SandboxSnapshotConditionType = "Failed"
 )
 
+// SandboxSnapshotFormat identifies the persisted snapshot representation.
+// Existing snapshots without this field are interpreted as rootfs-v1.
+// +kubebuilder:validation:Enum=rootfs-v1;qemu-v1
+type SandboxSnapshotFormat string
+
+const (
+	SandboxSnapshotFormatRootfsV1 SandboxSnapshotFormat = "rootfs-v1"
+	SandboxSnapshotFormatQEMUV1   SandboxSnapshotFormat = "qemu-v1"
+)
+
 // ContainerSnapshot records the snapshot result for a single container.
 type ContainerSnapshot struct {
 	// ContainerName is the name of the container.
@@ -49,6 +59,53 @@ type ContainerSnapshot struct {
 	// ImageDigest is the config digest of the pushed snapshot image.
 	// +optional
 	ImageDigest string `json:"imageDigest,omitempty"`
+}
+
+// QEMUCompatibility captures the immutable VM configuration required to load a
+// QEMU migration stream safely. The complete launch manifest is stored in the
+// VM state image; this status object contains the scheduling and validation
+// summary needed by the control plane.
+type QEMUCompatibility struct {
+	// Architecture is the guest host architecture, for example amd64.
+	Architecture string `json:"architecture"`
+	// QEMUVersion is the source QEMU version string.
+	QEMUVersion string `json:"qemuVersion"`
+	// MachineType is the versioned QEMU machine type.
+	MachineType string `json:"machineType"`
+	// CPUModel is the configured virtual CPU model.
+	CPUModel string `json:"cpuModel"`
+	// VCPUs is the number of virtual CPUs.
+	// +kubebuilder:validation:Minimum=1
+	VCPUs int32 `json:"vcpus"`
+	// MemoryBytes is the configured guest RAM in bytes.
+	// +kubebuilder:validation:Minimum=1
+	MemoryBytes int64 `json:"memoryBytes"`
+	// QEMUConfigDigest identifies the normalized QEMU launch configuration.
+	QEMUConfigDigest string `json:"qemuConfigDigest"`
+	// RequiredNodeClass optionally constrains restore to a compatible node class.
+	// +optional
+	RequiredNodeClass string `json:"requiredNodeClass,omitempty"`
+}
+
+// VirtualMachineSnapshot records the separately persisted QEMU migration
+// stream. ImageURI and ImageDigest form an immutable pull reference.
+type VirtualMachineSnapshot struct {
+	// ImageURI is the repository and tag used when the VM state image was pushed.
+	ImageURI string `json:"imageUri"`
+	// ImageDigest is the digest of the pushed standard container image.
+	ImageDigest string `json:"imageDigest"`
+	// PayloadDigest is the digest of the compressed VM state payload.
+	PayloadDigest string `json:"payloadDigest"`
+	// SizeBytes is the compressed VM state payload size.
+	// +kubebuilder:validation:Minimum=0
+	SizeBytes int64 `json:"sizeBytes"`
+	// Compression identifies the payload compression algorithm.
+	// +kubebuilder:validation:Enum=zstd
+	Compression string `json:"compression"`
+	// ManifestDigest identifies the compatibility manifest stored in the image.
+	ManifestDigest string `json:"manifestDigest"`
+	// Compatibility contains the restore compatibility summary.
+	Compatibility QEMUCompatibility `json:"compatibility"`
 }
 
 // SandboxSnapshotCondition represents a condition of a SandboxSnapshot.
@@ -87,9 +144,18 @@ type SandboxSnapshotStatus struct {
 	// Phase indicates the current phase of the snapshot.
 	Phase SandboxSnapshotPhase `json:"phase,omitempty"`
 
+	// Format identifies the snapshot representation. Empty means rootfs-v1 for
+	// backward compatibility with snapshots created before this field existed.
+	// +optional
+	Format SandboxSnapshotFormat `json:"format,omitempty"`
+
 	// Containers holds per-container snapshot results, filled after Succeed.
 	// +optional
 	Containers []ContainerSnapshot `json:"containers,omitempty"`
+
+	// VirtualMachine contains the QEMU VM state artifact for qemu-v1 snapshots.
+	// +optional
+	VirtualMachine *VirtualMachineSnapshot `json:"virtualMachine,omitempty"`
 
 	// Conditions records the readiness or failure of the snapshot.
 	// +optional

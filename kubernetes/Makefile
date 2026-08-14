@@ -182,6 +182,11 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+
+.PHONY: test-e2e-qemu
+test-e2e-qemu: ## Run QEMU-in-runc VMState pause/resume E2E (requires Linux amd64 and /dev/kvm)
+	bash test/e2e_qemu/run.sh
+
 # Common E2E setup targets - install CRDs and controller for any Kind cluster
 .PHONY: install-e2e-deps
 install-e2e-deps:

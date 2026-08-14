@@ -16,7 +16,10 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -34,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+	snapshotcontract "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 )
 
 func newTestSnapshotReconciler(objs ...client.Object) *SandboxSnapshotReconciler {
@@ -579,4 +583,99 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 	assert.False(t, *container.SecurityContext.AllowPrivilegeEscalation)
 	require.NotNil(t, container.SecurityContext.Capabilities)
 	assert.Equal(t, []corev1.Capability{"ALL"}, container.SecurityContext.Capabilities.Drop)
+	assert.Empty(t, container.SecurityContext.Capabilities.Add)
+}
+
+func TestBuildCommitJob_QEMUUsesStructuredRequestAndWorkVolume(t *testing.T) {
+	snapshotObject := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot", Namespace: "default"},
+		Spec:       sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: "test-sandbox"},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Format:         sandboxv1alpha1.SandboxSnapshotFormatQEMUV1,
+			SourcePodName:  "test-pod",
+			SourceNodeName: "node-1",
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "main", ImageURI: "registry.example/snapshots/test-main:snap-123"},
+			},
+		},
+	}
+	r := newTestSnapshotReconciler(snapshotObject)
+	r.SnapshotRegistry = "registry.example/snapshots"
+	contract := snapshotcontract.WorkloadContract{
+		Provider: snapshotcontract.ProviderQEMU,
+		QEMU: &snapshotcontract.QEMUContract{
+			ContainerName:      "main",
+			QMPSocketPath:      "/run/qemu/qmp.sock",
+			LaunchManifestPath: "/run/qemu/launch.json",
+			RequiredNodeClass:  "shenlong-v1",
+			VolumeMountPaths:   []string{"/dev/kvm", "/immutable-base"},
+		},
+	}
+
+	job, err := r.buildCommitJob(snapshotObject, contract)
+	require.NoError(t, err)
+	assert.True(t, job.Spec.Template.Spec.HostPID)
+	container := job.Spec.Template.Spec.Containers[0]
+	require.NotNil(t, container.SecurityContext)
+	require.NotNil(t, container.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"SYS_PTRACE"}, container.SecurityContext.Capabilities.Add)
+	require.Equal(t, []string{"snapshot", "--request-base64"}, container.Args[:2])
+	requestData, err := base64.StdEncoding.DecodeString(container.Args[2])
+	require.NoError(t, err)
+	var request snapshotcontract.Request
+	require.NoError(t, json.Unmarshal(requestData, &request))
+	assert.Equal(t, snapshotcontract.ProviderQEMU, request.Provider)
+	assert.Equal(t, "registry.example/snapshots/test-sandbox-vmstate:snap-123", request.VMStateImageURI)
+	assert.False(t, request.LeaveSourceFrozen)
+	require.NotNil(t, request.QEMU)
+	assert.Equal(t, "/run/qemu/qmp.sock", request.QEMU.QMPSocketPath)
+	assert.Equal(t, "shenlong-v1", request.QEMU.RequiredNodeClass)
+	assert.Equal(t, []string{"/dev/kvm", "/immutable-base"}, request.QEMU.VolumeMountPaths)
+	containerdRuntimeDir := filepath.Dir(ContainerdSocketPath)
+	assert.Contains(t, container.VolumeMounts, corev1.VolumeMount{Name: "containerd-sock", MountPath: containerdRuntimeDir})
+	assert.Contains(t, container.VolumeMounts, corev1.VolumeMount{Name: "vmstate-work", MountPath: "/workspace/checkpoint"})
+	require.NotNil(t, job.Spec.Template.Spec.Volumes[0].HostPath)
+	assert.Equal(t, containerdRuntimeDir, job.Spec.Template.Spec.Volumes[0].HostPath.Path)
+	require.NotNil(t, container.Resources.Limits.StorageEphemeral())
+}
+
+func TestBuildCommitJob_InternalQEMUSnapshotLeavesSourceFrozen(t *testing.T) {
+	controller := true
+	snapshotObject := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind:       "BatchSandbox",
+				Controller: &controller,
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: "test-sandbox"},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Format:         sandboxv1alpha1.SandboxSnapshotFormatQEMUV1,
+			SourcePodName:  "test-pod",
+			SourceNodeName: "node-1",
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "main", ImageURI: "registry.example/snapshots/test-main:snap-123"},
+			},
+		},
+	}
+	r := newTestSnapshotReconciler(snapshotObject)
+	r.SnapshotRegistry = "registry.example/snapshots"
+	contract := snapshotcontract.WorkloadContract{
+		Provider: snapshotcontract.ProviderQEMU,
+		QEMU: &snapshotcontract.QEMUContract{
+			ContainerName:      "main",
+			QMPSocketPath:      "/run/qemu/qmp.sock",
+			LaunchManifestPath: "/run/qemu/launch.json",
+		},
+	}
+
+	job, err := r.buildCommitJob(snapshotObject, contract)
+	require.NoError(t, err)
+	requestData, err := base64.StdEncoding.DecodeString(job.Spec.Template.Spec.Containers[0].Args[2])
+	require.NoError(t, err)
+	var request snapshotcontract.Request
+	require.NoError(t, json.Unmarshal(requestData, &request))
+	assert.True(t, request.LeaveSourceFrozen)
 }

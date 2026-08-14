@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: registry
+  namespace: qemu-vmstate-e2e
+  labels:
+    app: registry
+spec:
+  hostNetwork: true
+  containers:
+  - name: registry
+    image: registry:2
+    imagePullPolicy: IfNotPresent
+    ports:
+    - name: registry
+      containerPort: 5000
+      hostPort: 5000

@@ -1,0 +1,7 @@
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+nodes:
+- role: control-plane
+  extraMounts:
+  - hostPath: /dev/kvm
+    containerPath: /dev/kvm

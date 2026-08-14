@@ -157,6 +157,10 @@ export default defineConfig({
           items: [
             { text: "Overview", link: "/kubernetes/" },
             { text: "Deployment", link: "/kubernetes/deployment" },
+            {
+              text: "QEMU VMState Snapshots",
+              link: "/kubernetes/qemu-vmstate-snapshots",
+            },
           ],
         },
       ],
