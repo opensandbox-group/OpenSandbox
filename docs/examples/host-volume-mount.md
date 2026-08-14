@@ -34,12 +34,12 @@ For security, the server restricts which host paths can be mounted. Add a `[stor
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
 # Only paths under these prefixes can be mounted into sandboxes.
-# If empty, all host paths are allowed (not recommended for production).
+# If empty, all host bind mounts are rejected (secure by default).
 allowed_host_paths = ["/tmp/opensandbox-data", "/data/shared"]
 ```
 
 ::: warning Security note
-In production, always set explicit `allowed_host_paths` to prevent sandboxes from accessing sensitive host directories. An empty list allows all paths, which is convenient for local development but not safe for shared environments.
+In production, always set explicit `allowed_host_paths` to prevent sandboxes from accessing sensitive host directories. The default is an empty list, which rejects every host bind mount, so this section must be configured before host volumes can be used at all.
 :::
 
 ### 3. Create Host Directories

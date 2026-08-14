@@ -36,7 +36,7 @@ execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd
 
 [storage]
 # 允许进行 bind mount 的宿主机路径前缀白名单。
-# 如果为空，则允许所有路径（不建议在生产环境使用）。
+# 如果为空（默认值），则拒绝所有宿主机 bind mount（默认安全）。
 # 示例：allowed_host_paths = ["/data/opensandbox", "/tmp/sandbox"]
 allowed_host_paths = []
 
