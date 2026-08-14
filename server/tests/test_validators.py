@@ -371,6 +371,21 @@ class TestEnsureValidHostPath:
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
 
+    def test_empty_allowlist_rejects_every_path(self):
+        """An empty allowlist is secure-by-default: it rejects every host path.
+
+        This is the ``storage.allowed_host_paths = []`` default, and it is
+        distinct from ``None`` (no allowlist configured) below.
+        """
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_host_path("/data/opensandbox", [])
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
+
+    def test_none_allowlist_skips_the_prefix_check(self):
+        """``None`` means no prefix check at all, unlike an empty list."""
+        assert ensure_valid_host_path("/data/opensandbox", None) is None
+
 class TestEnsureValidPvcName:
 
     def test_valid_simple_name(self):
