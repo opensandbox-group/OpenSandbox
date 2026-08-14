@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyCo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PVC
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
@@ -31,6 +32,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -39,6 +41,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -534,6 +537,91 @@ class SandboxesAdapterTest {
         assertEquals("sk", ossfs["accessKeySecret"]!!.jsonPrimitive.content)
         assertEquals("2.0", ossfs["version"]!!.jsonPrimitive.content)
         assertEquals("prefix", serializedVolume["subPath"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `createSandbox should omit unset ensureSubPathDirectory`() {
+        mockWebServer.enqueue(createSandboxResponse())
+
+        sandboxesAdapter.createSandbox(
+            spec = SandboxImageSpec.builder().image("ubuntu:latest").build(),
+            entrypoint = listOf("bash"),
+            env = emptyMap(),
+            metadata = emptyMap(),
+            timeout = null,
+            resource = emptyMap(),
+            platform = null,
+            networkPolicy = null,
+            extensions = emptyMap(),
+            volumes =
+                listOf(
+                    Volume.builder()
+                        .name("workspace")
+                        .pvc(PVC.of("workspace-pvc"))
+                        .mountPath("/workspace")
+                        .subPath("unseeded")
+                        .build(),
+                ),
+            secureAccess = false,
+            snapshotId = null,
+            credentialProxy = null,
+        )
+
+        val payload = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        val serializedVolume = payload["volumes"]!!.jsonArray[0].jsonObject
+
+        assertNull(serializedVolume["ensureSubPathDirectory"])
+    }
+
+    @Test
+    fun `createSandbox should serialize enabled ensureSubPathDirectory with wire name`() {
+        mockWebServer.enqueue(createSandboxResponse())
+
+        sandboxesAdapter.createSandbox(
+            spec = SandboxImageSpec.builder().image("ubuntu:latest").build(),
+            entrypoint = listOf("bash"),
+            env = emptyMap(),
+            metadata = emptyMap(),
+            timeout = null,
+            resource = emptyMap(),
+            platform = null,
+            networkPolicy = null,
+            extensions = emptyMap(),
+            volumes =
+                listOf(
+                    Volume.builder()
+                        .name("workspace")
+                        .pvc(PVC.of("workspace-pvc"))
+                        .mountPath("/workspace")
+                        .subPath("unseeded")
+                        .ensureSubPathDirectory(true)
+                        .build(),
+                ),
+            secureAccess = false,
+            snapshotId = null,
+            credentialProxy = null,
+        )
+
+        val payload = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        val serializedVolume = payload["volumes"]!!.jsonArray[0].jsonObject
+
+        assertTrue(serializedVolume["ensureSubPathDirectory"]!!.jsonPrimitive.boolean)
+    }
+
+    private fun createSandboxResponse(): MockResponse {
+        return MockResponse()
+            .setResponseCode(201)
+            .setBody(
+                """
+                {
+                    "id": "sandbox-id",
+                    "status": { "state": "Running" },
+                    "expiresAt": null,
+                    "createdAt": "2023-01-01T10:00:00Z",
+                    "entrypoint": ["bash"]
+                }
+                """.trimIndent(),
+            )
     }
 
     @Test

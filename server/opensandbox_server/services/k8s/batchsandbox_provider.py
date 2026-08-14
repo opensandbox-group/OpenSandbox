@@ -54,7 +54,13 @@ from opensandbox_server.services.k8s.windows_profile import (
     is_windows_profile,
     validate_windows_profile_resource_limits,
 )
-from opensandbox_server.services.k8s.volume_helper import apply_volumes_to_pod_spec
+from opensandbox_server.services.k8s.volume_helper import (
+    SUBPATH_INITIALIZER_NAME,
+    add_subpath_initializer_to_pod_spec,
+    apply_volumes_to_pod_spec,
+    get_subpath_initializer_main_container_identity,
+    merge_subpath_initializer_main_container_identity,
+)
 from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
 from opensandbox_server.services.runtime_resolver import SecureRuntimeResolver
 
@@ -63,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 class BatchSandboxProvider(WorkloadProvider):
     """Workload provider for BatchSandbox CRDs."""
-    
+
     def __init__(
         self,
         k8s_client: K8sClient,
@@ -99,6 +105,10 @@ class BatchSandboxProvider(WorkloadProvider):
 
     def supports_image_auth(self) -> bool:
         """BatchSandbox supports per-request image pull auth."""
+        return True
+
+    def supports_ensure_sub_path_directory(self) -> bool:
+        """BatchSandbox template mode runs the trusted execd initializer."""
         return True
 
     def create_workload(
@@ -178,14 +188,13 @@ class BatchSandboxProvider(WorkloadProvider):
             self.execd_init_resources,
             disable_ipv6_for_egress=disable_ipv6_for_egress,
         )
-        
+
         main_env = dict(env)
         main_env["OPENSANDBOX_ID"] = sandbox_id
         if self.execd_run_as_init:
             main_env["EXECD_INIT"] = "1"
         if credential_proxy_enabled:
             main_env[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] = "true"
-
         main_container = _build_main_container(
             image_spec=image_spec,
             entrypoint=entrypoint,
@@ -196,7 +205,7 @@ class BatchSandboxProvider(WorkloadProvider):
             image_pull_policy=self.image_pull_policy,
             resource_requests=resource_requests or None,
         )
-        
+
         containers = [_container_to_dict(main_container)]
         pod_volumes = [
             {
@@ -291,6 +300,27 @@ class BatchSandboxProvider(WorkloadProvider):
             batchsandbox["spec"]["expireTime"] = expires_at.isoformat()
         self._merge_pod_spec_extras(batchsandbox, extra_volumes, extra_mounts)
         merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
+        if volumes and any(volume.ensure_sub_path_directory for volume in volumes):
+            self._reject_template_subpath_initializer_collision()
+            template = self.template_manager.get_base_template()
+            template_pod_spec = (
+                template.get("spec", {}).get("template", {}).get("spec", {})
+                if isinstance(template, dict)
+                else {}
+            )
+            identity = get_subpath_initializer_main_container_identity(
+                template_pod_spec
+            )
+            merge_subpath_initializer_main_container_identity(
+                merged_pod_spec,
+                identity,
+            )
+            add_subpath_initializer_to_pod_spec(
+                merged_pod_spec,
+                volumes,
+                execd_image,
+                identity["runAsGroup"],
+            )
         ensure_egress_runtime_compatible(
             network_policy,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
@@ -416,7 +446,7 @@ class BatchSandboxProvider(WorkloadProvider):
             plural=self.plural,
             body=runtime_manifest,
         )
-        
+
         return {
             "name": created["metadata"]["name"],
             "uid": created["metadata"]["uid"],
@@ -448,6 +478,23 @@ class BatchSandboxProvider(WorkloadProvider):
         if not isinstance(extra_mounts, list):
             extra_mounts = []
         return extra_volumes, extra_mounts
+
+    def _reject_template_subpath_initializer_collision(self) -> None:
+        """Reject templates that try to define the server-reserved initializer."""
+        template = self.template_manager.get_base_template()
+        template_spec = (
+            template.get("spec", {}).get("template", {}).get("spec", {})
+            if isinstance(template, dict)
+            else {}
+        )
+        init_containers = template_spec.get("initContainers", [])
+        if isinstance(init_containers, list) and any(
+            isinstance(container, dict) and container.get("name") == SUBPATH_INITIALIZER_NAME
+            for container in init_containers
+        ):
+            raise ValueError(
+                f"Pod template cannot define reserved init container '{SUBPATH_INITIALIZER_NAME}'."
+            )
 
     def _merge_pod_spec_extras(
         self,
@@ -530,7 +577,6 @@ class BatchSandboxProvider(WorkloadProvider):
             }
         }
 
-
     def get_workload(self, sandbox_id: str, namespace: str) -> Optional[Dict[str, Any]]:
         """Get BatchSandbox by sandbox ID."""
         workload = self.k8s_client.get_custom_object(
@@ -554,7 +600,7 @@ class BatchSandboxProvider(WorkloadProvider):
             )
 
         return None
-    
+
     def delete_workload(self, sandbox_id: str, namespace: str) -> None:
         """Delete BatchSandbox workload."""
         batchsandbox = self.get_workload(sandbox_id, namespace)
@@ -744,22 +790,20 @@ class BatchSandboxProvider(WorkloadProvider):
             raise ValueError(f"Cannot resume: sandbox is being created (phase={phase})")
         else:
             raise ValueError(f"Cannot resume sandbox in phase {phase}, expected Paused")
-
         if resume_failed:
             self._patch_pause_with_retry_bridge(sandbox_id, namespace, False)
             logger.info("Patched BatchSandbox %s retry bridge spec.pause=nil->false", sandbox_id)
         else:
             self.patch_workload(sandbox_id, namespace, {"spec": {"pause": False}})
             logger.info("Patched BatchSandbox %s spec.pause=false", sandbox_id)
-
     def get_expiration(self, workload: Dict[str, Any]) -> Optional[datetime]:
         """Parse expiration timestamp from `spec.expireTime`."""
         spec = workload.get("spec", {})
         expire_time_str = spec.get("expireTime")
-        
+
         if not expire_time_str:
             return None
-        
+
         try:
             return datetime.fromisoformat(expire_time_str.replace('Z', '+00:00'))
         except (ValueError, TypeError) as e:
@@ -800,7 +844,6 @@ class BatchSandboxProvider(WorkloadProvider):
             )
         except Exception:
             return None
-
         for pod in pods:
             message = _extract_platform_unschedulable_message_from_pod(
                 pod,
@@ -876,7 +919,7 @@ class BatchSandboxProvider(WorkloadProvider):
             "message": message,
             "last_transition_at": creation_timestamp,
         }
-    
+
     def get_internal_endpoint(
         self, workload: Dict[str, Any], port: int, sandbox_id: str
     ) -> Optional[Endpoint]:

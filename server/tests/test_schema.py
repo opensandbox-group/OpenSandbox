@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from opensandbox_server.api.schema import (
@@ -37,7 +38,6 @@ from opensandbox_server.api.schema import (
 
 
 class TestHost:
-
     def test_valid_path(self):
         backend = Host(path="/data/opensandbox")
         assert backend.path == "/data/opensandbox"
@@ -171,6 +171,67 @@ class TestVolume:
         assert volume.read_only is True
         assert volume.host is None
 
+    def test_ensure_subpath_directory_defaults_to_false_and_serializes(self):
+        volume = Volume(
+            name="workspace",
+            pvc=PVC(claim_name="workspace-pvc"),
+            mount_path="/workspace",
+            sub_path="jobs/123",
+        )
+
+        assert volume.ensure_sub_path_directory is False
+        assert volume.model_dump(by_alias=True)["ensureSubPathDirectory"] is False
+        assert (
+            Volume.model_json_schema(by_alias=True)["properties"]["ensureSubPathDirectory"][
+                "default"
+            ]
+            is False
+        )
+
+    def test_ensure_subpath_directory_rejects_unsupported_combinations(self):
+        with pytest.raises(ValidationError, match="readOnly=true"):
+            Volume(
+                name="workspace",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace",
+                sub_path="jobs/123",
+                read_only=True,
+                ensure_sub_path_directory=True,
+            )
+
+        with pytest.raises(ValidationError, match="only for PVC"):
+            Volume(
+                name="workspace",
+                host=Host(path="/data/workspace"),
+                mount_path="/workspace",
+                sub_path="jobs/123",
+                ensure_sub_path_directory=True,
+            )
+
+    @pytest.mark.parametrize(
+        "sub_path",
+        ["", "   ", "/absolute", ".", "..", "a//b", "a/./b", "a/../b", "a\x00b"],
+    )
+    def test_ensure_subpath_directory_rejects_invalid_subpaths(self, sub_path):
+        with pytest.raises(ValidationError, match="non-empty subPath|normalized relative subPath"):
+            Volume(
+                name="workspace",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace",
+                sub_path=sub_path,
+                ensure_sub_path_directory=True,
+            )
+
+    def test_lifecycle_spec_exposes_ensure_subpath_directory(self):
+        from pathlib import Path
+
+        spec_path = Path(__file__).resolve().parents[2] / "specs" / "sandbox-lifecycle.yml"
+        spec = yaml.safe_load(spec_path.read_text())
+        field = spec["components"]["schemas"]["Volume"]["properties"]["ensureSubPathDirectory"]
+
+        assert field["type"] == "boolean"
+        assert field["default"] is False
+
     def test_valid_volume_with_subpath(self):
         volume = Volume(
             name="workdir",
@@ -234,6 +295,7 @@ class TestVolume:
             "mountPath": "/mnt/work",
             "readOnly": False,
             "subPath": "task-001",
+            "ensureSubPathDirectory": False,
         }
 
     def test_serialization_pvc_volume(self):
@@ -253,6 +315,7 @@ class TestVolume:
             },
             "mountPath": "/mnt/models",
             "readOnly": True,
+            "ensureSubPathDirectory": False,
         }
 
     def test_deserialization_host_volume(self):

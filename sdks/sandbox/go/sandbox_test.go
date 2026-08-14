@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -106,6 +107,52 @@ func TestSandbox_Ping_OK(t *testing.T) {
 	}
 
 	require.NoError(t, sb.Ping(context.Background()))
+}
+
+func TestCreateSandboxMapsVolumeEnsureSubPathDirectory(t *testing.T) {
+	var createRequest CreateSandboxRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			if err := json.NewDecoder(r.Body).Decode(&createRequest); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			jsonResponse(w, http.StatusCreated, SandboxInfo{
+				ID:        "sbx-volume",
+				Status:    SandboxStatus{State: StateRunning},
+				CreatedAt: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sbx-volume":
+			jsonResponse(w, http.StatusOK, SandboxInfo{
+				ID:        "sbx-volume",
+				Status:    SandboxStatus{State: StateRunning},
+				CreatedAt: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/endpoints/"):
+			jsonResponse(w, http.StatusOK, Endpoint{Endpoint: "http://127.0.0.1:18080"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	enabled := true
+	_, err := CreateSandbox(context.Background(), ConnectionConfig{Domain: srv.URL}, SandboxCreateOptions{
+		Image:           "python:3.12",
+		SkipHealthCheck: true,
+		Volumes: []Volume{{
+			Name:                   "workspace",
+			PVC:                    &PVC{ClaimName: "workspace-pvc"},
+			MountPath:              "/workspace",
+			SubPath:                "agent/run",
+			EnsureSubPathDirectory: &enabled,
+		}},
+	})
+	require.NoErrorf(t, err, "CreateSandbox")
+	require.Len(t, createRequest.Volumes, 1)
+	if createRequest.Volumes[0].EnsureSubPathDirectory == nil || !*createRequest.Volumes[0].EnsureSubPathDirectory {
+		assert.Fail(t, "EnsureSubPathDirectory should be mapped to the lifecycle create request")
+	}
 }
 
 func TestSandbox_IsHealthy_ExecdNil(t *testing.T) {

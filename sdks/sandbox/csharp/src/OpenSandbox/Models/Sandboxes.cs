@@ -686,6 +686,14 @@ public class Volume
     /// </summary>
     [JsonPropertyName("subPath")]
     public string? SubPath { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether the Kubernetes BatchSandbox template runtime should create the subpath directory.
+    /// Supported only for writable PVC volume mounts with a normalized, nonempty subpath; rejected for Docker,
+    /// pool mode, and host or OSSFS volume mounts.
+    /// </summary>
+    [JsonPropertyName("ensureSubPathDirectory")]
+    public bool? EnsureSubPathDirectory { get; set; }
 }
 
 /// <summary>

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FluentAssertions;
 using OpenSandbox.Models;
 using Xunit;
@@ -304,6 +305,42 @@ public class ModelsTests
         json.Should().Contain("\"accessKeySecret\":\"sk\"");
         json.Should().Contain("\"version\":\"2.0\"");
         json.Should().Contain("\"platform\":{\"os\":\"linux\",\"arch\":\"arm64\"}");
+
+        json.Should().NotContain("ensureSubPathDirectory");
+
+        var volumeWithoutEnsure = new Volume
+        {
+            Name = "data",
+            MountPath = "/mnt/data"
+        };
+        var options = new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+        JsonSerializer.Serialize(volumeWithoutEnsure, options)
+            .Should().NotContain("ensureSubPathDirectory");
+    }
+
+    [Fact]
+    public void Volume_WithWritablePvcAndSubPath_ShouldSerializeEnsureSubPathDirectory()
+    {
+        var volume = new Volume
+        {
+            Name = "workspace",
+            Pvc = new PVC { ClaimName = "workspace-pvc" },
+            MountPath = "/workspace",
+            SubPath = "agent/run",
+            EnsureSubPathDirectory = true
+        };
+        var options = new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+        var json = JsonSerializer.Serialize(volume, options);
+
+        json.Should().Contain("\"pvc\":{\"claimName\":\"workspace-pvc\"}");
+        json.Should().Contain("\"subPath\":\"agent/run\"");
+        json.Should().Contain("\"ensureSubPathDirectory\":true");
     }
 
     [Fact]

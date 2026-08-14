@@ -95,13 +95,14 @@ type ResourceLimits map[string]string
 
 // Volume defines a storage mount for a sandbox.
 type Volume struct {
-	Name      string `json:"name"`
-	Host      *Host  `json:"host,omitempty"`
-	PVC       *PVC   `json:"pvc,omitempty"`
-	OSSFS     *OSSFS `json:"ossfs,omitempty"`
-	MountPath string `json:"mountPath"`
-	ReadOnly  bool   `json:"readOnly,omitempty"`
-	SubPath   string `json:"subPath,omitempty"`
+	Name                   string `json:"name"`
+	Host                   *Host  `json:"host,omitempty"`
+	PVC                    *PVC   `json:"pvc,omitempty"`
+	OSSFS                  *OSSFS `json:"ossfs,omitempty"`
+	MountPath              string `json:"mountPath"`
+	ReadOnly               bool   `json:"readOnly,omitempty"`
+	SubPath                string `json:"subPath,omitempty"`
+	EnsureSubPathDirectory *bool  `json:"ensureSubPathDirectory,omitempty"`
 }
 
 // Host represents a host path bind mount backend.

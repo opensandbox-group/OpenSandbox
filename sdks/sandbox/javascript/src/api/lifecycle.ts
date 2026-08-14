@@ -1338,7 +1338,7 @@ export interface components {
          * @description Storage mount definition for a sandbox. Each volume entry contains:
          *     - A unique name identifier
          *     - Exactly one backend struct (host, pvc, ossfs, etc.) with backend-specific fields
-         *     - Common mount settings (mountPath, readOnly, subPath)
+         *     - Common mount settings (mountPath, readOnly, subPath, ensureSubPathDirectory)
          */
         Volume: {
             /**
@@ -1365,6 +1365,28 @@ export interface components {
              *     Must be a relative path without '..' components.
              */
             subPath?: string;
+            /**
+             * @description When true, Kubernetes BatchSandbox template-mode creation ensures that
+             *     `subPath` exists before the main container starts using the fixed trusted
+             *     initializer bundled with a compatible published execd image that contains
+             *     `/opensandbox-subpath-initializer`. It supports only writable PVC mounts
+             *     with a non-empty normalized relative `subPath`. The existing BatchSandbox
+             *     template main `sandbox` container must explicitly set
+             *     `securityContext.runAsGroup` to an integer from `1` through `2147483647`.
+             *     No Pod `fsGroup` is set or required. The initializer assigns that GID and
+             *     mode `02770` only to newly created segments; it does not alter existing
+             *     directories. When enabled, the server applies/merges the template
+             *     `sandbox` container's selected identity fields (`runAsUser`, `runAsGroup`,
+             *     and `runAsNonRoot`) into the generated sandbox so its effective group
+             *     matches the initializer-created directory. It preserves runtime-required
+             *     capabilities, seccomp, and AppArmor settings and does not otherwise
+             *     replace the security context. Storage and mount behavior remains
+             *     Kubernetes/CSI dependent; the initializer does not recursively alter
+             *     existing paths. It is not supported for host or ossfs backends, read-only
+             *     mounts, Docker, other Kubernetes providers, or pool mode.
+             * @default false
+             */
+            ensureSubPathDirectory?: boolean;
         };
         /**
          * @description Host path bind mount backend. Maps a directory on the host filesystem

@@ -140,9 +140,9 @@ class TestBatchSandboxProvider:
             expires_at=expires_at,
             execd_image="execd:latest",
         )
-        
+
         assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
         # Verify API call
         call_args = mock_k8s_client.create_custom_object.call_args
         body = call_args.kwargs["body"]
@@ -880,7 +880,7 @@ spec:
         )
 
         assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-    
+
     # ===== Workload List Tests =====
 
     def test_list_workloads_returns_items(self, mock_k8s_client, mock_batchsandbox_list_response):
@@ -1335,7 +1335,7 @@ spec:
 
         # Should succeed and return workload info
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1367,7 +1367,7 @@ spec:
 
         # Should succeed and return workload info
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1435,9 +1435,9 @@ spec:
             execd_image="execd:latest",
             extensions={"poolRef": "my-pool"},
         )
-        
+
         assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
         # Verify the call
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -2866,6 +2866,325 @@ spec:
         data_mount = next((m for m in mounts if m["name"] == "data-volume"), None)
         assert data_mount is not None
         assert data_mount.get("subPath") == "task-001"
+        assert [container["name"] for container in pod_spec["initContainers"]] == [
+            "execd-installer"
+        ]
+
+    def test_create_workload_initializes_multiple_subpaths_for_one_pvc(
+        self, mock_k8s_client, tmp_path
+    ):
+        """The initializer receives one root PVC mount and a safe JSON plan."""
+        from opensandbox_server.api.schema import PVC, Volume
+        import json
+
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n  template:\n    spec:\n      containers:\n        - name: sandbox\n"
+            "          securityContext:\n            runAsUser: 1233\n"
+            "            runAsGroup: 1234\n            runAsNonRoot: true\n"
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+        volumes = [
+            Volume(
+                name="workspace-a",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace/a",
+                sub_path="jobs/a",
+                ensure_sub_path_directory=True,
+            ),
+            Volume(
+                name="workspace-b",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace/b",
+                sub_path="jobs/b",
+                ensure_sub_path_directory=True,
+            ),
+        ]
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+            volumes=volumes,
+        )
+
+        pod_spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"][
+            "template"
+        ]["spec"]
+        assert [container["name"] for container in pod_spec["initContainers"]] == [
+            "execd-installer",
+            "volume-subpath-initializer",
+        ]
+        initializer = pod_spec["initContainers"][1]
+        assert initializer["image"] == "execd:latest"
+        assert initializer["command"] == ["/opensandbox-subpath-initializer"]
+        assert initializer["args"][-2:] == ["--fs-group", "1234"]
+        # Root handles PVC ownership, but cannot escalate; only traversal and chown caps remain.
+        assert initializer["securityContext"] == {
+            "runAsUser": 0,
+            "runAsGroup": 0,
+            "runAsNonRoot": False,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {
+                "drop": ["ALL"],
+                "add": ["CHOWN", "DAC_OVERRIDE"],
+            },
+        }
+        assert initializer["volumeMounts"] == [
+            {"name": "workspace-a", "mountPath": "/opensandbox-subpath-pvcs/0"}
+        ]
+        assert json.loads(initializer["args"][1]) == [
+            {"mountPath": "/opensandbox-subpath-pvcs/0", "subPaths": ["jobs/a", "jobs/b"]}
+        ]
+        main_mounts = pod_spec["containers"][0]["volumeMounts"]
+        assert {mount["subPath"] for mount in main_mounts if mount["name"] == "workspace-a"} == {
+            "jobs/a",
+            "jobs/b",
+        }
+
+    def test_create_workload_rejects_template_initializer_name_collision(
+        self, mock_k8s_client, tmp_path
+    ):
+        from opensandbox_server.api.schema import PVC, Volume
+
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n  template:\n    spec:\n      initContainers:\n"
+            "        - name: volume-subpath-initializer\n"
+            "      containers:\n        - name: sandbox\n"
+            "          securityContext:\n            runAsGroup: 1000\n"
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+
+        with pytest.raises(ValueError, match="reserved init container"):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=None,
+                execd_image="execd:latest",
+                volumes=[
+                    Volume(
+                        name="workspace",
+                        pvc=PVC(claim_name="workspace-pvc"),
+                        mount_path="/workspace",
+                        sub_path="jobs/123",
+                        ensure_sub_path_directory=True,
+                    )
+                ],
+            )
+
+        mock_k8s_client.create_custom_object.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "main_container_security_context_yaml",
+        [
+            "      restartPolicy: Never\n",
+            "      securityContext: {}\n",
+            "      securityContext:\n        runAsGroup: 0\n",
+            "      securityContext:\n        runAsGroup: -1\n",
+            "      securityContext:\n        runAsGroup: 2147483648\n",
+            "      securityContext:\n        runAsGroup: true\n",
+            "      securityContext:\n        runAsGroup: \"1234\"\n",
+        ],
+        ids=[
+            "missing-sandbox-container",
+            "missing-run-as-group",
+            "zero",
+            "negative",
+            "too-large",
+            "bool",
+            "string",
+        ],
+    )
+    def test_create_workload_rejects_invalid_template_main_container_run_as_group(
+        self, mock_k8s_client, tmp_path, main_container_security_context_yaml
+    ):
+        """Directory initialization requires a valid main container runAsGroup."""
+        from opensandbox_server.api.schema import PVC, Volume
+
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: sandbox\n"
+            f"{main_container_security_context_yaml}"
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        volumes = [
+            Volume(
+                name="workspace",
+                pvc=PVC(claim_name="workspace-pvc"),
+                mount_path="/workspace",
+                sub_path="jobs/123",
+                ensure_sub_path_directory=True,
+            )
+        ]
+
+        with pytest.raises(ValueError, match="securityContext.runAsGroup must be an integer"):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+                volumes=volumes,
+            )
+
+        mock_k8s_client.create_custom_object.assert_not_called()
+
+    def test_create_workload_merges_selected_template_identity_for_subpath_initializer(
+        self, mock_k8s_client, tmp_path
+    ):
+        """Only selected template identity fields are merged into the sandbox."""
+        from opensandbox_server.api.schema import PVC, Volume
+
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsUser: 2000
+      containers:
+        - name: sandbox
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+            volumes=[
+                Volume(
+                    name="workspace",
+                    pvc=PVC(claim_name="workspace-pvc"),
+                    mount_path="/workspace",
+                    sub_path="jobs/123",
+                    ensure_sub_path_directory=True,
+                )
+            ],
+        )
+
+        pod_spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"][
+            "template"
+        ]["spec"]
+        assert pod_spec["securityContext"] == {
+            "runAsUser": 2000,
+        }
+        assert pod_spec["containers"][0]["securityContext"] == {
+            "runAsUser": 1000,
+            "runAsGroup": 1000,
+            "runAsNonRoot": True,
+        }
+        initializer = pod_spec["initContainers"][-1]
+        assert initializer["args"][-2:] == ["--fs-group", "1000"]
+
+    def test_create_workload_preserves_generated_network_and_isolation_security_context(
+        self, mock_k8s_client, tmp_path
+    ):
+        """Identity merging preserves generated network and isolation fields."""
+        from opensandbox_server.api.schema import PVC, Volume
+
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n  template:\n    spec:\n      containers:\n        - name: sandbox\n"
+            "          securityContext:\n            runAsUser: 1001\n"
+            "            runAsGroup: 1000\n            runAsNonRoot: true\n"
+            "            seccompProfile:\n              type: RuntimeDefault\n"
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="execd:latest",
+            network_policy=NetworkPolicy(default_action="deny", egress=[]),
+            egress_image="opensandbox/egress:v1.1.5",
+            extensions={"bootstrap.execd.isolation": "enable"},
+            volumes=[
+                Volume(
+                    name="workspace",
+                    pvc=PVC(claim_name="workspace-pvc"),
+                    mount_path="/workspace",
+                    sub_path="jobs/123",
+                    ensure_sub_path_directory=True,
+                )
+            ],
+        )
+
+        pod_spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"][
+            "template"
+        ]["spec"]
+        main_container = next(
+            container
+            for container in pod_spec["containers"]
+            if container["name"] == "sandbox"
+        )
+        assert main_container["securityContext"] == {
+            "capabilities": {"add": ["SYS_ADMIN"], "drop": ["NET_ADMIN"]},
+            "seccompProfile": {"type": "Unconfined"},
+            "appArmorProfile": {"type": "Unconfined"},
+            "runAsUser": 1001,
+            "runAsGroup": 1000,
+            "runAsNonRoot": True,
+        }
+        assert pod_spec["initContainers"][-1]["args"][-2:] == ["--fs-group", "1000"]
 
     def test_create_workload_with_host_volume(self, mock_k8s_client):
         """

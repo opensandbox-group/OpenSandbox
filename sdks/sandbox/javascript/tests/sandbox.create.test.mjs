@@ -8,6 +8,7 @@ import {
   DEFAULT_TIMEOUT_SECONDS,
   Sandbox,
 } from "../dist/index.js";
+import { SandboxesAdapter, createLifecycleClient } from "../dist/internal.js";
 
 function createAdapterFactory({ includeCredentialVault = true } = {}) {
   const recordedRequests = [];
@@ -325,6 +326,111 @@ test("Sandbox.create passes OSSFS volume to request", async () => {
   assert.equal(recordedRequests[0].volumes[0].name, "oss-data");
   assert.equal(recordedRequests[0].volumes[0].ossfs.bucket, "my-bucket");
   assert.equal(recordedRequests[0].volumes[0].ossfs.endpoint, "oss-cn-hangzhou.aliyuncs.com");
+});
+
+test("Sandbox.create serializes ensureSubPathDirectory in camelCase", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    skipHealthCheck: true,
+    volumes: [
+      {
+        name: "workspace",
+        pvc: { claimName: "workspace-pvc" },
+        mountPath: "/workspace",
+        subPath: "projects/example",
+        ensureSubPathDirectory: true,
+      },
+    ],
+  });
+
+  const volume = recordedRequests[0].volumes[0];
+  assert.equal(volume.ensureSubPathDirectory, true);
+  assert.equal(Object.hasOwn(volume, "ensure_sub_path_directory"), false);
+});
+
+test("SandboxesAdapter sends ensureSubPathDirectory as camelCase JSON", async () => {
+  let requestBody;
+  const client = createLifecycleClient({
+    baseUrl: "https://opensandbox.invalid/v1",
+    fetch: async (request) => {
+      requestBody = await request.json();
+      return new Response(
+        JSON.stringify({
+          id: "sandbox-test-id",
+          createdAt: "2026-01-01T00:00:00Z",
+          expiresAt: null,
+        }),
+        { status: 202, headers: { "content-type": "application/json" } }
+      );
+    },
+  });
+  const adapter = new SandboxesAdapter(client);
+
+  await adapter.createSandbox({
+    image: { uri: "python:3.12" },
+    entrypoint: [],
+    resourceLimits: { cpu: 1, memory: 1 },
+    secureAccess: false,
+    volumes: [
+      {
+        name: "workspace",
+        pvc: { claimName: "workspace-pvc" },
+        mountPath: "/workspace",
+        subPath: "projects/example",
+        ensureSubPathDirectory: true,
+      },
+    ],
+  });
+
+  const volume = requestBody.volumes[0];
+  assert.equal(volume.ensureSubPathDirectory, true);
+  assert.equal(Object.hasOwn(volume, "ensure_sub_path_directory"), false);
+});
+
+test("SandboxesAdapter omits false and unset ensureSubPathDirectory from JSON", async () => {
+  const requestBodies = [];
+  const client = createLifecycleClient({
+    baseUrl: "https://opensandbox.invalid/v1",
+    fetch: async (request) => {
+      requestBodies.push(await request.json());
+      return new Response(
+        JSON.stringify({
+          id: "sandbox-test-id",
+          createdAt: "2026-01-01T00:00:00Z",
+          expiresAt: null,
+        }),
+        { status: 202, headers: { "content-type": "application/json" } }
+      );
+    },
+  });
+  const adapter = new SandboxesAdapter(client);
+  const createRequest = (ensureSubPathDirectory) => ({
+    image: { uri: "python:3.12" },
+    entrypoint: [],
+    resourceLimits: { cpu: 1, memory: 1 },
+    secureAccess: false,
+    volumes: [
+      {
+        name: "workspace",
+        pvc: { claimName: "workspace-pvc" },
+        mountPath: "/workspace",
+        subPath: "projects/example",
+        ...(ensureSubPathDirectory === undefined ? {} : { ensureSubPathDirectory }),
+      },
+    ],
+  });
+
+  await adapter.createSandbox(createRequest(false));
+  await adapter.createSandbox(createRequest(undefined));
+
+  for (const body of requestBodies) {
+    assert.equal(Object.hasOwn(body.volumes[0], "ensureSubPathDirectory"), false);
+    assert.equal(Object.hasOwn(body.volumes[0], "ensure_sub_path_directory"), false);
+  }
 });
 
 test("Sandbox.create rejects volume with no backend", async () => {

@@ -480,7 +480,7 @@ class Volume(BaseModel):
     Each volume entry contains:
     - A unique name identifier
     - Exactly one backend (host, pvc, ossfs) with backend-specific fields
-    - Common mount settings (mount_path, read_only, sub_path)
+    - Common mount settings (mount_path, read_only, sub_path, ensure_sub_path_directory)
 
     Usage:
         # Host path mount (read-write by default)
@@ -527,6 +527,14 @@ class Volume(BaseModel):
         default=None,
         description="Optional subdirectory under the backend path to mount.",
         alias="subPath",
+    )
+    ensure_sub_path_directory: bool | None = Field(
+        default=None,
+        description=(
+            "Ensure a writable PVC subPath exists before a Kubernetes BatchSandbox "
+            "template-mode sandbox starts."
+        ),
+        alias="ensureSubPathDirectory",
     )
 
     model_config = ConfigDict(populate_by_name=True)

@@ -585,7 +585,7 @@ class OSSFS private constructor(
  * Each volume entry contains:
  * - A unique name identifier
  * - Exactly one backend (host, pvc, ossfs) with backend-specific fields
- * - Common mount settings (mountPath, readOnly, subPath)
+ * - Common mount settings (mountPath, readOnly, subPath, ensureSubPathDirectory)
  *
  * Example usage:
  * ```kotlin
@@ -612,6 +612,8 @@ class OSSFS private constructor(
  * @property mountPath Absolute path inside the container where the volume is mounted
  * @property readOnly If true, the volume is mounted as read-only. Defaults to false (read-write).
  * @property subPath Optional subdirectory under the backend path to mount
+ * @property ensureSubPathDirectory If true, ensures a PVC subpath directory exists before mounting it.
+ * When unset, the field is omitted from lifecycle requests.
  */
 class Volume private constructor(
     val name: String,
@@ -621,6 +623,7 @@ class Volume private constructor(
     val mountPath: String,
     val readOnly: Boolean,
     val subPath: String?,
+    val ensureSubPathDirectory: Boolean?,
 ) {
     companion object {
         @JvmStatic
@@ -635,6 +638,7 @@ class Volume private constructor(
         private var mountPath: String? = null
         private var readOnly: Boolean = false
         private var subPath: String? = null
+        private var ensureSubPathDirectory: Boolean? = null
 
         fun name(name: String): Builder {
             require(name.isNotBlank()) { "Volume name cannot be blank" }
@@ -673,6 +677,11 @@ class Volume private constructor(
             return this
         }
 
+        fun ensureSubPathDirectory(ensureSubPathDirectory: Boolean?): Builder {
+            this.ensureSubPathDirectory = ensureSubPathDirectory
+            return this
+        }
+
         fun build(): Volume {
             val nameValue = name ?: throw IllegalArgumentException("Name must be specified")
             val mountPathValue = mountPath ?: throw IllegalArgumentException("Mount path must be specified")
@@ -698,6 +707,7 @@ class Volume private constructor(
                 mountPath = mountPathValue,
                 readOnly = readOnly,
                 subPath = subPath,
+                ensureSubPathDirectory = ensureSubPathDirectory,
             )
         }
     }

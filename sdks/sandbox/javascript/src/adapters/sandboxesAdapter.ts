@@ -75,6 +75,18 @@ function encodeMetadataFilter(metadata: Record<string, string>): string {
   return parts.join("&");
 }
 
+function toApiCreateSandboxRequest(req: CreateSandboxRequest): ApiCreateSandboxRequest {
+  const volumes = req.volumes?.map(({ ensureSubPathDirectory, ...volume }) => ({
+    ...volume,
+    ...(ensureSubPathDirectory ? { ensureSubPathDirectory: true } : {}),
+  }));
+
+  return {
+    ...req,
+    ...(volumes ? { volumes } : {}),
+  } as unknown as ApiCreateSandboxRequest;
+}
+
 export class SandboxesAdapter implements Sandboxes {
   private readonly endpointCache: EndpointCache | null;
 
@@ -131,7 +143,7 @@ export class SandboxesAdapter implements Sandboxes {
 
   async createSandbox(req: CreateSandboxRequest): Promise<CreateSandboxResponse> {
     // Make the OpenAPI contract explicit so backend schema changes surface quickly.
-    const body: ApiCreateSandboxRequest = req as unknown as ApiCreateSandboxRequest;
+    const body = toApiCreateSandboxRequest(req);
     const { data, error, response } = await this.client.POST("/sandboxes", {
       body,
     });

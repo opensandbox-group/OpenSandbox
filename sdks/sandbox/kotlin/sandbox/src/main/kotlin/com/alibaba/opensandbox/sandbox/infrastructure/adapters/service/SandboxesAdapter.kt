@@ -20,6 +20,8 @@ import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.SandboxesApi
 import com.alibaba.opensandbox.sandbox.api.SnapshotsApi
 import com.alibaba.opensandbox.sandbox.api.infrastructure.Serializer
+import com.alibaba.opensandbox.sandbox.api.models.CreateSandboxRequest
+import com.alibaba.opensandbox.sandbox.api.models.CreateSandboxResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
@@ -48,6 +50,11 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandb
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -149,7 +156,12 @@ internal class SandboxesAdapter(
                     snapshotId = snapshotId,
                     resourceRequests = resourceRequests,
                 )
-            val apiResponse = api.sandboxesPost(createRequest)
+            val apiResponse =
+                if (volumes?.any { it.ensureSubPathDirectory == null } == true) {
+                    createSandboxOmittingUnsetVolumeFields(createRequest, volumes)
+                } else {
+                    api.sandboxesPost(createRequest)
+                }
             val response = apiResponse.toSandboxCreateResponse()
 
             logger.info("Successfully created sandbox: {}", response.id)
@@ -157,6 +169,58 @@ internal class SandboxesAdapter(
             response
         } catch (e: Exception) {
             throw e.toSandboxException()
+        }
+    }
+
+    private fun createSandboxOmittingUnsetVolumeFields(
+        createRequest: CreateSandboxRequest,
+        volumes: List<Volume>,
+    ): CreateSandboxResponse {
+        val payload =
+            Serializer.kotlinxSerializationJson
+                .encodeToJsonElement(createRequest)
+                .jsonObject
+                .toMutableMap()
+        val serializedVolumes = payload["volumes"] as? JsonArray
+        if (serializedVolumes != null) {
+            payload["volumes"] =
+                JsonArray(
+                    serializedVolumes.mapIndexed { index, serializedVolume ->
+                        if (volumes[index].ensureSubPathDirectory == null) {
+                            buildJsonObject {
+                                serializedVolume.jsonObject.forEach { (key, value) ->
+                                    if (key != "ensureSubPathDirectory") put(key, value)
+                                }
+                            }
+                        } else {
+                            serializedVolume
+                        }
+                    },
+                )
+        }
+        val body =
+            Serializer.kotlinxSerializationJson
+                .encodeToString(payload)
+                .toRequestBody("application/json".toMediaType())
+        val url =
+            provider.config.getBaseUrl().toHttpUrl().newBuilder()
+                .addPathSegment("sandboxes")
+                .build()
+        val request =
+            Request.Builder()
+                .url(url)
+                .post(body)
+                .header("Accept", "application/json")
+                .build()
+
+        provider.authenticatedClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            if (response.isSuccessful) {
+                return Serializer.kotlinxSerializationJson.decodeFromString(responseBody)
+            }
+            throw response.toSandboxApiException(responseBody) { statusCode, responseContent ->
+                "Failed to create sandbox. Status code: $statusCode, Body: $responseContent"
+            }
         }
     }
 

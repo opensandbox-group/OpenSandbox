@@ -282,6 +282,7 @@ def test_volume_with_host_backend() -> None:
     assert vol.mount_path == "/mnt/data"
     assert vol.read_only is False  # default is read-write
     assert vol.sub_path is None
+    assert vol.ensure_sub_path_directory is None
 
 
 def test_volume_with_pvc_backend() -> None:
@@ -299,6 +300,33 @@ def test_volume_with_pvc_backend() -> None:
     assert vol.mount_path == "/mnt/models"
     assert vol.read_only is True
     assert vol.sub_path == "v1"
+
+
+def test_volume_ensure_subpath_directory_serializes_with_alias() -> None:
+    vol = Volume(
+        name="workspace",
+        pvc=PVC(claimName="shared-workspace"),
+        mountPath="/workspace",
+        subPath="unseeded",
+        ensureSubPathDirectory=True,
+    )
+
+    dumped = vol.model_dump(by_alias=True, mode="json")
+
+    assert vol.ensure_sub_path_directory is True
+    assert dumped["ensureSubPathDirectory"] is True
+
+
+def test_volume_ensure_subpath_directory_is_omitted_by_default() -> None:
+    vol = Volume(
+        name="workspace",
+        pvc=PVC(claimName="shared-workspace"),
+        mountPath="/workspace",
+    )
+
+    dumped = vol.model_dump(by_alias=True, mode="json", exclude_none=True)
+
+    assert "ensureSubPathDirectory" not in dumped
 
 
 def test_volume_rejects_blank_name() -> None:

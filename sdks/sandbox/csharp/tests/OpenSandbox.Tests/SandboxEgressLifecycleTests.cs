@@ -142,6 +142,49 @@ public class SandboxEgressLifecycleTests
         sandboxes.LastCreateRequest!.Volumes.Should().NotBeNull();
         sandboxes.LastCreateRequest.Volumes!.Should().ContainSingle();
         sandboxes.LastCreateRequest.Volumes![0].Host!.Path.Should().Be("D:/sandbox-mnt/ReMe");
+        sandboxes.LastCreateRequest.Volumes[0].EnsureSubPathDirectory.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CreateAsync_ShouldMapEnsureSubPathDirectoryForWritablePvc()
+    {
+        var sandboxes = new StubSandboxes();
+        var adapterFactory = new StubAdapterFactory(sandboxes, new StubEgress());
+
+        await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+        {
+            Image = "python:3.12",
+            ConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+            {
+                Domain = "127.0.0.1:8080",
+                Protocol = ConnectionProtocol.Http
+            }),
+            AdapterFactory = adapterFactory,
+            SkipHealthCheck = true,
+            Volumes =
+            [
+                new Volume
+                {
+                    Name = "workspace",
+                    Pvc = new PVC { ClaimName = "workspace-pvc" },
+                    MountPath = "/workspace",
+                    SubPath = "agent/run",
+                    EnsureSubPathDirectory = true
+                }
+            ],
+            Diagnostics = new SdkDiagnosticsOptions
+            {
+                LoggerFactory = NullLoggerFactory.Instance
+            }
+        });
+
+        sandboxes.LastCreateRequest.Should().NotBeNull();
+        sandboxes.LastCreateRequest!.Volumes.Should().ContainSingle();
+        var volume = sandboxes.LastCreateRequest.Volumes![0];
+        volume.Pvc!.ClaimName.Should().Be("workspace-pvc");
+        volume.ReadOnly.Should().NotBeTrue();
+        volume.SubPath.Should().Be("agent/run");
+        volume.EnsureSubPathDirectory.Should().BeTrue();
     }
 
     [Fact]

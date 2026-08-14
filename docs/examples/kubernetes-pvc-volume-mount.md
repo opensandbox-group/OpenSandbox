@@ -93,6 +93,61 @@ print("\n".join(msg.text for msg in result.logs.stdout))
 
 The PVC is never deleted by OpenSandbox: when the sandbox terminates, the claim stays bound and the data is available for the next sandbox that mounts it.
 
+## Create a PVC subpath when needed
+
+Set `ensure_sub_path_directory=True` only when mounting a writable PVC subpath
+through Kubernetes `BatchSandbox` template mode. The subpath must be non-empty,
+normalized, and relative. Docker, pool mode, `host`, `ossfs`, and read-only PVC
+mounts do not support this option.
+
+The existing BatchSandbox template main `sandbox` container must explicitly set
+`securityContext.runAsGroup` to an integer from `1` through `2147483647`. No Pod
+`fsGroup` is set or required. For example:
+
+```yaml
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+spec:
+  template:
+    spec:
+      containers:
+      - name: sandbox
+        image: python:3.11
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+```
+
+With this template setting, a request can create a missing directory before it
+mounts the subpath:
+
+```python
+sandbox = await Sandbox.create(
+    image="python:3.11",
+    volumes=[
+        Volume(
+            name="run-workspace",
+            pvc=PVC(claim_name="my-pvc", create_if_not_exists=False),
+            mount_path="/workspace",
+            read_only=False,
+            sub_path="runs/current",
+            ensure_sub_path_directory=True,
+        ),
+    ],
+)
+```
+
+The initializer assigns the template `runAsGroup` and mode `02770` only to newly
+created segments; it does not alter existing directories. When enabled, the
+server applies/merges the template `sandbox` container's selected identity fields
+(`runAsUser`, `runAsGroup`, and `runAsNonRoot`) into the generated sandbox so its
+effective group matches the initializer-created directory. It preserves
+runtime-required capabilities, seccomp, and AppArmor settings and does not
+otherwise replace the security context. Storage and mount behavior remains
+Kubernetes/CSI dependent; the initializer does not recursively alter existing
+paths. Configure a compatible published execd image that contains
+`/opensandbox-subpath-initializer`.
+
 ### Run the end-to-end example
 
 ```shell

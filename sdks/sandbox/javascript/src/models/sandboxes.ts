@@ -376,7 +376,7 @@ export interface OSSFS extends Record<string, unknown> {
  * Each volume entry contains:
  * - A unique name identifier
  * - Exactly one backend (host, pvc, ossfs) with backend-specific fields
- * - Common mount settings (mountPath, readOnly, subPath)
+ * - Common mount settings (mountPath, readOnly, subPath, ensureSubPathDirectory)
  */
 export interface Volume extends Record<string, unknown> {
   /**
@@ -407,6 +407,12 @@ export interface Volume extends Record<string, unknown> {
    * Optional subdirectory under the backend path to mount.
    */
   subPath?: string;
+  /**
+   * When true, Kubernetes template-mode creation creates `subPath` before the
+   * main container starts. Supported only for writable PVC mounts with a
+   * non-empty relative subPath.
+   */
+  ensureSubPathDirectory?: boolean;
 }
 
 export type SandboxState =

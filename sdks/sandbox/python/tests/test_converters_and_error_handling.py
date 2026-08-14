@@ -49,11 +49,13 @@ from opensandbox.exceptions import (
 )
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import (
+    PVC,
     CredentialProxyConfig,
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
     SandboxImageSpec,
+    Volume,
 )
 
 
@@ -572,6 +574,34 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
 
     renew = SandboxModelConverter.to_api_renew_request(datetime(2025, 1, 1))
     assert renew.expires_at.tzinfo is timezone.utc
+
+
+def test_sandbox_model_converter_forwards_ensure_subpath_directory() -> None:
+    volume = Volume(
+        name="workspace",
+        pvc=PVC(claimName="workspace-pvc"),
+        mountPath="/workspace",
+        subPath="unseeded",
+        ensureSubPathDirectory=True,
+    )
+
+    converted = SandboxModelConverter.to_api_volume(volume)
+
+    assert converted.ensure_sub_path_directory is True
+    assert converted.to_dict()["ensureSubPathDirectory"] is True
+
+
+def test_sandbox_model_converter_omits_unset_ensure_subpath_directory() -> None:
+    volume = Volume(
+        name="workspace",
+        pvc=PVC(claimName="workspace-pvc"),
+        mountPath="/workspace",
+        subPath="unseeded",
+    )
+
+    converted = SandboxModelConverter.to_api_volume(volume)
+
+    assert "ensureSubPathDirectory" not in converted.to_dict()
 
 
 def test_platform_spec_accepts_windows() -> None:

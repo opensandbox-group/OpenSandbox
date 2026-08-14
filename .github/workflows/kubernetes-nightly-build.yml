@@ -34,12 +34,23 @@ jobs:
           - variant: direct
             script: scripts/python-k8s-e2e.sh
             e2e_gateway_route_mode: ""
+            e2e_batchsandbox_template_file: ""
+            e2e_pytest_target: ""
           - variant: ingress-header
             script: scripts/python-k8s-e2e-ingress.sh
             e2e_gateway_route_mode: ""
+            e2e_batchsandbox_template_file: ""
+            e2e_pytest_target: ""
           - variant: ingress-uri
             script: scripts/python-k8s-e2e-ingress.sh
             e2e_gateway_route_mode: uri
+            e2e_batchsandbox_template_file: ""
+            e2e_pytest_target: ""
+          - variant: direct-nonroot-subpath-initializer
+            script: scripts/python-k8s-e2e.sh
+            e2e_gateway_route_mode: ""
+            e2e_batchsandbox_template_file: /etc/opensandbox/e2e-subpath-nonroot.batchsandbox-template.yaml
+            e2e_pytest_target: tests/test_sandbox_e2e_sync.py::TestSandboxE2ESync::test_01g_pvc_unseeded_subpath_initializer_nonroot
     env:
       KIND_CLUSTER: opensandbox-e2e
       KIND_K8S_VERSION: v1.30.4
@@ -78,6 +89,8 @@ jobs:
       - name: Run Kubernetes runtime E2E
         env:
           E2E_GATEWAY_ROUTE_MODE: ${{ matrix.e2e_gateway_route_mode }}
+          E2E_BATCHSANDBOX_TEMPLATE_FILE: ${{ matrix.e2e_batchsandbox_template_file }}
+          E2E_PYTEST_TARGET: ${{ matrix.e2e_pytest_target }}
         run: bash "./${{ matrix.script }}"
 
       - name: Dump kind diagnostics

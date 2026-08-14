@@ -143,8 +143,24 @@ function ensureExecdSessionNote(filePath) {
 
 ensureExecdSessionNote(outFiles.execd);
 
+function ensureOptionalEnsureSubPathDirectory(filePath) {
+  const body = readFileSync(filePath, "utf8");
+  const requiredProperty = "            ensureSubPathDirectory: boolean;";
+  if (!body.includes(requiredProperty)) {
+    return;
+  }
+  writeFileSync(
+    filePath,
+    body.replace(requiredProperty, "            ensureSubPathDirectory?: boolean;"),
+    "utf8",
+  );
+}
+
+// `default: false` causes openapi-typescript to mark this non-required field as
+// required. Preserve the OpenAPI required list for the public request type.
+ensureOptionalEnsureSubPathDirectory(outFiles.lifecycle);
+
 console.log("\n✅ API type generation completed:");
 console.log(`- ${path.relative(packageRoot, outFiles.execd)}`);
 console.log(`- ${path.relative(packageRoot, outFiles.egress)}`);
 console.log(`- ${path.relative(packageRoot, outFiles.lifecycle)}`);
-

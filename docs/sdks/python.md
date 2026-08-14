@@ -560,7 +560,48 @@ sandbox = await Sandbox.create(
 )
 ```
 
-### 4. Runtime Egress Policy Updates
+### 4. Ensure a PVC Subpath Directory
+
+To create a missing directory before mounting a PVC subpath, set
+`ensure_sub_path_directory=True`. The `sub_path` must be a non-empty normalized
+relative path, and the PVC mount must be writable:
+
+```python
+from opensandbox.models.sandboxes import PVC, Volume
+
+sandbox = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+    volumes=[
+        Volume(
+            name="workspace",
+            pvc=PVC(claim_name="agent-workspace", create_if_not_exists=False),
+            mount_path="/workspace",
+            read_only=False,
+            sub_path="runs/current",
+            ensure_sub_path_directory=True,
+        ),
+    ],
+)
+```
+
+`ensure_sub_path_directory` is supported only for Kubernetes `BatchSandbox`
+template mode. It is rejected for Docker, pool mode, `host` and `ossfs`
+volumes. The existing BatchSandbox template main `sandbox` container must
+explicitly set `securityContext.runAsGroup` to an integer from `1` through
+`2147483647`; no Pod `fsGroup` is set or required. Newly created segments are
+assigned that GID and mode `02770`; existing directories are not altered. When
+enabled, the server applies/merges the template `sandbox` container's selected
+identity fields (`runAsUser`, `runAsGroup`, and `runAsNonRoot`) into the
+generated sandbox so its effective group matches the initializer-created
+directory. It preserves runtime-required capabilities, seccomp, and AppArmor
+settings and does not otherwise replace the security context. Storage and mount
+behavior remains Kubernetes/CSI dependent; the initializer does not recursively
+alter existing paths. The JSON wire field is
+`ensureSubPathDirectory`. Use a compatible published execd image that contains
+`/opensandbox-subpath-initializer`.
+
+### 5. Runtime Egress Policy Updates
 
 Runtime egress policy reads and patches are sent directly to the sandbox egress sidecar.
 The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
@@ -582,7 +623,7 @@ await sandbox.patch_egress_rules(
 )
 ```
 
-### 5. Credential Vault
+### 6. Credential Vault
 
 Credential Vault injects outbound credentials from the egress sidecar while
 keeping real secrets out of sandbox environment variables, commands, files, and

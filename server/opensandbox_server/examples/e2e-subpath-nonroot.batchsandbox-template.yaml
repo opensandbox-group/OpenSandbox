@@ -1,0 +1,24 @@
+# E2E-only BatchSandbox template for PVC subPath initialization as a non-root user.
+# Select explicitly with E2E_BATCHSANDBOX_TEMPLATE_FILE; never used by production defaults.
+#
+# Faster Pod teardown in Kind/CI: skip the default 30s graceful termination window.
+# Do not use for real workloads where graceful shutdown matters.
+
+# Metadata template (will be merged with runtime-generated metadata)
+metadata:
+# Spec template
+spec:
+  replicas: 1
+  template:
+    spec:
+      terminationGracePeriodSeconds: 0
+      restartPolicy: Never
+      tolerations:
+        - operator: "Exists"
+      containers:
+        # "sandbox" is the generated primary runtime container name.
+        - name: sandbox
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 2000

@@ -16,12 +16,17 @@
 Volume helper utilities for Kubernetes pod specs.
 """
 
+import json
 import logging
 from typing import Any, Dict, List
 
 from opensandbox_server.api.schema import Volume
 
 logger = logging.getLogger(__name__)
+
+SUBPATH_INITIALIZER_NAME = "volume-subpath-initializer"
+_SUBPATH_INITIALIZER_ROOT = "/opensandbox-subpath-pvcs"
+_MAX_FS_GROUP = 2_147_483_647
 
 
 def _get_pvc_source_read_only_policies(volumes: List[Volume]) -> Dict[str, bool]:
@@ -125,3 +130,154 @@ def apply_volumes_to_pod_spec(
 
     pod_spec["volumes"] = pod_volumes
     main_container["volumeMounts"] = mounts
+
+
+def add_subpath_initializer_to_pod_spec(
+    pod_spec: Dict[str, Any],
+    volumes: List[Volume],
+    initializer_image: str,
+    fs_group: int,
+) -> None:
+    """Append the fixed PVC subPath initializer when a request requires it."""
+    requested_volumes = [volume for volume in volumes if volume.ensure_sub_path_directory]
+    if not requested_volumes:
+        return
+
+    if not initializer_image or not initializer_image.strip():
+        raise ValueError(
+            "runtime.execd_image must be set when ensureSubPathDirectory=true."
+        )
+
+    init_containers = pod_spec.get("initContainers", [])
+    if not isinstance(init_containers, list):
+        raise ValueError("Pod spec initContainers must be a list.")
+    if any(
+        isinstance(container, dict) and container.get("name") == SUBPATH_INITIALIZER_NAME
+        for container in init_containers
+    ):
+        raise ValueError(
+            f"Pod template cannot define reserved init container '{SUBPATH_INITIALIZER_NAME}'."
+        )
+
+    pvc_volume_names: Dict[str, str] = {}
+    for pod_volume in pod_spec.get("volumes", []):
+        if not isinstance(pod_volume, dict):
+            continue
+        pvc = pod_volume.get("persistentVolumeClaim")
+        if isinstance(pvc, dict) and isinstance(pvc.get("claimName"), str):
+            pvc_volume_names[pvc["claimName"]] = pod_volume["name"]
+
+    plans_by_claim: Dict[str, Dict[str, Any]] = {}
+    for volume in requested_volumes:
+        # Volume schema validation guarantees pvc and sub_path are present here.
+        assert volume.pvc is not None
+        assert volume.sub_path is not None
+        claim_name = volume.pvc.claim_name
+        if claim_name not in pvc_volume_names:
+            raise ValueError(f"PVC '{claim_name}' is missing from the generated pod volumes.")
+        plan = plans_by_claim.setdefault(claim_name, {"subPaths": []})
+        if volume.sub_path not in plan["subPaths"]:
+            plan["subPaths"].append(volume.sub_path)
+
+    plan_entries = []
+    root_mounts = []
+    for index, (claim_name, plan) in enumerate(plans_by_claim.items()):
+        root_mount_path = f"{_SUBPATH_INITIALIZER_ROOT}/{index}"
+        plan_entries.append({"mountPath": root_mount_path, "subPaths": plan["subPaths"]})
+        root_mounts.append(
+            {
+                "name": pvc_volume_names[claim_name],
+                "mountPath": root_mount_path,
+            }
+        )
+
+    init_containers.append(
+        {
+            "name": SUBPATH_INITIALIZER_NAME,
+            "image": initializer_image.strip(),
+            "command": ["/opensandbox-subpath-initializer"],
+            "args": [
+                "--plan-json",
+                json.dumps(plan_entries, separators=(",", ":")),
+                "--fs-group",
+                str(fs_group),
+            ],
+            "volumeMounts": root_mounts,
+            "securityContext": {
+                "runAsUser": 0,
+                "runAsGroup": 0,
+                "runAsNonRoot": False,
+                "allowPrivilegeEscalation": False,
+                "capabilities": {
+                    "drop": ["ALL"],
+                    "add": ["CHOWN", "DAC_OVERRIDE"],
+                },
+            },
+        }
+    )
+    pod_spec["initContainers"] = init_containers
+
+
+def get_subpath_initializer_main_container_identity(
+    template_pod_spec: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return selected, validated identity fields from the template sandbox."""
+    containers = template_pod_spec.get("containers")
+    main_container = next(
+        (
+            container
+            for container in containers
+            if isinstance(container, dict) and container.get("name") == "sandbox"
+        ),
+        None,
+    ) if isinstance(containers, list) else None
+    security_context = (
+        main_container.get("securityContext")
+        if isinstance(main_container, dict)
+        else None
+    )
+    if not isinstance(security_context, dict):
+        raise ValueError(
+            "BatchSandbox template spec.template.spec.containers[name=sandbox]"
+            ".securityContext.runAsGroup must be an integer from 1 to 2147483647 "
+            "when ensureSubPathDirectory=true."
+        )
+
+    run_as_group = security_context.get("runAsGroup")
+    if type(run_as_group) is not int or not 1 <= run_as_group <= _MAX_FS_GROUP:
+        raise ValueError(
+            "BatchSandbox template spec.template.spec.containers[name=sandbox]"
+            ".securityContext.runAsGroup must be an integer from 1 to 2147483647 "
+            "when ensureSubPathDirectory=true."
+        )
+    return {
+        field: security_context[field]
+        for field in ("runAsUser", "runAsGroup", "runAsNonRoot")
+        if field in security_context
+    }
+
+
+def merge_subpath_initializer_main_container_identity(
+    pod_spec: Dict[str, Any],
+    identity: Dict[str, Any],
+) -> None:
+    """Merge selected template identity fields into the generated sandbox."""
+    containers = pod_spec.get("containers")
+    main_container = next(
+        (
+            container
+            for container in containers
+            if isinstance(container, dict) and container.get("name") == "sandbox"
+        ),
+        None,
+    ) if isinstance(containers, list) else None
+    if main_container is None:
+        raise ValueError("Generated pod spec is missing the sandbox container.")
+
+    security_context = main_container.get("securityContext")
+    if security_context is None:
+        security_context = {}
+        main_container["securityContext"] = security_context
+    if not isinstance(security_context, dict):
+        raise ValueError("Generated sandbox securityContext must be an object.")
+    security_context.update(identity)

@@ -2670,3 +2670,32 @@ func TestCreateSandbox_WithVolumes(t *testing.T) {
 	})
 	require.NoErrorf(t, err, "CreateSandbox with Volumes")
 }
+
+func TestVolumeEnsureSubPathDirectoryJSON(t *testing.T) {
+	withoutEnsure := Volume{
+		Name:      "data",
+		MountPath: "/mnt/data",
+	}
+	withoutEnsureJSON, err := json.Marshal(withoutEnsure)
+	require.NoErrorf(t, err, "marshal volume without EnsureSubPathDirectory")
+	if strings.Contains(string(withoutEnsureJSON), "ensureSubPathDirectory") {
+		assert.Fail(t, "EnsureSubPathDirectory should be omitted when nil")
+	}
+
+	enabled := true
+	volume := Volume{
+		Name:                   "data",
+		PVC:                    &PVC{ClaimName: "data-pvc"},
+		MountPath:              "/mnt/data",
+		SubPath:                "agent/run",
+		EnsureSubPathDirectory: &enabled,
+	}
+	data, err := json.Marshal(volume)
+	require.NoErrorf(t, err, "marshal volume with EnsureSubPathDirectory")
+
+	var payload map[string]any
+	require.NoErrorf(t, json.Unmarshal(data, &payload), "unmarshal volume JSON")
+	if got, ok := payload["ensureSubPathDirectory"].(bool); !ok || !got {
+		assert.Fail(t, fmt.Sprintf("ensureSubPathDirectory = %#v, want true", payload["ensureSubPathDirectory"]))
+	}
+}

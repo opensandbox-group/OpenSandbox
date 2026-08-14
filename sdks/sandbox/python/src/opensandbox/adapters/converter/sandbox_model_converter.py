@@ -164,6 +164,11 @@ class SandboxModelConverter:
             pvc=api_pvc,
             ossfs=api_ossfs,
             sub_path=api_sub_path,
+            ensure_sub_path_directory=(
+                volume.ensure_sub_path_directory
+                if volume.ensure_sub_path_directory is not None
+                else UNSET
+            ),
         )
 
     @staticmethod

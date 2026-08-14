@@ -389,6 +389,23 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             },
         )
 
+    def _ensure_sub_path_initializer_support(self, request: CreateSandboxRequest) -> None:
+        """Reject directory initialization unless the active provider implements it."""
+        if not any(volume.ensure_sub_path_directory for volume in request.volumes or []):
+            return
+        if self.workload_provider.supports_ensure_sub_path_directory():
+            return
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    "ensureSubPathDirectory is supported only by the Kubernetes "
+                    "BatchSandbox provider in template mode."
+                ),
+            },
+        )
+
     def _ensure_secure_access_support(self, request: CreateSandboxRequest) -> None:
         """Validate that secure access can be enforced for the configured exposure mode."""
         if not request.secure_access:
@@ -832,6 +849,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         ),
                     },
                 )
+
+            self._ensure_sub_path_initializer_support(request)
 
             if has_pool_ref and pool_ref != POOL_AUTO_ASSIGN_REF:
                 await asyncio.to_thread(self._ensure_pool_ref_exists, pool_ref)

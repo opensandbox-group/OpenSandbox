@@ -21,6 +21,8 @@
 # Optional:
 #   E2E_SERVER_GATEWAY_ENABLED=true — include server.gateway.* in Helm values (ingress-gateway path).
 #   E2E_GATEWAY_ROUTE_MODE — when gateway enabled: header | uri (default header). Matches chart server.gateway.gatewayRouteMode.
+#   E2E_BATCHSANDBOX_TEMPLATE_FILE — server-image template path for an opt-in E2E fixture.
+#   E2E_PYTEST_TARGET — run only this pytest node instead of the Kubernetes mini suite.
 
 k8s_e2e_export_kubeconfig() {
   export KUBECONFIG="${KUBECONFIG_PATH}"
@@ -132,7 +134,12 @@ EOF
 
 k8s_e2e_write_server_helm_values() {
   local signing_key
+  local batchsandbox_template_file
   signing_key=$(openssl rand -base64 32 | tr -d '\n')
+  batchsandbox_template_file="${E2E_BATCHSANDBOX_TEMPLATE_FILE:-/etc/opensandbox/e2e.batchsandbox-template.yaml}"
+  if [ -n "${E2E_BATCHSANDBOX_TEMPLATE_FILE:-}" ]; then
+    export E2E_BATCHSANDBOX_TEMPLATE_FILE
+  fi
 
   {
     cat <<EOF
@@ -199,7 +206,7 @@ configToml: |
   workload_provider = "batchsandbox"
   sandbox_create_timeout_seconds = 180
   sandbox_create_poll_interval_seconds = 1.0
-  batchsandbox_template_file = "/etc/opensandbox/e2e.batchsandbox-template.yaml"
+  batchsandbox_template_file = "${batchsandbox_template_file}"
 
   [storage]
   allowed_host_paths = []
@@ -294,5 +301,9 @@ k8s_e2e_generate_sdk_and_run_kubernetes_mini() {
   make generate-api
   cd "${REPO_ROOT}/tests/python"
   uv sync --all-extras --refresh
+  if [ -n "${E2E_PYTEST_TARGET:-}" ]; then
+    uv run pytest "${E2E_PYTEST_TARGET}"
+    return
+  fi
   make test-kubernetes-mini
 }

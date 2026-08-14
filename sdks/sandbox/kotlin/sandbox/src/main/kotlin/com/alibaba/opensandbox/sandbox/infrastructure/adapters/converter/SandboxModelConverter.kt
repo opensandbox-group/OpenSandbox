@@ -245,6 +245,7 @@ internal object SandboxModelConverter {
             pvc = this.pvc?.toApiPVC(),
             ossfs = this.ossfs?.toApiOSSFS(),
             subPath = this.subPath,
+            ensureSubPathDirectory = this.ensureSubPathDirectory,
         )
     }
 

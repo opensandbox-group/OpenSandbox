@@ -20,6 +20,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Host
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PVC
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -89,6 +90,7 @@ class VolumeModelsTest {
         assertEquals("/mnt/data", volume.mountPath)
         assertFalse(volume.readOnly) // default is read-write
         assertNull(volume.subPath)
+        assertNull(volume.ensureSubPathDirectory)
     }
 
     @Test
@@ -109,6 +111,23 @@ class VolumeModelsTest {
         assertEquals("/mnt/models", volume.mountPath)
         assertTrue(volume.readOnly)
         assertEquals("v1", volume.subPath)
+    }
+
+    @Test
+    fun `Volume should map ensureSubPathDirectory to lifecycle API`() {
+        val volume =
+            Volume.builder()
+                .name("models")
+                .pvc(PVC.of("shared-models"))
+                .mountPath("/mnt/models")
+                .subPath("v1")
+                .ensureSubPathDirectory(true)
+                .build()
+
+        val apiVolume = SandboxModelConverter.run { volume.toApiVolume() }
+
+        assertTrue(volume.ensureSubPathDirectory == true)
+        assertEquals(true, apiVolume.ensureSubPathDirectory)
     }
 
     @Test

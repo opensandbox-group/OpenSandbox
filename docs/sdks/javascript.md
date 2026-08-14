@@ -195,6 +195,46 @@ const sandbox = await Sandbox.create({
 });
 ```
 
+To create a missing directory before mounting a PVC subpath, set
+`ensureSubPathDirectory: true`. The `subPath` must be a non-empty normalized
+relative path, and the PVC mount must be writable:
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  volumes: [
+    {
+      name: "workspace",
+      pvc: {
+        claimName: "agent-workspace",
+        createIfNotExists: false,
+      },
+      mountPath: "/workspace",
+      readOnly: false,
+      subPath: "runs/current",
+      ensureSubPathDirectory: true,
+    },
+  ],
+});
+```
+
+`ensureSubPathDirectory` is supported only for Kubernetes `BatchSandbox`
+template mode. It is rejected for Docker, pool mode, `host` and `ossfs`
+volumes. The existing BatchSandbox template main `sandbox` container must
+explicitly set `securityContext.runAsGroup` to an integer from `1` through
+`2147483647`; no Pod `fsGroup` is set or required. Newly created segments are
+assigned that GID and mode `02770`; existing directories are not altered. When
+enabled, the server applies/merges the template `sandbox` container's selected
+identity fields (`runAsUser`, `runAsGroup`, and `runAsNonRoot`) into the
+generated sandbox so its effective group matches the initializer-created
+directory. It preserves runtime-required capabilities, seccomp, and AppArmor
+settings and does not otherwise replace the security context. Storage and mount
+behavior remains Kubernetes/CSI dependent; the initializer does not recursively
+alter existing paths. The JSON wire field is also
+`ensureSubPathDirectory`. Use a compatible published execd image that contains
+`/opensandbox-subpath-initializer`.
+
 ### 7. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.

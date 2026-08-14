@@ -3531,6 +3531,33 @@ class TestDockerVolumeValidation:
         assert response.status.state == "Running"
 
     @pytest.mark.asyncio
+    async def test_ensure_subpath_directory_is_rejected_before_docker_side_effects(self, mock_docker):
+        mock_client = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        service = DockerSandboxService(config=_app_config())
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            timeout=120,
+            resourceLimits=ResourceLimits(root={}),
+            entrypoint=["python"],
+            volumes=[
+                Volume(
+                    name="workspace",
+                    pvc=PVC(claim_name="workspace-pvc"),
+                    mount_path="/workspace",
+                    sub_path="jobs/123",
+                    ensure_sub_path_directory=True,
+                )
+            ],
+        )
+
+        with pytest.raises(HTTPException, match="BatchSandbox provider") as exc_info:
+            await service.create_sandbox(request)
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_client.api.inspect_volume.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_host_volume_binds_passed_to_docker(self, mock_docker):
         """Host volume binds should be passed to Docker host config."""
         mock_client = MagicMock()

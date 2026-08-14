@@ -338,6 +338,25 @@ class Volume(BaseModel):
         alias="subPath",
         description="Optional subdirectory under the backend path to mount.",
     )
+    ensure_sub_path_directory: bool = Field(
+        False,
+        alias="ensureSubPathDirectory",
+        description=(
+            "When true, Kubernetes BatchSandbox template-mode creation ensures that "
+            "subPath exists before the main container starts using the fixed trusted "
+            "initializer bundled with a compatible published execd image that contains "
+            "/opensandbox-subpath-initializer. It supports only writable PVC mounts "
+            "with a non-empty normalized relative subPath. The existing BatchSandbox "
+            "template main sandbox container must explicitly set securityContext.runAsGroup "
+            "to an integer from 1 through 2147483647. No Pod fsGroup is set or required. "
+            "The initializer assigns that GID and mode 02770 only to newly created "
+            "segments; it does not alter existing directories, the business container "
+            "identity, or its security context. Storage and mount behavior remains "
+            "Kubernetes/CSI dependent; the initializer does not recursively alter "
+            "existing paths. It is not supported for host or ossfs backends, read-only "
+            "mounts, Docker, other Kubernetes providers, or pool mode."
+        ),
+    )
 
     class Config:
         populate_by_name = True
@@ -351,6 +370,24 @@ class Volume(BaseModel):
             raise ValueError("Exactly one backend (host, pvc, ossfs) must be specified, but none was provided.")
         if len(specified) > 1:
             raise ValueError("Exactly one backend (host, pvc, ossfs) must be specified, but multiple were provided.")
+
+        if self.ensure_sub_path_directory:
+            if self.pvc is None:
+                raise ValueError("ensureSubPathDirectory is supported only for PVC volumes.")
+            if self.read_only:
+                raise ValueError("ensureSubPathDirectory cannot be used with readOnly=true.")
+            if not self.sub_path or not self.sub_path.strip():
+                raise ValueError("ensureSubPathDirectory requires a non-empty subPath.")
+            if (
+                self.sub_path.startswith("/")
+                or "\\" in self.sub_path
+                or "\x00" in self.sub_path
+                or any(segment in {"", ".", ".."} for segment in self.sub_path.split("/"))
+            ):
+                raise ValueError(
+                    "ensureSubPathDirectory requires a normalized relative subPath "
+                    "without empty, '.', or '..' segments."
+                )
         return self
 
 

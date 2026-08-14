@@ -20,7 +20,9 @@ This mirrors `test_sandbox_e2e.py` but uses the synchronous SDK.
 """
 
 import logging
+import os
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from io import BytesIO
@@ -68,6 +70,17 @@ from tests.base_e2e_test import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_NONROOT_SUBPATH_TEMPLATE_FILE = "/etc/opensandbox/e2e-subpath-nonroot.batchsandbox-template.yaml"
+
+
+def _uses_nonroot_subpath_template() -> bool:
+    return (
+        is_kubernetes_runtime()
+        and os.environ.get("E2E_BATCHSANDBOX_TEMPLATE_FILE")
+        == _NONROOT_SUBPATH_TEMPLATE_FILE
+    )
 
 
 def _now_ms() -> int:
@@ -778,6 +791,82 @@ class TestSandboxE2ESync:
                 pass
 
         logger.info("TEST 1f PASSED: PVC subPath named volume mount test completed successfully")
+
+    @pytest.mark.timeout(120)
+    @pytest.mark.order(1)
+    def test_01g_pvc_unseeded_subpath_initializer_nonroot(self) -> None:
+        """Create and use a non-root, runAsGroup-owned PVC subPath through the lifecycle API."""
+        if not _uses_nonroot_subpath_template():
+            pytest.skip(
+                "requires E2E_BATCHSANDBOX_TEMPLATE_FILE="
+                f"{_NONROOT_SUBPATH_TEMPLATE_FILE} in the Kubernetes E2E runner"
+            )
+
+        logger.info("=" * 80)
+        logger.info("TEST 1g: Creating a non-root sandbox with an unseeded PVC subPath initializer")
+        logger.info("=" * 80)
+
+        pvc_volume_name = get_test_pvc_name()
+        container_mount_path = "/mnt/ensure-subpath"
+        unseeded_sub_path = f"ensure-subpath-initializer-{uuid.uuid4().hex}"
+        cfg = create_connection_config_sync()
+        sandbox = SandboxSync.create(
+            image=SandboxImageSpec(get_sandbox_image()),
+            resource=get_e2e_sandbox_resource(),
+            connection_config=cfg,
+            timeout=timedelta(minutes=5),
+            ready_timeout=timedelta(seconds=30),
+            volumes=[
+                Volume(
+                    name="test-pvc-unseeded-subpath",
+                    pvc=PVC(claimName=pvc_volume_name),
+                    mountPath=container_mount_path,
+                    readOnly=False,
+                    subPath=unseeded_sub_path,
+                    ensureSubPathDirectory=True,
+                ),
+            ],
+        )
+        try:
+            info = sandbox.get_info()
+            assert info.status.state == "Running"
+
+            result = sandbox.commands.run(
+                f"test -d {container_mount_path} && "
+                f"test ! -e {container_mount_path}/marker.txt && "
+                f"test ! -e {container_mount_path}/datasets && "
+                "test \"$(id -u)\" = 1000 && "
+                "test \"$(id -g)\" = 2000 && "
+                f"test \"$(stat -c '%g' {container_mount_path})\" = 2000 && "
+                f"mode=$(stat -c '%a' {container_mount_path}) && "
+                "test $(((mode / 10) % 10)) -ge 2 && "
+                "test $((mode % 10)) -lt 2"
+            )
+            assert result.error is None, (
+                "business container does not have the expected runAs uid/gid and a group-writable, "
+                "non-world-writable initialized subPath"
+            )
+
+            result = sandbox.commands.run(
+                f"printf '%s\\n' 'ensure-subpath-write-test' > "
+                f"{container_mount_path}/output.txt && "
+                f"cat {container_mount_path}/output.txt"
+            )
+            assert result.error is None, f"Failed to write initialized subPath: {result.error}"
+            assert len(result.logs.stdout) == 1
+            assert result.logs.stdout[0].text == "ensure-subpath-write-test"
+        finally:
+            try:
+                sandbox.kill()
+            except Exception:
+                pass
+            sandbox.close()
+            try:
+                cfg.transport.close()
+            except Exception:
+                pass
+
+        logger.info("TEST 1g PASSED: Non-root PVC subPath initializer test completed successfully")
 
     @pytest.mark.timeout(120)
     @pytest.mark.order(2)
