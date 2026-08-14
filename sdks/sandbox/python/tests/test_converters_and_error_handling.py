@@ -45,6 +45,7 @@ from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxApiException,
     SandboxInternalException,
+    SandboxRateLimitException,
 )
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import (
@@ -381,6 +382,65 @@ def test_exception_converter_maps_generated_unexpected_status_to_api_exception()
     assert converted.status_code == 400
     assert converted.error is not None
     assert converted.error.code == "X"
+
+
+def test_exception_converter_splices_unstructured_body_into_message() -> None:
+    body = b'{"error": "invalid parameter"}'  # JSON without code/message envelope
+    err = UnexpectedStatus(400, body)
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxApiException)
+    assert converted.status_code == 400
+    # The raw body is spliced into str()/message so logs show the server reason.
+    assert '{"error": "invalid parameter"}' in str(converted)
+    # Full body still available on the exception field.
+    assert converted.response_body == body
+
+
+def test_exception_converter_splices_plain_text_body_into_message() -> None:
+    body = b"cursor must be positive"
+    err = UnexpectedStatus(400, body)
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxApiException)
+    assert "cursor must be positive" in str(converted)
+    assert converted.response_body == body
+
+
+def test_exception_converter_maps_unstructured_429_body_into_message() -> None:
+    body = b"quota exhausted for tenant foo"
+    err = UnexpectedStatus(429, body)
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxRateLimitException)
+    assert "quota exhausted for tenant foo" in str(converted)
+    assert converted.response_body == body
+
+
+def test_exception_converter_truncates_long_unstructured_body_in_message() -> None:
+    body = b"x" * 2000
+    err = UnexpectedStatus(502, body)
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxApiException)
+    assert converted.response_body == body
+    assert "…" in str(converted)
+    assert len(str(converted)) < 1500
+
+
+def test_exception_converter_preserves_structured_code_without_message() -> None:
+    err = UnexpectedStatus(429, b'{"code":"QUOTA"}')
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxRateLimitException)
+    # Structured code is preserved even when the body has no message field.
+    assert converted.error is not None
+    assert converted.error.code == "QUOTA"
 
 
 def test_exception_converter_maps_httpx_status_error_to_api_exception() -> None:

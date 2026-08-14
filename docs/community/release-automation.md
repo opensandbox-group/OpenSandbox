@@ -31,12 +31,14 @@ Script path:
 - `cli`
 - `server`
 - `docker/execd`
+- `docker/nodeagent`
 - `docker/code-interpreter`
 - `docker/ingress`
 - `docker/egress`
 - `k8s/controller`
 - `k8s/task-executor`
 - `helm/opensandbox`
+- `helm/opensandbox-node-agent`
 - `helm` (alias of `helm/opensandbox`)
 
 The `java/sandbox` target publishes the Kotlin/JVM SDK release train, including
@@ -126,7 +128,9 @@ Examples:
 - `js/sandbox` -> `sdks/sandbox/javascript` + `specs/sandbox-lifecycle.yml`
 - `server` -> `server` + `specs/sandbox-lifecycle.yml`
 - `docker/egress` -> `components/egress`
+- `docker/nodeagent` -> `components/nodeagent` + `components/internal`
 - `helm/opensandbox` -> `kubernetes/charts/opensandbox`
+- `helm/opensandbox-node-agent` -> `kubernetes/charts/opensandbox-node-agent`
 
 Override behavior:
 

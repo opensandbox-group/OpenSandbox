@@ -24,4 +24,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0016](0016-unified-umbrella-release-governance.md)       |      Unified Umbrella Release Governance                                  |     draft     |  2026-07-21  |
 | [OSEP-0017](0017-resilient-sdk-transport.md)                   |      Resilient SDK Transport                                              | implementing  |  2026-07-22  |
 | [OSEP-0018](0018-execd-as-sandbox-init.md)                     |      execd as Sandbox Init                                                |     draft     |  2026-07-27  |
-| [OSEP-0019](0019-node-agent-sandbox-collection.md)             |      Node Agent for Node-Level Sandbox Collection                         |     draft     |  2026-07-30  |
+| [OSEP-0019](0019-node-agent-sandbox-collection.md)             |      Node Agent for Node-Level Sandbox Collection                         | implementing  |  2026-08-11  |

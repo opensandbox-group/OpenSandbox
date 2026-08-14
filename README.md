@@ -32,6 +32,20 @@ OpenSandbox is a **general-purpose sandbox platform** for AI applications, offer
 - 🔑 **Credential Vault**: Secure credential injection for sandbox outbound requests without exposing real secrets to workloads. See [Credential Vault](docs/guides/credential-vault.md).
 - 🏰 **Strong Isolation**: Supports secure container runtimes like gVisor, Kata Containers, and Firecracker microVM for enhanced isolation between sandbox workloads and the host. See [Secure Container Runtime Guide](docs/guides/secure-container.md) for details.
 
+## Official Container Images
+
+OpenSandbox release images are published under the same component name in
+three official registries:
+
+- Docker Hub: `docker.io/opensandbox/<component>`
+- GitHub Container Registry: `ghcr.io/opensandbox-group/opensandbox/<component>`
+- Alibaba Cloud Container Registry: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/<component>`
+
+Tagged release images are signed keylessly with Cosign and include provenance
+attestations. Pin production images by digest and follow the
+[release verification guide](docs/community/release-verification.md) to verify
+the image against the OpenSandbox GitHub Actions identity before deployment.
+
 ## SDKs
 
 Python:

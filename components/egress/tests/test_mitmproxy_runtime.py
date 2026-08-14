@@ -55,7 +55,7 @@ VAULT_PAYLOAD = json.dumps(
                     "schemes": ["http"],
                     "hosts": ["code.example.com"],
                     "methods": ["POST"],
-                    "paths": ["/v1/chat/completions"],
+                    "paths": ["/v1/chat/*"],
                 },
                 "headers": [{"name": "x-api-key", "value": "secret-api-key"}],
             }

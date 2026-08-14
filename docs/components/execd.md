@@ -72,6 +72,39 @@ Bash session API (which keeps its existing name for compatibility), and
 isolated sessions. Commands submitted to a fallback session must use syntax
 supported by that image's `sh` implementation.
 
+## PTY WebSocket access
+
+The first WebSocket attached to `/pty/{session_id}/ws` is the exclusive
+read/write holder. A second read/write connection receives `409 Conflict`
+unless it uses `?takeover=1` to replace that holder.
+
+After the read/write holder has started the shell, any number of read-only
+clients can attach with:
+
+```text
+ws://localhost:44772/pty/{session_id}/ws?mode=viewer&since=0
+```
+
+Viewer connections receive the retained replay followed by live output, but
+they never acquire or evict the read/write holder. The JSON `connected` frame
+sets `role` to `viewer` (holders receive `role: "holder"`) so clients can use
+the appropriate binary-frame decoder. Holders receive `0x01` stdout and, in
+pipe mode, `0x02` stderr frames. Viewers receive `0x03` replay frames for both
+retained and live output: an 8-byte big-endian offset followed by raw bytes.
+
+Binary stdin and JSON `stdin`, `signal`, or `resize` frames are rejected with
+a `READ_ONLY` error; `ping` remains available. The server closes a viewer after
+five rejected mutating frames to bound error traffic from a misbehaving client.
+WebSocket backpressure from a slow or disconnected viewer does not block the
+interactive holder's live output pipe. In pipe mode, viewer output uses the
+combined replay stream because replay does not preserve stdout/stderr channel
+boundaries.
+
+A viewer can attach only while the shell is running. When the shell exits,
+viewers receive the `exit` frame and close. If a holder later starts the same
+session again, its bounded replay buffer is retained, so a viewer reconnecting
+with `since=0` can receive retained output from the preceding shell lifetime.
+
 ## Isolated Sessions
 
 Isolated sessions run a shell inside a per-execution

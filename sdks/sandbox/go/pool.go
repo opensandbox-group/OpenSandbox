@@ -556,7 +556,7 @@ func adaptHealthCheck(userCheck func(context.Context, *Sandbox) error) func(cont
 	}
 }
 
-// ReleaseAllIdle drains all idle sandboxes and kills them.
+// ReleaseAllIdle drains all idle sandboxes and schedules a best-effort kill for each one.
 func (p *DefaultSandboxPool) ReleaseAllIdle(ctx context.Context) (int, error) {
 	count := 0
 	for {
@@ -574,6 +574,63 @@ func (p *DefaultSandboxPool) ReleaseAllIdle(ctx context.Context) (int, error) {
 		count++
 	}
 	return count, nil
+}
+
+// ReleaseAllIdleParallel drains all idle sandboxes and kills them with bounded
+// concurrency. It blocks until every drained sandbox has received a best-effort
+// kill attempt. maxWorkers must be positive.
+//
+// ctx only bounds the drain phase. Once an ID has been drained, its kill attempt
+// uses an independent timeout and completes before this method returns, even if
+// ctx is cancelled.
+func (p *DefaultSandboxPool) ReleaseAllIdleParallel(ctx context.Context, maxWorkers int) (int, error) {
+	if maxWorkers <= 0 {
+		return 0, fmt.Errorf("opensandbox: pool release all idle parallel: maxWorkers must be positive, got %d", maxWorkers)
+	}
+	sandboxIDs := make([]string, 0)
+	var drainErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			drainErr = err
+			break
+		}
+		sandboxID, err := p.config.StateStore.TryTakeIdle(ctx, p.config.PoolName)
+		if err != nil {
+			drainErr = err
+			break
+		}
+		if sandboxID == "" {
+			break
+		}
+		sandboxIDs = append(sandboxIDs, sandboxID)
+	}
+
+	jobs := make(chan string)
+	var workers sync.WaitGroup
+	workerCount := len(sandboxIDs)
+	if workerCount > maxWorkers {
+		workerCount = maxWorkers
+	}
+	workers.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			defer workers.Done()
+			for sandboxID := range jobs {
+				if err := p.killSandbox(sandboxID); err != nil {
+					p.config.Logger.Warn("failed to kill sandbox (best-effort)",
+						"pool_name", p.config.PoolName,
+						"sandbox_id", sandboxID,
+						"error", err)
+				}
+			}
+		}()
+	}
+	for _, sandboxID := range sandboxIDs {
+		jobs <- sandboxID
+	}
+	close(jobs)
+	workers.Wait()
+	return len(sandboxIDs), drainErr
 }
 
 // Resize dynamically changes the idle target.
@@ -753,12 +810,18 @@ done:
 	return nil
 }
 
-const killSandboxTimeout = 30 * time.Second
+const (
+	killSandboxTimeout = 30 * time.Second
+)
 
 func (p *DefaultSandboxPool) killSandboxBestEffort(sandboxID string) {
+	_ = p.killSandbox(sandboxID)
+}
+
+func (p *DefaultSandboxPool) killSandbox(sandboxID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), killSandboxTimeout)
 	defer cancel()
-	_ = p.manager.KillSandbox(ctx, sandboxID)
+	return p.manager.KillSandbox(ctx, sandboxID)
 }
 
 func (p *DefaultSandboxPool) killDiscardedAliveSandboxes(ids []string) {

@@ -356,7 +356,7 @@ class SandboxTest {
     }
 
     @Test
-    fun `checkReady timeout should include connection context and bridge hint`() {
+    fun `checkReady timeout should include diagnostics without network configuration hints`() {
         every { healthService.ping(sandboxId) } throws RuntimeException("connect ECONNREFUSED")
 
         val ex =
@@ -365,27 +365,10 @@ class SandboxTest {
             }
 
         assertTrue(ex.message!!.contains("Connection context: domain=localhost:8080, useServerProxy=false"))
-        assertTrue(ex.message!!.contains("useServerProxy=true"))
-        assertTrue(ex.message!!.contains("[docker].host_ip"))
-        assertTrue(ex.message!!.contains("Last error: connect ECONNREFUSED"))
-    }
-
-    @Test
-    fun `checkReady timeout should omit host_ip hint when server proxy is enabled`() {
-        val proxyEnabledConfig =
-            ConnectionConfig.builder()
-                .domain("localhost:8080")
-                .useServerProxy(true)
-                .build()
-        every { httpClientProvider.config } returns proxyEnabledConfig
-        every { healthService.ping(sandboxId) } returns false
-
-        val ex =
-            assertThrows(SandboxReadyTimeoutException::class.java) {
-                sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
-            }
-
-        assertTrue(ex.message!!.contains("useServerProxy=true"))
+        assertFalse(ex.message!!.contains("consider enabling useServerProxy=true", ignoreCase = true))
+        assertFalse(ex.message!!.contains("Docker bridge", ignoreCase = true))
+        assertFalse(ex.message!!.contains("remote-network", ignoreCase = true))
         assertFalse(ex.message!!.contains("[docker].host_ip"))
+        assertTrue(ex.message!!.contains("Last error: connect ECONNREFUSED"))
     }
 }

@@ -1,0 +1,6 @@
+**
+!components/nodeagent/**
+!components/internal/**
+components/nodeagent/bin/
+components/nodeagent/coverage.out
+components/nodeagent/*.test

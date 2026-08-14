@@ -312,7 +312,7 @@ class CodesAdapter(Codes):
                         f"Failed to run code. Status: {response.status_code}, Body: {error_body}"
                     )
                     raise SandboxApiException(
-                        message=f"Failed to run code. Status code: {response.status_code}",
+                        message=f"Failed to run code. Status code: {response.status_code}, Body: {error_body}",
                         status_code=response.status_code,
                         request_id=extract_request_id(response.headers),
                     )

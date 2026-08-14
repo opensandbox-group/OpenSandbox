@@ -24,6 +24,7 @@ on:
           - controller
           - task-executor
           - image-committer
+          - nodeagent
         default: 'execd'
       image_tag:
         description: 'Docker image tag'
@@ -38,6 +39,7 @@ on:
       - 'k8s/controller/**'
       - 'k8s/task-executor/**'
       - 'k8s/image-committer/**'
+      - 'docker/nodeagent/**'
 
 jobs:
   release-preflight:
@@ -133,6 +135,8 @@ jobs:
             cd kubernetes
           elif [ "$COMPONENT" == "image-committer" ]; then
             cd kubernetes
+          elif [ "$COMPONENT" == "nodeagent" ]; then
+            cd components/nodeagent
           else
             cd sandboxes/$COMPONENT
           fi

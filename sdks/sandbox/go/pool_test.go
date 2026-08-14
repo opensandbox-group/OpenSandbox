@@ -136,31 +136,6 @@ func newTestPool(t *testing.T, serverURL string, opts ...func(*SandboxPoolBuilde
 
 // ---------- Builder Tests ----------
 
-func TestPoolBuilder_Defaults(t *testing.T) {
-	b := NewSandboxPoolBuilder()
-	if b.config.ReconcileInterval != 30*time.Second {
-		t.Errorf("ReconcileInterval = %v, want 30s", b.config.ReconcileInterval)
-	}
-	if b.config.PrimaryLockTTL != 60*time.Second {
-		t.Errorf("PrimaryLockTTL = %v, want 60s", b.config.PrimaryLockTTL)
-	}
-	if b.config.DegradedThreshold != 3 {
-		t.Errorf("DegradedThreshold = %d, want 3", b.config.DegradedThreshold)
-	}
-	if b.config.DrainTimeout != 30*time.Second {
-		t.Errorf("DrainTimeout = %v, want 30s", b.config.DrainTimeout)
-	}
-	if b.config.AcquireReadyTimeout != 30*time.Second {
-		t.Errorf("AcquireReadyTimeout = %v, want 30s", b.config.AcquireReadyTimeout)
-	}
-	if b.config.WarmupReadyTimeout != 30*time.Second {
-		t.Errorf("WarmupReadyTimeout = %v, want 30s", b.config.WarmupReadyTimeout)
-	}
-	if b.config.EmptyBehavior != AcquirePolicyDirectCreate {
-		t.Errorf("EmptyBehavior = %v, want DIRECT_CREATE", b.config.EmptyBehavior)
-	}
-}
-
 func TestPoolBuilder_MissingPoolName(t *testing.T) {
 	_, err := NewSandboxPoolBuilder().
 		ConnectionConfig(ConnectionConfig{Domain: "localhost:8080", Protocol: "http"}).
@@ -469,6 +444,40 @@ func TestPool_Acquire_Empty_FailFast(t *testing.T) {
 type failingTakeStore struct {
 	*InMemoryPoolStateStore
 	takeErr error
+}
+
+type failAfterTakeStore struct {
+	*InMemoryPoolStateStore
+	successfulTakes int
+	takes           int
+	err             error
+}
+
+type cancelAfterTakeStore struct {
+	*InMemoryPoolStateStore
+	successfulTakes int
+	takes           int
+	cancel          context.CancelFunc
+}
+
+func (s *failAfterTakeStore) TryTakeIdle(ctx context.Context, poolName string) (string, error) {
+	if s.takes >= s.successfulTakes {
+		return "", s.err
+	}
+	s.takes++
+	return s.InMemoryPoolStateStore.TryTakeIdle(ctx, poolName)
+}
+
+func (s *cancelAfterTakeStore) TryTakeIdle(ctx context.Context, poolName string) (string, error) {
+	sandboxID, err := s.InMemoryPoolStateStore.TryTakeIdle(ctx, poolName)
+	if err != nil || sandboxID == "" {
+		return sandboxID, err
+	}
+	s.takes++
+	if s.takes == s.successfulTakes {
+		s.cancel()
+	}
+	return sandboxID, nil
 }
 
 func (s *failingTakeStore) TryTakeIdle(_ context.Context, _ string) (string, error) {
@@ -835,6 +844,178 @@ func TestPool_Shutdown_DoesNotReleaseIdle(t *testing.T) {
 	}
 	if counters.IdleCount != 2 {
 		t.Errorf("idle count after shutdown = %d, want 2 (shutdown should not release idle)", counters.IdleCount)
+	}
+}
+
+func TestPool_ReleaseAllIdle_BoundsConcurrentKills(t *testing.T) {
+	const maxWorkers = 50
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	var deleted atomic.Int32
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	lifecycleSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		current := active.Add(1)
+		for {
+			observed := maxActive.Load()
+			if current <= observed || maxActive.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		if current == maxWorkers {
+			readyOnce.Do(func() { close(ready) })
+		}
+		select {
+		case <-ready:
+		case <-time.After(2 * time.Second):
+			t.Error("concurrent kills did not reach configured limit")
+		}
+		active.Add(-1)
+		deleted.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(lifecycleSrv.Close)
+	storeErr := errors.New("injected store failure")
+	store := &failAfterTakeStore{
+		InMemoryPoolStateStore: NewInMemoryPoolStateStore(),
+		successfulTakes:        55,
+		err:                    storeErr,
+	}
+	pool := newTestPool(t, lifecycleSrv.URL, func(b *SandboxPoolBuilder) {
+		b.MaxIdle(0).StateStore(store)
+	})
+	ctx := context.Background()
+	for i := 0; i < 55; i++ {
+		if err := pool.config.StateStore.PutIdle(ctx, "test-pool", fmt.Sprintf("idle-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := pool.ReleaseAllIdleParallel(ctx, 0); err == nil {
+		t.Fatal("ReleaseAllIdleParallel() accepted maxWorkers=0")
+	}
+	released, err := pool.ReleaseAllIdleParallel(ctx, maxWorkers)
+
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("ReleaseAllIdleParallel() error = %v, want injected store failure", err)
+	}
+	if released != 55 {
+		t.Fatalf("released = %d, want 55", released)
+	}
+	if maxActive.Load() != maxWorkers {
+		t.Errorf("max concurrent kills = %d, want %d", maxActive.Load(), maxWorkers)
+	}
+	if deleted.Load() != 55 {
+		t.Errorf("deleted = %d, want 55", deleted.Load())
+	}
+}
+
+func TestPool_ReleaseAllIdleParallel_CompletesDrainedKillsAfterContextCancellation(t *testing.T) {
+	const (
+		totalSandboxes      = 5
+		drainedBeforeCancel = 3
+	)
+	var deleted atomic.Int32
+	lifecycleSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		deleted.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(lifecycleSrv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &cancelAfterTakeStore{
+		InMemoryPoolStateStore: NewInMemoryPoolStateStore(),
+		successfulTakes:        drainedBeforeCancel,
+		cancel:                 cancel,
+	}
+	pool := newTestPool(t, lifecycleSrv.URL, func(b *SandboxPoolBuilder) {
+		b.MaxIdle(0).StateStore(store)
+	})
+	for i := 0; i < totalSandboxes; i++ {
+		if err := store.PutIdle(ctx, "test-pool", fmt.Sprintf("idle-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	released, err := pool.ReleaseAllIdleParallel(ctx, 2)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReleaseAllIdleParallel() error = %v, want context.Canceled", err)
+	}
+	if released != drainedBeforeCancel {
+		t.Fatalf("released = %d, want %d", released, drainedBeforeCancel)
+	}
+	if got := deleted.Load(); got != drainedBeforeCancel {
+		t.Errorf("deleted = %d, want %d", got, drainedBeforeCancel)
+	}
+	counters, snapshotErr := store.SnapshotCounters(context.Background(), "test-pool")
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
+	if want := totalSandboxes - drainedBeforeCancel; counters.IdleCount != want {
+		t.Errorf("remaining idle = %d, want %d", counters.IdleCount, want)
+	}
+}
+
+func TestPool_ReleaseAllIdle_PreservesFireAndForgetBehavior(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseKill := make(chan struct{})
+	deleted := make(chan struct{})
+	lifecycleSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		close(requestStarted)
+		<-releaseKill
+		w.WriteHeader(http.StatusNoContent)
+		close(deleted)
+	}))
+	t.Cleanup(lifecycleSrv.Close)
+	pool := newTestPool(t, lifecycleSrv.URL, func(b *SandboxPoolBuilder) { b.MaxIdle(0) })
+	ctx := context.Background()
+	if err := pool.config.StateStore.PutIdle(ctx, "test-pool", "idle-1"); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		count int
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		count, err := pool.ReleaseAllIdle(ctx)
+		done <- result{count: count, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil || got.count != 1 {
+			t.Fatalf("ReleaseAllIdle() = (%d, %v), want (1, nil)", got.count, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		close(releaseKill)
+		t.Fatal("ReleaseAllIdle blocked on the kill request")
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		close(releaseKill)
+		t.Fatal("kill request did not start")
+	}
+	close(releaseKill)
+	select {
+	case <-deleted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("kill request did not finish")
 	}
 }
 

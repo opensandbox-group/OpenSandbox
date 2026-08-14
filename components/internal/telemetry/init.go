@@ -57,6 +57,10 @@ type Config struct {
 	ServiceName        string
 	ResourceAttributes []attribute.KeyValue
 	RegisterMetrics    func() error
+	// DisableEndpointFallback prevents HOST_IP and /etc/hostinfo from enabling
+	// metrics export when no standard OTLP endpoint is configured. Components
+	// keep the historical fallback behavior unless they opt in to this flag.
+	DisableEndpointFallback bool
 }
 
 const (
@@ -86,8 +90,8 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		shutdownFuncs []func(context.Context) error
 	)
 
-	if metricsEnabled() {
-		opts := append(metricsClientOptions(),
+	if metricsEnabled(cfg.DisableEndpointFallback) {
+		opts := append(metricsClientOptions(cfg.DisableEndpointFallback),
 			otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector),
 		)
 		mexp, err := otlpmetrichttp.New(ctx, opts...)
@@ -134,16 +138,22 @@ func buildResource(ctx context.Context, serviceName string, extra []attribute.Ke
 }
 
 // Endpoint precedence: OTEL_EXPORTER_OTLP_*_ENDPOINT -> HOST_IP -> /etc/hostinfo.
-func metricsEnabled() bool {
+func metricsEnabled(disableEndpointFallback bool) bool {
 	if otlpEndpointFromEnv() != "" {
 		return true
+	}
+	if disableEndpointFallback {
+		return false
 	}
 	_, ok := resolveNodeIP()
 	return ok
 }
 
-func metricsClientOptions() []otlpmetrichttp.Option {
+func metricsClientOptions(disableEndpointFallback bool) []otlpmetrichttp.Option {
 	if otlpEndpointFromEnv() != "" {
+		return nil
+	}
+	if disableEndpointFallback {
 		return nil
 	}
 	ip, ok := resolveNodeIP()

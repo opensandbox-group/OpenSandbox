@@ -145,7 +145,7 @@ internal class CommandsAdapter(
                     ResponseType.ClientError -> {
                         val localVarError = localVarResponse as ClientError<*>
                         throw ClientException(
-                            "Client error : ${localVarError.statusCode} ${localVarError.message.orEmpty()}",
+                            "Client error : ${localVarError.statusCode} ${localVarError.message.orEmpty()} ${localVarError.body}",
                             localVarError.statusCode,
                             localVarResponse,
                         )

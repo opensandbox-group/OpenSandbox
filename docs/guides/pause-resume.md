@@ -75,8 +75,12 @@ The Lifecycle API exposes only the coarse-grained sandbox states above. For deta
 | Environment variables | ✅ Yes — from BatchSandbox template |
 | Running processes / memory | ❌ No — process state is not checkpointed |
 | Explicit volume mounts | Depends on volume type |
+| Credential Vault entries | No - stored only in egress sidecar memory; re-inject from a trusted control plane after resume |
 
 Pause/resume is currently single-replica only. The internal pause snapshot records one source Pod's container images and does not store per-replica state, so the Kubernetes controller rejects pause requests unless `BatchSandbox.spec.replicas=1`.
+
+See [Credential Vault](/guides/credential-vault#persistence-across-pause-and-resume)
+for the required post-resume credential re-injection procedure.
 
 ---
 

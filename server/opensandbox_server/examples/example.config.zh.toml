@@ -32,7 +32,7 @@ level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.22"
 
 [storage]
 allowed_host_paths = []
@@ -66,7 +66,7 @@ seccomp_profile = ""
 mode = "direct"
 
 [egress]
-image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.5"
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.6"
 mode = "dns"
 
 # 按访问续期。默认关闭 — 见 server/README_zh.md。

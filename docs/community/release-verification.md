@@ -19,9 +19,10 @@ OpenSandbox uses these signing paths:
 - Source code releases: the Generic Release workflow uploads an explicit
   `opensandbox-<tag>.tar.gz` source archive and `SHA256SUMS` file to the GitHub
   Release, then creates GitHub/Sigstore provenance attestations for both files.
-- Container images: the component and server image workflows sign Docker Hub
-  and ACR image digests with `cosign` keyless signing, and publish provenance
-  attestations to the registries.
+- Container images: the component and server image workflows sign Docker Hub,
+  GitHub Container Registry (GHCR), and Alibaba Cloud Container Registry (ACR)
+  image digests with `cosign` keyless signing, and publish provenance
+  attestations to all three registries.
 - Python and CLI packages: wheels and source distributions are attested before
   `uv publish`.
 - JavaScript packages: the workflow runs `pnpm pack`, attests the generated npm
@@ -83,9 +84,9 @@ If you run the release workflows from a downstream fork, replace
 `opensandbox-group/OpenSandbox` in the verification commands with that fork's
 `owner/repository` identity.
 
-Private signing material is not stored in GitHub Releases, Docker Hub, ACR,
-PyPI, npm, Maven Central, NuGet, or Helm chart downloads. Java/Kotlin Maven
-Central signing keys are held only in GitHub Actions secrets.
+Private signing material is not stored in GitHub Releases, Docker Hub, GHCR,
+ACR, PyPI, npm, Maven Central, NuGet, or Helm chart downloads. Java/Kotlin
+Maven Central signing keys are held only in GitHub Actions secrets.
 
 ## Verify Source Releases
 
@@ -136,6 +137,19 @@ provenance `source-ref` is the ref selected when the workflow was dispatched
 Install `cosign` and `gh`, then resolve the image digest. Always verify by
 digest, not by mutable tag alone.
 
+Release images are published with the same component name and digest in all
+three official registries:
+
+| Registry | Image name pattern |
+| --- | --- |
+| Docker Hub | `docker.io/opensandbox/<component>` |
+| GitHub Container Registry | `ghcr.io/opensandbox-group/opensandbox/<component>` |
+| Alibaba Cloud Container Registry | `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/<component>` |
+
+The component can be `execd`, `code-interpreter`, `ingress`, `egress`,
+`controller`, `task-executor`, `image-committer`, or `nodeagent`. The server
+image uses the component name `server`.
+
 ```bash
 IMAGE="docker.io/opensandbox/execd"
 TAG="v1.0.15"
@@ -173,10 +187,12 @@ cosign verify "$IMAGE_REF" \
   --certificate-identity-regexp "^${WORKFLOW_REPOSITORY_URL}/.github/workflows/publish-server.yml@refs/tags/server/v[0-9].*$"
 ```
 
-ACR images use the same digest and identity checks with the ACR image name, for
-example:
+GHCR and ACR images use the same digest and identity checks with their
+respective image names, for example:
 
 ```bash
+IMAGE="ghcr.io/opensandbox-group/opensandbox/execd"
+# or
 IMAGE="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd"
 ```
 

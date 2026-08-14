@@ -145,6 +145,7 @@ export default defineConfig({
             { text: "Execd", link: "/components/execd" },
             { text: "Ingress", link: "/components/ingress" },
             { text: "Egress", link: "/components/egress" },
+            { text: "Node Agent", link: "/components/node-agent" },
           ],
         },
       ],
