@@ -112,7 +112,7 @@ spec:
             - name: opensandbox-bin
               mountPath: /opt/opensandbox
         - name: execd-installer
-          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.22
           command: [ "/bin/sh", "-c" ]
           args:
             - |
@@ -130,7 +130,9 @@ spec:
           - "/bin/sh"
           - "-c"
           - |
-            /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 >/tmp/task-executor.log 2>&1
+            /opt/opensandbox/task-executor \
+              -listen-addr=0.0.0.0:5758 \
+              -log-dir=/tmp
           env:
           - name: SANDBOX_MAIN_CONTAINER
             value: main
@@ -151,6 +153,52 @@ spec:
     poolMax: 5
     poolMin: 0
 ```
+
+#### How Pool entrypoint injection works
+
+The lifecycle API allocates an already-running Pod from the Pool, so it does not replace that Pod's `command`, `args`, or `env`. When a create request supplies an `entrypoint` or environment variables, the server records them in `BatchSandbox.spec.taskTemplate`. The controller then sends the task to the allocated Pod's IP on port `5758`.
+
+The Pool template must provide all parts of that execution path:
+
+- Install and run task-executor, listening on `0.0.0.0:5758`. Set its
+  `-log-dir` explicitly so the troubleshooting path is deterministic; the
+  example writes `/tmp/task-executor.log`.
+- Install execd and `bootstrap.sh` into the shared volume before the Pod starts.
+- Keep `bootstrap.sh` at `/opt/opensandbox/bootstrap.sh`. The server-generated task invokes that exact path. The execd binary can use another path only when the task-executor environment sets `EXECD` accordingly.
+- Start execd through `bootstrap.sh` after allocation so request-specific values such as `EXECD_ACCESS_TOKEN` are available. The example above leaves task-executor as the warm Pod's foreground process for this reason.
+
+The Pod YAML continuing to show the Pool template is therefore expected. Inspect the `BatchSandbox` resource and task-executor instead:
+
+```shell
+# Confirm that the server injected the requested process and environment.
+kubectl get batchsandbox <sandbox-name> -n <namespace> \
+  -o jsonpath='{.spec.taskTemplate}{"\n"}'
+
+# Find the allocated Pod. The annotation value contains a JSON `pods` array.
+kubectl get batchsandbox <sandbox-name> -n <namespace> \
+  -o jsonpath='{.metadata.annotations.sandbox\.opensandbox\.io/alloc-status}{"\n"}'
+
+# Replace <pool-pod> with the first Pod name from that array.
+kubectl exec <pool-pod> -n <namespace> -- \
+  sh -c 'test -x /opt/opensandbox/task-executor && test -x /opt/opensandbox/bootstrap.sh'
+kubectl exec <pool-pod> -n <namespace> -- \
+  tail -n 100 /tmp/task-executor.log
+
+# Check the executor health endpoint from a second terminal while this runs.
+kubectl port-forward pod/<pool-pod> -n <namespace> 5758:5758
+curl http://127.0.0.1:5758/health
+curl http://127.0.0.1:5758/getTasks
+
+# The lifecycle server uses <sandbox-name>-0 as the task name. Check the task's
+# captured output (adjust the path if task-executor uses a custom data directory).
+kubectl exec <pool-pod> -n <namespace> -- \
+  sh -c 'tail -n 100 /var/lib/sandbox/tasks/<sandbox-name>-0/stdout.log; tail -n 100 /var/lib/sandbox/tasks/<sandbox-name>-0/stderr.log'
+
+# Check controller logs for delivery failures between the controller and port 5758.
+kubectl logs -n opensandbox-system -l control-plane=controller-manager --tail=100
+```
+
+If `taskTemplate` exists but the health check cannot reach port `5758`, verify that task-executor is installed and remains running. The generated task intentionally starts `bootstrap.sh` in the background, so its wrapper can report success even when `bootstrap.sh` is missing or the requested entrypoint later fails. Do not rely on `taskFailed` or `taskLastErrorMessage` alone for these failures; inspect the task's captured `stderr.log` and `stdout.log`, then verify the execd or application process directly.
 
 Start the k8s OpenSandbox server:
 

@@ -26,7 +26,7 @@ namespace OpenSandbox.Tests;
 public class SandboxReadinessDiagnosticsTests
 {
     [Fact]
-    public async Task WaitUntilReadyAsync_WhenHealthCheckThrows_IncludesLastErrorAndConnectionContext()
+    public async Task WaitUntilReadyAsync_WhenHealthCheckThrows_OmitsNetworkConfigurationHints()
     {
         // Arrange
         var healthMock = new Mock<IExecdHealth>();
@@ -52,8 +52,10 @@ public class SandboxReadinessDiagnosticsTests
             ex.Which.Message.Should().Contain("Last health check error");
             ex.Which.Message.Should().Contain("domain=localhost:8080");
             ex.Which.Message.Should().Contain("useServerProxy=False");
-            ex.Which.Message.Should().Contain("useServerProxy=true");
-            ex.Which.Message.Should().Contain("[docker].host_ip");
+            ex.Which.Message.Should().NotContainEquivalentOf("consider enabling useServerProxy=true");
+            ex.Which.Message.Should().NotContainEquivalentOf("Docker bridge");
+            ex.Which.Message.Should().NotContainEquivalentOf("remote-network");
+            ex.Which.Message.Should().NotContain("[docker].host_ip");
         }
         finally
         {

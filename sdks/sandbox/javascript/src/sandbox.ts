@@ -738,12 +738,7 @@ export class Sandbox {
 
     const buildTimeoutMessage = () => {
       const context = `domain=${this.connectionConfig.domain}, useServerProxy=${this.connectionConfig.useServerProxy}`;
-      let suggestion =
-        "If this sandbox runs in Docker bridge or remote-network mode, consider enabling useServerProxy=true.";
-      if (!this.connectionConfig.useServerProxy) {
-        suggestion += " You can also configure server-side [docker].host_ip for direct endpoint access.";
-      }
-      return `Sandbox health check timed out after ${opts.readyTimeoutSeconds}s (${attempt} attempts). ${errorDetail} Connection context: ${context}. ${suggestion}`;
+      return `Sandbox health check timed out after ${opts.readyTimeoutSeconds}s (${attempt} attempts). ${errorDetail} Connection context: ${context}.`;
     };
 
     // Wait until execd becomes reachable and passes health check.

@@ -56,6 +56,134 @@ async def test_async_acquire_fail_fast_empty_raises_pool_empty() -> None:
 
 
 @pytest.mark.asyncio
+async def test_release_all_idle_preserves_serial_behavior() -> None:
+    store = InMemoryAsyncPoolStateStore()
+    for index in range(3):
+        await store.put_idle("pool", f"idle-{index}")
+
+    class TrackingManager(FakeAsyncManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+
+        async def kill_sandbox(self, sandbox_id: str) -> None:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0)
+            self.killed.append(sandbox_id)
+            self.active -= 1
+
+    manager = TrackingManager()
+    pool = _create_pool(max_idle=0, store=store, manager=manager)
+
+    released = await pool.release_all_idle()
+
+    assert released == 3
+    assert manager.max_active == 1
+    assert len(manager.killed) == 3
+    assert manager.closed
+
+
+@pytest.mark.asyncio
+async def test_release_all_idle_parallel_rejects_nonpositive_workers() -> None:
+    pool = _create_pool(max_idle=0)
+
+    with pytest.raises(ValueError, match="max_workers must be positive"):
+        await pool.release_all_idle_parallel(0)
+
+
+@pytest.mark.asyncio
+async def test_release_all_idle_bounds_kills_and_cleans_up_before_store_failure() -> (
+    None
+):
+    class FailingStore(InMemoryAsyncPoolStateStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.takes = 0
+
+        async def try_take_idle(self, pool_name: str) -> str | None:
+            if self.takes == 55:
+                raise RuntimeError("injected store failure")
+            self.takes += 1
+            return await super().try_take_idle(pool_name)
+
+    store = FailingStore()
+    for index in range(55):
+        await store.put_idle("pool", f"idle-{index}")
+
+    class ConcurrentManager(FakeAsyncManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+            self.ready = asyncio.Event()
+
+        async def kill_sandbox(self, sandbox_id: str) -> None:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == 50:
+                self.ready.set()
+            await self.ready.wait()
+            self.killed.append(sandbox_id)
+            self.active -= 1
+            if sandbox_id == "idle-0":
+                raise RuntimeError("injected kill failure")
+
+    manager = ConcurrentManager()
+    pool = _create_pool(max_idle=0, store=store, manager=manager)
+
+    with pytest.raises(RuntimeError, match="injected store failure"):
+        await asyncio.wait_for(pool.release_all_idle_parallel(), timeout=2)
+
+    assert manager.max_active == 50
+    assert len(manager.killed) == 55
+    assert (await store.snapshot_counters("pool")).idle_count == 0
+    assert manager.closed
+
+
+@pytest.mark.asyncio
+async def test_release_all_idle_parallel_finishes_kills_before_cancellation() -> None:
+    store = InMemoryAsyncPoolStateStore()
+    for index in range(55):
+        await store.put_idle("pool", f"idle-{index}")
+
+    class BlockingManager(FakeAsyncManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = 0
+            self.first_batch_started = asyncio.Event()
+            self.release_kills = asyncio.Event()
+
+        async def kill_sandbox(self, sandbox_id: str) -> None:
+            self.started += 1
+            if self.started == 50:
+                self.first_batch_started.set()
+            await self.release_kills.wait()
+            self.killed.append(sandbox_id)
+
+    manager = BlockingManager()
+    pool = _create_pool(max_idle=0, store=store, manager=manager)
+    release_task = asyncio.create_task(pool.release_all_idle_parallel())
+    await asyncio.wait_for(manager.first_batch_started.wait(), timeout=2)
+
+    try:
+        release_task.cancel()
+        await asyncio.sleep(0)
+        assert not release_task.done()
+        manager.release_kills.set()
+        with pytest.raises(asyncio.CancelledError):
+            await release_task
+    finally:
+        manager.release_kills.set()
+        await asyncio.gather(release_task, return_exceptions=True)
+
+    assert len(manager.killed) == 55
+    assert (await store.snapshot_counters("pool")).idle_count == 0
+    assert manager.closed
+
+
+@pytest.mark.asyncio
 async def test_async_reconcile_batch_failures_only_advance_backoff_once() -> None:
     store = InMemoryAsyncPoolStateStore()
     config = AsyncPoolConfig(

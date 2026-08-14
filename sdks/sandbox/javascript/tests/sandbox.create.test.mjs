@@ -532,6 +532,45 @@ test("Sandbox.create metrics failure does not change create error", async () => 
   );
 });
 
+test("Sandbox.create readiness timeout omits network configuration hints", async () => {
+  const { adapterFactory } = createAdapterFactory();
+  adapterFactory.createExecdStack = () => ({
+    commands: {},
+    files: {},
+    health: {
+      async ping() {
+        throw new Error("connect ECONNREFUSED");
+      },
+    },
+    metrics: {},
+  });
+
+  const connectionConfig = new ConnectionConfig({
+    domain: "http://127.0.0.1:8080",
+    useServerProxy: false,
+    disableMetrics: true,
+  });
+
+  await assert.rejects(
+    Sandbox.create({
+      adapterFactory,
+      connectionConfig,
+      image: "python:3.12",
+      readyTimeoutSeconds: 0.2,
+      healthCheckPollingInterval: 50,
+    }),
+    (err) => {
+      const message = String(err && err.message);
+      assert.match(message, /Sandbox health check timed out after/);
+      assert.match(message, /domain=http:\/\/127\.0\.0\.1:8080, useServerProxy=false/);
+      assert.match(message, /Last health check error: connect ECONNREFUSED/);
+      assert.doesNotMatch(message, /consider enabling useServerProxy=true/i);
+      assert.doesNotMatch(message, /Docker bridge|remote-network|\[docker\]\.host_ip/i);
+      return true;
+    }
+  );
+});
+
 test("Sandbox.create metrics synchronous throw does not change create error", async () => {
   // Regression test: previously, payload/URL/headers construction and
   // `connectionConfig.fetch(...)` ran outside any try/catch in the reporter.

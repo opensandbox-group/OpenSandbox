@@ -172,7 +172,7 @@ async def test_check_ready_timeout_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_ready_timeout_message_includes_troubleshooting_hints() -> None:
+async def test_check_ready_timeout_message_omits_network_configuration_hints() -> None:
     async def _always_false(_: Sandbox) -> bool:
         return False
 
@@ -188,7 +188,9 @@ async def test_check_ready_timeout_message_includes_troubleshooting_hints() -> N
 
     message = str(exc_info.value)
     assert "ConnectionConfig(domain=10.0.0.1:8080, use_server_proxy=False)" in message
-    assert "ConnectionConfig(use_server_proxy=True)" in message
+    assert "set connectionconfig(use_server_proxy=true)" not in message.lower()
+    assert "direct sandbox endpoint access" not in message
+    assert "[docker].host_ip" not in message
 
 
 @pytest.mark.asyncio

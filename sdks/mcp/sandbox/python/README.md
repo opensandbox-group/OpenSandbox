@@ -42,6 +42,7 @@ Config fields:
 - `protocol`: `http` or `https` for API requests.
 - `request_timeout_seconds`: HTTP request timeout in seconds.
 - `transport`: `stdio` by default, or `streamable-http`.
+- `use-server-proxy`: when present, forces the SDK client to use server proxy mode.
 
 ### Streamable HTTP
 

@@ -642,12 +642,18 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     if vault is None:
         return
 
-    # Reject ambiguous paths before injecting credentials: dot-segments or
-    # encoded separators on the wire are not produced by legit clients and
-    # could redirect credentials to a scope the canonical path does not match.
-    # A single-layer ``%2f`` is tolerated here (npm scoped packages send
-    # ``/@scope%2fname``); the next check rejects it if it crosses a binding
-    # boundary.
+    # Requests outside credential binding scope are ordinary egress traffic.
+    # Leave them untouched, including paths whose encoding would be ambiguous
+    # for credential injection, because no secret is at risk.
+    binding = _select_binding(flow, vault)
+    if not binding:
+        return
+
+    # Reject ambiguous paths only for requests that would receive credentials:
+    # dot-segments or encoded separators could redirect credentials to a scope
+    # the canonical path does not match. A single-layer ``%2f`` is tolerated
+    # here (npm scoped packages send ``/@scope%2fname``); the next check rejects
+    # it if it crosses a binding boundary.
     raw_path = flow.request.path or "/"
     if _path_is_ambiguous(raw_path, allow_single_encoded_slash=True):
         _reject_request(flow, b"request path contains ambiguous segments\n")
@@ -669,9 +675,6 @@ def requestheaders(flow: http.HTTPFlow) -> None:
         )
         return
 
-    binding = _select_binding(flow, vault)
-    if not binding:
-        return
     flow.metadata[FLOW_BINDING_KEY] = binding
     # Persist the redactions of the matched revision: body substitutions run
     # later in the request hook, and reloading the vault there could return a

@@ -84,7 +84,7 @@ class _DiagnosticsServiceStub:
         )
 
 
-def test_sync_check_ready_timeout_message_includes_troubleshooting_hints() -> None:
+def test_sync_check_ready_timeout_message_omits_network_configuration_hints() -> None:
     def _always_false(_: SandboxSync) -> bool:
         return False
 
@@ -109,7 +109,9 @@ def test_sync_check_ready_timeout_message_includes_troubleshooting_hints() -> No
 
     message = str(exc_info.value)
     assert "ConnectionConfig(domain=10.0.0.2:8080, use_server_proxy=False)" in message
-    assert "ConnectionConfigSync(use_server_proxy=True)" in message
+    assert "set connectionconfigsync(use_server_proxy=true)" not in message.lower()
+    assert "direct sandbox endpoint access" not in message
+    assert "[docker].host_ip" not in message
 
 
 def test_sync_get_egress_policy_uses_injected_egress_service() -> None:

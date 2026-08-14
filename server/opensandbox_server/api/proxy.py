@@ -27,6 +27,7 @@ import websockets
 from fastapi import APIRouter, Request, WebSocket, status
 from fastapi.exceptions import HTTPException
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection
 from websockets.typing import Origin
@@ -50,6 +51,12 @@ HOP_BY_HOP_HEADERS = {
     "trailer",
     "transfer-encoding",
     "upgrade",
+}
+
+# Uvicorn adds this to client-facing responses. Forwarding the backend value as
+# well would produce a duplicate field on the wire.
+SERVER_GENERATED_RESPONSE_HEADERS = {
+    "server",
 }
 
 # Headers that shouldn't be forwarded to untrusted/internal backends
@@ -207,19 +214,43 @@ async def _authenticate_websocket_tenant(websocket: WebSocket) -> bool:
     return True
 
 
-async def _stream_backend_response(resp: httpx.Response) -> AsyncIterator[bytes]:
-    """
-    Yield backend body chunks without httpx content decoding and always close the response.
-
-    httpx requires ``await resp.aclose()`` for ``stream=True`` responses so connections
-    return to the pool; Starlette's StreamingResponse does not do this automatically.
-    Use ``aiter_raw`` so forwarded ``content-encoding`` headers still match the body bytes.
-    """
-    try:
-        async for chunk in resp.aiter_raw():
-            yield chunk
-    finally:
+async def _close_backend_response(resp: httpx.Response) -> None:
+    """Return a streamed backend response to httpx's pool, even during cancellation."""
+    with anyio.CancelScope(shield=True):
         await resp.aclose()
+
+
+async def _stream_backend_response(resp: httpx.Response) -> AsyncIterator[bytes]:
+    """Yield raw backend chunks so content-encoding still matches the body bytes."""
+    async for chunk in resp.aiter_raw():
+        yield chunk
+
+
+class _ProxyStreamingResponse(StreamingResponse):
+    """Streaming response that owns and always releases its httpx response."""
+
+    def __init__(
+        self,
+        resp: httpx.Response,
+        *,
+        status_code: int,
+        headers: Mapping[str, str],
+    ) -> None:
+        self._backend_response = resp
+        super().__init__(
+            content=_stream_backend_response(resp),
+            status_code=status_code,
+            headers=headers,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # The body iterator may never start if the downstream disconnects
+            # while Starlette sends response headers. Keep ownership here so
+            # that connection is still returned to the shared httpx pool.
+            await _close_backend_response(self._backend_response)
 
 
 def _verify_secure_access(endpoint: Endpoint, caller_headers: Mapping[str, str]) -> None:
@@ -295,25 +326,32 @@ async def _proxy_http_request(
 
         resp = await client.send(req, stream=True)
 
-        hop_by_hop = set(HOP_BY_HOP_HEADERS)
-        connection_header = resp.headers.get("connection")
-        if connection_header:
-            hop_by_hop.update(
-                header.strip().lower()
-                for header in connection_header.split(",")
-                if header.strip()
-            )
-        response_headers = {
-            key: value
-            for key, value in resp.headers.items()
-            if key.lower() not in hop_by_hop
-        }
+        try:
+            hop_by_hop = set(HOP_BY_HOP_HEADERS)
+            connection_header = resp.headers.get("connection")
+            if connection_header:
+                hop_by_hop.update(
+                    header.strip().lower()
+                    for header in connection_header.split(",")
+                    if header.strip()
+                )
+            response_header_exclusions = hop_by_hop | SERVER_GENERATED_RESPONSE_HEADERS
+            response_headers = {
+                key: value
+                for key, value in resp.headers.items()
+                if key.lower() not in response_header_exclusions
+            }
 
-        return StreamingResponse(
-            content=_stream_backend_response(resp),
-            status_code=resp.status_code,
-            headers=response_headers,
-        )
+            return _ProxyStreamingResponse(
+                resp,
+                status_code=resp.status_code,
+                headers=response_headers,
+            )
+        except BaseException:
+            # Until ownership passes to _ProxyStreamingResponse, any failure
+            # after client.send() must release the acquired pool connection.
+            await _close_backend_response(resp)
+            raise
     except httpx.ConnectError as e:
         raise HTTPException(
             status_code=502,
