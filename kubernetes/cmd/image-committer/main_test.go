@@ -164,6 +164,80 @@ func TestGetContainerIDByNerdctlReturnsHelpfulErrorWhenBothLookupsAreEmpty(t *te
 	}
 }
 
+func TestGetContainerImageReturnsSourceReferenceAfterWarning(t *testing.T) {
+	original := commandCombinedOutput
+	t.Cleanup(func() { commandCombinedOutput = original })
+	commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		if name != "nerdctl" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		if !contains(args, "inspect") || !contains(args, "container-1") {
+			t.Fatalf("unexpected inspect arguments: %v", args)
+		}
+		return []byte("time=\"2026-08-13T13:55:17Z\" level=warning msg=\"failed to inspect NetNS\"\nOPENSANDBOX_SOURCE_IMAGE=registry.example.com/quovy/sandbox:release-1\ntime=\"2026-08-13T13:55:18Z\" level=warning msg=\"cleanup warning\"\n"), nil
+	}
+
+	image, err := getContainerImage("container-1")
+	if err != nil {
+		t.Fatalf("expected source image lookup to succeed, got %v", err)
+	}
+	if image != "registry.example.com/quovy/sandbox:release-1" {
+		t.Fatalf("unexpected source image %q", image)
+	}
+}
+
+func TestPullImageContentFetchesCompressedLayers(t *testing.T) {
+	original := commandCombinedOutput
+	t.Cleanup(func() { commandCombinedOutput = original })
+	t.Setenv("SNAPSHOT_REGISTRY_INSECURE", "false")
+
+	var gotArgs []string
+	commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		if name != "nerdctl" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		return []byte("pulled"), nil
+	}
+
+	image := "registry.example.com/quovy/sandbox:release-1"
+	if err := pullImageContent(image); err != nil {
+		t.Fatalf("expected source content pull to succeed, got %v", err)
+	}
+	if !contains(gotArgs, "pull") || !contains(gotArgs, image) {
+		t.Fatalf("unexpected pull arguments: %v", gotArgs)
+	}
+	if !contains(gotArgs, "--all-platforms") {
+		t.Fatalf("source pull must bypass containerd's transfer-service cache: %v", gotArgs)
+	}
+}
+
+func TestPushImagePreservesCommittedManifest(t *testing.T) {
+	original := commandCombinedOutput
+	t.Cleanup(func() { commandCombinedOutput = original })
+	t.Setenv("SNAPSHOT_REGISTRY_INSECURE", "false")
+
+	var gotArgs []string
+	commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		if name != "nerdctl" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		return []byte("pushed"), nil
+	}
+
+	image := "registry.example.com/quovy/sandbox:snapshot-1"
+	if err := pushImage(image); err != nil {
+		t.Fatalf("expected snapshot push to succeed, got %v", err)
+	}
+	if !contains(gotArgs, "push") || !contains(gotArgs, image) {
+		t.Fatalf("unexpected push arguments: %v", gotArgs)
+	}
+	if !contains(gotArgs, "--all-platforms") {
+		t.Fatalf("snapshot push must preserve the committed manifest: %v", gotArgs)
+	}
+}
+
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

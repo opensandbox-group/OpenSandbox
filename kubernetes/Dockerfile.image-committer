@@ -13,10 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM golang:1.25-alpine AS builder
-
-# Use Aliyun mirror for faster downloads in China
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+FROM golang:1.26.5-alpine3.23@sha256:622e56dbc11a8cfe87cafa2331e9a201877271cbff918af53d3be315f3da88cc AS builder
 
 WORKDIR /workspace
 
@@ -31,18 +28,31 @@ COPY cmd/image-committer/ cmd/image-committer/
 RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/image-committer ./cmd/image-committer/
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
-# Use Aliyun mirror for faster downloads in China
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+ARG TARGETARCH
 
 # Install nerdctl for container operations
 # nerdctl is used to find containers, commit rootfs, and push images.
 # We use nerdctl directly (not crictl or ctr) to avoid CRI API version issues.
 RUN apk add --no-cache \
     curl \
-    jq \
-    nerdctl
+    jq
+
+# Install the current upstream minimal client, verify the release checksum, and
+# preserve multi-platform builds. The distro package lags the nerdctl behavior
+# used by the snapshot path.
+RUN case "${TARGETARCH}" in \
+      amd64) NERDCTL_SHA256="de3206aeb7cbd5f20f5fb1f55c1e3bf2db1be567812a8a3f5e65eba2488347ee" ;; \
+      arm64) NERDCTL_SHA256="76ced9bd0d03f6140f9cf7b927958b654cb8d5ecd3c58af585d096c8bdf9d6c2" ;; \
+      *) printf 'unsupported TARGETARCH: %s\n' "${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSLo /tmp/nerdctl.tgz \
+      "https://github.com/containerd/nerdctl/releases/download/v2.3.5/nerdctl-2.3.5-linux-${TARGETARCH}.tar.gz" \
+    && printf '%s  %s\n' "${NERDCTL_SHA256}" /tmp/nerdctl.tgz | sha256sum -c - \
+    && tar -xzf /tmp/nerdctl.tgz -C /usr/local/bin nerdctl \
+    && rm /tmp/nerdctl.tgz \
+    && nerdctl --version
 
 # Create directory for containerd socket mount
 RUN mkdir -p /var/run/containerd

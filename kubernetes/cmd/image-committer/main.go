@@ -62,8 +62,9 @@ type ContainerSpec struct {
 }
 
 type discoveredContainer struct {
-	ID      string
-	Running bool
+	ID          string
+	Running     bool
+	SourceImage string
 }
 
 type snapshotResult struct {
@@ -163,9 +164,26 @@ func main() {
 			fmt.Fprintf(os.Stderr, "ERROR: Failed to find container '%s': %v\n", spec.Name, err)
 			os.Exit(1)
 		}
+		sourceImage, err := getContainerImage(container.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: Failed to identify the source image for container '%s': %v Ensure the sandbox container still exists, then retry the pause operation.\n", spec.Name, err)
+			os.Exit(1)
+		}
+		container.SourceImage = sourceImage
 
-		fmt.Printf("Container '%s' -> ID: %s (running: %t)\n", spec.Name, container.ID, container.Running)
+		fmt.Printf("Container '%s' -> ID: %s (running: %t, source image: %s)\n", spec.Name, container.ID, container.Running, container.SourceImage)
 		containers[spec.Name] = container
+	}
+
+	// Kubernetes/containerd may retain unpacked snapshots while garbage-collecting
+	// the compressed source layers. A committed manifest still references those
+	// layers, so make them locally available before attempting a registry push.
+	fmt.Println("\n=== Step 1b: Ensure source image content is available ===")
+	for _, spec := range containerSpecs {
+		if err := pullImageContent(containers[spec.Name].SourceImage); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: Failed to make source image content available for container '%s': %v Ensure the snapshot registry secret can read the source image registry, then retry the pause operation.\n", spec.Name, err)
+			os.Exit(1)
+		}
 	}
 
 	// Step 2: Flush each running container's filesystem from inside its runtime.
@@ -519,6 +537,53 @@ func commitContainer(containerID, targetImage string) error {
 	return nil
 }
 
+// getContainerImage returns the source image reference recorded on a container.
+func getContainerImage(containerID string) (string, error) {
+	const imagePrefix = "OPENSANDBOX_SOURCE_IMAGE="
+	args := append(nerdctlBaseArgs(), "inspect", "--format", imagePrefix+"{{.Image}}", containerID)
+	output, err := commandCombinedOutput("nerdctl", args...)
+	if err != nil {
+		return "", fmt.Errorf("nerdctl inspect failed for container %s: %v, output: %s", containerID, err, strings.TrimSpace(string(output)))
+	}
+
+	// nerdctl can emit harmless network-namespace warnings to stderr while
+	// still returning the requested image on stdout. Prefix the formatted value
+	// so it can be identified regardless of stdout/stderr interleaving.
+	for _, line := range strings.Split(string(output), "\n") {
+		if value, found := strings.CutPrefix(strings.TrimSpace(line), imagePrefix); found && value != "" {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("nerdctl inspect returned an empty source image for container %s", containerID)
+}
+
+// pullImageContent restores any compressed source layers that containerd may
+// have garbage-collected after unpacking the image. nerdctl commit reuses those
+// layers in the snapshot manifest, and nerdctl push requires their local blobs.
+func pullImageContent(sourceImage string) error {
+	fmt.Printf("Ensuring source image content is available: %s...\n", sourceImage)
+
+	imageParts := strings.Split(sourceImage, "/")
+	if len(imageParts) == 0 || imageParts[0] == "" {
+		return fmt.Errorf("invalid source image: %s", sourceImage)
+	}
+	registryHost := imageParts[0]
+	isInsecure := shouldUseInsecureRegistry(registryHost)
+	loginToRegistryIfConfigured(registryHost, isInsecure)
+
+	pullOpts := append(nerdctlBaseArgs(), "pull", "--all-platforms")
+	if isInsecure {
+		pullOpts = append(pullOpts, "--insecure-registry")
+	}
+	pullOpts = append(pullOpts, sourceImage)
+
+	output, err := commandCombinedOutput("nerdctl", pullOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to pull source image %s: %v, output: %s", sourceImage, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 // pushImage uses nerdctl to push the image to the registry.
 // nerdctl push does not support --username/--password flags, so we use
 // nerdctl login first, then nerdctl push with --insecure-registry.
@@ -534,32 +599,37 @@ func pushImage(targetImage string) error {
 
 	isInsecure := shouldUseInsecureRegistry(registryHost)
 
-	// Try to login using credentials from mounted secret
-	credDir := "/var/run/opensandbox/registry"
-	configPath := filepath.Join(credDir, "config.json")
-	if _, err := os.Stat(configPath); err == nil {
-		fmt.Printf("Found registry credentials at %s\n", configPath)
-		if err := nerdctlLogin(configPath, registryHost, isInsecure); err != nil {
-			fmt.Fprintf(os.Stderr, "WARNING: nerdctl login failed: %v (will attempt push anyway)\n", err)
-		}
-	} else {
-		fmt.Println("No registry credentials found, assuming insecure or pre-authenticated registry")
-	}
+	loginToRegistryIfConfigured(registryHost, isInsecure)
 
 	// Build push options
-	pushOpts := append(nerdctlBaseArgs(), "push")
+	// A committed sandbox image is already a complete local single-platform
+	// manifest. Without --all-platforms nerdctl first builds a reduced-platform
+	// temporary image, whose content check tries to pull this brand-new tag from
+	// the remote registry and fails on the expected 404.
+	pushOpts := append(nerdctlBaseArgs(), "push", "--all-platforms")
 	if isInsecure {
 		pushOpts = append(pushOpts, "--insecure-registry")
 	}
 	pushOpts = append(pushOpts, targetImage)
 
-	cmd := exec.Command("nerdctl", pushOpts...)
-	output, err := cmd.CombinedOutput()
+	output, err := commandCombinedOutput("nerdctl", pushOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to push image %s: %v, output: %s", targetImage, err, string(output))
 	}
 
 	return nil
+}
+
+func loginToRegistryIfConfigured(registryHost string, isInsecure bool) {
+	configPath := filepath.Join("/var/run/opensandbox/registry", "config.json")
+	if _, err := os.Stat(configPath); err == nil {
+		fmt.Printf("Found registry credentials at %s\n", configPath)
+		if err := nerdctlLogin(configPath, registryHost, isInsecure); err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Registry login failed: %v Verify the snapshot registry secret grants access to %s; the operation will continue in case the registry is already authenticated.\n", err, registryHost)
+		}
+		return
+	}
+	fmt.Println("No registry credentials found, assuming insecure or pre-authenticated registry")
 }
 
 // nerdctlLogin extracts credentials from a Docker config.json and runs nerdctl login.
