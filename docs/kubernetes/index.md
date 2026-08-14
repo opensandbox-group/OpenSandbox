@@ -494,6 +494,8 @@ For a BatchSandbox with multiple replicas, `Succeed` also does not mean that eve
 | `Resuming` | The controller is restoring runtime resources after a pause. |
 | `Failed` | The controller detected a sandbox runtime failure. Inspect conditions and Pod events for details. |
 
+When a transient Pod failure clears, the controller returns `Failed` to `Succeed` only if the Pods recorded at failure time are still the same Kubernetes objects (matching UIDs) and are Running and Ready. A replacement Pod does not count as recovery, even if it reuses the same name. Lifecycle failures such as a failed resume remain terminal.
+
 The controller records active conditions with `status: "True"`:
 
 | Condition | Meaning when `True` |

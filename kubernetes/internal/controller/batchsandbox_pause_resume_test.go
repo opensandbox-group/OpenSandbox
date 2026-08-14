@@ -1807,6 +1807,176 @@ func TestBuildRuntimeView_AggregatesPodFailuresInSteadyState(t *testing.T) {
 	assert.Equal(t, "3/4 observed pods failed; primary reason=ErrImagePull; sample pod=err-image-0", podFailed.Message)
 }
 
+func TestBuildRuntimeView_RecoversOnlySameFailedPod(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-bs",
+			Namespace: "default",
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase: sandboxv1alpha1.BatchSandboxPhasePending,
+		},
+	}
+	failedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-bs-0",
+			Namespace: "default",
+			UID:       types.UID("original-pod-uid"),
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main"}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "main",
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "CreateContainerConfigError",
+						Message: "temporary container creation failure",
+					},
+				},
+			}},
+		},
+	}
+
+	failedView := buildRuntimeView(bs, []*corev1.Pod{failedPod})
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, failedView.status.Phase)
+	require.Equal(t, []types.UID{failedPod.UID}, failedView.status.FailedPodUIDs)
+
+	tests := []struct {
+		name                 string
+		podUID               types.UID
+		mainContainerRunning bool
+		wantPhase            sandboxv1alpha1.BatchSandboxPhase
+	}{
+		{
+			name:                 "same Pod recovers",
+			podUID:               failedPod.UID,
+			mainContainerRunning: true,
+			wantPhase:            sandboxv1alpha1.BatchSandboxPhaseSucceed,
+		},
+		{
+			name:                 "same Pod is Ready but main container is not running",
+			podUID:               failedPod.UID,
+			mainContainerRunning: false,
+			wantPhase:            sandboxv1alpha1.BatchSandboxPhaseFailed,
+		},
+		{
+			name:                 "replacement Pod reuses name",
+			podUID:               types.UID("replacement-pod-uid"),
+			mainContainerRunning: true,
+			wantPhase:            sandboxv1alpha1.BatchSandboxPhaseFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			afterFailure := bs.DeepCopy()
+			afterFailure.Status = *failedView.status.DeepCopy()
+			recoveredPod := failedPod.DeepCopy()
+			recoveredPod.UID = tt.podUID
+			mainContainerState := corev1.ContainerState{}
+			if tt.mainContainerRunning {
+				mainContainerState.Running = &corev1.ContainerStateRunning{}
+			}
+			recoveredPod.Status = corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				}},
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  "main",
+					State: mainContainerState,
+				}},
+			}
+
+			view := buildRuntimeView(afterFailure, []*corev1.Pod{recoveredPod})
+			assert.Equal(t, tt.wantPhase, view.status.Phase)
+			if tt.wantPhase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
+				assert.Empty(t, view.status.FailedPodUIDs)
+			} else {
+				assert.Equal(t, []types.UID{failedPod.UID}, view.status.FailedPodUIDs)
+			}
+		})
+	}
+
+	t.Run("failure without recorded Pod identity remains terminal", func(t *testing.T) {
+		afterFailure := bs.DeepCopy()
+		afterFailure.Status = *failedView.status.DeepCopy()
+		afterFailure.Status.FailedPodUIDs = nil
+		recoveredPod := failedPod.DeepCopy()
+		recoveredPod.Status = corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "main",
+				State: corev1.ContainerState{
+					Running: &corev1.ContainerStateRunning{},
+				},
+			}},
+		}
+
+		view := buildRuntimeView(afterFailure, []*corev1.Pod{recoveredPod})
+		assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+	})
+}
+
+func TestBuildRuntimeView_DoesNotRecoverResumeFailure(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default"},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase: sandboxv1alpha1.BatchSandboxPhaseResuming,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-bs-0",
+			Namespace: "default",
+			UID:       types.UID("original-pod-uid"),
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main"}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "main",
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
+				},
+			}},
+		},
+	}
+
+	failedView := buildRuntimeView(bs, []*corev1.Pod{pod})
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, failedView.status.Phase)
+	require.Empty(t, failedView.status.FailedPodUIDs)
+
+	afterFailure := bs.DeepCopy()
+	afterFailure.Status = *failedView.status.DeepCopy()
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		Conditions: []corev1.PodCondition{{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionTrue,
+		}},
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "main",
+			State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{},
+			},
+		}},
+	}
+
+	view := buildRuntimeView(afterFailure, []*corev1.Pod{pod})
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+}
+
 func TestBuildRuntimeView_AggregatesResumeFailures(t *testing.T) {
 	bs := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{
