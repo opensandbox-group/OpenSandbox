@@ -31,7 +31,9 @@ COPY cmd/image-committer/ cmd/image-committer/
 RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/image-committer ./cmd/image-committer/
 
 # Runtime stage
-FROM alpine:3.19
+# Alpine 3.21 provides nerdctl 2.x. nerdctl 2.x restores image content that
+# containerd may discard after CRI unpack before committing a new image.
+FROM alpine:3.21
 
 # Use Aliyun mirror for faster downloads in China
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
@@ -43,6 +45,9 @@ RUN apk add --no-cache \
     curl \
     jq \
     nerdctl
+
+# Missing-content recovery before commit was added in nerdctl 2.0.
+RUN nerdctl --version | grep -Eq 'nerdctl version ([2-9]|[1-9][0-9]+)\.'
 
 # Create directory for containerd socket mount
 RUN mkdir -p /var/run/containerd

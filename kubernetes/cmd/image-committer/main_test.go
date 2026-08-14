@@ -173,6 +173,25 @@ func contains(values []string, target string) bool {
 	return false
 }
 
+func TestNerdctlPushArgsSelectsRuntimePlatform(t *testing.T) {
+	t.Setenv("CONTAINERD_SOCKET", "/test/containerd.sock")
+	t.Setenv("CONTAINERD_NAMESPACE", "test-ns")
+
+	args := nerdctlPushArgs("registry.example.com/test/image:snap", true)
+
+	want := []string{
+		"--address", "/test/containerd.sock",
+		"--namespace", "test-ns",
+		"push",
+		"--platform", runtimePlatform(),
+		"--insecure-registry",
+		"registry.example.com/test/image:snap",
+	}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected nerdctl push args: got %v, want %v", args, want)
+	}
+}
+
 func TestSyncRunningContainerFilesystemsSyncsEveryRunningContainerAndSkipsStopped(t *testing.T) {
 	original := commandCombinedOutput
 	t.Cleanup(func() { commandCombinedOutput = original })
