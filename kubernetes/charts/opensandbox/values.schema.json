@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "global": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": true
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Global values passed to sub-charts (e.g. imagePullSecrets)"
+    },
+    "opensandbox-controller": {
+      "type": "object",
+      "properties": {
+        "controller": {
+          "type": "object",
+          "properties": {
+            "logLevel": {
+              "type": "string"
+            },
+            "replicaCount": {
+              "type": "integer"
+            },
+            "snapshot": {
+              "type": "object",
+              "properties": {
+                "commitJobTimeout": {
+                  "type": "string"
+                },
+                "imageCommitterImage": {
+                  "type": "string"
+                },
+                "registry": {
+                  "type": "string"
+                },
+                "registryInsecure": {
+                  "type": "boolean"
+                },
+                "resumePullSecret": {
+                  "type": "string"
+                },
+                "snapshotPushSecret": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "opensandbox-server": {
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "object",
+          "properties": {
+            "replicaCount": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    }
+  }
+}
