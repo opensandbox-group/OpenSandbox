@@ -233,7 +233,6 @@ func testValidatePatternWith(t *testing.T, idx int, tt MatchTest) {
 
 func TestPathMatch(t *testing.T) {
 	for idx, tt := range matchTests {
-		// Even though we aren't actually matching paths on disk, we are using
 		if tt.testOnDisk {
 			testPathMatchWith(t, idx, tt)
 		}
@@ -263,13 +262,11 @@ func testPathMatchWith(t *testing.T, idx int, tt MatchTest) {
 }
 
 func TestPathMatchFake(t *testing.T) {
-	// This test fakes that our path separator is `\\` so we can test what it
 	if onWindows {
 		return
 	}
 
 	for idx, tt := range matchTests {
-		// Even though we aren't actually matching paths on disk, we are using
 		if tt.testOnDisk && !strings.Contains(tt.pattern, "\\") {
 			testPathMatchFakeWith(t, idx, tt)
 		}

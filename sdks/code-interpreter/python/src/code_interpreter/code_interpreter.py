@@ -45,19 +45,21 @@ class CodeInterpreter:
 
     Key Features:
 
-    - Multi-language Code Execution: Support for Python, JavaScript, Bash, Java, Kotlin
+    - Multi-language Code Execution: Support for Python, JavaScript, TypeScript, Bash, Java, Go
     - Session Management: Persistent execution contexts with variable state
     - Sandbox Integration: Full access to underlying sandbox file system and command execution
     - Streaming Execution: Real-time code execution with output streaming
-    - Variable Inspection: Access to execution variables and state
+    - Variable Persistence: Variables and imports persist across executions in a context
 
     Usage Example:
 
     ```python
-    # First create a sandbox instance
+    # First create a sandbox instance.
+    # Use the opensandbox/code-interpreter image: it ships the Jupyter kernels
+    # the interpreter relies on (a plain python:3.11 image cannot run code).
 
     sandbox = await Sandbox.create(
-        "python:3.11",
+        "opensandbox/code-interpreter:v1.1.0",
         resource={"cpu": "1", "memory": "2Gi"}
     )
 
@@ -68,7 +70,7 @@ class CodeInterpreter:
     from code_interpreter.models.code import SupportedLanguage
     context = await interpreter.codes.create_context(SupportedLanguage.PYTHON)
     result = await interpreter.codes.run("print('Hello World')", context=context)
-    print(result.logs.stdout)  # Output: Hello World
+    print(result.logs.stdout[0].text)  # Output: Hello World
 
     # Access underlying sandbox for file operations
     await interpreter.sandbox.files.write_files([

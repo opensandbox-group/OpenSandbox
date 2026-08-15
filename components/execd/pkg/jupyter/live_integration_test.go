@@ -26,17 +26,14 @@ import (
 
 // TestLiveServerIntegration tests SDK integration with a real Jupyter server
 func TestLiveServerIntegration(t *testing.T) {
-	// Get configuration from environment variables, use default values if not set
 	jupyterURL := getEnv("JUPYTER_URL", "")
 	jupyterToken := getEnv("JUPYTER_TOKEN", "")
 	if jupyterURL == "" || jupyterToken == "" {
 		t.Skip("JUPYTER_URL and JUPYTER_TOKEN environment variables must be set to run this test")
 	}
 
-	// Output test information
 	t.Logf("Connecting to Jupyter server: %s", jupyterURL)
 
-	// Create HTTP client with authentication capability
 	httpClient := &http.Client{
 		Transport: &AuthTransport{
 			Token: jupyterToken,
@@ -44,12 +41,10 @@ func TestLiveServerIntegration(t *testing.T) {
 		},
 	}
 
-	// Create client and set authentication
 	client := NewClient(jupyterURL,
 		WithToken(jupyterToken), // Keep Token setting to support ValidateAuth and WebSocket connections
 		WithHTTPClient(httpClient))
 
-	// Test 1: Validate authentication
 	t.Run("Validate Authentication", func(t *testing.T) {
 		status, err := client.ValidateAuth()
 		if err != nil {
@@ -61,7 +56,6 @@ func TestLiveServerIntegration(t *testing.T) {
 		t.Logf("Authentication validation successful! Status: %s", status)
 	})
 
-	// Test 2: Get kernel specs
 	var kernelName string
 	t.Run("Get Kernel Specs", func(t *testing.T) {
 		specs, err := client.GetKernelSpecs()
@@ -88,7 +82,6 @@ func TestLiveServerIntegration(t *testing.T) {
 		t.Logf("Available kernels: %v", specs.Kernelspecs)
 	})
 
-	// Test 3: List sessions
 	t.Run("List Sessions", func(t *testing.T) {
 		sessions, err := client.ListSessions()
 		if err != nil {
@@ -100,10 +93,8 @@ func TestLiveServerIntegration(t *testing.T) {
 		}
 	})
 
-	// Test 4: Create new session
 	var sessionID string
 	t.Run("Create Session", func(t *testing.T) {
-		// Generate unique name for test session
 		sessionName := fmt.Sprintf("test-session-%d", time.Now().Unix())
 		sessionPath := "/test-notebook.ipynb"
 
@@ -124,7 +115,6 @@ func TestLiveServerIntegration(t *testing.T) {
 		t.Logf("Create session successful! Session ID: %s, Kernel ID: %s", session.ID, session.Kernel.ID)
 	})
 
-	// Test 5: Get created session
 	var kernelID string
 	t.Run("Get Session", func(t *testing.T) {
 		if sessionID == "" {
@@ -145,7 +135,6 @@ func TestLiveServerIntegration(t *testing.T) {
 		t.Logf("Get session successful! Session name: %s, Kernel name: %s", session.Name, session.Kernel.Name)
 	})
 
-	// Test 6: List all kernels
 	t.Run("List Kernels", func(t *testing.T) {
 		kernels, err := client.ListKernels()
 		if err != nil {
@@ -156,7 +145,6 @@ func TestLiveServerIntegration(t *testing.T) {
 			t.Logf("Kernel %d: ID=%s, Name=%s, State=%s", i+1, k.ID, k.Name, k.ExecutionState)
 		}
 
-		// Verify that the created kernel is in the list
 		if kernelID != "" {
 			found := false
 			for _, k := range kernels {
@@ -171,20 +159,17 @@ func TestLiveServerIntegration(t *testing.T) {
 		}
 	})
 
-	// Test 7: Connect to kernel and execute code
 	t.Run("Execute Code", func(t *testing.T) {
 		if kernelID == "" {
 			t.Skip("No kernel ID, skipping test")
 		}
 
-		// Connect to kernel
 		err := client.ConnectToKernel(kernelID)
 		if err != nil {
 			t.Fatalf("Failed to connect to kernel: %v", err)
 		}
 		defer client.DisconnectFromKernel()
 
-		// Execute simple code
 		code := "print('Hello, Jupyter!')\nresult = 2 + 2\nresult"
 		t.Logf("Executing code:\n%s", code)
 
@@ -194,20 +179,17 @@ func TestLiveServerIntegration(t *testing.T) {
 		}
 	})
 
-	// Test 7: Connect to kernel and execute code
 	t.Run("Execute Code", func(t *testing.T) {
 		if kernelID == "" {
 			t.Skip("No kernel ID, skipping test")
 		}
 
-		// Connect to kernel
 		err := client.ConnectToKernel(kernelID)
 		if err != nil {
 			t.Fatalf("Failed to connect to kernel: %v", err)
 		}
 		defer client.DisconnectFromKernel()
 
-		// Execute simple code
 		code := "print(f'2 + 2 = {result}')\nresult"
 		t.Logf("Executing code:\n%s", code)
 
@@ -217,20 +199,17 @@ func TestLiveServerIntegration(t *testing.T) {
 		}
 	})
 
-	// Test 8: Execute complex code with different types of output
 	t.Run("Execute Complex Code", func(t *testing.T) {
 		if kernelID == "" {
 			t.Skip("No kernel ID, skipping test")
 		}
 
-		// Connect to kernel
 		err := client.ConnectToKernel(kernelID)
 		if err != nil {
 			t.Fatalf("Failed to connect to kernel: %v", err)
 		}
 		defer client.DisconnectFromKernel()
 
-		// Execute code that generates multiple output types
 		code := `
 # Display table data
 import pandas as pd
@@ -263,22 +242,18 @@ except Exception as e:
 		}
 	})
 
-	// Test 9: Restart kernel
 	t.Run("Restart Kernel", func(t *testing.T) {
 		if kernelID == "" {
 			t.Skip("No kernel ID, skipping test")
 		}
 
-		// Restart kernel
 		restarted, err := client.RestartKernel(kernelID)
 		if err != nil {
 			t.Fatalf("Failed to restart kernel: %v", err)
 		}
 
-		// Wait for kernel restart to complete
 		time.Sleep(2 * time.Second)
 
-		// Verify kernel state
 		kernel, err := client.GetKernel(kernelID)
 		if err != nil {
 			t.Fatalf("Failed to get kernel: %v", err)
@@ -287,19 +262,16 @@ except Exception as e:
 		t.Logf("Restart kernel successful! Restart status: %v, Kernel state: %s", restarted, kernel.ExecutionState)
 	})
 
-	// Test 10: Close session
 	t.Run("Close Session", func(t *testing.T) {
 		if sessionID == "" {
 			t.Skip("No session ID, skipping test")
 		}
 
-		// Delete session
 		err := client.DeleteSession(sessionID)
 		if err != nil {
 			t.Fatalf("Failed to delete session: %v", err)
 		}
 
-		// Verify session is deleted
 		sessions, err := client.ListSessions()
 		if err != nil {
 			t.Fatalf("Failed to list sessions: %v", err)

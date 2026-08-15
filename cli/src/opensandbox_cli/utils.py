@@ -148,7 +148,7 @@ def select_output_format(
     allowed: tuple[str, ...],
     fallback: str,
 ) -> str:
-    """Resolve a command-scoped output format from explicit input, config, and fallback."""
+    """Resolve a command-scoped output format from explicit input and fallback."""
     if requested:
         if requested not in allowed:
             allowed_list = ", ".join(allowed)

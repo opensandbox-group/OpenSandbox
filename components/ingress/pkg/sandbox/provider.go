@@ -27,7 +27,9 @@ const (
 
 	sandboxNameIndex string = "sandbox-name"
 
-	// AnnotationAccessToken marks a sandbox that requires signed ingress routes when non-empty.
+	// AnnotationAccessToken marks a sandbox that requires secure access when
+	// non-empty: requests must present the matching OpenSandbox-Secure-Access
+	// header token or a valid signed ingress route.
 	AnnotationAccessToken = "opensandbox.io/secure-access-token"
 )
 

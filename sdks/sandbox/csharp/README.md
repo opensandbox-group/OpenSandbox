@@ -401,7 +401,6 @@ await sandbox.CreateCredentialVaultAsync(
             Match = new CredentialMatch
             {
                 Schemes = new[] { "https" },
-                Ports = new[] { 443 },
                 Hosts = new[] { "api.example.com" },
                 Paths = new[] { "/v1/*" }
             },

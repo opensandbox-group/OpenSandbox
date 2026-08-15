@@ -44,7 +44,7 @@ const (
 	wsReadDeadline  = 60 * time.Second
 	wsWriteDeadline = 10 * time.Second
 	// wsTakeoverTimeout bounds how long a ?takeover=1 request waits for the current
-	// holder to release after being evicted, before giving up with 409.
+	// holder to release after being evicted, before the takeover fails.
 	wsTakeoverTimeout = 5 * time.Second
 	// wsTakeoverCloseTimeout bounds the best-effort close-frame write sent to an
 	// evicted holder, so a full/unresponsive client socket cannot stall the takeover.

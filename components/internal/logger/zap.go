@@ -60,7 +60,8 @@ func (r *RotateConfig) applyDefaults() {
 	}
 }
 
-// Config is the minimal configuration to align execd/ingress defaults.
+// Config is the minimal configuration shared by the runtime components
+// (execd, egress, ingress, nodeagent).
 // - JSON encoding, ISO8601 time
 // - Caller/stacktrace disabled
 // - Stdout as default output

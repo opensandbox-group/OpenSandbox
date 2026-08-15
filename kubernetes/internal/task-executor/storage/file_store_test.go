@@ -63,7 +63,6 @@ func TestFileStore_CRUD(t *testing.T) {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Verify file exists
 	taskDir := filepath.Join(tmpDir, task.Name)
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		t.Error("Task directory was not created")
@@ -111,7 +110,6 @@ func TestFileStore_CRUD(t *testing.T) {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
-	// Verify deletion
 	if _, err := store.Get(ctx, task.Name); err == nil {
 		t.Error("Get should fail after delete")
 	}
@@ -124,7 +122,6 @@ func TestFileStore_CRUD(t *testing.T) {
 		t.Errorf("List returned %d tasks after delete, want 0", len(tasks))
 	}
 
-	// Verify directory gone
 	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
 		t.Error("Task directory still exists after delete")
 	}

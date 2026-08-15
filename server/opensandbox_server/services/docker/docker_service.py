@@ -158,7 +158,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._metadata_store = DockerMetadataStore()
         self._api_timeout = self._resolve_api_timeout()
         try:
-            # Initialize Docker service from environment variables
             client_kwargs = {}
             try:
                 signature = inspect.signature(docker.from_env)

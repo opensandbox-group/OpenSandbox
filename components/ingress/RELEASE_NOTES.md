@@ -3,7 +3,7 @@
 ## What's New
 
 ### ✨ Features
-- **[EXPERIMENTAL]** publishing renew-intent to Redis for [OSEP-0009](https://github.com/alibaba/OpenSandbox/blob/main/oseps/0009-auto-renew-sandbox-on-ingress-access.md) (#480)
+- **[EXPERIMENTAL]** publishing renew-intent to Redis for [OSEP-0009](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0009-auto-renew-sandbox-on-ingress-access.md) (#480)
 
 ### 🐛 Bug Fixes
 - use LoadOrStore for renew-intent MinInterval throttle (#529)

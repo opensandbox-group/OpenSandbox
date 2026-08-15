@@ -32,16 +32,16 @@ class Codes(Protocol):
     Code execution service for multi-language code interpretation.
 
     This service provides advanced code execution capabilities with context management,
-    session persistence, and multi-language support. It extends basic command execution
-    with interpreter-specific features like variable inspection and execution history.
+    session persistence, and multi-language support.
 
     Supported Languages:
 
     - Python: Full Python 3.x support with package management
     - JavaScript/Node.js: ES6+ with npm package support
+    - TypeScript: With Node.js runtime support
     - Bash: Shell scripting with full system access
     - Java: Compilation and execution with classpath management
-    - Kotlin: Script and compiled Kotlin execution
+    - Go: Script and compiled Go execution
 
     Key Features:
 

@@ -34,22 +34,17 @@ func (stubNoSecureProvider) GetEndpoint(string) (*sandbox.EndpointInfo, error) {
 
 func (stubNoSecureProvider) Start(context.Context) error { return nil }
 
-// Test_WatchPods is removed as we now use BatchSandbox Provider instead of direct Pod watching
-
 func TestIsWebSocketRequest(t *testing.T) {
 	proxy := &Proxy{}
 
-	// Valid websocket request
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
 	assert.True(t, proxy.isWebSocketRequest(req))
 
-	// Missing upgrade headers
 	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
 	assert.False(t, proxy.isWebSocketRequest(req))
 
-	// Wrong method
 	req = httptest.NewRequest(http.MethodPost, "/ws", nil)
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")

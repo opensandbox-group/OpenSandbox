@@ -322,7 +322,7 @@ Console.WriteLine($"CPU: {metrics.CpuUsedPercentage}%, Memory: {metrics.MemoryUs
 
 - **Lifecycle**: `CodeInterpreter` wraps an existing `Sandbox` and reuses its connection and services.
 - **Default context behavior**: `RunAsync(..., new RunCodeOptions { Language = ... })` uses the language default context.
-- **Cleanup**: `DisposeAsync` only cleans local resources. Call `KillAsync()` to terminate the remote sandbox instance.
+- **Cleanup**: `CodeInterpreter` has no resources of its own; dispose the wrapped `Sandbox`, and call `KillAsync()` on it to terminate the remote sandbox instance.
 
 ## License
 

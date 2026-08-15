@@ -52,7 +52,6 @@ from opensandbox_server.services.constants import (
 from opensandbox_server.services.factory import create_sandbox_service
 from opensandbox_server.services.snapshot_service import create_snapshot_service
 
-# Initialize router
 router = APIRouter(tags=["Sandboxes"])
 
 # Initialize service based on configuration from config.toml (defaults to docker)
@@ -163,7 +162,6 @@ def list_sandboxes(
     logger = logging.getLogger(__name__)
     logger.info("ListSandboxes: %s", request.filter)
 
-    # Delegate to the service layer for filtering and pagination
     return sandbox_service.list_sandboxes(request)
 
 
@@ -199,7 +197,6 @@ def get_sandbox(
     Raises:
         HTTPException: If sandbox not found or access denied
     """
-    # Delegate to the service layer for sandbox lookup
     return sandbox_service.get_sandbox(sandbox_id)
 
 
@@ -261,7 +258,6 @@ def delete_sandbox(
     Raises:
         HTTPException: If sandbox not found or deletion fails
     """
-    # Delegate to the service layer for deletion
     sandbox_service.delete_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -302,7 +298,6 @@ def pause_sandbox(
     Raises:
         HTTPException: If sandbox not found or cannot be paused
     """
-    # Delegate to the service layer for pause orchestration
     sandbox_service.pause_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
@@ -339,7 +334,6 @@ def resume_sandbox(
     Raises:
         HTTPException: If sandbox not found or cannot be resumed
     """
-    # Delegate to the service layer for resume orchestration
     sandbox_service.resume_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
@@ -380,7 +374,6 @@ def renew_sandbox_expiration(
     Raises:
         HTTPException: If sandbox not found or renewal fails
     """
-    # Delegate to the service layer for expiration updates
     return sandbox_service.renew_expiration(sandbox_id, request)
 
 
@@ -564,7 +557,6 @@ def get_sandbox_endpoint(
             },
         )
 
-    # Delegate to the service layer for endpoint resolution
     endpoint = sandbox_service.get_endpoint(sandbox_id, port, expires=expires)
 
     if use_server_proxy:

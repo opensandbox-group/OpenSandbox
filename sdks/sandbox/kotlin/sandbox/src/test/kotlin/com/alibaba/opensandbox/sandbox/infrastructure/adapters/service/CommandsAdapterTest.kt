@@ -48,7 +48,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class CommandsAdapterTest {
-    // CommandsAdapter unit tests
     private lateinit var mockWebServer: MockWebServer
     private lateinit var commandsAdapter: CommandsAdapter
     private lateinit var httpClientProvider: HttpClientProvider

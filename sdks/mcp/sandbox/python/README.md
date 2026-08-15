@@ -101,7 +101,7 @@ claude mcp add opensandbox-sandbox --transport http http://localhost:8000/mcp
 Notes:
 
 - All tools operate on a `sandbox_id` returned by `sandbox_create` or `sandbox_connect`.
-- `file_read`/`file_write` are text-only; use `encoding` and `range_header` for large files.
+- `file_read`/`file_write` are text-only; `file_read` supports `encoding` and `range_header` for large files.
 
 ### Sandbox
 

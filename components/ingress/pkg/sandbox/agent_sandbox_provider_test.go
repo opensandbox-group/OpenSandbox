@@ -141,7 +141,6 @@ func TestAgentSandboxProvider_GetEndpoint_ServiceFQDN(t *testing.T) {
 	err := provider.Start(ctx)
 	assert.NoError(t, err)
 
-	// Seed store
 	err = provider.informer.GetStore().Add(obj)
 	assert.NoError(t, err)
 
@@ -201,7 +200,6 @@ func TestAgentSandboxProvider_GetEndpoint_NoServiceFQDN(t *testing.T) {
 	err := provider.Start(ctx)
 	assert.NoError(t, err)
 
-	// Seed store
 	err = provider.informer.GetStore().Add(obj)
 	assert.NoError(t, err)
 
@@ -245,7 +243,6 @@ func TestAgentSandboxProvider_GetEndpoint_NotReadyCondition(t *testing.T) {
 	err := provider.Start(ctx)
 	assert.NoError(t, err)
 
-	// Seed store
 	err = provider.informer.GetStore().Add(obj)
 	assert.NoError(t, err)
 

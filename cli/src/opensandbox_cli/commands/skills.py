@@ -184,6 +184,7 @@ _SKILL_AREAS = {
     "command-execution": "Execution",
     "file-operations": "Files",
     "network-egress": "Network",
+    "credential-vault": "Credentials",
     "sandbox-troubleshooting": "Troubleshooting",
 }
 
@@ -418,9 +419,6 @@ def _install_guidance_text() -> str:
         "    osb skills install <skill-name> --target <tool> --scope <scope>\n\n"
         "  Install all bundled skills for one tool:\n"
         "    osb skills install --all-builtins --target <tool> --scope <scope>\n\n"
-        "  Discover skills and targets:\n"
-        "    osb skills list\n"
-        "    osb skills show <skill-name>\n\n"
         f"  Available skills: {', '.join(_ALL_SKILL_NAMES)}\n"
         f"  Available targets: {', '.join(_ALL_TARGET_NAMES)}\n"
         f"  Available scopes: {', '.join(_ALL_SCOPE_NAMES)}"

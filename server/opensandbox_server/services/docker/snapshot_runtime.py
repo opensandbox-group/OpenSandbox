@@ -15,9 +15,9 @@
 """
 Docker-backed snapshot runtime.
 
-This runtime performs ``docker commit`` inline and returns the final status to
-the caller so the server can persist terminal snapshot state in the request
-path.
+This runtime performs ``docker commit`` on a background worker thread and
+returns the committed image result to the snapshot service, which persists the
+terminal snapshot state outside the request path.
 """
 
 from __future__ import annotations

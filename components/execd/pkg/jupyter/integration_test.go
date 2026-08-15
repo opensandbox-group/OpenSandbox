@@ -27,26 +27,20 @@ import (
 
 // Test integration flow: authentication -> get kernel specs -> create session -> execute code -> close session
 func TestIntegrationFlow(t *testing.T) {
-	// Create mock HTTP server
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Handle authentication validation request
 		if r.URL.Path == "/api/status" {
-			// Check authentication token
 			auth := r.Header.Get("Authorization")
 			if auth != "token test-token" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 
-			// Return status information
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"status": "ok"}`))
 			return
 		}
 
-		// Handle kernel specs request
 		if r.URL.Path == "/api/kernelspecs" {
-			// Return kernel specs
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{
 				"default": "python3",
@@ -61,10 +55,8 @@ func TestIntegrationFlow(t *testing.T) {
 			return
 		}
 
-		// Handle session-related requests
 		if r.URL.Path == "/api/sessions" {
 			if r.Method == http.MethodGet {
-				// List sessions
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`[{
 					"id": "test-session-id",
@@ -78,7 +70,6 @@ func TestIntegrationFlow(t *testing.T) {
 				}]`))
 				return
 			} else if r.Method == http.MethodPost {
-				// Create session
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusCreated)
 				w.Write([]byte(`{
@@ -95,14 +86,11 @@ func TestIntegrationFlow(t *testing.T) {
 			}
 		}
 
-		// Handle specific session requests
 		if strings.HasPrefix(r.URL.Path, "/api/sessions/test-session-id") {
 			if r.Method == http.MethodDelete {
-				// Delete session
 				w.WriteHeader(http.StatusNoContent)
 				return
 			} else if r.Method == http.MethodPatch {
-				// Modify session
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`{
 					"id": "test-session-id",
@@ -116,7 +104,6 @@ func TestIntegrationFlow(t *testing.T) {
 				}`))
 				return
 			} else if r.Method == http.MethodGet {
-				// Get session
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`{
 					"id": "test-session-id",
@@ -132,10 +119,8 @@ func TestIntegrationFlow(t *testing.T) {
 			}
 		}
 
-		// Handle kernel requests
 		if r.URL.Path == "/api/kernels" {
 			if r.Method == http.MethodGet {
-				// List kernels
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`[{
 					"id": "test-kernel-id",
@@ -146,10 +131,8 @@ func TestIntegrationFlow(t *testing.T) {
 			}
 		}
 
-		// Handle specific kernel requests
 		if strings.HasPrefix(r.URL.Path, "/api/kernels/test-kernel-id") {
 			if r.Method == http.MethodGet {
-				// Get kernel
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`{
 					"id": "test-kernel-id",
@@ -158,7 +141,6 @@ func TestIntegrationFlow(t *testing.T) {
 				}`))
 				return
 			} else if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/restart") {
-				// Restart kernel
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`{
 					"id": "test-kernel-id",
@@ -169,26 +151,22 @@ func TestIntegrationFlow(t *testing.T) {
 			}
 		}
 
-		// If it's a WebSocket connection request, upgrade to WebSocket
 		if strings.HasSuffix(r.URL.Path, "/channels") {
 			// Return 404, as WebSocket connections will be handled by a dedicated WebSocket server
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 
-		// For other requests, return 404
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer httpServer.Close()
 
-	// Create mock WebSocket server for code execution
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/channels") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 
-		// Upgrade HTTP connection to WebSocket
 		upgrader := websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		}
@@ -198,18 +176,14 @@ func TestIntegrationFlow(t *testing.T) {
 		}
 		defer conn.Close()
 
-		// Continuously handle WebSocket messages
 		for {
-			// Read request message
 			var msg execute.Message
 			err := conn.ReadJSON(&msg)
 			if err != nil {
 				break
 			}
 
-			// If it's an execute request, send mock response
 			if msg.Header.MessageType == string(execute.MsgExecuteRequest) {
-				// Send stream output
 				streamContent, _ := json.Marshal(execute.StreamOutput{
 					Name: execute.StreamStdout,
 					Text: "Hello from test WebSocket!\n",
@@ -226,7 +200,6 @@ func TestIntegrationFlow(t *testing.T) {
 				}
 				conn.WriteJSON(streamMsg)
 
-				// Send execution result
 				resultContent, _ := json.Marshal(execute.ExecuteResult{
 					ExecutionCount: 1,
 					Data: map[string]interface{}{
@@ -246,7 +219,6 @@ func TestIntegrationFlow(t *testing.T) {
 				}
 				conn.WriteJSON(executeResultMsg)
 
-				// Send status message
 				statusContent, _ := json.Marshal(execute.StatusUpdate{
 					ExecutionState: execute.StateIdle,
 				})
@@ -266,11 +238,9 @@ func TestIntegrationFlow(t *testing.T) {
 	}))
 	defer wsServer.Close()
 
-	// Create Jupyter client
 	client := NewClient(httpServer.URL)
 	client.SetToken("test-token")
 
-	// Test 1: Validate authentication
 	status, err := client.ValidateAuth()
 	if err != nil {
 		t.Fatalf("Authentication validation failed: %v", err)
@@ -279,7 +249,6 @@ func TestIntegrationFlow(t *testing.T) {
 		t.Errorf("Authentication status incorrect, expected 'ok', got '%s'", status)
 	}
 
-	// Test 2: Get kernel specs
 	specs, err := client.GetKernelSpecs()
 	if err != nil {
 		t.Fatalf("Failed to get kernel specs: %v", err)
@@ -291,7 +260,6 @@ func TestIntegrationFlow(t *testing.T) {
 		t.Errorf("Kernel count incorrect, expected 1, got %d", len(specs.Kernelspecs))
 	}
 
-	// Test 3: Create session
 	session, err := client.CreateSession("Test Session", "/path/to/notebook.ipynb", "python3")
 	if err != nil {
 		t.Fatalf("Failed to create session: %v", err)
@@ -306,7 +274,6 @@ func TestIntegrationFlow(t *testing.T) {
 	// Modify WebSocket URL to point to WebSocket test server
 	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http") + "/api/kernels/test-kernel-id/channels"
 
-	// Test 4: Connect to kernel and execute code
 	executor := execute.NewExecutor(wsURL, nil)
 	err = executor.Connect()
 	if err != nil {
@@ -314,13 +281,11 @@ func TestIntegrationFlow(t *testing.T) {
 	}
 	defer executor.Disconnect()
 
-	// Execute code
 	err = executor.ExecuteCodeWithCallback("print('Hello from integration test!')", execute.CallbackHandler{})
 	if err != nil {
 		t.Fatalf("Failed to execute code: %v", err)
 	}
 
-	// Test 5: Delete session
 	err = client.DeleteSession(session.ID)
 	if err != nil {
 		t.Fatalf("Failed to delete session: %v", err)

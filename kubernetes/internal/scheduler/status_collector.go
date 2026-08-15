@@ -30,12 +30,11 @@ func newTaskStatusCollector(creator taskClientCreator, logger logr.Logger) taskS
 	return &defaultTaskStatusCollector{creator: creator, logger: logger}
 }
 
-// TODO error
+// taskStatusCollector gathers task state from the pods' task-executor endpoints.
 type taskStatusCollector interface {
 	Collect(ctx context.Context, ipList []string) map[string]*api.Task /*ip<->task*/
 }
 
-// TODO maybe cache
 type defaultTaskStatusCollector struct {
 	creator taskClientCreator
 	logger  logr.Logger

@@ -381,8 +381,8 @@ func TestRun_RejectsEmptyCmd(t *testing.T) {
 	}
 }
 
-// Sanity: parse a duration into a string and back to verify the suite runs
-// when triggered by the real go test entry (not the re-exec path).
+// Sanity: verify the suite runs when triggered by the real go test entry
+// (not the re-exec child path).
 func TestSanity(t *testing.T) {
 	_, err := strconv.Atoi("1")
 	if err != nil {

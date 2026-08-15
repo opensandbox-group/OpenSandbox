@@ -158,7 +158,7 @@ type IsolatedRunStatus struct {
 // session ID (e.g. after a client restart). Older execd builds may omit
 // these fields; clients must tolerate them being absent.
 type SessionState struct {
-	Status               string    `json:"status"` // "active" | "dead" | "destroyed"
+	Status               string    `json:"status"` // "active" | "dead"
 	CreatedAt            time.Time `json:"created_at"`
 	LastRunAt            time.Time `json:"last_run_at"`
 	IdleRemainingSeconds *int      `json:"idle_remaining_seconds,omitempty"`

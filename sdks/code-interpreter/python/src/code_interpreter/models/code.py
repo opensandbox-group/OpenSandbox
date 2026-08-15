@@ -51,7 +51,7 @@ class CodeContext(BaseModel):
     1. Creation: Context is created with language and working directory
     2. Execution: Code runs within this context, building up state
     3. Persistence: Variables, imports, and functions persist between executions
-    4. Cleanup: Context can be explicitly destroyed or garbage collected
+    4. Cleanup: Context is destroyed explicitly by the caller when no longer needed
     """
 
     id: str | None = Field(default=None, description="Unique identifier for this execution context")

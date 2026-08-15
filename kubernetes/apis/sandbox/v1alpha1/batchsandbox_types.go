@@ -153,9 +153,9 @@ type BatchSandboxStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// Replicas is the number of actual Pods
 	Replicas int32 `json:"replicas"`
-	//	Allocated is the number of actual scheduled Pod
+	// Allocated is the number of scheduled Pods
 	Allocated int32 `json:"allocated"`
-	//	Ready is the number of actual Ready Pod
+	// Ready is the number of Ready Pods
 	Ready int32 `json:"ready"`
 	// TaskRunning is the number of Running task
 	TaskRunning int32 `json:"taskRunning"`

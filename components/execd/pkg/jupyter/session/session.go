@@ -42,28 +42,23 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 
 // ListSessions retrieves the list of all active sessions
 func (c *Client) ListSessions() ([]*Session, error) {
-	// Build request URL
 	url := fmt.Sprintf("%s/api/sessions", c.baseURL)
 
-	// Send GET request
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Check response status
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned error status code: %d", resp.StatusCode)
 	}
 
-	// Read response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Parse JSON response
 	var sessions []*Session
 	if err := json.Unmarshal(body, &sessions); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
@@ -74,28 +69,23 @@ func (c *Client) ListSessions() ([]*Session, error) {
 
 // GetSession retrieves information about a specific session
 func (c *Client) GetSession(sessionId string) (*Session, error) {
-	// Build request URL
 	url := fmt.Sprintf("%s/api/sessions/%s", c.baseURL, sessionId)
 
-	// Send GET request
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Check response status
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned error status code: %d", resp.StatusCode)
 	}
 
-	// Read response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Parse JSON response
 	var session Session
 	if err := json.Unmarshal(body, &session); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
@@ -106,7 +96,6 @@ func (c *Client) GetSession(sessionId string) (*Session, error) {
 
 // CreateSession creates a new session
 func (c *Client) CreateSession(name, ipynb, kernel string) (*Session, error) {
-	// Build request URL
 	url := fmt.Sprintf("%s/api/sessions", c.baseURL)
 
 	// Build request body
@@ -139,18 +128,15 @@ func (c *Client) CreateSession(name, ipynb, kernel string) (*Session, error) {
 	}
 	defer resp.Body.Close()
 
-	// Check response status
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned error status code: %d", resp.StatusCode)
 	}
 
-	// Read response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Parse JSON response
 	var session Session
 	if err := json.Unmarshal(body, &session); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
@@ -161,7 +147,6 @@ func (c *Client) CreateSession(name, ipynb, kernel string) (*Session, error) {
 
 // DeleteSession deletes the specified session
 func (c *Client) DeleteSession(sessionId string) error {
-	// Build request URL
 	url := fmt.Sprintf("%s/api/sessions/%s", c.baseURL, sessionId)
 
 	// Create DELETE request
@@ -177,7 +162,6 @@ func (c *Client) DeleteSession(sessionId string) error {
 	}
 	defer resp.Body.Close()
 
-	// Check response status
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server returned error status code: %d", resp.StatusCode)
 	}
@@ -185,9 +169,8 @@ func (c *Client) DeleteSession(sessionId string) error {
 	return nil
 }
 
-// CreateSessionWithOptions usingoption to create a new session
+// CreateSessionWithOptions creates a new Jupyter session.
 func (c *Client) CreateSessionWithOptions(options *SessionOptions) (*Session, error) {
-	// Build request URL
 	url := fmt.Sprintf("%s/api/sessions", c.baseURL)
 
 	// Build request body
@@ -236,18 +219,15 @@ func (c *Client) CreateSessionWithOptions(options *SessionOptions) (*Session, er
 	}
 	defer resp.Body.Close()
 
-	// Check response status
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned error status code: %d", resp.StatusCode)
 	}
 
-	// Read response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Parse JSON response
 	var session Session
 	if err := json.Unmarshal(body, &session); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)

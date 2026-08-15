@@ -18,6 +18,9 @@ This page lists the OpenTelemetry metrics currently implemented in execd.
 | `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | System memory used bytes (gopsutil). |
 | `execd.system.network.io.bytes` | Observable Counter | `By` | `direction` (`in`/`out`) | Cumulative network I/O bytes. |
 | `execd.system.network.connections.active` | Observable Gauge | - | `protocol` (`tcp`/`udp`) | Current active network connections. |
+| `execd.isolation.run.duration` | Histogram | `ms` | `result` | Duration of isolated session runs by result. |
+| `execd.isolation.session.count` | Observable Gauge | - | - | Current number of active isolated sessions. |
+| `execd.isolation.upper.usage_bytes` | Observable Gauge | `By` | - | Total bytes used by isolated session upper directories. |
 
 ## Shared Attributes
 
@@ -28,12 +31,11 @@ All execd metrics may include shared attributes:
 
 ## OTEL Endpoint Configuration
 
-Metric export is enabled only when at least one OTLP endpoint is set.
+Metric export is enabled when an OTLP endpoint is set, or (unless explicitly disabled) when a node IP is available via `HOST_IP` or `/etc/hostinfo`, in which case metrics are exported insecurely to `<ip>:4318`.
 
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (preferred)
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (fallback)
-
-If both are unset, execd keeps metrics local (no OTLP export).
+- `HOST_IP` (fallback endpoint host when both OTLP env vars are unset)
 
 ### Minimal Example
 

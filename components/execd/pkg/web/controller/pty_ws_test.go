@@ -188,8 +188,6 @@ func ptyWriteStdin(t *testing.T, conn *websocket.Conn, text string) {
 	require.NoError(t, conn.WriteMessage(websocket.BinaryMessage, frame))
 }
 
-// --- Tests ---
-
 func TestPTYWS_UnknownSessionReturns404(t *testing.T) {
 	srv := newPTYTestServer(t)
 	defer srv.Close()
@@ -466,7 +464,6 @@ func TestPTYWS_ReplayOnReconnect(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&status))
 	require.True(t, status.OutputOffset > 0)
 
-	// Disconnect.
 	_ = conn1.Close()
 	time.Sleep(100 * time.Millisecond)
 

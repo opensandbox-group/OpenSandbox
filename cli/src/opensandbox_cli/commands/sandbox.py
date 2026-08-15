@@ -51,9 +51,6 @@ def sandbox_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-# Alias: osb sb ...
-sandbox_group.name = "sandbox"
-
 _SANDBOX_STATE_CANONICAL = {
     state.lower(): state for state in SandboxState.values()
 }

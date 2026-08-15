@@ -18,8 +18,7 @@ type Task interface {
 	GetName() string
 	GetState() TaskState
 	GetPodName() string
-	// IsResourceReleased task resource is released
-	// TODO func name is strange
+	// IsResourceReleased reports whether the task's pod resources have been released.
 	IsResourceReleased() bool
 	// GetTerminatedMessage returns a human-readable message when the task has
 	// reached a terminal failure state (e.g., a lifecycle hook error with stderr).

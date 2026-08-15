@@ -419,7 +419,7 @@ class LogConfig(BaseModel):
         default=False,
         description=(
             "When true, logs are written to rotating files instead of stdout. "
-            "Uses default paths (/var/log/opensandbox/) unless file_path/access_file_path are set."
+            "Uses default paths (~/logs/opensandbox/) unless file_path/access_file_path are set."
         ),
     )
     file_path: Optional[str] = Field(

@@ -29,7 +29,7 @@ Do not drop them: the instrument records **seconds**, while the SDK default boun
 the spec's millisecond ladder (`0, 5, 10, … 10000`), so every realistic latency would fall
 into the single `le=5` bucket and the quantiles would be meaningless.
 
-The head resolves a cache hit (sub-millisecond) up to one upstream timeout
+The head spans a fast single-upstream exchange (sub-millisecond) up to one upstream timeout
 (`OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT`, 5s by default). The coarse tail exists because
 the recorded duration covers the **whole resolver chain**: forwarding walks the upstreams
 serially, each with the full timeout, so a query can legitimately take
@@ -84,12 +84,11 @@ All egress metrics may include shared attributes:
 
 ## OTEL Endpoint Configuration
 
-Metric export is enabled only when at least one OTLP endpoint is set.
+Metric export is enabled when an OTLP endpoint is set, or when a node IP is available via `HOST_IP` or `/etc/hostinfo` (metrics are then exported insecurely to `<ip>:4318`).
 
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (preferred)
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (fallback)
-
-If both are unset, egress keeps metrics local (no OTLP export).
+- `HOST_IP` (fallback endpoint host when both OTLP env vars are unset)
 
 ### Minimal Example
 

@@ -79,12 +79,13 @@ import java.time.OffsetDateTime
  *     .build()
  *
  * // Use the sandbox
- * sandbox.writeFile("script.py", "print('Hello World')")
- * val result = sandbox.execute("python script.py")
- * println(result.stdout) // Output: Hello World
+ * sandbox.files().writeFile("script.py", "print('Hello World')")
+ * val result = sandbox.commands().run("python script.py")
+ * println(result.logs.stdout.joinToString("") { it.text }) // Output: Hello World
  *
  * // Always clean up resources
- * sandbox.terminate()
+ * sandbox.kill()
+ * sandbox.close()
  * ```
  *
  */

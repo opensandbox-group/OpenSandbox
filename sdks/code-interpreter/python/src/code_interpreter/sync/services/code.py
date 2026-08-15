@@ -42,7 +42,7 @@ class CodesSync(Protocol):
         - JavaScript / TypeScript
         - Bash
         - Java
-        - Kotlin (depending on server image)
+        - Go
 
     Key Features:
         - Execution Contexts: Isolated environments with persistent state

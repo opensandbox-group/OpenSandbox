@@ -33,8 +33,8 @@ const (
 	EventShutdown  = "shutdown"
 )
 
-// Event is one structured record in the supervisor's event log. Only set
-// fields are emitted (omitempty everywhere) so different kinds share one type.
+// Event is one structured record in the supervisor's event log. Optional
+// fields are emitted only when set (omitempty) so different kinds share one type.
 type Event struct {
 	TS           time.Time `json:"ts"`
 	Name         string    `json:"name,omitempty"`
@@ -69,8 +69,7 @@ func newEventWriter(w io.Writer, name string, now func() time.Time) *eventWriter
 }
 
 // emit fills TS/Name and writes the event followed by a newline. Errors are
-// returned to the caller so the supervisor can surface them; callers may
-// choose to ignore (event logging must not abort the main loop).
+// returned so callers may ignore them (event logging must not abort the main loop).
 func (ew *eventWriter) emit(e Event) error {
 	if ew == nil || ew.w == nil {
 		return nil

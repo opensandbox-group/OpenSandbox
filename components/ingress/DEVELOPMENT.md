@@ -1,7 +1,7 @@
 # Development Guide (Quick)
 
 ## Prerequisites
-- Go 1.24+
+- Go 1.25+
 - Docker (optional, for image build)
 - Access to a Kubernetes cluster with BatchSandbox CRD installed.
 
@@ -13,8 +13,8 @@ go mod tidy && go mod vendor
 
 ## Build & Run
 ```bash
-make build          # binary at bin/ingress with ldflags version info
-./bin/ingress \
+make build          # binary at bin/router with ldflags version info
+./bin/router \
   --namespace <target-namespace> \
   --port 28888 \
   --log-level info

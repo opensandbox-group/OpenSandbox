@@ -701,23 +701,19 @@ func Test_collectTaskStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mock task status collector
 			mockCollector := NewMocktaskStatusCollector(ctl)
 			if len(tt.expectedCollectIPs) > 0 {
 				mockCollector.EXPECT().Collect(gomock.Any(), tt.expectedCollectIPs).Return(tt.mockReturnTasks).Times(1)
 			}
 
-			// Create scheduler with mock collector
 			sch := &defaultTaskScheduler{
 				taskNodes:           tt.taskNodes,
 				taskStatusCollector: mockCollector,
 				logger:              testLogger,
 			}
 
-			// Call collectTaskStatus
 			sch.collectTaskStatus(tt.taskNodes)
 
-			// Verify results
 			for i, expectedNode := range tt.expectedTaskNodes {
 				actualNode := tt.taskNodes[i]
 
@@ -749,7 +745,6 @@ func Test_collectTaskStatus(t *testing.T) {
 					t.Errorf("taskNode[%d].tState = %v, want %v", i, actualNode.tState, expectedNode.tState)
 				}
 
-				// Compare time pointers
 				if expectedNode.tStateLastTransTime == nil {
 					if actualNode.tStateLastTransTime != nil {
 						t.Errorf("taskNode[%d].tStateLastTransTime = %v, want nil", i, actualNode.tStateLastTransTime)
@@ -1141,10 +1136,8 @@ func Test_scheduleTaskNodes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mock task clients for each pod IP and task node
 			mockClients := make(map[string]*MocktaskClient)
 
-			// Create task client creator function that returns mock clients
 			taskClientCreator := func(ip string) taskClient {
 				if mockClient, ok := mockClients[ip]; ok {
 					return mockClient
@@ -1154,7 +1147,6 @@ func Test_scheduleTaskNodes(t *testing.T) {
 				return mockClient
 			}
 
-			// Set expectations for Set calls
 			for ip, expectedTask := range tt.expectedSetCalls {
 				mockClient := mockClients[ip]
 				if mockClient == nil {
@@ -1164,7 +1156,6 @@ func Test_scheduleTaskNodes(t *testing.T) {
 				mockClient.EXPECT().Set(gomock.Any(), expectedTask).Return(expectedTask, nil).Times(1)
 			}
 
-			// Create scheduler
 			sch := &defaultTaskScheduler{
 				taskNodes:         tt.taskNodes,
 				freePods:          tt.freePods,
@@ -1173,15 +1164,12 @@ func Test_scheduleTaskNodes(t *testing.T) {
 				logger:            testLogger,
 			}
 
-			// Call scheduleTaskNodes
 			err := sch.scheduleTaskNodes()
 
-			// Verify no error
 			if err != nil {
 				t.Errorf("scheduleTaskNodes() error = %v, want nil", err)
 			}
 
-			// Verify results
 			for i, expectedNode := range tt.expectedTaskNodes {
 				actualNode := tt.taskNodes[i]
 
@@ -1198,7 +1186,6 @@ func Test_scheduleTaskNodes(t *testing.T) {
 				}
 			}
 
-			// Verify remaining free pods
 			if len(sch.freePods) != tt.expectedRemainingFreePods {
 				t.Errorf("scheduleTaskNodes() remaining freePods length = %v, want %v", len(sch.freePods), tt.expectedRemainingFreePods)
 			}

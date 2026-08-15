@@ -300,7 +300,6 @@ func TestConvertInternalToAPITask(t *testing.T) {
 		assert.False(t, apiTask.PodStatus.ContainerStatuses[1].Ready)
 		assert.False(t, utils.IsPodReadyConditionTrue(*apiTask.PodStatus))
 
-		// Conditions check
 		var podReady, containersReady *corev1.PodCondition
 		for i := range apiTask.PodStatus.Conditions {
 			c := &apiTask.PodStatus.Conditions[i]
@@ -340,7 +339,6 @@ func TestConvertInternalToAPITask(t *testing.T) {
 		apiTask := convertInternalToAPITask(task)
 		assert.NotNil(t, apiTask.PodStatus)
 
-		// Conditions check
 		var podReady, containersReady *corev1.PodCondition
 		for i := range apiTask.PodStatus.Conditions {
 			c := &apiTask.PodStatus.Conditions[i]

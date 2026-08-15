@@ -179,7 +179,7 @@ func (c *CodeInterpretingController) RunCode() {
 		c.RespondError(
 			http.StatusInternalServerError,
 			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running codes %v", err),
+			fmt.Sprintf("error running code %v", err),
 		)
 		return
 	}
@@ -504,7 +504,7 @@ func (c *CodeInterpretingController) interrupt() {
 		c.RespondError(
 			http.StatusInternalServerError,
 			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error interruptting code context. %v", err),
+			fmt.Sprintf("error interrupting code context. %v", err),
 		)
 		return
 	}

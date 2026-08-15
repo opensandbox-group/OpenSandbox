@@ -41,19 +41,15 @@ func TestReadMetrics(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, metrics)
 
-	// Validate CPU count
 	assert.Greater(t, metrics.CpuCount, 0.0)
 
-	// Validate CPU utilization
 	assert.GreaterOrEqual(t, metrics.CpuUsedPct, 0.0)
 	assert.Less(t, metrics.CpuUsedPct, 100.1) // CPU usage should be under 100% with small float tolerance
 
-	// Validate memory information
 	assert.Greater(t, metrics.MemTotalMiB, 0.0)
 	assert.GreaterOrEqual(t, metrics.MemUsedMiB, 0.0)
 	assert.LessOrEqual(t, metrics.MemUsedMiB, metrics.MemTotalMiB) // Used memory should not exceed total
 
-	// Validate timestamps
 	currentTime := time.Now().UnixMilli()
 	oneMinuteAgo := currentTime - 60*1000
 	assert.GreaterOrEqual(t, metrics.Timestamp, oneMinuteAgo) // Should be within the last minute

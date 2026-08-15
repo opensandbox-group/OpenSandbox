@@ -45,8 +45,10 @@ const (
 	lifecycleHookOutputMarker    = "\n... output truncated; showing first 8 KiB and last 8 KiB ...\n"
 )
 
-// processExecutor handles both Host and Sidecar modes as they share the same
-// shim-based process execution model.
+// processExecutor handles both Local and Sidecar execution modes as they
+// share the same shim-based process execution model: Local runs the process
+// in the task-executor's own container, Sidecar enters the main sandbox
+// container via nsenter.
 type processExecutor struct {
 	config  *config.Config
 	rootDir string
@@ -132,7 +134,7 @@ func (e *processExecutor) Start(ctx context.Context, task *types.Task) error {
 	} else {
 		cmd = exec.Command("/bin/sh", "-c", shimScript)
 		cmd.Env = os.Environ()
-		klog.InfoS("Starting host task", "name", task.Name, "cmd", safeCmdStr, "exitPath", exitPath)
+		klog.InfoS("Starting local task", "name", task.Name, "cmd", safeCmdStr, "exitPath", exitPath)
 	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -195,7 +197,7 @@ func (e *processExecutor) executeCommand(task *types.Task, cmd *exec.Cmd, pidPat
 		}
 	}
 
-	// Write PID to file immediately (Host-side PID)
+	// Write PID to file immediately (task-executor-side PID)
 	// This fixes the issue where sidecar tasks would write the container-internal PID
 	pid := cmd.Process.Pid
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {

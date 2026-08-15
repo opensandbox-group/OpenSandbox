@@ -55,7 +55,7 @@ Each delay is perturbed by ±`backoff-jitter` (default ±10%) to avoid thunderin
 
 ### Crashloop Circuit Breaker
 
-A sliding-window counter tracks launches. If more than `burst-max` (default 10) launches occur within `burst-window` (default 5 min), the supervisor either:
+A sliding-window counter tracks launches. If `burst-max` (default 10) launches occur within `burst-window` (default 5 min), the supervisor either:
 
 - **Exits non-zero** (`--on-burst-exit=true`, default) — surfacing the crashloop via Kubernetes pod status instead of silently retrying.
 - **Continues retrying** (`--on-burst-exit=false`) — for environments without an outer restart supervisor.

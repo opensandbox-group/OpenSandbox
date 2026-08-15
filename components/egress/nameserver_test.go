@@ -37,7 +37,6 @@ func TestAllowIPsForNft_EmptyResolv(t *testing.T) {
 func TestAllowIPsForNft_ValidNameservers(t *testing.T) {
 	dir := t.TempDir()
 	resolv := filepath.Join(dir, "resolv.conf")
-	// Standard resolv.conf with two nameservers
 	content := "nameserver 192.168.65.7\nnameserver 10.0.0.1\n"
 	require.NoError(t, os.WriteFile(resolv, []byte(content), 0644))
 	ips := AllowIPsForNft(resolv)

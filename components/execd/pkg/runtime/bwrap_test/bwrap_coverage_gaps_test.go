@@ -225,13 +225,12 @@ func TestDeleteThenRecreate(t *testing.T) {
 		err = r.DeleteIsolatedSession(id)
 		require.NoError(t, err, "delete %d", i)
 
-		// Verify it's gone.
 		_, err = r.GetIsolatedSession(id)
 		assert.Error(t, err, "session %d should be gone after delete", i)
 	}
 }
 
-// TestBashAliasAndBuiltins verifies bash builtins and functions work.
+// TestBashBuiltinsAndFunctions verifies bash builtins and functions work.
 func TestBashBuiltinsAndFunctions(t *testing.T) {
 	r := newRunner(t)
 
@@ -433,7 +432,6 @@ func TestWorkspaceIsolationAcrossSessions(t *testing.T) {
 	r := newRunner(t)
 
 	ws := t.TempDir()
-	// Pre-create a file in workspace.
 	require.NoError(t, os.WriteFile(ws+"/shared.txt", []byte("original"), 0644))
 
 	// Session 1: rw mode — write modifies workspace directly.

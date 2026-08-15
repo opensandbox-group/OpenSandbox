@@ -87,9 +87,6 @@ func (c *Client) Connect(wsURL string) error {
 	}
 	c.conn = conn
 
-	// Register default message handlers
-	c.registerDefaultHandlers()
-
 	// Start message receiving goroutine
 	safego.Go(func() { c.receiveMessages() })
 
@@ -420,7 +417,6 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 				return
 			}
 
-			// calls callback functions
 			handler.OnExecuteResult(&execResult)
 		})
 	}
@@ -433,7 +429,6 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 				return
 			}
 
-			// calls callback functions
 			handler.OnStream(&stream)
 		})
 	}
@@ -446,7 +441,6 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 				return
 			}
 
-			// calls callback functions
 			handler.OnDisplayData(&display)
 		})
 	}
@@ -459,7 +453,6 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 				return
 			}
 
-			// calls callback functions
 			handler.OnError(&errOutput)
 		})
 	}
@@ -472,7 +465,6 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 				return
 			}
 
-			// calls callback functions
 			handler.OnStatus(&status)
 		})
 	}
@@ -488,11 +480,6 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 	return nil
 }
 
-// Register default message handlers
-func (c *Client) registerDefaultHandlers() {
-	// default message handlers can be registered here
-}
-
 // Register temporary message handler
 func (c *Client) registerHandler(msgType MessageType, handler func(*Message)) {
 	c.mu.Lock()
@@ -505,7 +492,6 @@ func (c *Client) clearTemporaryHandlers() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.handlers = make(map[MessageType]func(*Message))
-	c.registerDefaultHandlers()
 }
 
 // Receive WebSocket messages

@@ -15,9 +15,9 @@
 """
 Snapshot service orchestration for server-managed snapshot resources.
 
-The preferred path is to persist the snapshot record and, when supported by the
-runtime, complete snapshot creation inline so the repository reaches a terminal
-state within the request lifecycle.
+The preferred path is to persist the snapshot record immediately and create the
+snapshot asynchronously on a worker thread, so the API returns a CREATING state
+without blocking the request on the (potentially slow) runtime commit.
 """
 
 from __future__ import annotations

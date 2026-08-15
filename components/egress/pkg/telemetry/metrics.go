@@ -108,7 +108,7 @@ func registerEgressMetrics() error {
 		// boundaries are the spec's millisecond ladder (0, 5, 10, ... 10000), so every
 		// realistic DNS latency lands in the same bucket and the quantiles are noise.
 		//
-		// The head spans a cache hit (sub-ms) to one upstream timeout
+		// The head spans a fast single-upstream exchange (sub-ms) to one upstream timeout
 		// (DefaultDNSUpstreamTimeoutSec = 5s). The coarse tail covers the retry chain:
 		// forward() walks the resolvers serially, each with the full timeout, and the
 		// recorded duration is the whole chain — so a query can legitimately take

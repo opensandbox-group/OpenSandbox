@@ -21,7 +21,8 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class SupportedLanguageSync:
-    # kept for symmetry; values match SupportedLanguage
+    # Mirror of SupportedLanguage; note that JAVASCRIPT is intentionally
+    # absent because the sync flow only wires the languages listed below.
     PYTHON = "python"
     JAVA = "java"
     GO = "go"

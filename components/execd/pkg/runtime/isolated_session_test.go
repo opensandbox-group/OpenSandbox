@@ -258,7 +258,6 @@ func TestCreateIsolatedSession_HappyPath(t *testing.T) {
 		t.Error("expected non-empty session ID")
 	}
 
-	// Verify session is tracked.
 	s := runner.lookup(id)
 	if s == nil {
 		t.Fatal("session not found after create")
@@ -267,7 +266,6 @@ func TestCreateIsolatedSession_HappyPath(t *testing.T) {
 		t.Errorf("profile = %q, want strict", s.opts.Profile)
 	}
 
-	// Clean up.
 	if err := runner.DeleteIsolatedSession(id); err != nil {
 		t.Errorf("DeleteIsolatedSession: %v", err)
 	}
@@ -527,7 +525,6 @@ func TestDeleteIsolatedSession_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify removed.
 	if s := runner.lookup(id); s != nil {
 		t.Error("session should be removed after delete")
 	}
@@ -551,13 +548,11 @@ func TestRunInIsolatedSession_HappyPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// echo should succeed (exit 0).
 	err = runner.RunInIsolatedSession(ctx, id, "echo hello", nil, nil)
 	if err != nil {
 		t.Errorf("RunInIsolatedSession: %v", err)
 	}
 
-	// Verify lastRunAt was updated.
 	s := runner.lookup(id)
 	if s == nil {
 		t.Fatal("session disappeared")

@@ -28,10 +28,8 @@ import (
 	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
 )
 
-// Create WebSocket test server
 func createTestServer(t *testing.T, handleFunc func(conn *websocket.Conn)) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Validate request path
 		if !strings.HasPrefix(r.URL.Path, "/api/kernels/") {
 			t.Errorf("expected path to start with '/api/kernels/', got '%s'", r.URL.Path)
 		}
@@ -39,7 +37,6 @@ func createTestServer(t *testing.T, handleFunc func(conn *websocket.Conn)) *http
 			t.Errorf("expected path to end with '/channels', got '%s'", r.URL.Path)
 		}
 
-		// Upgrade HTTP connection to WebSocket
 		upgrader := websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		}
@@ -49,25 +46,20 @@ func createTestServer(t *testing.T, handleFunc func(conn *websocket.Conn)) *http
 		}
 		defer conn.Close()
 
-		// Handle WebSocket connection
 		handleFunc(conn)
 	}))
 
 	return server
 }
 
-// Test streaming code execution
 func TestExecuteCodeStream(t *testing.T) {
-	// Spin up mock WebSocket server
 	server := createTestServer(t, func(conn *websocket.Conn) {
-		// Read execution request
 		var executeRequest Message
 		err := conn.ReadJSON(&executeRequest)
 		if err != nil {
 			t.Fatalf("failed to read execution request: %v", err)
 		}
 
-		// Send multiple stream messages
 		for i := 0; i < 3; i++ {
 			streamContent, _ := json.Marshal(StreamOutput{
 				Name: StreamStdout,
@@ -87,7 +79,6 @@ func TestExecuteCodeStream(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		// Send execution result
 		resultContent, _ := json.Marshal(ExecuteResult{
 			ExecutionCount: 1,
 			Data: map[string]interface{}{
@@ -107,7 +98,6 @@ func TestExecuteCodeStream(t *testing.T) {
 		}
 		conn.WriteJSON(executeResultMsg)
 
-		// Send status message
 		statusContent, _ := json.Marshal(StatusUpdate{
 			ExecutionState: StateIdle,
 		})
@@ -128,24 +118,20 @@ func TestExecuteCodeStream(t *testing.T) {
 	// Convert HTTP URL to WebSocket URL
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/test-kernel-id/channels"
 
-	// Create executor client
 	executor := NewExecutor(wsURL, nil)
 
-	// Connect to WebSocket
 	err := executor.Connect()
 	if err != nil {
 		t.Fatalf("failed to connect to WebSocket: %v", err)
 	}
 	defer executor.Disconnect()
 
-	// Execute code in streaming mode
 	resultChan := make(chan *ExecutionResult, 10)
 	err = executor.ExecuteCodeStream("for i in range(3):\n    print(f'Line {i}')", resultChan)
 	if err != nil {
 		t.Fatalf("failed to start streaming execution: %v", err)
 	}
 
-	// Receive and verify stream results
 	resultCount := 0
 	for result := range resultChan {
 		if result == nil {

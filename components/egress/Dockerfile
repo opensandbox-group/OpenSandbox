@@ -124,10 +124,13 @@ RUN chown mitmproxy:mitmproxy /var/lib/mitmproxy/.mitmproxy/config.yaml \
 COPY --from=builder /out/egress /opt/opensandbox-egress/egress
 COPY --from=builder /out/opensandbox-supervisor /opt/opensandbox-egress/supervisor
 # Pre-start hook: reap any mitmdump left over from a previous crashed
-# egress so the new launch can bind the transparent-MITM listen port.
-# Intentionally does NOT touch iptables/nft rules — the sidecar shares
-# a network namespace with the workload, so leaving rules in place keeps
-# egress filtering active across the supervisor's backoff window.
+# egress so the new launch can bind the transparent-MITM listen port, and
+# remove stale redirect rules (iptables DNS 53 redirect, transparent-MITM
+# REDIRECT, and the opensandbox_dns_redirect nft table) left pointing at the
+# dead processes. It intentionally leaves the `inet opensandbox` policy
+# table untouched — the sidecar shares a network namespace with the
+# workload, so leaving the filter rules in place keeps egress enforcement
+# active across the supervisor's backoff window.
 COPY components/egress/scripts/cleanup.sh /opt/opensandbox-egress/cleanup.sh
 RUN chmod 0755 /opt/opensandbox-egress/cleanup.sh \
             /opt/opensandbox-egress/egress \

@@ -54,7 +54,8 @@ type nftApplier interface {
 	RemoveEnforcement(context.Context) error
 }
 
-// startPolicyServer: runtime POST/GET /policy, GET /healthz. nameserverIPs are merged into every nft
+// startPolicyServer serves the runtime policy API (GET/POST/PUT/PATCH/DELETE /policy,
+// /credential-vault* subroutes) and GET /healthz. nameserverIPs are merged into every nft
 // static apply so the pod’s resolv / private DNS still works alongside user egress rules.
 func startPolicyServer(
 	proxy policyUpdater,

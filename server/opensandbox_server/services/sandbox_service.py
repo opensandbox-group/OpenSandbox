@@ -13,10 +13,10 @@
 # limitations under the License.
 
 """
-Sandbox service layer for business logic.
+Sandbox service layer: abstract interface for sandbox lifecycle management.
 
-This module contains the business logic for sandbox lifecycle management.
-This module defines the abstract interface for sandbox services.
+Implementations live in the runtime-specific service modules (Docker and
+Kubernetes); this module defines the interface they must satisfy.
 """
 
 from abc import ABC, abstractmethod

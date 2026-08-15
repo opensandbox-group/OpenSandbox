@@ -30,8 +30,9 @@ import (
 var ErrBurstExceeded = errors.New("supervisor: crashloop budget exceeded")
 
 // Run supervises the worker described by spec until ctx is cancelled or the
-// crashloop budget is exhausted. It returns ctx.Err() on graceful shutdown,
-// ErrBurstExceeded on burst exit, or a setup error if Spec is invalid.
+// crashloop budget is exhausted (only when Spec.OnBurstExit is true; with
+// OnBurstExit=false it keeps looping). It returns ctx.Err() on graceful
+// shutdown, ErrBurstExceeded on burst exit, or a setup error if Spec is invalid.
 func Run(ctx context.Context, spec Spec) error {
 	if spec.Cmd == "" {
 		return errors.New("supervisor: Spec.Cmd is required")

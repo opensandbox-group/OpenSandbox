@@ -36,7 +36,6 @@ func TestNewUpperManager(t *testing.T) {
 		t.Errorf("MaxBytes() = %d, want %d", mgr.MaxBytes(), 8<<30)
 	}
 
-	// Verify directory was created.
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		t.Error("root dir not created")
 	}
@@ -63,14 +62,12 @@ func TestUpperManager_Allocate(t *testing.T) {
 		t.Error("empty directories")
 	}
 
-	// Verify directories exist.
 	for _, p := range []string{upper1, work1} {
 		if _, err := os.Stat(p); os.IsNotExist(err) {
 			t.Errorf("directory %s not created", p)
 		}
 	}
 
-	// Verify entries tracked.
 	mgr.mu.Lock()
 	e := mgr.entries[id1]
 	mgr.mu.Unlock()
@@ -121,7 +118,6 @@ func TestUpperManager_Remove(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Upper parent should be gone.
 	upperParent := filepath.Dir(upper)
 	if _, err := os.Stat(upperParent); !os.IsNotExist(err) {
 		t.Error("upper parent should be removed")
@@ -228,13 +224,11 @@ func TestUpperManager_Collect(t *testing.T) {
 		t.Errorf("freed id = %q, want %q", freed[0], id1)
 	}
 
-	// Freed directory should be gone.
 	upperParent1 := filepath.Dir(upper1)
 	if _, err := os.Stat(upperParent1); !os.IsNotExist(err) {
 		t.Error("freed upper should be removed")
 	}
 
-	// Non-freed directory should still exist.
 	if _, err := os.Stat(upper2); os.IsNotExist(err) {
 		t.Error("in-use upper should not be removed")
 	}
@@ -243,7 +237,6 @@ func TestUpperManager_Collect(t *testing.T) {
 func TestUpperManager_Usage(t *testing.T) {
 	mgr := newTestUpperManager(t)
 
-	// Empty usage.
 	usage, err := mgr.Usage()
 	if err != nil {
 		t.Fatal(err)
@@ -252,7 +245,6 @@ func TestUpperManager_Usage(t *testing.T) {
 		t.Errorf("empty usage = %d, want 0", usage)
 	}
 
-	// Allocate and write a file.
 	_, upper, _, _ := mgr.Allocate()
 	if err := os.WriteFile(filepath.Join(upper, "test.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -343,8 +335,6 @@ func TestUpperManager_AllocateNoLimitWhenZero(t *testing.T) {
 		t.Errorf("unexpected error with maxBytes=0: %v", err)
 	}
 }
-
-// Helpers
 
 func newTestUpperManager(t *testing.T) *UpperManager {
 	t.Helper()

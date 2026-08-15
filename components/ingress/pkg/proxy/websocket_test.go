@@ -39,7 +39,6 @@ func Test_WebSocketProxy(t *testing.T) {
 }
 
 func webSocketProxyWithHeaderMode(t *testing.T) {
-	// Create mock provider
 	provider := &mockProvider{
 		endpoints: map[string]string{
 			"test-sandbox": "127.0.0.1",
@@ -65,7 +64,6 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 	backendPort, err := findAvailablePort()
 	assert.Nil(t, err)
 
-	// backend echo server
 	go func() {
 		mux2 := http.NewServeMux()
 		mux2.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -100,8 +98,6 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 
 	time.Sleep(time.Millisecond * 100)
 
-	// frontend server, dial now our proxy, which will reverse proxy our
-	// message to the backend websocket server.
 	h := http.Header{}
 	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
 	conn, _, err := websocket.DefaultDialer.Dial(proxyURL+"/ws", h)
@@ -109,7 +105,6 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// write a message and send it to the backend server
 	msg := "hello kite"
 	err = conn.WriteMessage(websocket.TextMessage, []byte(msg))
 	if err != nil {
@@ -131,7 +126,6 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 }
 
 func webSocketProxyWithURIMode(t *testing.T) {
-	// Create mock provider
 	provider := &mockProvider{
 		endpoints: map[string]string{
 			"test-sandbox": "127.0.0.1",
@@ -157,7 +151,6 @@ func webSocketProxyWithURIMode(t *testing.T) {
 	backendPort, err := findAvailablePort()
 	assert.Nil(t, err)
 
-	// backend echo server
 	go func() {
 		mux2 := http.NewServeMux()
 		mux2.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -192,8 +185,6 @@ func webSocketProxyWithURIMode(t *testing.T) {
 
 	time.Sleep(time.Millisecond * 100)
 
-	// frontend server, dial now our proxy, which will reverse proxy our
-	// message to the backend websocket server.
 	h := http.Header{}
 	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
 	conn, _, err := websocket.DefaultDialer.Dial(proxyURL+fmt.Sprintf("/test-sandbox/%v", backendPort)+"/ws", h)
@@ -201,7 +192,6 @@ func webSocketProxyWithURIMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// write a message and send it to the backend server
 	msg := "hello kite"
 	err = conn.WriteMessage(websocket.TextMessage, []byte(msg))
 	if err != nil {

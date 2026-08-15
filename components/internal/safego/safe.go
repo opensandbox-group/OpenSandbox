@@ -23,6 +23,9 @@ import (
 	runtimeutil "k8s.io/apimachinery/pkg/util/runtime"
 )
 
+// InitPanicLogger installs a panic handler that logs the recovered panic with
+// its stack trace instead of crashing. http.ErrAbortHandler is swallowed
+// because it is a normal control-flow signal in net/http, not a bug.
 func InitPanicLogger(_ context.Context, log logger.Logger) {
 	runtimeutil.PanicHandlers = []func(context.Context, any){
 		func(_ context.Context, r any) {
@@ -46,6 +49,9 @@ func init() {
 	runtimeutil.ReallyCrash = false
 }
 
+// Go runs f in a new goroutine with the global panic handler (see
+// InitPanicLogger) attached, so an unexpected panic is logged instead of
+// taking down the process.
 func Go(f func()) {
 	go func() {
 		defer runtimeutil.HandleCrash()

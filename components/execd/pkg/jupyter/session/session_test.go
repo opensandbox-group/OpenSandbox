@@ -21,11 +21,8 @@ import (
 	"testing"
 )
 
-// Test listing sessions
 func TestListSessions(t *testing.T) {
-	// Create mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request method and path
 		if r.Method != http.MethodGet {
 			t.Errorf("expected request method GET, got %s", r.Method)
 		}
@@ -33,7 +30,6 @@ func TestListSessions(t *testing.T) {
 			t.Errorf("expected request path /api/sessions, got %s", r.URL.Path)
 		}
 
-		// Return mocked session list
 		response := `[
 			{
 				"id": "session-1",
@@ -69,21 +65,17 @@ func TestListSessions(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create client
 	client := NewClient(server.URL, &http.Client{})
 
-	// Fetch session list
 	sessions, err := client.ListSessions()
 	if err != nil {
 		t.Fatalf("failed to list sessions: %v", err)
 	}
 
-	// Validate session count
 	if len(sessions) != 2 {
 		t.Errorf("expected 2 sessions, got %d", len(sessions))
 	}
 
-	// Validate first session fields
 	if sessions[0].ID != "session-1" {
 		t.Errorf("expected session ID 'session-1', got '%s'", sessions[0].ID)
 	}
@@ -97,7 +89,6 @@ func TestListSessions(t *testing.T) {
 		t.Errorf("expected session type 'notebook', got '%s'", sessions[0].Type)
 	}
 
-	// Validate first session kernel fields
 	if sessions[0].Kernel.ID != "kernel-1" {
 		t.Errorf("expected kernel ID 'kernel-1', got '%s'", sessions[0].Kernel.ID)
 	}
@@ -106,11 +97,8 @@ func TestListSessions(t *testing.T) {
 	}
 }
 
-// Test creating session
 func TestCreateSession(t *testing.T) {
-	// Create mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request method and path
 		if r.Method != http.MethodPost {
 			t.Errorf("expected request method POST, got %s", r.Method)
 		}
@@ -118,7 +106,6 @@ func TestCreateSession(t *testing.T) {
 			t.Errorf("expected request path /api/sessions, got %s", r.URL.Path)
 		}
 
-		// Parse request body
 		var requestBody SessionCreateRequest
 		decoder := json.NewDecoder(r.Body)
 		if err := decoder.Decode(&requestBody); err != nil {
@@ -139,7 +126,6 @@ func TestCreateSession(t *testing.T) {
 			t.Errorf("expected kernel name 'python3', got '%s'", requestBody.Kernel.Name)
 		}
 
-		// Return mocked create response
 		response := `{
 			"id": "new-session-id",
 			"path": "/path/to/notebook.ipynb",
@@ -160,16 +146,13 @@ func TestCreateSession(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create client
 	client := NewClient(server.URL, &http.Client{})
 
-	// Create session
 	newSession, err := client.CreateSession("Test Session", "/path/to/notebook.ipynb", "python3")
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
 
-	// Validate created session
 	if newSession.ID != "new-session-id" {
 		t.Errorf("expected session ID 'new-session-id', got '%s'", newSession.ID)
 	}
@@ -184,13 +167,10 @@ func TestCreateSession(t *testing.T) {
 	}
 }
 
-// Test fetching a specific session
 func TestGetSession(t *testing.T) {
 	sessionID := "test-session-id"
 
-	// Create mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request method and path
 		if r.Method != http.MethodGet {
 			t.Errorf("expected request method GET, got %s", r.Method)
 		}
@@ -200,7 +180,6 @@ func TestGetSession(t *testing.T) {
 			t.Errorf("expected request path '%s', got '%s'", expectedPath, r.URL.Path)
 		}
 
-		// Return mocked session
 		response := `{
 			"id": "test-session-id",
 			"path": "/path/to/notebook.ipynb",
@@ -221,16 +200,13 @@ func TestGetSession(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create client
 	client := NewClient(server.URL, &http.Client{})
 
-	// Fetch session
 	session, err := client.GetSession(sessionID)
 	if err != nil {
 		t.Fatalf("failed to get session: %v", err)
 	}
 
-	// Validate session
 	if session.ID != sessionID {
 		t.Errorf("expected session ID '%s', got '%s'", sessionID, session.ID)
 	}

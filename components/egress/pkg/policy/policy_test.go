@@ -102,7 +102,6 @@ func TestWithExtraAllowIPs(t *testing.T) {
 	require.Len(t, allowV6, 1, "allowV6 length mismatch")
 	require.Equal(t, "2001:db8::1", allowV6[0])
 
-	// nil/empty ips returns same policy
 	require.Same(t, p, p.WithExtraAllowIPs(nil), "WithExtraAllowIPs(nil) should return same policy")
 	require.Same(t, p, p.WithExtraAllowIPs([]netip.Addr{}), "WithExtraAllowIPs([]) should return same policy")
 }

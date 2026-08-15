@@ -356,7 +356,8 @@ func bwrapEnvSegment(spec EnvSpec) []string {
 	}
 }
 
-// strictEnvBlacklist defines glob patterns stripped in strict profile.
+// strictEnvBlacklist defines glob patterns stripped when no explicit env
+// passthrough mode is set (default sessions) and for deny mode with no keys.
 var strictEnvBlacklist = []string{
 	"*_API_KEY", "*_TOKEN", "*_SECRET", "*_PASSWORD",
 	"AWS_*", "ALI_*", "ALIYUN_*", "K8S_*", "KUBE_*",

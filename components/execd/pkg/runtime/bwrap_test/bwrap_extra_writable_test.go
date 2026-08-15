@@ -84,11 +84,9 @@ func TestExtraWritable_ReadWriteRoundTrip(t *testing.T) {
 
 	testFile := filepath.Join(extraDir, "roundtrip.txt")
 
-	// Write.
 	err = r.RunInIsolatedSession(ctx, id, "echo 'roundtrip-value' > "+testFile, nil, nil)
 	require.NoError(t, err)
 
-	// Read back.
 	var lines []string
 	err = r.RunInIsolatedSession(ctx, id, "cat "+testFile, nil,
 		func(line string) { lines = append(lines, line) })

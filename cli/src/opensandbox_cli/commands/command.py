@@ -131,7 +131,13 @@ def _handle_execution_error(obj: ClientContext, execution) -> None:
 @click.option("-d", "--background", is_flag=True, default=False, help="Run in background.")
 @click.option("-w", "--workdir", default=None, help="Working directory.")
 @click.option("-t", "--timeout", type=DURATION, default=None, help="Command timeout (e.g. 30s, 5m).")
-@output_option("table", "json", "yaml", "raw")
+@output_option(
+    "table",
+    "json",
+    "yaml",
+    "raw",
+    help_text="Output format. Foreground mode: raw only (default). Background mode: table, json, or yaml.",
+)
 @click.pass_obj
 @handle_errors
 def command_run(

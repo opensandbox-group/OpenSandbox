@@ -62,7 +62,7 @@ func TestSplitOnDoubleDash(t *testing.T) {
 		{
 			name:           "empty input",
 			in:             []string{},
-			wantSupArgs:    nil, // append(nil, []string{}...) returns nil
+			wantSupArgs:    nil,
 			wantWorkerArgs: nil,
 		},
 	}

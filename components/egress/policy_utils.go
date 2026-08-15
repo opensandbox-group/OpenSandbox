@@ -111,7 +111,8 @@ func removeRulesByTarget(rules []policy.EgressRule, targets []string) (kept, rem
 	return kept, removed
 }
 
-// mergeKey: domain targets lowercased for dedupe; IP/CIDR left as-is.
+// mergeKey lowercases targets for dedupe (IP/CIDR strings are lowered too,
+// which is lossless for canonical IP/CIDR forms).
 func mergeKey(r policy.EgressRule) string {
 	if r.Target == "" {
 		return r.Target
