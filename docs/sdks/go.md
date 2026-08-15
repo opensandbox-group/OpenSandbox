@@ -150,7 +150,6 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
             Name: "api-token",
             Match: opensandbox.CredentialMatch{
                 Schemes: []opensandbox.CredentialScheme{opensandbox.CredentialSchemeHTTPS},
-                Ports:   []int{443},
                 Hosts:   []string{"api.example.com"},
                 Paths:   []string{"/v1/*"},
             },

@@ -48,7 +48,7 @@ uv run python examples/desktop/main.py
 ```
 
 The script starts the desktop stack (Xvfb + XFCE + x11vnc) and also launches noVNC/websockify. It prints:
-- VNC endpoint (`endpoint.endpoint`) for native VNC clients when direct endpoint mode is enabled, password from `VNC_PASSWORD` (default: `opensandbox`)
+- VNC endpoint (`endpoint.endpoint`) for native VNC clients when direct endpoint mode is enabled, password from `VNC_PASSWORD` (required, no default)
 - noVNC URL for browsers (`/vnc.html?host=...&port=...&path=...`)
 
 The sandbox stays alive for 5 minutes by default; interrupt sooner with Ctrl+C. Uses the prebuilt desktop image by default.
@@ -142,7 +142,7 @@ clients, so the example omits the native VNC endpoint in this mode.
 | `SANDBOX_API_KEY` | _(optional for local)_ | Example-specific API key; takes precedence over `OPEN_SANDBOX_API_KEY` |
 | `OPEN_SANDBOX_API_KEY` | _(optional for local)_ | SDK-standard API key fallback when `SANDBOX_API_KEY` is unset |
 | `SANDBOX_IMAGE` | `opensandbox/desktop:latest` | Sandbox image to use |
-| `VNC_PASSWORD` | `opensandbox` | Password for VNC access |
+| `VNC_PASSWORD` | _(required)_ | Password for VNC access; the example fails fast if unset |
 
 ## References
 

@@ -57,7 +57,7 @@ Layered architecture:
 Client → POST /sandboxes
   → Auth Middleware validates API key
   → lifecycle.create_sandbox() receives CreateSandboxRequest
-  → sandbox_service.create_sandbox_async(request)
+  → sandbox_service.create_sandbox(request)
   → Returns 202 Accepted with Pending status immediately
   → Background thread provisions the sandbox
 ```
@@ -73,10 +73,10 @@ In-memory timer tracking per sandbox. On timeout, sandbox is cleaned up automati
 ### Network Modes
 
 **Bridge (recommended):** isolated networks, HTTP proxy for routing.
-- Endpoint: `http://{server}/route/{sandbox_id}/{port}/path`
+- Endpoint: `{public_host}:{execd_host_port}/proxy/{port}` (e.g. `http://host:44772/proxy/8080`); direct HTTP access via the mapped host port `{public_host}:{http_host_port}` where available.
 
 **Host:** sandboxes share host network, direct port access. Not recommended — no network isolation.
-- Endpoint: `http://{domain}/{sandbox_id}/{port}`
+- Endpoint: `{public_host}:{port}`
 
 ```bash
 # Local Docker

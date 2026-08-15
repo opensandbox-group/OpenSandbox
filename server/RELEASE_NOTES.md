@@ -272,7 +272,7 @@ Thanks to these contributors ❤️
 - create kubernetes resource name with sandbox-id (#163)
 
 ### ⚠️ Breaking Changes
-- extract egress configuration as an independent module, `[runtime].egress_image` is not accepted, you can refer it from [Configuration reference](https://github.com/alibaba/OpenSandbox/blob/main/server/README.md#configuration-reference) (#186)
+- extract egress configuration as an independent module, `[runtime].egress_image` is not accepted, you can refer it from [Configuration reference](configuration.md) (#186)
 
 ### 📦 Misc
 - package server as PyPI artifact (#170)

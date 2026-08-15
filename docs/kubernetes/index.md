@@ -220,7 +220,7 @@ This project requires two separate images - one for the controller and another f
 You can install OpenSandbox Controller directly from GitHub Releases. Check the [Releases page](https://github.com/opensandbox-group/OpenSandbox/releases?q=helm%2Fopensandbox-controller&expanded=true) for all available versions.
 
 ```sh
-# Replace <version> with the desired version (e.g., 0.1.0)
+# Replace <version> with the desired version (e.g., 0.2.0)
 helm install opensandbox-controller \
   https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/<version>/opensandbox-controller-<version>.tgz \
   --namespace opensandbox-system \
@@ -233,7 +233,7 @@ Use `--set` flags to customize the configuration:
 
 ```sh
 helm install opensandbox-controller \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
+  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
   --namespace opensandbox-system \
   --create-namespace \
   --set controller.replicaCount=2 \
@@ -258,7 +258,7 @@ controller:
 EOF
 
 helm install opensandbox-controller \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
+  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
   --namespace opensandbox-system \
   --create-namespace \
   -f custom-values.yaml
@@ -543,15 +543,15 @@ The time complexity of SIG Agent-Sandbox and BatchSandbox for batch delivery of 
 
 ```
 kubernetes/
-  api/v1alpha1/          # Custom resource definitions (BatchSandbox, Pool)
+  apis/sandbox/v1alpha1/  # Custom resource types (BatchSandbox, Pool, SandboxSnapshot)
   cmd/controller/        # Main controller manager entry point
   cmd/task-executor/     # Task executor binary
   config/crd/            # CRD manifests
   config/manager/        # Controller manager configuration
   config/rbac/           # RBAC manifests
   config/samples/        # Sample YAML manifests
-  internal/controller/   # Core controller implementations
-  internal/scheduler/    # Resource allocation and scheduling logic
+  internal/controller/   # Core controller implementations (allocator, eviction, pause/resume)
+  internal/scheduler/    # In-process task scheduling (task-to-pod assignment)
   internal/task-executor/# Task execution engine internals
   pkg/task-executor/     # Shared task executor packages
   test/                  # Test suites and utilities

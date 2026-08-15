@@ -21,10 +21,12 @@ uv run python examples/openclaw/main.py
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENCLAW_SERVER` | `http://localhost:8080` | OpenSandbox server address |
-| `OPENCLAW_TOKEN` | `dummy-token-for-sandbox` | Gateway authentication token |
+| `OPEN_SANDBOX_SERVER` | `http://localhost:8080` | OpenSandbox server address |
+| `OPEN_SANDBOX_API_KEY` | *(empty)* | API key for the OpenSandbox server |
 | `OPENCLAW_IMAGE` | `ghcr.io/openclaw/openclaw:latest` | Container image |
 | `OPENCLAW_TIMEOUT` | `3600` | Sandbox timeout in seconds |
+| `OPENCLAW_PORT` | `18789` | OpenClaw gateway port |
+| `OPENCLAW_GATEWAY_TOKEN` | value of `OPENCLAW_TOKEN` (default `dummy-token-for-sandbox`) | Gateway authentication token |
 
 ## Network Policy
 
@@ -114,10 +116,10 @@ Openclaw started finished. Please refer to 127.0.0.1:56123
 
 ## Advanced: Custom Gateway Port
 
-To use a custom port, modify the `entrypoint` in `main.py`:
+To use a custom port, modify the `entrypoint` in `main.py` (each argument as a separate list element):
 
 ```python
-entrypoint=["node dist/index.js gateway --bind=lan --port 19999 --allow-unconfigured --verbose"],
+entrypoint=["node", "dist/index.js", "gateway", "--bind=lan", "--port", "19999", "--allow-unconfigured", "--verbose"],
 ```
 
 Then update the port in the `get_endpoint()` call:

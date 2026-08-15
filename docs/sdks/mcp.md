@@ -48,6 +48,7 @@ Config fields:
 - `protocol`: `http` or `https` for API requests.
 - `request_timeout_seconds`: HTTP request timeout in seconds.
 - `transport`: `stdio` by default, or `streamable-http`.
+- `use_server_proxy`: when present, forces the SDK client to use server proxy mode.
 
 ### Streamable HTTP
 
@@ -105,7 +106,7 @@ claude mcp add opensandbox-sandbox --transport http http://localhost:8000/mcp
 
 ::: info
 - All tools operate on a `sandbox_id` returned by `sandbox_create` or `sandbox_connect`.
-- `file_read`/`file_write` are text-only; use `encoding` and `range_header` for large files.
+- `file_read`/`file_write` are text-only; `file_read` supports `encoding` and `range_header` for large files.
 :::
 
 ### Sandbox

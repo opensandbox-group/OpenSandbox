@@ -30,11 +30,12 @@ Example files in this repository:
 9. [`[egress]`](#egress)
 10. [`[storage]`](#storage)
 11. [`[store]`](#store)
-12. [`[secure_runtime]`](#secure_runtime)
-13. [`[renew_intent]`](#renew_intent)
-14. [`[otel]`](#otel)
-15. [Environment variables (outside TOML)](#environment-variables-outside-toml)
-16. [Cross-field validation rules](#cross-field-validation-rules)
+12. [`[tenants]`](#tenants)
+13. [`[secure_runtime]`](#secure_runtime)
+14. [`[renew_intent]`](#renew_intent)
+15. [`[otel]`](#otel)
+16. [Environment variables (outside TOML)](#environment-variables-outside-toml)
+17. [Cross-field validation rules](#cross-field-validation-rules)
 
 ---
 
@@ -52,6 +53,7 @@ Example files in this repository:
 | `[egress]` | No | Required values when clients use `networkPolicy` on create |
 | `[storage]` | No | Host bind mounts / OSSFS mount root |
 | `[store]` | No | Server-managed persistent metadata backend |
+| `[tenants]` | No | Multi-tenant mode; see [`[tenants]`](#tenants) |
 | `[secure_runtime]` | No | gVisor / Kata / Firecracker |
 | `[renew_intent]` | No | Auto-renew on access |
 | `[otel]` | No | OTLP export for ingested SDK metrics |
@@ -64,7 +66,7 @@ Example files in this repository:
 |-----|------|---------|-------------|
 | `host` | string | `"0.0.0.0"` | Bind address for the HTTP API. |
 | `port` | integer | `8080` | Listen port (1–65535). |
-| `api_key` | string \| omitted | `null` | If set to a non-empty string, requests must send header `OPEN-SANDBOX-API-KEY` with this value (except documented public routes such as `/health`, `/docs`, `/redoc`). If omitted or empty, API key checks are skipped, but startup now requires explicit risk acknowledgment: interactive TTY confirmation (`YES`) or `OPENSANDBOX_INSECURE_SERVER=YES`. |
+| `api_key` | string \| omitted | `null` | If set to a non-empty string, requests must send header `OPEN-SANDBOX-API-KEY` with this value, except documented public routes (`/health`, `/version`, `/docs`, `/redoc`, `/openapi.json`) and proxy-to-sandbox routes in single-tenant mode. If omitted or empty, API key checks are skipped, but startup now requires explicit risk acknowledgment: interactive TTY confirmation (`YES`) or `OPENSANDBOX_INSECURE_SERVER=YES`. |
 | `eip` | string \| omitted | `null` | Public IP or hostname used as the **host part** when the server returns sandbox endpoint URLs (notably Docker runtime). |
 | `max_sandbox_timeout_seconds` | integer \| omitted | `null` | Upper bound on sandbox TTL in seconds for **create** requests that specify `timeout`. Must be ≥ **60** if set. Omit to disable the server-side cap. |
 | `timeout_keep_alive` | integer | `30` | Idle keep-alive timeout (seconds) passed to uvicorn. |
@@ -181,6 +183,8 @@ Controls how **ingress exposure** is described for sandbox endpoints (especially
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `mode` | string | `"direct"` | **`direct`** — clients reach sandboxes without an L7 gateway configured here. **`gateway`** — use `[ingress.gateway]` for address and routing mode (Kubernetes-oriented deployments). |
+| `secure_access.active_key` | string \| omitted | `null` | **OSEP-0011** secure access. Identifier of the active signing key, exactly one character `[0-9a-z]`, must reference a `key_id` present in `keys`. Required when `secure_access.keys` is set. |
+| `secure_access.keys` | list of objects \| omitted | `null` | List of signing keys for signed ingress routes. Each entry has `key_id` (one character `[0-9a-z]`) and `key` (base64-encoded HMAC key). May also be injected via `OPENSANDBOX_SECURE_ACCESS_KEYS` / `OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY` (see [Environment variables](#environment-variables-outside-toml)). |
 
 ### When `mode = "gateway"`
 
@@ -259,6 +263,21 @@ the same backend.
 
 ---
 
+## `[tenants]`
+
+Optional multi-tenant mode. When the table is present, tenant resolution is enabled and API key checks apply per tenant instead of globally. Provider types: **`file`** (reads a `tenants.toml` at the path given by `SANDBOX_TENANTS_CONFIG_PATH`, default `~/.opensandbox/tenants.toml`) or **`http`** (fetches tenants from a remote endpoint with in-process caching).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `provider` | string | `"file"` | Tenant provider type: **`file`** or **`http`**. |
+| `endpoint` | string \| omitted | `null` | HTTP tenant provider endpoint URL. **Required** when `provider = "http"`. |
+| `max_stale_seconds` | float | `300` | Maximum seconds to serve the stale tenant cache when the HTTP endpoint is unreachable. |
+| `timeout_seconds` | float | `5` | HTTP request timeout in seconds. |
+| `auth_header` | string \| omitted | `null` | Optional header name for provider-level authentication to the HTTP endpoint. |
+| `auth_token` | string \| omitted | `null` | Optional token value for provider-level authentication to the HTTP endpoint. |
+
+---
+
 ## `[secure_runtime]`
 
 Optional **strong isolation** runtimes (gVisor, Kata, Firecracker).
@@ -319,6 +338,10 @@ These are read by the server or runtime code in addition to the TOML file:
 |----------|------------|-------------|
 | `SANDBOX_CONFIG_PATH` | `config.py`, CLI | Path to the TOML file. Overrides the default `~/.sandbox.toml` when set. |
 | `OPENSANDBOX_SERVER_API_KEY` | `config.py` | Overrides the API key from the TOML file. |
+| `OPENSANDBOX_INSECURE_SERVER` | `startup_guard.py` | Set to `YES` to acknowledge running without an API key in non-interactive environments. |
+| `OPENSANDBOX_SECURE_ACCESS_KEYS` | `config.py` | Comma-separated key ring in `key_id=base64` form for `[ingress.secure_access]`. Requires `OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY` and `ingress.mode = "gateway"`. |
+| `OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY` | `config.py` | Names the active key in the `OPENSANDBOX_SECURE_ACCESS_KEYS` ring. |
+| `SANDBOX_TENANTS_CONFIG_PATH` | `tenants/file_provider.py` | Path to the `tenants.toml` file when `[tenants] provider = "file"`. Defaults to `~/.opensandbox/tenants.toml`. |
 | `DOCKER_HOST` | Docker service | Standard Docker daemon address (e.g. `unix:///var/run/docker.sock`). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTEL exporter | Default OTLP endpoint when `[otel].endpoint` is omitted. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | OTEL exporter | Metrics-specific OTLP endpoint override. |

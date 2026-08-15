@@ -15,9 +15,9 @@ This document describes how to deploy the OpenSandbox Controller using Helm Char
 Download and install the published chart package directly:
 
 ```bash
-# Install the latest version (0.1.0)
+# Install the latest version (0.2.0)
 helm install opensandbox-controller \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
+  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
   --namespace opensandbox-system \
   --create-namespace
 ```
@@ -26,7 +26,7 @@ To use a custom image:
 
 ```bash
 helm install opensandbox-controller \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
+  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
   --set controller.image.repository=<your-registry>/controller \
   --set controller.image.tag=v0.0.1 \
   --namespace opensandbox-system \
@@ -91,7 +91,7 @@ helm list -n opensandbox-system
 Visit GitHub Releases to see all available versions:
 https://github.com/opensandbox-group/OpenSandbox/releases
 
-Look for tags starting with `helm/opensandbox-controller/`, such as `helm/opensandbox-controller/0.1.0`
+Look for tags starting with `helm/opensandbox-controller/`, such as `helm/opensandbox-controller/0.2.0`
 
 ### Upgrade to a Specific Version
 
@@ -434,9 +434,9 @@ Publish Helm Charts automatically via GitHub Actions:
 #### Option 1: Trigger via Git Tag
 
 ```bash
-# Publish opensandbox-controller chart version 0.1.0
-git tag helm/opensandbox-controller/0.1.0
-git push origin helm/opensandbox-controller/0.1.0
+# Publish opensandbox-controller chart version 0.2.0
+git tag helm/opensandbox-controller/0.2.0
+git push origin helm/opensandbox-controller/0.2.0
 ```
 
 Tag naming convention: `helm/{component}/{version}`
@@ -483,7 +483,7 @@ https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/{COMPONE
 
 Example:
 ```
-https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz
+https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz
 ```
 
 ### Adding a New Helm Chart Component

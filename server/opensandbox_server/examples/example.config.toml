@@ -36,7 +36,7 @@ execd_image = "opensandbox/execd:v1.0.22"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
-# If empty, all host paths are allowed (not recommended for production).
+# If empty, host bind mounts are rejected.
 # Example: allowed_host_paths = ["/data/opensandbox", "/tmp/sandbox"]
 allowed_host_paths = []
 
@@ -71,7 +71,7 @@ mode = "direct"
 image = "opensandbox/egress:v1.1.6"
 mode = "dns"
 
-# Renew-on-access. Off by default — see server/README.md.
+# Renew-on-access. Off by default — see server/configuration.md.
 [renew_intent]
 enabled = false
 min_interval_seconds = 60

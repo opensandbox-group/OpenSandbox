@@ -48,6 +48,7 @@ The controller communicates allocation state through annotations on BatchSandbox
 
 - `sandbox.opensandbox.io/alloc-status`: JSON `{"pods":["pod-1","pod-2"]}` — current pod allocation
 - `sandbox.opensandbox.io/alloc-release`: JSON `{"pods":["pod-3"]}` — pods released back to pool
+- `sandbox.opensandbox.io/alloc-released`: JSON `{"pods":["pod-3"]}` — pods already released (written on release, read on recovery)
 - `sandbox.opensandbox.io/endpoints`: JSON endpoint list consumed by server-side endpoint resolution
 
 Do not change annotation keys or JSON shapes without updating both writers and all readers, including controller tests and any server-side Kubernetes integration that parses them.
@@ -57,6 +58,8 @@ Do not change annotation keys or JSON shapes without updating both writers and a
 - `sandbox.opensandbox.io/pool-name`: labels pool-owned pods
 - `sandbox.opensandbox.io/pool-revision`: revision hash for rolling updates
 - `batch-sandbox.sandbox.opensandbox.io/pod-index`: pod index within a BatchSandbox
+- `batch-sandbox.sandbox.opensandbox.io/name`: owning BatchSandbox name (used for pause/resume pod lookup)
+- `sandbox.opensandbox.io/privileged-node-access`: marks pods eligible for privileged node access (snapshot commit Jobs)
 - `pool.opensandbox.io/evict`: marks idle pool pods for eviction
 - `pool.opensandbox.io/eviction-handler`: selects pool eviction handler implementation
 

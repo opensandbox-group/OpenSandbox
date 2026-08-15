@@ -26,9 +26,7 @@ configs:
       port_range_max = 60000
       drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
       no_new_privileges = true
-      # TODO: For production environments, it is recommended to set this to '4096' or higher to avoid
-      # "can't start new thread" errors when multiple sandboxes are running concurrently.
-      # See: https://github.com/opensandbox-group/OpenSandbox/issues/447
+      # 4096 is the default limit; set null to disable the per-container PID cap.
       pids_limit = 4096
 
       [ingress]

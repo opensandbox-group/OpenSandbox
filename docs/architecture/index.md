@@ -115,7 +115,8 @@ Command and code execution use Server-Sent Events for streaming output. The curr
 `specs/egress-api.yaml` defines the runtime policy API exposed directly by the egress sidecar:
 
 - `GET /policy`
-- `PATCH /policy`
+- `POST` / `PUT` / `PATCH` / `DELETE` `/policy`
+- `/credential-vault*` — sandbox-local Credential Vault management (create, inspect, mutate, delete)
 
 The API is reached by resolving the sandbox endpoint for the egress sidecar port. When sidecar authentication is enabled, callers must include the endpoint headers returned by the lifecycle endpoint resolution API.
 

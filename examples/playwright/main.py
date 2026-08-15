@@ -52,8 +52,11 @@ async def main() -> None:
         request_timeout=timedelta(seconds=60),
     )
 
-    # Inject Python version into container environment
-    env = {"PYTHON_VERSION": python_version}
+    # Inject Python version and target URL into the container environment
+    env = {
+        "PYTHON_VERSION": python_version,
+        "TARGET_URL": os.getenv("TARGET_URL", "https://example.com"),
+    }
     sandbox = await Sandbox.create(
         image,
         connection_config=config,

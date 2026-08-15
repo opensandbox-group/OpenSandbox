@@ -50,13 +50,13 @@ If `server.api_key` is empty, the server runs without authentication. In non-int
 | Section | Description |
 |---------|-------------|
 | `[server]` | Host, port, API key, and general server settings |
-| `[docker]` | Docker runtime: `network_mode`, `host_ip`, image registry |
+| `[docker]` | Docker runtime: `network_mode`, `host_ip`, port range, security options |
 | `[kubernetes]` | Kubernetes runtime: `workload_provider`, `batchsandbox_template_file` |
 | `[egress]` | Egress sidecar for `networkPolicy` enforcement |
 | `[ingress]` | Ingress gateway configuration |
 | `[secure_runtime]` | Secure container runtime (gVisor, Kata, Firecracker) |
 | `[store]` | Persistence backend (default: SQLite at `~/.opensandbox/opensandbox.db`) |
-| `[renew_intent]` | Auto-renew on access (experimental) |
+| `[renew_intent]` | Auto-renew sandbox expiration on ingress access |
 | `[agent_sandbox]` | Agent sandbox settings for Kubernetes |
 
 For the full configuration reference with all keys and defaults, see the [server configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).

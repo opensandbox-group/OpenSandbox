@@ -47,9 +47,8 @@ curl -H "Host: my-sandbox-8080.example.com" https://ingress.opensandbox.io/api/u
 ```
 
 **Parsing logic:**
-- Extracts sandbox ID and port from the format `<sandbox-id>-<port>`
-- The last segment after the last `-` is treated as the port
-- Everything before the last `-` is treated as the sandbox ID
+- Header mode first attempts to parse the header/Host label as an OSEP-0011 signed route token (`<sandbox-id>-<port>-<expires-b36>-<sig>`); on failure it falls back to the legacy `<sandbox-id>-<port>` format.
+- For the legacy format: the last segment after the last `-` is treated as the port; everything before the last `-` is treated as the sandbox ID.
 
 ### URI Mode (`--mode uri`)
 
@@ -69,15 +68,27 @@ wss://ingress.opensandbox.io/my-sandbox/8080/ws
 ```
 
 **Parsing logic:**
-- First path segment: sandbox ID
-- Second path segment: sandbox port
-- Remaining path: forwarded to the target sandbox as the request URI
+- The path is first parsed as an OSEP-0011 signed route (`/<sandbox-id>/<port>/<expires-b36>/<sig>/<path>`); if that fails, the legacy format applies.
+- Legacy format: first path segment = sandbox ID; second path segment = sandbox port; remaining path is forwarded to the target sandbox as the request URI.
 - If no remaining path is provided, defaults to `/`
 
 **Use cases:**
 - When you cannot modify HTTP headers
 - When you need path-based routing
 - For simpler client configuration without custom headers
+
+## Secure Access (OSEP-0011)
+
+Sandboxes created with `secureAccess` are annotated with a per-sandbox access token and require signed routes. The ingress enforces access when the target sandbox is secure:
+
+- If the request carries an `OpenSandbox-Secure-Access` header, its value is compared (constant-time) against the sandbox's annotation token; a mismatch returns **401** with no signature fallback.
+- Otherwise the request must carry a valid signed route (host label or URI path with `expires` + `signature` segments); the signature is verified against the keys configured via `--secure-access-keys` and its expiry is checked. Requests without a signature return **401**; if no verifier keys are configured, the ingress returns **503**.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--secure-access-keys` | `` | OSEP-0011 verification keys as comma-separated `key_id=base64` entries (key_id is one char `[0-9a-z]`) |
+
+See [Secure Access](/guides/secure-access) for the full guide.
 
 ## Auto-Renew on Ingress Access (OSEP-0009)
 
@@ -154,7 +165,7 @@ TAG=local VERSION=1.2.3 GIT_COMMIT=abc BUILD_TIME=2025-01-01T00:00:00Z bash buil
   - `ErrSandboxNotFound` (sandbox resource not exists) -> HTTP 404
   - `ErrSandboxNotReady` (not enough replicas, missing endpoints, invalid config) -> HTTP 503
   - Other errors (K8s API errors, etc.) -> HTTP 502
-- WebSocket path forwards essential headers and X-Forwarded-*; HTTP path strips `OpenSandbox-Ingress-To` before proxying (header mode only).
+- WebSocket path forwards essential headers and X-Forwarded-*; both HTTP and WebSocket paths strip `OpenSandbox-Ingress-To` and `OpenSandbox-Secure-Access` before proxying (all routing modes).
 
 ## Development & Tests
 ```bash

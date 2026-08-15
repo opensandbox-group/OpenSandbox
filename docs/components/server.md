@@ -101,7 +101,7 @@ Authentication is enforced only when `server.api_key` is set. If the value is em
 Strongly recommend enabling `server.api_key`. See [security report Issue #750](https://github.com/opensandbox-group/OpenSandbox/issues/750).
 :::
 
-All API endpoints (except `/health`, `/docs`, `/redoc`) require authentication via the `OPEN-SANDBOX-API-KEY` header when authentication is enabled:
+All API endpoints (except the documented public routes `/health`, `/version`, `/docs`, `/redoc`, `/openapi.json`, and proxy-to-sandbox routes in single-tenant mode) require authentication via the `OPEN-SANDBOX-API-KEY` header when authentication is enabled:
 
 ```bash
 curl -H "OPEN-SANDBOX-API-KEY: your-secret-api-key" http://localhost:8080/v1/sandboxes
@@ -252,13 +252,9 @@ restart, and Kubernetes keeps `spec.expireTime` on the workload. A newly
 created replacement receives its own ID and expiration time from its new create
 request.
 
-## Experimental Features
+## Auto-Renew on Access
 
-Optional experimental behavior; off by default. See release notes before production.
-
-### Auto-Renew on Access
-
-Extends sandbox TTL when traffic is observed (lifecycle proxy and/or ingress + optional Redis queue). Per-sandbox: on create, set `extensions["access.renew.extend.seconds"]` (string integer 300-86400). Clients using the server proxy: request endpoints with `use_server_proxy=true` (REST) or SDK `ConnectionConfig(..., use_server_proxy=True)`.
+Extends sandbox TTL when traffic is observed (lifecycle proxy and/or ingress + optional Redis queue). Per-sandbox: on create, set `extensions["access.renew.extend.seconds"]` (string integer 300-86400). Clients using the server proxy: request endpoints with `use_server_proxy=true` (REST) or SDK `ConnectionConfig(..., use_server_proxy=True)`. Off by default; see release notes before production.
 
 ## Development
 

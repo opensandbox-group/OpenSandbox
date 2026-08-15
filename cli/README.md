@@ -303,6 +303,7 @@ The main command groups are:
 - `osb command`: command execution and persistent sessions
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
+- `osb credential-vault`: manage the Credential Vault
 - `osb diagnostics`: stable diagnostics logs and events
 - `osb devops`: experimental legacy diagnostics
 - `osb config`: local CLI configuration
@@ -327,6 +328,7 @@ Bundled skills:
 - `command-execution`
 - `file-operations`
 - `network-egress`
+- `credential-vault`
 - `sandbox-troubleshooting`
 
 Supported targets:

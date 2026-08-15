@@ -102,7 +102,7 @@ kubernetes/
 │   ├── e2e/                       # Core e2e tests (Kind-based)
 │   ├── e2e_task/                  # Task-executor e2e tests
 │   ├── e2e_runtime/               # RuntimeClass e2e (gVisor)
-│   └── kind/                      # Kind cluster configs
+│   └── utils/                     # Shared e2e test helpers
 └── docs/                          # Design documents
     ├── proposals/                 # Design proposals for new features and significant changes
     │   ├── YYYYMMDD-template.md   # Proposal template
@@ -159,11 +159,9 @@ BatchSandboxReconciler.Reconcile
             └─ assigns tasks to pods via task-executor HTTP API
 ```
 
-The `task-executor` binary runs as a sidecar inside sandbox pods. It exposes an HTTP API on port 5758 for task lifecycle management (create, list, stop). It supports two runtime modes:
-- **Process executor**: runs commands directly on the host
-- **Container executor**: manages containers via CRI
+The `task-executor` binary runs as a sidecar inside sandbox pods. It exposes an HTTP API on port 5758 for task lifecycle management (create, list, stop). The process executor runs task commands either locally in the task-executor container or inside the main sandbox container (via nsenter); a CRI-based container executor exists only as a placeholder and returns "not implemented yet".
 
-The `compositeExecutor` dispatches to the appropriate runtime based on the task type (tasks with `Process` field use process executor, tasks with `PodTemplateSpec` use container executor).
+The `compositeExecutor` dispatches to the appropriate runtime based on the task type (tasks with a `Process` field use the process executor; tasks without one are routed to the container executor, which is not implemented yet).
 
 ### Strategy Pattern
 
@@ -410,6 +408,8 @@ The controller communicates allocation state through annotations on BatchSandbox
 |---|---|---|---|
 | `sandbox.opensandbox.io/alloc-status` | `{"pods":["pod-1"]}` | `allocator.go` via `apis.go` | `batchsandbox_controller.go` |
 | `sandbox.opensandbox.io/alloc-release` | `{"pods":["pod-3"]}` | `batchsandbox_controller.go` | `allocator.go` |
+| `sandbox.opensandbox.io/alloc-released` | `{"pods":["pod-3"]}` | `allocator.go` | `allocator.go` (recovery) |
+| `sandbox.opensandbox.io/endpoints` | JSON endpoint list | server-side K8s integration | endpoint resolution |
 
 When changing annotation shapes, update all readers and writers, and add migration logic if the change is not backward-compatible.
 

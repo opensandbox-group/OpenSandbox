@@ -63,7 +63,7 @@ Run the example (it will create a sandbox via OpenSandbox, wait until it's Runni
 uv run python examples/aio-sandbox/main.py
 ```
 
-Subsequently, you will instantiate an AIO sandbox, navigate to Google, capture a screenshot, and download it to your local environment.
+Subsequently, you will instantiate an AIO sandbox, run a shell command (`ls -la`), read a file (`.bashrc`), capture a screenshot of the portal's default page, and download it to your local environment.
 
 ```text
 Creating AIO sandbox with image=ghcr.io/agent-infra/sandbox:latest on OpenSandbox server http://localhost:8080...

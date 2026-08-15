@@ -41,9 +41,10 @@ opensandbox-server
 
 ## Create and access a Chrome sandbox
 
-Build/pull the image above, then create a sandbox with image `opensandbox/chrome:latest` and an entrypoint that keeps it
-alive (e.g., `["/bin/sh", "-c", "sleep infinity"]`), or reuse `tail -f /dev/null`. Make sure the runtime exposes ports
-`5901` and `9222` for VNC/DevTools.
+Build/pull the image above, then create a sandbox with image `opensandbox/chrome:latest`. The image ships an
+`/entrypoint` supervisor that starts Xtigervnc and the Chrome launcher; the example passes
+`entrypoint=["/entrypoint"]` explicitly, so the VNC (`5901`) and DevTools (`9222`) ports come up on their own.
+(Using a plain `sleep infinity`/`tail -f /dev/null` entrypoint will NOT start the VNC/Chrome stack.)
 
 ```shell
 uv pip install opensandbox

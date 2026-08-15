@@ -3,7 +3,7 @@ title: Pool Auto-Assign for BatchSandbox
 authors:
   - "@Spground"
 creation-date: 2026-04-27
-status: provisional
+status: implemented
 ---
 
 # Pool Auto-Assign for BatchSandbox

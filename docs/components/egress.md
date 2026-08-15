@@ -179,7 +179,7 @@ The credential vault provides automatic credential injection for outbound reques
 
 Prerequisites: transparent mitmproxy enabled (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`), egress API auth token set (`OPENSANDBOX_EGRESS_TOKEN`).
 
-Supported auth types: `bearer`, `basic`, `apiKey`, `customHeaders`.
+Supported auth types: `bearer`, `basic`, `apiKey`, `customHeaders`, `passthrough`.
 
 See [Credential Vault](/guides/credential-vault) for full API usage, binding rules, and security model.
 
@@ -196,7 +196,7 @@ explicitly:
 0.001  0.0025  0.005  0.01  0.025  0.05  0.1  0.25  0.5  1  2.5  5  10  15  30  60  120  300  600
 ```
 
-The head resolves a cache hit up to one upstream timeout
+The head spans a fast single-upstream exchange (sub-millisecond) up to one upstream timeout
 (`OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT`, 5s by default). The coarse tail is there because
 the recorded duration covers the **whole resolver chain** — forwarding walks the upstreams
 serially with the full timeout each, so a query can legitimately take

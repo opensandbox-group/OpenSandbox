@@ -36,7 +36,7 @@ execd_image = "opensandbox/execd:v1.0.22"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
-# If empty, all host paths are allowed (not recommended for production).
+# If empty, host bind mounts are rejected.
 # Example: allowed_host_paths = ["/data/opensandbox", "/tmp/sandbox"]
 allowed_host_paths = []
 
@@ -80,7 +80,7 @@ mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false
 
-# Renew-on-access. Off by default — see server/README.md.
+# Renew-on-access. Off by default — see server/configuration.md.
 [renew_intent]
 enabled = false
 min_interval_seconds = 60

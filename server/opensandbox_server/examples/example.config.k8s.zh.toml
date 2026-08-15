@@ -36,7 +36,7 @@ execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd
 
 [storage]
 # 允许进行 bind mount 的宿主机路径前缀白名单。
-# 如果为空，则允许所有路径（不建议在生产环境使用）。
+# 如果为空，则拒绝所有 host bind mount。
 # 示例：allowed_host_paths = ["/data/opensandbox", "/tmp/sandbox"]
 allowed_host_paths = []
 
@@ -81,7 +81,7 @@ mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false
 
-# 按访问续期。默认关闭 — 见 server/README_zh.md。
+# 按访问续期。默认关闭 — 见 server/configuration.md。
 [renew_intent]
 enabled = false
 min_interval_seconds = 60

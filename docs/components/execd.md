@@ -239,6 +239,8 @@ OTLP metrics export is enabled when either endpoint is set:
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
 - `OTEL_EXPORTER_OTLP_ENDPOINT`
 
+When neither is set, execd falls back to exporting insecurely to `<HOST_IP>:4318` when `HOST_IP` (or `/etc/hostinfo`) contains a valid IP.
+
 ### Local Metrics Endpoints
 
 - `GET /metrics`: point-in-time host metrics snapshot

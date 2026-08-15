@@ -109,7 +109,6 @@ Do not manually set `CPU_CORES`, `RAM_SIZE`, or `DISK_SIZE` -- they are derived 
 | Port | Service |
 |------|---------|
 | 44772 | execd (sandbox execution API) |
-| 8080 | HTTP service |
 | 3389 | RDP (native Remote Desktop) |
 | 8006 | Web console (noVNC) |
 
