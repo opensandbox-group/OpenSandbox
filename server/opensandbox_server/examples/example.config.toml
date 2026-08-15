@@ -61,6 +61,12 @@ no_new_privileges = true
 apparmor_profile = ""
 # Limit process count to reduce host impact from fork bombs; set to null to disable
 pids_limit = 4096
+# Optional: environment variables injected into every sandbox container
+# (request env overrides same-named keys). Pair with sandbox_binds to make
+# every sandbox trust a private CA:
+# sandbox_env = { NODE_EXTRA_CA_CERTS = "/etc/ssl/private-ca/root-ca.crt" }
+# Optional: host bind mounts applied to every sandbox container (docker -v syntax)
+# sandbox_binds = ["/opt/certs/root-ca.crt:/etc/ssl/private-ca/root-ca.crt:ro"]
 # Seccomp profile: empty string uses Docker default; set to an absolute path for a custom profile
 seccomp_profile = ""
 

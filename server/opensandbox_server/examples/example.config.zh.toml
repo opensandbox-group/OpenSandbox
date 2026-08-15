@@ -59,6 +59,11 @@ no_new_privileges = true
 apparmor_profile = ""
 # Limit process count to reduce host impact from fork bombs; set to null to disable
 pids_limit = 4096
+# 可选:注入到每个沙箱容器的环境变量(创建请求中的同名键优先)。
+# 与 sandbox_binds 搭配可让所有沙箱信任私有 CA:
+# sandbox_env = { NODE_EXTRA_CA_CERTS = "/etc/ssl/private-ca/root-ca.crt" }
+# 可选:应用到每个沙箱容器的宿主机 bind 挂载(docker -v 语法)
+# sandbox_binds = ["/opt/certs/root-ca.crt:/etc/ssl/private-ca/root-ca.crt:ro"]
 # Seccomp profile: empty string uses Docker default; set to an absolute path for a custom profile
 seccomp_profile = ""
 

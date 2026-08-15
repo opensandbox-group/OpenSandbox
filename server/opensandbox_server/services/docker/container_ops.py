@@ -307,7 +307,8 @@ class DockerContainerOpsMixin:
         apply_access_renew_extend_seconds_to_mapping(labels, request.extensions)
         apply_extensions_to_mapping(labels, request.extensions)
 
-        env_dict = request.env or {}
+        # Config-level defaults apply to every sandbox; request keys win.
+        env_dict = {**(self.app_config.docker.sandbox_env or {}), **(request.env or {})}
         environment = []
         for key, value in env_dict.items():
             if value is None:

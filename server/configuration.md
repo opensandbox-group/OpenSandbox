@@ -111,6 +111,8 @@ Example files in this repository:
 | `no_new_privileges` | boolean | `true` | Sets `no-new-privileges` to block privilege escalation. |
 | `seccomp_profile` | string \| omitted | `null` | Seccomp profile name or **absolute path**; empty uses Docker default seccomp. |
 | `pids_limit` | integer \| null | `4096` | Max PIDs per sandbox container; set to **`null`** to disable the limit. |
+| `sandbox_env` | table | `{}` | Environment variables injected into **every** sandbox container; keys from a creation request override same-named keys. Docker-runtime counterpart of the Kubernetes pod template (e.g. `NODE_EXTRA_CA_CERTS` to trust a private CA, together with `sandbox_binds`). |
+| `sandbox_binds` | string[] | `[]` | Host bind mounts applied to **every** sandbox container, Docker `-v` syntax (`host:container[:mode]`); prepended to binds derived from a request's `volumes`. |
 | `port_range_min` | integer | `40000` | Lower bound of the host port range used by bridge-mode sandbox port allocation. Must be less than `port_range_max`. Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar). Narrow this range to match your firewall policy — e.g., 100 concurrent sandboxes ≈ 300 ports. |
 | `port_range_max` | integer | `60000` | Upper bound of the host port range. Range must span ≥ 100 ports for reliable allocation. |
 

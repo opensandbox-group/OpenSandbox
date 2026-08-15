@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from opensandbox_server.config import (
     AppConfig,
+    DockerConfig,
     EGRESS_MODE_DNS,
     EgressConfig,
     RuntimeConfig,
@@ -180,6 +181,55 @@ async def test_create_sandbox_applies_security_defaults(mock_docker):
     assert "no-new-privileges:true" in host_config.get("security_opt", [])
     assert host_config.get("cap_drop") == service.app_config.docker.drop_capabilities
     assert host_config.get("pids_limit") == service.app_config.docker.pids_limit
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_applies_config_sandbox_env_and_binds(mock_docker):
+    """docker.sandbox_env / docker.sandbox_binds apply to every sandbox; request env wins."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.create_host_config.return_value = {}
+    mock_client.api.create_container.return_value = {"Id": "cid"}
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    config = _app_config()
+    config.docker = DockerConfig(
+        sandbox_env={
+            "NODE_EXTRA_CA_CERTS": "/etc/ssl/private-ca/root-ca.crt",
+            "SHARED": "config",
+        },
+        sandbox_binds=["/opt/certs/root-ca.crt:/etc/ssl/private-ca/root-ca.crt:ro"],
+    )
+    service = DockerSandboxService(config=config)
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={"SHARED": "request"},
+        metadata={},
+        entrypoint=["python"],
+    )
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 40001),
+                "8080": ("0.0.0.0", 40002),
+            },
+        ),
+    ):
+        await service.create_sandbox(request)
+
+    environment = mock_client.api.create_container.call_args.kwargs["environment"]
+    assert "NODE_EXTRA_CA_CERTS=/etc/ssl/private-ca/root-ca.crt" in environment
+    assert "SHARED=request" in environment  # request overrides the config default
+    assert "SHARED=config" not in environment
+    binds = mock_client.api.create_host_config.call_args.kwargs.get("binds")
+    assert binds == ["/opt/certs/root-ca.crt:/etc/ssl/private-ca/root-ca.crt:ro"]
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")

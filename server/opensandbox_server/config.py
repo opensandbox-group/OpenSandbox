@@ -898,6 +898,23 @@ class DockerConfig(BaseModel):
         ge=1,
         description="Maximum number of processes allowed per sandbox container. Set to null to disable the limit.",
     )
+    sandbox_env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Environment variables injected into every sandbox container. Keys from a sandbox "
+            "creation request override same-named keys. Docker-runtime counterpart of the "
+            "Kubernetes pod template: useful for fleet-wide settings such as trusting a private "
+            "CA (e.g. NODE_EXTRA_CA_CERTS) together with sandbox_binds."
+        ),
+    )
+    sandbox_binds: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Host bind mounts applied to every sandbox container, in Docker -v syntax "
+            "(host_path:container_path[:mode]). Prepended to the binds derived from a request's "
+            "volumes. Useful for mounting a private CA certificate into all sandboxes."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_port_range(self) -> "DockerConfig":
