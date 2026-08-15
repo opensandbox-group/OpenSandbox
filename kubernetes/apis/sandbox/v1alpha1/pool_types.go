@@ -20,9 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // RecycleType defines the type of recycle policy.
 type RecycleType string
 
@@ -107,8 +104,8 @@ type UpdateStrategy struct {
 
 // PoolStatus defines the observed state of Pool.
 type PoolStatus struct {
-	// ObservedGeneration is the most recent generation observed for this BatchSandbox. It corresponds to the
-	// BatchSandbox's generation, which is updated on mutation by the API Server.
+	// ObservedGeneration is the most recent generation observed for this Pool.
+	// It corresponds to the Pool's generation, which is updated on mutation by the API Server.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// Revision is the latest version of pool
 	Revision string `json:"revision"`

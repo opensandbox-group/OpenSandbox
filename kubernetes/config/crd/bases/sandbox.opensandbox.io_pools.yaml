@@ -156,8 +156,8 @@ spec:
                 type: integer
               observedGeneration:
                 description: |-
-                  ObservedGeneration is the most recent generation observed for this BatchSandbox. It corresponds to the
-                  BatchSandbox's generation, which is updated on mutation by the API Server.
+                  ObservedGeneration is the most recent generation observed for this Pool. It corresponds to the
+                  Pool's generation, which is updated on mutation by the API Server.
                 format: int64
                 type: integer
               revision:

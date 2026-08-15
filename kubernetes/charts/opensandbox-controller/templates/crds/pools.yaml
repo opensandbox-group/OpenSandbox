@@ -36,6 +36,13 @@ spec:
       jsonPath: .status.available
       name: AVAILABLE
       type: integer
+    - description: The number of nodes updated to the latest revision.
+      jsonPath: .status.updated
+      name: UPDATED
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -158,8 +165,8 @@ spec:
                 type: integer
               observedGeneration:
                 description: |-
-                  ObservedGeneration is the most recent generation observed for this BatchSandbox. It corresponds to the
-                  BatchSandbox's generation, which is updated on mutation by the API Server.
+                  ObservedGeneration is the most recent generation observed for this Pool. It corresponds to the
+                  Pool's generation, which is updated on mutation by the API Server.
                 format: int64
                 type: integer
               revision:
@@ -167,6 +174,11 @@ spec:
                 type: string
               total:
                 description: Total is the total number of nodes in the pool.
+                format: int32
+                type: integer
+              updated:
+                description: Updated is the number of nodes that have been updated
+                  to the latest revision.
                 format: int32
                 type: integer
             required:
