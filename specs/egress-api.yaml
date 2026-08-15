@@ -65,6 +65,53 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [Policy]
+      summary: Replace the egress policy
+      description: |
+        Replace the currently enforced egress policy wholesale.
+
+        - An empty request body resets the policy to deny-all.
+        - An object body is parsed as a `NetworkPolicy`; an empty object or
+          `null` also resets the policy to deny-all.
+        - `PUT` behaves identically to `POST`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkPolicy'
+            examples:
+              reset-to-deny-all:
+                summary: Reset policy to deny-all (empty body)
+                value: {}
+              allow-pypi:
+                summary: Allow pypi.org, deny everything else
+                value:
+                  defaultAction: deny
+                  egress:
+                    - action: allow
+                      target: pypi.org
+      responses:
+        '200':
+          description: Policy replaced successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyStatusResponse'
+              examples:
+                replaced:
+                  summary: Policy replaced
+                  value:
+                    status: ok
+                    mode: deny_all
+                    enforcementMode: dns
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     patch:
       tags: [Policy]
       summary: Patch egress rules
@@ -372,7 +419,7 @@ components:
       description: |
         Egress network policy matching the sidecar `/policy` request body.
         If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
-        object or null results in allow-all behavior at startup.
+        object or null resets the policy to deny-all at startup.
       properties:
         defaultAction:
           type: string
@@ -394,8 +441,9 @@ components:
         target:
           type: string
           description: |
-            FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-            IP/CIDR not yet supported in the egress MVP.
+            FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IPv4/IPv6
+            address, or CIDR block (e.g., "10.96.0.0/12"). IP/CIDR targets are enforced
+            in nftables mode (`dns+nft`); in DNS-proxy mode they are not enforced.
       required: [action, target]
       additionalProperties: false
     CredentialVaultCreateRequest:

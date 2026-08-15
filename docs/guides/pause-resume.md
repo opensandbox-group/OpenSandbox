@@ -60,7 +60,7 @@ The sandbox transitions through both stable and intermediate states:
 | `Resuming` | Intermediate | Resume operation in progress. The controller is rewriting the sandbox template to the latest snapshot image and recreating the runtime |
 | `Failed` | Stable | Operation failed (check `reason` and `message` for details) |
 
-The Lifecycle API exposes only the coarse-grained sandbox states above. For detailed snapshot progress, inspect the internal `SandboxSnapshot` resource:
+The Lifecycle API exposes the sandbox states defined in the lifecycle spec (`Pending`, `Running`, `Pausing`, `Paused`, `Resuming`, `Stopping`, `Terminated`, `Failed`). For detailed snapshot progress, inspect the internal `SandboxSnapshot` resource:
 
 - `Pending`: snapshot request accepted, waiting to resolve source Pod / create commit Job
 - `Committing`: commit Job is running and pushing snapshot images
@@ -244,7 +244,7 @@ curl -X POST http://localhost:8080/v1/sandboxes/{sandbox_id}/pause \
 **Response:** `202 Accepted` with an empty body.
 
 The pause is asynchronous. The sandbox transitions through:
-`running` → `pausing` → `paused`
+`Running` → `Pausing` → `Paused`
 
 ### Check pause status
 
@@ -252,7 +252,7 @@ The pause is asynchronous. The sandbox transitions through:
 curl http://localhost:8080/v1/sandboxes/{sandbox_id}
 ```
 
-When `status` is `paused`, the filesystem has been committed and cluster resources have been released.
+When `status` is `Paused`, the filesystem has been committed and cluster resources have been released.
 
 ### Resume a sandbox
 
@@ -264,7 +264,7 @@ curl -X POST http://localhost:8080/v1/sandboxes/{sandbox_id}/resume \
 **Response:** `202 Accepted` with an empty body.
 
 The sandbox transitions through:
-`paused` → `resuming` → `running`
+`Paused` → `Resuming` → `Running`
 
 ### Multiple pause/resume cycles
 

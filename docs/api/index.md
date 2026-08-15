@@ -18,7 +18,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 **Core Features:**
 - **Sandbox Management**: Create, list, query, and delete sandbox instances with metadata filters and pagination
 - **State Control**: Pause and resume sandbox execution
-- **Lifecycle States**: Supports transitions across Pending -> Running -> Pausing -> Paused -> Stopping -> Terminated, and error handling with `Failed`
+- **Lifecycle States**: Supports transitions across Pending -> Running -> Pausing -> Paused -> Resuming -> Stopping -> Terminated, and error handling with `Failed`
 - **Resource & Runtime Configuration**: Specify CPU/memory/GPU resource limits, image startup `entrypoint`, optional `secureAccess`, environment variables, and opaque `extensions`
 - **Image Support**: Create sandboxes from public or private registries, including registry auth
 - **Timeout Management**: Optional `timeout` on creation (omit or set to `null` to disable automatic expiration) with explicit renewal via API
@@ -39,6 +39,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `POST /sandboxes/{sandboxId}/renew-expiration` - Renew sandbox expiration (TTL)
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
 - `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint for a service port
+- `POST /metrics/events` - Report SDK-side metrics events (e.g. sandbox creation latency)
 
 **Authentication:**
 - HTTP Header: `OPEN-SANDBOX-API-KEY: your-api-key`
@@ -51,8 +52,8 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 Defines best-effort troubleshooting descriptors for sandbox diagnostic logs and events. The descriptors either embed plain-text diagnostic content inline or return a download URL for the content. This spec does not define a structured audit or observability model.
 
 **Main Endpoints (base path `/v1`):**
-- `GET /sandboxes/{sandboxId}/diagnostics/logs` - Retrieve a diagnostic log content descriptor for an optional scope
-- `GET /sandboxes/{sandboxId}/diagnostics/events` - Retrieve a diagnostic event content descriptor for an optional scope
+- `GET /sandboxes/{sandboxId}/diagnostics/logs` - Retrieve a diagnostic log content descriptor for the requested scope
+- `GET /sandboxes/{sandboxId}/diagnostics/events` - Retrieve a diagnostic event content descriptor for the requested scope
 
 **Authentication:**
 - HTTP Header: `OPEN-SANDBOX-API-KEY: your-api-key`
@@ -62,7 +63,7 @@ Defines best-effort troubleshooting descriptors for sandbox diagnostic logs and 
 
 **Code Execution API Inside Sandbox**
 
-Defines interfaces for executing code, commands, and file operations within sandbox environments, providing complete code interpreter and filesystem management capabilities. All endpoints require the `X-EXECD-ACCESS-TOKEN` header.
+Defines interfaces for executing code, commands, and file operations within sandbox environments, providing complete code interpreter and filesystem management capabilities. Endpoints require the `X-EXECD-ACCESS-TOKEN` header when the server is started with `--access-token` (optional by default).
 
 **Core Features:**
 - **Code Execution**: Stateful code execution supporting Python, JavaScript, and other languages with context lifecycle management
@@ -117,10 +118,13 @@ Defines interfaces for executing code, commands, and file operations within sand
 
 **Isolated Execution (base path `/v1/isolated`):**
 - `POST /session` - Create an isolated bash session
+- `GET /sessions` - List isolated sessions
 - `GET /capabilities` - Get isolator capabilities
 - `GET /session/{sessionId}` - Get isolated session state
 - `DELETE /session/{sessionId}` - Delete an isolated session
 - `POST /session/{sessionId}/run` - Run code in an isolated session (SSE streaming)
+- `GET /session/{sessionId}/runs/{runId}` - Get a background run result
+- `GET /session/{sessionId}/runs/{runId}/logs` - Fetch accumulated run output
 - `GET /session/{sessionId}/diff` - Download upper directory diff
 - `POST /session/{sessionId}/commit` - Commit upper changes to workspace
 - `GET /session/{sessionId}/files/info` - Get file information
@@ -151,8 +155,15 @@ the sandbox endpoint for the egress port and then calling the sidecar endpoint d
 
 **Main Endpoints:**
 - `GET /policy` - Get the current egress policy
+- `POST` / `PUT` `/policy` - Replace the current egress policy (empty body resets to deny-all)
 - `PATCH /policy` - Merge new egress rules into the current policy
 - `DELETE /policy` - Remove specific egress rules from the current policy by target
+- `POST /credential-vault` - Create a sandbox-local Credential Vault
+- `GET /credential-vault` - Fetch the current vault state
+- `PATCH /credential-vault` - Mutate vault credentials/bindings
+- `DELETE /credential-vault` - Delete the vault
+- `GET /credential-vault/credentials[/{name}]` - Read individual credentials
+- `GET /credential-vault/bindings[/{name}]` - Read individual bindings
 
 ## Technical Features
 
@@ -160,6 +171,7 @@ the sandbox endpoint for the egress port and then calling the sidecar endpoint d
 
 Code execution and command execution interfaces use SSE for real-time streaming output, supporting the following event types:
 - `init` - Initialization event
+- `ping` - Keep-alive event
 - `status` - Status update
 - `stdout` / `stderr` - Standard output/error streams
 - `result` - Execution result

@@ -74,8 +74,8 @@ paths:
       parameters:
         - name: language
           in: query
-          required: true
-          description: Filter contexts by execution runtime (python, bash, java, etc.)
+          required: false
+          description: Filter contexts by execution runtime (python, bash, java, etc.). When omitted, all contexts are returned.
           schema:
             type: string
           example: python
@@ -511,10 +511,12 @@ paths:
         Returns stdout and stderr for a background (detached) command by command ID.
         Foreground commands should be consumed via SSE; this endpoint is intended for
         polling logs of background commands. Supports incremental reads similar to a file seek:
-        pass a starting line via query to fetch output after that line and receive the latest
-        tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-        Response body is plain text so it can be rendered directly in browsers; the latest line index
-        is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+        pass the byte offset returned by the previous response (via `EXECD-COMMANDS-TAIL-CURSOR`)
+        to fetch output after that position and receive the latest tail cursor for the next poll.
+        When no cursor is provided, the full logs are returned.
+        Response body is plain text so it can be rendered directly in browsers; the latest
+        byte offset is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent
+        incremental requests.
       operationId: getBackgroundCommandLogs
       tags:
         - Command
@@ -530,10 +532,11 @@ paths:
           in: query
           required: false
           description: |
-            Optional 0-based line cursor (behaves like a file seek). When provided, only
-            stdout/stderr lines after this line are returned. The response includes the
-            latest line index (`cursor`) so the client can request incremental output
-            on subsequent calls. If omitted, the full log is returned.
+            Optional 0-based byte offset into the combined stdout/stderr output file
+            (behaves like a file seek). When provided, only output after this offset is
+            returned. The response header includes the latest byte offset (`cursor`) so the
+            client can request incremental output on subsequent calls. If omitted, the full
+            log is returned.
           schema:
             type: integer
             format: int64
@@ -552,7 +555,7 @@ paths:
                 warn: something on stderr
           headers:
             EXECD-COMMANDS-TAIL-CURSOR:
-              description: Highest available 0-based line index after applying the request cursor (use as the next cursor for incremental reads)
+              description: Highest available byte offset after applying the request cursor (use as the next cursor for incremental reads)
               schema:
                 type: integer
                 format: int64
@@ -1808,8 +1811,9 @@ components:
       in: header
       name: X-EXECD-ACCESS-TOKEN
       description: |
-        Access token for API authentication. All requests must include this header
-        with a valid token. The token is configured during server initialization.
+        Optional shared access token for API authentication. Requests must include this
+        header with a valid token when the server is started with `--access-token`.
+        When no token is configured (the default), the header is not enforced.
 
   schemas:
     CreateSessionRequest:
@@ -2170,7 +2174,7 @@ components:
         cpu_count:
           type: number
           format: float
-          description: Number of CPU cores
+          description: Number of CPU cores visible to the process (GOMAXPROCS, may reflect cgroup CPU quota)
           example: 4.0
         cpu_used_pct:
           type: number
@@ -2426,7 +2430,7 @@ components:
       properties:
         status:
           type: string
-          enum: ["active", "dead", "destroyed"]
+          enum: ["active", "dead"]
         created_at:
           type: string
           format: date-time
@@ -2479,7 +2483,7 @@ components:
           format: uuid
         status:
           type: string
-          enum: ["active", "dead", "destroyed"]
+          enum: ["active", "dead"]
         created_at:
           type: string
           format: date-time
