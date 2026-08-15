@@ -31,7 +31,7 @@ opensandbox-node-agent:
   enabled: false
 
 # Global values (passed to both sub-charts)
-global:
+global: {}
   # Example: shared image pull secrets
   # imagePullSecrets:
   #   - name: my-registry-secret

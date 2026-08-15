@@ -1,0 +1,236 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenSandbox Server Helm values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "namespaceOverride": {
+      "type": "string"
+    },
+    "imagePullSecrets": {
+      "$ref": "#/definitions/localObjectReferences"
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "$ref": "#/definitions/kubernetesObjectArray"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resources": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "tolerations": {
+          "$ref": "#/definitions/kubernetesObjectArray"
+        },
+        "affinity": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "volumeMounts": {
+          "$ref": "#/definitions/kubernetesObjectArray"
+        },
+        "volumes": {
+          "$ref": "#/definitions/kubernetesObjectArray"
+        },
+        "nodeSelector": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "podSecurityContext": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "containerSecurityContext": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "podAnnotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "podLabels": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "priorityClassName": {
+          "type": "string"
+        },
+        "topologySpreadConstraints": {
+          "$ref": "#/definitions/kubernetesObjectArray"
+        },
+        "gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "host": {
+              "type": "string"
+            },
+            "gatewayRouteMode": {
+              "type": "string",
+              "enum": [
+                "header",
+                "uri"
+              ]
+            },
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "replicaCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "dataplaneNamespace": {
+              "type": "string"
+            },
+            "providerType": {
+              "type": "string"
+            },
+            "logLevel": {
+              "type": "string"
+            },
+            "env": {
+              "$ref": "#/definitions/kubernetesObjectArray"
+            },
+            "resources": {
+              "$ref": "#/definitions/kubernetesObject"
+            },
+            "secureAccess": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "activeKey": {
+                  "type": "string",
+                  "pattern": "^$|^[0-9a-z]$"
+                },
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "key_id",
+                      "key"
+                    ],
+                    "properties": {
+                      "key_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-z]$"
+                      },
+                      "key": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "nodeSelector": {
+              "$ref": "#/definitions/stringMap"
+            },
+            "podSecurityContext": {
+              "$ref": "#/definitions/kubernetesObject"
+            },
+            "containerSecurityContext": {
+              "$ref": "#/definitions/kubernetesObject"
+            },
+            "podAnnotations": {
+              "$ref": "#/definitions/stringMap"
+            },
+            "podLabels": {
+              "$ref": "#/definitions/stringMap"
+            },
+            "priorityClassName": {
+              "type": "string"
+            },
+            "topologySpreadConstraints": {
+              "$ref": "#/definitions/kubernetesObjectArray"
+            },
+            "tolerations": {
+              "$ref": "#/definitions/kubernetesObjectArray"
+            },
+            "affinity": {
+              "$ref": "#/definitions/kubernetesObject"
+            }
+          }
+        }
+      }
+    },
+    "configToml": {
+      "type": "string"
+    },
+    "global": {
+      "$ref": "#/definitions/kubernetesObject"
+    }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        },
+        "tag": {
+          "type": "string"
+        }
+      }
+    },
+    "kubernetesObject": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "kubernetesObjectArray": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/kubernetesObject"
+      }
+    },
+    "localObjectReferences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}

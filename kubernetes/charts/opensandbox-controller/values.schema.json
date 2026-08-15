@@ -1,0 +1,284 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenSandbox Controller Helm values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "namespaceOverride": {
+      "type": "string"
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resources": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "logLevel": {
+          "type": "string"
+        },
+        "kubeClient": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "qps": {
+              "type": "number",
+              "minimum": 0
+            },
+            "burst": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "imageCommitterImage": {
+              "type": "string"
+            },
+            "containerdSocketPath": {
+              "type": "string"
+            },
+            "commitJobTimeout": {
+              "type": "string"
+            },
+            "registry": {
+              "type": "string"
+            },
+            "registryInsecure": {
+              "type": "boolean"
+            },
+            "snapshotPushSecret": {
+              "type": "string"
+            },
+            "imageCommitterPullSecret": {
+              "type": "string"
+            },
+            "resumePullSecret": {
+              "type": "string"
+            }
+          }
+        },
+        "leaderElection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "livenessProbe": {
+          "$ref": "#/definitions/probe"
+        },
+        "readinessProbe": {
+          "$ref": "#/definitions/probe"
+        },
+        "nodeSelector": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "tolerations": {
+          "$ref": "#/definitions/kubernetesObjectArray"
+        },
+        "affinity": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "podSecurityContext": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "containerSecurityContext": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "podLabels": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "podAnnotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "priorityClassName": {
+          "type": "string"
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "$ref": "#/definitions/localObjectReferences"
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        }
+      }
+    },
+    "crds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "install": {
+          "type": "boolean"
+        },
+        "keep": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "$ref": "#/definitions/stringMap"
+        }
+      }
+    },
+    "extraEnv": {
+      "$ref": "#/definitions/kubernetesObjectArray"
+    },
+    "extraVolumes": {
+      "$ref": "#/definitions/kubernetesObjectArray"
+    },
+    "extraVolumeMounts": {
+      "$ref": "#/definitions/kubernetesObjectArray"
+    },
+    "extraInitContainers": {
+      "$ref": "#/definitions/kubernetesObjectArray"
+    },
+    "extraContainers": {
+      "$ref": "#/definitions/kubernetesObjectArray"
+    },
+    "global": {
+      "$ref": "#/definitions/kubernetesObject"
+    }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        },
+        "tag": {
+          "type": "string"
+        }
+      }
+    },
+    "kubernetesObject": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "kubernetesObjectArray": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/kubernetesObject"
+      }
+    },
+    "localObjectReferences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "httpGet": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "port": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ]
+            }
+          }
+        },
+        "initialDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "successThreshold": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}
