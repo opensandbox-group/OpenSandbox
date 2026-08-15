@@ -398,11 +398,14 @@ class TestK8sClient:
         c = self._make_client(k8s_runtime_config)
         body = {"metadata": {"ownerReferences": [{"name": "x"}]}}
         c.patch_pvc("ns", "pvc-a", body)
-        c._core_v1_api.patch_namespaced_persistent_volume_claim.assert_called_once_with(
-            name="pvc-a",
-            namespace="ns",
+        c._core_v1_api.api_client.call_api.assert_called_once_with(
+            "/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}",
+            "PATCH",
+            path_params={"name": "pvc-a", "namespace": "ns"},
+            header_params={"Content-Type": "application/strategic-merge-patch+json"},
             body=body,
-            _content_type="application/strategic-merge-patch+json",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
         )
 
     def test_create_secret_delegates_to_api(self, k8s_runtime_config):

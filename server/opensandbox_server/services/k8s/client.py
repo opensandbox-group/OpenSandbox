@@ -367,14 +367,24 @@ class K8sClient:
         default (first entry in the generated content-type list) which would
         reject our merge-shaped body. Force strategic-merge so list fields
         like ``ownerReferences`` merge by key.
+
+        Uses ``api_client.call_api`` instead of the generated method because
+        the deployed kubernetes-client (pre-OpenAPI-generator) does not
+        support ``_headers`` or ``_content_type`` kwargs on the generated
+        ``patch_namespaced_persistent_volume_claim``.  ``call_api`` accepts
+        ``header_params`` in all versions.
         """
         if self._write_limiter:
             self._write_limiter.acquire()
-        return self.get_core_v1_api().patch_namespaced_persistent_volume_claim(
-            name=name,
-            namespace=namespace,
+        api = self.get_core_v1_api()
+        return api.api_client.call_api(
+            "/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}",
+            "PATCH",
+            path_params={"name": name, "namespace": namespace},
+            header_params={"Content-Type": "application/strategic-merge-patch+json"},
             body=body,
-            _content_type="application/strategic-merge-patch+json",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
         )
 
     # ------------------------------------------------------------------
