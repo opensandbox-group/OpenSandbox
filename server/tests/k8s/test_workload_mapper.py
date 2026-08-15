@@ -76,7 +76,6 @@ class TestExtractPlatformFromWorkload:
             },
             "status": {"replicas": 1, "ready": 1, "allocated": 1},
         }
-        # Should return None (no platform info), not raise.
         assert _extract_platform_from_workload(workload) is None
 
     def test_pool_mode_workload_without_template_key_returns_none(self):

@@ -115,9 +115,7 @@ def test_parse_timestamp_defaults_on_invalid():
     assert future.year == 2024
 
 def test_env_allows_empty_string_and_skips_none():
-    # Use base config helper
     DockerSandboxService(config=_app_config())
-    # Build request with mixed env values
     req = CreateSandboxRequest(
         image=ImageSpec(uri="python:3.11"),
         timeout=120,
@@ -126,7 +124,6 @@ def test_env_allows_empty_string_and_skips_none():
         metadata={},
         entrypoint=["python"],
     )
-    # Validate env handling
     env_dict = req.env or {}
     environment = []
     for key, value in env_dict.items():
@@ -135,8 +132,7 @@ def test_env_allows_empty_string_and_skips_none():
         environment.append(f"{key}={value}")
 
     assert "FOO=bar" in environment
-    assert "EMPTY=" in environment  # empty string preserved
-    # None should be skipped
+    assert "EMPTY=" in environment
     assert all(not item.startswith("NONE=") for item in environment)
 
 @pytest.mark.asyncio
@@ -843,17 +839,14 @@ async def test_egress_sidecar_injection_and_capabilities(mock_docker):
     sidecar_kwargs = sidecar_call.kwargs
     main_kwargs = main_call.kwargs
 
-    # Sidecar host config should have NET_ADMIN and port bindings
     assert "NET_ADMIN" in sidecar_kwargs["host_config"]["cap_add"]
     assert "44772" in sidecar_kwargs["host_config"]["port_bindings"]
     assert "8080" in sidecar_kwargs["host_config"]["port_bindings"]
 
-    # Main container should share sidecar netns, drop NET_ADMIN, and have no port bindings
     assert main_kwargs["host_config"]["network_mode"] == "container:sidecar-id"
     assert "NET_ADMIN" in set(main_kwargs["host_config"].get("cap_drop") or [])
     assert "port_bindings" not in main_kwargs["host_config"]
 
-    # Main container labels should carry host port info
     labels = main_kwargs["labels"]
     assert labels.get("opensandbox.io/embedding-proxy-port")
     assert labels.get("opensandbox.io/http-port")
@@ -3172,7 +3165,6 @@ class TestDockerVolumeValidation:
 
         assert response.status.state == "Running"
 
-        # Verify named volume bind was passed to create_host_config
         host_config_call = mock_client.api.create_host_config.call_args
         assert "binds" in host_config_call.kwargs
         binds = host_config_call.kwargs["binds"]
@@ -3483,7 +3475,6 @@ class TestDockerVolumeValidation:
             ):
                 await service.create_sandbox(request)
 
-            # Verify binds were passed to create_host_config
             host_config_call = mock_client.api.create_host_config.call_args
             assert "binds" in host_config_call.kwargs
             binds = host_config_call.kwargs["binds"]
@@ -3550,7 +3541,6 @@ class TestDockerVolumeValidation:
             cfg = _app_config()
             cfg.storage = StorageConfig(allowed_host_paths=[tmpdir])
             service = DockerSandboxService(config=cfg)
-            # Create the subPath directory
             sub_dir = os.path.join(tmpdir, "task-001")
             os.makedirs(sub_dir)
 
@@ -3699,7 +3689,6 @@ class TestDockerVolumeValidation:
         mock_client.containers.get.return_value = MagicMock()
         mock_docker.from_env.return_value = mock_client
 
-        # Default config has storage.allowed_host_paths = []
         cfg = _app_config()
         assert cfg.storage.allowed_host_paths == []
         service = DockerSandboxService(config=cfg)

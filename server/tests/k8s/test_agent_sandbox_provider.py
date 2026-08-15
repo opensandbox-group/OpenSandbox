@@ -740,8 +740,6 @@ spec:
 
 
 class TestAgentSandboxProviderExecdInit:
-    """AgentSandboxProvider execd init container resource tests"""
-
     def test_init_container_has_no_resources_when_not_configured(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
@@ -803,8 +801,6 @@ class TestAgentSandboxProviderExecdInit:
 
 
 class TestAgentSandboxProviderEgress:
-    """AgentSandboxProvider egress sidecar tests"""
-
     def test_create_workload_without_network_policy_no_sidecar(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
@@ -831,10 +827,8 @@ class TestAgentSandboxProviderEgress:
         pod_spec = body["spec"]["podTemplate"]["spec"]
         containers = pod_spec["containers"]
 
-        # Should only have main container
         assert len(containers) == 1
         assert containers[0]["name"] == "sandbox"
-        # Should not have securityContext with sysctls
         assert "securityContext" not in pod_spec or "sysctls" not in pod_spec.get(
             "securityContext", {}
         )
@@ -873,15 +867,12 @@ class TestAgentSandboxProviderEgress:
         pod_spec = body["spec"]["podTemplate"]["spec"]
         containers = pod_spec["containers"]
 
-        # Should have both main container and sidecar
         assert len(containers) == 2
 
-        # Find sidecar container
         sidecar = next((c for c in containers if c["name"] == "egress"), None)
         assert sidecar is not None
         assert sidecar["image"] == "opensandbox/egress:v1.1.6"
 
-        # Verify sidecar has environment variable
         env_vars = {e["name"]: e["value"] for e in sidecar.get("env", [])}
         assert "OPENSANDBOX_EGRESS_RULES" in env_vars
         assert env_vars["OPENSANDBOX_EGRESS_MODE"] == EGRESS_MODE_DNS
@@ -1102,11 +1093,9 @@ class TestAgentSandboxProviderEgress:
         pod_spec = body["spec"]["podTemplate"]["spec"]
         containers = pod_spec["containers"]
 
-        # Find main container
         main_container = next((c for c in containers if c["name"] == "sandbox"), None)
         assert main_container is not None
 
-        # Verify main container has securityContext
         assert "securityContext" in main_container
         assert "capabilities" in main_container["securityContext"]
         assert "drop" in main_container["securityContext"]["capabilities"]
@@ -1142,7 +1131,6 @@ class TestAgentSandboxProviderEgress:
         pod_spec = body["spec"]["podTemplate"]["spec"]
         containers = pod_spec["containers"]
 
-        # Should only have main container
         assert len(containers) == 1
         assert containers[0]["name"] == "sandbox"
 
@@ -1185,7 +1173,6 @@ class TestAgentSandboxProviderEgress:
         env_vars = {e["name"]: e["value"] for e in sidecar.get("env", [])}
         assert "OPENSANDBOX_EGRESS_RULES" in env_vars
 
-        # Verify the environment variable contains valid JSON with network policy
         import json
 
         policy_json = json.loads(env_vars["OPENSANDBOX_EGRESS_RULES"])
@@ -1221,5 +1208,4 @@ class TestAgentSandboxProviderEgress:
         containers = pod_spec["containers"]
 
         main_container = containers[0]
-        # Main container should not have securityContext when no network policy
         assert "securityContext" not in main_container

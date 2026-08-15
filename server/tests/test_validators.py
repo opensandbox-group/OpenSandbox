@@ -508,7 +508,6 @@ class TestEnsureVolumesValid:
         """Invalid volume name should be rejected by Pydantic pattern validation."""
         from pydantic import ValidationError
 
-        # Pydantic validates the pattern before our validators run
         with pytest.raises(ValidationError) as exc_info:
             Volume(
                 name="Invalid_Name",  # Invalid: uppercase and underscore
@@ -522,7 +521,6 @@ class TestEnsureVolumesValid:
         """Invalid mount path should be rejected by Pydantic pattern validation."""
         from pydantic import ValidationError
 
-        # Pydantic validates the pattern before our validators run
         with pytest.raises(ValidationError) as exc_info:
             Volume(
                 name="workdir",
@@ -632,7 +630,6 @@ class TestEnsureVolumesValid:
         """Invalid PVC name should be rejected by Pydantic pattern validation."""
         from pydantic import ValidationError
 
-        # Pydantic validates the pattern before our validators run
         with pytest.raises(ValidationError) as exc_info:
             PVC(claim_name="Invalid_PVC")  # Invalid: uppercase and underscore
         assert "claim_name" in str(exc_info.value)

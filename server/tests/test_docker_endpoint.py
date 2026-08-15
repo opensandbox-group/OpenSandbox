@@ -26,7 +26,6 @@ from opensandbox_server.config import AppConfig, RuntimeConfig, DockerConfig, Se
 @pytest.fixture
 def mock_docker_service():
     """Create a DockerSandboxService with mocked docker client."""
-    # Setup base config
     config = AppConfig(
         server=ServerConfig(port=8080, host="0.0.0.0"),
         runtime=RuntimeConfig(type="docker", execd_image="test/execd:latest"),
@@ -38,7 +37,6 @@ def mock_docker_service():
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
 
-        # Initialize service
         service = DockerSandboxService(config=config)
         # Inject the mock client directly to ensure we control it
         service.docker_client = mock_client

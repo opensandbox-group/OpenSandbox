@@ -124,7 +124,6 @@ class TestWorkloadInformerUpdateCache:
         """update_cache silently ignores objects that lack a metadata.name."""
         informer = _make_informer()
         informer.update_cache({"metadata": {}})
-        # Cache remains empty — no exception raised
         assert informer._cache == {}
 
     def test_update_cache_updates_resource_version(self):

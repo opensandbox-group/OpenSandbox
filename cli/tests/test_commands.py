@@ -72,7 +72,7 @@ def _build_mock_client_context(
     ctx.make_output.side_effect = _make_output
     ctx.get_manager.return_value = manager or MagicMock()
     ctx.connect_sandbox.return_value = sandbox or MagicMock()
-    ctx.resolve_sandbox_id.side_effect = lambda prefix: prefix  # passthrough
+    ctx.resolve_sandbox_id.side_effect = lambda prefix: prefix
     ctx.connection_config = MagicMock()
     ctx.close = MagicMock()
     return ctx

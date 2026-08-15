@@ -622,7 +622,6 @@ def test_docker_runtime_rejects_gateway_ingress():
                 ),
             ),
         )
-    # direct remains valid
     app_cfg = AppConfig(
         server=server_cfg,
         runtime=runtime_cfg,
@@ -911,26 +910,21 @@ def test_log_config_resolved_file_path():
     cfg = LogConfig(file_enabled=False)
     assert cfg.resolved_file_path() is None
 
-    # file_enabled=True without file_path uses default
     cfg = LogConfig(file_enabled=True)
     assert cfg.resolved_file_path() == LogConfig.DEFAULT_FILE_PATH
 
-    # file_enabled=True with file_path uses custom path
     cfg = LogConfig(file_enabled=True, file_path="/custom/path.log")
     assert cfg.resolved_file_path() == "/custom/path.log"
 
 
 def test_log_config_resolved_access_file_path():
     """resolved_access_file_path() should return default path when file_enabled."""
-    # file_enabled=False always returns None
     cfg = LogConfig(file_enabled=False, access_file_path="/path/access.log")
     assert cfg.resolved_access_file_path() is None
 
-    # file_enabled=True without access_file_path returns default path
     cfg = LogConfig(file_enabled=True)
     assert cfg.resolved_access_file_path() == LogConfig.DEFAULT_ACCESS_FILE_PATH
 
-    # file_enabled=True with access_file_path returns the custom path
     cfg = LogConfig(file_enabled=True, access_file_path="/custom/access.log")
     assert cfg.resolved_access_file_path() == "/custom/access.log"
 
@@ -1103,7 +1097,6 @@ def test_load_config_log_file_enabled(tmp_path, monkeypatch):
     assert loaded.log.file_enabled is True
     assert loaded.log.file_path is None  # not set, uses default
     assert loaded.log.access_file_path is None
-    # resolved_* methods should return default paths
     assert loaded.log.resolved_file_path() == LogConfig.DEFAULT_FILE_PATH
     assert loaded.log.resolved_access_file_path() == LogConfig.DEFAULT_ACCESS_FILE_PATH
 
