@@ -46,7 +46,7 @@ type ContainerSnapshot struct {
 	ContainerName string `json:"containerName"`
 	// ImageURI is the snapshot image URI for this container.
 	ImageURI string `json:"imageUri"`
-	// ImageDigest is the digest of the pushed snapshot image.
+	// ImageDigest is the config digest of the pushed snapshot image.
 	// +optional
 	ImageDigest string `json:"imageDigest,omitempty"`
 }

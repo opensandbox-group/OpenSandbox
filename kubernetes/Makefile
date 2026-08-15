@@ -54,7 +54,7 @@ OPERATOR_SDK_VERSION ?= v1.42.0
 CONTROLLER_IMG ?= controller:dev
 # TASK_EXECUTOR_IMG defines the image for the task-executor service.
 TASK_EXECUTOR_IMG ?= task-executor:dev
-# IMAGE_COMMITTER_IMG defines the image for the image-committer service.
+# IMAGE_COMMITTER_IMG defines the image for the default image-committer service.
 IMAGE_COMMITTER_IMG ?= image-committer:dev
 # SNAPSHOT_REGISTRY defines the OCI registry used by the controller for snapshot images.
 SNAPSHOT_REGISTRY ?= docker-registry.default.svc.cluster.local:5000

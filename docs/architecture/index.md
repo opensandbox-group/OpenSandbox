@@ -160,7 +160,7 @@ Header-routed ingress endpoints include `OpenSandbox-Ingress-To` in their endpoi
 When the endpoint is rewritten to a server-proxied URL, the server removes only this
 ingress routing header and preserves other required endpoint headers.
 
-The server proxy supports HTTP and WebSocket traffic and is also integrated with optional renew-on-access behavior. For HTTP responses, it strips hop-by-hop headers and the backend `Server` header while preserving an origin `Date`; the server adds a current `Date` only when the response does not already contain one.
+The server proxy supports HTTP and WebSocket traffic and is also integrated with optional renew-on-access behavior. For HTTP responses, it strips hop-by-hop headers and the backend `Server` header while preserving an origin `Date`; the server adds a current `Date` only when the response does not already contain one. A root-relative `Location` value that starts with a single `/` is rebased under the same sandbox proxy route, while absolute URLs, network-path references (`//host/path`), and ordinary path-relative values are forwarded unchanged.
 
 ## 4. Runtime Backends
 

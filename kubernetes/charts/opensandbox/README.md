@@ -70,6 +70,18 @@ opensandbox-controller:
       registry: my-registry/snapshots
       registryInsecure: false
       snapshotPushSecret: registry-snapshot-push-secret
+      imageCommitterPodTemplate:
+        metadata:
+          labels:
+            identity.example/use: "true"
+        spec:
+          serviceAccountName: snapshot-committer
+          containers:
+            - name: commit
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
       resumePullSecret: registry-pull-secret
 
 opensandbox-server:

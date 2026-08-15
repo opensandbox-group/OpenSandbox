@@ -20,6 +20,7 @@ import hmac
 import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import Optional
+from urllib.parse import urlsplit
 
 import anyio
 import httpx
@@ -168,6 +169,30 @@ def _set_forwarded_headers(
         headers["X-Forwarded-Host"] = inbound_host
     if request.client:
         headers["X-Forwarded-For"] = request.client.host
+
+
+def _rewrite_proxy_location(
+    location: str,
+    request: Request,
+    sandbox_id: str,
+    port: int,
+) -> str:
+    """Keep root-relative redirects inside the current sandbox proxy route."""
+    if not location.startswith("/") or location.startswith("//"):
+        return location
+
+    proxy_suffix = f"/sandboxes/{sandbox_id}/proxy/{port}"
+    eip = (lifecycle.get_config().server.eip or "").strip().rstrip("/")
+    if eip:
+        external_url = eip if "://" in eip else f"//{eip}"
+        external_prefix = urlsplit(external_url).path.rstrip("/")
+        return f"{external_prefix}{proxy_suffix}{location}"
+
+    proxy_start = request.url.path.find(proxy_suffix)
+    if proxy_start < 0:
+        return location
+    proxy_path = request.url.path[: proxy_start + len(proxy_suffix)]
+    return f"{proxy_path}{location}"
 
 
 def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None:
@@ -337,7 +362,11 @@ async def _proxy_http_request(
                 )
             response_header_exclusions = hop_by_hop | SERVER_GENERATED_RESPONSE_HEADERS
             response_headers = {
-                key: value
+                key: (
+                    _rewrite_proxy_location(value, request, sandbox_id, port)
+                    if key.lower() == "location"
+                    else value
+                )
                 for key, value in resp.headers.items()
                 if key.lower() not in response_header_exclusions
             }

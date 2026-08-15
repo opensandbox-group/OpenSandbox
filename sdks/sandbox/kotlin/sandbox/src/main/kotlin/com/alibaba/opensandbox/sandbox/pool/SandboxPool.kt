@@ -811,7 +811,10 @@ class SandboxPool internal constructor(
 
         private fun complete() {
             if (completed.compareAndSet(false, true)) {
-                run?.let { endOperation(it) }
+                run?.let {
+                    endOperation(it)
+                    requestReconcile(it)
+                }
             }
         }
     }
