@@ -12,7 +12,7 @@ info:
 
     A sandbox follows this lifecycle:
 
-    1. **Creation** → Sandbox is provisioned asynchronously (`Pending` → `Running`)
+    1. **Creation** → Sandbox is provisioned and enters `Running` state (creation completes before the API responds)
     2. **Execution** → Sandbox is running and ready to accept requests
     3. **Pause** (optional) → `Pausing` → `Paused` (asynchronous process)
     4. **Resume** (optional) → `Resuming` → `Running` (asynchronous process)
@@ -245,11 +245,11 @@ paths:
       responses:
         '202':
           description: |
-            Sandbox creation accepted and provisioning started asynchronously.
+            Sandbox created and provisioned successfully.
 
             The returned sandbox includes:
             - `id`: Unique sandbox identifier
-            - `status.state`: one of `Pending` (provisioning in progress) or `Running` (already provisioned)
+            - `status.state: "Running"` (provisioning completed synchronously)
             - `status.reason` and `status.message` indicating current state
             - `metadata`, `expiresAt`, `createdAt`: Core sandbox information
 

@@ -65,18 +65,17 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
-    post:
+    post: &replace-policy
       tags: [Policy]
       summary: Replace the egress policy
       description: |
         Replace the currently enforced egress policy wholesale.
 
-        - An empty request body resets the policy to deny-all.
+        - An omitted or empty request body resets the policy to deny-all.
         - An object body is parsed as a `NetworkPolicy`; an empty object or
           `null` also resets the policy to deny-all.
-        - `PUT` behaves identically to `POST`.
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
@@ -112,6 +111,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+    put:
+      <<: *replace-policy
+      summary: Replace the egress policy
+      description: |
+        Identical to `POST /policy`: replace the currently enforced egress policy
+        wholesale. An omitted or empty request body resets the policy to deny-all.
     patch:
       tags: [Policy]
       summary: Patch egress rules

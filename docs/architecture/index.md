@@ -307,7 +307,7 @@ Client / SDK / CLI / MCP
   -> sandbox reaches Running or reports Failed with status reason/message
 ```
 
-Creation is asynchronous from the API perspective. Clients should poll `GET /v1/sandboxes/{sandboxId}` or use SDK readiness helpers.
+Creation completes before the API responds: the create call returns `202` only after the sandbox reaches `Running` (or fails with a status reason/message). Polling is not required on the happy path; SDK readiness helpers still exist for cases where provisioning continues after the response (e.g. pool allocations).
 
 ### 7.2 Command, File, and Code Execution
 

@@ -267,6 +267,13 @@ the same backend.
 
 Optional multi-tenant mode. When the table is present, tenant resolution is enabled and API key checks apply per tenant instead of globally. Provider types: **`file`** (reads a `tenants.toml` at the path given by `SANDBOX_TENANTS_CONFIG_PATH`, default `~/.opensandbox/tenants.toml`) or **`http`** (fetches tenants from a remote endpoint with in-process caching).
 
+::: warning Startup constraints
+`validate_tenant_config` (see `tenants/__init__.py`) rejects invalid combinations at startup:
+
+- `runtime.type` must be **`kubernetes`** — multi-tenancy requires Kubernetes namespaces; `runtime.type = "docker"` is rejected.
+- `server.api_key` must be **removed** (empty) — it conflicts with tenant-managed keys; set `api_key = ""` or delete the key.
+:::
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `provider` | string | `"file"` | Tenant provider type: **`file`** or **`http`**. |

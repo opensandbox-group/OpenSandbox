@@ -69,7 +69,7 @@ snapshot_service = create_snapshot_service(sandbox_service)
     response_model_exclude_none=True,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
-        202: {"description": "Sandbox creation accepted for asynchronous provisioning"},
+        202: {"description": "Sandbox created and provisioned successfully"},
         400: {"model": ErrorResponse, "description": "The request was invalid or malformed"},
         401: {"model": ErrorResponse, "description": "Authentication credentials are missing or invalid"},
         409: {"model": ErrorResponse, "description": "The operation conflicts with the current state"},

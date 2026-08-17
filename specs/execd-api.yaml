@@ -2430,7 +2430,7 @@ components:
       properties:
         status:
           type: string
-          enum: ["active", "dead"]
+          enum: ["active", "dead", "destroyed"]
         created_at:
           type: string
           format: date-time
@@ -2483,7 +2483,7 @@ components:
           format: uuid
         status:
           type: string
-          enum: ["active", "dead"]
+          enum: ["active", "dead", "destroyed"]
         created_at:
           type: string
           format: date-time

@@ -58,11 +58,10 @@ Client → POST /sandboxes
   → Auth Middleware validates API key
   → lifecycle.create_sandbox() receives CreateSandboxRequest
   → sandbox_service.create_sandbox(request)
-  → Returns 202 Accepted with Pending status immediately
-  → Background thread provisions the sandbox
+  → 202 Accepted returned after provisioning completes (status.state "Running")
 ```
 
-Async provisioning avoids blocking API requests during slow operations (image pull, container start). Sandbox stored in pending state first, transitions to running when ready.
+Provisioning (image pull, container start) runs on a worker thread internally, but the API awaits it: the create response is only sent once the sandbox reaches the running state. On failure the request fails with the provisioning error instead.
 
 ### Expiration System
 
