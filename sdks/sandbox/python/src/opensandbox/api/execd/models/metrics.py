@@ -30,7 +30,8 @@ class Metrics:
     """System resource usage metrics
 
     Attributes:
-        cpu_count (float): Number of CPU cores Example: 4.0.
+        cpu_count (float): Number of CPU cores visible to the process (GOMAXPROCS, may reflect cgroup CPU quota)
+            Example: 4.0.
         cpu_used_pct (float): CPU usage percentage Example: 45.5.
         mem_total_mib (float): Total memory in MiB Example: 8192.0.
         mem_used_mib (float): Used memory in MiB Example: 4096.0.

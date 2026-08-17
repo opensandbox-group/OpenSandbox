@@ -1281,8 +1281,11 @@ export interface components {
         Endpoint: {
             /**
              * @description Public URL to access the service from outside the sandbox.
-             *     Format: {endpoint-host}/sandboxes/{sandboxId}/port/{port}
-             *     Example: endpoint.opensandbox.io/sandboxes/abc123/port/8080
+             *     The exact shape depends on the runtime and network mode, e.g. direct
+             *     `{endpoint-host}:{port}`, execd proxy
+             *     `{endpoint-host}:{hostProxyPort}/proxy/{port}`, or server proxy
+             *     `{endpoint-host}/sandboxes/{sandboxId}/proxy/{port}`.
+             *     Example: endpoint.opensandbox.io/sandboxes/abc123/proxy/8080
              */
             endpoint: string;
             /** @description Requests targeting the sandbox must include the corresponding header(s). */
@@ -1293,7 +1296,7 @@ export interface components {
         /**
          * @description Egress network policy matching the sidecar `/policy` request body.
          *     If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
-         *     object or null results in allow-all behavior at startup.
+         *     object or null resets the policy to deny-all at startup.
          */
         NetworkPolicy: {
             /**
@@ -1329,8 +1332,9 @@ export interface components {
              */
             action: "allow" | "deny";
             /**
-             * @description FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-             *     IP/CIDR not yet supported in the egress MVP.
+             * @description FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IPv4/IPv6
+             *     address, or CIDR block (e.g., "10.96.0.0/12"). IP/CIDR targets are enforced
+             *     in nftables mode (`dns+nft`); in DNS-proxy mode they are not enforced.
              */
             target: string;
         };

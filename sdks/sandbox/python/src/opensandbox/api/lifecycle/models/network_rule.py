@@ -31,8 +31,9 @@ class NetworkRule:
     """
     Attributes:
         action (NetworkRuleAction): Whether to allow or deny matching targets.
-        target (str): FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-            IP/CIDR not yet supported in the egress MVP.
+        target (str): FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IPv4/IPv6
+            address, or CIDR block (e.g., "10.96.0.0/12"). IP/CIDR targets are enforced
+            in nftables mode (`dns+nft`); in DNS-proxy mode they are not enforced.
     """
 
     action: NetworkRuleAction

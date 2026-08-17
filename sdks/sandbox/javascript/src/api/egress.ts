@@ -52,8 +52,73 @@ export interface paths {
                 500: components["responses"]["InternalServerError"];
             };
         };
-        put?: never;
-        post?: never;
+        /**
+         * Replace the egress policy
+         * @description Identical to `POST /policy`: replace the currently enforced egress policy
+         *     wholesale. An omitted or empty request body resets the policy to deny-all.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["NetworkPolicy"];
+                };
+            };
+            responses: {
+                /** @description Policy replaced successfully. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PolicyStatusResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        /**
+         * Replace the egress policy
+         * @description Replace the currently enforced egress policy wholesale.
+         *
+         *     - An omitted or empty request body resets the policy to deny-all.
+         *     - An object body is parsed as a `NetworkPolicy`; an empty object or
+         *       `null` also resets the policy to deny-all.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["NetworkPolicy"];
+                };
+            };
+            responses: {
+                /** @description Policy replaced successfully. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PolicyStatusResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
         /**
          * Delete egress rules
          * @description Remove specific egress rules from the currently enforced policy by target.
@@ -434,7 +499,7 @@ export interface components {
         /**
          * @description Egress network policy matching the sidecar `/policy` request body.
          *     If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
-         *     object or null results in allow-all behavior at startup.
+         *     object or null resets the policy to deny-all at startup.
          */
         NetworkPolicy: {
             /**
@@ -452,8 +517,9 @@ export interface components {
              */
             action: "allow" | "deny";
             /**
-             * @description FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-             *     IP/CIDR not yet supported in the egress MVP.
+             * @description FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IPv4/IPv6
+             *     address, or CIDR block (e.g., "10.96.0.0/12"). IP/CIDR targets are enforced
+             *     in nftables mode (`dns+nft`); in DNS-proxy mode they are not enforced.
              */
             target: string;
         };

@@ -40,7 +40,7 @@ class PolicyStatusResponse:
         reason (str | Unset): Optional human-readable reason when the sidecar returns extra context.
         policy (NetworkPolicy | Unset): Egress network policy matching the sidecar `/policy` request body.
             If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
-            object or null results in allow-all behavior at startup.
+            object or null resets the policy to deny-all at startup.
     """
 
     status: str | Unset = UNSET

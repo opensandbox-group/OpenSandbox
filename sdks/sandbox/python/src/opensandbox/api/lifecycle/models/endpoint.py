@@ -37,8 +37,11 @@ class Endpoint:
 
         Attributes:
             endpoint (str): Public URL to access the service from outside the sandbox.
-                Format: {endpoint-host}/sandboxes/{sandboxId}/port/{port}
-                Example: endpoint.opensandbox.io/sandboxes/abc123/port/8080
+                The exact shape depends on the runtime and network mode, e.g. direct
+                `{endpoint-host}:{port}`, execd proxy
+                `{endpoint-host}:{hostProxyPort}/proxy/{port}`, or server proxy
+                `{endpoint-host}/sandboxes/{sandboxId}/proxy/{port}`.
+                Example: endpoint.opensandbox.io/sandboxes/abc123/proxy/8080
             headers (EndpointHeaders | Unset): Requests targeting the sandbox must include the corresponding header(s).
     """
 

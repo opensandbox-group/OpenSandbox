@@ -80,6 +80,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/NetworkPolicy'
+              nullable: true
             examples:
               reset-to-deny-all:
                 summary: Reset policy to deny-all (empty body)

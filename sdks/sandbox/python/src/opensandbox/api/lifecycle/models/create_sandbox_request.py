@@ -128,7 +128,7 @@ class CreateSandboxRequest:
                  Example: ['python', '/app/main.py'].
             network_policy (NetworkPolicy | Unset): Egress network policy matching the sidecar `/policy` request body.
                 If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
-                object or null results in allow-all behavior at startup.
+                object or null resets the policy to deny-all at startup.
             credential_proxy (CredentialProxyConfig | Unset): Credential Vault proxy startup settings. This is an explicit
                 opt-in for
                 transparent MITM support used by credential injection. Credential Vault

@@ -35,7 +35,7 @@ T = TypeVar("T", bound="NetworkPolicy")
 class NetworkPolicy:
     """Egress network policy matching the sidecar `/policy` request body.
     If `defaultAction` is omitted, the sidecar defaults to "deny"; passing an empty
-    object or null results in allow-all behavior at startup.
+    object or null resets the policy to deny-all at startup.
 
         Attributes:
             default_action (NetworkPolicyDefaultAction | Unset): Default action when no egress rule matches. Defaults to

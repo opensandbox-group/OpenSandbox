@@ -94,10 +94,12 @@ def sync_detailed(
      Returns stdout and stderr for a background (detached) command by command ID.
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
-    pass a starting line via query to fetch output after that line and receive the latest
-    tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-    Response body is plain text so it can be rendered directly in browsers; the latest line index
-    is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    pass the byte offset returned by the previous response (via `EXECD-COMMANDS-TAIL-CURSOR`)
+    to fetch output after that position and receive the latest tail cursor for the next poll.
+    When no cursor is provided, the full logs are returned.
+    Response body is plain text so it can be rendered directly in browsers; the latest
+    byte offset is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent
+    incremental requests.
 
     Args:
         id (str):
@@ -134,10 +136,12 @@ def sync(
      Returns stdout and stderr for a background (detached) command by command ID.
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
-    pass a starting line via query to fetch output after that line and receive the latest
-    tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-    Response body is plain text so it can be rendered directly in browsers; the latest line index
-    is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    pass the byte offset returned by the previous response (via `EXECD-COMMANDS-TAIL-CURSOR`)
+    to fetch output after that position and receive the latest tail cursor for the next poll.
+    When no cursor is provided, the full logs are returned.
+    Response body is plain text so it can be rendered directly in browsers; the latest
+    byte offset is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent
+    incremental requests.
 
     Args:
         id (str):
@@ -169,10 +173,12 @@ async def asyncio_detailed(
      Returns stdout and stderr for a background (detached) command by command ID.
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
-    pass a starting line via query to fetch output after that line and receive the latest
-    tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-    Response body is plain text so it can be rendered directly in browsers; the latest line index
-    is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    pass the byte offset returned by the previous response (via `EXECD-COMMANDS-TAIL-CURSOR`)
+    to fetch output after that position and receive the latest tail cursor for the next poll.
+    When no cursor is provided, the full logs are returned.
+    Response body is plain text so it can be rendered directly in browsers; the latest
+    byte offset is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent
+    incremental requests.
 
     Args:
         id (str):
@@ -207,10 +213,12 @@ async def asyncio(
      Returns stdout and stderr for a background (detached) command by command ID.
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
-    pass a starting line via query to fetch output after that line and receive the latest
-    tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-    Response body is plain text so it can be rendered directly in browsers; the latest line index
-    is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    pass the byte offset returned by the previous response (via `EXECD-COMMANDS-TAIL-CURSOR`)
+    to fetch output after that position and receive the latest tail cursor for the next poll.
+    When no cursor is provided, the full logs are returned.
+    Response body is plain text so it can be rendered directly in browsers; the latest
+    byte offset is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent
+    incremental requests.
 
     Args:
         id (str):

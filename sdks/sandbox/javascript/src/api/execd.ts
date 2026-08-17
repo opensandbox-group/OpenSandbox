@@ -278,10 +278,12 @@ export interface paths {
          * @description Returns stdout and stderr for a background (detached) command by command ID.
          *     Foreground commands should be consumed via SSE; this endpoint is intended for
          *     polling logs of background commands. Supports incremental reads similar to a file seek:
-         *     pass a starting line via query to fetch output after that line and receive the latest
-         *     tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-         *     Response body is plain text so it can be rendered directly in browsers; the latest line index
-         *     is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+         *     pass the byte offset returned by the previous response (via `EXECD-COMMANDS-TAIL-CURSOR`)
+         *     to fetch output after that position and receive the latest tail cursor for the next poll.
+         *     When no cursor is provided, the full logs are returned.
+         *     Response body is plain text so it can be rendered directly in browsers; the latest
+         *     byte offset is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent
+         *     incremental requests.
          */
         get: operations["getBackgroundCommandLogs"];
         put?: never;
@@ -1281,7 +1283,7 @@ export interface components {
         Metrics: {
             /**
              * Format: float
-             * @description Number of CPU cores
+             * @description Number of CPU cores visible to the process (GOMAXPROCS, may reflect cgroup CPU quota)
              * @example 4
              */
             cpu_count: number;
@@ -1599,12 +1601,12 @@ export interface operations {
     };
     listContexts: {
         parameters: {
-            query: {
+            query?: {
                 /**
-                 * @description Filter contexts by execution runtime (python, bash, java, etc.)
+                 * @description Filter contexts by execution runtime (python, bash, java, etc.). When omitted, all contexts are returned.
                  * @example python
                  */
-                language: string;
+                language?: string;
             };
             header?: never;
             path?: never;
@@ -1954,10 +1956,11 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Optional 0-based line cursor (behaves like a file seek). When provided, only
-                 *     stdout/stderr lines after this line are returned. The response includes the
-                 *     latest line index (`cursor`) so the client can request incremental output
-                 *     on subsequent calls. If omitted, the full log is returned.
+                 * @description Optional 0-based byte offset into the combined stdout/stderr output file
+                 *     (behaves like a file seek). When provided, only output after this offset is
+                 *     returned. The response header includes the latest byte offset (`cursor`) so the
+                 *     client can request incremental output on subsequent calls. If omitted, the full
+                 *     log is returned.
                  * @example 120
                  */
                 cursor?: number;
@@ -1977,7 +1980,7 @@ export interface operations {
             /** @description Command output (plain text) and status metadata via headers */
             200: {
                 headers: {
-                    /** @description Highest available 0-based line index after applying the request cursor (use as the next cursor for incremental reads) */
+                    /** @description Highest available byte offset after applying the request cursor (use as the next cursor for incremental reads) */
                     "EXECD-COMMANDS-TAIL-CURSOR"?: number;
                     [name: string]: unknown;
                 };
