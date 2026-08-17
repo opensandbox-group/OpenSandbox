@@ -460,6 +460,8 @@ const ptyViewerReadOnlyViolationLimit = 5
 // ptyViewerClientReadLoop accepts ping frames but rejects every operation that
 // could mutate the session. It closes a connection that repeatedly sends
 // mutating frames to bound server-to-client error traffic.
+//
+//nolint:gocognit // flat frame-type dispatch; refactor later
 func ptyViewerClientReadLoop(
 	conn *websocket.Conn,
 	writeJSON func(any) error,
