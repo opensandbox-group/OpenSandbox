@@ -93,6 +93,7 @@ def setup_otel_metrics(config: OtelConfig) -> None:
     # Disabled: do not attach instruments to any global provider (may already export).
     if not config.enabled:
         _create_duration_histogram = None
+        _http_request_duration_histogram = None
         logger.info(
             "OpenTelemetry metrics export disabled; SDK events are accepted but not exported"
         )

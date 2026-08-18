@@ -170,3 +170,25 @@ class TestOtelHttpMetricsSetup:
         otel_metrics._meter_provider = None
         otel_metrics._create_duration_histogram = None
         otel_metrics._http_request_duration_histogram = None
+
+    def test_setup_disabled_resets_http_histogram(self):
+        import opensandbox_server.integrations.otel.metrics as otel_metrics
+
+        # Simulate a prior enabled setup having bound both instruments.
+        otel_metrics._create_duration_histogram = MagicMock()
+        otel_metrics._http_request_duration_histogram = MagicMock()
+
+        class FakeConfig:
+            enabled = False
+            endpoint = None
+            export_interval_millis = 60000
+            service_name = "test"
+
+        otel_metrics.setup_otel_metrics(FakeConfig())
+
+        # A disabled setup must unbind the HTTP histogram too, otherwise samples
+        # would be recorded against a stale provider.
+        assert otel_metrics._create_duration_histogram is None
+        assert otel_metrics._http_request_duration_histogram is None
+
+        otel_metrics._meter_provider = None
