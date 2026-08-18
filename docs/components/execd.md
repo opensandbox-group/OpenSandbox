@@ -347,7 +347,7 @@ OTLP metrics export is enabled when either endpoint is set:
 
 ## Init mode
 
-[OSEP-0018](../../oseps/0018-execd-as-sandbox-init.md) makes execd the sandbox
+[OSEP-0018](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0018-execd-as-sandbox-init.md) makes execd the sandbox
 init: it becomes the parent of the user entrypoint, reaps every child through
 a single reaper, forwards application signals, and propagates the entrypoint
 exit code to the container runtime.
