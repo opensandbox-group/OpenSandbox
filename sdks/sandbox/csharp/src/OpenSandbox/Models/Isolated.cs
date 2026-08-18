@@ -125,7 +125,8 @@ public record IsolatedCapabilities(
     [property: JsonPropertyName("commit_supported")] bool CommitSupported = false,
     [property: JsonPropertyName("diff_supported")] bool DiffSupported = false,
     [property: JsonPropertyName("setpriv_available")] bool SetprivAvailable = false,
-    [property: JsonPropertyName("userns_available")] bool UsernsAvailable = false
+    [property: JsonPropertyName("userns_available")] bool UsernsAvailable = false,
+    [property: JsonPropertyName("hardening")] HardeningStatus? Hardening = null
 )
 {
     public void Deconstruct(
@@ -144,3 +145,19 @@ public record IsolatedCapabilities(
         diffSupported = DiffSupported;
     }
 }
+
+/// <summary>execd init-mode and workload-hardening state (OSEP-0018).</summary>
+public record HardeningStatus(
+    [property: JsonPropertyName("init_mode")] string? InitMode = null, // "pid1" | "subreaper" | "none"
+    [property: JsonPropertyName("signal_shield")] bool SignalShield = false,
+    [property: JsonPropertyName("cap_drop")] HardeningLayerState? CapDrop = null,
+    [property: JsonPropertyName("seccomp")] HardeningLayerState? Seccomp = null,
+    [property: JsonPropertyName("landlock")] HardeningLayerState? Landlock = null,
+    [property: JsonPropertyName("ebpf")] HardeningLayerState? Ebpf = null
+);
+
+/// <summary>Whether one hardening layer is actually enforced.</summary>
+public record HardeningLayerState(
+    [property: JsonPropertyName("state")] string? State = null, // active | disabled | degraded | unsupported
+    [property: JsonPropertyName("message")] string? Message = null
+);

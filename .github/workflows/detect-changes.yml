@@ -74,6 +74,9 @@ jobs:
                 path === "scripts/python-k8s-e2e.sh" ||
                 path === "scripts/python-k8s-e2e-ingress.sh" ||
                 path === "scripts/common/kubernetes-e2e.sh" ||
+                path === "scripts/python-k8s-execd-init-e2e.sh" ||
+                path === "tests/python/tests/test_execd_init_e2e.py" ||
+                path.startsWith("components/execd/") ||
                 path.startsWith("kubernetes/charts/"),
               ingress: (path) =>
                 workflowChanged(path, "ingress-test.yaml") ||

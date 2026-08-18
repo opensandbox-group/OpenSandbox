@@ -55,6 +55,11 @@ jobs:
         run: |
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
+      - name: Run execd-ebpf variant tests
+        working-directory: components/execd
+        run: |
+          CGO_ENABLED=1 go test -tags ebpf -count=1 ./pkg/ebpf/
+
       - name: Calculate coverage and generate summary
         working-directory: components/execd
         id: coverage
@@ -129,6 +134,14 @@ jobs:
         run: |
           chmod +x components/execd/tests/smoke_bwrap.sh
           bash components/execd/tests/smoke_bwrap.sh
+
+      - name: Init-mode container regression (OSEP-0018)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          chmod +x components/execd/tests/init_container.sh
+          bash components/execd/tests/init_container.sh
 
       - name: Show logs
         if: always()

@@ -773,6 +773,17 @@ class RuntimeConfig(BaseModel):
         description="Container image that contains the execd binary for sandbox initialization.",
         min_length=1,
     )
+    execd_run_as_init: bool = Field(
+        default=False,
+        description=(
+            "Run execd as the sandbox init (OSEP-0018): sets EXECD_INIT in the "
+            "sandbox environment so bootstrap.sh execs into execd (--init) and "
+            "execd becomes PID 1, reaping children and owning the container "
+            "lifecycle. Defaults to false (classic background-and-wait "
+            "topology); intended to be flipped on after a few releases once "
+            "the init mode is validated in production."
+        ),
+    )
 
 
 class SecureRuntimeConfig(BaseModel):

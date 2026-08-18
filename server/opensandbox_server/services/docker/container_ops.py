@@ -314,6 +314,9 @@ class DockerContainerOpsMixin:
             if value is None:
                 continue
             environment.append(f"{key}={value}")
+        if self.app_config and self.app_config.runtime.execd_run_as_init:
+            environment.append("EXECD_INIT=1")
+        environment.append(f"OPENSANDBOX_ID={sandbox_id}")
         return labels, environment
 
     def _resolve_image_auth(

@@ -70,6 +70,12 @@ var denylistSyscalls = []string{
 	"acct",
 }
 
+// GenerateSeccompDenyBPF returns BPF bytecode for a default-allow,
+// deny-listed syscall filter (exported for the hardening floor launcher).
+func GenerateSeccompDenyBPF(override *SeccompOverride) ([]byte, error) {
+	return generateSeccompDenyBPF(override)
+}
+
 // generateSeccompDenyBPF returns BPF bytecode for a default-allow,
 // deny-listed syscall filter. The returned bytes are in struct sock_filter
 // format (8 bytes per instruction, native endian).

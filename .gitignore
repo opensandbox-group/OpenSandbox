@@ -269,6 +269,12 @@ nbdist/
 generated/
 **/generated/**
 
+# execd eBPF kernel BTF dumps (bpf2go build-time only, never committed —
+# see components/execd/pkg/ebpf/prog/audit.bpf.c; regenerate with:
+#   bpftool btf dump file /sys/kernel/btf/vmlinux format c > .../vmlinux.h)
+components/execd/pkg/ebpf/prog/vmlinux.h
+components/execd/pkg/ebpf/prog/vmlinux_*.h
+
 # gVisor runtime binaries (downloaded dynamically)
 kubernetes/test/kind/gvisor/runsc
 kubernetes/test/kind/gvisor/containerd-shim-runsc-v1

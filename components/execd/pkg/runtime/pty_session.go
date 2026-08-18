@@ -86,6 +86,7 @@ type ptySession struct {
 	lastExitCode int           // exit code; -1 until process exits
 	doneCh       chan struct{} // closed when process exits (non-nil after Start*)
 	outputDoneCh chan struct{} // closed after output broadcasters finish writing to replay
+	proc         *managedProcess
 
 	// Stdin (PTY master in PTY mode; write end of os.Pipe in pipe mode)
 	stdin io.WriteCloser
@@ -268,7 +269,12 @@ func (s *ptySession) StartPTY() error {
 	// Do NOT set Setpgid: pty.StartWithSize sets Setsid+Setctty internally.
 	// Combining Setsid+Setpgid causes EPERM (setpgid is illegal for a session leader).
 
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 80, Rows: 24})
+	var ptmx *os.File
+	mp, err := launchManagedWith(cmd, func() error {
+		var perr error
+		ptmx, perr = pty.StartWithSize(cmd, &pty.Winsize{Cols: 80, Rows: 24})
+		return perr
+	})
 	if err != nil {
 		return fmt.Errorf("pty.StartWithSize: %w", err)
 	}
@@ -276,6 +282,7 @@ func (s *ptySession) StartPTY() error {
 	s.ptmx = ptmx
 	s.isPTY = true
 	s.pid = cmd.Process.Pid
+	s.proc = mp
 	s.doneCh = make(chan struct{})
 	outputDoneCh := make(chan struct{})
 	s.outputDoneCh = outputDoneCh
@@ -285,7 +292,7 @@ func (s *ptySession) StartPTY() error {
 		defer close(outputDoneCh)
 		s.broadcastPTY(ptmx)
 	})
-	safego.Go(func() { s.waitAndExit(cmd, ptmx) })
+	safego.Go(func() { s.waitAndExit(mp, ptmx) })
 
 	return nil
 }
@@ -332,7 +339,8 @@ func (s *ptySession) StartPipe() error {
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stderrW
 
-	if err := cmd.Start(); err != nil {
+	mp, err := launchManagedWith(cmd, cmd.Start)
+	if err != nil {
 		_ = stdinR.Close()
 		_ = stdinW.Close()
 		_ = stdoutR.Close()
@@ -349,6 +357,7 @@ func (s *ptySession) StartPipe() error {
 
 	s.isPTY = false
 	s.pid = cmd.Process.Pid
+	s.proc = mp
 	s.doneCh = make(chan struct{})
 	outputDoneCh := make(chan struct{})
 	s.outputDoneCh = outputDoneCh
@@ -368,7 +377,7 @@ func (s *ptySession) StartPipe() error {
 		outputWg.Wait()
 		close(outputDoneCh)
 	})
-	safego.Go(func() { s.waitAndExitPipe(cmd, stdinW, stdoutR, stderrR) })
+	safego.Go(func() { s.waitAndExitPipe(mp, stdinW, stdoutR, stderrR) })
 
 	return nil
 }
@@ -429,17 +438,14 @@ func (s *ptySession) writeAndFanout(chunk []byte, isStdout bool) {
 }
 
 // waitAndExit waits for the PTY-mode process and updates session state on exit.
-func (s *ptySession) waitAndExit(cmd *exec.Cmd, ptmx *os.File) {
-	_ = cmd.Wait()
+func (s *ptySession) waitAndExit(mp *managedProcess, ptmx *os.File) {
+	_ = mp.Wait()
 
 	// Close the PTY master to unblock the broadcast goroutine.
 	_ = ptmx.Close()
 
 	s.mu.Lock()
-	exitCode := 0
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
-	}
+	exitCode := mp.ExitCode()
 	s.lastExitCode = exitCode
 	s.pid = 0
 	doneCh := s.doneCh
@@ -449,17 +455,14 @@ func (s *ptySession) waitAndExit(cmd *exec.Cmd, ptmx *os.File) {
 }
 
 // waitAndExitPipe waits for the pipe-mode process and updates session state on exit.
-func (s *ptySession) waitAndExitPipe(cmd *exec.Cmd, stdinW, stdoutR, stderrR *os.File) {
-	_ = cmd.Wait()
+func (s *ptySession) waitAndExitPipe(mp *managedProcess, stdinW, stdoutR, stderrR *os.File) {
+	_ = mp.Wait()
 
 	// Close stdin write-end so the child (if still running) sees EOF.
 	_ = stdinW.Close()
 
 	s.mu.Lock()
-	exitCode := 0
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
-	}
+	exitCode := mp.ExitCode()
 	s.lastExitCode = exitCode
 	s.pid = 0
 	doneCh := s.doneCh

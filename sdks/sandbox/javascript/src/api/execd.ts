@@ -1514,6 +1514,30 @@ export interface components {
             userns_available?: boolean;
             commit_supported?: boolean;
             diff_supported?: boolean;
+            /** @description execd init-mode and workload-hardening state (OSEP-0018): whether execd is the sandbox init and which of its controls are in effect. Not an isolation capability; reported here so operators see enforcement state in one place. */
+            hardening?: {
+                /**
+                 * @description How execd supervises the sandbox process tree. pid1: execd is the kernel init of the container. subreaper: execd reaps orphans but lacks the PID 1 kernel signal shield. none: init mode is off (default).
+                 * @enum {string}
+                 */
+                init_mode?: "pid1" | "subreaper" | "none";
+                /** @description Whether the kernel PID 1 signal shield protects execd from in-namespace signals (true only in init_mode pid1). */
+                signal_shield?: boolean;
+                /** @description Capability/bounding-set reduction on user code. */
+                cap_drop?: components["schemas"]["HardeningLayerState"];
+                /** @description Seccomp floor installed on user code. */
+                seccomp?: components["schemas"]["HardeningLayerState"];
+                /** @description Landlock filesystem confinement on user code. */
+                landlock?: components["schemas"]["HardeningLayerState"];
+                /** @description eBPF exec/connect/privilege observation. */
+                ebpf?: components["schemas"]["HardeningLayerState"];
+            };
+        };
+        /** @description Whether one hardening layer is actually enforced. state is "active" | "disabled" (not configured) | "degraded" (configured but a prerequisite is missing) | "unsupported" (kernel/build cannot provide it). message gives the concrete reason whenever state is not active. */
+        HardeningLayerState: {
+            /** @enum {string} */
+            state?: "active" | "disabled" | "degraded" | "unsupported";
+            message?: string;
         };
     };
     responses: {

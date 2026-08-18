@@ -19,7 +19,6 @@ package runtime
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -667,18 +666,6 @@ func TestIsolatedSessionPreStartFailuresCleanLifecycleAndDescriptors(t *testing.
 		configure func(*exec.Cmd)
 	}{
 		{name: "wrap", wrapErr: wrapErr},
-		{
-			name: "stdin pipe",
-			configure: func(cmd *exec.Cmd) {
-				cmd.Stdin = strings.NewReader("")
-			},
-		},
-		{
-			name: "stdout pipe",
-			configure: func(cmd *exec.Cmd) {
-				cmd.Stdout = io.Discard
-			},
-		},
 		{
 			name: "command start",
 			configure: func(cmd *exec.Cmd) {

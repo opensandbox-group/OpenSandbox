@@ -310,8 +310,6 @@ if [ -n "${EXECD_BOOTSTRAP_PRE_SCRIPT:-}" ]; then
 fi
 
 echo "starting OpenSandbox Execd daemon at $EXECD."
-$EXECD &
-EXECD_PID=$!
 
 # Allow chained shell commands (e.g., /test1.sh && /test2.sh)
 # Usage:
@@ -337,16 +335,26 @@ if [ -z "$SHELL_BIN" ]; then
 	fi
 fi
 
+# Resolve the user command into a concrete argv shared by both branches.
 if [ "$CMD" != "" ]; then
-	"$SHELL_BIN" -c "$CMD" &
-	CMD_PID=$!
+	set -- "$SHELL_BIN" -c "$CMD"
 elif [ $# -eq 0 ]; then
-	"$SHELL_BIN" &
-	CMD_PID=$!
-else
-	"$@" &
-	CMD_PID=$!
+	set -- "$SHELL_BIN"
 fi
+
+# Init mode (OSEP-0018): exec into execd so it becomes the sandbox init (PID 1
+# on the direct paths) and supervises the user command itself. The shell must
+# exec, never background, or execd would run as a subreaper without the kernel
+# signal shield.
+if is_truthy "${EXECD_INIT:-}"; then
+	exec "$EXECD" --init -- "$@"
+fi
+
+"$EXECD" &
+EXECD_PID=$!
+
+"$@" &
+CMD_PID=$!
 
 set +e
 wait "$CMD_PID" 2>/dev/null

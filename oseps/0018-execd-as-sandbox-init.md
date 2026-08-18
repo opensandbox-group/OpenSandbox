@@ -3,8 +3,8 @@ title: execd as Sandbox Init
 authors:
   - "@pjp"
 creation-date: 2026-07-27
-last-updated: 2026-07-27
-status: draft
+last-updated: 2026-08-12
+status: implementing
 ---
 
 # OSEP-0018: execd as Sandbox Init
@@ -33,6 +33,64 @@ status: draft
 - [Open Implementation Questions](#open-implementation-questions)
 - [Upgrade & Migration Strategy](#upgrade--migration-strategy)
 <!-- /toc -->
+
+## Implementation Status
+
+> Updated 2026-08-12. Status: **implementing** — the phased rollout below is
+> implemented on branch `feat/execd-init-mode` (Phases 1–5 plus the server
+> switch); remaining items are the trusted stop channel (§3), kernel-5.10
+> empirical validation, cross-language e2e, and the default-on rollout (see
+> the Remaining work table below).
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | execd `--init` mode: single reaper (only wait4 caller), managedProcess abstraction replacing `Cmd.Wait` on every launch path, signal forwarding (TERM/HUP/USR1/USR2/WINCH), entrypoint-owned container lifecycle, subreaper fallback, `PR_SET_DUMPABLE`, `bootstrap.sh` `EXECD_INIT` exec branch, hardening endpoint reporting | ✅ implemented |
+| 2 | Pre-exec floor (`[hardening] enabled`): `opensandbox-launcher` native helper (env strip → KEEPCAPS → bounding trim → no_new_privs → identity drop → ambient caps → seccomp last → execve), `[seccomp] deny` reuse with `execve` reserved, `keep_capabilities`; fail-open per layer | ✅ implemented |
+| 3 | Landlock (`[landlock] enabled`): allowlist policy (system paths + `/proc/self` + device files + `/tmp`/`/run`/`allowed_writable` + extras), ABI probe v1–v4 with access-bit trimming; ABI < 1 → `unsupported` | ✅ implemented |
+| 4 | eBPF observation (`[ebpf] enabled`, `execd-ebpf` variant): exec/connect/privilege hooks (CO-RE), sandbox cgroup filter, rotating JSONL audit file; kernel ≥5.10 with BTF | ✅ implemented |
+| 5 | Pool taskTemplate: with `execd_run_as_init`, tasks are no longer backgrounded — execd becomes the task process-tree root (subreaper + exit-code propagation); `kill 1` recycle contract confirmed compatible under current SIGTERM semantics | ✅ implemented (task level) |
+| — | Server switch `runtime.execd_run_as_init` injects `EXECD_INIT=1` across Docker / K8s Batch/Agent / Pool paths — resolves Open Question 1 | ✅ implemented |
+
+**Open implementation questions — resolution:**
+
+1. **Single enable switch** — resolved: the server sets `EXECD_INIT` from the
+   single `runtime.execd_run_as_init` config (default `false`); `bootstrap.sh`
+   passes `--init` iff `EXECD_INIT` is truthy, so topology and flag stay in
+   lockstep by construction.
+2. **External SIGTERM forwarding** — implemented: SIGTERM is forwarded to the
+   entrypoint and execd exits with the workload's status. Distinguishing
+   external vs in-namespace SIGTERM (the §3 trusted-stop mechanism) is still
+   open: today an in-namespace `kill 1` also stops the sandbox (same as the
+   pre-OSEP bootstrap behavior) — tracked as remaining work.
+3. **Managed-process abstraction** — implemented (reaper delivers
+   `WaitStatus`; per-call-site pipes/teardown are owned by the abstraction).
+4. **Landlock device files** — resolved: `null/zero/full/random/urandom/tty`
+   writable + `/dev/pts` subtree for the controlling terminal.
+5. **Landlock `/proc/self` for descendants** — resolved by accepting the
+   limitation: only the initial workload keeps `/proc/self` access; forked
+   descendants get EACCES on their own procfs (documented in
+   `docs/components/execd.md`).
+
+**Remaining work** (status 2026-08-12, PR #1474):
+
+| # | Item | Status / plan |
+|---|---|---|
+| R-a | Trusted out-of-band stop channel (§3, R2) | **Open — biggest remaining item, separate PR.** Any SIGTERM (incl. in-namespace `kill 1`) still stops the sandbox (same as pre-OSEP behavior); `kill -9 1` is inert. Target: authenticated channel unreachable from the workload; then point the K8s Restart recycle at it instead of `kill 1` (`restart_default.go`; current SIGTERM semantics confirmed compatible, comment added) |
+| R-b | Pool pod-level PID 1 | **Declined follow-up.** Pool sandboxes run execd as task-level subreaper (Phase 5): the per-child floor holds without PID 1; the lost signal shield is no regression (pool exposure equals the pre-OSEP era; task-executor owns pod reaping). Operators wanting full PID 1 configure the Pool template command manually (`bootstrap.sh` + keepalive + `EXECD_INIT=1`); server auto-injection out of scope |
+| R-c | Kernel-5.10 eBPF empirical validation | Open. The 5.10–5.15 exec-hook fallback (inline `filename[1024]`, `__data_loc` argv) is derived from the tracepoint definition, not boot-tested; worst case the hook degrades (fail-open). Needs a real 5.10 node with BTF + `CAP_BPF` |
+| R-d | Cross-language SDK e2e | Python covered (docker-bridge + k8s nightly: PID 1, reaping, kill-9 inert, `/proc/1/environ` denial, capabilities endpoint). JS/Go/C#/Java/Kotlin init-mode e2e not written |
+| R-e | `execd-ebpf` server-side selection | **Deferred.** The default image ships both binaries (`/execd` + `/execd-ebpf`); choosing which runs (`EXECD` env, `runtime.execd_binary`) is not wired into the server or the Docker/K8s distribution paths. Tracked in `components/execd/README.md` "Known issue / TODO" |
+| R-f | Default-on rollout | `runtime.execd_run_as_init` and `[hardening] enabled` default `false` by design; flip after N releases of validation (owner decision), record in release notes |
+| R-g | `OPENSANDBOX_ID` reserved-env override (Codex round 7) | **Deferred.** Docker env builder appends `OPENSANDBOX_ID` after user env (pre-existing pattern); harden reserved-key filtering first if a duplicate-key spoofing path is demonstrated |
+| R-h | CI flake observation | PauseResume v1.32.2 (only) timed out at 900s on "commit/push fails with invalid registry" (Kubernetes CI); unrelated to this branch's recent commits — re-run to confirm flake |
+
+Closed this round (2026-08-12): CI green for all execd-init jobs; `/proc/1/environ`
+e2e assertion (`test_workload_cannot_read_execd_environ`); hardening report
+degrades honestly when hardening is on without init topology; launcher aborts on
+failed identity drop; bundled-image Jupyter log relocated under `/tmp`;
+generated eBPF bindings gated behind `ebpf &&` tags; `runtime.execd_run_as_init`
+documented in `server/configuration.md`.
+
 
 ## Summary
 

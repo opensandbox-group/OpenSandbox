@@ -127,6 +127,84 @@ jobs:
           docker rm -f opensandbox-e2e-redis || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
 
+  python-execd-init-e2e:
+    name: Python Execd-Init E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Clean Docker runner cache
+        run: bash scripts/ci-docker-cleanup.sh
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify uv
+        run: |
+          uv --version
+          uv run python --version
+
+      - name: Clean up previous E2E resources
+        run: |
+          docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
+          docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
+
+      - name: Build local egress image
+        run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
+
+      - name: Run execd-init E2E
+        run: |
+          set -e
+
+          cat <<EOF > ~/.sandbox.toml
+          [server]
+          host = "127.0.0.1"
+          port = 8080
+          api_key = ""
+          [log]
+          level = "INFO"
+          [runtime]
+          type = "docker"
+          execd_image = "opensandbox/execd:local"
+          execd_run_as_init = true
+          [egress]
+          image = "opensandbox/egress:local"
+          mode = "dns+nft"
+          [docker]
+          network_mode = "bridge"
+          [storage]
+          allowed_host_paths = ["/tmp/opensandbox-e2e"]
+          [renew_intent]
+          enabled = true
+          min_interval_seconds = 60
+          EOF
+
+          bash scripts/python-execd-init-e2e.sh
+
+      - name: Eval server logs
+        if: ${{ always() }}
+        run: cat server/server.log
+
+      - name: Upload execd logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: execd-log-for-execd-init-e2e
+          path: /tmp/opensandbox-e2e/logs/
+          retention-days: 5
+
+      - name: Clean up after E2E
+        if: always()
+        run: |
+          docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
+          docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+
   java-e2e:
     name: Java E2E (docker bridge)
     needs: changes

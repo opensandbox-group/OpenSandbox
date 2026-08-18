@@ -188,6 +188,7 @@ configToml: |
   [runtime]
   type = "kubernetes"
   execd_image = "${EXECD_IMG}"
+  execd_run_as_init = ${E2E_EXECD_RUN_AS_INIT:-false}
 
   [egress]
   image = "${EGRESS_IMG}"
