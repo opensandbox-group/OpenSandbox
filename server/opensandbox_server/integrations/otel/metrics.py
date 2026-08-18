@@ -88,7 +88,7 @@ def _http_request_histogram_from_provider(provider: MeterProvider):
 
 def setup_otel_metrics(config: OtelConfig) -> None:
     """Configure OTEL metrics export when enabled; otherwise keep recording as noop."""
-    global _meter_provider, _create_duration_histogram
+    global _meter_provider, _create_duration_histogram, _http_request_duration_histogram
 
     # Disabled: do not attach instruments to any global provider (may already export).
     if not config.enabled:

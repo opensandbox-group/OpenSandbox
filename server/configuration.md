@@ -305,7 +305,7 @@ Per-sandbox enablement uses create request extensions (see OSEP-0009 and `exampl
 
 ## `[otel]`
 
-Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the ingestion endpoint still accepts events and records them as noop.
+Optional OpenTelemetry metrics export. When enabled, the Server exports the metrics below over OTLP HTTP. Off by default; the ingestion endpoint still accepts SDK events and records them as noop.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -313,6 +313,13 @@ Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency 
 | `endpoint` | string \| omitted | `null` | OTLP HTTP metrics endpoint. When omitted, uses `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`. |
 | `service_name` | string | `"opensandbox-server"` | `service.name` resource attribute. |
 | `export_interval_millis` | integer | `60000` | Periodic export interval (≥ 1000). |
+
+### Exported metrics
+
+| Metric | Type | Unit | Attributes | Description |
+|--------|------|------|------------|-------------|
+| `opensandbox.sandbox.create.duration` | Histogram | `ms` | `sdk.language`, `sdk.version`, `success` | Sandbox creation latency, reported by SDKs via `POST /v1/metrics/events`. |
+| `server.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | Lifecycle Server request latency for every HTTP request, including authentication failures, validation errors, unmatched routes, and unhandled exceptions. `http_route` is the matched route template (e.g. `/v1/sandboxes/{sandbox_id}`), not the raw URL path, and is `unknown` when no route matched. |
 
 ---
 
