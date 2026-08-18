@@ -214,6 +214,7 @@ class CommandsAdapter(Commands):
         handlers: ExecutionHandlers | None,
         infer_exit_code: bool,
         failure_message: str,
+        is_background: bool = False,
     ) -> Execution:
         execution = Execution(
             id=None,
@@ -237,6 +238,12 @@ class CommandsAdapter(Commands):
                 if event_node is None:
                     continue
                 await dispatcher.dispatch(event_node)
+                if is_background and event_node.type == "execution_complete":
+                    # Background commands are done once execution_complete
+                    # arrives; do not wait for the chunked terminator, which
+                    # execd sends only after a graceful-shutdown sleep and can
+                    # be lost if the connection is closed early (#1528).
+                    break
 
         if infer_exit_code:
             execution.exit_code = _infer_foreground_exit_code(execution)
@@ -268,6 +275,7 @@ class CommandsAdapter(Commands):
                 handlers=handlers,
                 infer_exit_code=not opts.background,
                 failure_message="Failed to run command",
+                is_background=opts.background,
             )
 
         except Exception as e:

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -172,6 +173,53 @@ func TestReaperReapsOrphan(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("orphan pid %d was not reaped by the reaper", pid)
+}
+
+// TestReaperSweepBackstop verifies the periodic sweep drains children even
+// when no SIGCHLD notification can reach the run loop — the lost/coalesced
+// signal case the sweep ticker backstops (OSEP-0018 R-t).
+//
+// The reaper's signal.Notify subscription stays registered (which also stops
+// the Go runtime from auto-reaping children), but the run loop is severed
+// from the subscribed channel before it starts, so the kernel-delivered
+// SIGCHLD goes nowhere. Only the ticker can reap the exiting child.
+func TestReaperSweepBackstop(t *testing.T) {
+	oldInterval := reaperSweepInterval
+	reaperSweepInterval = 50 * time.Millisecond
+	defer func() { reaperSweepInterval = oldInterval }()
+
+	r := newReaper()
+	r.start()
+	// Replace the subscribed channel before the run loop reads it: the kernel
+	// keeps signalling the subscribed channel (unread), so the loop below can
+	// only ever drain via the sweep ticker. Keep the original channel so
+	// cleanup can stop the subscription — signal.Stop on the replacement
+	// would leave the process-global SIGCHLD handler registered.
+	subscribed := r.sigchld
+	r.sigchld = make(chan os.Signal, 1)
+	initReaper = r
+	t.Cleanup(func() {
+		initReaper.stop()
+		signal.Stop(subscribed)
+		initReaper = nil
+	})
+	go r.run()
+
+	cmd := exec.Command("sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := exitStatusByPid(t, pid); !ok {
+			return // reaped by the sweep ticker
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child pid %d was not reaped by the sweep backstop", pid)
 }
 
 func TestPreReapBarrierRunsBeforeWaitReturns(t *testing.T) {

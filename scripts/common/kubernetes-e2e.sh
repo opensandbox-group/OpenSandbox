@@ -78,7 +78,10 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
   hostPath:
-    path: /tmp/${PV_NAME}
+    # NOT under /tmp: the kind node mounts /tmp as a noexec tmpfs, so a
+    # hostPath PV there is not executable (writes/reads work, exec fails with
+    # EACCES regardless of Landlock). /var lives on the node's rootfs.
+    path: /var/opensandbox-e2e/${PV_NAME}
     type: DirectoryOrCreate
 ---
 apiVersion: v1

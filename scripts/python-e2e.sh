@@ -91,5 +91,6 @@ else
   uv run pytest \
     --ignore=tests/test_code_interpreter_e2e.py \
     --ignore=tests/test_code_interpreter_e2e_sync.py \
-    --ignore=tests/test_execd_init_e2e.py
+    --ignore=tests/test_execd_init_e2e.py \
+    --ignore=tests/test_execd_hardening_e2e.py
 fi

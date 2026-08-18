@@ -51,12 +51,33 @@ k8s_e2e_setup_kind_and_controller
 k8s_e2e_build_runtime_images
 k8s_e2e_kind_load_runtime_images
 k8s_e2e_apply_pvc_and_seed
+# The hardened isolation TOML travels to sandboxes via a ConfigMap mounted by
+# the e2e batchsandbox template (optional: true), and the hardening e2e points
+# EXECD_ISOLATION_CONFIG at it per request. No server config needed.
+kubectl create configmap opensandbox-e2e-execd-isolation \
+  --namespace "${E2E_NAMESPACE}" \
+  --from-file=isolation.hardened.toml="${REPO_ROOT}/components/execd/configs/isolation.hardened.toml" \
+  --dry-run=client -o yaml | kubectl apply -f -
 k8s_e2e_write_server_helm_values
 k8s_e2e_helm_install_server
 
 kubectl port-forward -n "${SERVER_NAMESPACE}" svc/opensandbox-server "${LIFECYCLE_LOCAL_PORT}:80" >"${PORT_FORWARD_LOG}" 2>&1 &
 PORT_FORWARD_PID=$!
 trap 'kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true' EXIT
+
+# Capture the sandbox pod specs and BatchSandbox CRs while the tests run: the
+# hardening leg has twice observed PVC mount paths showing up as noexec tmpfs
+# inside the container, so the pod-spec dump is needed to see what the
+# controller actually created.
+(
+  for _ in $(seq 1 600); do
+    kubectl get pods -n "${E2E_NAMESPACE}" -o yaml > /tmp/opensandbox-e2e-pods.yaml 2>/dev/null || true
+    kubectl get batchsandboxes -n "${E2E_NAMESPACE}" -o yaml > /tmp/opensandbox-e2e-batchsandboxes.yaml 2>/dev/null || true
+    sleep 2
+  done
+) &
+SPEC_WATCHER_PID=$!
+trap 'kill "${SPEC_WATCHER_PID}" >/dev/null 2>&1 || true; kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true' EXIT
 
 k8s_e2e_wait_http_ok "http://127.0.0.1:${LIFECYCLE_LOCAL_PORT}/health"
 
@@ -75,3 +96,4 @@ make generate-api
 cd "${REPO_ROOT}/tests/python"
 uv sync --all-extras --refresh
 uv run pytest tests/test_execd_init_e2e.py -v
+uv run pytest tests/test_execd_hardening_e2e.py -v -k "TestHardeningE2E"

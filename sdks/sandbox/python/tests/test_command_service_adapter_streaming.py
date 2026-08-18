@@ -23,7 +23,12 @@ import pytest
 
 from opensandbox.adapters.command_adapter import CommandsAdapter
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxApiException,
+    SandboxConnectionException,
+)
+from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
 
 _UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
@@ -256,3 +261,75 @@ async def test_run_in_session_non_zero_exit_updates_exit_code() -> None:
     assert execution.error.value == "7"
     assert execution.complete is None
     assert execution.exit_code == 7
+
+
+class _EarlyCloseAfterCompleteStream(httpx.AsyncByteStream):
+    """Yields SSE bytes then simulates the connection closing before the
+    chunked terminator arrives (regression case for #1528)."""
+
+    def __init__(self, sse: bytes) -> None:
+        self._sse = sse
+
+    async def __aiter__(self):
+        yield self._sse
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+
+
+class _EarlyCloseTransport(httpx.AsyncBaseTransport):
+    """Transport whose SSE response body closes early right after the
+    ``execution_complete`` event, before the chunked terminator is sent."""
+
+    def __init__(self, sse: bytes) -> None:
+        self._sse = sse
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=_EarlyCloseAfterCompleteStream(self._sse),
+            request=request,
+        )
+
+
+_EARLY_CLOSE_SSE = (
+    b'data: {"type":"init","text":"exec-bg","timestamp":1}\n\n'
+    b'data: {"type":"execution_complete","timestamp":2,"execution_time":3}\n\n'
+)
+
+
+@pytest.mark.asyncio
+async def test_run_background_command_breaks_on_complete_before_terminator() -> None:
+    """Background commands must not wait for the chunked terminator: once
+    ``execution_complete`` arrives, the SDK should stop reading the stream
+    even if the connection is closed early (#1528)."""
+    cfg = ConnectionConfig(
+        protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
+    )
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    execution = await adapter.run("sleep 1", opts=RunCommandOpts(background=True))
+
+    assert execution.id == "exec-bg"
+    assert execution.complete is not None
+    assert execution.complete.execution_time_in_millis == 3
+    # Background executions do not synthesize an exit code from the stream.
+    assert execution.exit_code is None
+
+
+@pytest.mark.asyncio
+async def test_run_foreground_command_still_waits_for_terminator() -> None:
+    """Foreground commands must keep waiting for the stream terminator
+    after ``execution_complete`` — an early close is still surfaced as an
+    error, proving the background early-break did not change this path."""
+    cfg = ConnectionConfig(
+        protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
+    )
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    with pytest.raises(SandboxConnectionException):
+        await adapter.run("sleep 1", opts=RunCommandOpts(background=False))

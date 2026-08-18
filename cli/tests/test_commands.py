@@ -1380,6 +1380,32 @@ class TestDiagnosticsCommands:
         assert "line 1\nline 2" in result.output
         manager.get_diagnostic_logs.assert_called_once_with("sb-1", scope="container")
 
+    def test_logs_raw_surfaces_diagnostic_notices_on_stderr(
+        self, runner: CliRunner
+    ) -> None:
+        manager = MagicMock()
+        manager.get_diagnostic_logs.return_value = DiagnosticContent(
+            sandboxId="sb-1",
+            kind="logs",
+            scope="all",
+            delivery="inline",
+            contentType="text/plain; charset=utf-8",
+            content="container logs",
+            truncated=True,
+            warnings=["Only container logs are available."],
+        )
+
+        result = _invoke(
+            runner,
+            ["diagnostics", "logs", "sb-1", "--scope", "all", "-o", "raw"],
+            manager=manager,
+        )
+
+        assert result.exit_code == 0
+        assert result.stdout == "container logs\n"
+        assert "Warning: diagnostic content was truncated." in result.stderr
+        assert "Warning: Only container logs are available." in result.stderr
+
     def test_events_json_prints_descriptor(self, runner: CliRunner) -> None:
         manager = MagicMock()
         manager.get_diagnostic_events.return_value = DiagnosticContent(

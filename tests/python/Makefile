@@ -7,7 +7,7 @@ sync-dev:
 	uv sync --group dev
 
 test:
-	uv run pytest --ignore=tests/test_execd_init_e2e.py
+	uv run pytest --ignore=tests/test_execd_init_e2e.py --ignore=tests/test_execd_hardening_e2e.py
 
 test-kubernetes-mini:
 	uv run pytest \

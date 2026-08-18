@@ -1,9 +1,9 @@
 ---
 title: execd as Sandbox Init
 authors:
-  - "@pjp"
+  - "@Pangjiping"
 creation-date: 2026-07-27
-last-updated: 2026-08-12
+last-updated: 2026-08-18
 status: implementing
 ---
 
@@ -36,11 +36,12 @@ status: implementing
 
 ## Implementation Status
 
-> Updated 2026-08-12. Status: **implementing** — the phased rollout below is
+> Updated 2026-08-18. Status: **implementing** — the phased rollout below is
 > implemented on branch `feat/execd-init-mode` (Phases 1–5 plus the server
 > switch); remaining items are the trusted stop channel (§3), kernel-5.10
 > empirical validation, cross-language e2e, and the default-on rollout (see
-> the Remaining work table below).
+> the Remaining work table below). R-i (server-path hardening e2e, docker
+> bridge) landed in PR #1554.
 
 | Phase | Scope | Status |
 |---|---|---|
@@ -71,7 +72,7 @@ status: implementing
    descendants get EACCES on their own procfs (documented in
    `docs/components/execd.md`).
 
-**Remaining work** (status 2026-08-12, PR #1474):
+**Remaining work** (status 2026-08-18, PR #1474 + #1546 + #1554):
 
 | # | Item | Status / plan |
 |---|---|---|
@@ -83,6 +84,19 @@ status: implementing
 | R-f | Default-on rollout | `runtime.execd_run_as_init` and `[hardening] enabled` default `false` by design; flip after N releases of validation (owner decision), record in release notes |
 | R-g | `OPENSANDBOX_ID` reserved-env override (Codex round 7) | **Deferred.** Docker env builder appends `OPENSANDBOX_ID` after user env (pre-existing pattern); harden reserved-key filtering first if a duplicate-key spoofing path is demonstrated |
 | R-h | CI flake observation | PauseResume v1.32.2 (only) timed out at 900s on "commit/push fails with invalid registry" (Kubernetes CI); unrelated to this branch's recent commits — re-run to confirm flake |
+| R-i | Server-path hardening e2e (Python) | **Implemented (docker bridge + k8s)** — `tests/python/tests/test_execd_hardening_e2e.py` + `scripts/python-execd-hardening-e2e.sh` + CI job `python-execd-hardening-e2e` (PR #1554), extended to the Kubernetes path in the execd-init k8s nightly. **Docker**: the hardened isolation TOML (`components/execd/configs/isolation.hardened.toml`) is injected into every sandbox via a config-level bind mount + `EXECD_ISOLATION_CONFIG` (`[docker] sandbox_env`); the workspace bind additionally exercises the launcher's mount expansion. **Kubernetes** (no server config change): the TOML travels in a ConfigMap (`opensandbox-e2e-execd-isolation`) mounted by the e2e `batchsandbox_template_file` (added `execd-isolation` volume + mount, `optional: true`, merged by the existing template-extras path), the test points `EXECD_ISOLATION_CONFIG` at it per request env, and the workspace PVC is mounted at `/mnt/workspace-exec` via request volumes so the Landlock bind-mount expansion is still exercised. k8s root-cause note: the e2e PVC's hostPath PV used to live under the kind node's `/tmp`, which is a **noexec tmpfs** — every PVC mount was therefore non-executable (writes/reads fine, exec EACCES regardless of Landlock, pod spec and CR were always correct); the e2e harness now places the PV on the node rootfs (`/var/opensandbox-e2e`, `scripts/common/kubernetes-e2e.sh`). The entrypoint dump goes to `/workspace` (writable in both runtimes) and is read back via the SDK files API on k8s. Covers: reduced caps/seccomp/NNP + env strip on entrypoint and `/command`, Landlock (`/tmp` writable, `/etc/passwd` read-only, workspace mount write+exec; skipped when the kernel reports `unsupported`, per §6 fail-open), capabilities endpoint layer states, and the missing-`CAP_SETPCAP` degradation (phase 2, docker only — k8s degradation still open: the k8s container ceiling caps are not tuned in the e2e) |
+| R-j | eBPF JSONL audit e2e | **Open.** No container/e2e test runs the `execd-ebpf` variant with `[ebpf] enabled` and asserts exec/connect/privilege events land in the rotating audit file; only event-decoding unit tests exist — the `commit_creds` privilege hook has never been validated on a real kernel (ties into R-c/R-e) |
+| R-k | Python e2e signal-forwarding breadth | **Implemented** — `test_application_signals_forwarded_to_entrypoint` now sends HUP/USR1/USR2/WINCH to PID 1 and asserts every trap marker fires in the entrypoint (SIGTERM graceful shutdown covered by `tests/init_container.sh`) |
+| R-l | K8s init-mode e2e depth | **Partially addressed.** The k8s nightly runs the same Python file with two k8s-path adaptations: `test_entrypoint_exit_code_propagates` skips on k8s (BatchSandbox stays Pending after pod completion and does not surface the container exit code — verified empirically on the nightly), and the `kill 1` pin asserts execd becomes unreachable instead of a lifecycle state transition. Still open: no Pool + `EXECD_INIT` subreaper-report case (R-b); no K8s Restart recycle (`kill 1`) against an init-mode pod — the `restart_default.go` "contract compatible" comment is unverified e2e |
+| R-m | Default-off assertion + sustained fork-heavy | **Open (low).** No explicit e2e pin that with init/hardening off the capabilities endpoint reports `init_mode: none` and layers `disabled`; the fork-heavy e2e loop is 20×5 short-lived children — a long-running mix of `/command` churn + background sleepers would closer match OSEP §Test-Plan |
+| R-n | PTY path under hardening — zero coverage | **Implemented** — Go integration test `TestHardeningPTYSessions` (`hardening_linux_test.go`, runs in the execd `test` CI job): StartPTY + StartPipe both launch through the launcher with the reaper active and assert the session shell reports Seccomp=2 / NoNewPrivs=1 / CapEff=0 (root) / `EXECD_ACCESS_TOKEN` stripped. Container-level `/pty` WS case dropped: the alpine execd image has no WS client, and the pty fd / `setsid` / `Setctty` survival across the launcher's `execve` is covered by the integration test |
+| R-o | Isolated session (bwrap) + init-mode reaper combination | **Implemented** — (1) Go integration test `TestIsolatedSessionWithInitReaper` (`isolated_session_initmode_linux_test.go`, `linux && bwrap`, run as root in the `bwrap-smoke` CI job): full bwrap lifecycle (create/run/exit-code/delete) under reaper dispatch, plus a delete racing a running workload to exercise the pre-reap barrier's PGID-reuse serialization with the reaper's WNOWAIT-observe → consume path. (2) Python e2e `TestIsolatedSessionHardeningE2E` (docker bridge, runs in the hardening e2e job's phase 1): bwrap sessions under init mode + the floor — capabilities available, session workload carries bwrap's seccomp/NNP floor + credential env strip, PID-namespace isolation, state persistence, delete-while-busy teardown, hardening report intact around sessions |
+| R-p | `/code` (Jupyter kernels) under init/hardening e2e | **Declined follow-up.** Not validated at e2e level; kernels inherit the reduced Jupyter entrypoint by construction, and `test_execd_init_e2e.py` covers Jupyter startup under PID 1 via the ready check. Revisit if the code-interpreter entrypoint changes |
+| R-q | Custom `[seccomp] deny` + `keep_capabilities` e2e | **Open (low).** Only Go unit tests cover the reserved-`execve` rejection (`TestHardeningRejectsReservedExecve`) and the ambient-raise path (`TestHardeningKeepCapabilities`). No e2e runs a hardened sandbox with a custom deny list + `keep_capabilities`: plan a TOML variant (e.g. deny `chmod`, `keep_capabilities=["CAP_NET_RAW"]`) in the hardening e2e asserting the denied syscall fails in `/command` and the workload shows CapEff=0x2000 |
+| R-r | e2e consumes the SDK `hardening` model instead of a raw HTTP probe | **Implemented** — `_hardening_report` now reads `sandbox.isolation.capabilities().hardening` (`HardeningStatus` model) instead of a `/command` urllib JSON probe, pinning the spec → SDK → implementation alignment of the hardening object |
+| R-s | `EXECD_INIT` ↔ TOML drift pin (init off, hardening on) | **Open (low).** The "hardening enabled but execd is not the init → layers degraded" state is only pinned in Go (`TestHardeningReportDegradesWithoutInitMode`); no Python e2e asserts the endpoint reports `init_mode: none` + degraded layers with `[hardening] enabled` but `execd_run_as_init = false`. Complements R-m's default-off pin |
+| R-t | Reaper sweep backstop (lost/coalesced SIGCHLD) | **Implemented** — `TestReaperSweepBackstop` (`initmode_linux_test.go`): the reaper's `signal.Notify` subscription stays registered (blocking the Go runtime's auto-reap) while the run loop is severed from it, so only the sweep ticker can reap an exiting child; asserts the child is drained within the ticker budget |
+| R-u | Runtime-initiated container stop (external SIGTERM) at SDK/e2e level | **Open (low).** Only `components/execd/tests/init_container.sh` (docker stop) covers the graceful-shutdown path; no SDK-level e2e asserts the entrypoint receives SIGTERM and the sandbox exits with its status when the runtime stops the container. Adjacent to R-k's signal-forwarding breadth |
 
 Closed this round (2026-08-12): CI green for all execd-init jobs; `/proc/1/environ`
 e2e assertion (`test_workload_cannot_read_execd_environ`); hardening report

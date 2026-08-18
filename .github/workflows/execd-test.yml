@@ -237,6 +237,17 @@ jobs:
         working-directory: components/execd
         run: sudo -E env "PATH=$PATH" go test -tags="linux,bwrap" -v -count=1 -timeout=5m ./pkg/runtime/bwrap_test/
 
+      - name: Run isolated session init-mode reaper integration test
+        working-directory: components/execd
+        run: |
+          # bwrap lifecycle under init-mode reaper dispatch (OSEP-0018 R-o):
+          # the pre-reap barrier must serialize process-group teardown with
+          # the reaper's observe/consume while execd owns wait4.
+          sudo -E env "PATH=$PATH" go test \
+            -tags="linux,bwrap" -v -count=1 -timeout=3m \
+            -run '^TestIsolatedSessionWithInitReaper$' \
+            ./pkg/runtime
+
   required:
     name: Execd CI
     if: always()

@@ -13,13 +13,14 @@
 # limitations under the License.
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from typing import cast
+from unittest.mock import call, MagicMock
 
 import pytest
 from fastapi import HTTPException
 from kubernetes.client import V1ResourceRequirements
 
-from opensandbox_server.services.constants import SANDBOX_ID_LABEL
+from opensandbox_server.services.constants import SANDBOX_ID_LABEL, SandboxErrorCodes
 from opensandbox_server.services.k8s.k8s_diagnostics import (
     K8sDiagnosticsMixin,
     _parse_since,
@@ -280,6 +281,27 @@ def test_get_sandbox_logs_maps_kubernetes_403_to_forbidden_response() -> None:
     assert exc.value.status_code == 403
 
 
+@pytest.mark.parametrize("api_status", [None, 503])
+def test_get_sandbox_logs_maps_undocumented_kubernetes_failures_to_500(
+    api_status: int | None,
+) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    service = _DiagnosticsService([_multi_container_pod()])
+    api_exc = ApiException(status=api_status, reason="Kubernetes log API error")
+    api_exc.body = "log API unavailable"
+    service.core_v1.read_namespaced_pod_log.side_effect = api_exc
+
+    with pytest.raises(HTTPException) as exc:
+        service.get_sandbox_logs("sbx-1")
+
+    assert exc.value.status_code == 500
+    detail = cast(dict[str, str], exc.value.detail)
+    assert detail["code"] == SandboxErrorCodes.K8S_API_ERROR
+    assert "pod-1" in detail["message"]
+    assert api_exc.body in detail["message"]
+
+
 def test_get_sandbox_inspect_formats_runtime_statuses_and_resources() -> None:
     running_status = _status(running=SimpleNamespace(started_at="2026-01-01T00:00:01Z"))
     waiting_status = _status(waiting=SimpleNamespace(reason="ImagePullBackOff", message="pull failed"))
@@ -365,3 +387,144 @@ def test_get_sandbox_events_uses_found_pod_namespace() -> None:
         field_selector="involvedObject.name=pod-1",
         limit=50,
     )
+
+
+def test_get_sandbox_events_follows_continuation_until_limit() -> None:
+    service = _DiagnosticsService([_pod()])
+
+    def event(index: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            last_timestamp=f"2026-01-01T00:00:{index:02d}Z",
+            event_time=None,
+            first_timestamp=None,
+            type="Normal",
+            reason="Started",
+            message=f"event-{index}",
+        )
+
+    service.core_v1.list_namespaced_event.side_effect = [
+        SimpleNamespace(
+            items=[event(index) for index in range(50)],
+            metadata=SimpleNamespace(_continue="next-page-token"),
+        ),
+        SimpleNamespace(
+            items=[event(50)],
+            metadata=SimpleNamespace(_continue=None),
+        ),
+    ]
+
+    output = service.get_sandbox_events("sbx-1", limit=51)
+
+    assert len(output.splitlines()) == 51
+    assert "event-50" in output
+    assert service.core_v1.list_namespaced_event.call_args_list == [
+        call(
+            namespace="sandbox-system",
+            field_selector="involvedObject.name=pod-1",
+            limit=51,
+        ),
+        call(
+            namespace="sandbox-system",
+            field_selector="involvedObject.name=pod-1",
+            limit=51,
+            _continue="next-page-token",
+        ),
+    ]
+
+
+def test_stable_event_diagnostics_policy_is_owned_by_kubernetes_service() -> None:
+    service = _DiagnosticsService([_pod()])
+    events = [f"event {index}" for index in range(51)]
+    service.get_sandbox_events = MagicMock(return_value="\n".join(events))
+
+    result = service.get_sandbox_event_diagnostics("sbx-1", scope="ALL")
+
+    assert result.scope == "all"
+    assert result.content.splitlines() == events[:50]
+    assert result.truncated is True
+    assert result.warnings == (
+        "The current backend only contributes runtime events to the all scope.",
+    )
+    service.get_sandbox_events.assert_called_once_with("sbx-1", limit=51)
+
+
+def test_stable_log_diagnostics_policy_is_owned_by_kubernetes_service() -> None:
+    service = _DiagnosticsService([_pod()])
+    lines = [f"line {index}" for index in range(101)]
+    service.get_sandbox_logs = MagicMock(return_value="\n".join(lines))
+
+    result = service.get_sandbox_log_diagnostics("sbx-1", scope="ALL")
+
+    assert result.scope == "all"
+    assert result.content.splitlines() == lines[-100:]
+    assert result.truncated is True
+    assert result.warnings == (
+        "The current backend only contributes sandbox container logs to the all scope.",
+    )
+    service.get_sandbox_logs.assert_called_once_with(
+        "sbx-1",
+        tail=101,
+        since=None,
+        container=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("method_name", "scope", "kind", "supported"),
+    [
+        ("get_sandbox_log_diagnostics", "lifecycle", "logs", "container, all"),
+        ("get_sandbox_event_diagnostics", "network", "events", "runtime, all"),
+    ],
+)
+def test_stable_diagnostics_reject_unsupported_kubernetes_scopes(
+    method_name: str,
+    scope: str,
+    kind: str,
+    supported: str,
+) -> None:
+    service = _DiagnosticsService([_pod()])
+
+    with pytest.raises(HTTPException) as exc:
+        getattr(service, method_name)("sbx-1", scope)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == {
+        "code": "DIAGNOSTICS_SCOPE_UNSUPPORTED",
+        "message": (
+            f"Unsupported {kind} diagnostics scope {scope!r}. Supported scopes: {supported}."
+        ),
+    }
+    service.k8s_client.list_pods.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("api_status", "expected_status", "expected_code"),
+    [
+        (400, 400, SandboxErrorCodes.K8S_API_ERROR),
+        (403, 403, SandboxErrorCodes.K8S_API_ERROR),
+        (404, 404, SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND),
+        (503, 500, SandboxErrorCodes.K8S_API_ERROR),
+    ],
+)
+def test_get_sandbox_events_maps_kubernetes_api_errors(
+    api_status: int,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    service = _DiagnosticsService([_pod()])
+    api_exc = ApiException(status=api_status, reason="Kubernetes event API error")
+    api_exc.body = f"event API failed with status {api_status}"
+    service.core_v1.list_namespaced_event.side_effect = api_exc
+
+    with pytest.raises(HTTPException) as exc:
+        service.get_sandbox_events("sbx-1")
+
+    assert exc.value.status_code == expected_status
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    typed_detail = cast(dict[str, str], detail)
+    assert typed_detail["code"] == expected_code
+    assert "pod-1" in typed_detail["message"]
+    assert api_exc.body in typed_detail["message"]
