@@ -14,21 +14,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Init mode (OSEP-0018, phase 1): execd is the sandbox init. It reaps every
-// child through a single reaper, forwards application signals to the user
-// entrypoint, and owns the container lifecycle (entrypoint exit code is
-// propagated to the runtime).
+// Init mode (OSEP-0018): execd is the sandbox init — it reaps children
+// through a single reaper, forwards application signals to the entrypoint,
+// and owns the container lifecycle (exit code propagated to the runtime).
 //
-// The reaper is the only wait4-family caller in init mode, so execd never
-// calls os/exec.Cmd.Wait for its own children. Callers build the process with
-// exec.Command as usual but launch and wait through the managedProcess
-// abstraction, which reproduces the pipe teardown Cmd.Wait would otherwise
-// perform.
-//
-// The reaper registry lock spans child start and registration: a child is
-// added to the owned map before any concurrent drain can observe it, so the
-// start/register race is closed structurally. Any child observed that is not
-// owned is a reparented orphan and is reaped and logged.
+// The reaper is the only wait4-family caller, so execd never calls
+// os/exec.Cmd.Wait; managedProcess reproduces the pipe teardown Cmd.Wait
+// would perform. The reaper registry lock spans child start and
+// registration, closing the start/register race structurally; unowned
+// children are reparented orphans, reaped and logged.
 
 package runtime
 
@@ -150,7 +144,7 @@ func (r *reaper) start() {
 }
 
 // stop terminates the reaper and waits until its signal subscription is
-// removed. Test-only in practice; execd runs one reaper for its lifetime.
+// removed.
 //
 //nolint:unused // test-only lifecycle; execd runs one reaper for its lifetime
 func (r *reaper) stop() {
@@ -307,11 +301,10 @@ func withoutHardening() launchOption {
 	}
 }
 
-// bootstrapEnv overrides the env strip for the user entrypoint: the image's
-// own entrypoint scripts may need JUPYTER_TOKEN/EXECD_ENVS to configure
-// themselves (e.g. the code-interpreter entrypoint), so those survive — but
-// EXECD_ACCESS_TOKEN is execd's control-plane credential and must never
-// reach the long-lived entrypoint (its Jupyter kernels are user code).
+// bootstrapEnv overrides the env strip for the user entrypoint: its scripts
+// may need JUPYTER_TOKEN/EXECD_ENVS to configure themselves (e.g. the
+// code-interpreter entrypoint), but EXECD_ACCESS_TOKEN must never reach the
+// long-lived entrypoint (its Jupyter kernels are user code).
 func bootstrapEnv() launchOption {
 	return func(mp *managedProcess) {
 		mp.stripEnv = []string{"EXECD_ACCESS_TOKEN"}
@@ -522,10 +515,9 @@ func terminateInit(entry *managedProcess) {
 // SIGKILLs the survivors. Reaping is done by the reaper; the kernel reaps
 // anything left when execd exits.
 func stopChildrenExcept(keep *managedProcess) {
-	// SIGTERM and the final SIGKILL pass are sent while holding the reaper
-	// lock: the pid is verified against the owned map and the reaper cannot
-	// consume (and release) the PID/PGID between verification and kill, so
-	// a recycled process group can never be signalled.
+	// Signal while holding the reaper lock: the pid stays verified against
+	// the owned map, so the reaper cannot release the PID/PGID between the
+	// check and the kill (no recycled process group can be signalled).
 	others := initReaper.signalOthers(keep, syscall.SIGTERM)
 	if len(others) == 0 {
 		return

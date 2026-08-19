@@ -97,9 +97,8 @@ func run() int {
 	log.Init(flag.ServerLogLevel)
 
 	if flag.InitMode {
-		// OSEP-0018: execd is the sandbox init. Must start after the startup
-		// probes (which run short-lived children via cmd.Run) so the reaper is
-		// the only wait4 caller from here on.
+		// Start after the startup probes (which run short-lived cmd.Run
+		// children) so the reaper is the only wait4 caller from here on.
 		runtime.StartInitMode(flag.Args())
 	}
 

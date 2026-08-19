@@ -342,10 +342,9 @@ elif [ $# -eq 0 ]; then
 	set -- "$SHELL_BIN"
 fi
 
-# Init mode (OSEP-0018): exec into execd so it becomes the sandbox init (PID 1
-# on the direct paths) and supervises the user command itself. The shell must
-# exec, never background, or execd would run as a subreaper without the kernel
-# signal shield.
+# Init mode (OSEP-0018): exec into execd so it becomes PID 1 and supervises
+# the user command. The shell must exec, never background, or execd runs as a
+# subreaper without the kernel signal shield.
 if is_truthy "${EXECD_INIT:-}"; then
 	exec "$EXECD" --init -- "$@"
 fi

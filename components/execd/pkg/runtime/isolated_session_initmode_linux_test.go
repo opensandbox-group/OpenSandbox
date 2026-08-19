@@ -27,11 +27,10 @@ import (
 )
 
 // Integration test: isolated sessions (bwrap) under init-mode reaper dispatch
-// (OSEP-0018 R-o). The bwrap process is launched through launchManaged with
-// withoutHardening and a pre-reap barrier; with the reaper active, the barrier
-// runs inside the reaper's drain between the WNOWAIT observe and the consuming
-// wait. These tests run the real bwrap lifecycle (create / run / delete, and
-// delete racing a running workload) with the reaper owning wait4.
+// (OSEP-0018 R-o). bwrap launches through launchManaged with
+// withoutHardening and a pre-reap barrier that runs inside the reaper's drain
+// (WNOWAIT observe -> consume). Covers the real bwrap lifecycle including
+// delete racing a running workload.
 func TestIsolatedSessionWithInitReaper(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("bwrap init-mode integration requires root")

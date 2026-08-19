@@ -43,7 +43,9 @@ running with ``[hardening]``/``[landlock]`` enabled:
   from the entrypoint)
 - Landlock confinement: /tmp writable, /etc/passwd not writable, the
   bind-mounted workspace writable AND executable (exercises the launcher's
-  mount expansion), /proc/1/environ denied
+  mount expansion); the /proc/1/environ denial is pinned by
+  test_execd_init_e2e.py::test_workload_cannot_read_execd_environ
+  (PR_SET_DUMPABLE is independent of the hardening TOML)
 - GET /v1/isolated/capabilities reports init_mode=pid1 with
   cap_drop/seccomp active and landlock active|unsupported
 
@@ -335,14 +337,6 @@ class TestHardeningE2E:
         assert status["NoNewPrivs"] == "1", status
         for name in ENTRYPOINT_BOOTSTRAP_ENV_STRIPPED:
             assert name not in env, f"entrypoint env leaked {name}"
-
-    def test_workload_cannot_read_execd_environ(self, sandbox) -> None:
-        # PR_SET_DUMPABLE shield: same-uid workload without CAP_SYS_PTRACE
-        # cannot read execd's environment even before Landlock.
-        result = sandbox.commands.run("cat /proc/1/environ")
-        assert result.error is not None, "reading execd's /proc/1/environ must be denied"
-        stderr = "".join(msg.text for msg in result.logs.stderr)
-        assert "Permission denied" in stderr or "Operation not permitted" in stderr
 
     def test_tmp_is_writable(self, sandbox) -> None:
         if _landlock_state(sandbox) != "active":

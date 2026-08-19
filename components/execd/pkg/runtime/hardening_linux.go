@@ -83,10 +83,9 @@ const (
 		llMakeSym | llRemoveDir | llRemoveFile | llRefer | llTruncate
 )
 
-// landlockRule grants access beneath path (OSEP-0018 §5). Rules only grant
-// access; everything else under the handled set is denied. Required rules
-// must all install or the launch skips confinement entirely (fail closed);
-// best-effort rules (mount-expansion duplicates) are logged and skipped.
+// landlockRule grants access beneath path (OSEP-0018 §5); rules only grant,
+// never deny. Required rules must all install or confinement is skipped
+// (fail closed); best-effort rules are logged and skipped.
 type landlockRule struct {
 	Access   uint64
 	Path     string
@@ -94,21 +93,16 @@ type landlockRule struct {
 }
 
 // buildLandlockRules assembles the default allowlist. The root rule grants
-// EXECUTE only: it covers path traversal and execve of any binary without
-// exposing any read access. /proc is deliberately limited to /proc/self and
-// /proc/sys — never all of /proc, which would re-expose /proc/1 (and
-// execd's credentials) to a same-uid workload. Note that Landlock
-// path_beneath rules are scoped to the mount the path sits on, so
-// expandMountRules adds a rule per mount point beneath each grant (a bind
-// mount like a workspace would otherwise be invisible to the rule).
+// EXECUTE only (traversal/execve without read access). /proc is limited to
+// /proc/self and /proc/sys — never all of /proc, which would re-expose
+// /proc/1 (and execd's credentials) to a same-uid workload.
 func buildLandlockRules(cfg isolation.Config) []landlockRule {
 	bestEffort := func(access uint64, path string) landlockRule {
 		return landlockRule{Access: access, Path: path, Required: false}
 	}
-	// Operator-explicit grants are required: if one cannot be installed the
-	// layer degrades instead of silently narrowing. The default set stays
-	// best-effort — images legitimately differ (e.g. alpine has no /lib64,
-	// minimal images lack /workspace).
+	// Operator-explicit grants are required (degrade if uninstallable); the
+	// default set is best-effort — images legitimately differ (alpine has no
+	// /lib64, minimal images lack /workspace).
 	required := func(access uint64, path string) landlockRule {
 		return landlockRule{Access: access, Path: path, Required: true}
 	}
@@ -139,13 +133,10 @@ func buildLandlockRules(cfg isolation.Config) []landlockRule {
 	for _, p := range []string{"/tmp", "/run"} {
 		rules = append(rules, bestEffort(llRwAccess, p))
 	}
-	// The workspace family (allowed_writable) must additionally be
-	// executable: workloads compile/run scripts there, and the e2e contract
-	// asserts it. Landlock anchors a rule on the mount the path resolves to,
-	// so granting llExecute here covers the workspace even when the
-	// mount-expansion rules below are incomplete (e.g. a mount not present
-	// in /proc/self/mounts at policy-build time). One rule per path: a
-	// duplicate entry would shadow the combined access in rule matching.
+	// allowed_writable paths must also be executable (workloads compile/run
+	// scripts there). Landlock anchors a rule on the path's mount, so the
+	// direct llExecute grant covers the workspace even if the
+	// mount-expansion below is incomplete.
 	for _, p := range cfg.AllowedWritable {
 		rules = append(rules, bestEffort(llRwAccess|llExecute, p))
 	}
@@ -160,11 +151,10 @@ func buildLandlockRules(cfg isolation.Config) []landlockRule {
 	return expandMountRules(rules)
 }
 
-// expandMountRules duplicates every rule onto each mount point beneath the
-// rule path. Landlock path_beneath rules only cover the mount the path
-// belongs to, so a bind-mounted workspace (a separate mount) is invisible
-// to a rule on its parent path — without expansion, execve and file access
-// on bind mounts would be denied.
+// expandMountRules duplicates rules onto each mount point beneath the rule
+// path: path_beneath rules only cover the mount the path belongs to, so a
+// bind-mounted workspace would otherwise be invisible to a rule on its
+// parent path.
 func expandMountRules(rules []landlockRule) []landlockRule {
 	mounts := readMountPoints()
 	if len(mounts) == 0 {
@@ -181,11 +171,9 @@ func expandMountRules(rules []landlockRule) []landlockRule {
 	return expanded
 }
 
-// ruleForPath returns the merged access of every rule that covers path
-// (path == rule.Path or path is beneath it). A mount point may be beneath
-// several grants (e.g. /mnt beneath both / for EXECUTE and the /mnt
-// writable grant); merging keeps both, so a bind-mounted workspace keeps
-// execute access.
+// ruleForPath returns the merged access of every rule covering path. A mount
+// point may sit beneath several grants (e.g. /mnt under both / for EXECUTE
+// and the /mnt writable grant); merging keeps both.
 func ruleForPath(rules []landlockRule, path string) (uint64, bool) {
 	var access uint64
 	found := false
@@ -521,15 +509,12 @@ func parseKeepCapabilities(names []string) ([]uint32, error) {
 	return caps, nil
 }
 
-// hardenCmd rewrites cmd to exec the launcher with the floor policy, unless
-// the launch opted out (isolated sessions).
-// hardenCmd rewrites cmd to exec the launcher with the floor policy. The
-// returned file is the parent-side policy memfd; the caller must close it
-// after the child has started (MFD_CLOEXEC keeps it out of any later exec).
-//
-// A per-request identity (cmd.SysProcAttr.Credential) is folded into the
-// policy and cleared: os/exec would otherwise drop the launcher to that
-// uid/gid before exec, breaking the privileged prelude (capset/setgroups).
+// hardenCmd rewrites cmd to exec the launcher with the floor policy (unless
+// the launch opted out). The returned file is the parent-side policy memfd;
+// the caller must close it after the child has started (MFD_CLOEXEC keeps it
+// out of any later exec). A per-request identity (SysProcAttr.Credential) is
+// folded into the policy and cleared: os/exec would otherwise drop the
+// launcher to that uid/gid before exec, breaking the privileged prelude.
 func hardenCmd(cmd *exec.Cmd, noHardening bool, stripEnv []string) (*os.File, error) {
 	if noHardening || !hardening.enabled.Load() {
 		return nil, nil //nolint:nilnil // no policy file when not hardening
@@ -677,15 +662,10 @@ func ReportHardening() HardeningReport {
 	if es := hardening.ebpf.Load(); es != nil {
 		report.Ebpf = *es
 	}
-	// Without init mode (classic background-and-wait topology), the image
-	// entrypoint — and any /code kernels it spawns — is launched by the
-	// bootstrap shell, not by execd, so it never passes through the launcher.
-	// The layer states above only cover execd-spawned commands/sessions; say
-	// so instead of letting the endpoint claim full enforcement. Key the
-	// correction off hardening being enabled (not off cap_drop's state: the
-	// layer can be degraded while seccomp/Landlock are active, or cap_drop
-	// can be active while a configured layer is disabled) and only touch the
-	// layers that are actually in effect.
+	// Without init mode the image entrypoint (and its /code kernels) is
+	// launched by the bootstrap shell, never through the launcher, so the
+	// enabled layers must report degraded rather than claiming full
+	// enforcement. Key off hardening.enabled and only touch active layers.
 	if mode == "none" && hardening.enabled.Load() {
 		msg := "hardening enabled but execd is not the sandbox init (EXECD_INIT unset): " +
 			"the image entrypoint and its /code kernels are not wrapped; only " +

@@ -22,6 +22,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -60,7 +61,9 @@ jobs:
         run: |
           # Regenerate the per-arch bytecode first: the generated files are
           # build artifacts (not committed), so local tests need them too.
-          sudo apt-get update -qq && sudo apt-get install -y -qq clang >/dev/null
+          # clang ships in the GitHub-hosted ubuntu image; apt is only a
+          # fallback for hosts without a toolchain.
+          command -v clang >/dev/null || sudo apt-get update -qq && sudo apt-get install -y -qq clang >/dev/null
           make generate-ebpf ARCH=$(go env GOARCH)
           CGO_ENABLED=1 go test -tags ebpf -count=1 ./pkg/ebpf/
 

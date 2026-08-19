@@ -30,10 +30,8 @@
  *      the launcher's own setup syscalls above
  *   8. execve(user argv)
  *
- * The order is pinned by Linux semantics (see the OSEP). Every step is
- * best-effort and fail-open: a missing prerequisite is logged to stderr and
- * skipped, never fatal — matching execd's degradation contract. The policy is
- * read from an inherited descriptor; any malformed policy exits without
+ * The order is pinned by Linux semantics. Every step is best-effort and
+ * fail-open (logged, never fatal); a malformed policy exits without
  * executing the workload.
  */
 
@@ -271,11 +269,9 @@ static void apply_landlock(const struct ll_rule *rules, size_t n_rules)
         }
 
         if (rule_failed) {
-            /* Fail closed per launch: a missing required rule would silently
-             * deny access the operator explicitly granted. Skip confinement
-             * entirely and report instead of restricting with a narrower
-             * policy. Best-effort (mount-expansion) failures are logged
-             * above and do not abort. */
+            /* Fail closed: a missing required rule would silently deny
+             * operator-granted access, so skip confinement entirely.
+             * Best-effort (mount-expansion) failures only log. */
             fprintf(stderr,
                     "opensandbox-launcher: landlock: rule installation failed; "
                     "skipping filesystem confinement for this launch\n");
@@ -432,8 +428,6 @@ int main(int argc, char **argv)
     }
 
     if (hdr.flags & FLAG_CAP_DROP) {
-        int caps_dropped = 0;
-
         /* 2. Keep caps across the identity change (step 5 clears them). */
         if (prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0)
             log_err("PR_SET_KEEPCAPS", errno);
@@ -448,12 +442,10 @@ int main(int argc, char **argv)
                     break;
                 }
             }
-            if (!keep && prctl(PR_CAPBSET_DROP, (unsigned long)cap, 0, 0, 0) == 0)
-                caps_dropped++;
-            else if (!keep && errno != EPERM && errno != EINVAL)
+            if (!keep && prctl(PR_CAPBSET_DROP, (unsigned long)cap, 0, 0, 0) != 0 &&
+                errno != EPERM && errno != EINVAL)
                 log_err("PR_CAPBSET_DROP", errno);
         }
-        (void)caps_dropped;
     }
 
     /* 4. No new privileges: nothing below can regain what the launcher drops. */
@@ -461,10 +453,8 @@ int main(int argc, char **argv)
         log_err("PR_SET_NO_NEW_PRIVS", errno);
 
     if (hdr.flags & FLAG_UID_DROP) {
-        /* 5. Identity change. The requested identity is part of the launch
-         * contract: a same-uid re-apply always succeeds, but a foreign
-         * target that cannot be applied must abort the launch (os/exec
-         * would fail) instead of silently running as the wrong user. */
+        /* 5. Identity change: a foreign target that cannot be applied must
+         * abort the launch rather than silently run as the wrong user. */
         if (hdr.n_groups > 0) {
             gid_t *gids = (gid_t *)malloc(hdr.n_groups * sizeof(gid_t));
 

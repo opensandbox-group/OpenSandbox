@@ -276,9 +276,8 @@ func TestHardeningReportDegradesWithoutInitMode(t *testing.T) {
 	launcherSearchPaths = append(launcherSearchPaths, launcherBuilt)
 
 	// Without init topology the entrypoint and /code kernels never pass
-	// through the launcher; every enabled layer must report degraded, and a
-	// layer that is not configured must stay disabled rather than being
-	// dragged into the degradation.
+	// through the launcher: enabled layers must report degraded, unconfigured
+	// ones stay disabled.
 	initHardeningForTest(t, hardenedCfg())
 	report := ReportHardening()
 	if report.InitMode != "none" {
@@ -435,12 +434,10 @@ func assertLandlockRule(t *testing.T, rules []landlockRule, path string, access 
 	t.Fatalf("landlock rule for %s missing", path)
 }
 
-// TestHardeningPTYSessions verifies the PTY launch paths pass through the
-// hardening floor (OSEP-0018 R-n): StartPTY and StartPipe both route through
-// the opensandbox-launcher, whose argv[0]-replacement execve must preserve the
-// pty/session semantics (setsid/Setctty by creack/pty, the pty fds) while
-// applying the floor to the final workload. The reaper is started so the launch
-// also exercises reaper dispatch of launcher-exec'd children.
+// TestHardeningPTYSessions verifies StartPTY/StartPipe route through the
+// launcher (OSEP-0018 R-n): the argv[0]-replacement execve must preserve the
+// pty/session semantics (setsid/Setctty, pty fds) while the floor applies,
+// with the reaper dispatching launcher-exec'd children.
 func TestHardeningPTYSessions(t *testing.T) {
 	buildLauncher(t)
 	launcherSearchPaths = append(launcherSearchPaths, launcherBuilt)
@@ -448,9 +445,7 @@ func TestHardeningPTYSessions(t *testing.T) {
 	initHardeningForTest(t, hardenedCfg())
 	requireBash(t)
 
-	// The launcher strips execd's credential env from the workload; seed it in
-	// the test process so the session's inherited environment would leak it
-	// without the strip.
+	// Seed the credential env so the session would leak it without the strip.
 	t.Setenv("EXECD_ACCESS_TOKEN", "pty-session-secret")
 
 	// The session shell is the launcher-exec'd workload: read the floor from

@@ -272,25 +272,11 @@ class TestExecdInitE2E:
             time.sleep(2)
         pytest.fail("execd still reachable after in-namespace kill 1")
 
-    def test_fork_heavy_keeps_process_table_bounded(self, sandbox) -> None:
-        # Sustained fork churn: short-lived background children (reparented
-        # orphans) plus a few long sleepers. The reaper must keep the process
-        # table bounded and zombie-free over many cycles.
-        baseline = _process_count(sandbox)
-        for _ in range(20):
-            _run_command(sandbox, "for i in $(seq 1 5); do ( sleep 0.1 ) & done; sleep 0.3")
-        _run_command(sandbox, "sleep 15 & sleep 15 & sleep 15 &")
-        time.sleep(2)
-        zombies = _zombie_count(sandbox)
-        assert zombies == 0, f"zombies under pid 1: {zombies}"
-        total = _process_count(sandbox)
-        assert total <= baseline + 10, f"process table grew: {baseline} -> {total}"
-
     def test_sustained_fork_heavy_mix_keeps_process_table_bounded(self, sandbox) -> None:
         # Long-running mix of /command churn interleaved with background
         # sleepers, sustained over ~30s, must keep the process table bounded
-        # and zombie-free throughout. This closes the gap left by the short
-        # 20x5 loop above (the minimal form; this is the sustained variant).
+        # and zombie-free throughout (the sustained form of
+        # test_orphans_are_reaped).
         baseline = _process_count(sandbox)
         deadline = time.monotonic() + 30
         round_n = 0

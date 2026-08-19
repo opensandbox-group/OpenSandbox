@@ -14,55 +14,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Init mode is Linux-only (OSEP-0018). On other platforms the managedProcess
-// abstraction degrades to plain Cmd.Start/Cmd.Wait so the shared launch paths
-// keep compiling unchanged.
+// Init mode is Linux-only (OSEP-0018). Off Linux, execd keeps today's
+// behavior; the managedProcess fallback for Unix platforms lives in
+// initmode_other_unix.go.
 
 package runtime
 
-import (
-	"os/exec"
-
-	"github.com/alibaba/opensandbox/execd/pkg/log"
-)
-
-type managedProcess struct {
-	cmd *exec.Cmd
-}
-
-func newManagedProcess(cmd *exec.Cmd) *managedProcess {
-	return &managedProcess{cmd: cmd}
-}
-
-func (mp *managedProcess) Wait() error {
-	return mp.cmd.Wait()
-}
-
-func (mp *managedProcess) ExitCode() int {
-	return mp.cmd.ProcessState.ExitCode()
-}
-
-type launchOption func(*managedProcess)
-
-func withPreReap(fn func()) launchOption {
-	return func(*managedProcess) {}
-}
-
-// withoutHardening is a no-op off Linux (the floor never applies there).
-func withoutHardening() launchOption {
-	return func(*managedProcess) {}
-}
-
-func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption) (*managedProcess, error) {
-	if err := startFn(); err != nil {
-		return nil, err
-	}
-	return newManagedProcess(cmd), nil
-}
-
-func launchManaged(cmd *exec.Cmd, opts ...launchOption) (*managedProcess, error) {
-	return launchManagedWith(cmd, cmd.Start, opts...)
-}
+import "github.com/alibaba/opensandbox/execd/pkg/log"
 
 // StartInitMode is unsupported off Linux; execd keeps today's behavior.
 func StartInitMode(entryArgs []string) {
@@ -73,9 +31,4 @@ func StartInitMode(entryArgs []string) {
 // capabilities endpoint.
 func InitModeReport() (mode string, signalShield bool) {
 	return "none", false
-}
-
-// initModeActive is always false off Linux: init mode never runs there.
-func initModeActive() bool {
-	return false
 }
