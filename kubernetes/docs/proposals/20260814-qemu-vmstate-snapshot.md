@@ -3,7 +3,7 @@ title: QEMU VMState Snapshots for QEMU-in-runc Sandboxes
 authors:
   - "@fengcone"
 creation-date: 2026-08-14
-last-updated: 2026-08-14
+last-updated: 2026-08-19
 status: experimental
 ---
 
@@ -21,6 +21,11 @@ container and starts QEMU with an incoming migration stream.
 The first version uses the configured image registry for both artifacts. It
 does not require object storage, a custom OCI artifact media type, `savevm`, or
 a Kubernetes RuntimeClass.
+
+This document records the design and its boundaries. Workload authors and
+cluster operators should follow the
+[QEMU VMState operations guide](../../../docs/kubernetes/qemu-vmstate-snapshots.md)
+for image preparation, Helm deployment, Kind validation, and troubleshooting.
 
 ## Motivation
 
@@ -72,6 +77,28 @@ The QEMU image is responsible for:
 - keeping writable guest disk overlays inside the container rootfs in v1;
 - keeping liveness healthy while a checkpoint marker is present.
 
+The launch manifest is an OpenSandbox-defined workload contract, not a QEMU
+file and not an executable launch plan. The workload entrypoint produces it
+from the same effective values used to construct the QEMU command line. A
+static file baked into the image is valid only when every compatibility-
+sensitive setting is immutable; runtime generation is preferred when CPU,
+memory, disks, or devices are configurable through the Pod template.
+
+QMP and the launch manifest have separate responsibilities:
+
+- QMP controls the live process and exports or resumes the migration stream.
+- The launch manifest declares restore compatibility and storage intent that
+  QMP cannot reliably reconstruct, including the writable overlay capture
+  policy, optional base-image identity, and the workload-defined device
+  configuration digest.
+
+The snapshot worker treats `qemuConfigDigest` as an opaque SHA-256 identity
+for the compatibility-sensitive QEMU configuration. The workload must derive
+it deterministically from a canonical representation of machine, CPU, memory,
+disk, network, firmware, and device settings. It must not include transient
+values such as PID, socket path, generated MAC address, or timestamps. The v1
+worker records this value but does not reconstruct the command line from it.
+
 The snapshot Job is node-trusted infrastructure. QEMU mode uses the host PID
 namespace, `SYS_PTRACE`, and a same-path mount of the host containerd runtime
 directory so `nerdctl cp` and `nerdctl exec` can reach the target rootfs and
@@ -102,6 +129,74 @@ The VM state image is a normal runnable container image containing:
 
 The complete compatibility manifest is stored in the image. The CR status
 contains a smaller summary for scheduling, validation, and observability.
+
+### Design Q&A
+
+#### Why does a QEMU snapshot contain two images?
+
+A QEMU-in-runc sandbox has two different state domains with different restore
+consumers:
+
+1. The **rootfs image** is the committed root filesystem of the outer runc
+   container. It contains the QEMU binary and workload files, changes made by
+   other processes in the container, and the writable Guest qcow2 overlay when
+   that overlay is stored inside the container rootfs. The qcow2 file is the
+   Guest disk, not the outer container rootfs itself.
+2. The **VMState image** contains the compressed QEMU migration stream. It
+   represents the live Guest RAM, vCPU state, and migratable emulated-device
+   state at the checkpoint boundary. An injected init container pulls and
+   verifies this image before the QEMU container starts with `-incoming`.
+
+The rootfs image is a normal replacement image for the outer container. It is
+sufficient to start that container and cold-boot QEMU from the captured qcow2
+disk, but it cannot continue the Guest process from the exact paused
+instruction and memory state. The VMState image supplies that missing live
+state; it is not useful by itself because it must be restored against the
+matching Guest disk and QEMU launch topology.
+
+The VMState therefore has a strong compatibility relationship with both the
+rootfs snapshot and the launch configuration. The recorded compatibility
+summary includes architecture, QEMU version, versioned machine type, CPU
+model, vCPU count, RAM size, device-configuration digest, and optional node
+class. The Guest OS is not a separate compatibility field: its disk contents
+are in qcow2 and its running kernel and process state are already represented
+by the disk plus migration stream.
+
+Keeping two images preserves the existing rootfs commit and Kubernetes image
+restore path while giving VMState its own streaming, compression, verification,
+and loader lifecycle. Combining them would require rebuilding the committed
+rootfs image to append a large migration payload and would still require a
+pre-start extraction mechanism. `SandboxSnapshot.status` instead publishes the
+two immutable manifest digests together, so resume treats them as one atomic
+checkpoint even though the Registry stores two images.
+
+#### Why is an OpenSandbox `launch.json` required?
+
+The QEMU migration stream is not a complete, portable recipe for recreating
+the source process. Before QEMU can consume `-incoming`, the workload must
+start a compatible QEMU process with the same machine type, CPU model, memory,
+vCPU count, firmware, disk, network, and device topology.
+
+QMP can control the running process, report selected runtime information, and
+export the migration stream, but it cannot reliably recover the complete
+workload launch intent. In particular, it does not define which qcow2 file
+OpenSandbox must capture, whether that file belongs to the container rootfs,
+which immutable base image it depends on, or which normalized device settings
+the workload considers restore-compatible.
+
+`launch.json` fills that gap. It is an OpenSandbox-defined declarative manifest
+generated by the workload entrypoint from the same effective values used to
+construct the QEMU command line. The snapshot worker uses it to:
+
+- validate the QEMU version and required compatibility fields;
+- validate writable disk paths and the `capture: rootfs` policy;
+- record the disk and compatibility metadata beside the VMState payload; and
+- expose a compatibility summary for scheduling, diagnostics, and restore.
+
+The manifest is descriptive metadata, not an executable QEMU configuration.
+OpenSandbox does not use it to synthesize the QEMU command line. The workload
+entrypoint remains responsible for deterministically recreating that command
+and adding `-incoming` during restore.
 
 ### Guest disk layout
 
@@ -232,7 +327,7 @@ continue to use the current behavior without conversion.
 
 - [x] 2026-08-14: QEMU-in-runc and registry compatibility PoC completed.
 - [x] 2026-08-14: Proposal drafted and implementation branch created.
-- [ ] QEMU snapshot implementation opened for review.
+- [x] 2026-08-19: QEMU snapshot implementation prepared for review.
 - [x] 2026-08-14: Dedicated Linux KVM/Kind E2E passed with a new Pod, stable
   Guest boot ID, continuous mmap counter, and preserved mmap, raw Guest disk,
   and outer-rootfs values; the compressed 512 MiB Guest VMState payload was

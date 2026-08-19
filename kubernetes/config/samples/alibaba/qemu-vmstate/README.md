@@ -36,9 +36,12 @@ hostPath, cloud-disk, and external network-peer state are not captured.
 - A compatible QEMU version, machine type, CPU model, vCPU count, memory size,
   and device configuration on restore.
 
-## Validation and workload contract
+## Documentation
 
-See
-[`docs/kubernetes/qemu-vmstate-snapshots.md`](../../../../../docs/kubernetes/qemu-vmstate-snapshots.md)
-for the workload contract, Kind environment setup, command-by-command manual
-validation, Registry inspection, and security and compatibility boundaries.
+See the
+[design proposal](../../../../docs/proposals/20260814-qemu-vmstate-snapshot.md)
+for the artifact model, pause/resume sequence, compatibility boundaries, and
+design decisions. See the
+[operations guide](../../../../../docs/kubernetes/qemu-vmstate-snapshots.md)
+for workload image preparation, the annotation and launch-manifest contract,
+Helm deployment, Kind setup, and command-by-command validation.
