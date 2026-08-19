@@ -174,21 +174,37 @@ volumes:
   claim with different `subPath` values, each entry with the opt-in gets its
   own initialization; the init container mounts the claim once and creates
   each requested subPath.
-- **Unknown-field handling**: Because the current request-model handling may
-  ignore an unknown field on older servers, a client that sets
-  `createSubPathIfMissing: true` against a server that does not support it
-  could silently lose the guarantee. The implementation must therefore reject
-  the combination via schema validation (the field is part of the published
-  spec, and `additionalProperties: false` on the `pvc` object means an unknown
-  field is rejected on servers that implement the schema). Server and SDK
-  release notes must call out the minimum server version that supports the
-  field.
+- **Unknown-field handling / capability negotiation**: The runtime request
+  models (`server/opensandbox_server/api/schema.py`) do **not** set
+  `extra="forbid"` on their Pydantic `Config` (only `populate_by_name = True`),
+  so an unknown field on an older server is silently ignored — the OpenAPI
+  `additionalProperties: false` declaration is **not** runtime enforcement.
+  A client setting `createSubPathIfMissing: true` against a server that does
+  not support it would therefore silently lose the guarantee. The design must
+  add an explicit client-visible capability/version negotiation instead of
+  relying on schema strictness. Options to be resolved at implementation
+  time, in order of preference:
+  1. **Server capability surface**: extend the server's version/diagnostics
+     response (e.g. the stable diagnostics API from #1553) with a feature
+     flag such as `capabilities.subpath_init = true`, which the SDK checks
+     before sending the opt-in and rejects client-side otherwise.
+  2. **Runtime rejection with a stable error**: set `extra="forbid"` on the
+     `PVC` model (and affected request models) so an older server — after
+     this change ships — rejects the unknown field with a `4xx` instead of
+     ignoring it. This does not help clients talking to servers deployed
+     before the change, so (1) remains the primary mechanism for mixed
+     versions.
+  3. **SDK guard**: typed SDKs refuse to serialize `createSubPathIfMissing`
+     unless the connected server advertises support.
+  Server and SDK release notes must call out the minimum server version that
+  supports the field and the capability-flag contract.
 
 ### Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
 | Path traversal via `subPath` (`..`, absolute paths) | Reuse the existing `ensure_valid_sub_path` validator; no new traversal surface. |
+| Option-like or shell-special `subPath` names (e.g. `-m`, `` `rm -rf /` ``) interpreted by the init command | Invoke `mkdir` as an argv array with `--` option terminator, never through a shell; subPath is passed as a single argument, so shell metacharacters have no effect. Add option-like and shell-special names to the test plan. |
 | Symlink escapes inside the PVC (a parent component of `subPath` is a symlink pointing outside the claim) | Documented as caller responsibility in the initial scope; the init container runs `mkdir -p` which follows symlinks. A stricter design (e.g. `O_NOFOLLOW` walking) is deferred; the guarantee is "directory exists at the resolved path", matching `volumeMounts.subPath` resolution semantics. |
 | Concurrent creates racing to create the same directory | `mkdir -p` is idempotent and safe under concurrency; no locks required. |
 | Init container image availability / trust boundary | Reuse the existing execd or a minimal busybox-style image already available in the sandbox image set; the image is server-configured and operator-controlled. |
@@ -240,7 +256,10 @@ When all validation passes, the server adds an init container to the sandbox
 pod before the sandbox container:
 
 1. Mount the PVC at a scratch mount path (e.g. `/mnt/subpath-init`).
-2. Run `mkdir -p <subPath>` with the resolved relative path.
+2. Run `mkdir -p -- "<subPath>"` as an **argv array** (no shell), with `--`
+   as the option terminator so option-like names (e.g. `subPath: -m`) are
+   treated as paths, not `mkdir` options. The subPath must never be
+   interpolated into a shell command string.
 3. Exit 0 on success; exit non-zero on failure, which fails the pod and
    surfaces as a sandbox create/run failure with the init container's log
    attached to the error.
@@ -255,6 +274,16 @@ guarantees the target directory exists.
 - Init-container failures surface as pod-level failures: the sandbox does not
   reach Ready, and the server reports the init container's termination
   message with a stable error code.
+- **Init-container failure detection is a required implementation change**:
+  the existing readiness wait path
+  (`KubernetesSandboxService._wait_for_sandbox_ready`) recognizes only
+  Running/Allocated and unschedulable states; it neither detects a failed
+  init container nor fetches its logs, so without a change it would return
+  the generic `K8S_POD_READY_TIMEOUT` instead of the promised stable error.
+  The implementation must extend the wait path to inspect
+  `pod.status.initContainerStatuses` for `terminated.reason != Completed`
+  (or `CrashLoopBackOff`) and surface `SUBPATH_INIT_FAILED` with the init
+  container's log tail attached.
 - Transient init-container failures (e.g. pod eviction, node pressure) are
   retried by the Kubernetes pod lifecycle under the sandbox pod's
   `restartPolicy`; the create request stays in a retrying state until success
@@ -286,10 +315,18 @@ Unit tests (`server/tests/`):
   request → accepted.
 - Validator keeps rejecting absolute paths and `..` components even with the
   opt-in set.
+- **Option-like and shell-special `subPath` names**: `subPath: "-m"`,
+  `subPath: "--help"`, and `subPath: "a;rm -rf /"` produce a single argv
+  argument passed to `mkdir -p --` (never a shell string); the init container
+  spec uses an argv array and no shell.
 - Kubernetes volume-helper: request with opt-in produces an init container
   with `mkdir -p` and the correct scratch mount; request without opt-in
   produces no init container (byte-for-byte parity with today's output).
 - Docker provider: opt-in → `UNSUPPORTED_SUBPATH_INIT` rejection.
+- **Capability negotiation**: with the chosen mechanism (capability flag or
+  strict model), a client against a server without the feature either gets a
+  `4xx` rejection or a client-side error before the request is sent; the
+  "silently discarded field" path is covered by a regression test.
 
 Integration tests:
 
@@ -299,6 +336,13 @@ Integration tests:
   against the same path is idempotent.
 - Negative e2e: `createSubPathIfMissing: true` on a read-only mount → create
   rejected before pod creation.
+- **Init-container failure detection e2e**: make `mkdir` fail (e.g. mount the
+  PVC read-only via a test-only override, or point `subPath` into a
+  read-only mount), assert the sandbox transitions to
+  `SUBPATH_INIT_FAILED` with the init container's log tail attached — not the
+  generic `K8S_POD_READY_TIMEOUT`.
+- Option-like path e2e: create a sandbox with `subPath: "-m"` and assert the
+  directory named `-m` is created (not parsed as a `mkdir` option).
 
 Manual verification:
 
@@ -343,12 +387,18 @@ Manual verification:
 - **Backward compatibility**: existing valid requests that omit
   `createSubPathIfMissing` retain exact current semantics. The new field
   defaults to `false`.
-- **Server version gating**: servers that implement the new schema field
-  accept the opt-in; older servers reject it via `additionalProperties: false`
-  schema validation (the field will not exist in their published schema), so
-  the guarantee can never be silently lost.
+- **Server version gating / capability negotiation**: servers that implement
+  the new field accept the opt-in; older servers must be detected by a
+  client-visible capability mechanism (see
+  [Notes/Constraints/Caveats](#notesconstraintscaveats)), because the runtime
+  request models do not set `extra="forbid"` and an unknown field is silently
+  ignored rather than rejected. The guarantee must never be silently lost;
+  either the capability flag is absent (client refuses to send the opt-in) or
+  the server rejects the request with a `4xx`.
 - **Docs and release notes**: update the volume documentation in `docs/`,
   SDK reference, and release notes to state the Kubernetes-only scope, the
-  error codes, and the minimum server version required.
+  error codes, the capability-flag contract, and the minimum server version
+  required.
 - **SDKs**: add the field to SDK request builders and regenerate clients from
-  the updated spec, so typed SDKs expose `createSubPathIfMissing`.
+  the updated spec, so typed SDKs expose `createSubPathIfMissing` and refuse
+  to serialize it against servers that do not advertise support.
