@@ -492,7 +492,7 @@ post_sandboxes.sync(client=client, body=request)
 - For `ossfs` backend, validate required fields (`bucket`, `endpoint`, `accessKeyId`, `accessKeySecret`).
 - For `pvc` backend, validate `claimName` is a valid DNS label (lowercase alphanumeric and hyphens, max 63 characters). In Kubernetes, validate the PVC exists in the same namespace. In Docker, validate the named volume exists via the Docker API (`docker volume inspect`).
 - For `nfs` backend, validate required fields (`server`, `path`).
-- `subPath` is created if missing under the resolved backend path; if creation fails due to permissions or policy, the request is rejected.
+- Missing `subPath` behavior is runtime-dependent and may fail if the path does not exist. Secure opt-in initialization for supported Kubernetes PVC mounts is governed by OSEP-0021; omission does not enable creation.
 
 ### Configuration (example)
 Host path allowlists are configured by the control plane (server/execd) and enforced at validation time. Example `config.toml`:
