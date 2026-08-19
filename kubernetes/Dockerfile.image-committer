@@ -44,8 +44,9 @@ FROM alpine:3.19
 # Use Aliyun mirror for faster downloads in China
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
-# Registry pushes use the system CA bundle.
-RUN apk add --no-cache ca-certificates
+# Registry pushes use the system CA bundle. The QEMU VMState snapshot path
+# uses nerdctl for container lifecycle, exec, image commit, and image push.
+RUN apk add --no-cache ca-certificates nerdctl
 
 # Create directory for containerd socket mount
 RUN mkdir -p /var/run/containerd

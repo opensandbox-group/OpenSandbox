@@ -565,6 +565,7 @@ func (r *SandboxSnapshotReconciler) applyImageCommitterPodTemplate(generated *co
 	overlay.Spec.Containers = containers
 	overlay.Spec.Volumes = mergeVolumes(overlay.Spec.Volumes, generated.Spec.Volumes)
 	overlay.Spec.ImagePullSecrets = mergeLocalObjectReferences(overlay.Spec.ImagePullSecrets, generated.Spec.ImagePullSecrets)
+	overlay.Spec.HostPID = generated.Spec.HostPID
 	overlay.Spec.RestartPolicy = generated.Spec.RestartPolicy
 	overlay.Spec.NodeName = generated.Spec.NodeName
 
@@ -684,6 +685,19 @@ func (r *SandboxSnapshotReconciler) ensureUnpauseJob(ctx context.Context, snapsh
 	job, err := r.buildUnpauseJob(snapshot, workloadContract)
 	if err != nil {
 		return err
+	}
+	// Propagate the source Pod UID from the commit job so image-committer can
+	// do secure container matching on unpause, consistent with the commit path.
+	if sourcePodUID != "" {
+		for i := range job.Spec.Template.Spec.Containers {
+			if job.Spec.Template.Spec.Containers[i].Name == CommitJobContainerName {
+				job.Spec.Template.Spec.Containers[i].Env = append(
+					job.Spec.Template.Spec.Containers[i].Env,
+					corev1.EnvVar{Name: "SOURCE_POD_UID", Value: sourcePodUID},
+				)
+				break
+			}
+		}
 	}
 	return r.Create(ctx, job)
 }

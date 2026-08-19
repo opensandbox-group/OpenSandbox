@@ -480,7 +480,7 @@ func TestBuildCommitJob_SetsBoundedBackoffLimit(t *testing.T) {
 	r := newTestSnapshotReconciler(snapshot)
 	r.SnapshotPushSecret = "registry-snapshot-push-secret"
 
-	job, err := r.buildCommitJob(snapshot, "")
+	job, err := r.buildCommitJob(snapshot)
 	require.NoError(t, err)
 	require.NotNil(t, job.Spec.BackoffLimit)
 	assert.Equal(t, DefaultCommitJobBackoffLimit, *job.Spec.BackoffLimit)
@@ -533,7 +533,7 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 		},
 	}
 
-	job, err := r.buildCommitJob(snapshot, "pod-uid")
+	job, err := r.buildCommitJob(snapshot)
 	require.NoError(t, err)
 	require.Len(t, job.Spec.Template.Spec.Containers, 2)
 
@@ -544,7 +544,7 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 		"default",
 		"main;echo nope:registry.example.com/test:tag",
 	}, container.Args)
-	assert.Contains(t, container.Env, corev1.EnvVar{Name: "SOURCE_POD_UID", Value: "pod-uid"})
+	assert.Contains(t, container.Env, corev1.EnvVar{Name: "CONTAINERD_SOCKET", Value: ContainerdSocketPath})
 	assert.Contains(t, container.Env, corev1.EnvVar{Name: "SNAPSHOT_REGISTRY_INSECURE", Value: "true"})
 	assert.Equal(t, "snapshot-committer", job.Spec.Template.Spec.ServiceAccountName)
 	assert.Equal(t, "node-1", job.Spec.Template.Spec.NodeName)
