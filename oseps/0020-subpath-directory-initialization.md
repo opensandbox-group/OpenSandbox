@@ -116,6 +116,16 @@ semantics are well-defined.
   the same request is rejected in the initial scope.
 - The final mount must be read-write for the initial scope (a read-only final
   mount combined with the opt-in is rejected).
+- Newly created directories must have well-defined creator identity and initial
+  UID, GID, mode, umask, and ACL behavior, documented in the release notes and
+  resolved from the init container's `securityContext` and the PVC mount
+  options.
+- Initialization retries and stable errors: transient init-container failures
+  are retried by the Kubernetes pod lifecycle (restartPolicy), and terminal
+  failures surface as a stable, documented sandbox error carrying the init
+  container's termination message.
+- `volumes` remain incompatible with `extensions.poolRef` under the existing
+  Lifecycle schema; the opt-in does not change that constraint.
 
 ## Proposal
 
@@ -245,14 +255,24 @@ guarantees the target directory exists.
 - Init-container failures surface as pod-level failures: the sandbox does not
   reach Ready, and the server reports the init container's termination
   message with a stable error code.
+- Transient init-container failures (e.g. pod eviction, node pressure) are
+  retried by the Kubernetes pod lifecycle under the sandbox pod's
+  `restartPolicy`; the create request stays in a retrying state until success
+  or a terminal failure.
+- Terminal failures (non-zero exit after retries, unusable claim, mount
+  failure) produce a stable, documented error code (e.g.
+  `SUBPATH_INIT_FAILED`) with the init container's logs attached, so callers
+  can distinguish "directory not initialized" from other sandbox failures.
 
 ### Idempotency and Metadata
 
 - If the directory already exists, `mkdir -p` succeeds and leaves all metadata
-  (ownership, mode) unchanged.
+  (ownership, mode, umask-derived attributes, ACLs) unchanged.
 - For newly created directories, ownership/UID/GID/mode follow the init
-  container's `securityContext` and the PVC's mount options; exact defaults
-  are resolved at implementation time and documented in the release notes.
+  container's `securityContext` and the PVC's mount options, applied under the
+  init container's umask; exact defaults (including any default ACL inherited
+  from the PVC mount or filesystem) are resolved at implementation time and
+  documented in the release notes.
 - Successful existence does not guarantee that the workload can write the
   directory (e.g. permissions may still block writes); this is consistent with
   ordinary `subPath` mounts.
