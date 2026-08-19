@@ -27,7 +27,6 @@ status: draft
   - [Security model](#security-model)
   - [Runtime adapters](#runtime-adapters)
    - [Pool incompatibility](#pool-incompatibility)
-   - [AgentRuntime relevance](#agentruntime-relevance)
    - [Retain, delete, and reject decisions](#retain-delete-and-reject-decisions)
   - [Capability-aware creation and rollout](#capability-aware-creation-and-rollout)
 - [Test Plan](#test-plan)
@@ -423,23 +422,6 @@ between tasks. Until a separate design proves ownership, isolation, and
 lifecycle semantics for pools, a Pool request with `createSubPathIfMissing: true`
 is rejected before pool allocation or task creation.
 
-### AgentRuntime relevance
-
-AgentRuntime workloads commonly use a PVC to retain workspace, model, or task
-artifacts while the sandbox process runs as a non-root user. This proposal
-helps an AgentRuntime launch a new task-specific directory without requiring
-the business caller to run a privileged setup command inside the image. It
-does not change the AgentRuntime contract: image, command, environment,
-workspace, timeout, and artifacts remain separate concerns, and the runtime
-still receives the final mount requested by the caller.
-
-AgentRuntime must not depend on this feature unless capability negotiation has
-confirmed support for the target server and the request uses the supported
-Kubernetes/Linux non-Pool PVC tuple. A missing capability, an old server, or a
-Pool placement must produce an explicit failure rather than changing the
-workspace to the PVC root or relying on a user-image hook. Existing
-AgentRuntime images and requests that omit the field are unaffected.
-
 ### Retain, delete, and reject decisions
 
 These decisions constrain later implementation and review:
@@ -564,12 +546,12 @@ conformance must add focused tests at each boundary:
 - Final mount failures preserve the requested mode and do not trigger
   directory rollback.
 
-### AgentRuntime and compatibility tests
+### Compatibility tests
 
-- An AgentRuntime-style request using the opt-in reaches its configured
-  workspace only when capability negotiation succeeds.
-- Existing AgentRuntime requests without the field continue to work without
-  changes to image, command, environment, workspace, or artifact handling.
+- An opt-in request reaches its configured workspace only when capability
+  negotiation succeeds.
+- Existing requests without the field continue to work without changes to
+  image, command, environment, workspace, or artifact handling.
 - An old server, an unknown capability, and a mixed replica route each produce
   an explicit unsupported result rather than silently changing the mount.
 
@@ -585,7 +567,7 @@ other storage adapters must continue to provision subdirectories themselves.
 
 - **Require callers to pre-create directories:** simple and broadly portable,
   but requires extra credentials, setup races, and a privileged or out-of-band
-  operation for common AgentRuntime launches.
+  operation for common sandbox launches.
 - **Create the directory in the user container:** works only when the image
   starts with sufficient access and cannot safely support a final read-only
   mount; it also turns storage preparation into an image-specific contract.
