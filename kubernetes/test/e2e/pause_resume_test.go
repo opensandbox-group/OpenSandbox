@@ -871,16 +871,37 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).To(Equal("Succeed"))
 			}, 2*time.Minute).Should(Succeed())
 
-			By("patching registry push secret to malformed matching credentials")
+			By("replacing registry push secret with malformed matching credentials")
 			// The matching auth entry is malformed so the image committer fails before
-			// entering containerd's remote authorization retry loop.
+			// entering containerd's remote authorization retry loop. Recreate the
+			// Secret instead of patching it so kubelet cannot reuse the previous
+			// projected volume contents on Kubernetes versions with slower Secret
+			// propagation.
 			invalidConfig := `{"auths":{"docker-registry.default.svc.cluster.local:5000":{"auth":"not-base64"}}}`
-			encoded := base64.StdEncoding.EncodeToString([]byte(invalidConfig))
-			patchData := fmt.Sprintf(`{"data":{".dockerconfigjson":"%s"}}`, encoded)
-			cmd = exec.Command("kubectl", "patch", "secret", "registry-snapshot-push-secret", "-n", pauseResumeNamespace,
-				"--type=merge", "-p", patchData)
+			invalidConfigFile := filepath.Join("/tmp", "test-pause-invalid-registry-config.json")
+			err = os.WriteFile(invalidConfigFile, []byte(invalidConfig), 0600)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(invalidConfigFile)
+
+			cmd = exec.Command("kubectl", "delete", "secret", "registry-snapshot-push-secret", "-n", pauseResumeNamespace,
+				"--ignore-not-found=true")
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "create", "secret", "generic", "registry-snapshot-push-secret",
+				"--from-file=.dockerconfigjson="+invalidConfigFile,
+				"--type=kubernetes.io/dockerconfigjson", "-n", pauseResumeNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			encoded := base64.StdEncoding.EncodeToString([]byte(invalidConfig))
+			By("waiting for the malformed registry Secret data to be visible")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secret", "registry-snapshot-push-secret", "-n", pauseResumeNamespace,
+					"-o", "jsonpath={.data['.dockerconfigjson']}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(encoded))
+			}, 30*time.Second).Should(Succeed())
 
 			By("triggering pause with malformed registry credentials")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
