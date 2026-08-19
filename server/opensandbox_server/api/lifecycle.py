@@ -51,9 +51,10 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.factory import create_sandbox_service
 from opensandbox_server.services.snapshot_service import create_snapshot_service
+from opensandbox_server.integrations.otel import InstrumentedRoute, lifecycle_operation
 
 # Initialize router
-router = APIRouter(tags=["Sandboxes"])
+router = APIRouter(tags=["Sandboxes"], route_class=InstrumentedRoute)
 
 # Initialize service based on configuration from config.toml (defaults to docker)
 sandbox_service = create_sandbox_service()
@@ -77,6 +78,7 @@ snapshot_service = create_snapshot_service(sandbox_service)
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
+@lifecycle_operation("create")
 async def create_sandbox(
     request: CreateSandboxRequest,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
@@ -217,6 +219,7 @@ def get_sandbox(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
+@lifecycle_operation("update_metadata")
 def patch_sandbox_metadata(
     sandbox_id: str,
     patch: PatchSandboxMetadataRequest = Body(...),
@@ -242,6 +245,7 @@ def patch_sandbox_metadata(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
+@lifecycle_operation("delete")
 def delete_sandbox(
     sandbox_id: str,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
@@ -282,6 +286,7 @@ def delete_sandbox(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
+@lifecycle_operation("pause")
 def pause_sandbox(
     sandbox_id: str,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
@@ -319,6 +324,7 @@ def pause_sandbox(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
+@lifecycle_operation("resume")
 def resume_sandbox(
     sandbox_id: str,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
@@ -358,6 +364,7 @@ def resume_sandbox(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
+@lifecycle_operation("renew")
 def renew_sandbox_expiration(
     sandbox_id: str,
     request: RenewSandboxExpirationRequest,
@@ -405,6 +412,7 @@ def renew_sandbox_expiration(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
+@lifecycle_operation("create_snapshot")
 def create_snapshot(
     sandbox_id: str,
     response: Response,
@@ -488,6 +496,7 @@ def get_snapshot(
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
+@lifecycle_operation("delete_snapshot")
 def delete_snapshot(
     snapshot_id: str,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),

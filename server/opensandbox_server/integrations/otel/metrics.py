@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Optional
 
 from opentelemetry import metrics
@@ -35,6 +36,21 @@ _CREATE_DURATION_UNIT = "ms"
 _CREATE_DURATION_DESCRIPTION = (
     "Sandbox creation latency from SDK create start until ready or failure"
 )
+_OPERATION_DURATION_HISTOGRAM_NAME = "opensandbox.sandbox.operation.duration"
+_OPERATION_COUNTER_NAME = "opensandbox.sandbox.operation.total"
+_OPERATION_DURATION_UNIT = "ms"
+_OPERATION_DURATION_DESCRIPTION = (
+    "Server-side latency of a sandbox lifecycle operation, measured at the API boundary"
+)
+_OPERATION_COUNTER_DESCRIPTION = (
+    "Sandbox lifecycle operations by outcome, with the server error code when they fail"
+)
+# An error code is a constant in the source, never interpolated user input. Validating the
+# shape anyway keeps the attribute's cardinality bounded no matter what a future call site
+# puts in an HTTPException detail.
+_ERROR_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_:]{0,63}$")
+_ERROR_CODE_FALLBACK = "OTHER"
+
 _CREATE_DURATION_BOUNDARIES = (
     100.0,
     250.0,
@@ -49,6 +65,8 @@ _CREATE_DURATION_BOUNDARIES = (
 
 _meter_provider: Optional[MeterProvider] = None
 _create_duration_histogram = None
+_operation_duration_histogram = None
+_operation_counter = None
 
 
 def _histogram_from_provider(provider: MeterProvider):
@@ -59,13 +77,30 @@ def _histogram_from_provider(provider: MeterProvider):
     )
 
 
+def _operation_instruments_from_provider(provider: MeterProvider):
+    meter = provider.get_meter("opensandbox.server")
+    histogram = meter.create_histogram(
+        name=_OPERATION_DURATION_HISTOGRAM_NAME,
+        unit=_OPERATION_DURATION_UNIT,
+        description=_OPERATION_DURATION_DESCRIPTION,
+    )
+    counter = meter.create_counter(
+        name=_OPERATION_COUNTER_NAME,
+        description=_OPERATION_COUNTER_DESCRIPTION,
+    )
+    return histogram, counter
+
+
 def setup_otel_metrics(config: OtelConfig) -> None:
     """Configure OTEL metrics export when enabled; otherwise keep recording as noop."""
     global _meter_provider, _create_duration_histogram
+    global _operation_duration_histogram, _operation_counter
 
     # Disabled: do not attach instruments to any global provider (may already export).
     if not config.enabled:
         _create_duration_histogram = None
+        _operation_duration_histogram = None
+        _operation_counter = None
         logger.info(
             "OpenTelemetry metrics export disabled; SDK events are accepted but not exported"
         )
@@ -97,7 +132,15 @@ def setup_otel_metrics(config: OtelConfig) -> None:
             aggregation=ExplicitBucketHistogramAggregation(
                 boundaries=list(_CREATE_DURATION_BOUNDARIES)
             ),
-        )
+        ),
+        # Same ladder: both measure a lifecycle operation in milliseconds, and the SDK
+        # default boundaries top out at 10s, which is short for a sandbox operation.
+        View(
+            instrument_name=_OPERATION_DURATION_HISTOGRAM_NAME,
+            aggregation=ExplicitBucketHistogramAggregation(
+                boundaries=list(_CREATE_DURATION_BOUNDARIES)
+            ),
+        ),
     ]
     provider = MeterProvider(
         resource=resource,
@@ -118,6 +161,7 @@ def setup_otel_metrics(config: OtelConfig) -> None:
     # even when set_meter_provider() cannot override a preexisting global provider.
     _meter_provider = provider
     _create_duration_histogram = _histogram_from_provider(provider)
+    _operation_duration_histogram, _operation_counter = _operation_instruments_from_provider(provider)
     logger.info(
         "OpenTelemetry metrics enabled (service=%s, endpoint=%s)",
         config.service_name,
@@ -128,9 +172,12 @@ def setup_otel_metrics(config: OtelConfig) -> None:
 def shutdown_otel_metrics() -> None:
     """Flush and shut down the configured MeterProvider if any."""
     global _meter_provider, _create_duration_histogram
+    global _operation_duration_histogram, _operation_counter
     provider = _meter_provider
     _meter_provider = None
     _create_duration_histogram = None
+    _operation_duration_histogram = None
+    _operation_counter = None
     if provider is None:
         return
     try:
@@ -164,3 +211,48 @@ def record_sandbox_create_duration(
         )
     except Exception:
         logger.exception("Failed to record sandbox create duration metric")
+
+
+def normalize_error_code(code: object) -> str:
+    """Coerce a server error code into a bounded attribute value.
+
+    Codes are constants in the source (``SandboxErrorCodes`` and a few literals), so this
+    normally passes them straight through. Anything that is not code-shaped becomes
+    ``OTHER``, which keeps the counter's cardinality bounded even if a future call site
+    interpolates a message into ``detail["code"]``.
+    """
+    if isinstance(code, str) and _ERROR_CODE_PATTERN.match(code):
+        return code
+    return _ERROR_CODE_FALLBACK
+
+
+def record_sandbox_operation(
+    *,
+    operation: str,
+    duration_ms: float,
+    outcome: str,
+    error_code: Optional[str] = None,
+) -> None:
+    """Record a server-side lifecycle operation. Never raises.
+
+    Unlike ``record_sandbox_create_duration``, which stores a number the SDK measured and
+    reported, this is the server timing its own work, so it exists for every deployment
+    rather than only for those whose clients report metrics.
+
+    ``operation`` is a lifecycle verb from a closed set, ``outcome`` is ``success`` or
+    ``error``, and ``error_code`` is attached only on failure.
+
+    No-ops when OTEL export is disabled or setup has not installed the instruments.
+    """
+    histogram = _operation_duration_histogram
+    counter = _operation_counter
+    if histogram is None or counter is None:
+        return
+    attributes = {"operation": operation, "outcome": outcome}
+    try:
+        histogram.record(float(duration_ms), attributes=attributes)
+        if error_code is not None:
+            attributes = {**attributes, "error.code": normalize_error_code(error_code)}
+        counter.add(1, attributes=attributes)
+    except Exception:
+        logger.exception("Failed to record sandbox operation metric")

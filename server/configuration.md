@@ -305,7 +305,7 @@ Per-sandbox enablement uses create request extensions (see OSEP-0009 and `exampl
 
 ## `[otel]`
 
-Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the ingestion endpoint still accepts events and records them as noop.
+Optional OpenTelemetry metrics export. Off by default; the ingestion endpoint still accepts events and records them as noop.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -313,6 +313,44 @@ Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency 
 | `endpoint` | string \| omitted | `null` | OTLP HTTP metrics endpoint. When omitted, uses `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`. |
 | `service_name` | string | `"opensandbox-server"` | `service.name` resource attribute. |
 | `export_interval_millis` | integer | `60000` | Periodic export interval (≥ 1000). |
+
+### Exported metrics
+
+| Metric | Type | Unit | Source |
+|---|---|---|---|
+| `opensandbox.sandbox.create.duration` | Histogram | `ms` | **Reported by the SDK** via `POST /v1/metrics/events` |
+| `opensandbox.sandbox.operation.duration` | Histogram | `ms` | Measured by the server at the API boundary |
+| `opensandbox.sandbox.operation.total` | Counter | - | Measured by the server at the API boundary |
+
+The distinction matters. `create.duration` is a number the client measured and sent, so it
+covers the client's whole experience — network and SDK overhead included — and **only exists
+in deployments whose clients report it**. An integration that calls the REST API directly
+produces none of it.
+
+The `operation.*` pair is the server timing its own work, so it exists in every deployment.
+Attributes:
+
+- `operation` — a lifecycle verb from a closed set: `create`, `update_metadata`, `delete`,
+  `pause`, `resume`, `renew`, `create_snapshot`, `delete_snapshot`. Read-only endpoints are
+  not instrumented.
+- Recorded at the **route**, so it also covers requests rejected before the handler runs — a
+  body that fails validation is counted with `error.code = "HTTP_422"` rather than going
+  missing from the error rate.
+- `outcome` — `success` or `error`.
+- `error.code` — on the counter only, and only when the operation failed. Values come from
+  `SandboxErrorCodes` (`KUBERNETES::POD_READY_TIMEOUT`, `DOCKER::SANDBOX_IMAGE_PULL_FAILED`,
+  and so on), so the server's existing error taxonomy becomes queryable:
+  `sum by (error_code) (rate(opensandbox_sandbox_operation_total{outcome="error"}[5m]))`.
+
+`create` covers **provisioning, not just scheduling**, despite the `202 Accepted` status: the
+handler blocks until the sandbox exists. In Kubernetes `create_sandbox` awaits
+`_wait_for_sandbox_ready`, so the sample includes pod readiness; in Docker it awaits the
+provisioning thread, so it includes container start and egress sidecar readiness. This is
+therefore a usable **server-side cold-start signal**, and the one metric here that does not
+depend on clients reporting anything.
+
+What it does not include is anything the sandbox does after it is ready — execd bootstrapping
+its own workload, for instance.
 
 ---
 

@@ -45,7 +45,39 @@ After create succeeds or fails, the SDK fire-and-forget posts to `POST /v1/metri
 - `sandboxId` / `image` may be omitted when create fails early.
 - SDK language and version come from the HTTP `User-Agent` header (for example `OpenSandbox-Python-SDK/0.1.15`), not from body fields.
 
-The server accepts the event with `204` and, when `[otel]` is enabled, records an OTEL histogram. See [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
+The server accepts the event with `204` and, when `[otel]` is enabled, records an OTEL histogram (`opensandbox.sandbox.create.duration`). See [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
+
+## SDK-reported vs server-measured
+
+This page describes what the **SDK** reports. `[otel]` also exports metrics the **server**
+measures itself, and the difference matters when you build dashboards:
+
+| Metric | Measured by | Covers |
+|---|---|---|
+| `opensandbox.sandbox.create.duration` | the SDK | the client's whole experience, network and SDK overhead included |
+| `opensandbox.sandbox.operation.duration` | the server | the server's own work at the API boundary |
+| `opensandbox.sandbox.operation.total` | the server | the same, as a count, with the error code on failure |
+
+Two consequences:
+
+- The SDK histogram **only exists where clients report it**. An integration calling the REST
+  API directly produces none of it, so a dashboard built on it alone will look empty rather
+  than healthy. The `operation.*` pair exists in every deployment.
+- `operation.total` carries `error.code` from the server's own taxonomy, which is what makes
+  failures queryable:
+  `sum by (error_code) (rate(opensandbox_sandbox_operation_total{outcome="error"}[5m]))`.
+
+The `operation.*` pair is recorded at the route, so it also counts requests rejected before
+the handler runs — a malformed body appears with `error.code = "HTTP_422"` instead of being
+missing from your error rate.
+
+Both cover provisioning: despite the `202 Accepted` status, `POST /sandboxes` blocks until
+the sandbox exists — Kubernetes awaits pod readiness, Docker awaits container start and
+egress sidecar readiness. So `operation.duration{operation="create"}` is a **server-side
+cold-start signal**, and unlike the SDK histogram it does not depend on clients reporting
+anything. The difference between the two is the client's share: network, auth, SDK overhead.
+
+Full attribute reference: [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel).
 
 ## When it runs
 
