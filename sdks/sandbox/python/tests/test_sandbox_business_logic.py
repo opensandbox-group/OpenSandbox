@@ -23,7 +23,10 @@ import pytest
 
 from opensandbox.config import ConnectionConfig
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
-from opensandbox.exceptions import SandboxReadyTimeoutException
+from opensandbox.exceptions import (
+    SandboxInternalException,
+    SandboxReadyTimeoutException,
+)
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import NetworkPolicy, NetworkRule, SandboxEndpoint
 from opensandbox.sandbox import Sandbox
@@ -172,7 +175,7 @@ async def test_check_ready_timeout_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_ready_timeout_message_includes_troubleshooting_hints() -> None:
+async def test_check_ready_timeout_message_omits_network_configuration_hints() -> None:
     async def _always_false(_: Sandbox) -> bool:
         return False
 
@@ -188,7 +191,9 @@ async def test_check_ready_timeout_message_includes_troubleshooting_hints() -> N
 
     message = str(exc_info.value)
     assert "ConnectionConfig(domain=10.0.0.1:8080, use_server_proxy=False)" in message
-    assert "ConnectionConfig(use_server_proxy=True)" in message
+    assert "set connectionconfig(use_server_proxy=true)" not in message.lower()
+    assert "direct sandbox endpoint access" not in message
+    assert "[docker].host_ip" not in message
 
 
 @pytest.mark.asyncio
@@ -346,6 +351,200 @@ async def test_create_resolves_egress_endpoint_and_builds_service(
             headers={"X-Port": str(DEFAULT_EGRESS_PORT)},
         )
     ]
+
+
+class _GatedEndpointServiceStub:
+    """get_sandbox_endpoint that blocks the execd request until released.
+
+    Detects serial endpoint resolution: when the two endpoint requests are
+    awaited sequentially, the egress request cannot start while the execd
+    request is still blocked.
+    """
+
+    def __init__(self) -> None:
+        self.execd_entered = asyncio.Event()
+        self.egress_entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get_sandbox_endpoint(
+        self, _sandbox_id, port: int, _use_server_proxy: bool = False
+    ) -> SandboxEndpoint:
+        if port == DEFAULT_EXECD_PORT:
+            self.execd_entered.set()
+            await self.release.wait()
+        else:
+            self.egress_entered.set()
+        return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
+
+
+async def _assert_parallel_endpoint_resolution(
+    gate: _GatedEndpointServiceStub, op
+) -> None:
+    task = asyncio.create_task(op())
+    await asyncio.wait_for(gate.execd_entered.wait(), timeout=1)
+    try:
+        # Fails if the egress endpoint is requested only after the execd
+        # endpoint request has completed.
+        await asyncio.wait_for(gate.egress_entered.wait(), timeout=1)
+    finally:
+        gate.release.set()
+        await task
+
+
+@pytest.mark.parametrize("flow", ["create", "connect", "resume"])
+@pytest.mark.asyncio
+async def test_sandbox_resolves_endpoints_in_parallel(
+    monkeypatch: pytest.MonkeyPatch, flow: str
+) -> None:
+    gate = _GatedEndpointServiceStub()
+
+    class _CreateResponse:
+        id = "sbx-1"
+
+    class _SandboxServiceStub:
+        async def create_sandbox(self, *_args, **_kwargs):
+            return _CreateResponse()
+
+        async def resume_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+        async def kill_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+        async def get_sandbox_endpoint(
+            self, sandbox_id, port: int, use_server_proxy: bool = False
+        ) -> SandboxEndpoint:
+            return await gate.get_sandbox_endpoint(sandbox_id, port, use_server_proxy)
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            pass
+
+        def create_sandbox_service(self):
+            return sandbox_service
+
+        def create_filesystem_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint: SandboxEndpoint):
+            return _EgressServiceStub()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    sandbox_service = _SandboxServiceStub()
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
+
+    async def _op() -> Sandbox:
+        if flow == "create":
+            return await Sandbox.create(
+                "python:3.11",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+        if flow == "connect":
+            return await Sandbox.connect(
+                "sbx-1",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+        return await Sandbox.resume(
+            "sbx-1",
+            skip_health_check=True,
+            connection_config=ConnectionConfig(),
+        )
+
+    await _assert_parallel_endpoint_resolution(gate, _op)
+
+
+@pytest.mark.parametrize("flow", ["create", "connect", "resume"])
+@pytest.mark.parametrize("failing_port", [DEFAULT_EXECD_PORT, DEFAULT_EGRESS_PORT])
+@pytest.mark.asyncio
+async def test_sandbox_errors_when_either_endpoint_resolution_fails(
+    monkeypatch: pytest.MonkeyPatch, flow: str, failing_port: int
+) -> None:
+    class _CreateResponse:
+        id = "sbx-1"
+
+    class _SandboxServiceStub:
+        async def create_sandbox(self, *_args, **_kwargs):
+            return _CreateResponse()
+
+        async def resume_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+        async def kill_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+        async def get_sandbox_endpoint(
+            self, _sandbox_id, port: int, _use_server_proxy: bool = False
+        ) -> SandboxEndpoint:
+            if port == failing_port:
+                raise RuntimeError(f"endpoint resolution failed for port {port}")
+            return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            pass
+
+        def create_sandbox_service(self):
+            return sandbox_service
+
+        def create_filesystem_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint: SandboxEndpoint):
+            return _EgressServiceStub()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    sandbox_service = _SandboxServiceStub()
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
+
+    with pytest.raises(SandboxInternalException):
+        if flow == "create":
+            await Sandbox.create(
+                "python:3.11",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+        elif flow == "connect":
+            await Sandbox.connect(
+                "sbx-1",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+        else:
+            await Sandbox.resume(
+                "sbx-1",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
 
 
 @pytest.mark.asyncio

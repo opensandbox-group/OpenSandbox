@@ -40,6 +40,14 @@ class TenantProvider(Protocol):
         """Return all known tenant entries (used for startup validation)."""
         ...
 
+    supports_enumeration: bool
+    """True if ``list_tenants()`` returns the complete tenant set at startup.
+
+    File-backed providers enumerate their config at startup. Per-key HTTP
+    providers only know tenants discovered through prior lookups, so their
+    startup list is empty and must not be treated as validated.
+    """
+
     def ready(self) -> bool:
         """True once the provider has loaded initial state and can serve lookups."""
         ...

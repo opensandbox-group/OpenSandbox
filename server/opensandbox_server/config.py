@@ -147,12 +147,12 @@ class RenewIntentRedisConfig(BaseModel):
 
 
 class OtelConfig(BaseModel):
-    """Optional OpenTelemetry export for ingested SDK metrics."""
+    """Optional OpenTelemetry export for Server and ingested SDK metrics."""
 
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable OTLP metrics export. When false, SDK events are accepted but recorded as noop."
+            "Enable OTLP metrics export. When false, Server and SDK metrics are noops."
         ),
     )
     endpoint: Optional[str] = Field(
@@ -751,6 +751,14 @@ class EgressConfig(BaseModel):
             "(e.g. IPv4-only CNI or experimenting with IPv6 egress despite gaps)."
         ),
     )
+    readiness_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Maximum time in seconds to wait for the egress sidecar health endpoint "
+            "to become ready in Docker runtime."
+        ),
+    )
 
 
 class RuntimeConfig(BaseModel):
@@ -764,6 +772,17 @@ class RuntimeConfig(BaseModel):
         ...,
         description="Container image that contains the execd binary for sandbox initialization.",
         min_length=1,
+    )
+    execd_run_as_init: bool = Field(
+        default=False,
+        description=(
+            "Run execd as the sandbox init (OSEP-0018): sets EXECD_INIT in the "
+            "sandbox environment so bootstrap.sh execs into execd (--init) and "
+            "execd becomes PID 1, reaping children and owning the container "
+            "lifecycle. Defaults to false (classic background-and-wait "
+            "topology); intended to be flipped on after a few releases once "
+            "the init mode is validated in production."
+        ),
     )
 
 
@@ -897,6 +916,23 @@ class DockerConfig(BaseModel):
         default=4096,
         ge=1,
         description="Maximum number of processes allowed per sandbox container. Set to null to disable the limit.",
+    )
+    sandbox_env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Environment variables injected into every sandbox container. Keys from a sandbox "
+            "creation request override same-named keys. Docker-runtime counterpart of the "
+            "Kubernetes pod template: useful for fleet-wide settings such as trusting a private "
+            "CA (e.g. NODE_EXTRA_CA_CERTS) together with sandbox_binds."
+        ),
+    )
+    sandbox_binds: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Host bind mounts applied to every sandbox container, in Docker -v syntax "
+            "(host_path:container_path[:mode]). Prepended to the binds derived from a request's "
+            "volumes. Useful for mounting a private CA certificate into all sandboxes."
+        ),
     )
 
     @model_validator(mode="after")

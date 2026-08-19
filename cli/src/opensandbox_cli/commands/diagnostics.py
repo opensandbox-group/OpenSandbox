@@ -46,13 +46,19 @@ def render_diagnostic_content(
     )
 
     if output.fmt == "raw":
+        if content.truncated:
+            click.echo("Warning: diagnostic content was truncated.", err=True)
+        for warning in content.warnings or []:
+            click.echo(f"Warning: {warning}", err=True)
         if content.delivery == "inline":
             click.echo(content.content or "")
             return
         if content.content_url:
             click.echo(content.content_url)
             return
-        raise click.ClickException("Diagnostic response did not include inline content or a content URL.")
+        raise click.ClickException(
+            "Diagnostic response did not include inline content or a content URL."
+        )
 
     output.print_dict(_diagnostic_to_dict(content), title=title)
 
@@ -72,8 +78,8 @@ def diagnostics_group(ctx: click.Context) -> None:
     "-s",
     required=True,
     help=(
-        "Diagnostic log scope. Common scopes: lifecycle for manager logs, "
-        "container for sandbox stdout; other scopes are server-defined."
+        "Diagnostic log scope. Built-in server scopes: container and all; "
+        "other scopes are server-defined."
     ),
 )
 @output_option(
@@ -104,8 +110,8 @@ def diagnostics_logs(
     "-s",
     required=True,
     help=(
-        "Diagnostic event scope. Common scopes: lifecycle for audit events, "
-        "runtime for scheduler/container events; other scopes are server-defined."
+        "Diagnostic event scope. Built-in server scopes: runtime and all; "
+        "other scopes are server-defined."
     ),
 )
 @output_option(

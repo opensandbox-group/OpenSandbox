@@ -172,6 +172,38 @@ class IsolatedSessionsAdapterTest {
     }
 
     @Test
+    fun `capabilities parses hardening status`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setBody(
+                    """
+                    {
+                      "available": true,
+                      "hardening": {
+                        "init_mode": "pid1",
+                        "signal_shield": true,
+                        "cap_drop": {"state": "active"},
+                        "seccomp": {"state": "active"},
+                        "landlock": {"state": "unsupported", "message": "kernel ABI < 1"},
+                        "ebpf": {"state": "disabled"}
+                      }
+                    }
+                    """.trimIndent(),
+                ),
+        )
+        val capabilities = adapter.capabilities()
+
+        val hardening = capabilities.hardening
+        assertEquals("pid1", hardening?.initMode)
+        assertEquals(true, hardening?.signalShield)
+        assertEquals("active", hardening?.capDrop?.state)
+        assertEquals("active", hardening?.seccomp?.state)
+        assertEquals("unsupported", hardening?.landlock?.state)
+        assertEquals("kernel ABI < 1", hardening?.landlock?.message)
+        assertEquals("disabled", hardening?.ebpf?.state)
+    }
+
+    @Test
     fun `create serializes uid and gid above Int MaxValue`() {
         // Spec declares uid/gid as uint32; values above Int.MAX_VALUE must not fail.
         val uidAboveInt = 3_000_000_000L

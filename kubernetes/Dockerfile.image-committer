@@ -26,6 +26,7 @@ RUN  GOPROXY=https://goproxy.cn,direct go mod download
 
 # Copy source code
 COPY cmd/image-committer/ cmd/image-committer/
+COPY pkg/imagecommitter/ pkg/imagecommitter/
 
 # Build binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/image-committer ./cmd/image-committer/
@@ -36,13 +37,8 @@ FROM alpine:3.19
 # Use Aliyun mirror for faster downloads in China
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
-# Install nerdctl for container operations
-# nerdctl is used to find containers, commit rootfs, and push images.
-# We use nerdctl directly (not crictl or ctr) to avoid CRI API version issues.
-RUN apk add --no-cache \
-    curl \
-    jq \
-    nerdctl
+# Registry pushes use the system CA bundle.
+RUN apk add --no-cache ca-certificates
 
 # Create directory for containerd socket mount
 RUN mkdir -p /var/run/containerd

@@ -290,10 +290,15 @@ Pool lifecycle semantics:
 - Graceful shutdown stops admitting new warmups, keeps the primary heartbeat and
   completion controller alive while already-admitted warmups finish, and preserves
   the existing behavior of allowing those warmups to enter idle before shutdown completes.
+- The pool shares one OkHttp `ConnectionPool` across every sandbox it creates
+  (warmup, direct create, idle connect). When the `ConnectionConfig` carries no
+  custom pool, the pool creates one sized by `warmupConcurrency` (5-minute
+  keep-alive) and evicts it on `shutdown()`; a user-provided pool is never touched.
 
 
 > For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. The pool renews an owned primary lock independently from warmup execution at an internal interval no greater than `primaryLockTtl / 3`, so one slow warmup does not block leader heartbeats.
 > In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass.
+> `releaseAllIdle()` preserves the original serial cleanup behavior. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive; the overload returns only after every ID drained from the store has received a best-effort kill attempt.
 > `SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
 
 ## Configuration

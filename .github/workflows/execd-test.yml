@@ -55,6 +55,11 @@ jobs:
         run: |
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
+      - name: Run execd-ebpf variant tests
+        working-directory: components/execd
+        run: |
+          CGO_ENABLED=1 go test -tags ebpf -count=1 ./pkg/ebpf/
+
       - name: Calculate coverage and generate summary
         working-directory: components/execd
         id: coverage
@@ -129,6 +134,14 @@ jobs:
         run: |
           chmod +x components/execd/tests/smoke_bwrap.sh
           bash components/execd/tests/smoke_bwrap.sh
+
+      - name: Init-mode container regression (OSEP-0018)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          chmod +x components/execd/tests/init_container.sh
+          bash components/execd/tests/init_container.sh
 
       - name: Show logs
         if: always()
@@ -223,6 +236,17 @@ jobs:
       - name: Run bwrap integration tests
         working-directory: components/execd
         run: sudo -E env "PATH=$PATH" go test -tags="linux,bwrap" -v -count=1 -timeout=5m ./pkg/runtime/bwrap_test/
+
+      - name: Run isolated session init-mode reaper integration test
+        working-directory: components/execd
+        run: |
+          # bwrap lifecycle under init-mode reaper dispatch (OSEP-0018 R-o):
+          # the pre-reap barrier must serialize process-group teardown with
+          # the reaper's observe/consume while execd owns wait4.
+          sudo -E env "PATH=$PATH" go test \
+            -tags="linux,bwrap" -v -count=1 -timeout=3m \
+            -run '^TestIsolatedSessionWithInitReaper$' \
+            ./pkg/runtime
 
   required:
     name: Execd CI

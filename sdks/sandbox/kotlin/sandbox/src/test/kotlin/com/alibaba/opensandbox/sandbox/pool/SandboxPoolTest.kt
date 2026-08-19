@@ -204,6 +204,89 @@ class SandboxPoolTest {
     }
 
     @Test
+    fun `failed warmup does not trigger an immediate completion-driven reconcile`() {
+        val store = CountingPoolStateStore()
+        val created = AtomicInteger(0)
+        val pool =
+            SandboxPool.builder()
+                .poolName("failure-no-retrigger-pool")
+                .ownerId("failure-no-retrigger-owner")
+                .maxIdle(2)
+                .warmupConcurrency(1)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(
+                    PooledSandboxCreator {
+                        created.incrementAndGet()
+                        throw RuntimeException("fast create failure")
+                    },
+                ).warmupSkipHealthCheck()
+                .reconcileInterval(Duration.ofSeconds(30))
+                .drainTimeout(Duration.ofMillis(200))
+                .build()
+
+        pool.start()
+        try {
+            awaitCondition { pool.snapshot().failureCount >= 1 }
+            // Fast-failing warmups previously queued a new reconcile tick on every failure,
+            // causing unbounded create/retry churn within a single reconcileInterval.
+            Thread.sleep(800)
+            assertEquals(1, created.get(), "failed warmup must not be retried before the periodic tick")
+            assertTrue(
+                store.reconcileTicks.get() <= 2,
+                "failed warmup must not drive extra reconcile ticks, got=${store.reconcileTicks.get()}",
+            )
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `completion-driven reconcile ticks are rate limited during fast completions`() {
+        val store = CountingPoolStateStore()
+        val created = AtomicInteger(0)
+        val pool =
+            SandboxPool.builder()
+                .poolName("tick-rate-limit-pool")
+                .ownerId("tick-rate-limit-owner")
+                .maxIdle(4)
+                .warmupConcurrency(2)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(
+                    PooledSandboxCreator {
+                        if (created.getAndIncrement() % 2 == 0) {
+                            throw RuntimeException("fast create failure")
+                        }
+                        mockk<Sandbox>(relaxed = true).also { sandbox ->
+                            every { sandbox.id } returns "alternating-${created.get()}"
+                        }
+                    },
+                ).warmupSkipHealthCheck()
+                .reconcileInterval(Duration.ofSeconds(30))
+                .drainTimeout(Duration.ofMillis(200))
+                .build()
+
+        pool.start()
+        try {
+            // A mixed burst of fast success/failure completions keeps the pool in deficit and
+            // previously drove one reconcile tick per completion round (~tens per second),
+            // amplified by several state-store round-trips per tick. The minimum-interval
+            // coalescing window must cap the tick rate regardless of outcome mix.
+            Thread.sleep(1100)
+            assertTrue(
+                store.reconcileTicks.get() <= 5,
+                "completion-driven ticks must be rate limited, got=${store.reconcileTicks.get()}",
+            )
+            assertTrue(created.get() >= 3, "burst must still make progress, created=${created.get()}")
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
     fun `primary heartbeat continues while warmup is blocked`() {
         val store = HeartbeatRecordingStore()
         val sandbox = mockk<Sandbox>(relaxed = true)
@@ -935,6 +1018,61 @@ class SandboxPoolTest {
     }
 
     @Test
+    fun `stale acquire cleanup triggers replenish before periodic reconcile`() {
+        val store = CountingPoolStateStore()
+        val manager = mockk<SandboxManager>(relaxed = true)
+        val created = AtomicInteger(0)
+        val killed = CountDownLatch(1)
+        every { manager.killSandbox("warmup-1") } answers { killed.countDown() }
+
+        val config =
+            PoolConfig.builder()
+                .poolName("cleanup-reconcile-pool")
+                .ownerId("cleanup-reconcile-owner")
+                .maxIdle(1)
+                .warmupConcurrency(1)
+                .stateStore(store)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .sandboxCreator(
+                    PooledSandboxCreator {
+                        val index = created.incrementAndGet()
+                        mockk<Sandbox>(relaxed = true).also { sandbox ->
+                            every { sandbox.id } returns "warmup-$index"
+                        }
+                    },
+                ).warmupSkipHealthCheck()
+                .reconcileInterval(Duration.ofSeconds(30))
+                .drainTimeout(Duration.ofSeconds(2))
+                .build()
+        val pool =
+            SandboxPool(
+                config = config,
+                sandboxManagerFactory = { manager },
+                idleSandboxConnector = { throw RuntimeException("stale sandbox") },
+            )
+
+        pool.start()
+        try {
+            awaitCondition {
+                store.snapshotCounters("cleanup-reconcile-pool").idleCount == 1 &&
+                    store.reconcileTicks.get() >= 2
+            }
+
+            assertThrows(PoolAcquireFailedException::class.java) {
+                pool.acquire(policy = AcquirePolicy.FAIL_FAST)
+            }
+
+            assertTrue(killed.await(5, TimeUnit.SECONDS))
+            awaitCondition {
+                created.get() == 2 && store.snapshotCounters("cleanup-reconcile-pool").idleCount == 1
+            }
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
     fun `acquire with RETRY_NEXT_IDLE and empty idle throws PoolEmptyException`() {
         val pool = buildPool()
         pool.start()
@@ -952,11 +1090,12 @@ class SandboxPoolTest {
     @Test
     fun `acquire with RETRY_NEXT_IDLE and all stale idle drains up to maxAcquireRetries and throws`() {
         val store = InMemoryPoolStateStore()
+        val connectAttempts = AtomicInteger(0)
         // maxIdle=0 keeps the reconcile loop from creating fresh sandboxes against the (missing)
         // server; we drive idle membership manually via putIdle so the test only exercises the
         // acquire retry loop.
-        val pool =
-            SandboxPool.builder()
+        val config =
+            PoolConfig.builder()
                 .poolName("test-pool")
                 .ownerId("test-owner")
                 .maxIdle(0)
@@ -967,7 +1106,21 @@ class SandboxPoolTest {
                 .reconcileInterval(Duration.ofSeconds(30))
                 .maxAcquireRetries(3)
                 .build()
-        // 5 stale IDs in idle; retry policy should try 3, leave 2 behind.
+        val pool =
+            SandboxPool(
+                config = config,
+                sandboxManagerFactory = { cfg ->
+                    SandboxManager.builder().connectionConfig(cfg).build()
+                },
+                idleSandboxConnector = { sandboxId ->
+                    connectAttempts.incrementAndGet()
+                    throw RuntimeException("stale sandbox $sandboxId")
+                },
+            )
+        // 5 stale IDs in idle; retry policy should try exactly 3. The leftover two are excess
+        // under maxIdle=0 and the completion-driven reconcile may remove them before the
+        // assertion, so the retry budget is verified via connector attempts instead of the
+        // residual idle count.
         repeat(5) { store.putIdle("test-pool", "stale-id-$it") }
 
         pool.start()
@@ -975,7 +1128,7 @@ class SandboxPoolTest {
             assertThrows(PoolAcquireFailedException::class.java) {
                 pool.acquire(policy = AcquirePolicy.RETRY_NEXT_IDLE)
             }
-            assertEquals(2, store.snapshotCounters("test-pool").idleCount)
+            assertEquals(3, connectAttempts.get())
         } finally {
             pool.shutdown(graceful = false)
         }
@@ -1305,14 +1458,12 @@ class SandboxPoolTest {
     }
 
     @Test
-    fun `warmup Error cleans sandbox and releases rolling slot`() {
+    fun `warmup Error cleans sandbox and releases rolling slot without immediate replacement`() {
         val store = InMemoryPoolStateStore()
         val manager = mockk<SandboxManager>(relaxed = true)
         val firstSandbox = mockk<Sandbox>(relaxed = true)
-        val replacementSandbox = mockk<Sandbox>(relaxed = true)
         val created = AtomicInteger(0)
         every { firstSandbox.id } returns "warmup-error"
-        every { replacementSandbox.id } returns "warmup-replacement"
 
         val config =
             PoolConfig.builder()
@@ -1325,7 +1476,8 @@ class SandboxPoolTest {
                 .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
                 .sandboxCreator(
                     PooledSandboxCreator {
-                        if (created.incrementAndGet() == 1) firstSandbox else replacementSandbox
+                        created.incrementAndGet()
+                        firstSandbox
                     },
                 ).warmupSkipHealthCheck()
                 .warmupSandboxPreparer(
@@ -1342,15 +1494,15 @@ class SandboxPoolTest {
         pool.start()
         try {
             awaitCondition {
-                store.snapshotCounters("warmup-error-pool").idleCount == 1 &&
+                pool.snapshot().failureCount >= 1 &&
                     pool.snapshot().inFlightOperations == 0 &&
                     currentRunWarming(pool).get() == 0
             }
 
-            assertEquals(2, created.get())
+            assertEquals(1, created.get(), "failed warmup must not be retried before the periodic tick")
+            assertEquals(0, store.snapshotCounters("warmup-error-pool").idleCount)
             verify(exactly = 1) { firstSandbox.kill() }
             verify(exactly = 1) { firstSandbox.close() }
-            assertEquals("warmup-replacement", pool.snapshotIdleEntries().single().sandboxId)
         } finally {
             pool.releaseAllIdle()
             pool.shutdown(graceful = false)
@@ -1596,6 +1748,106 @@ class SandboxPoolTest {
         assertEquals(0, store.snapshotCounters("test-pool").idleCount)
         verify(exactly = 1) { temporaryManager.killSandbox("id-1") }
         verify(exactly = 1) { temporaryManager.killSandbox("id-2") }
+        verify(exactly = 1) { temporaryManager.close() }
+    }
+
+    @Test
+    fun `releaseAllIdle bounds kills and cleans up before store failure`() {
+        val delegate = InMemoryPoolStateStore()
+        repeat(55) { delegate.putIdle("test-pool", "id-$it") }
+        val store =
+            object : PoolStateStore by delegate {
+                var takes = 0
+
+                override fun tryTakeIdle(poolName: String): String? {
+                    if (takes == 55) throw RuntimeException("injected store failure")
+                    takes++
+                    return delegate.tryTakeIdle(poolName)
+                }
+            }
+        val active = AtomicInteger()
+        val maxActive = AtomicInteger()
+        val ready = CountDownLatch(50)
+        val killed = AtomicInteger()
+        val temporaryManager = mockk<SandboxManager>()
+        every { temporaryManager.killSandbox(any()) } answers {
+            val current = active.incrementAndGet()
+            maxActive.updateAndGet { maxOf(it, current) }
+            ready.countDown()
+            assertTrue(ready.await(2, TimeUnit.SECONDS))
+            killed.incrementAndGet()
+            active.decrementAndGet()
+            if (firstArg<String>() == "id-0") throw RuntimeException("injected kill failure")
+        }
+        every { temporaryManager.close() } just runs
+        val pool =
+            SandboxPool(
+                config =
+                    PoolConfig.builder()
+                        .poolName("test-pool")
+                        .ownerId("test-owner")
+                        .maxIdle(0)
+                        .stateStore(store)
+                        .connectionConfig(ConnectionConfig.builder().build())
+                        .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                        .build(),
+                sandboxManagerFactory = { temporaryManager },
+            )
+
+        assertThrows(IllegalArgumentException::class.java) { pool.releaseAllIdle(0) }
+        val failure = assertThrows(RuntimeException::class.java) { pool.releaseAllIdle(50) }
+
+        assertEquals("injected store failure", failure.message)
+        assertEquals(50, maxActive.get())
+        assertEquals(55, killed.get())
+        assertEquals(0, store.snapshotCounters("test-pool").idleCount)
+        verify(exactly = 1) { temporaryManager.close() }
+    }
+
+    @Test
+    fun `releaseAllIdle waits for kills before closing manager when caller is interrupted`() {
+        val store = InMemoryPoolStateStore()
+        store.putIdle("test-pool", "id-1")
+        val killStarted = CountDownLatch(1)
+        val releaseKill = CountDownLatch(1)
+        val temporaryManager = mockk<SandboxManager>()
+        every { temporaryManager.killSandbox("id-1") } answers {
+            killStarted.countDown()
+            releaseKill.await()
+        }
+        every { temporaryManager.close() } just runs
+        val pool =
+            SandboxPool(
+                config =
+                    PoolConfig.builder()
+                        .poolName("test-pool")
+                        .ownerId("test-owner")
+                        .maxIdle(0)
+                        .stateStore(store)
+                        .connectionConfig(ConnectionConfig.builder().build())
+                        .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                        .build(),
+                sandboxManagerFactory = { temporaryManager },
+            )
+        val released = AtomicInteger()
+        val interruptRestored = AtomicBoolean()
+        val caller =
+            Thread {
+                released.set(pool.releaseAllIdle(1))
+                interruptRestored.set(Thread.currentThread().isInterrupted)
+            }
+
+        caller.start()
+        assertTrue(killStarted.await(2, TimeUnit.SECONDS))
+        caller.interrupt()
+        Thread.sleep(20)
+        assertTrue(caller.isAlive)
+        verify(exactly = 0) { temporaryManager.close() }
+        releaseKill.countDown()
+        caller.join(2_000)
+
+        assertEquals(1, released.get())
+        assertTrue(interruptRestored.get())
         verify(exactly = 1) { temporaryManager.close() }
     }
 
@@ -1989,6 +2241,22 @@ class SandboxPoolTest {
                 sandboxId = null,
                 discardedAliveSandboxIds = listOf("near-expiry-id"),
             )
+    }
+
+    private class CountingPoolStateStore(
+        private val delegate: InMemoryPoolStateStore = InMemoryPoolStateStore(),
+    ) : PoolStateStore by delegate {
+        /** Number of reconcile ticks, proxied by the primary-lock acquisition that opens each tick. */
+        val reconcileTicks = AtomicInteger(0)
+
+        override fun tryAcquirePrimaryLock(
+            poolName: String,
+            ownerId: String,
+            ttl: Duration,
+        ): Boolean {
+            reconcileTicks.incrementAndGet()
+            return delegate.tryAcquirePrimaryLock(poolName, ownerId, ttl)
+        }
     }
 
     private class BlockingTakePoolStateStore(

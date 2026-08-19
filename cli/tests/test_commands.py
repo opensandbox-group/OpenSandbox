@@ -569,12 +569,12 @@ class TestSandboxKill:
 
 
 class TestSandboxPause:
-    def test_pause_calls_manager(self, runner: CliRunner) -> None:
+    def test_pause_reports_request_accepted(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
         result = _invoke(runner, ["sandbox", "pause", "sb-123"], manager=mock_mgr)
         assert result.exit_code == 0
         mock_mgr.pause_sandbox.assert_called_once_with("sb-123")
-        assert "Sandbox paused: sb-123" in result.output
+        assert "Pause request accepted: sb-123" in result.output
 
 
 class TestSandboxResume:
@@ -1379,6 +1379,32 @@ class TestDiagnosticsCommands:
         assert result.exit_code == 0
         assert "line 1\nline 2" in result.output
         manager.get_diagnostic_logs.assert_called_once_with("sb-1", scope="container")
+
+    def test_logs_raw_surfaces_diagnostic_notices_on_stderr(
+        self, runner: CliRunner
+    ) -> None:
+        manager = MagicMock()
+        manager.get_diagnostic_logs.return_value = DiagnosticContent(
+            sandboxId="sb-1",
+            kind="logs",
+            scope="all",
+            delivery="inline",
+            contentType="text/plain; charset=utf-8",
+            content="container logs",
+            truncated=True,
+            warnings=["Only container logs are available."],
+        )
+
+        result = _invoke(
+            runner,
+            ["diagnostics", "logs", "sb-1", "--scope", "all", "-o", "raw"],
+            manager=manager,
+        )
+
+        assert result.exit_code == 0
+        assert result.stdout == "container logs\n"
+        assert "Warning: diagnostic content was truncated." in result.stderr
+        assert "Warning: Only container logs are available." in result.stderr
 
     def test_events_json_prints_descriptor(self, runner: CliRunner) -> None:
         manager = MagicMock()

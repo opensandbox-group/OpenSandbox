@@ -54,7 +54,7 @@ OPERATOR_SDK_VERSION ?= v1.42.0
 CONTROLLER_IMG ?= controller:dev
 # TASK_EXECUTOR_IMG defines the image for the task-executor service.
 TASK_EXECUTOR_IMG ?= task-executor:dev
-# IMAGE_COMMITTER_IMG defines the image for the image-committer service.
+# IMAGE_COMMITTER_IMG defines the image for the default image-committer service.
 IMAGE_COMMITTER_IMG ?= image-committer:dev
 # SNAPSHOT_REGISTRY defines the OCI registry used by the controller for snapshot images.
 SNAPSHOT_REGISTRY ?= docker-registry.default.svc.cluster.local:5000
@@ -530,9 +530,13 @@ HELM_CHART_PATH ?= charts/opensandbox-controller
 HELM_CHART_VERSION ?= $(VERSION)
 
 .PHONY: helm-lint
-helm-lint: ## Lint the Helm chart
-	@echo "Linting Helm chart..."
-	helm lint $(HELM_CHART_PATH)
+helm-lint: ## Lint all Helm charts and verify dependencies
+	@echo "Linting Helm charts..."
+	helm lint charts/opensandbox-controller
+	helm lint charts/opensandbox-server
+	helm lint charts/opensandbox-node-agent
+	helm dependency build charts/opensandbox
+	helm lint charts/opensandbox
 
 .PHONY: helm-template
 helm-template: ## Generate Kubernetes manifests from Helm chart

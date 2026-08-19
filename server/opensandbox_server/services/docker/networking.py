@@ -511,6 +511,7 @@ class DockerNetworkingMixin:
                     sandbox_id,
                     egress_api_host_port,
                     egress_token,
+                    timeout_seconds=self.app_config.egress.readiness_timeout_seconds,
                 )
             return sidecar_container
         except Exception as exc:
@@ -549,7 +550,7 @@ class DockerNetworkingMixin:
         sandbox_id: str,
         host_port: int,
         egress_token: str,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float,
     ) -> None:
         deadline = time.monotonic() + timeout_seconds
         url = f"http://{self._resolve_proxy_host()}:{host_port}/healthz"

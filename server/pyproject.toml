@@ -58,6 +58,8 @@ dependencies = [
     "tomli; python_version < \"3.11\"",
     "uvicorn[standard]",
     "websockets>=14.0",
+    "grpcio>=1.83.0",
+    "protobuf>=7.35.1",
 ]
 
 [project.urls]
@@ -89,6 +91,7 @@ packages = ["opensandbox_server"]
 
 [dependency-groups]
 dev = [
+    "grpcio-tools>=1.83.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
@@ -100,6 +103,7 @@ dev = [
 target-version = "py310"
 line-length = 100
 src = ["opensandbox_server", "tests"]
+exclude = ["opensandbox_server/services/fleets/generated"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]

@@ -611,7 +611,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         """%2f encoded path separator must be rejected."""
         system = self._make_system_with_vault()
         flow = _Flow()
-        flow.request.path = "/api/v8/projects/123%2f..%2f456/variables"
+        flow.request.path = "/api/v8/projects/123/%2f..%2f456/variables"
 
         system.requestheaders(flow)
 
@@ -650,6 +650,35 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
 
         self.assertNotIn("Private-Token", flow.request.headers._values)
 
+    def test_double_encoded_path_outside_binding_scope_is_allowed(self) -> None:
+        """Ambiguous paths pass through when no credential binding matches."""
+        system = self._make_system_with_vault()
+        flow = _Flow()
+        flow.request.pretty_host = "packages.example.com"
+        flow.request.host = "packages.example.com"
+        flow.request.path = (
+            "/1/pypi/simple/pyyaml/"
+            "%252Fcentral-pypi-proxy%252Fpackages%252F8b%252F9d/wheel.whl"
+        )
+
+        system.requestheaders(flow)
+
+        self.assertFalse(flow.killed)
+        self.assertNotEqual(403, getattr(flow.response, "status_code", None))
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
+    def test_ambiguous_path_on_bound_host_outside_path_scope_is_allowed(self) -> None:
+        """A host match alone does not put a request in credential scope."""
+        system = self._make_system_with_vault()
+        flow = _Flow()
+        flow.request.path = "/downloads/%252Fartifacts%252Fwheel.whl"
+
+        system.requestheaders(flow)
+
+        self.assertFalse(flow.killed)
+        self.assertNotEqual(403, getattr(flow.response, "status_code", None))
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
     def test_dot_dot_substring_not_rejected(self) -> None:
         """'..' not as a complete segment (e.g. '/.../') must NOT be blocked."""
         system = self._make_system_with_vault()
@@ -682,7 +711,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         """Raw backslash in path must be rejected."""
         system = self._make_system_with_vault()
         flow = _Flow()
-        flow.request.path = "/api/v8/projects/123\\..\\456/variables"
+        flow.request.path = "/api/v8/projects/123/\\..\\456/variables"
 
         system.requestheaders(flow)
 
@@ -887,7 +916,7 @@ class SystemAddonStreamingTest(unittest.TestCase):
                     "match": {
                         "hosts": ["code.example.com"],
                         "methods": ["POST"],
-                        "paths": ["/v1/chat/completions"],
+                        "paths": ["/v1/chat/*"],
                     },
                     "headers": [{"name": "x-api-key", "value": "secret-api-key"}],
                     "substitutions": [

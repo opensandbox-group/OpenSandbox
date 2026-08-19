@@ -301,10 +301,20 @@ poolManager.destroy(
 - Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool.
 :::
 
+::: tip Observing warmup performance
+To trace the warmup path, enable `ConnectionConfig.builder().enableTracing(true)` and add an
+OpenTelemetry SDK + exporter to your application. Each warmup becomes one trace
+(`pool.warmup` root span plus `create` / `prepare` / `renew` / `commit` phases) with
+`trace_id` / `span_id` published to the SLF4J MDC, so you can look up a sandbox's
+warmup by searching logs for its `sandbox_id`. See [SDK Tracing (Pool Warmup)](/guides/sdk-tracing).
+:::
+
 ::: tip Distributed Deployment
 For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. Configure `primaryLockTtl` greater than `warmupReadyTimeout` plus expected warmup preparer time and buffer, otherwise leadership may expire while a node is creating idle sandboxes.
 
 In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass.
+
+`releaseAllIdle()` preserves serial cleanup. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive, and the overload waits for every drained ID to receive a best-effort kill attempt.
 
 `SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
 :::
@@ -327,6 +337,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `retryPolicy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
 | `useServerProxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false` | -                      |
 | `disableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
+| `enableTracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/guides/sdk-tracing)) | `false` | - |
 
 ```java
 // 1. Basic configuration

@@ -18,6 +18,10 @@ from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import Endpoint
+from opensandbox_server.services.constants import (
+    OPEN_SANDBOX_INGRESS_HEADER,
+    OPEN_SANDBOX_SECURE_ACCESS_HEADER,
+)
 
 
 def test_get_endpoint_returns_service_result(
@@ -45,6 +49,30 @@ def test_get_endpoint_returns_service_result(
     assert calls == [("sbx-001", 44772)]
 
 
+def test_get_endpoint_preserves_ingress_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
+            return Endpoint(
+                endpoint="gateway.example.com",
+                headers={OPEN_SANDBOX_INGRESS_HEADER: "sbx-001-44772"},
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.get(
+        "/v1/sandboxes/sbx-001/endpoints/44772",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["headers"] == {OPEN_SANDBOX_INGRESS_HEADER: "sbx-001-44772"}
+
+
 def test_get_endpoint_use_server_proxy_rewrites_url(
     client: TestClient,
     auth_headers: dict,
@@ -68,6 +96,34 @@ def test_get_endpoint_use_server_proxy_rewrites_url(
     # proxy routes live under the same prefix, and on shared hosts the bare
     # root path belongs to a different backend.
     assert response.json()["endpoint"] == "testserver/v1/sandboxes/sbx-001/proxy/44772"
+
+
+def test_get_endpoint_use_server_proxy_omits_ingress_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, **kwargs) -> Endpoint:
+            return Endpoint(
+                endpoint="gateway.example.com",
+                headers={
+                    OPEN_SANDBOX_INGRESS_HEADER.lower(): "sbx-001-44772",
+                    OPEN_SANDBOX_SECURE_ACCESS_HEADER: "secure-token",
+                },
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.get(
+        "/v1/sandboxes/sbx-001/endpoints/44772",
+        params={"use_server_proxy": "true"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["headers"] == {OPEN_SANDBOX_SECURE_ACCESS_HEADER: "secure-token"}
 
 
 def test_get_endpoint_use_server_proxy_without_mount_prefix(

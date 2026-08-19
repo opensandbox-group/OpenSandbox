@@ -96,6 +96,11 @@ class HTTPTenantProvider:
         self._callbacks: List[Callable[[List[TenantEntry]], None]] = []
         self._client: Optional[httpx.Client] = None
 
+    @property
+    def supports_enumeration(self) -> bool:
+        """The HTTP provider only knows tenants seen in prior per-key lookups."""
+        return False
+
     def lookup(self, api_key: str) -> Optional[TenantEntry]:
         now = time.monotonic()
 

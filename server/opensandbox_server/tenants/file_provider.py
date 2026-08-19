@@ -99,6 +99,11 @@ class FileTenantProvider:
         self._watcher_thread: Optional[threading.Thread] = None
 
     @property
+    def supports_enumeration(self) -> bool:
+        """The file provider lists its full config at startup."""
+        return True
+
+    @property
     def path(self) -> Path:
         return self._path
 

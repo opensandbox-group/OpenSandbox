@@ -216,11 +216,29 @@ def _build_api_exception(
     retry_after: timedelta | None = None,
 ) -> SandboxApiException:
     """Build a Sandbox(ApiException|RateLimitException) from raw fields."""
+    from opensandbox.adapters.converter.response_handler import (
+        _raw_body_message_fragment,
+    )
+
     sandbox_error = _parse_error_body(content) if content else None
+    message = f"API error: HTTP {status_code}"
+    if sandbox_error is not None and sandbox_error.code != SandboxError.UNEXPECTED_RESPONSE:
+        if sandbox_error.message:
+            message = f"{message}: {sandbox_error.message}"
+    else:
+        # Unstructured body: splice the raw response body (truncated) into the
+        # message so logs carry the server's own explanation instead of only
+        # "API error: HTTP 400". The full body stays on ``response_body``.
+        # Structured codes with an empty message are preserved on the error.
+        raw_fragment = _raw_body_message_fragment(content)
+        if raw_fragment:
+            message = f"{message}: {raw_fragment}"
+            if sandbox_error is None or sandbox_error.code == SandboxError.UNEXPECTED_RESPONSE:
+                sandbox_error = SandboxError(SandboxError.UNEXPECTED_RESPONSE, raw_fragment)
     is_retryable = status_code in _RETRYABLE_STATUS_CODES
     if status_code == HTTPStatus.TOO_MANY_REQUESTS:
         return SandboxRateLimitException(
-            message=f"API error: HTTP {status_code}",
+            message=message,
             status_code=status_code,
             cause=cause,
             error=sandbox_error,
@@ -230,7 +248,7 @@ def _build_api_exception(
             is_retryable=is_retryable,
         )
     return SandboxApiException(
-        message=f"API error: HTTP {status_code}",
+        message=message,
         status_code=status_code,
         cause=cause,
         error=sandbox_error,

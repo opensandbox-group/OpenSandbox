@@ -42,6 +42,7 @@ func InitFlags() {
 	ApiGracefulShutdownTimeout = time.Second * 1
 	JupyterIdlePollInterval = 100 * time.Millisecond
 	IsolationConfigPath = ""
+	InitMode = false
 
 	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
@@ -95,6 +96,10 @@ func InitFlags() {
 	}
 	flag.StringVar(&IsolationConfigPath, "isolation-config", IsolationConfigPath, "Path to isolation TOML config file (default: built-in defaults)")
 
+	// Init mode must be enabled explicitly; bootstrap.sh passes it together
+	// with EXECD_INIT so the shell's exec/background decision stays in lockstep.
+	flag.BoolVar(&InitMode, "init", false, "Run as the sandbox init: reap children, forward signals, own the container lifecycle")
+
 	// Parse flags - these will override environment variables if provided
 	flag.Parse()
 	if JupyterIdlePollInterval <= 0 {
@@ -105,4 +110,10 @@ func InitFlags() {
 	// Log final values
 	log.Info("Jupyter server host is: %s", JupyterServerHost)
 	log.Info("Jupyter server token is: %s", log.MaskToken(JupyterServerToken))
+}
+
+// Args returns the non-flag arguments after flag.Parse — in init mode this is
+// the user command passed after "--" (e.g. `execd --init -- sh -c "..."`).
+func Args() []string {
+	return flag.Args()
 }

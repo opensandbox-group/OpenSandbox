@@ -17,6 +17,7 @@ kotlin = "2.2.21"
 kotlinx-serialization = "1.9.0"
 okhttp = "4.12.0"
 slf4j = "2.0.9"
+opentelemetry = "1.51.0"
 jedis = "5.2.0"
 junit = "5.10.1"
 mockk = "1.13.8"
@@ -43,6 +44,11 @@ kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 
 # Logging
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version = "1.5.18" }
+
+# Tracing (API only; no-op when no OpenTelemetry SDK is on the classpath)
+opentelemetry-api = { module = "io.opentelemetry:opentelemetry-api", version.ref = "opentelemetry" }
+opentelemetry-sdk-testing = { module = "io.opentelemetry:opentelemetry-sdk-testing", version.ref = "opentelemetry" }
 
 # Redis
 jedis = { module = "redis.clients:jedis", version.ref = "jedis" }

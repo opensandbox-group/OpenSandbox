@@ -112,9 +112,82 @@ jobs:
         run: |
           kind delete cluster --name "${KIND_CLUSTER}" || true
 
+  execd-init-e2e:
+    name: Execd-Init + Hardening E2E
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    env:
+      KIND_CLUSTER: opensandbox-e2e
+      KIND_K8S_VERSION: v1.30.4
+      KUBECONFIG_PATH: /tmp/opensandbox-kind-kubeconfig
+      KUBECONFIG: /tmp/opensandbox-kind-kubeconfig
+      OPENSANDBOX_E2E_SANDBOX_CPU: 250m
+      OPENSANDBOX_E2E_SANDBOX_MEMORY: 512Mi
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.0"
+
+      - name: Add Go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Run execd-init + hardening E2E
+        run: bash scripts/python-k8s-execd-init-e2e.sh
+
+      - name: Dump kind diagnostics
+        if: always()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get batchsandboxes -A || true
+          kubectl describe deployment -n opensandbox-system opensandbox-server || true
+
+      - name: Eval in-cluster server logs
+        if: always()
+        run: |
+          kubectl logs -n opensandbox-system deployment/opensandbox-server || true
+          cat /tmp/opensandbox-server-port-forward.log || true
+
+      - name: Upload Python test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execd-init-e2e-logs
+          path: |
+            /tmp/opensandbox-server-port-forward.log
+            /tmp/opensandbox-e2e-pods.yaml
+            /tmp/opensandbox-e2e-batchsandboxes.yaml
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Clean up Kind cluster
+        if: always()
+        run: |
+          kind delete cluster --name "${KIND_CLUSTER}" || true
+
   publish-nightly-latest:
     name: Publish latest (${{ matrix.component }} nightly)
-    needs: k8s-mini-e2e
+    needs: [k8s-mini-e2e, execd-init-e2e]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
@@ -179,7 +252,7 @@ jobs:
   required:
     name: Kubernetes Mini E2E CI
     if: ${{ always() && github.event_name == 'pull_request' }}
-    needs: [changes, k8s-mini-e2e]
+    needs: [changes, k8s-mini-e2e, execd-init-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -187,13 +260,14 @@ jobs:
           RELEVANT: ${{ needs.changes.outputs.relevant }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           E2E_RESULT: ${{ needs.k8s-mini-e2e.result }}
+          EXECD_INIT_RESULT: ${{ needs.execd-init-e2e.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$E2E_RESULT" == "success" ]]
+            [[ "$E2E_RESULT" == "success" && "$EXECD_INIT_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$E2E_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$E2E_RESULT" == "skipped" && "$EXECD_INIT_RESULT" == "skipped" ]]
           fi

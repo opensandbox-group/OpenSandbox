@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -191,29 +192,48 @@ func (s *isolatedSession) start() error {
 	}
 	s.lifecycle = lifecycle
 
-	stdin, err := cmd.StdinPipe()
+	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		closeCommandExtraFiles(cmd)
 		return s.failStartup(err)
 	}
-	s.stdin = stdin
-	stdout, err := cmd.StdoutPipe()
+	s.stdin = stdinW
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
+		_ = stdinR.Close()
+		_ = stdinW.Close()
 		closeCommandExtraFiles(cmd)
 		return s.failStartup(err)
 	}
-	s.stdout = stdout
-	cmd.Stderr = cmd.Stdout
+	s.stdout = stdoutR
+	cmd.Stdin = stdinR
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stdoutW
 
-	if err := cmd.Start(); err != nil {
+	mp, err := launchManaged(
+		cmd,
+		withPreReap(func() { s.markProcessExitedBeforeReap(nil) }),
+		// bwrap needs unshare/mount + capabilities to build the namespace;
+		// its workload is already reduced inside by bwrap's own seccomp and
+		// the session gate.
+		withoutHardening(),
+	)
+	if err != nil {
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
 		closeCommandExtraFiles(cmd)
 		return s.failStartup(fmt.Errorf("start %s: %w", shell, err))
 	}
 
+	// Close the child-side ends in the parent — the child has its own copies.
+	_ = stdinR.Close()
+	_ = stdoutW.Close()
 	closeCommandExtraFiles(cmd)
 
 	go func() {
-		_ = waitCommandWithExitBarrier(cmd, s.markProcessExitedBeforeReap)
+		_ = waitManagedWithBarrier(mp, s.markProcessExitedBeforeReap)
 		// Publish process reaping before waiting for lifecycle accounting.
 		// Once Wait returns, the numeric PID/PGID may be reused and must never
 		// be signalled again.

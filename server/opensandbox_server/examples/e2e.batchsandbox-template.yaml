@@ -3,6 +3,11 @@
 #
 # Faster Pod teardown in Kind/CI: skip the default 30s graceful termination window.
 # Do not use for real workloads where graceful shutdown matters.
+#
+# The execd-isolation ConfigMap carries the hardened isolation TOML for the
+# OSEP-0018 hardening e2e (created by scripts/python-k8s-execd-init-e2e.sh).
+# It is optional: e2e runs that do not create the ConfigMap get an empty
+# mount, and execd only reads it when EXECD_ISOLATION_CONFIG points at it.
 
 # Metadata template (will be merged with runtime-generated metadata)
 metadata:
@@ -15,3 +20,14 @@ spec:
       restartPolicy: Never
       tolerations:
         - operator: "Exists"
+      volumes:
+        - name: execd-isolation
+          configMap:
+            name: opensandbox-e2e-execd-isolation
+            optional: true
+      containers:
+        - name: sandbox
+          volumeMounts:
+            - name: execd-isolation
+              mountPath: /etc/opensandbox/execd-isolation
+              readOnly: true

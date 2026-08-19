@@ -441,6 +441,64 @@ data: {"type":"error","error":{"ename":"CommandExecError","evalue":"7","tracebac
             .WithMessage("*sessionId*");
     }
 
+    [Fact]
+    public async Task GetCommandStatusAsync_ShouldIncludeBodyInMessage_WhenBodyUnparseable()
+    {
+        var body = "{\"error\":\"cursor must be positive\"}";
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.GetCommandStatusAsync("exec-1");
+
+        var ex = await act.Should().ThrowAsync<SandboxApiException>();
+        ex.Which.Message.Should().Contain(body);
+    }
+
+    [Fact]
+    public async Task GetCommandStatusAsync_ShouldIncludeBodyInMessage_WhenBodyIsPlainText()
+    {
+        var body = "cursor must be positive";
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "text/plain")
+            });
+        });
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.GetCommandStatusAsync("exec-1");
+
+        var ex = await act.Should().ThrowAsync<SandboxApiException>();
+        ex.Which.Message.Should().Contain(body);
+        ex.Which.RawBody.Should().Be(body);
+    }
+
+    [Fact]
+    public async Task GetBackgroundCommandLogsAsync_ShouldIncludeBodyInMessage_WhenBodyUnparseable()
+    {
+        var body = "quota exceeded for sandbox";
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "text/plain")
+            });
+        });
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.GetBackgroundCommandLogsAsync("exec-1");
+
+        var ex = await act.Should().ThrowAsync<SandboxApiException>();
+        ex.Which.Message.Should().Contain(body);
+    }
+
     private static CommandsAdapter CreateAdapter(HttpMessageHandler httpHandler)
     {
         var baseUrl = "http://execd.local";

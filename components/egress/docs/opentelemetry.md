@@ -91,10 +91,47 @@ Metric export is enabled only when at least one OTLP endpoint is set.
 
 If both are unset, egress keeps metrics local (no OTLP export).
 
+### Automatic Egress Allow Rule
+
+When an OTLP destination is configured — the endpoint env vars below, or the
+exporter fallback node IP (`HOST_IP` / `/etc/hostinfo`) when both are unset —
+egress automatically injects an always-allow egress rule for that host
+(domain or IP, any port), so telemetry export works under the default deny-all
+policy without manually managing allowlist rules. This also covers the egress
+sidecar's own metric export, which shares the sandbox network namespace and
+would otherwise be blocked by its own egress chain.
+
+- The rule follows the standard precedence: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+  wins over `OTEL_EXPORTER_OTLP_ENDPOINT`; the fallback node IP applies only
+  when neither is set. A set-but-invalid endpoint never falls back (the
+  exporter does not either), so no rule is injected in that case.
+- The endpoint must be a URL (`https://host:4318/v1/metrics`) — the
+  `otlpmetrichttp` env-var form. Bare `host:port` or `host` values are not
+  accepted (the exporter parses them as opaque URLs with an empty host); a
+  trailing root dot on FQDNs is trimmed to match DNS policy normalization.
+- The rule lives in the always-allow layer: it survives user `POST`/`PATCH`/`DELETE`
+  policy updates and always-rule file reloads. Operators can still block the target
+  with `deny.always`, which takes precedence.
+- Rules are host-scoped (any port), matching the egress rule model; ports are not
+  enforced per rule.
+
+> **Note**: use a fully-qualified service name or an IP in the endpoint.
+> Single-label names (e.g. `otel-collector`) are subject to resolver
+> search-domain expansion, and the deny-all DNS proxy answers the expanded
+> names (e.g. `otel-collector.<ns>.svc.cluster.local`) with NXDOMAIN without
+> falling back to the bare name, so the auto-generated exact-host allow rule
+> would not be reached.
+
 ### Minimal Example
 
 ```bash
-export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector:4318"
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector.sandbox.svc.cluster.local:4318"
+```
+
+An IP endpoint works as well:
+
+```bash
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://10.0.0.5:4318"
 ```
 
 ### Service Name

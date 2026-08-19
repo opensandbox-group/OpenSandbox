@@ -304,10 +304,12 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			}, 2*time.Minute).Should(Succeed())
 
 			By("verifying the reserved internal SandboxSnapshot is deleted after successful resume")
-			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
-				"-n", pauseResumeNamespace, "-o", "name")
-			output, err = utils.Run(cmd)
-			Expect(err).To(HaveOccurred(), "Internal pause snapshot should be deleted after successful resume")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
+					"-n", pauseResumeNamespace, "-o", "name")
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Internal pause snapshot should be deleted after successful resume")
+			}, 2*time.Minute).Should(Succeed())
 
 			By("verifying the deleted snapshot manifest is absent from the registry")
 			expectRegistryManifestMissing(snapshotImageURI)

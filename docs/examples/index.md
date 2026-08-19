@@ -20,9 +20,11 @@ Run coding CLIs and AI agent frameworks inside isolated sandboxes.
 | [Claude Code](/examples/claude-code) | Run Claude Code CLI in a sandbox |
 | [Gemini CLI](/examples/gemini-cli) | Run Gemini CLI in a sandbox |
 | [Codex CLI](/examples/codex-cli) | Run OpenAI Codex CLI in a sandbox |
+| [OpenCode](/examples/opencode) | Run the OpenCode coding agent in a sandbox |
 | [Qwen Code](/examples/qwen-code) | Run Qwen Code CLI in a sandbox |
 | [Kimi CLI](/examples/kimi-cli) | Run Kimi CLI (Moonshot AI) in a sandbox |
 | [LangGraph](/examples/langgraph) | LangGraph state-machine workflow with sandbox |
+| [Deep Agents](/examples/deep-agents) | Deep Agents file/shell tools running in a sandbox |
 | [Google ADK](/examples/google-adk) | Google ADK agent using OpenSandbox tools |
 | [OpenClaw](/examples/openclaw) | OpenClaw Gateway inside a sandbox |
 | [NullClaw](/examples/nullclaw) | NullClaw Gateway sandbox integration |

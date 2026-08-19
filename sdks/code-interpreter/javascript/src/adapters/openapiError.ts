@@ -24,10 +24,22 @@ export function throwOnOpenApiFetchError(
   const status = (result.response as any).status ?? 0;
 
   const err = result.error as any;
+
+  let rawFragment: string | undefined;
+  if (typeof result.error === "string") {
+    rawFragment = result.error;
+  } else if (result.error && typeof result.error === "object") {
+    try {
+      rawFragment = JSON.stringify(result.error);
+    } catch {
+      rawFragment = undefined;
+    }
+  }
+
   const message =
     err?.message ??
     err?.error?.message ??
-    fallbackMessage;
+    (rawFragment && rawFragment.length > 0 ? rawFragment : fallbackMessage);
 
   const code = err?.code ?? err?.error?.code;
   const msg = err?.message ?? err?.error?.message ?? message;

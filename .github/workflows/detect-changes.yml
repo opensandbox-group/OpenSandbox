@@ -64,7 +64,9 @@ jobs:
                 path.startsWith("components/execd/") ||
                 path.startsWith("components/egress/") ||
                 path.startsWith("sdks/") ||
-                path.startsWith("tests/"),
+                path.startsWith("tests/") ||
+                path === "scripts/python-execd-init-e2e.sh" ||
+                path === "scripts/python-execd-hardening-e2e.sh",
               egress: (path) =>
                 workflowChanged(path, "egress-test.yml") ||
                 path.startsWith("components/egress/") ||
@@ -74,6 +76,11 @@ jobs:
                 path === "scripts/python-k8s-e2e.sh" ||
                 path === "scripts/python-k8s-e2e-ingress.sh" ||
                 path === "scripts/common/kubernetes-e2e.sh" ||
+                path === "scripts/python-k8s-execd-init-e2e.sh" ||
+                path === "tests/python/tests/test_execd_init_e2e.py" ||
+                path === "tests/python/tests/test_execd_hardening_e2e.py" ||
+                path === "server/opensandbox_server/examples/e2e.batchsandbox-template.yaml" ||
+                path.startsWith("components/execd/") ||
                 path.startsWith("kubernetes/charts/"),
               ingress: (path) =>
                 workflowChanged(path, "ingress-test.yaml") ||

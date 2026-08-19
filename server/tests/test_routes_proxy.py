@@ -14,10 +14,14 @@
 
 import asyncio
 import gzip
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
+from starlette.types import Message
 from websockets.typing import Origin
 
 import opensandbox_server.api.proxy as proxy_api
@@ -55,7 +59,19 @@ class _FakeStreamingResponse:
             yield chunk
 
     async def aclose(self):
+        await asyncio.sleep(0)
         self.aclose_called = True
+
+
+class _BlockingStreamingResponse(_FakeStreamingResponse):
+    def __init__(self) -> None:
+        super().__init__()
+        self.body_started = asyncio.Event()
+
+    async def aiter_raw(self):
+        self.body_started.set()
+        await asyncio.Future()
+        yield b"unreachable"
 
 
 class _FakeAsyncClient:
@@ -208,6 +224,153 @@ def test_proxy_forwards_filtered_headers_and_query(
     assert fake_client.response.aclose_called is True
 
 
+def test_proxy_preserves_origin_date_and_filters_server_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+            assert sandbox_id == "sbx-123"
+            assert port == 44772
+            assert resolve_internal is True
+            return Endpoint(endpoint="backend.example:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    origin_date = "Wed, 21 Oct 2015 07:28:00 GMT"
+    fake_client.response = _FakeStreamingResponse(
+        headers={
+            "Date": origin_date,
+            "Server": "backend-server",
+            "X-Backend": "yes",
+        },
+        chunks=[b"proxy-ok"],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/44772",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("x-backend") == "yes"
+    assert response.headers.get("date") == origin_date
+    assert "server" not in response.headers
+
+
+@pytest.mark.parametrize(
+    ("request_path", "location", "expected_location"),
+    [
+        (
+            "/v1/sandboxes/sbx-123/proxy/44772/",
+            "/login?next=%2F",
+            "/v1/sandboxes/sbx-123/proxy/44772/login?next=%2F",
+        ),
+        (
+            "/sandboxes/sbx-123/proxy/44772/",
+            "/login?next=%2F",
+            "/sandboxes/sbx-123/proxy/44772/login?next=%2F",
+        ),
+        (
+            "/v1/sandboxes/sbx-123/proxy/44772/nested/page",
+            "/login?next=%2F",
+            "/v1/sandboxes/sbx-123/proxy/44772/login?next=%2F",
+        ),
+        ("/v1/sandboxes/sbx-123/proxy/44772/", "login?next=%2F", "login?next=%2F"),
+        (
+            "/v1/sandboxes/sbx-123/proxy/44772/",
+            "https://example.com/login",
+            "https://example.com/login",
+        ),
+        (
+            "/v1/sandboxes/sbx-123/proxy/44772/",
+            "//example.com/login",
+            "//example.com/login",
+        ),
+        ("/v1/sandboxes/sbx-123/proxy/44772/", "?next=%2F", "?next=%2F"),
+    ],
+)
+def test_proxy_rewrites_only_root_relative_redirects(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    request_path: str,
+    location: str,
+    expected_location: str,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+            assert sandbox_id == "sbx-123"
+            assert port == 44772
+            assert resolve_internal is True
+            return Endpoint(endpoint="backend.example:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=302,
+        headers={"Location": location},
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        request_path,
+        headers=auth_headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == expected_location
+
+
+def test_proxy_rewrites_root_relative_redirect_with_server_eip_path(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+            assert sandbox_id == "sbx-123"
+            assert port == 44772
+            assert resolve_internal is True
+            return Endpoint(endpoint="backend.example:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    monkeypatch.setattr(
+        lifecycle,
+        "get_config",
+        lambda: SimpleNamespace(
+            server=SimpleNamespace(eip="sandbox.example.com/opensandbox/")
+        ),
+    )
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=302,
+        headers={"Location": "/login?next=%2F"},
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/44772/",
+        headers=auth_headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert (
+        response.headers["location"]
+        == "/opensandbox/sandboxes/sbx-123/proxy/44772/login?next=%2F"
+    )
+
+
 def test_proxy_root_path_forwards_endpoint_headers_and_query(
     client: TestClient,
     auth_headers: dict,
@@ -357,6 +520,7 @@ def test_proxy_allows_valid_secure_access_header(
     )
 
     assert response.status_code == 200
+    assert fake_client.built is not None
     lowered_headers = {
         key.lower(): value for key, value in fake_client.built["headers"].items()
     }
@@ -526,6 +690,79 @@ def test_proxy_streams_raw_body_for_content_encoded_response(
     assert fake_client.response.aiter_raw_called is True
     assert fake_client.response.aiter_bytes_called is False
     assert fake_client.response.aclose_called is True
+
+
+def test_proxy_closes_backend_response_when_downstream_rejects_headers() -> None:
+    """A disconnect before body iteration must not retain the backend connection."""
+
+    async def run() -> None:
+        backend_response = _FakeStreamingResponse()
+        response = proxy_api._ProxyStreamingResponse(
+            cast(httpx.Response, backend_response),
+            status_code=200,
+            headers={},
+        )
+
+        async def receive() -> Message:
+            return {"type": "http.disconnect"}
+
+        async def reject_response_start(message: Message) -> None:
+            assert message["type"] == "http.response.start"
+            raise ConnectionError("downstream disconnected")
+
+        try:
+            await response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}},
+                receive,
+                reject_response_start,
+            )
+        except ClientDisconnect:
+            pass
+        else:
+            raise AssertionError("expected the downstream send to fail")
+
+        assert backend_response.aclose_called is True
+
+    asyncio.run(run())
+
+
+def test_proxy_closes_backend_response_when_stream_is_cancelled() -> None:
+    """Task cancellation must not interrupt returning the backend connection."""
+
+    async def run() -> None:
+        backend_response = _BlockingStreamingResponse()
+        response = proxy_api._ProxyStreamingResponse(
+            cast(httpx.Response, backend_response),
+            status_code=200,
+            headers={},
+        )
+
+        async def send(message: Message) -> None:
+            return None
+
+        async def receive() -> Message:
+            return {"type": "http.disconnect"}
+
+        task = asyncio.create_task(
+            response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}},
+                receive,
+                send,
+            )
+        )
+        await backend_response.body_started.wait()
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("expected stream task cancellation")
+
+        assert backend_response.aclose_called is True
+
+    asyncio.run(run())
 
 
 def test_proxy_rejects_websocket_upgrade(

@@ -114,8 +114,8 @@ spec:
                       description: ContainerName is the name of the container.
                       type: string
                     imageDigest:
-                      description: ImageDigest is the digest of the pushed snapshot
-                        image.
+                      description: ImageDigest is the config digest of the pushed
+                        snapshot image.
                       type: string
                     imageUri:
                       description: ImageURI is the snapshot image URI for this container.

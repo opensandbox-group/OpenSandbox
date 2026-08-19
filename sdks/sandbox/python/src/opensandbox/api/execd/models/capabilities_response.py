@@ -17,12 +17,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.capabilities_response_hardening import CapabilitiesResponseHardening
+
 
 T = TypeVar("T", bound="CapabilitiesResponse")
 
@@ -41,6 +45,9 @@ class CapabilitiesResponse:
         userns_available (bool | Unset): Whether sessions using uid_mode userns can be created
         commit_supported (bool | Unset):
         diff_supported (bool | Unset):
+        hardening (CapabilitiesResponseHardening | Unset): execd init-mode and workload-hardening state (OSEP-0018):
+            whether execd is the sandbox init and which of its controls are in effect. Not an isolation capability; reported
+            here so operators see enforcement state in one place.
     """
 
     available: bool | Unset = UNSET
@@ -51,6 +58,7 @@ class CapabilitiesResponse:
     userns_available: bool | Unset = UNSET
     commit_supported: bool | Unset = UNSET
     diff_supported: bool | Unset = UNSET
+    hardening: CapabilitiesResponseHardening | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -69,6 +77,10 @@ class CapabilitiesResponse:
         commit_supported = self.commit_supported
 
         diff_supported = self.diff_supported
+
+        hardening: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.hardening, Unset):
+            hardening = self.hardening.to_dict()
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -89,11 +101,15 @@ class CapabilitiesResponse:
             field_dict["commit_supported"] = commit_supported
         if diff_supported is not UNSET:
             field_dict["diff_supported"] = diff_supported
+        if hardening is not UNSET:
+            field_dict["hardening"] = hardening
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.capabilities_response_hardening import CapabilitiesResponseHardening
+
         d = dict(src_dict)
         available = d.pop("available", UNSET)
 
@@ -111,6 +127,13 @@ class CapabilitiesResponse:
 
         diff_supported = d.pop("diff_supported", UNSET)
 
+        _hardening = d.pop("hardening", UNSET)
+        hardening: CapabilitiesResponseHardening | Unset
+        if isinstance(_hardening, Unset):
+            hardening = UNSET
+        else:
+            hardening = CapabilitiesResponseHardening.from_dict(_hardening)
+
         capabilities_response = cls(
             available=available,
             isolator=isolator,
@@ -120,6 +143,7 @@ class CapabilitiesResponse:
             userns_available=userns_available,
             commit_supported=commit_supported,
             diff_supported=diff_supported,
+            hardening=hardening,
         )
 
         capabilities_response.additional_properties = d

@@ -3,8 +3,8 @@ title: Pluggable Secure Container Runtime Support
 authors:
   - "@hittyt"
 creation-date: 2026-02-05
-last-updated: 2026-02-09
-status: implementing
+last-updated: 2026-07-27
+status: implemented
 ---
 
 # OSEP-0004: Pluggable Secure Container Runtime Support
@@ -182,7 +182,7 @@ Extension to `~/.sandbox.toml`. A single `[secure_runtime]` section configures t
 ```toml
 [runtime]
 type = "docker"  # or "kubernetes"
-execd_image = "opensandbox/execd:v1.0.21"
+execd_image = "opensandbox/execd:v1.0.22"
 
 # Secure container runtime configuration.
 # When enabled, ALL sandboxes on this server use the specified runtime.
@@ -212,7 +212,7 @@ Example 1 — gVisor on Docker:
 # ~/.sandbox.toml
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.21"
+execd_image = "opensandbox/execd:v1.0.22"
 
 [secure_runtime]
 type = "gvisor"
@@ -226,7 +226,7 @@ Example 2 — Kata Containers (QEMU) on Kubernetes:
 # ~/.sandbox.toml
 [runtime]
 type = "kubernetes"
-execd_image = "opensandbox/execd:v1.0.21"
+execd_image = "opensandbox/execd:v1.0.22"
 
 [secure_runtime]
 type = "kata"

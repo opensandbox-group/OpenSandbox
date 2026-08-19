@@ -113,6 +113,20 @@ export interface IsolatedRunLogs {
   cursor: number;
 }
 
+export interface HardeningLayerState {
+  state: "active" | "disabled" | "degraded" | "unsupported" | string;
+  message?: string;
+}
+
+export interface HardeningStatus {
+  init_mode: "pid1" | "subreaper" | "none" | string;
+  signal_shield: boolean;
+  cap_drop?: HardeningLayerState;
+  seccomp?: HardeningLayerState;
+  landlock?: HardeningLayerState;
+  ebpf?: HardeningLayerState;
+}
+
 export interface IsolatedCapabilities {
   available: boolean;
   isolator?: string;
@@ -122,6 +136,7 @@ export interface IsolatedCapabilities {
   userns_available?: boolean;
   commit_supported: boolean;
   diff_supported: boolean;
+  hardening?: HardeningStatus;
 }
 
 export interface IsolatedSessionSummary {

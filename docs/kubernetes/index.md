@@ -138,12 +138,15 @@ The snapshot controller supports the following command-line flags:
 |------|---------|-------------|
 | `--snapshot-registry` | `""` | OCI registry prefix used for snapshot images |
 | `--snapshot-push-secret` | `""` | Secret name used to push and delete snapshot images; must contain inline `auths` credentials with manifest delete permission |
+| `--image-committer-pod-template-file` | `""` | Path to a PodTemplateSpec overlay for image-committer commit Job Pods |
 | `--resume-pull-secret` | `""` | Secret name injected into resumed sandboxes for image pulls |
-| `--image-committer-image` | `image-committer:dev` | Image used for commit operations (must contain `nerdctl` tool) |
+| `--image-committer-image` | `image-committer:dev` | Image used for commit operations |
 | `--commit-job-timeout` | `10m` | Timeout duration for commit jobs |
 | `--snapshot-registry-insecure` | `false` | Pass insecure registry mode to snapshot commit Jobs |
 
-These flags are configured at controller startup. The `image-committer-image` must be a trusted container image with `nerdctl` to perform rootfs commit and push operations. Commit Jobs mount the host containerd socket on the source node, so the image effectively has node-level runtime access. Pin the image by digest or enforce a trusted registry/admission policy in production.
+These flags are configured at controller startup. The built-in image committer uses containerd APIs directly. Any custom `image-committer-image` must implement the documented commit and unpause command contract and must be trusted: commit Jobs mount the host containerd socket on the source node, so the image effectively has node-level runtime access. Pin the image by digest or enforce a trusted registry/admission policy in production.
+
+The optional Pod template is operator-controlled and can supply identity metadata, a ServiceAccount, resources, scheduling settings, and additional containers while the controller preserves the commit runtime invariants.
 
 ### Quick Setup
 
@@ -400,6 +403,22 @@ spec:
 Pool pods are created before allocation. The lifecycle API therefore rejects `networkPolicy` together with `extensions.poolRef`; it cannot inject an egress sidecar into an existing pool pod. Configure required network controls in the Pool pod template before pods are created, or use a non-pooled sandbox for per-request policies.
 :::
 
+::: tip Entrypoint and environment injection
+Pool pods are also created before a lifecycle request supplies its `entrypoint` or environment variables. The server does not rewrite the allocated Pod's `command`, `args`, or `env`; seeing the original Pool template in the Pod YAML is expected. Instead, it writes the request-specific process to `BatchSandbox.spec.taskTemplate`, and the controller sends that task to an in-pod task-executor on port `5758`.
+
+A Pool used through the lifecycle API with a custom entrypoint or environment must therefore run task-executor and provide an executable `/opt/opensandbox/bootstrap.sh`. See the [Code Interpreter Pool example](/examples/code-interpreter#how-pool-entrypoint-injection-works) for a complete template and troubleshooting commands.
+:::
+
+::: tip Shared storage in Pool mode
+Static shared storage follows the same rule: pre-create a PVC (normally with a
+`ReadWriteMany`-capable storage class) and mount it in the Pool pod template as
+shown in the complete example linked below. The Kubernetes controller preserves
+these static mounts when it creates warm pods from the Pool template.
+Per-sandbox `volumes` cannot be combined with `extensions.poolRef`, because an
+allocated warm pod cannot gain new volumes. See the
+[Kubernetes PVC guide](/examples/kubernetes-pvc-volume-mount#pool-mode-pre-mount-a-shared-pvc).
+:::
+
 #### Pooled Sandbox with Heterogeneous Tasks
 Create a batch of sandboxes with process-based heterogeneous tasks. For task execution to work properly, the task-executor must be deployed as a sidecar container in the pool template and share the process namespace with the sandbox container:
 
@@ -458,6 +477,54 @@ kubectl get batchsandboxes
 kubectl describe pool example-pool
 kubectl describe batchsandbox example-batch-sandbox
 ```
+
+#### Understand BatchSandbox status
+
+A `BatchSandbox` reports sandbox availability and optional task execution separately. Use `status.phase`, `status.conditions`, and the replica counters for the sandbox runtime. Use the `status.task*` counters for task progress and completion.
+
+::: warning `Succeed` is not task completion
+`status.phase: Succeed` is the steady running phase. The controller sets it after observing at least one non-deleting Pod that is Running and Ready. It is non-terminal and does not mean that a task, Pod, or Kubernetes Job completed successfully.
+
+For a BatchSandbox with multiple replicas, `Succeed` also does not mean that every desired replica is Ready.
+:::
+
+| `status.phase` | Meaning |
+|---|---|
+| `Pending` | The controller has not observed a Running and Ready sandbox Pod yet. |
+| `Succeed` | At least one sandbox Pod is Running and Ready; the sandbox is available. |
+| `Pausing` | A pause operation is in progress. |
+| `Paused` | The sandbox is paused and its runtime resources have been released. |
+| `Resuming` | The controller is restoring runtime resources after a pause. |
+| `Failed` | The controller detected a sandbox runtime failure. Inspect conditions and Pod events for details. |
+
+The controller records active conditions with `status: "True"`:
+
+| Condition | Meaning when `True` |
+|---|---|
+| `Ready` | The phase is `Succeed`; reason `PodsReady` means the sandbox is running. |
+| `Progressing` | The sandbox is being created, paused, or resumed. |
+| `Paused` | The sandbox is fully paused. |
+| `PauseFailed`, `ResumeFailed`, `PodFailed` | The corresponding operation or runtime failed; inspect `reason` and `message`. |
+
+Treat a condition as satisfied only when the matching entry exists with `status: "True"`. Check `status.observedGeneration` against `metadata.generation` before acting on status after a spec update.
+
+Inspect runtime and task status together:
+
+```sh
+kubectl get batchsandbox example-batch-sandbox \
+  -o custom-columns='NAME:.metadata.name,GEN:.metadata.generation,OBSERVED:.status.observedGeneration,PHASE:.status.phase,READY:.status.ready,DESIRED:.spec.replicas,TASK_RUNNING:.status.taskRunning,TASK_SUCCEED:.status.taskSucceed,TASK_FAILED:.status.taskFailed'
+
+kubectl get batchsandbox example-batch-sandbox \
+  -o jsonpath='{range .status.conditions[*]}{.type}{"="}{.status}{"\t"}{.reason}{"\t"}{.message}{"\n"}{end}'
+```
+
+Choose monitoring fields based on the question you need to answer:
+
+| Monitoring goal | Fields to evaluate |
+|---|---|
+| At least one sandbox is available | A `Ready=True` condition, normally with `status.phase=Succeed` |
+| All desired replicas are Ready | A fresh status where `status.ready == spec.replicas` |
+| Tasks have completed | `taskPending`, `taskRunning`, `taskSucceed`, `taskFailed`, and `taskUnknown`, according to the workload's completion policy |
 
 ## Performance
 

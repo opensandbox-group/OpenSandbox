@@ -247,6 +247,10 @@ For async pools, pass a `redis.asyncio` client to `AsyncRedisPoolStateStore`.
   idle buffer. `release_all_idle()` is only a best-effort cleanup pass in distributed
   mode because another primary may put new idle sandboxes concurrently unless the
   shared target has already been reduced.
+- `release_all_idle()` preserves serial cleanup. Use
+  `release_all_idle_parallel(max_workers=50)` for bounded parallel cleanup. The
+  worker count must be positive, and the call waits for every drained ID to receive
+  a best-effort kill attempt.
 - Configure `primary_lock_ttl` greater than `warmup_ready_timeout` plus expected
   warmup preparer time and buffer.
 - Redis outages are surfaced as pool state store errors. The pool fails closed; it

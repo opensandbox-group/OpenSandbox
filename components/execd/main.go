@@ -31,6 +31,7 @@ import (
 	_ "go.uber.org/automaxprocs/maxprocs"
 
 	"github.com/alibaba/opensandbox/execd/pkg/clone3compat"
+	"github.com/alibaba/opensandbox/execd/pkg/ebpf"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
@@ -69,6 +70,22 @@ func run() int {
 		return 1
 	}
 
+	// Activate the pre-exec hardening floor ([hardening] enabled, OSEP-0018).
+	// Config errors (unknown capability, reserved execve) are fatal; missing
+	// runtime support degrades and is reported on the capabilities endpoint.
+	if err := runtime.InitHardening(isoCfg); err != nil {
+		log.Error("hardening: %v", err)
+		return 1
+	}
+
+	// Start the eBPF observation layer ([ebpf] enabled, OSEP-0018 §5).
+	// The stub build reports disabled; the execd-ebpf variant attaches the
+	// exec/connect/privilege hooks.
+	{
+		ebpfState, ebpfMessage := ebpf.Init(isoCfg.Ebpf, os.Getenv("OPENSANDBOX_ID"))
+		runtime.SetEbpfState(runtime.LayerState{State: ebpfState, Message: ebpfMessage})
+	}
+
 	// Probe isolation runtime capabilities.
 	isolationProbe := isolation.Probe(isolation.ProbeConfig{
 		UpperRoot:     isoCfg.UpperRoot,
@@ -78,6 +95,13 @@ func run() int {
 		isolationProbe.Available, isolationProbe.Isolator, isolationProbe.Version)
 
 	log.Init(flag.ServerLogLevel)
+
+	if flag.InitMode {
+		// OSEP-0018: execd is the sandbox init. Must start after the startup
+		// probes (which run short-lived children via cmd.Run) so the reaper is
+		// the only wait4 caller from here on.
+		runtime.StartInitMode(flag.Args())
+	}
 
 	ctrl := controller.InitCodeRunner()
 
@@ -134,10 +158,16 @@ func run() int {
 		return 1
 	}
 	log.Info("execd listening on %s (IPv4)", addr)
+	// In init mode SIGTERM belongs to the init lifecycle (forward + graceful
+	// shutdown with the entrypoint's exit status); only SIGINT cancels the
+	// HTTP server there.
+	ctxSignals := []os.Signal{os.Interrupt}
+	if !flag.InitMode {
+		ctxSignals = append(ctxSignals, syscall.SIGTERM)
+	}
 	serverCtx, stopSignals := signal.NotifyContext(
 		context.Background(),
-		os.Interrupt,
-		syscall.SIGTERM,
+		ctxSignals...,
 	)
 	defer stopSignals()
 	if err := serveHTTPUntilShutdown(serverCtx, listener, engine); err != nil {
