@@ -189,11 +189,10 @@ volumes:
      flag such as `capabilities.subpath_init = true`, which the SDK checks
      before sending the opt-in and rejects client-side otherwise.
   2. **Runtime rejection with a stable error**: set `extra="forbid"` on the
-     `PVC` model (and affected request models) so an older server — after
-     this change ships — rejects the unknown field with a `4xx` instead of
-     ignoring it. This does not help clients talking to servers deployed
-     before the change, so (1) remains the primary mechanism for mixed
-     versions.
+     `PVC` model (and affected request models) so servers that ship this
+     change reject the unknown field with a `4xx` instead of ignoring it.
+     This does not help clients talking to servers deployed before the
+     change, so (1) remains the primary mechanism for mixed versions.
   3. **SDK guard**: typed SDKs refuse to serialize `createSubPathIfMissing`
      unless the connected server advertises support.
   Server and SDK release notes must call out the minimum server version that
