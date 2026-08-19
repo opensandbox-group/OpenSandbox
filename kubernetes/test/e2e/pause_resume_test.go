@@ -941,6 +941,53 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			cmd = exec.Command("kubectl", "delete", "batchsandbox", sandboxName, "-n", pauseResumeNamespace, "--ignore-not-found=true")
 			utils.Run(cmd)
 
+			By("restoring the snapshot registry")
+			cmd = exec.Command("kubectl", "scale", "deployment", "docker-registry",
+				"-n", pauseResumeNamespace, "--replicas=1")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the snapshot registry to become available")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "docker-registry", "-n", pauseResumeNamespace, "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				var deployment struct {
+					Status struct {
+						AvailableReplicas int `json:"availableReplicas"`
+					} `json:"status"`
+				}
+				g.Expect(json.Unmarshal([]byte(output), &deployment)).To(Succeed())
+				g.Expect(deployment.Status.AvailableReplicas).To(Equal(1))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("waiting for the snapshot registry endpoint to become ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "endpointslice", "-l", "kubernetes.io/service-name=docker-registry",
+					"-n", pauseResumeNamespace, "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				var endpointSlices struct {
+					Items []struct {
+						Endpoints []struct {
+							Conditions struct {
+								Ready *bool `json:"ready"`
+							} `json:"conditions"`
+						} `json:"endpoints"`
+					} `json:"items"`
+				}
+				g.Expect(json.Unmarshal([]byte(output), &endpointSlices)).To(Succeed())
+				readyCount := 0
+				for _, endpointSlice := range endpointSlices.Items {
+					for _, endpoint := range endpointSlice.Endpoints {
+						if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
+							readyCount++
+						}
+					}
+				}
+				g.Expect(readyCount).To(BeNumerically(">=", 1))
+			}, 2*time.Minute).Should(Succeed())
+
 			By("restoring registry push secret to valid credentials")
 			err = createDockerRegistrySecrets(pauseResumeNamespace)
 			Expect(err).NotTo(HaveOccurred())
