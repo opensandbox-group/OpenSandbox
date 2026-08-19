@@ -896,11 +896,14 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			encoded := base64.StdEncoding.EncodeToString([]byte(invalidConfig))
 			By("waiting for the malformed registry Secret data to be visible")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", "registry-snapshot-push-secret", "-n", pauseResumeNamespace,
-					"-o", "jsonpath={.data['.dockerconfigjson']}")
+				cmd := exec.Command("kubectl", "get", "secret", "registry-snapshot-push-secret", "-n", pauseResumeNamespace, "-o", "json")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal(encoded))
+				var secret struct {
+					Data map[string]string `json:"data"`
+				}
+				g.Expect(json.Unmarshal([]byte(output), &secret)).To(Succeed())
+				g.Expect(secret.Data[".dockerconfigjson"]).To(Equal(encoded))
 			}, 30*time.Second).Should(Succeed())
 
 			By("triggering pause with malformed registry credentials")
