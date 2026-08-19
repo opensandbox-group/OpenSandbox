@@ -14,7 +14,10 @@
 
 package telemetry
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestAppendAttrsFromKeyValuePairs(t *testing.T) {
 	t.Parallel()
@@ -43,5 +46,14 @@ func TestSharedAttrsFromEnv(t *testing.T) {
 	})
 	if len(attrs) != 3 {
 		t.Fatalf("attrs len = %d, want 3", len(attrs))
+	}
+}
+
+// ForceFlush exists for paths that call os.Exit, where the periodic reader never gets
+// another chance. It must be safe to call when metrics were never enabled, which is the
+// common case in tests and in dns-only deployments.
+func TestForceFlushWithoutProviderIsNoop(t *testing.T) {
+	if err := ForceFlush(context.Background()); err != nil {
+		t.Fatalf("ForceFlush() = %v, want nil when metrics are disabled", err)
 	}
 }

@@ -35,6 +35,7 @@ from opensandbox_server.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
 )
+from opensandbox_server.services.diagnostics import DiagnosticResult
 from opensandbox_server.services.validators import ensure_valid_port
 
 
@@ -257,6 +258,40 @@ class SandboxService(ABC):
 
     # Diagnostics (DevOps)
     # ------------------------------------------------------------------
+
+    @abstractmethod
+    def get_sandbox_log_diagnostics(
+        self,
+        sandbox_id: str,
+        scope: str,
+    ) -> DiagnosticResult:
+        """Collect stable log diagnostics using runtime-specific policy.
+
+        Args:
+            sandbox_id: Unique sandbox identifier.
+            scope: Diagnostic scope requested by the caller.
+
+        Returns:
+            Runtime-provided stable diagnostic result.
+        """
+        pass
+
+    @abstractmethod
+    def get_sandbox_event_diagnostics(
+        self,
+        sandbox_id: str,
+        scope: str,
+    ) -> DiagnosticResult:
+        """Collect stable event diagnostics using runtime-specific policy.
+
+        Args:
+            sandbox_id: Unique sandbox identifier.
+            scope: Diagnostic scope requested by the caller.
+
+        Returns:
+            Runtime-provided stable diagnostic result.
+        """
+        pass
 
     @abstractmethod
     def get_sandbox_logs(

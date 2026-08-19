@@ -282,16 +282,6 @@ func bwrapWorkspaceSegment(opts WrapOptions) ([]string, error) {
 	}
 }
 
-// execdConfigEnvBlacklist enumerates execd's own configuration env vars.
-// They are always stripped so execd's credentials never leak into the sandbox.
-var execdConfigEnvBlacklist = []string{
-	"EXECD_ACCESS_TOKEN",
-	"JUPYTER_HOST",
-	"JUPYTER_TOKEN",
-	"EXECD_ISOLATION_CONFIG",
-	"EXECD_ENVS",
-}
-
 func unsetExecdConfigEnv() []string {
 	argv := make([]string, 0, 2*len(execdConfigEnvBlacklist))
 	for _, key := range execdConfigEnvBlacklist {

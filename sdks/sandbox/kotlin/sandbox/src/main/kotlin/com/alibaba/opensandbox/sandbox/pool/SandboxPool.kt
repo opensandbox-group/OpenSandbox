@@ -38,8 +38,13 @@ import com.alibaba.opensandbox.sandbox.domain.pool.PooledSandboxCreator
 import com.alibaba.opensandbox.sandbox.domain.pool.SandboxPreparer
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.PoolReconciler
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.ReconcileState
+import com.alibaba.opensandbox.sandbox.internal.PoolTracer
+import com.alibaba.opensandbox.sandbox.internal.WarmupTrace
+import com.alibaba.opensandbox.sandbox.internal.isCausedByInterruption
+import okhttp3.ConnectionPool
 import org.slf4j.LoggerFactory
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -47,9 +52,11 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.Condition
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Client-side sandbox pool for acquiring ready sandboxes with predictable latency.
@@ -87,10 +94,20 @@ import java.util.concurrent.locks.ReentrantLock
  */
 class SandboxPool internal constructor(
     config: PoolConfig,
-    private val sandboxManagerFactory: (ConnectionConfig) -> SandboxManager = { cfg ->
-        SandboxManager.builder().connectionConfig(cfg).build()
-    },
+    private val sandboxManagerFactory: (ConnectionConfig) -> SandboxManager,
+    idleSandboxConnector: ((String) -> Sandbox)?,
 ) {
+    internal constructor(
+        config: PoolConfig,
+        sandboxManagerFactory: (ConnectionConfig) -> SandboxManager = { cfg ->
+            SandboxManager.builder().connectionConfig(cfg).build()
+        },
+    ) : this(
+        config = config,
+        sandboxManagerFactory = sandboxManagerFactory,
+        idleSandboxConnector = null,
+    )
+
     private val logger = LoggerFactory.getLogger(SandboxPool::class.java)
 
     private val config: PoolConfig = config
@@ -99,6 +116,48 @@ class SandboxPool internal constructor(
     private val creationSpec: PoolCreationSpec = config.creationSpec
     private val sandboxCreator: PooledSandboxCreator? = config.sandboxCreator
     private val reconcileState = ReconcileState(config.degradedThreshold)
+    private val poolTracer = PoolTracer.from(config.connectionConfig)
+
+    /**
+     * A pool-wide shared OkHttp connection pool, created by the pool when the
+     * user's [ConnectionConfig] does not carry one. Sized from
+     * [PoolConfig.warmupConcurrency] so concurrent warmup creates reuse
+     * connections instead of each opening fresh TCP connections — at high
+     * concurrency the per-sandbox connection churn otherwise causes
+     * connection resets and retry amplification. Pool-managed: evicted when
+     * the pool closes. Null when the user supplied their own pool.
+     */
+    private val sharedConnectionPool: ConnectionPool? =
+        if (config.connectionConfig.connectionPool == null) {
+            ConnectionPool(
+                maxIdleConnections = maxOf(config.warmupConcurrency, 1),
+                keepAliveDuration = DEFAULT_SHARED_POOL_KEEPALIVE_MINUTES,
+                timeUnit = TimeUnit.MINUTES,
+            )
+        } else {
+            null
+        }
+
+    /**
+     * The [ConnectionConfig] used for every sandbox the pool creates
+     * (warmup, direct create, idle connect). When [sharedConnectionPool] was
+     * created it is injected here so all sandbox HTTP clients reuse it. The
+     * pool's internal manager client deliberately keeps
+     * [ConnectionConfig.copyWithoutConnectionPool] semantics and is not part
+     * of this sharing.
+     */
+    private val poolConnectionConfig: ConnectionConfig =
+        sharedConnectionPool?.let { connectionConfig.copyWithConnectionPool(it) } ?: connectionConfig
+
+    /**
+     * The default idle-sandbox connector, resolved after [poolConnectionConfig]
+     * so acquired sandboxes share the pool's connection pool.
+     */
+    private val idleSandboxConnector: (String) -> Sandbox =
+        idleSandboxConnector ?: defaultIdleSandboxConnector(config, poolConnectionConfig)
+
+    /** Exposed for tests: the pool-created shared connection pool, or null when user-provided. */
+    internal fun sharedConnectionPoolForTests(): ConnectionPool? = sharedConnectionPool
 
     @Volatile
     private var currentMaxIdle: Int = config.maxIdle
@@ -108,9 +167,11 @@ class SandboxPool internal constructor(
     private var scheduler: ScheduledExecutorService? = null
     private var warmupExecutor: ExecutorService? = null
     private var reconcileTask: ScheduledFuture<*>? = null
-    private val inFlightOperations = AtomicInteger(0)
-    private val inFlightLock = ReentrantLock()
-    private val inFlightZero: Condition = inFlightLock.newCondition()
+    private var primaryHeartbeatTask: ScheduledFuture<*>? = null
+    private val runSequence = AtomicLong(0)
+
+    @Volatile
+    private var currentRun: RunContext? = null
 
     /**
      * Starts the pool: begins the background reconcile loop and, if [PoolConfig.maxIdle] > 0,
@@ -124,28 +185,49 @@ class SandboxPool internal constructor(
         lifecycleState.set(LifecycleState.STARTING)
         try {
             ensurePoolNamespaceActive()
-            warnIfPrimaryLockTtlMayExpireDuringWarmup()
             sandboxManager = createSandboxManager()
             stateStore.setIdleEntryTtl(config.poolName, config.idleTimeout)
             stateStore.setMaxIdle(config.poolName, config.maxIdle)
-            warmupExecutor =
+            val warmupExec =
                 Executors.newFixedThreadPool(config.warmupConcurrency.coerceAtLeast(1)) { r ->
                     Thread(r, "sandbox-pool-warmup-${config.poolName}").apply { isDaemon = true }
                 }
+            warmupExecutor = warmupExec
             val exec =
                 Executors.newSingleThreadScheduledExecutor { r ->
                     Thread(r, "sandbox-pool-reconcile-${config.poolName}").apply { isDaemon = true }
                 }
             scheduler = exec
+            val run = RunContext(runSequence.incrementAndGet(), exec, warmupExec)
+            currentRun = run
             val reconcileIntervalMs = config.reconcileInterval.toMillis()
+            val primaryHeartbeatIntervalMs =
+                minOf(
+                    reconcileIntervalMs,
+                    config.primaryLockTtl.dividedBy(3L).toMillis(),
+                ).coerceAtLeast(1L)
             // The first reconcile may run immediately. Publish RUNNING only after all of its
             // dependencies are initialized, but before scheduling it so that tick is not skipped.
             lifecycleState.set(LifecycleState.RUNNING)
+            primaryHeartbeatTask =
+                exec.scheduleAtFixedRate(
+                    {
+                        try {
+                            runPrimaryHeartbeat(run)
+                        } catch (t: Throwable) {
+                            // Keep periodic heartbeats alive after transient store failures.
+                            logger.error("Pool primary heartbeat failed: pool_name={}", config.poolName, t)
+                        }
+                    },
+                    primaryHeartbeatIntervalMs,
+                    primaryHeartbeatIntervalMs,
+                    TimeUnit.MILLISECONDS,
+                )
             reconcileTask =
                 exec.scheduleAtFixedRate(
                     {
                         try {
-                            runReconcileTick()
+                            runReconcileTick(run)
                         } catch (t: Throwable) {
                             // Keep periodic scheduling alive even if one tick fails unexpectedly.
                             logger.error("Pool reconcile tick failed unexpectedly: pool_name={}", config.poolName, t)
@@ -168,19 +250,6 @@ class SandboxPool internal constructor(
             logger.error("Pool start failed: pool_name={}", config.poolName, e)
             throw e
         }
-    }
-
-    private fun warnIfPrimaryLockTtlMayExpireDuringWarmup() {
-        if (config.primaryLockTtl > config.warmupReadyTimeout) return
-        logger.warn(
-            "Pool primary lock TTL may expire during warmup: pool_name={} primary_lock_ttl_ms={} " +
-                "warmup_ready_timeout_ms={}. In distributed mode, configure primaryLockTtl greater than " +
-                "warmupReadyTimeout plus expected warmupSandboxPreparer time and buffer to avoid losing leadership " +
-                "while creating idle sandboxes.",
-            config.poolName,
-            config.primaryLockTtl.toMillis(),
-            config.warmupReadyTimeout.toMillis(),
-        )
     }
 
     /**
@@ -218,20 +287,16 @@ class SandboxPool internal constructor(
             logger.info("Pool not running, acquire rejected: pool_name={} state={}", config.poolName, state)
             throw PoolNotRunningException("Cannot acquire when pool state is $state")
         }
-        beginOperation()
+        val run = currentRun ?: throw PoolNotRunningException("Cannot acquire without an active pool run")
+        val poolName = config.poolName
+        val pendingKill = ArrayList<String>()
+        beginOperation(run)
         try {
-            if (lifecycleState.get() != LifecycleState.RUNNING) {
-                val state = lifecycleState.get()
-                throwIfPoolNamespaceDestroyed()
-                logger.info("Pool not running after acquire started, rejected: pool_name={} state={}", config.poolName, state)
-                throw PoolNotRunningException("Cannot acquire when pool state is $state")
-            }
+            ensureAcquireRunActive(run)
             ensurePoolNamespaceActiveForAcquire(policy)
-            val poolName = config.poolName
             val maxAttempts = effectiveMaxIdleAttempts(policy)
             // Accumulate discarded-alive sandbox IDs across all take iterations so we schedule
             // a single deferred cleanup, instead of one kill batch per retry.
-            val pendingKill = ArrayList<String>()
             var lastSandboxId: String? = null
             var lastIdleConnectFailure: Exception? = null
             var attemptedAny = false
@@ -241,7 +306,12 @@ class SandboxPool internal constructor(
                 attempt++
                 val takeResult =
                     try {
-                        stateStore.tryTakeIdle(poolName, config.acquireMinRemainingTtl)
+                        // Linearize the active-run fence with the destructive take against retireRun.
+                        // Otherwise an old acquire could pop an idle committed by a restarted run.
+                        run.commitLock.withLock {
+                            ensureAcquireRunActive(run)
+                            stateStore.tryTakeIdle(poolName, config.acquireMinRemainingTtl)
+                        }
                     } catch (e: PoolStateStoreUnavailableException) {
                         // State store outage. Per OSEP-0005, under policies that fall through to
                         // direct-create on empty idle we degrade to that fallback so the pool
@@ -249,9 +319,9 @@ class SandboxPool internal constructor(
                         // Under non-fallthrough policies (FAIL_FAST / RETRY_NEXT_IDLE) we surface
                         // the outage as-is so callers can react.
                         if (!policyFallsThroughToDirectCreate(policy)) {
-                            scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
                             throw e
                         }
+                        ensureAcquireRunActive(run)
                         logger.warn(
                             "Acquire: state store unavailable, falling through to direct create " +
                                 "per policy={} error={}",
@@ -275,100 +345,45 @@ class SandboxPool internal constructor(
                 attemptedAny = true
                 val sandbox: Sandbox
                 try {
-                    sandbox =
-                        Sandbox.connector()
-                            .sandboxId(sandboxId)
-                            .connectTimeout(config.acquireReadyTimeout)
-                            .healthCheckPollingInterval(config.acquireHealthCheckPollingInterval)
-                            .skipHealthCheck(config.acquireSkipHealthCheck)
-                            .connectionConfig(connectionConfig)
-                            .run {
-                                config.acquireHealthCheck?.let { healthCheck(it) } ?: this
-                            }.connect()
-                } catch (e: PoolDestroyedException) {
-                    scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
-                    throw e
-                } catch (e: Exception) {
-                    // Connect / readiness / health-check failure — the idle candidate itself is
-                    // unusable. Remove it, best-effort kill, then let the loop try the next.
-                    lastIdleConnectFailure = e
-                    logger.warn(
-                        "Idle connect failed (stale or unreachable), removed from pool: " +
-                            "pool_name={} sandbox_id={} policy={} attempt={}/{} error={}",
-                        poolName,
-                        sandboxId,
-                        policy,
-                        attempt,
-                        maxAttempts,
-                        e.message,
-                    )
-                    stateStore.removeIdle(poolName, sandboxId)
-                    // Fire-and-forget the remote kill on the warmup executor. Awaiting kill
-                    // inline would let a slow DELETE (up to the lifecycle client's request
-                    // timeout) block the next retry iteration, defeating the point of
-                    // RETRY_NEXT_IDLE. scheduleKillDiscardedAlive uses the same executor path
-                    // as discarded-alive cleanup and falls back to inline execution when the
-                    // pool is mid-shutdown so cleanup is never silently dropped.
-                    scheduleKillDiscardedAlive(poolName, listOf(sandboxId), source = "acquire-stale")
-                    // Re-check lifecycle between iterations so an in-flight shutdown / namespace
-                    // destroy short-circuits the retry loop instead of paying another readyTimeout.
-                    if (lifecycleState.get() != LifecycleState.RUNNING) {
-                        val state = lifecycleState.get()
-                        throwIfPoolNamespaceDestroyed()
-                        scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
-                        throw PoolNotRunningException("Cannot acquire when pool state is $state")
-                    }
-                    ensurePoolNamespaceActive()
-                    continue
-                }
-                // Connect + readiness succeeded. From here on the sandbox is a healthy, borrowable
-                // idle: any failure below (renew rejection, namespace fenced) is NOT a candidate-
-                // specific problem, so we must not treat it as "stale idle" and burn another retry.
-                // Dispose the sandbox and rethrow instead.
-                try {
-                    sandboxTimeout?.let { sandbox.renew(it) }
-                    ensurePoolNamespaceActiveOrDispose(sandbox)
-                } catch (e: PoolDestroyedException) {
-                    scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
-                    throw e
-                } catch (e: Exception) {
-                    // Renew failed against a healthy sandbox. Retrying another idle will not fix a
-                    // lifecycle-API renew rejection, so we must not loop. But `tryTakeIdle` has
-                    // already popped this ID out of the idle store — if we only close() locally,
-                    // the remote sandbox stays alive on the server until its TTL expires and is
-                    // no longer tracked anywhere (leaks against pool capacity accounting). Kill
-                    // the remote sandbox best-effort, then close local resources and rethrow.
-                    logger.warn(
-                        "Acquire renew failed after idle connect; killing remote sandbox and not " +
-                            "retrying (renew errors are not candidate-specific): " +
-                            "pool_name={} sandbox_id={} policy={} error={}",
-                        poolName,
-                        sandboxId,
-                        policy,
-                        e.message,
-                    )
+                    sandbox = idleSandboxConnector(sandboxId)
+                } catch (failure: Throwable) {
+                    val restoreInterrupt = Thread.interrupted() || failure.isCausedByInterruption()
                     try {
-                        sandbox.kill()
-                    } catch (killEx: Exception) {
+                        discardAcquireCandidate(run, sandboxId, failure)
+                        if (failure is PoolDestroyedException) throw failure
+                        if (restoreInterrupt || failure !is Exception) throw failure
+
+                        lastIdleConnectFailure = failure
                         logger.warn(
-                            "Best-effort kill after renew failure failed: pool_name={} sandbox_id={} error={}",
+                            "Idle connect failed (stale or unreachable), removed from pool: " +
+                                "pool_name={} sandbox_id={} policy={} attempt={}/{} error={}",
                             poolName,
                             sandboxId,
-                            killEx.message,
+                            policy,
+                            attempt,
+                            maxAttempts,
+                            failure.message,
                         )
+                        ensureAcquireRunActive(run)
+                        ensurePoolNamespaceActive()
+                        continue
+                    } finally {
+                        if (restoreInterrupt) {
+                            Thread.currentThread().interrupt()
+                        }
                     }
-                    try {
-                        sandbox.close()
-                    } catch (_: Exception) {
-                        // best-effort local resource release
-                    }
-                    scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
-                    throw e
                 }
-                // Candidate is connected and renewed. Now safe to clean up the discarded-alive
-                // sandboxes; offload to the warmup executor so the caller does not wait for
-                // N kill RPCs.
-                scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
+                // Connect + readiness succeeded. From here on the sandbox is a healthy, borrowable
+                // idle: renew and namespace failures are operation-wide and must not consume another
+                // candidate. Dispose the popped sandbox before propagating either failure.
+                try {
+                    sandboxTimeout?.let { sandbox.renew(it) }
+                } catch (failure: Throwable) {
+                    disposeSandboxAfterAcquireFailure(sandbox, failure)
+                    throw failure
+                }
+                ensurePoolNamespaceActiveOrDispose(sandbox)
+                ensureAcquireRunActive(run, sandbox)
                 logger.debug(
                     "Acquire from idle: pool_name={} sandbox_id={} policy={} attempt={}/{}",
                     poolName,
@@ -379,10 +394,6 @@ class SandboxPool internal constructor(
                 )
                 return sandbox
             }
-            // Reaching here means we did not return a sandbox from idle. Fire the deferred cleanup
-            // so the discarded-alive sandboxes do not linger; both the fail-fast and direct-create
-            // fallthroughs below benefit from asynchronous cleanup instead of a synchronous kill.
-            scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
 
             val reason =
                 when {
@@ -404,11 +415,25 @@ class SandboxPool internal constructor(
                 }
                 throw PoolEmptyException("Cannot acquire: $reason; policy is $policy")
             }
+            ensureAcquireRunActive(run)
             ensurePoolNamespaceActiveForAcquire(policy)
             logger.debug("Acquire direct create: pool_name={} reason={} policy={}", poolName, reason, policy)
-            return directCreate(sandboxTimeout, policy)
+            val sandbox = directCreate(sandboxTimeout, policy)
+            ensureAcquireRunActive(run, sandbox)
+            return sandbox
         } finally {
-            endOperation()
+            val restoreInterrupt = Thread.interrupted()
+            try {
+                scheduleAcquireCleanup(run, pendingKill, source = "acquire")
+            } finally {
+                try {
+                    endOperation(run)
+                } finally {
+                    if (restoreInterrupt) {
+                        Thread.currentThread().interrupt()
+                    }
+                }
+            }
         }
     }
 
@@ -505,6 +530,100 @@ class SandboxPool internal constructor(
     }
 
     /**
+     * Takes all idle sandbox IDs from the store and terminates them with bounded concurrency.
+     * This method blocks until every ID taken from the store has received a best-effort kill attempt.
+     *
+     * @param concurrency Maximum number of concurrent kill requests. Must be positive.
+     * @return Number of idle sandboxes taken from the store.
+     */
+    fun releaseAllIdle(concurrency: Int): Int {
+        require(concurrency > 0) { "concurrency must be positive" }
+        val poolName = config.poolName
+        val sandboxIds = mutableListOf<String>()
+        var drainFailure: Exception? = null
+        var temporaryManager: SandboxManager? = null
+        try {
+            while (true) {
+                val sandboxId =
+                    try {
+                        stateStore.tryTakeIdle(poolName)
+                    } catch (e: Exception) {
+                        drainFailure = e
+                        break
+                    } ?: break
+                sandboxIds.add(sandboxId)
+            }
+
+            if (sandboxIds.isNotEmpty()) {
+                val manager =
+                    sandboxManager ?: try {
+                        createSandboxManager().also { temporaryManager = it }
+                    } catch (e: Exception) {
+                        logger.warn(
+                            "releaseAllIdle(concurrency): failed to create sandbox manager; " +
+                                "draining idle ids without remote kill: " +
+                                "pool_name={} error={}",
+                            poolName,
+                            e.message,
+                        )
+                        null
+                    }
+                if (manager != null) {
+                    val threadIndex = AtomicInteger()
+                    val executor =
+                        Executors.newFixedThreadPool(minOf(concurrency, sandboxIds.size)) { runnable ->
+                            Thread(
+                                runnable,
+                                "sandbox-pool-release-$poolName-${threadIndex.incrementAndGet()}",
+                            ).apply { isDaemon = true }
+                        }
+                    try {
+                        sandboxIds.forEach { sandboxId ->
+                            executor.submit {
+                                try {
+                                    manager.killSandbox(sandboxId)
+                                } catch (e: Exception) {
+                                    logger.warn(
+                                        "releaseAllIdle(concurrency): failed to kill sandbox (best-effort): " +
+                                            "pool_name={} sandbox_id={} error={}",
+                                        poolName,
+                                        sandboxId,
+                                        e.message,
+                                    )
+                                }
+                            }
+                        }
+                    } finally {
+                        executor.shutdown()
+                        var interrupted = false
+                        while (!executor.isTerminated) {
+                            try {
+                                executor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+                            } catch (_: InterruptedException) {
+                                interrupted = true
+                            }
+                        }
+                        if (interrupted) {
+                            Thread.currentThread().interrupt()
+                        }
+                    }
+                }
+            }
+        } finally {
+            temporaryManager?.close()
+        }
+        drainFailure?.let { throw it }
+        if (sandboxIds.isNotEmpty()) {
+            logger.info(
+                "releaseAllIdle(concurrency): released {} idle sandbox(es): pool_name={}",
+                sandboxIds.size,
+                poolName,
+            )
+        }
+        return sandboxIds.size
+    }
+
+    /**
      * Returns a point-in-time snapshot of pool state for observability.
      */
     fun snapshot(): PoolSnapshot {
@@ -526,7 +645,7 @@ class SandboxPool internal constructor(
             failureCount = reconcileState.failureCount,
             backoffActive = reconcileState.isBackoffActive(),
             lastError = reconcileState.lastError,
-            inFlightOperations = inFlightOperations.get(),
+            inFlightOperations = currentRun?.inFlightOperations?.get() ?: 0,
         )
     }
 
@@ -546,9 +665,11 @@ class SandboxPool internal constructor(
     @Synchronized
     fun shutdown(graceful: Boolean = true) {
         if (lifecycleState.get() == LifecycleState.STOPPED) return
+        val run = currentRun
+        run?.warmupSubmissionsOpen?.set(false)
         if (!graceful) {
-            stopReconcile()
             lifecycleState.set(LifecycleState.STOPPED)
+            stopReconcile()
             closeProvider()
             logger.info("Pool stopped (non-graceful): pool_name={} state={}", config.poolName, LifecycleState.STOPPED)
             return
@@ -557,12 +678,12 @@ class SandboxPool internal constructor(
         var drained = false
         try {
             beginGracefulReconcileStop()
-            drained = awaitInFlightDrain(config.drainTimeout)
+            drained = awaitInFlightDrain(run, config.drainTimeout)
             if (!drained) {
                 logger.warn(
                     "Pool graceful shutdown timed out waiting in-flight operations: pool_name={} in_flight={} timeout_ms={}",
                     config.poolName,
-                    inFlightOperations.get(),
+                    run?.inFlightOperations?.get() ?: 0,
                     config.drainTimeout.toMillis(),
                 )
             }
@@ -573,6 +694,7 @@ class SandboxPool internal constructor(
             if (drained) {
                 completeGracefulReconcileStop()
             } else {
+                lifecycleState.set(LifecycleState.STOPPED)
                 forceStopReconcileAfterGracefulDrain()
             }
             lifecycleState.set(LifecycleState.STOPPED)
@@ -583,6 +705,96 @@ class SandboxPool internal constructor(
 
     private fun resolveMaxIdle(): Int = stateStore.getMaxIdle(config.poolName) ?: currentMaxIdle
 
+    private fun ensureAcquireRunActive(
+        run: RunContext,
+        sandbox: Sandbox? = null,
+    ) {
+        if (isCurrentRun(run) && lifecycleState.get() == LifecycleState.RUNNING) return
+
+        val state = lifecycleState.get()
+        val failure =
+            try {
+                throwIfPoolNamespaceDestroyed()
+                PoolNotRunningException(
+                    "Cannot acquire after pool run ${run.generation} was retired; current state is $state",
+                )
+            } catch (t: Throwable) {
+                t
+            }
+        sandbox?.let { disposeSandboxAfterAcquireFailure(it, failure) }
+        throw failure
+    }
+
+    private fun discardAcquireCandidate(
+        run: RunContext,
+        sandboxId: String,
+        failure: Throwable,
+    ) {
+        try {
+            stateStore.removeIdle(config.poolName, sandboxId)
+        } catch (cleanupFailure: Throwable) {
+            if (cleanupFailure !== failure) {
+                failure.addSuppressed(cleanupFailure)
+            }
+        }
+        scheduleAcquireCleanup(run, listOf(sandboxId), source = "acquire-stale")
+    }
+
+    private fun scheduleAcquireCleanup(
+        run: RunContext,
+        sandboxIds: List<String>,
+        source: String,
+    ) {
+        scheduleKillDiscardedAlive(
+            config.poolName,
+            sandboxIds,
+            source = source,
+            executor = run.warmupExecutor,
+            run = run,
+        )
+    }
+
+    private fun disposeSandboxAfterAcquireFailure(
+        sandbox: Sandbox,
+        failure: Throwable,
+    ) {
+        val restoreInterrupt = Thread.interrupted() || failure.isCausedByInterruption()
+        try {
+            try {
+                sandbox.kill()
+            } catch (cleanupFailure: Throwable) {
+                if (cleanupFailure !== failure) {
+                    failure.addSuppressed(cleanupFailure)
+                }
+                logger.warn(
+                    "Pool sandbox cleanup after acquire failure failed: " +
+                        "pool_name={} sandbox_id={} operation=kill error={}",
+                    config.poolName,
+                    sandbox.id,
+                    cleanupFailure.message,
+                )
+            }
+            try {
+                sandbox.close()
+            } catch (cleanupFailure: Throwable) {
+                if (cleanupFailure !== failure) {
+                    failure.addSuppressed(cleanupFailure)
+                }
+                logger.warn(
+                    "Pool sandbox cleanup after acquire failure failed: " +
+                        "pool_name={} sandbox_id={} operation=close error={}",
+                    config.poolName,
+                    sandbox.id,
+                    cleanupFailure.message,
+                )
+            }
+        } finally {
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+
     /**
      * Offload [killDiscardedAlive] to the warmup executor so the caller does not block on the
      * kill RPCs. Falls back to inline execution when no executor is available (e.g. the pool is
@@ -592,10 +804,11 @@ class SandboxPool internal constructor(
         poolName: String,
         sandboxIds: List<String>,
         source: String,
+        executor: ExecutorService? = warmupExecutor,
+        run: RunContext? = currentRun,
     ) {
         if (sandboxIds.isEmpty()) return
-        val cleanupTask = TrackedCleanupTask(poolName, sandboxIds.toList(), source)
-        val executor = warmupExecutor
+        val cleanupTask = TrackedCleanupTask(poolName, sandboxIds.toList(), source, run)
         if (executor == null) {
             cleanupTask.run()
             return
@@ -621,11 +834,12 @@ class SandboxPool internal constructor(
         private val poolName: String,
         private val sandboxIds: List<String>,
         private val source: String,
+        private val run: RunContext?,
     ) : Runnable {
         private val completed = AtomicBoolean(false)
 
         init {
-            beginOperation()
+            run?.let { beginOperation(it) }
         }
 
         override fun run() {
@@ -642,14 +856,21 @@ class SandboxPool internal constructor(
 
         private fun complete() {
             if (completed.compareAndSet(false, true)) {
-                endOperation()
+                run?.let {
+                    endOperation(it)
+                    requestReconcile(it)
+                }
             }
         }
     }
 
-    private fun completeDroppedCleanupTasks(dropped: List<Runnable>) {
+    private fun completeDroppedTasks(dropped: List<Runnable>) {
         dropped.forEach { task ->
-            (task as? TrackedCleanupTask)?.completeIfDropped()
+            when (task) {
+                is TrackedCleanupTask -> task.completeIfDropped()
+                is TrackedWarmupTask -> task.completeIfDropped()
+                is TrackedWarmupCompletionTask -> task.completeIfDropped()
+            }
         }
     }
 
@@ -668,22 +889,50 @@ class SandboxPool internal constructor(
         source: String,
     ) {
         if (sandboxIds.isEmpty()) return
-        val manager = sandboxManager ?: return
-        for (sandboxId in sandboxIds) {
-            try {
-                manager.killSandbox(sandboxId)
-                logger.debug(
-                    "Killed near-expiry idle sandbox: pool_name={} sandbox_id={} source={}",
-                    poolName,
-                    sandboxId,
-                    source,
-                )
+        var temporaryManager: SandboxManager? = null
+        val manager =
+            sandboxManager ?: try {
+                createSandboxManager().also { temporaryManager = it }
             } catch (e: Exception) {
                 logger.warn(
-                    "Failed to kill near-expiry idle sandbox (best-effort, will expire server-side): " +
-                        "pool_name={} sandbox_id={} source={} error={}",
+                    "Failed to create manager for discarded sandbox cleanup: " +
+                        "pool_name={} count={} source={} error={}",
                     poolName,
-                    sandboxId,
+                    sandboxIds.size,
+                    source,
+                    e.message,
+                )
+                return
+            }
+        try {
+            for (sandboxId in sandboxIds) {
+                try {
+                    manager.killSandbox(sandboxId)
+                    logger.debug(
+                        "Killed discarded sandbox: pool_name={} sandbox_id={} source={}",
+                        poolName,
+                        sandboxId,
+                        source,
+                    )
+                } catch (e: Exception) {
+                    logger.warn(
+                        "Failed to kill discarded sandbox (best-effort, will expire server-side): " +
+                            "pool_name={} sandbox_id={} source={} error={}",
+                        poolName,
+                        sandboxId,
+                        source,
+                        e.message,
+                    )
+                }
+            }
+        } finally {
+            try {
+                temporaryManager?.close()
+            } catch (e: Exception) {
+                logger.warn(
+                    "Failed to close temporary manager after discarded sandbox cleanup: " +
+                        "pool_name={} source={} error={}",
+                    poolName,
                     source,
                     e.message,
                 )
@@ -693,29 +942,368 @@ class SandboxPool internal constructor(
 
     private fun createSandboxManager(): SandboxManager = sandboxManagerFactory(connectionConfig.copyWithoutConnectionPool())
 
-    private fun runReconcileTick() {
-        if (lifecycleState.get() != LifecycleState.RUNNING) return
+    private fun runReconcileTick(run: RunContext) {
+        if (!isCurrentRun(run) || lifecycleState.get() != LifecycleState.RUNNING) return
         if (!isPoolNamespaceActive()) {
             logger.info("Pool namespace is destroyed; stopping local pool: pool_name={}", config.poolName)
             stopAfterNamespaceDestroyed()
             return
         }
-        val executor = warmupExecutor ?: return
-        beginOperation()
+        beginOperation(run)
         try {
-            if (lifecycleState.get() != LifecycleState.RUNNING) return
+            if (!isCurrentRun(run) || lifecycleState.get() != LifecycleState.RUNNING) return
             if (!isPoolNamespaceActive()) return
             val reconcileConfig = config.withMaxIdle(resolveMaxIdle())
-            PoolReconciler.runReconcileTick(
-                config = reconcileConfig,
-                stateStore = stateStore,
-                createOne = { createOneSandbox() },
-                onDiscardSandbox = { sandboxId -> killSandboxBestEffort(sandboxId) },
-                reconcileState = reconcileState,
-                warmupExecutor = executor,
-            )
+            try {
+                run.primaryOwned.set(
+                    PoolReconciler.runReconcileTick(
+                        config = reconcileConfig,
+                        stateStore = stateStore,
+                        onDiscardSandbox = { sandboxId -> killSandboxBestEffort(sandboxId) },
+                        reconcileState = reconcileState,
+                        warmingCount = run.warmingCount.get(),
+                        submitWarmups = { count -> submitWarmups(run, count) },
+                    ),
+                )
+            } catch (e: Exception) {
+                run.primaryOwned.set(false)
+                throw e
+            }
         } finally {
-            endOperation()
+            endOperation(run)
+        }
+    }
+
+    private fun runPrimaryHeartbeat(run: RunContext) {
+        if (!isCurrentRun(run)) return
+        val state = lifecycleState.get()
+        if (state != LifecycleState.RUNNING && state != LifecycleState.DRAINING) return
+        if (!run.primaryOwned.get()) return
+        val renewed =
+            stateStore.renewPrimaryLock(
+                config.poolName,
+                config.ownerId,
+                config.primaryLockTtl,
+            )
+        if (!renewed) {
+            run.primaryOwned.set(false)
+            logger.trace(
+                "Pool primary heartbeat skipped (not current owner): pool_name={} owner_id={}",
+                config.poolName,
+                config.ownerId,
+            )
+        }
+    }
+
+    private fun requestReconcile(run: RunContext) {
+        if (!isCurrentRun(run) ||
+            lifecycleState.get() != LifecycleState.RUNNING ||
+            !run.warmupSubmissionsOpen.get()
+        ) {
+            return
+        }
+        val exec = run.scheduler
+        if (!run.reconcileQueued.compareAndSet(false, true)) return
+        // Completion-driven ticks are a latency optimization, not the correctness loop (the
+        // periodic tick is). Coalesce them into a minimum interval so bursts of fast
+        // completions cannot drive reconcile ticks — each of which costs several state-store
+        // round-trips — at unbounded frequency. The floor advances from the later of the last
+        // request and the previous floor so it applies between tick executions, not merely
+        // between requests: a completion that lands right after a scheduled tick must still
+        // wait out the full window.
+        val nowNanos = System.nanoTime()
+        val nextAllowedNanos = run.nextCompletionReconcileAtNanos
+        run.nextCompletionReconcileAtNanos =
+            maxOf(nextAllowedNanos, nowNanos) + TimeUnit.MILLISECONDS.toNanos(COMPLETION_RECONCILE_MIN_INTERVAL_MS)
+        val delayMs = TimeUnit.NANOSECONDS.toMillis(nextAllowedNanos - nowNanos).coerceAtLeast(0L)
+        val tick =
+            Runnable {
+                run.reconcileQueued.set(false)
+                try {
+                    runReconcileTick(run)
+                } catch (t: Throwable) {
+                    logger.error("Pool completion-driven reconcile failed: pool_name={}", config.poolName, t)
+                }
+            }
+        try {
+            if (delayMs == 0L) {
+                exec.execute(tick)
+            } else {
+                exec.schedule(tick, delayMs, TimeUnit.MILLISECONDS)
+            }
+        } catch (e: Exception) {
+            run.reconcileQueued.set(false)
+            if (lifecycleState.get() == LifecycleState.RUNNING) {
+                logger.debug(
+                    "Pool completion-driven reconcile submit rejected: pool_name={} error={}",
+                    config.poolName,
+                    e.message,
+                )
+            }
+        }
+    }
+
+    private fun submitWarmups(
+        run: RunContext,
+        count: Int,
+    ) {
+        repeat(count) {
+            if (!isCurrentRun(run) ||
+                lifecycleState.get() != LifecycleState.RUNNING ||
+                !run.warmupSubmissionsOpen.get()
+            ) {
+                return
+            }
+            val task = TrackedWarmupTask(run, submittedEpochNanos())
+            try {
+                run.warmupExecutor.execute(task)
+            } catch (e: Exception) {
+                logger.debug(
+                    "Pool warmup submit rejected: pool_name={} error={}",
+                    config.poolName,
+                    e.message,
+                )
+                task.completeIfDropped()
+                return
+            }
+        }
+    }
+
+    /**
+     * Epoch-based submission timestamp (OpenTelemetry start timestamps are
+     * wall-clock, not monotonic). Used to backdate the warmup root span so the
+     * queue-wait window is part of the trace.
+     */
+    private fun submittedEpochNanos(): Long = System.currentTimeMillis() * 1_000_000L
+
+    private inner class TrackedWarmupTask(
+        private val run: RunContext,
+        private val submittedEpochNanos: Long,
+    ) : Runnable {
+        private val completed = AtomicBoolean(false)
+
+        init {
+            run.warmingCount.incrementAndGet()
+            beginOperation(run)
+        }
+
+        override fun run() {
+            // Backdate the root span to task submission so queue-wait time
+            // (submit -> run) is visible inside the trace.
+            val trace =
+                poolTracer.startWarmupRoot(
+                    poolName = config.poolName,
+                    ownerId = config.ownerId,
+                    runGeneration = run.generation,
+                    submittedEpochNanos = submittedEpochNanos,
+                )
+            val outcome: WarmupOutcome
+            if (trace == null) {
+                outcome = captureOutcome()
+            } else {
+                outcome = trace.withCurrent { captureOutcome() }
+                if (outcome is WarmupOutcome.Failure) {
+                    trace.endFailure(outcome.error)
+                }
+            }
+            // Keep the trace open on success: the commit phase (scheduler
+            // thread) ends it after the sandbox is put idle.
+            dispatchCompletion(outcome, if (outcome is WarmupOutcome.Success) trace else null)
+        }
+
+        private fun captureOutcome(): WarmupOutcome =
+            try {
+                WarmupOutcome.Success(createOneSandbox())
+            } catch (failure: Throwable) {
+                WarmupOutcome.Failure(failure)
+            }
+
+        fun completeIfDropped() {
+            complete(WarmupOutcome.Cancelled, null)
+        }
+
+        private fun dispatchCompletion(
+            outcome: WarmupOutcome,
+            trace: WarmupTrace?,
+        ) {
+            val completion = TrackedWarmupCompletionTask(run, this, outcome, trace)
+            run.pendingWarmupCompletions.add(completion)
+            try {
+                run.scheduler.execute(completion)
+            } catch (e: Exception) {
+                logger.debug(
+                    "Pool warmup completion submit rejected, handling inline: pool_name={} error={}",
+                    config.poolName,
+                    e.message,
+                )
+                completion.run()
+            }
+        }
+
+        fun complete(
+            outcome: WarmupOutcome,
+            trace: WarmupTrace?,
+        ) {
+            if (!completed.compareAndSet(false, true)) return
+            try {
+                handleWarmupOutcome(run, outcome, trace)
+            } finally {
+                run.warmingCount.decrementAndGet()
+                endOperation(run)
+                // Only successful completions trigger an immediate reconcile. A failed warmup
+                // frees its slot but must not cause an immediate retry: fast-failing creates
+                // would otherwise form a self-sustaining reconcile/create loop that amplifies
+                // state-store load far beyond the periodic tick. Retries are driven by the
+                // periodic tick, which the backoff window already paces.
+                if (outcome is WarmupOutcome.Success) {
+                    requestReconcile(run)
+                }
+            }
+        }
+    }
+
+    /**
+     * Tracks a warmup outcome while it waits in the controller queue.
+     *
+     * Scheduled executors may wrap submitted [Runnable]s before returning them from `shutdownNow()`,
+     * so [RunContext.pendingWarmupCompletions] is the authoritative registry. Both normal execution
+     * and forced shutdown finish the original warmup through this task; the warmup's CAS keeps that
+     * completion exactly once.
+     */
+    private inner class TrackedWarmupCompletionTask(
+        private val run: RunContext,
+        private val warmupTask: TrackedWarmupTask,
+        private val outcome: WarmupOutcome,
+        private val trace: WarmupTrace?,
+    ) : Runnable {
+        override fun run() {
+            try {
+                warmupTask.complete(outcome, trace)
+            } finally {
+                run.pendingWarmupCompletions.remove(this)
+            }
+        }
+
+        fun completeIfDropped() {
+            run()
+        }
+    }
+
+    private fun completePendingWarmupCompletions(run: RunContext?) {
+        run?.pendingWarmupCompletions?.toList()?.forEach { it.completeIfDropped() }
+    }
+
+    private sealed interface WarmupOutcome {
+        class Success(
+            val sandboxId: String,
+        ) : WarmupOutcome
+
+        class Failure(
+            val error: Throwable,
+        ) : WarmupOutcome
+
+        data object Cancelled : WarmupOutcome
+    }
+
+    private fun handleWarmupOutcome(
+        run: RunContext,
+        outcome: WarmupOutcome,
+        trace: WarmupTrace?,
+    ) {
+        when (outcome) {
+            is WarmupOutcome.Success -> commitWarmupSandbox(run, outcome.sandboxId, trace)
+            is WarmupOutcome.Failure -> {
+                if (isCurrentRun(run) && lifecycleState.get() == LifecycleState.RUNNING) {
+                    reconcileState.recordAsyncFailure(outcome.error.message)
+                }
+            }
+            WarmupOutcome.Cancelled -> Unit
+        }
+    }
+
+    private fun commitWarmupSandbox(
+        run: RunContext,
+        sandboxId: String,
+        trace: WarmupTrace?,
+    ) {
+        var cleanupSource: String? = null
+        val commit: () -> Unit = {
+            run.commitLock.lock()
+            try {
+                val state = lifecycleState.get()
+                if (!isCurrentRun(run) || (state != LifecycleState.RUNNING && state != LifecycleState.DRAINING)) {
+                    cleanupSource = "warmup-stale-run"
+                } else {
+                    try {
+                        ensurePoolNamespaceActive()
+                        if (!stateStore.renewPrimaryLock(config.poolName, config.ownerId, config.primaryLockTtl)) {
+                            run.primaryOwned.set(false)
+                            logger.warn(
+                                "Pool lost primary lock before putIdle; dropping warmup sandbox: " +
+                                    "pool_name={} sandbox_id={} run={}",
+                                config.poolName,
+                                sandboxId,
+                                run.generation,
+                            )
+                            cleanupSource = "warmup-lock-lost"
+                        } else {
+                            stateStore.putIdle(config.poolName, sandboxId)
+                            reconcileState.recordSuccess()
+                            logger.debug(
+                                "Pool warmup sandbox entered idle: pool_name={} sandbox_id={} run={}",
+                                config.poolName,
+                                sandboxId,
+                                run.generation,
+                            )
+                        }
+                    } catch (e: Exception) {
+                        if (isCurrentRun(run) && lifecycleState.get() == LifecycleState.RUNNING) {
+                            reconcileState.recordAsyncFailure(e.message)
+                        }
+                        try {
+                            stateStore.removeIdle(config.poolName, sandboxId)
+                        } catch (_: Exception) {
+                            // best-effort remove before remote cleanup
+                        }
+                        cleanupSource = "warmup-commit-failed"
+                        logger.warn(
+                            "Pool warmup commit failed; dropped sandbox: pool_name={} sandbox_id={} run={} error={}",
+                            config.poolName,
+                            sandboxId,
+                            run.generation,
+                            e.message,
+                        )
+                    }
+                }
+            } finally {
+                run.commitLock.unlock()
+            }
+        }
+        if (trace == null) {
+            commit()
+        } else {
+            // Runs on the scheduler thread; re-attach the warmup trace's
+            // context (and MDC trace_id/span_id) so the commit span and its
+            // log lines belong to the same trace as the create phases.
+            trace.withCurrent {
+                poolTracer.withPhaseSpan(PoolTracer.WARMUP_COMMIT_SPAN) { commit() }
+            }
+            if (cleanupSource != null) {
+                // The sandbox never entered the idle pool (stale run, lock
+                // lost, or commit failure); do not report a success.
+                trace.endDropped(cleanupSource)
+            } else {
+                trace.endSuccess(sandboxId, creationSpec.imageSpec.image)
+            }
+        }
+        cleanupSource?.let { source ->
+            scheduleKillDiscardedAlive(
+                config.poolName,
+                listOf(sandboxId),
+                source = source,
+                executor = run.warmupExecutor,
+                run = run,
+            )
         }
     }
 
@@ -724,53 +1312,71 @@ class SandboxPool internal constructor(
      * id into the store; the created [Sandbox] is closed immediately so only the id is
      * kept in the pool.
      */
-    private fun createOneSandbox(): String? {
-        beginOperation()
+    private fun createOneSandbox(): String {
         return try {
-            val sandbox = buildWarmupSandbox()
+            // Phase spans auto-parent to the warmup root via the trace context
+            // made current by the warmup task; they no-op when tracing is off.
+            val sandbox = poolTracer.withPhaseSpan(PoolTracer.WARMUP_CREATE_SPAN) { buildWarmupSandbox() }
+            var failure: Throwable? = null
             try {
-                config.warmupSandboxPreparer?.prepare(sandbox)
+                poolTracer.withPhaseSpan(PoolTracer.WARMUP_PREPARE_SPAN) {
+                    config.warmupSandboxPreparer?.prepare(sandbox)
+                }
                 // The server-side TTL has been ticking since sandbox creation; readiness
                 // wait and `warmupSandboxPreparer` can both consume meaningful time (think
                 // initialization scripts). Renew right before handing the id back to the
                 // reconciler so the store's stamped expiry (now + idleTimeout) actually matches
                 // what the server will honor — otherwise `acquireMinRemainingTtl` overestimates
                 // remaining TTL by the warmup duration.
-                sandbox.renew(config.idleTimeout)
+                poolTracer.withPhaseSpan(PoolTracer.WARMUP_RENEW_SPAN) {
+                    sandbox.renew(config.idleTimeout)
+                }
                 sandbox.id
-            } catch (e: Exception) {
-                killWarmupSandboxAfterFailure(sandbox, e)
-                throw e
+            } catch (t: Throwable) {
+                failure = t
+                killWarmupSandboxAfterFailure(sandbox, t)
+                throw t
             } finally {
-                sandbox.close()
+                try {
+                    sandbox.close()
+                } catch (closeFailure: Throwable) {
+                    if (failure != null) {
+                        if (closeFailure !== failure) {
+                            failure.addSuppressed(closeFailure)
+                        }
+                    } else {
+                        killWarmupSandboxAfterFailure(sandbox, closeFailure)
+                        throw closeFailure
+                    }
+                }
             }
-        } catch (e: Exception) {
-            logger.warn("Pool create sandbox failed: poolName={}", config.poolName, e)
-            throw e
-        } finally {
-            endOperation()
+        } catch (failure: Throwable) {
+            logger.warn("Pool create sandbox failed: poolName={}", config.poolName, failure)
+            throw failure
         }
     }
 
     private fun killWarmupSandboxAfterFailure(
         sandbox: Sandbox,
-        failure: Exception,
+        failure: Throwable,
     ) {
         // A warmup preparer may restore the thread's interrupted status before propagating an
         // InterruptedException. OkHttp treats that status as cancellation and can reject the
         // cleanup request before the DELETE is sent. Temporarily clear it for the synchronous
         // cleanup, then restore it so executor shutdown semantics are preserved.
-        val restoreInterrupt = Thread.interrupted()
+        val restoreInterrupt = Thread.interrupted() || failure.isCausedByInterruption()
         try {
             sandbox.kill()
-        } catch (cleanupEx: Exception) {
+        } catch (cleanupFailure: Throwable) {
             logger.warn(
                 "Pool warmup sandbox preparer cleanup failed: pool_name={} sandbox_id={} error={}",
                 config.poolName,
                 sandbox.id,
-                cleanupEx.message,
+                cleanupFailure.message,
             )
-            failure.addSuppressed(cleanupEx)
+            if (cleanupFailure !== failure) {
+                failure.addSuppressed(cleanupFailure)
+            }
         } finally {
             if (restoreInterrupt) {
                 Thread.currentThread().interrupt()
@@ -798,7 +1404,7 @@ class SandboxPool internal constructor(
                     .readyTimeout(config.warmupReadyTimeout)
                     .healthCheckPollingInterval(config.warmupHealthCheckPollingInterval)
                     .skipHealthCheck(config.warmupSkipHealthCheck)
-                    .connectionConfig(connectionConfig),
+                    .connectionConfig(poolConnectionConfig),
             )
         config.warmupHealthCheck?.let { builder.healthCheck(it) }
         return builder.build()
@@ -827,13 +1433,9 @@ class SandboxPool internal constructor(
             sandboxTimeout?.let { timeout ->
                 try {
                     sandbox.renew(timeout)
-                } catch (e: Exception) {
-                    try {
-                        sandbox.kill()
-                    } finally {
-                        sandbox.close()
-                    }
-                    throw e
+                } catch (failure: Throwable) {
+                    disposeSandboxAfterAcquireFailure(sandbox, failure)
+                    throw failure
                 }
             }
             ensurePoolNamespaceActiveOrDispose(sandbox, policy)
@@ -847,20 +1449,16 @@ class SandboxPool internal constructor(
                     .readyTimeout(config.acquireReadyTimeout)
                     .healthCheckPollingInterval(config.acquireHealthCheckPollingInterval)
                     .skipHealthCheck(config.acquireSkipHealthCheck)
-                    .connectionConfig(connectionConfig),
+                    .connectionConfig(poolConnectionConfig),
             )
         config.acquireHealthCheck?.let { builder.healthCheck(it) }
         val sandbox = builder.build()
         // Renew is a candidate-specific step; failure means kill+close and rethrow.
         try {
             sandboxTimeout?.let { sandbox.renew(it) }
-        } catch (e: Exception) {
-            try {
-                sandbox.kill()
-            } finally {
-                sandbox.close()
-            }
-            throw e
+        } catch (failure: Throwable) {
+            disposeSandboxAfterAcquireFailure(sandbox, failure)
+            throw failure
         }
         // Post-create fence check uses the policy-aware helper so full state-store
         // outages degrade correctly under fallthrough policies; on rethrow the helper
@@ -947,49 +1545,11 @@ class SandboxPool internal constructor(
                 )
                 return
             }
-            try {
-                sandbox.kill()
-            } catch (cleanupError: Exception) {
-                logger.warn(
-                    "Pool sandbox cleanup after store-outage fence failed: pool_name={} sandbox_id={} operation=kill error={}",
-                    config.poolName,
-                    sandbox.id,
-                    cleanupError.message,
-                )
-            }
-            try {
-                sandbox.close()
-            } catch (cleanupError: Exception) {
-                logger.warn(
-                    "Pool sandbox cleanup after store-outage fence failed: pool_name={} sandbox_id={} operation=close error={}",
-                    config.poolName,
-                    sandbox.id,
-                    cleanupError.message,
-                )
-            }
+            disposeSandboxAfterAcquireFailure(sandbox, e)
             throw e
-        } catch (e: Exception) {
-            try {
-                sandbox.kill()
-            } catch (cleanupError: Exception) {
-                logger.warn(
-                    "Pool sandbox cleanup after fence failed: pool_name={} sandbox_id={} operation=kill error={}",
-                    config.poolName,
-                    sandbox.id,
-                    cleanupError.message,
-                )
-            }
-            try {
-                sandbox.close()
-            } catch (cleanupError: Exception) {
-                logger.warn(
-                    "Pool sandbox cleanup after fence failed: pool_name={} sandbox_id={} operation=close error={}",
-                    config.poolName,
-                    sandbox.id,
-                    cleanupError.message,
-                )
-            }
-            throw e
+        } catch (failure: Throwable) {
+            disposeSandboxAfterAcquireFailure(sandbox, failure)
+            throw failure
         }
     }
 
@@ -1012,7 +1572,7 @@ class SandboxPool internal constructor(
                 healthCheckPollingInterval = healthCheckPollingInterval,
                 skipHealthCheck = skipHealthCheck,
                 healthCheck = customHealthCheck,
-                connectionConfig = connectionConfig,
+                connectionConfig = poolConnectionConfig,
             )
         return creator.create(context)
     }
@@ -1030,103 +1590,135 @@ class SandboxPool internal constructor(
         }
     }
 
-    private fun beginOperation() {
-        inFlightOperations.incrementAndGet()
+    private fun beginOperation(run: RunContext) {
+        run.inFlightOperations.incrementAndGet()
     }
 
-    private fun endOperation() {
-        val remaining = inFlightOperations.decrementAndGet()
+    private fun endOperation(run: RunContext) {
+        val remaining = run.inFlightOperations.decrementAndGet()
         if (remaining < 0) {
-            inFlightOperations.set(0)
-            logger.warn("Pool in-flight counter underflow corrected: pool_name={}", config.poolName)
-            inFlightLock.lock()
+            run.inFlightOperations.set(0)
+            logger.warn(
+                "Pool in-flight counter underflow corrected: pool_name={} run={}",
+                config.poolName,
+                run.generation,
+            )
+            run.inFlightLock.lock()
             try {
-                inFlightZero.signalAll()
+                run.inFlightZero.signalAll()
             } finally {
-                inFlightLock.unlock()
+                run.inFlightLock.unlock()
             }
             return
         }
         if (remaining == 0) {
-            inFlightLock.lock()
+            run.inFlightLock.lock()
             try {
-                inFlightZero.signalAll()
+                run.inFlightZero.signalAll()
             } finally {
-                inFlightLock.unlock()
+                run.inFlightLock.unlock()
             }
         }
     }
 
     @Throws(InterruptedException::class)
-    private fun awaitInFlightDrain(timeout: Duration): Boolean {
+    private fun awaitInFlightDrain(
+        run: RunContext?,
+        timeout: Duration,
+    ): Boolean {
+        if (run == null) return true
         val timeoutNanos = timeout.toNanos()
         if (timeoutNanos <= 0) {
-            return inFlightOperations.get() == 0
+            return run.inFlightOperations.get() == 0
         }
         val deadline = System.nanoTime() + timeoutNanos
-        inFlightLock.lock()
+        run.inFlightLock.lock()
         try {
-            while (inFlightOperations.get() > 0) {
+            while (run.inFlightOperations.get() > 0) {
                 val remaining = deadline - System.nanoTime()
                 if (remaining <= 0) {
                     return false
                 }
-                inFlightZero.awaitNanos(remaining)
+                run.inFlightZero.awaitNanos(remaining)
             }
             return true
         } finally {
-            inFlightLock.unlock()
+            run.inFlightLock.unlock()
         }
     }
 
     private fun stopReconcile() {
+        val run = currentRun
+        run?.warmupSubmissionsOpen?.set(false)
+        retireRun(run)
         reconcileTask?.cancel(true)
         reconcileTask = null
-        scheduler?.let { shutdownExecutor(it, "scheduler") }
-        scheduler = null
+        primaryHeartbeatTask?.cancel(true)
+        primaryHeartbeatTask = null
         warmupExecutor?.let { shutdownExecutor(it, "warmup") }
         warmupExecutor = null
-        releasePrimaryLockBestEffort()
+        scheduler?.let { shutdownExecutor(it, "scheduler") }
+        scheduler = null
+        completePendingWarmupCompletions(run)
+        run?.reconcileQueued?.set(false)
+        releasePrimaryLockBestEffort(run)
     }
 
     private fun beginGracefulReconcileStop() {
         reconcileTask?.cancel(false)
         reconcileTask = null
-        scheduler?.shutdown()
     }
 
     private fun completeGracefulReconcileStop() {
-        scheduler?.let { shutdownExecutor(it, "scheduler") }
-        scheduler = null
+        val run = currentRun
+        retireRun(run)
         warmupExecutor?.let { shutdownExecutor(it, "warmup") }
         warmupExecutor = null
-        releasePrimaryLockBestEffort()
+        primaryHeartbeatTask?.cancel(false)
+        primaryHeartbeatTask = null
+        scheduler?.let { shutdownExecutor(it, "scheduler") }
+        scheduler = null
+        completePendingWarmupCompletions(run)
+        run?.reconcileQueued?.set(false)
+        releasePrimaryLockBestEffort(run)
     }
 
     private fun forceStopReconcileAfterGracefulDrain() {
-        // Stop warmup workers first and let their failure cleanup finish before interrupting
-        // the scheduler. Interrupting the scheduler while it waits in invokeAll() would cancel
-        // the same warmup futures again and could re-interrupt an in-progress cleanup DELETE.
+        val run = currentRun
+        retireRun(run)
+        // Stop warmup workers first while the controller remains alive so interrupted workers can
+        // still deliver completion cleanup and release their tracked operation slots.
         warmupExecutor?.let { forceShutdownExecutor(it, "warmup") }
         warmupExecutor = null
-        scheduler?.let { forceShutdownExecutor(it, "scheduler") }
+        primaryHeartbeatTask?.cancel(true)
+        primaryHeartbeatTask = null
+        scheduler?.let { shutdownExecutor(it, "scheduler") }
         scheduler = null
-        releasePrimaryLockBestEffort()
+        completePendingWarmupCompletions(run)
+        run?.reconcileQueued?.set(false)
+        releasePrimaryLockBestEffort(run)
     }
 
     private fun stopAfterNamespaceDestroyed() {
         if (!lifecycleState.compareAndSet(LifecycleState.RUNNING, LifecycleState.STOPPED)) return
+        val run = currentRun
+        run?.warmupSubmissionsOpen?.set(false)
+        retireRun(run)
         reconcileTask?.cancel(false)
         reconcileTask = null
+        primaryHeartbeatTask?.cancel(false)
+        primaryHeartbeatTask = null
+        warmupExecutor?.let { completeDroppedTasks(it.shutdownNow()) }
+        warmupExecutor = null
         scheduler?.shutdown()
         scheduler = null
-        warmupExecutor?.let { completeDroppedCleanupTasks(it.shutdownNow()) }
-        warmupExecutor = null
-        releasePrimaryLockBestEffort()
+        completePendingWarmupCompletions(run)
+        run?.reconcileQueued?.set(false)
+        releasePrimaryLockBestEffort(run)
         closeProvider()
     }
 
-    private fun releasePrimaryLockBestEffort() {
+    private fun releasePrimaryLockBestEffort(run: RunContext? = currentRun) {
         try {
             stateStore.releasePrimaryLock(config.poolName, config.ownerId)
         } catch (e: Exception) {
@@ -1136,6 +1728,8 @@ class SandboxPool internal constructor(
                 config.ownerId,
                 e.message,
             )
+        } finally {
+            run?.primaryOwned?.set(false)
         }
     }
 
@@ -1147,7 +1741,7 @@ class SandboxPool internal constructor(
         try {
             if (executor.awaitTermination(5, TimeUnit.SECONDS)) return
             val dropped = executor.shutdownNow()
-            completeDroppedCleanupTasks(dropped)
+            completeDroppedTasks(dropped)
             if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
                 logger.warn(
                     "Pool {} executor did not terminate after forced stop: pool_name={} dropped_tasks={}",
@@ -1158,7 +1752,7 @@ class SandboxPool internal constructor(
             }
         } catch (_: InterruptedException) {
             val dropped = executor.shutdownNow()
-            completeDroppedCleanupTasks(dropped)
+            completeDroppedTasks(dropped)
             Thread.currentThread().interrupt()
             logger.warn(
                 "Pool {} executor shutdown interrupted; forced stop issued: pool_name={} dropped_tasks={}",
@@ -1174,7 +1768,7 @@ class SandboxPool internal constructor(
         role: String,
     ) {
         val dropped = executor.shutdownNow()
-        completeDroppedCleanupTasks(dropped)
+        completeDroppedTasks(dropped)
         try {
             if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
                 logger.warn(
@@ -1202,6 +1796,55 @@ class SandboxPool internal constructor(
             logger.warn("Error closing pool SandboxManager", e)
         }
         sandboxManager = null
+        // Evict the pool-created shared pool so its idle connections are
+        // released on shutdown. A user-provided pool is never touched here.
+        try {
+            sharedConnectionPool?.evictAll()
+        } catch (e: Exception) {
+            logger.warn("Error evicting pool shared connection pool", e)
+        }
+    }
+
+    private fun isCurrentRun(run: RunContext): Boolean = currentRun === run && run.active.get()
+
+    private fun retireRun(run: RunContext?) {
+        if (run == null) return
+        run.commitLock.lock()
+        try {
+            run.active.set(false)
+            if (currentRun === run) {
+                currentRun = null
+            }
+        } finally {
+            run.commitLock.unlock()
+        }
+    }
+
+    /**
+     * Internal identity and executors for one start/shutdown lifecycle.
+     *
+     * Warmup workers capture this context so a task that outlives forced shutdown can only
+     * complete against the scheduler that submitted it. [commitLock] linearizes retirement
+     * with the final primary-lock renewal and idle-store commit.
+     */
+    private class RunContext(
+        val generation: Long,
+        val scheduler: ScheduledExecutorService,
+        val warmupExecutor: ExecutorService,
+    ) {
+        val active = AtomicBoolean(true)
+        val commitLock = ReentrantLock()
+        val warmingCount = AtomicInteger(0)
+        val warmupSubmissionsOpen = AtomicBoolean(true)
+        val reconcileQueued = AtomicBoolean(false)
+
+        @Volatile
+        var nextCompletionReconcileAtNanos: Long = 0
+        val primaryOwned = AtomicBoolean(false)
+        val inFlightOperations = AtomicInteger(0)
+        val inFlightLock = ReentrantLock()
+        val inFlightZero: Condition = inFlightLock.newCondition()
+        val pendingWarmupCompletions = ConcurrentHashMap.newKeySet<TrackedWarmupCompletionTask>()
     }
 
     @Suppress("ktlint:standard:property-naming")
@@ -1224,8 +1867,30 @@ class SandboxPool internal constructor(
     }
 
     companion object {
+        /** Minimum spacing between completion-driven reconcile ticks (see [requestReconcile]). */
+        private const val COMPLETION_RECONCILE_MIN_INTERVAL_MS = 500L
+
+        /** Keep-alive of the pool-created shared connection pool. */
+        private const val DEFAULT_SHARED_POOL_KEEPALIVE_MINUTES = 5L
+
         @JvmStatic
         fun builder(): Builder = Builder()
+
+        private fun defaultIdleSandboxConnector(
+            config: PoolConfig,
+            connectionConfig: ConnectionConfig,
+        ): (String) -> Sandbox =
+            { sandboxId ->
+                Sandbox.connector()
+                    .sandboxId(sandboxId)
+                    .connectTimeout(config.acquireReadyTimeout)
+                    .healthCheckPollingInterval(config.acquireHealthCheckPollingInterval)
+                    .skipHealthCheck(config.acquireSkipHealthCheck)
+                    .connectionConfig(connectionConfig)
+                    .run {
+                        config.acquireHealthCheck?.let { healthCheck(it) } ?: this
+                    }.connect()
+            }
     }
 
     class Builder internal constructor() {

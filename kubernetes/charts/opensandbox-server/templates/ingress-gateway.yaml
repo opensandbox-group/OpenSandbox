@@ -116,14 +116,27 @@ spec:
             - "--log-level={{ .Values.server.gateway.logLevel }}"
 {{- if .Values.server.gateway.secureAccess.keys }}
             - "--secure-access-keys={{- range $i, $k := .Values.server.gateway.secureAccess.keys }}{{ if $i }},{{ end }}{{ $k.key_id }}={{ $k.key }}{{- end }}"
+{{- else if .Values.server.gateway.secureAccess.existingSecret }}
+            # Kubelet expands $(...) from the env below, so the key ring
+            # reaches the arg only at container start, never via the pod spec.
+            - "--secure-access-keys=$(OPENSANDBOX_SECURE_ACCESS_KEYS)"
 {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.server.gateway.port }}
               protocol: TCP
-          {{- with .Values.server.gateway.env }}
+          {{- if or .Values.server.gateway.env .Values.server.gateway.secureAccess.existingSecret }}
           env:
+            {{- if .Values.server.gateway.secureAccess.existingSecret }}
+            - name: OPENSANDBOX_SECURE_ACCESS_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.gateway.secureAccess.existingSecret | quote }}
+                  key: keys
+            {{- end }}
+            {{- with .Values.server.gateway.env }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           livenessProbe:
             httpGet:

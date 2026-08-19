@@ -194,6 +194,7 @@ export class CommandsAdapter implements ExecdCommands {
     stream: AsyncIterable<ServerStreamEvent>,
     handlers?: ExecutionHandlers,
     inferExitCode = false,
+    isBackground = false,
   ): Promise<CommandExecution> {
     const execution: CommandExecution = {
       logs: { stdout: [], stderr: [] },
@@ -205,6 +206,13 @@ export class CommandsAdapter implements ExecdCommands {
         (ev as { text?: string }).text = execution.id;
       }
       await dispatcher.dispatch(ev as any);
+      if (isBackground && ev.type === "execution_complete") {
+        // Background commands are done once execution_complete arrives; do
+        // not wait for the chunked terminator, which execd sends only after
+        // a graceful-shutdown sleep and can be lost if the connection is
+        // closed early (#1528).
+        break;
+      }
     }
 
     if (inferExitCode) {
@@ -288,6 +296,7 @@ export class CommandsAdapter implements ExecdCommands {
       this.runStream(command, opts, signal),
       handlers,
       !opts?.background,
+      !!opts?.background,
     );
   }
 

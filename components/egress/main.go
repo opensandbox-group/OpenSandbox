@@ -78,6 +78,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load always allow/deny rule files: %v", err)
 	}
+	alwaysAllow = withTelemetryAllow(alwaysAllow)
 
 	allowIPs := allowIps()
 	mode := parseMode()

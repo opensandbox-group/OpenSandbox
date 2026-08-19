@@ -301,10 +301,20 @@ poolManager.destroy(
 - Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool.
 :::
 
+::: tip Observing warmup performance
+To trace the warmup path, enable `ConnectionConfig.builder().enableTracing(true)` and add an
+OpenTelemetry SDK + exporter to your application. Each warmup becomes one trace
+(`pool.warmup` root span plus `create` / `prepare` / `renew` / `commit` phases) with
+`trace_id` / `span_id` published to the SLF4J MDC, so you can look up a sandbox's
+warmup by searching logs for its `sandbox_id`. See [SDK Tracing (Pool Warmup)](/guides/sdk-tracing).
+:::
+
 ::: tip Distributed Deployment
 For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. Configure `primaryLockTtl` greater than `warmupReadyTimeout` plus expected warmup preparer time and buffer, otherwise leadership may expire while a node is creating idle sandboxes.
 
 In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass.
+
+`releaseAllIdle()` preserves serial cleanup. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive, and the overload waits for every drained ID to receive a best-effort kill attempt.
 
 `SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
 :::
@@ -324,8 +334,10 @@ The `ConnectionConfig` class manages API server connection settings.
 | `debug`          | Enable debug logging for HTTP requests     | `false`                      | -                      |
 | `headers`        | Custom HTTP headers                        | Empty                        | -                      |
 | `connectionPool` | Shared OKHttp ConnectionPool               | SDK-created per instance     | -                      |
+| `retryPolicy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
 | `useServerProxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false` | -                      |
 | `disableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
+| `enableTracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/guides/sdk-tracing)) | `false` | - |
 
 ```java
 // 1. Basic configuration
@@ -355,7 +367,66 @@ ConnectionConfig sharedConfig = ConnectionConfig.builder()
 `Sandbox.builder()...build()` reports create latency to `POST /v1/metrics/events` by default. Call `ConnectionConfig.builder().disableMetrics(true)` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/guides/sdk-telemetry).
 :::
 
-### 2. Sandbox Creation Configuration
+### 2. Automatic retries
+
+The SDK retries transient failures automatically. `ConnectionConfig` installs a
+`RetryInterceptor` (`com.alibaba.opensandbox.sandbox.transport.RetryPolicy`) on the
+SDK's non-streaming HTTP clients.
+
+Default behavior:
+
+- **Enabled by default.** Idempotent methods (`GET/HEAD/PUT/DELETE/OPTIONS`) are
+  retried on `429`, `502`, `503`, and on pre-send transport failures (DNS, TCP
+  connect, TLS handshake).
+- **`POST`/`PATCH` are never retried on a status code by default**, since the
+  request may already have been applied server-side. Pre-send transport failures
+  (before any byte is written) are still retried for these methods.
+- Up to `3` retries with decorrelated-jitter exponential backoff, honoring a server
+  `Retry-After` header (capped at 60s).
+- **SSE / streaming requests bypass all automatic retry** because their bodies
+  are not safely replayable. The SSE client also disables OkHttp's built-in
+  connection recovery to prevent a streaming command POST from being replayed.
+
+::: warning Behavior change
+SDK-policy retries are on by default. This can increase the number of HTTP attempts
+and tail latency compared to earlier SDK versions. To disable the new SDK-policy
+retries, use `RetryPolicy.disabled()`; non-streaming requests then fall back to
+OkHttp's pre-existing built-in connection recovery.
+:::
+
+```java
+import com.alibaba.opensandbox.sandbox.transport.RetryPolicy;
+import com.alibaba.opensandbox.sandbox.transport.StatusCode;
+import java.time.Duration;
+import java.util.Set;
+
+// Disable SDK-policy retries and retain OkHttp's built-in connection recovery.
+ConnectionConfig config = ConnectionConfig.builder()
+    .apiKey("your-key")
+    .domain("api.opensandbox.io")
+    .retryPolicy(RetryPolicy.disabled())
+    .build();
+
+// Custom policy: more retries, an overall wall-clock deadline, and an opt-in to
+// retry POST/PATCH on 503 (only safe if your endpoints are idempotent).
+ConnectionConfig tuned = ConnectionConfig.builder()
+    .apiKey("your-key")
+    .domain("api.opensandbox.io")
+    .retryPolicy(new RetryPolicy(
+        /* maxRetries */ 5,
+        /* initialBackoff */ Duration.ofMillis(500),
+        /* maxBackoff */ Duration.ofSeconds(30),
+        /* backoffMultiplier */ 2.0,
+        /* jitter */ com.alibaba.opensandbox.sandbox.transport.JitterMode.DECORRELATED,
+        /* retryableStatusCodesIdempotent */ RetryPolicy.DEFAULT_IDEMPOTENT_STATUS,
+        /* retryableStatusCodesNonIdempotent */ Set.of(StatusCode.SERVICE_UNAVAILABLE),
+        /* perAttemptTimeout */ null,
+        /* overallDeadline */ Duration.ofSeconds(20),
+        /* onRetry */ null))
+    .build();
+```
+
+### 3. Sandbox Creation Configuration
 
 The `Sandbox.builder()` allows configuring the sandbox environment.
 
@@ -405,7 +476,7 @@ Sandbox sandbox = Sandbox.builder()
     .build();
 ```
 
-### 3. Runtime Egress Policy Updates
+### 4. Runtime Egress Policy Updates
 
 Runtime egress reads and patches go directly to the sandbox egress sidecar.
 The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
@@ -427,7 +498,7 @@ sandbox.patchEgressRules(
 );
 ```
 
-### 4. Credential Vault
+### 5. Credential Vault
 
 Credential Vault injects outbound credentials from the egress sidecar while
 keeping real secrets out of sandbox environment variables, commands, files, and

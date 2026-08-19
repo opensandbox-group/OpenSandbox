@@ -110,6 +110,9 @@ Render [ingress] TOML block from server.gateway.
 When server.gateway.enabled=true: mode=gateway + gateway.address + gateway.route.mode; otherwise mode=direct.
 */}}
 {{- define "opensandbox-server.ingressConfigToml" -}}
+{{- if and .Values.server.gateway.secureAccess.keys .Values.server.gateway.secureAccess.existingSecret }}
+{{- fail "server.gateway.secureAccess: set either keys or existingSecret, not both" }}
+{{- end }}
 [ingress]
 mode = {{ .Values.server.gateway.enabled | ternary "gateway" "direct" | quote }}
 {{- if .Values.server.gateway.enabled }}

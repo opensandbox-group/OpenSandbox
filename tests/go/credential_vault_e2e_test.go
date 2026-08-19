@@ -17,6 +17,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -279,6 +280,35 @@ func TestCredentialVaultRuntimeMutationAddsReplacesAndDeletesBinding(t *testing.
 	require.Empty(t, state.Credentials)
 }
 
+func TestCredentialVaultLargeBodiesAcrossStreamingThreshold(t *testing.T) {
+	targetIP := credentialVaultTargetIP(t)
+	ctx, sb := createCredentialVaultSandbox(t, targetIP)
+
+	_, err := sb.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
+		Credentials: credentialVaultCredentials("api-key-token"),
+		Bindings: []opensandbox.CredentialBinding{
+			credentialVaultBindingWithMethods("large-body", "/large-body", opensandbox.CredentialAuth{
+				Type:       opensandbox.CredentialAuthAPIKey,
+				Name:       "X-Api-Key",
+				Credential: "api-key-token",
+			}, []string{"POST"}),
+		},
+	})
+	require.NoError(t, err)
+
+	// Regression for the stream_large_bodies=1m header-injection bug: bodies
+	// above 1 MiB are streamed upstream by mitmproxy and used to reach the
+	// upstream without the injected API key (403). Injection now happens in
+	// the requestheaders hook, so all four sizes must succeed.
+	for _, size := range []int{1024*1024 - 1, 1024 * 1024, 1024*1024 + 1, 2 * 1024 * 1024} {
+		response := credentialVaultCurlJSONWithLargeBody(t, ctx, sb, targetIP, "/large-body", size)
+		require.Equal(t, true, response["ok"])
+		require.Equal(t, "large-body", response["case"])
+		require.Empty(t, stringSliceFromJSON(t, response["missingOrInvalid"]))
+		require.Equal(t, float64(size), response["bodyReceivedLength"])
+	}
+}
+
 func credentialVaultTargetHost() string {
 	if host := os.Getenv("OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_HOST"); host != "" {
 		return host
@@ -425,6 +455,44 @@ func credentialVaultCurlJSONWithOptions(
 		"http://"+credentialVaultTargetHost()+path,
 	)
 	command := strings.Join(args, " ")
+	for _, secret := range credentialVaultSecrets {
+		require.NotContains(t, command, secret)
+	}
+
+	exec, err := sb.RunCommand(ctx, command, nil)
+	require.NoError(t, err)
+	require.Nil(t, exec.Error)
+	require.NotNil(t, exec.ExitCode)
+	require.Equal(t, 0, *exec.ExitCode)
+
+	stdout := exec.Text()
+	require.NotEmpty(t, stdout)
+
+	var response map[string]any
+	require.NoError(t, json.Unmarshal([]byte(stdout), &response))
+	return response
+}
+
+func credentialVaultCurlJSONWithLargeBody(
+	t *testing.T,
+	ctx context.Context,
+	sb *opensandbox.Sandbox,
+	targetIP string,
+	path string,
+	size int,
+) map[string]any {
+	t.Helper()
+	payloadPath := fmt.Sprintf("/tmp/credential-vault-large-%d.bin", size)
+	create, err := sb.RunCommand(ctx, fmt.Sprintf("head -c %d /dev/zero | tr '\\000' 'x' > %s", size, payloadPath), nil)
+	require.NoError(t, err)
+	require.Nil(t, create.Error)
+
+	command := fmt.Sprintf(
+		"curl --fail --silent --show-error --connect-timeout 5 --max-time 60 "+
+			"--request POST --header 'content-type: text/plain' --data-binary @%s "+
+			"--resolve %s:80:%s http://%s%s",
+		payloadPath, credentialVaultTargetHost(), targetIP, credentialVaultTargetHost(), path,
+	)
 	for _, secret := range credentialVaultSecrets {
 		require.NotContains(t, command, secret)
 	}

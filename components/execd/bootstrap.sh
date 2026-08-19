@@ -19,10 +19,27 @@ set -e
 _forward_signal() {
 	sig="$1"
 	pid="$2"
+	if [ -z "$pid" ]; then
+		return
+	fi
 	kill "-$sig" "$pid" 2>/dev/null || true
-	wait "$pid" 2>/dev/null || true
+}
+
+_shutdown_children() {
+	sig="$1"
+	_forward_signal "$sig" "${CMD_PID:-}"
+	_forward_signal "$sig" "${EXECD_PID:-}"
+	if [ -n "${CMD_PID:-}" ]; then
+		wait "$CMD_PID" 2>/dev/null || true
+	fi
+	if [ -n "${EXECD_PID:-}" ]; then
+		wait "$EXECD_PID" 2>/dev/null || true
+	fi
 	exit 0
 }
+
+trap '_shutdown_children TERM' TERM
+trap '_shutdown_children INT' INT
 
 # Returns 0 if the value looks like a boolean "true" (1, true, yes, on).
 is_truthy() {
@@ -293,7 +310,6 @@ if [ -n "${EXECD_BOOTSTRAP_PRE_SCRIPT:-}" ]; then
 fi
 
 echo "starting OpenSandbox Execd daemon at $EXECD."
-$EXECD &
 
 # Allow chained shell commands (e.g., /test1.sh && /test2.sh)
 # Usage:
@@ -319,18 +335,31 @@ if [ -z "$SHELL_BIN" ]; then
 	fi
 fi
 
+# Resolve the user command into a concrete argv shared by both branches.
 if [ "$CMD" != "" ]; then
-	"$SHELL_BIN" -c "$CMD" &
-	CMD_PID=$!
+	set -- "$SHELL_BIN" -c "$CMD"
 elif [ $# -eq 0 ]; then
-	"$SHELL_BIN" &
-	CMD_PID=$!
-else
-	"$@" &
-	CMD_PID=$!
+	set -- "$SHELL_BIN"
 fi
 
-trap '_forward_signal TERM "$CMD_PID"' TERM
+# Init mode (OSEP-0018): exec into execd so it becomes the sandbox init (PID 1
+# on the direct paths) and supervises the user command itself. The shell must
+# exec, never background, or execd would run as a subreaper without the kernel
+# signal shield.
+if is_truthy "${EXECD_INIT:-}"; then
+	exec "$EXECD" --init -- "$@"
+fi
 
+"$EXECD" &
+EXECD_PID=$!
+
+"$@" &
+CMD_PID=$!
+
+set +e
 wait "$CMD_PID" 2>/dev/null
-exit $?
+CMD_STATUS=$?
+set -e
+_forward_signal TERM "$EXECD_PID"
+wait "$EXECD_PID" 2>/dev/null || true
+exit "$CMD_STATUS"

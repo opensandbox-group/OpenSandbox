@@ -16,6 +16,9 @@ spec:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: manager
+        {{- if .Values.controller.snapshot.imageCommitterPodTemplate }}
+        checksum/image-committer-pod-template: {{ include (print $.Template.BasePath "/image-committer-pod-template.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.controller.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -65,6 +68,9 @@ spec:
         {{- end }}
         {{- if .Values.controller.snapshot.imageCommitterImage }}
         - --image-committer-image={{ .Values.controller.snapshot.imageCommitterImage }}
+        {{- end }}
+        {{- if .Values.controller.snapshot.imageCommitterPodTemplate }}
+        - --image-committer-pod-template-file=/etc/opensandbox/image-committer/pod-template.yaml
         {{- end }}
         {{- if .Values.controller.snapshot.containerdSocketPath }}
         - --containerd-socket-path={{ .Values.controller.snapshot.containerdSocketPath }}
@@ -128,16 +134,30 @@ spec:
         env:
         {{- toYaml .Values.extraEnv | nindent 8 }}
         {{- end }}
-        {{- with .Values.extraVolumeMounts }}
+        {{- if or .Values.controller.snapshot.imageCommitterPodTemplate .Values.extraVolumeMounts }}
         volumeMounts:
+        {{- if .Values.controller.snapshot.imageCommitterPodTemplate }}
+        - name: image-committer-pod-template
+          mountPath: /etc/opensandbox/image-committer
+          readOnly: true
+        {{- end }}
+        {{- with .Values.extraVolumeMounts }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- end }}
       {{- with .Values.extraContainers }}
       {{- toYaml . | nindent 6 }}
       {{- end }}
-      {{- with .Values.extraVolumes }}
+      {{- if or .Values.controller.snapshot.imageCommitterPodTemplate .Values.extraVolumes }}
       volumes:
+      {{- if .Values.controller.snapshot.imageCommitterPodTemplate }}
+      - name: image-committer-pod-template
+        configMap:
+          name: {{ include "opensandbox.imageCommitterPodTemplateName" . }}
+      {{- end }}
+      {{- with .Values.extraVolumes }}
       {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:

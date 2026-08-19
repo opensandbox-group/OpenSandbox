@@ -3,8 +3,8 @@ title: Client-Side Sandbox Pool
 authors:
   - "@ninan"
 creation-date: 2026-03-02
-last-updated: 2026-03-06
-status: implementing
+last-updated: 2026-07-27
+status: implemented
 ---
 
 # OSEP-0005: Client-Side Sandbox Pool

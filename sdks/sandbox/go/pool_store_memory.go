@@ -42,6 +42,12 @@ type poolState struct {
 	// configurable per-pool settings.
 	idleTTL time.Duration
 	maxIdle int
+
+	// destroy fence / tombstone state.
+	destroyState   PoolDestroyState
+	destroyOwnerID string
+	// destroyExpiresAt is zero when the current destroy state never expires.
+	destroyExpiresAt time.Time
 }
 
 // InMemoryPoolStateStore is a pure in-memory implementation of PoolStateStore.
@@ -165,6 +171,9 @@ func (s *InMemoryPoolStateStore) PutIdle(_ context.Context, poolName string, san
 	defer ps.mu.Unlock()
 
 	now := time.Now()
+	if err := ps.rejectIfFencedLocked(poolName, now); err != nil {
+		return err
+	}
 	if existing, exists := ps.idleMap[sandboxID]; exists {
 		if existing.ExpiresAt.IsZero() || now.Before(existing.ExpiresAt) {
 			return nil // still alive, idempotent no-op
@@ -204,6 +213,9 @@ func (s *InMemoryPoolStateStore) TryAcquirePrimaryLock(_ context.Context, poolNa
 	defer ps.mu.Unlock()
 
 	now := time.Now()
+	if ps.destroyStateLocked(now) != PoolDestroyStateActive {
+		return false, nil
+	}
 	if ps.lock.ownerID != "" && now.Before(ps.lock.expiresAt) {
 		// Lock is held and not expired.
 		if ps.lock.ownerID == ownerID {
@@ -228,6 +240,9 @@ func (s *InMemoryPoolStateStore) RenewPrimaryLock(_ context.Context, poolName st
 	defer ps.mu.Unlock()
 
 	now := time.Now()
+	if ps.destroyStateLocked(now) != PoolDestroyStateActive {
+		return false, nil
+	}
 	if ps.lock.ownerID != ownerID {
 		return false, nil
 	}
@@ -352,6 +367,9 @@ func (s *InMemoryPoolStateStore) SetMaxIdle(_ context.Context, poolName string, 
 	ps := s.getOrCreatePool(poolName)
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	if err := ps.rejectIfFencedLocked(poolName, time.Now()); err != nil {
+		return err
+	}
 	ps.maxIdle = maxIdle
 	return nil
 }
@@ -364,7 +382,97 @@ func (s *InMemoryPoolStateStore) SetIdleEntryTTL(_ context.Context, poolName str
 	ps := s.getOrCreatePool(poolName)
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	if err := ps.rejectIfFencedLocked(poolName, time.Now()); err != nil {
+		return err
+	}
 	ps.idleTTL = ttl
+	return nil
+}
+
+// GetDestroyState returns the destroy state of the pool namespace.
+func (s *InMemoryPoolStateStore) GetDestroyState(_ context.Context, poolName string) (PoolDestroyState, error) {
+	ps := s.getOrCreatePool(poolName)
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.destroyStateLocked(time.Now()), nil
+}
+
+// BeginDestroy writes the DESTROYING fence. Returns *PoolDestroyedError if the
+// namespace already carries a live tombstone.
+func (s *InMemoryPoolStateStore) BeginDestroy(_ context.Context, poolName string, ownerID string) error {
+	if ownerID == "" {
+		return fmt.Errorf("opensandbox: ownerID must not be blank")
+	}
+	ps := s.getOrCreatePool(poolName)
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	if ps.destroyStateLocked(time.Now()) == PoolDestroyStateDestroyed {
+		return &PoolDestroyedError{PoolName: poolName, State: PoolDestroyStateDestroyed}
+	}
+	ps.destroyState = PoolDestroyStateDestroying
+	ps.destroyOwnerID = ownerID
+	ps.destroyExpiresAt = time.Time{}
+	return nil
+}
+
+// ClearPoolState wipes the pool's coordination state, leaving the destroy state
+// in place so the fence survives the cleanup.
+func (s *InMemoryPoolStateStore) ClearPoolState(_ context.Context, poolName string) error {
+	ps := s.getOrCreatePool(poolName)
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	ps.idleMap = make(map[string]*IdleEntry)
+	ps.idleQueue = nil
+	ps.lock = poolLock{}
+	ps.idleTTL = DefaultIdleTimeout
+	ps.maxIdle = 0
+	return nil
+}
+
+// MarkDestroyed writes the DESTROYED tombstone. A zero tombstoneTTL never expires.
+func (s *InMemoryPoolStateStore) MarkDestroyed(_ context.Context, poolName string, ownerID string, tombstoneTTL time.Duration) error {
+	if ownerID == "" {
+		return fmt.Errorf("opensandbox: ownerID must not be blank")
+	}
+	if tombstoneTTL < 0 {
+		return fmt.Errorf("opensandbox: tombstoneTTL must not be negative, got %v", tombstoneTTL)
+	}
+	ps := s.getOrCreatePool(poolName)
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	ps.destroyState = PoolDestroyStateDestroyed
+	ps.destroyOwnerID = ownerID
+	if tombstoneTTL == 0 {
+		ps.destroyExpiresAt = time.Time{}
+	} else {
+		ps.destroyExpiresAt = time.Now().Add(tombstoneTTL)
+	}
+	return nil
+}
+
+// destroyStateLocked returns the current destroy state, clearing an expired
+// tombstone on the way. Must be called with ps.mu held.
+func (ps *poolState) destroyStateLocked(now time.Time) PoolDestroyState {
+	if ps.destroyState == PoolDestroyStateActive {
+		return PoolDestroyStateActive
+	}
+	if !ps.destroyExpiresAt.IsZero() && !now.Before(ps.destroyExpiresAt) {
+		ps.destroyState = PoolDestroyStateActive
+		ps.destroyOwnerID = ""
+		ps.destroyExpiresAt = time.Time{}
+	}
+	return ps.destroyState
+}
+
+// rejectIfFencedLocked returns *PoolDestroyedError when the namespace is fenced.
+// Must be called with ps.mu held.
+func (ps *poolState) rejectIfFencedLocked(poolName string, now time.Time) error {
+	if state := ps.destroyStateLocked(now); state != PoolDestroyStateActive {
+		return &PoolDestroyedError{PoolName: poolName, State: state}
+	}
 	return nil
 }
 

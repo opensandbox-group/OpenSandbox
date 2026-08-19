@@ -19,6 +19,7 @@ package com.alibaba.opensandbox.e2e;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.alibaba.opensandbox.sandbox.SandboxManager;
@@ -36,6 +37,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
@@ -140,6 +142,88 @@ public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
     }
 
     @Test
+    @DisplayName("graceful shutdown drains admitted rolling warmups without refilling slots")
+    @Timeout(value = 4, unit = TimeUnit.MINUTES)
+    void testGracefulShutdownDrainsAdmittedRollingWarmupsWithoutRefill() throws Exception {
+        tag = uniqueTag("graceful-rolling");
+        InMemoryPoolStateStore stateStore = new InMemoryPoolStateStore();
+        CountDownLatch admittedWarmupsEntered = new CountDownLatch(2);
+        CountDownLatch releaseWarmups = new CountDownLatch(1);
+        AtomicInteger preparerCalls = new AtomicInteger();
+        AtomicReference<Throwable> shutdownFailure = new AtomicReference<>();
+        SandboxPool pool =
+                createPool(
+                        stateStore,
+                        Duration.ofSeconds(20),
+                        sandbox -> {
+                            preparerCalls.incrementAndGet();
+                            admittedWarmupsEntered.countDown();
+                            awaitLatch(releaseWarmups);
+                        },
+                        3,
+                        2);
+        Thread shutdownThread = null;
+
+        try {
+            pool.start();
+            assertTrue(
+                    admittedWarmupsEntered.await(2, TimeUnit.MINUTES),
+                    "both rolling warmup slots should be admitted before shutdown");
+            assertEquals(2, preparerCalls.get());
+
+            shutdownThread =
+                    new Thread(
+                            () -> {
+                                try {
+                                    pool.shutdown(true);
+                                } catch (Throwable throwable) {
+                                    shutdownFailure.set(throwable);
+                                }
+                            },
+                            "sandbox-pool-e2e-graceful-rolling-shutdown");
+            shutdownThread.start();
+
+            eventually(
+                    "pool enters draining before warmups are released",
+                    Duration.ofSeconds(10),
+                    Duration.ofMillis(100),
+                    () -> pool.snapshot().getLifecycleState() == PoolLifecycleState.DRAINING);
+            releaseWarmups.countDown();
+
+            shutdownThread.join(30_000);
+            assertFalse(shutdownThread.isAlive(), "graceful shutdown should finish after drain");
+            assertNull(shutdownFailure.get(), "graceful shutdown should not fail");
+            assertEquals(PoolLifecycleState.STOPPED, pool.snapshot().getLifecycleState());
+            assertEquals(
+                    2,
+                    pool.snapshot().getIdleCount(),
+                    "both pre-admitted warmups should be persisted");
+            assertEquals(
+                    2,
+                    preparerCalls.get(),
+                    "shutdown must close admissions instead of refilling the released slots");
+            eventually(
+                    "only the two pre-admitted sandboxes remain remotely",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> countTaggedSandboxes() == 2);
+
+            pool.releaseAllIdle();
+            eventually(
+                    "drained rolling warmups are deleted remotely",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> countTaggedSandboxes() == 0);
+        } finally {
+            releaseWarmups.countDown();
+            if (shutdownThread != null) {
+                shutdownThread.join(5_000);
+            }
+            shutdownAndRelease(pool);
+        }
+    }
+
+    @Test
     @DisplayName("forced shutdown deletes interrupted warmup sandbox not persisted as idle")
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
     void testForcedShutdownDeletesInterruptedWarmupSandboxNotPersistedAsIdle() throws Exception {
@@ -207,10 +291,115 @@ public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
         }
     }
 
+    @Test
+    @DisplayName("restart fences and deletes a late warmup from the retired run")
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void testRestartFencesLateWarmupFromRetiredRun() throws Exception {
+        tag = uniqueTag("restart-late-warmup");
+        InMemoryPoolStateStore stateStore = new InMemoryPoolStateStore();
+        CountDownLatch oldWarmupEntered = new CountDownLatch(1);
+        CountDownLatch releaseOldWarmup = new CountDownLatch(1);
+        CountDownLatch newWarmupEntered = new CountDownLatch(1);
+        AtomicInteger warmupSequence = new AtomicInteger();
+        AtomicBoolean oldWarmupInterrupted = new AtomicBoolean(false);
+        AtomicReference<String> oldSandboxId = new AtomicReference<>();
+        AtomicReference<String> newSandboxId = new AtomicReference<>();
+        SandboxPool pool =
+                createPool(
+                        stateStore,
+                        Duration.ofMillis(300),
+                        sandbox -> {
+                            if (warmupSequence.incrementAndGet() == 1) {
+                                oldSandboxId.set(sandbox.getId());
+                                oldWarmupEntered.countDown();
+                                awaitIgnoringInterrupt(releaseOldWarmup, oldWarmupInterrupted);
+                            } else {
+                                newSandboxId.set(sandbox.getId());
+                                newWarmupEntered.countDown();
+                            }
+                        });
+
+        try {
+            pool.start();
+            assertTrue(
+                    oldWarmupEntered.await(2, TimeUnit.MINUTES),
+                    "the first lifecycle should enter its deliberately uncooperative warmup");
+            assertNotNull(oldSandboxId.get());
+            eventually(
+                    "old lifecycle warmup is visible remotely",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> taggedSandboxExists(oldSandboxId.get()));
+
+            pool.shutdown(true);
+
+            assertTrue(
+                    oldWarmupInterrupted.get(),
+                    "forced shutdown should interrupt the old preparer even though it keeps waiting");
+            assertEquals(PoolLifecycleState.STOPPED, pool.snapshot().getLifecycleState());
+            assertEquals(
+                    1L,
+                    releaseOldWarmup.getCount(),
+                    "old warmup must still be blocked after its lifecycle has stopped");
+            assertEquals(0, pool.snapshot().getInFlightOperations());
+
+            pool.start();
+            assertTrue(
+                    newWarmupEntered.await(2, TimeUnit.MINUTES),
+                    "the restarted lifecycle should admit a new warmup independently");
+            eventually(
+                    "restarted lifecycle publishes only its new warmup",
+                    Duration.ofMinutes(2),
+                    Duration.ofMillis(500),
+                    () ->
+                            newSandboxId.get() != null
+                                    && pool.snapshot().getIdleCount() == 1
+                                    && pool.snapshot().getInFlightOperations() == 0
+                                    && pool.snapshotIdleEntries().stream()
+                                            .allMatch(
+                                                    entry ->
+                                                            newSandboxId
+                                                                    .get()
+                                                                    .equals(entry.getSandboxId())));
+            eventually(
+                    "old and restarted sandboxes overlap before the old warmup is released",
+                    Duration.ofSeconds(30),
+                    Duration.ofMillis(500),
+                    () -> countTaggedSandboxes() == 2);
+
+            releaseOldWarmup.countDown();
+
+            eventually(
+                    "retired lifecycle sandbox is deleted after its late completion",
+                    Duration.ofSeconds(60),
+                    Duration.ofMillis(500),
+                    () ->
+                            !taggedSandboxExists(oldSandboxId.get())
+                                    && taggedSandboxExists(newSandboxId.get())
+                                    && countTaggedSandboxes() == 1);
+            assertEquals(1, pool.snapshot().getIdleCount());
+            assertEquals(0, pool.snapshot().getInFlightOperations());
+            assertTrue(
+                    pool.snapshotIdleEntries().stream()
+                            .allMatch(entry -> newSandboxId.get().equals(entry.getSandboxId())),
+                    "late old-run completion must never enter the restarted idle pool");
+        } finally {
+            releaseOldWarmup.countDown();
+            shutdownAndRelease(pool);
+        }
+    }
+
+    private SandboxPool createPool(
+            InMemoryPoolStateStore stateStore, Duration drainTimeout, SandboxPreparer preparer) {
+        return createPool(stateStore, drainTimeout, preparer, 1, 1);
+    }
+
     private SandboxPool createPool(
             InMemoryPoolStateStore stateStore,
             Duration drainTimeout,
-            SandboxPreparer preparer) {
+            SandboxPreparer preparer,
+            int maxIdle,
+            int warmupConcurrency) {
         PoolCreationSpec creationSpec =
                 PoolCreationSpec.builder()
                         .image(getSandboxImage())
@@ -228,8 +417,8 @@ public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
         return SandboxPool.builder()
                 .poolName("pool-" + tag)
                 .ownerId("owner-" + tag)
-                .maxIdle(1)
-                .warmupConcurrency(1)
+                .maxIdle(maxIdle)
+                .warmupConcurrency(warmupConcurrency)
                 .stateStore(stateStore)
                 .connectionConfig(sharedConnectionConfig)
                 .creationSpec(creationSpec)
@@ -281,6 +470,16 @@ public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
         return infos.getSandboxInfos().size();
     }
 
+    private boolean taggedSandboxExists(String sandboxId) {
+        if (sandboxId == null) {
+            return false;
+        }
+        PagedSandboxInfos infos =
+                sandboxManager.listSandboxInfos(
+                        SandboxFilter.builder().metadata(Map.of("tag", tag)).pageSize(20).build());
+        return infos.getSandboxInfos().stream().anyMatch(info -> sandboxId.equals(info.getId()));
+    }
+
     private void cleanupTaggedSandboxes() {
         if (sandboxManager == null || tag == null || tag.isBlank()) {
             return;
@@ -315,6 +514,17 @@ public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
         try {
             pool.releaseAllIdle();
         } catch (Exception ignored) {
+        }
+    }
+
+    private static void awaitIgnoringInterrupt(CountDownLatch latch, AtomicBoolean interrupted) {
+        while (true) {
+            try {
+                latch.await();
+                return;
+            } catch (InterruptedException exception) {
+                interrupted.set(true);
+            }
         }
     }
 

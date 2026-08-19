@@ -56,14 +56,17 @@ jobs:
               kubernetes: (path) =>
                 workflowChanged(path, "kubernetes-test.yml") ||
                 (path.startsWith("kubernetes/") &&
-                  !path.startsWith("kubernetes/docs/")),
+                  !path.startsWith("kubernetes/docs/") &&
+                  !path.startsWith("kubernetes/charts/opensandbox-node-agent/")),
               "real-e2e": (path) =>
                 workflowChanged(path, "real-e2e.yml") ||
                 path.startsWith("server/opensandbox_server/") ||
                 path.startsWith("components/execd/") ||
                 path.startsWith("components/egress/") ||
                 path.startsWith("sdks/") ||
-                path.startsWith("tests/"),
+                path.startsWith("tests/") ||
+                path === "scripts/python-execd-init-e2e.sh" ||
+                path === "scripts/python-execd-hardening-e2e.sh",
               egress: (path) =>
                 workflowChanged(path, "egress-test.yml") ||
                 path.startsWith("components/egress/") ||
@@ -73,6 +76,11 @@ jobs:
                 path === "scripts/python-k8s-e2e.sh" ||
                 path === "scripts/python-k8s-e2e-ingress.sh" ||
                 path === "scripts/common/kubernetes-e2e.sh" ||
+                path === "scripts/python-k8s-execd-init-e2e.sh" ||
+                path === "tests/python/tests/test_execd_init_e2e.py" ||
+                path === "tests/python/tests/test_execd_hardening_e2e.py" ||
+                path === "server/opensandbox_server/examples/e2e.batchsandbox-template.yaml" ||
+                path.startsWith("components/execd/") ||
                 path.startsWith("kubernetes/charts/"),
               ingress: (path) =>
                 workflowChanged(path, "ingress-test.yaml") ||
@@ -82,6 +90,14 @@ jobs:
                 workflowChanged(path, "execd-test.yml") ||
                 path.startsWith("components/execd/") ||
                 path.startsWith("components/internal/"),
+              nodeagent: (path) =>
+                workflowChanged(path, "nodeagent-test.yml") ||
+                path.startsWith("components/nodeagent/") ||
+                path.startsWith("components/internal/") ||
+                path.startsWith("kubernetes/charts/opensandbox-node-agent/") ||
+                path === "kubernetes/charts/opensandbox/Chart.yaml" ||
+                path === "kubernetes/charts/opensandbox/Chart.lock" ||
+                path === "kubernetes/charts/opensandbox/values.yaml",
               sdk: (path) =>
                 workflowChanged(path, "sdk-tests.yml") ||
                 path.startsWith("cli/") ||

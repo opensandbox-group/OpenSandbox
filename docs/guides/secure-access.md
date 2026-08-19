@@ -113,6 +113,12 @@ The `opensandbox-server` Helm chart exposes the same shape under
 `server.gateway.secureAccess` and wires the keys into both the server and the
 ingress gateway.
 
+To keep key material out of the config file, the server also accepts the
+`OPENSANDBOX_SECURE_ACCESS_KEYS` (`a=<base64-secret>[,b=...]`) and
+`OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY` (`a`) environment variables, which
+override the TOML block; the chart's
+`server.gateway.secureAccess.existingSecret` option sources them from a Secret.
+
 **Key rotation.** Add a new key entry, deploy, then flip `active_key`.
 Verification loads every configured key, so tokens signed by older keys stay
 valid until you remove them — keep old entries until the longest possible

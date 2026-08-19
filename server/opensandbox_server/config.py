@@ -43,6 +43,12 @@ DEFAULT_CONFIG_PATH = Path.home() / ".sandbox.toml"
 
 API_KEY_ENV_VAR = "OPENSANDBOX_SERVER_API_KEY"
 
+# OSEP-0011 secure-access keys may be injected via environment instead of the
+# [ingress.secure_access] TOML block, so key material can come from a Secret
+# rather than a plaintext config file.
+SECURE_ACCESS_KEYS_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_KEYS"
+SECURE_ACCESS_ACTIVE_KEY_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY"
+
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?:\.(?!-)[A-Za-z0-9-]{1,63})*$")
 _WILDCARD_DOMAIN_RE = re.compile(r"^\*\.(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$")
 _IPV4_WITH_PORT_RE = re.compile(r"^(?P<ip>(?:\d{1,3}\.){3}\d{1,3})(?::(?P<port>\d{1,5}))?$")
@@ -141,12 +147,12 @@ class RenewIntentRedisConfig(BaseModel):
 
 
 class OtelConfig(BaseModel):
-    """Optional OpenTelemetry export for ingested SDK metrics."""
+    """Optional OpenTelemetry export for Server and ingested SDK metrics."""
 
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable OTLP metrics export. When false, SDK events are accepted but recorded as noop."
+            "Enable OTLP metrics export. When false, Server and SDK metrics are noops."
         ),
     )
     endpoint: Optional[str] = Field(
@@ -351,7 +357,9 @@ class IngressConfig(BaseModel):
             "OSEP-0011 secure access signing configuration. "
             "When set, the server can issue signed route tokens and static "
             "SecureAccessTokens for sandbox endpoints. "
-            "Requires ingress.mode = 'gateway'."
+            "Requires ingress.mode = 'gateway'. "
+            "May also be injected via the OPENSANDBOX_SECURE_ACCESS_KEYS and "
+            "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY environment variables."
         ),
     )
 
@@ -743,6 +751,14 @@ class EgressConfig(BaseModel):
             "(e.g. IPv4-only CNI or experimenting with IPv6 egress despite gaps)."
         ),
     )
+    readiness_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Maximum time in seconds to wait for the egress sidecar health endpoint "
+            "to become ready in Docker runtime."
+        ),
+    )
 
 
 class RuntimeConfig(BaseModel):
@@ -756,6 +772,17 @@ class RuntimeConfig(BaseModel):
         ...,
         description="Container image that contains the execd binary for sandbox initialization.",
         min_length=1,
+    )
+    execd_run_as_init: bool = Field(
+        default=False,
+        description=(
+            "Run execd as the sandbox init (OSEP-0018): sets EXECD_INIT in the "
+            "sandbox environment so bootstrap.sh execs into execd (--init) and "
+            "execd becomes PID 1, reaping children and owning the container "
+            "lifecycle. Defaults to false (classic background-and-wait "
+            "topology); intended to be flipped on after a few releases once "
+            "the init mode is validated in production."
+        ),
     )
 
 
@@ -889,6 +916,23 @@ class DockerConfig(BaseModel):
         default=4096,
         ge=1,
         description="Maximum number of processes allowed per sandbox container. Set to null to disable the limit.",
+    )
+    sandbox_env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Environment variables injected into every sandbox container. Keys from a sandbox "
+            "creation request override same-named keys. Docker-runtime counterpart of the "
+            "Kubernetes pod template: useful for fleet-wide settings such as trusting a private "
+            "CA (e.g. NODE_EXTRA_CA_CERTS) together with sandbox_binds."
+        ),
+    )
+    sandbox_binds: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Host bind mounts applied to every sandbox container, in Docker -v syntax "
+            "(host_path:container_path[:mode]). Prepended to the binds derived from a request's "
+            "volumes. Useful for mounting a private CA certificate into all sandboxes."
+        ),
     )
 
     @model_validator(mode="after")
@@ -1053,6 +1097,44 @@ def _apply_env_overrides(config: AppConfig) -> None:
     """Apply environment variable overrides to parsed configuration."""
     if API_KEY_ENV_VAR in os.environ:
         config.server.api_key = os.environ[API_KEY_ENV_VAR]
+    _apply_secure_access_env_overrides(config)
+
+
+def _apply_secure_access_env_overrides(config: AppConfig) -> None:
+    """Build ingress.secure_access from OPENSANDBOX_SECURE_ACCESS_* env vars.
+
+    OPENSANDBOX_SECURE_ACCESS_KEYS is a comma-separated key ring in
+    "key_id=base64" form; OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY names the
+    signing key. Both must be set together, and env wins over any
+    [ingress.secure_access] block from the config file.
+    """
+    keys_env = os.environ.get(SECURE_ACCESS_KEYS_ENV_VAR)
+    active_key_env = os.environ.get(SECURE_ACCESS_ACTIVE_KEY_ENV_VAR)
+    if keys_env is None and active_key_env is None:
+        return
+    if not keys_env or not active_key_env:
+        raise ValueError(
+            f"{SECURE_ACCESS_KEYS_ENV_VAR} and {SECURE_ACCESS_ACTIVE_KEY_ENV_VAR} "
+            "must be set together."
+        )
+    if config.ingress is None or config.ingress.mode != INGRESS_MODE_GATEWAY:
+        raise ValueError(
+            f"{SECURE_ACCESS_KEYS_ENV_VAR} requires ingress.mode = "
+            f"'{INGRESS_MODE_GATEWAY}' in the config file."
+        )
+    keys: list[SecureAccessKey] = []
+    for pair in keys_env.split(","):
+        key_id, sep, b64 = pair.partition("=")
+        if not sep or not key_id:
+            raise ValueError(
+                f"{SECURE_ACCESS_KEYS_ENV_VAR} entries must be in "
+                f"key_id=base64 form, got {pair!r}"
+            )
+        keys.append(SecureAccessKey(key_id=key_id, key=b64))
+    config.ingress.secure_access = SecureAccessConfig(
+        active_key=active_key_env,
+        keys=keys,
+    )
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

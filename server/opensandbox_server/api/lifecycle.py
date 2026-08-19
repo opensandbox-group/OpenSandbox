@@ -45,7 +45,10 @@ from opensandbox_server.api.schema import (
     Snapshot,
     SnapshotFilter,
 )
-from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.constants import (
+    OPEN_SANDBOX_INGRESS_HEADER,
+    SandboxErrorCodes,
+)
 from opensandbox_server.services.factory import create_sandbox_service
 from opensandbox_server.services.snapshot_service import create_snapshot_service
 
@@ -580,5 +583,11 @@ def get_sandbox_endpoint(
             base_url = str(request.base_url).rstrip("/") + mount_prefix
         base_url = base_url.replace("https://", "").replace("http://", "")
         endpoint.endpoint = f"{base_url}/sandboxes/{sandbox_id}/proxy/{port}"
+        if endpoint.headers:
+            endpoint.headers = {
+                key: value
+                for key, value in endpoint.headers.items()
+                if key.lower() != OPEN_SANDBOX_INGRESS_HEADER.lower()
+            } or None
 
     return endpoint

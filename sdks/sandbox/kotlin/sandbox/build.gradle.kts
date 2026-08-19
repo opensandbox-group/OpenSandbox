@@ -21,10 +21,13 @@ dependencies {
 
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
+    implementation(libs.opentelemetry.api)
     compileOnly(libs.bundles.serialization)
 
     testImplementation(libs.bundles.testing)
     testImplementation(libs.bundles.serialization)
+    testImplementation(libs.opentelemetry.sdk.testing)
+    testRuntimeOnly(libs.logback.classic)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 

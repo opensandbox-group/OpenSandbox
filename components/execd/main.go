@@ -16,9 +16,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/alibaba/opensandbox/internal/version"
@@ -27,6 +31,7 @@ import (
 	_ "go.uber.org/automaxprocs/maxprocs"
 
 	"github.com/alibaba/opensandbox/execd/pkg/clone3compat"
+	"github.com/alibaba/opensandbox/execd/pkg/ebpf"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
@@ -36,7 +41,22 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 )
 
+const (
+	// Only retry fast, retained namespace cleanup. Process teardown is
+	// synchronous and may already consume its own bounded wait.
+	isolatedRunnerCloseRetryTimeout  = 5 * time.Second
+	isolatedRunnerCloseRetryInterval = 100 * time.Millisecond
+)
+
+type isolatedRunnerCloser interface {
+	Close() error
+}
+
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	clone3Compat := clone3compat.MaybeApply()
 
 	version.EchoVersion("OpenSandbox Execd")
@@ -47,7 +67,23 @@ func main() {
 	isoCfg, err := isolation.LoadConfig(flag.IsolationConfigPath)
 	if err != nil {
 		log.Error("isolation: config: %v", err)
-		os.Exit(1)
+		return 1
+	}
+
+	// Activate the pre-exec hardening floor ([hardening] enabled, OSEP-0018).
+	// Config errors (unknown capability, reserved execve) are fatal; missing
+	// runtime support degrades and is reported on the capabilities endpoint.
+	if err := runtime.InitHardening(isoCfg); err != nil {
+		log.Error("hardening: %v", err)
+		return 1
+	}
+
+	// Start the eBPF observation layer ([ebpf] enabled, OSEP-0018 §5).
+	// The stub build reports disabled; the execd-ebpf variant attaches the
+	// exec/connect/privilege hooks.
+	{
+		ebpfState, ebpfMessage := ebpf.Init(isoCfg.Ebpf, os.Getenv("OPENSANDBOX_ID"))
+		runtime.SetEbpfState(runtime.LayerState{State: ebpfState, Message: ebpfMessage})
 	}
 
 	// Probe isolation runtime capabilities.
@@ -59,6 +95,13 @@ func main() {
 		isolationProbe.Available, isolationProbe.Isolator, isolationProbe.Version)
 
 	log.Init(flag.ServerLogLevel)
+
+	if flag.InitMode {
+		// OSEP-0018: execd is the sandbox init. Must start after the startup
+		// probes (which run short-lived children via cmd.Run) so the reaper is
+		// the only wait4 caller from here on.
+		runtime.StartInitMode(flag.Args())
+	}
 
 	ctrl := controller.InitCodeRunner()
 
@@ -73,6 +116,21 @@ func main() {
 			log.Error("isolation: runner init failed (continuing without isolation): %v", err)
 		} else {
 			controller.InitIsolatedRunner(runner)
+			defer func() {
+				if err := closeIsolatedRunnerWithRetry(
+					runner,
+					isolatedRunnerCloseRetryTimeout,
+					isolatedRunnerCloseRetryInterval,
+					func(err error) {
+						log.Warn(
+							"isolation: runner shutdown cleanup failed; retrying: %v",
+							err,
+						)
+					},
+				); err != nil {
+					log.Error("isolation: runner shutdown failed: %v", err)
+				}
+			}()
 			log.Info("isolation: runner ready, upper_root=%s", isoCfg.UpperRoot)
 		}
 	}
@@ -97,11 +155,114 @@ func main() {
 	listener, err := net.Listen("tcp4", addr)
 	if err != nil {
 		log.Error("failed to listen on %s: %v", addr, err)
-		os.Exit(1)
+		return 1
 	}
 	log.Info("execd listening on %s (IPv4)", addr)
-	if err := engine.RunListener(listener); err != nil {
-		log.Error("failed to start execd server: %v", err)
-		os.Exit(1)
+	// In init mode SIGTERM belongs to the init lifecycle (forward + graceful
+	// shutdown with the entrypoint's exit status); only SIGINT cancels the
+	// HTTP server there.
+	ctxSignals := []os.Signal{os.Interrupt}
+	if !flag.InitMode {
+		ctxSignals = append(ctxSignals, syscall.SIGTERM)
 	}
+	serverCtx, stopSignals := signal.NotifyContext(
+		context.Background(),
+		ctxSignals...,
+	)
+	defer stopSignals()
+	if err := serveHTTPUntilShutdown(serverCtx, listener, engine); err != nil {
+		log.Error("execd server stopped with error: %v", err)
+		return 1
+	}
+	return 0
+}
+
+func closeIsolatedRunnerWithRetry(
+	runner isolatedRunnerCloser,
+	retryTimeout time.Duration,
+	retryInterval time.Duration,
+	reportRetry func(error),
+) error {
+	err := runner.Close()
+	if !isRetryableIsolatedRunnerCloseError(err) {
+		return err
+	}
+
+	retryCtx, cancelRetry := context.WithTimeout(
+		context.Background(),
+		retryTimeout,
+	)
+	defer cancelRetry()
+	for {
+		if reportRetry != nil {
+			reportRetry(err)
+		}
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-retryCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return errors.Join(
+				err,
+				fmt.Errorf(
+					"retry isolated runner cleanup: %w",
+					retryCtx.Err(),
+				),
+			)
+		case <-timer.C:
+		}
+
+		err = runner.Close()
+		if !isRetryableIsolatedRunnerCloseError(err) {
+			return err
+		}
+	}
+}
+
+func isRetryableIsolatedRunnerCloseError(err error) bool {
+	return errors.Is(err, runtime.ErrSessionNamespaceCleanup)
+}
+
+func serveHTTPUntilShutdown(
+	ctx context.Context,
+	listener net.Listener,
+	handler http.Handler,
+) error {
+	server := &http.Server{Handler: handler}
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveDone:
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		closeErr := server.Close()
+		serveErr := <-serveDone
+		return errors.Join(
+			fmt.Errorf("gracefully shut down execd server: %w", err),
+			closeErr,
+			serveErr,
+		)
+	}
+	if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }

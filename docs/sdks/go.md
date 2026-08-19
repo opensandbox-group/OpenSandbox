@@ -296,6 +296,10 @@ pool, err := opensandbox.NewSandboxPoolBuilder().
 - All nodes sharing one pool must use the same creation and warmup definition. If that definition changes, use a new `PoolName` or key prefix and drain the old pool.
 - `Resize(ctx, maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile.
 - Use `Resize(ctx, 0)` and wait for `Snapshot().IdleCount == 0` to drain a distributed idle buffer. `ReleaseAllIdle()` is only a best-effort cleanup pass in distributed mode.
+- `ReleaseAllIdle(ctx)` preserves fire-and-forget kill scheduling. Call
+  `ReleaseAllIdleParallel(ctx, maxWorkers)` on `*DefaultSandboxPool` for bounded
+  parallel cleanup that waits for every drained ID to receive a kill attempt.
+  `maxWorkers` must be positive; the method is not part of the `SandboxPool` interface.
 - Configure `PrimaryLockTTL` greater than `WarmupReadyTimeout` plus expected warmup preparer time.
 :::
 

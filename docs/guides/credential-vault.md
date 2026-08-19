@@ -57,9 +57,33 @@ At a high level:
    substitutions.
 6. Secret values are redacted from vault responses and response headers.
 
+Requests that do not match any credential binding are forwarded unchanged.
+Credential path-safety checks apply only after a binding matches and the request
+would otherwise receive credentials.
+
 The active vault used by the MITM process is served over a local Unix domain
 socket inside the sidecar. The sandbox workload cannot fetch this active state
 over the normal server proxy path.
+
+## Persistence Across Pause and Resume
+
+::: warning In-memory state
+Credential Vault entries are process-local memory in the egress sidecar; they
+are not part of the sandbox root filesystem or the `BatchSandbox` Pod template.
+Kubernetes pause deletes the Pod after snapshotting, so the fresh egress
+sidecar created by resume starts with an empty vault. Credential injection does
+not resume until a trusted client creates the credentials and bindings again.
+
+Keep the original vault request or an equivalent secret-manager reference in a
+trusted control plane outside the sandbox. After the sandbox returns to
+`Running`, call the Credential Vault create API again before allowing work that
+depends on those credentials. Do not persist real credential values in sandbox
+metadata, environment variables, snapshots, or logs.
+
+Docker pause/unpause retains the existing container processes, but any egress
+sidecar replacement or restart also creates a new in-memory vault and requires
+the same re-injection procedure.
+:::
 
 ## Service Mesh Compatibility
 
@@ -428,6 +452,12 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 - Scope bindings by path whenever possible, for example `/v1/*`.
 - Avoid overlapping bindings at the same precedence; ambiguous matches are
   rejected.
+- Rejected requests (ambiguous paths, encoded separators crossing a binding
+  boundary) return `403` when the request body is small and fully known.
+  Requests with bodies above the mitmproxy streaming threshold (~1 MiB) or
+  with unknown length (chunked) cannot be answered with a `403` while the
+  body is being streamed, so the sidecar drops the connection instead —
+  either way the request is never forwarded upstream.
 - Do not put real secrets in sandbox `env`, command arguments, files, or
   metadata.
 - Keep fake environment variables when a CLI refuses to start without a key; the

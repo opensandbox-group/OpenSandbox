@@ -75,8 +75,12 @@ The Lifecycle API exposes only the coarse-grained sandbox states above. For deta
 | Environment variables | ✅ Yes — from BatchSandbox template |
 | Running processes / memory | ❌ No — process state is not checkpointed |
 | Explicit volume mounts | Depends on volume type |
+| Credential Vault entries | No - stored only in egress sidecar memory; re-inject from a trusted control plane after resume |
 
 Pause/resume is currently single-replica only. The internal pause snapshot records one source Pod's container images and does not store per-replica state, so the Kubernetes controller rejects pause requests unless `BatchSandbox.spec.replicas=1`.
+
+See [Credential Vault](/guides/credential-vault#persistence-across-pause-and-resume)
+for the required post-resume credential re-injection procedure.
 
 ---
 
@@ -98,8 +102,8 @@ SandboxSnapshot Controller
     │ creates commit Job on the same node
     ▼
 commit Job Pod (image-committer)
-    │ nerdctl: commit container rootfs → OCI image
-    │ nerdctl: push to registry
+    │ containerd API: commit container rootfs → OCI image
+    │ OCI registry resolver: push image
     ▼
 SandboxSnapshot.status.phase = Succeed
     │ BatchSandbox.status.phase = Paused
@@ -153,6 +157,7 @@ Configure the controller manager deployment with snapshot flags:
 | `--snapshot-registry` | string | `""` | **Required.** OCI registry prefix. Images are stored as `<registry>/<sandboxName>-<container>:snap-gen<N>`. |
 | `--snapshot-registry-insecure` | bool | `false` | Enables insecure registry mode for snapshot push operations. Use only for HTTP or self-signed local registries. |
 | `--snapshot-push-secret` | string | `""` | Kubernetes Secret name for pushing snapshots. Must be `kubernetes.io/dockerconfigjson` type. |
+| `--image-committer-pod-template-file` | string | `""` | Path to a PodTemplateSpec overlay for commit Job Pods. |
 | `--resume-pull-secret` | string | `""` | Kubernetes Secret name injected into resumed sandboxes for pulling snapshot images. Can be the same as push secret. |
 | `--image-committer-image` | string | `"image-committer:dev"` | Image used by commit Jobs. |
 | `--commit-job-timeout` | duration | `"10m"` | Timeout for commit Jobs. |
@@ -162,6 +167,7 @@ Configure the controller manager deployment with snapshot flags:
 The `opensandbox-controller` Helm chart now exposes the snapshot-related controller values directly:
 
 - `controller.snapshot.imageCommitterImage`
+- `controller.snapshot.imageCommitterPodTemplate`
 - `controller.snapshot.commitJobTimeout`
 - `controller.snapshot.registry`
 - `controller.snapshot.registryInsecure`
@@ -314,7 +320,11 @@ The controller creates a short-lived Kubernetes `Job` for each pause:
 
 The commit Job mounts the host containerd socket from the source node and runs as UID 0. This gives the `image-committer` image node-level container runtime access. Use only a trusted image, preferably pinned by digest or controlled by an admission policy.
 
-Before pausing containers, `image-committer` attempts to run `sync` inside every running container included in the snapshot. This flushes guest filesystem caches for VM-isolated runtimes such as Kata Containers, where a host-side sync cannot flush the guest kernel. Guest sync is best effort: if it fails, the commit Job logs a warning and continues, so recent guest filesystem writes may be absent from the resulting snapshot. Containers that were already stopped cannot be targeted by `nerdctl exec` and continue through the stopped-container commit path. The Job mounts both the containerd socket and the host `/run/containerd/fifo` directory; the FIFO mount lets the host-side containerd shim access the I/O streams created by `nerdctl exec`.
+The built-in image committer uses containerd APIs directly for container lookup, task pause/unpause, writable-snapshot image creation, and registry push. Before committing, it verifies that the node's content store contains every base-image blob for the node platform and fetches missing blobs from the original image digest; this avoids snapshot failures after CRI discards compressed content during image unpack. Source registries use HTTPS by default. For a trusted source registry that requires skipped TLS verification or plain HTTP, inject `SOURCE_IMAGE_REGISTRY_INSECURE=true` into the `commit` container through the image-committer Pod template. The reusable Go contracts and default implementations are exposed in [`pkg/imagecommitter`](https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes/pkg/imagecommitter); provider-specific binaries can supply a credential provider and reuse the standard CLI contract. The Job also retains the host `/run/containerd/fifo` mount so compatible implementations can use containerd task exec. Any preparation command used by the built-in implementation is best effort and does not change the commit interface.
+
+The operator-controlled Pod template can add labels, annotations, a ServiceAccount, scheduling settings, init containers, sidecars, and settings on the required `commit` container such as resources, `env`, and `envFrom`. The template is the merge base, and controller-generated invariants override conflicting template values. The controller reserves the source `nodeName`, restart policy, committer image, image pull policy, command, arguments, security context, termination-message settings, and required environment variables, mounts, and volumes. Environment variables, mounts, and volumes are merged by name, with required controller values winning conflicts. Additional regular sidecars must terminate for the Job to complete.
+
+Any ServiceAccount or admission configuration referenced by the template must exist in every sandbox namespace. Unpause Jobs do not receive the commit Pod template because they do not access the registry.
 
 If the commit Job fails, the controller creates a best-effort `<snapshotName>-unpause` Job on the same node to unpause any source containers that may have been left paused by an abrupt committer exit.
 
@@ -389,7 +399,7 @@ curl http://localhost:8080/v1/sandboxes/{sandbox_id}
 | `conditions` | list | `Ready` / `Failed` conditions with reason and message |
 | `sourcePodName` | string | Pod name used for commit |
 | `sourceNodeName` | string | Node where commit Job runs |
-| `containers` | list | `{containerName, imageUri, imageDigest}` per container |
+| `containers` | list | `{containerName, imageUri, imageDigest}` per container. `imageDigest` is the image config digest, preserving the image ID semantics of earlier image-committer versions. |
 | `observedGeneration` | int | Last processed spec generation |
 
 ---

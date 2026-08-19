@@ -34,6 +34,7 @@ from opensandbox.adapters.converter.response_handler import (
     build_api_exception_from_httpx,
     handle_api_error,
 )
+from opensandbox.adapters.sse import iter_sse_events
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import (
@@ -96,22 +97,15 @@ def _build_run_in_session_request_body(
     )
 
 
-def _decode_sse_event_line(line: str) -> EventNode | None:
-    if not line or not line.strip():
-        return None
-
-    if line.startswith((":", "event:", "id:", "retry:")):
-        return None
-
-    data = line[5:].strip() if line.startswith("data:") else line
-    if not data:
+def _decode_sse_event_data(data: str) -> EventNode | None:
+    if not data.strip():
         return None
 
     try:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error(f"Failed to parse SSE line: {line}", exc_info=e)
+        logger.error(f"Failed to parse SSE event data: {data}", exc_info=e)
         return None
 
 
@@ -196,6 +190,7 @@ class CommandsAdapterSync(CommandsSync):
         handlers: ExecutionHandlersSync | None,
         infer_exit_code: bool,
         failure_message: str,
+        is_background: bool = False,
     ) -> Execution:
         execution = Execution(id=None, execution_count=None, result=[], error=None)
         dispatcher = ExecutionEventDispatcherSync(execution, handlers)
@@ -205,11 +200,17 @@ class CommandsAdapterSync(CommandsSync):
                 response.read()
                 raise build_api_exception_from_httpx(response, failure_message)
 
-            for line in response.iter_lines():
-                event_node = _decode_sse_event_line(line)
+            for event in iter_sse_events(response):
+                event_node = _decode_sse_event_data(event.data)
                 if event_node is None:
                     continue
                 dispatcher.dispatch(event_node)
+                if is_background and event_node.type == "execution_complete":
+                    # Background commands are done once execution_complete
+                    # arrives; do not wait for the chunked terminator, which
+                    # execd sends only after a graceful-shutdown sleep and can
+                    # be lost if the connection is closed early (#1528).
+                    break
 
         if infer_exit_code:
             execution.exit_code = _infer_foreground_exit_code(execution)
@@ -236,6 +237,7 @@ class CommandsAdapterSync(CommandsSync):
                 handlers=handlers,
                 infer_exit_code=not opts.background,
                 failure_message="Failed to run command",
+                is_background=opts.background,
             )
 
         except Exception as e:

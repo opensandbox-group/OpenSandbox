@@ -18,8 +18,11 @@ import type { SandboxFiles } from "./filesystem.js";
 import type {
   BindMount,
   CreateIsolatedSessionRequest,
+  IsolatedBackgroundRun,
   IsolatedCapabilities,
+  IsolatedRunLogs,
   IsolatedRunOpts,
+  IsolatedRunStatus,
   IsolatedSessionInfo,
   IsolatedSessionState,
   IsolatedSessionSummary,
@@ -35,6 +38,27 @@ export interface IsolationSession {
     handlers?: ExecutionHandlers,
     signal?: AbortSignal,
   ): Promise<CommandExecution>;
+  /**
+   * Start `code` detached inside the session and return a run handle.
+   *
+   * The run's combined output and exit code are captured by execd; poll
+   * them with {@link getRunStatus} and {@link getRunLogs}. The run is not
+   * time-limited and idle GC is suspended while it is active. Background
+   * runs require a writable log location, so sessions with a read-only
+   * (`ro`) workspace reject them.
+   */
+  runBackground(code: string, opts?: IsolatedRunOpts): Promise<IsolatedBackgroundRun>;
+  /** Return the lifecycle state of a background run. */
+  getRunStatus(runId: string): Promise<IsolatedRunStatus>;
+  /**
+   * Return the background run's log from `cursor` plus the next cursor.
+   *
+   * Each call returns at most 16 MiB; pass the returned `cursor` to fetch
+   * the remainder. Per-run log retention is capped at 16 MiB (output beyond
+   * it is discarded when the run finishes), so drain incrementally while
+   * the run is active if more than one page is needed.
+   */
+  getRunLogs(runId: string, cursor?: number): Promise<IsolatedRunLogs>;
   get(): Promise<IsolatedSessionState>;
   delete(): Promise<void>;
 }

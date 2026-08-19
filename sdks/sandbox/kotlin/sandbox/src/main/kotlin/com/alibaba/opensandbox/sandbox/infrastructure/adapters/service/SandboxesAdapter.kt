@@ -20,9 +20,6 @@ import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.SandboxesApi
 import com.alibaba.opensandbox.sandbox.api.SnapshotsApi
 import com.alibaba.opensandbox.sandbox.api.infrastructure.Serializer
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
@@ -47,7 +44,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Sandbox
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toSandboxInfo
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toSandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toSnapshotInfo
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -223,12 +220,9 @@ internal class SandboxesAdapter(
             if (response.isSuccessful) {
                 return Serializer.kotlinxSerializationJson.decodeFromString<ApiSandbox>(responseBody)
             }
-            throw SandboxApiException(
-                message = "Failed to patch sandbox metadata. Status code: ${response.code}, Body: $responseBody",
-                statusCode = response.code,
-                error = parseSandboxError(responseBody) ?: SandboxError(UNEXPECTED_RESPONSE),
-                requestId = response.header("X-Request-ID"),
-            )
+            throw response.toSandboxApiException(responseBody) { statusCode, body ->
+                "Failed to patch sandbox metadata. Status code: $statusCode, Body: $body"
+            }
         }
     }
 

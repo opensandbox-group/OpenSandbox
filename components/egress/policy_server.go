@@ -713,6 +713,8 @@ func (s *policyServer) reloadAlwaysRules() (bool, error) {
 	if !changed {
 		return false, nil
 	}
+	allow = withTelemetryAllow(allow)
+	s.setAlwaysRules(deny, allow)
 	s.proxy.UpdateAlwaysRules(deny, allow)
 	return true, nil
 }

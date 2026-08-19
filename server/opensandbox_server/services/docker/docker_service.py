@@ -153,6 +153,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._bootstrap_script_cache: Dict[str, bytes] = {}
         self._bwrap_archive_cache: Dict[str, bytes] = {}
         self._session_gate_archive_cache: Dict[str, bytes] = {}
+        self._launcher_archive_cache: Dict[str, bytes] = {}
         self._windows_profile_cache: Dict[str, bytes] = {}
         self._daemon_platform: Optional[PlatformSpec] = None
         self._metadata_store = DockerMetadataStore()
@@ -868,8 +869,11 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     volume_binds.append(
                         f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
                     )
-            if volume_binds:
-                host_config_kwargs["binds"] = volume_binds
+            # Config-level binds (docker.sandbox_binds) apply to every sandbox
+            # and come first.
+            all_binds = list(self.app_config.docker.sandbox_binds or []) + (volume_binds or [])
+            if all_binds:
+                host_config_kwargs["binds"] = all_binds
             if requested_windows_profile:
                 host_config_kwargs = apply_windows_runtime_host_config_defaults(
                     host_config_kwargs,

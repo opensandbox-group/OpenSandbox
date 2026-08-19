@@ -31,7 +31,7 @@ spec:
             - name: opensandbox-bin
               mountPath: /opt/opensandbox
         - name: execd-installer
-          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.22
           command: [ "/bin/sh", "-c" ]
           args:
             - |
@@ -49,7 +49,9 @@ spec:
           - "/bin/sh"
           - "-c"
           - |
-            /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 >/tmp/task-executor.log 2>&1
+            /opt/opensandbox/task-executor \
+              -listen-addr=0.0.0.0:5758 \
+              -log-dir=/tmp
           env:
           - name: SANDBOX_MAIN_CONTAINER
             value: main

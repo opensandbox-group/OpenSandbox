@@ -43,6 +43,10 @@ fun GenerateTask.configureCommonOptions() {
     generatorName.set("kotlin")
     library.set("jvm-okhttp4")
 
+    templateDir.set(
+        project.projectDir.resolve("openapi-templates").absolutePath,
+    )
+
     typeMappings.set(
         mapOf(
             "object" to "kotlinx.serialization.json.JsonElement",

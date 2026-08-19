@@ -38,6 +38,7 @@ from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
     EGRESS_RULES_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
@@ -411,6 +412,7 @@ class DockerNetworkingMixin:
             f"{EGRESS_RULES_ENV}={policy_payload}",
             f"{EGRESS_MODE_ENV}={egress_mode}",
             f"{OPENSANDBOX_EGRESS_TOKEN}={egress_token}",
+            f"{OPENSANDBOX_EGRESS_SANDBOX_ID}={sandbox_id}",
         ]
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
@@ -509,6 +511,7 @@ class DockerNetworkingMixin:
                     sandbox_id,
                     egress_api_host_port,
                     egress_token,
+                    timeout_seconds=self.app_config.egress.readiness_timeout_seconds,
                 )
             return sidecar_container
         except Exception as exc:
@@ -547,7 +550,7 @@ class DockerNetworkingMixin:
         sandbox_id: str,
         host_port: int,
         egress_token: str,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float,
     ) -> None:
         deadline = time.monotonic() + timeout_seconds
         url = f"http://{self._resolve_proxy_host()}:{host_port}/healthz"

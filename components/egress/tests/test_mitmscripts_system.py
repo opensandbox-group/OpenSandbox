@@ -72,6 +72,8 @@ class _Request:
         self.headers = _Headers({})
         self.raw_content: bytes | None = None
         self.content = b""
+        self.stream = False
+        self.http_version = "HTTP/1.1"
 
 
 class _Response:
@@ -99,11 +101,23 @@ class _Flow:
         self.request = _Request()
         self.response = _Response()
         self.metadata: dict[str, Any] = {}
+        self.error = None
+        self.live = True
+        self.killable = True
+        self.killed = False
+
+    def kill(self) -> None:
+        self.killed = True
+        self.error = "Killed"
+        self.live = False
+        self.killable = False
 
 
 def _load_system_module() -> Any:
     mitmproxy = types.ModuleType("mitmproxy")
-    mitmproxy.ctx = types.SimpleNamespace(log=_Log(), options=types.SimpleNamespace(ignore_hosts=[]))
+    mitmproxy.ctx = types.SimpleNamespace(
+        log=_Log(), options=types.SimpleNamespace(ignore_hosts=[], ssl_insecure=False)
+    )
     def _make_response(status: int, body: bytes = b"", headers: dict | None = None):
         resp = _Response()
         resp.status_code = status
@@ -206,7 +220,7 @@ class SystemAddonRedactionTest(unittest.TestCase):
             ["secret-token"],
         )
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
         self.assertNotIn("secret-token", "\n".join(system.ctx.log.messages))
@@ -238,7 +252,7 @@ class SystemAddonRedactionTest(unittest.TestCase):
             ["old-secret"],
         )
 
-        system.request(flow)
+        system.requestheaders(flow)
         system._load_active_vault = lambda: system.ActiveVault(2, [], ["new-secret"])
         flow.response.headers["x-token-echo"] = "old-secret"
         system.responseheaders(flow)
@@ -312,7 +326,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.response = None
         flow.request.path = "/lookup?api_key=__query_secret__&static=1"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertEqual("/lookup?api_key=query%20secret%2Bvalue&static=1", flow.request.path)
         self.assertIn("query secret+value", flow.metadata[system.FLOW_REDACTIONS_KEY])
@@ -324,7 +338,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.response = None
         flow.request.path = "/tenants/__tenant_id__/items?tenant=__tenant_id__"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertEqual("/tenants/tenant%2042/items?tenant=__tenant_id__", flow.request.path)
 
@@ -338,6 +352,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.request.headers["transfer-encoding"] = "chunked"
         flow.request.content = b'{"client_secret":"__body_secret__"}'
 
+        system.requestheaders(flow)
         system.request(flow)
 
         body = flow.request.content.decode("utf-8")
@@ -354,6 +369,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.request.headers["content-type"] = "application/merge-patch+json; charset=utf-8"
         flow.request.content = b'{"client_secret":"__body_secret__"}'
 
+        system.requestheaders(flow)
         system.request(flow)
 
         body = flow.request.content.decode("utf-8")
@@ -368,6 +384,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.request.headers["content-type"] = "application/x-www-form-urlencoded"
         flow.request.content = b"secret=__form_secret__"
 
+        system.requestheaders(flow)
         system.request(flow)
 
         self.assertEqual(b"secret=form+secret%2Bvalue", flow.request.content)
@@ -407,6 +424,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.request.headers["content-type"] = "text/plain"
         flow.request.content = b"first=__a__&second=__b__"
 
+        system.requestheaders(flow)
         system.request(flow)
 
         self.assertEqual(b"first=prefix __b__&second=secret-b", flow.request.content)
@@ -442,7 +460,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.request.path = "/lookup"
         flow.request.headers["X-Template"] = "client __header_secret__"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertEqual("client substituted-secret", flow.request.headers.get("X-Template"))
         self.assertEqual("Bearer __header_secret__", flow.request.headers.get("Authorization"))
@@ -457,6 +475,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow.request.headers["content-encoding"] = "gzip"
         flow.request.content = b'{"client_secret":"__body_secret__"}'
 
+        system.requestheaders(flow)
         system.request(flow)
 
         self.assertEqual(b'{"client_secret":"__body_secret__"}', flow.request.content)
@@ -489,7 +508,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/tenants/__tenant_id__/items"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -524,7 +543,7 @@ class SystemAddonSubstitutionTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/tenants/__tenant_id__/items"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -558,7 +577,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/../456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -570,7 +589,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/%2e%2e/456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -582,7 +601,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/%2E%2e/456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -592,9 +611,9 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         """%2f encoded path separator must be rejected."""
         system = self._make_system_with_vault()
         flow = _Flow()
-        flow.request.path = "/api/v8/projects/123%2f..%2f456/variables"
+        flow.request.path = "/api/v8/projects/123/%2f..%2f456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -606,7 +625,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/variables?ref=../../main"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         # Should inject credential normally (path matches the binding).
         self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
@@ -617,7 +636,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
 
@@ -627,8 +646,37 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
+    def test_double_encoded_path_outside_binding_scope_is_allowed(self) -> None:
+        """Ambiguous paths pass through when no credential binding matches."""
+        system = self._make_system_with_vault()
+        flow = _Flow()
+        flow.request.pretty_host = "packages.example.com"
+        flow.request.host = "packages.example.com"
+        flow.request.path = (
+            "/1/pypi/simple/pyyaml/"
+            "%252Fcentral-pypi-proxy%252Fpackages%252F8b%252F9d/wheel.whl"
+        )
+
+        system.requestheaders(flow)
+
+        self.assertFalse(flow.killed)
+        self.assertNotEqual(403, getattr(flow.response, "status_code", None))
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
+    def test_ambiguous_path_on_bound_host_outside_path_scope_is_allowed(self) -> None:
+        """A host match alone does not put a request in credential scope."""
+        system = self._make_system_with_vault()
+        flow = _Flow()
+        flow.request.path = "/downloads/%252Fartifacts%252Fwheel.whl"
+
+        system.requestheaders(flow)
+
+        self.assertFalse(flow.killed)
+        self.assertNotEqual(403, getattr(flow.response, "status_code", None))
         self.assertNotIn("Private-Token", flow.request.headers._values)
 
     def test_dot_dot_substring_not_rejected(self) -> None:
@@ -636,7 +684,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         system = self._make_system_with_vault()
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/.../data"
-        system.request(flow)
+        system.requestheaders(flow)
         self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
 
     def test_dot_dot_metadata_path_not_rejected(self) -> None:
@@ -644,7 +692,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         system = self._make_system_with_vault()
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/..metadata"
-        system.request(flow)
+        system.requestheaders(flow)
         self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
 
     def test_encoded_backslash_rejected(self) -> None:
@@ -653,7 +701,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/%5c..%5c456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -663,9 +711,9 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         """Raw backslash in path must be rejected."""
         system = self._make_system_with_vault()
         flow = _Flow()
-        flow.request.path = "/api/v8/projects/123\\..\\456/variables"
+        flow.request.path = "/api/v8/projects/123/\\..\\456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -677,7 +725,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/%252e%252e/456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -690,7 +738,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123/../456/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         # No response set means the request passes through unmodified.
         # (flow.response is the pre-initialized _Response, not a 403)
@@ -721,7 +769,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         )
         flow.request.path = "/api/v8/projects/123%2fnested/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
 
@@ -764,7 +812,7 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
         flow = _Flow()
         flow.request.path = "/api/v8/projects/123%2fescape/variables"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         # Raw match set = {broad, narrow}; decoded match set = {broad}.
         # The two differ, so the request is rejected before injection.
@@ -804,7 +852,7 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow.request.host = "registry.npmjs.org"
         flow.request.path = "/@ali%2forion-claude-plugin"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertEqual("Bearer npm-token", flow.request.headers.get("Authorization"))
         self.assertIsNone(getattr(flow.response, "status_code", None))
@@ -817,7 +865,7 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow.request.host = "registry.npmjs.org"
         flow.request.path = "/@ali%2Forion-claude-plugin"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertEqual("Bearer npm-token", flow.request.headers.get("Authorization"))
 
@@ -830,7 +878,7 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow.request.host = "registry.npmjs.org"
         flow.request.path = "/@ali%5corion-claude-plugin"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
@@ -845,11 +893,316 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow.request.host = "registry.npmjs.org"
         flow.request.path = "/@ali%252forion-claude-plugin"
 
-        system.request(flow)
+        system.requestheaders(flow)
 
         self.assertIsNotNone(flow.response)
         self.assertEqual(403, flow.response.status_code)
         self.assertNotIn("Authorization", flow.request.headers._values)
+
+
+class SystemAddonStreamingTest(unittest.TestCase):
+    """Regression tests for the stream_large_bodies=1m header-injection bug.
+
+    Header injection must happen in the ``requestheaders`` hook; the 1 MiB
+    threshold itself is mitmproxy runtime behavior covered by e2e tests.
+    """
+
+    def _make_vault_with_large_body_binding(self, system):
+        return system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "llm-api",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/v1/chat/*"],
+                    },
+                    "headers": [{"name": "x-api-key", "value": "secret-api-key"}],
+                    "substitutions": [
+                        {
+                            "placeholder": "__body_secret__",
+                            "value": "body secret value",
+                            "in": ["body"],
+                        }
+                    ],
+                }
+            ],
+            ["secret-api-key", "__body_secret__", "body secret value"],
+        )
+
+    def test_header_injected_at_requestheaders_for_large_body(self) -> None:
+        """The regression: a >1 MiB request must receive the injected header
+        in the requestheaders hook, where the body is not available yet."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: self._make_vault_with_large_body_binding(
+            system
+        )
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/v1/chat/completions"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.headers["content-length"] = str(1024 * 1024 + 1)
+
+        system.requestheaders(flow)
+
+        self.assertEqual("secret-api-key", flow.request.headers.get("x-api-key"))
+        self.assertNotIn("secret-api-key", "\n".join(system.ctx.log.messages))
+
+    def test_streamed_request_injection_and_body_substitution_skip(self) -> None:
+        """A streamed request (body forwarded, content unavailable) must not
+        crash and must keep its body untouched; header injection still works."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: self._make_vault_with_large_body_binding(
+            system
+        )
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/v1/chat/completions"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.headers["content-length"] = str(1024 * 1024 + 1)
+        flow.request.content = b'{"prompt":"__body_secret__"}'
+        flow.request.raw_content = None
+        flow.request.stream = True
+
+        system.requestheaders(flow)
+        system.request(flow)
+
+        self.assertEqual("secret-api-key", flow.request.headers.get("x-api-key"))
+        self.assertEqual(b'{"prompt":"__body_secret__"}', flow.request.content)
+        self.assertNotIn("body secret value", "\n".join(system.ctx.log.messages))
+
+    def test_body_only_binding_sets_redactions_when_body_substituted(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "body-only",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/token"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__body_secret__",
+                            "value": "body secret value",
+                            "in": ["body"],
+                        }
+                    ],
+                }
+            ],
+            ["__body_secret__", "body secret value"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"client_secret":"__body_secret__"}'
+
+        system.requestheaders(flow)
+        self.assertNotIn(system.FLOW_REDACTIONS_KEY, flow.metadata)
+        self.assertIn(system.FLOW_VAULT_REDACTIONS_KEY, flow.metadata)
+
+        system.request(flow)
+
+        body = flow.request.content.decode("utf-8")
+        self.assertEqual({"client_secret": "body secret value"}, json.loads(body))
+        self.assertIn(system.FLOW_REDACTIONS_KEY, flow.metadata)
+
+    def test_body_substitution_redactions_from_matched_revision(self) -> None:
+        """Redactions must come from the vault revision matched at
+        requestheaders time, not from a later reload (0.5s cache TTL)."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "body-only",
+                    "match": {
+                        "hosts": ["code.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/token"],
+                    },
+                    "substitutions": [
+                        {
+                            "placeholder": "__body_secret__",
+                            "value": "body secret value",
+                            "in": ["body"],
+                        }
+                    ],
+                }
+            ],
+            ["__body_secret__", "body secret value"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"client_secret":"__body_secret__"}'
+
+        system.requestheaders(flow)
+        # Vault changes (e.g. cache TTL expiry) before the body arrives.
+        system._load_active_vault = lambda: system.ActiveVault(2, [], ["new-secret"])
+
+        system.request(flow)
+
+        body = flow.request.content.decode("utf-8")
+        self.assertEqual({"client_secret": "body secret value"}, json.loads(body))
+        self.assertEqual(
+            ["__body_secret__", "body secret value"],
+            flow.metadata[system.FLOW_REDACTIONS_KEY],
+        )
+        self.assertNotIn("new-secret", flow.metadata[system.FLOW_REDACTIONS_KEY])
+
+    def test_request_alone_is_noop_without_requestheaders(self) -> None:
+        """Phase 2 must not do anything without phase 1 having matched a
+        binding (e.g. no active vault at header time)."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "body-only",
+                    "match": {"hosts": ["code.example.com"]},
+                    "substitutions": [
+                        {
+                            "placeholder": "__body_secret__",
+                            "value": "body secret value",
+                            "in": ["body"],
+                        }
+                    ],
+                }
+            ],
+            ["__body_secret__", "body secret value"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.method = "POST"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"client_secret":"__body_secret__"}'
+
+        system.request(flow)
+
+        self.assertEqual(b'{"client_secret":"__body_secret__"}', flow.request.content)
+        self.assertNotIn(system.FLOW_BINDING_KEY, flow.metadata)
+
+    def test_streamed_request_with_ambiguous_path_is_killed_not_403(self) -> None:
+        """Regression: setting a 403 on a >1 MiB request crashes mitmproxy
+        11.0.2 (start_request_stream raises NotImplementedError). A streamed
+        request must be killed instead, and must never receive credentials."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: self._make_vault_with_large_body_binding(
+            system
+        )
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/v1/chat/completions/../admin"
+        flow.request.headers["content-length"] = str(1024 * 1024 + 1)
+        flow.request.stream = True
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.killed)
+        self.assertIsNone(getattr(flow.response, "status_code", None))
+        self.assertNotIn("x-api-key", flow.request.headers._values)
+
+    def test_unknown_length_request_with_ambiguous_path_is_killed_not_403(self) -> None:
+        """Chunked bodies can cross 1 MiB after requestheaders, which enables
+        streaming mid-upload; a 403 would crash there, so kill instead."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: self._make_vault_with_large_body_binding(
+            system
+        )
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/v1/chat/completions/../admin"
+        flow.request.headers["transfer-encoding"] = "chunked"
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.killed)
+        self.assertIsNone(getattr(flow.response, "status_code", None))
+        self.assertNotIn("x-api-key", flow.request.headers._values)
+
+    def test_small_known_body_with_ambiguous_path_still_403(self) -> None:
+        """Bodies fully known to be under stream_large_bodies can never be
+        streamed, so the 403 response is still safe."""
+        system = _load_system_module()
+        system._load_active_vault = lambda: self._make_vault_with_large_body_binding(
+            system
+        )
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/v1/chat/completions/../admin"
+        flow.request.headers["content-length"] = "100"
+
+        system.requestheaders(flow)
+
+        self.assertFalse(flow.killed)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("x-api-key", flow.request.headers._values)
+
+
+class SystemAddonTlsClientHelloTest(unittest.TestCase):
+    def _client_hello_data(self, sni: str | None) -> Any:
+        class _ClientHello:
+            def __init__(self, sni: str | None) -> None:
+                self.sni = sni
+
+        class _Data:
+            def __init__(self, sni: str | None) -> None:
+                self.client_hello = _ClientHello(sni)
+                self.ignore_connection = False
+
+        return _Data(sni)
+
+    def test_no_sni_passes_through(self) -> None:
+        """Connections without SNI cannot be MITM'd (upstream hostname
+        verification would fall back to the IP) and must pass through."""
+        system = _load_system_module()
+        data = self._client_hello_data(None)
+        system.tls_clienthello(data)
+        self.assertTrue(data.ignore_connection)
+
+    def test_no_sni_passes_through_even_with_patterns(self) -> None:
+        system = _load_system_module()
+        system.ctx.options.ignore_hosts = [r".*\.oss[-a-z0-9]*\.aliyuncs\.com"]
+        data = self._client_hello_data(None)
+        system.tls_clienthello(data)
+        self.assertTrue(data.ignore_connection)
+
+    def test_no_sni_keeps_mitm_when_ssl_insecure_enabled(self) -> None:
+        """The explicit insecure-MITM escape hatch (SSL_INSECURE) must keep
+        working for no-SNI clients, so pass-through is skipped."""
+        system = _load_system_module()
+        system.ctx.options.ssl_insecure = True
+        data = self._client_hello_data(None)
+        system.tls_clienthello(data)
+        self.assertFalse(data.ignore_connection)
+
+    def test_sni_matching_ignore_hosts_passes_through(self) -> None:
+        system = _load_system_module()
+        system.ctx.options.ignore_hosts = [r".*\.oss[-a-z0-9]*\.aliyuncs\.com"]
+        data = self._client_hello_data("taskline-oss-daily.oss-cn-wulanchabu.aliyuncs.com")
+        system.tls_clienthello(data)
+        self.assertTrue(data.ignore_connection)
+
+    def test_sni_not_matching_keeps_connection(self) -> None:
+        system = _load_system_module()
+        system.ctx.options.ignore_hosts = [r".*\.oss[-a-z0-9]*\.aliyuncs\.com"]
+        data = self._client_hello_data("dashscope.aliyuncs.com")
+        system.tls_clienthello(data)
+        self.assertFalse(data.ignore_connection)
+
+    def test_empty_patterns_keeps_sni_connection(self) -> None:
+        system = _load_system_module()
+        data = self._client_hello_data("example.com")
+        system.tls_clienthello(data)
+        self.assertFalse(data.ignore_connection)
 
 
 if __name__ == "__main__":

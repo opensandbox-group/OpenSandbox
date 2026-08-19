@@ -95,7 +95,7 @@ func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot 
 	snapshot.Status.SourceNodeName = sourceNodeName
 	snapshot.Status.Containers = containers
 
-	job, err := r.buildCommitJob(snapshot)
+	job, err := r.buildCommitJob(snapshot, string(pod.UID))
 	if err != nil {
 		msg := fmt.Sprintf("failed to build commit job: %v", err)
 		_ = r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "BuildCommitJobFailed", msg)
@@ -153,7 +153,7 @@ func (r *SandboxSnapshotReconciler) handleCommitting(ctx context.Context, snapsh
 			message = failedCond.Message
 		}
 		log.Info("Commit job failed", "job", jobName, "message", message)
-		if err := r.ensureUnpauseJob(ctx, snapshot); err != nil {
+		if err := r.ensureUnpauseJob(ctx, snapshot, imageCommitterEnvValue(job, "SOURCE_POD_UID")); err != nil {
 			log.Error(err, "Failed to create best-effort unpause job")
 		}
 		r.Recorder.Eventf(snapshot, corev1.EventTypeWarning, "JobFailed", "Commit job failed")
@@ -322,6 +322,7 @@ func (r *SandboxSnapshotReconciler) imageCommitterPullSecrets() []corev1.LocalOb
 func commitJobSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsUser:                ptrToInt64(0),
+		RunAsNonRoot:             ptrToBool(false),
 		AllowPrivilegeEscalation: ptrToBool(false),
 		Capabilities: &corev1.Capabilities{
 			Drop: []corev1.Capability{"ALL"},
@@ -329,7 +330,7 @@ func commitJobSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.SandboxSnapshot) (*batchv1.Job, error) {
+func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.SandboxSnapshot, sourcePodUID string) (*batchv1.Job, error) {
 	jobName := r.getJobName(snapshot)
 	imageCommitterImage := r.imageCommitterImage()
 
@@ -376,6 +377,9 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 	}
 	args := append([]string{snapshot.Status.SourcePodName, snapshot.Namespace}, containerSpecs...)
 	env := []corev1.EnvVar{{Name: "CONTAINERD_SOCKET", Value: ContainerdSocketPath}}
+	if sourcePodUID != "" {
+		env = append(env, corev1.EnvVar{Name: "SOURCE_POD_UID", Value: sourcePodUID})
+	}
 	if r.SnapshotRegistryInsecure {
 		env = append(env, corev1.EnvVar{Name: "SNAPSHOT_REGISTRY_INSECURE", Value: "true"})
 	}
@@ -416,13 +420,153 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 		},
 	}
 
+	if err := r.applyImageCommitterPodTemplate(&job.Spec.Template); err != nil {
+		return nil, err
+	}
 	if err := ctrl.SetControllerReference(snapshot, job, r.Scheme); err != nil {
 		return nil, fmt.Errorf("failed to set controller reference: %w", err)
 	}
 	return job, nil
 }
 
-func (r *SandboxSnapshotReconciler) ensureUnpauseJob(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) error {
+func (r *SandboxSnapshotReconciler) applyImageCommitterPodTemplate(generated *corev1.PodTemplateSpec) error {
+	if generated == nil {
+		return fmt.Errorf("generated image-committer Pod template is required")
+	}
+
+	var overlay *corev1.PodTemplateSpec
+	if r.ImageCommitterPodTemplate != nil {
+		overlay = r.ImageCommitterPodTemplate.DeepCopy()
+	} else {
+		overlay = &corev1.PodTemplateSpec{}
+	}
+
+	generated.Labels = mergeStringMaps(overlay.Labels, generated.Labels)
+	generated.Annotations = mergeStringMaps(overlay.Annotations, generated.Annotations)
+
+	generatedContainer := generated.Spec.Containers[0]
+	commitContainer := corev1.Container{Name: CommitJobContainerName}
+	commitCount := 0
+	containers := make([]corev1.Container, 0, len(overlay.Spec.Containers)+1)
+	for _, container := range overlay.Spec.Containers {
+		if container.Name != CommitJobContainerName {
+			containers = append(containers, container)
+			continue
+		}
+		commitCount++
+		commitContainer = container
+	}
+	if commitCount > 1 {
+		return fmt.Errorf("image-committer Pod template contains multiple %q containers", CommitJobContainerName)
+	}
+
+	commitContainer.Name = generatedContainer.Name
+	commitContainer.Image = generatedContainer.Image
+	commitContainer.ImagePullPolicy = generatedContainer.ImagePullPolicy
+	commitContainer.Command = generatedContainer.Command
+	commitContainer.Args = generatedContainer.Args
+	commitContainer.Env = mergeEnvVars(commitContainer.Env, generatedContainer.Env)
+	commitContainer.VolumeMounts = mergeVolumeMounts(commitContainer.VolumeMounts, generatedContainer.VolumeMounts)
+	commitContainer.SecurityContext = generatedContainer.SecurityContext
+	commitContainer.TerminationMessagePath = "/dev/termination-log"
+	commitContainer.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	containers = append([]corev1.Container{commitContainer}, containers...)
+
+	overlay.Spec.Containers = containers
+	overlay.Spec.Volumes = mergeVolumes(overlay.Spec.Volumes, generated.Spec.Volumes)
+	overlay.Spec.ImagePullSecrets = mergeLocalObjectReferences(overlay.Spec.ImagePullSecrets, generated.Spec.ImagePullSecrets)
+	overlay.Spec.RestartPolicy = generated.Spec.RestartPolicy
+	overlay.Spec.NodeName = generated.Spec.NodeName
+
+	generated.Spec = overlay.Spec
+	return nil
+}
+
+func mergeStringMaps(maps ...map[string]string) map[string]string {
+	var result map[string]string
+	for _, values := range maps {
+		for key, value := range values {
+			if result == nil {
+				result = make(map[string]string)
+			}
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func mergeEnvVars(base, required []corev1.EnvVar) []corev1.EnvVar {
+	result := append([]corev1.EnvVar(nil), base...)
+	for _, value := range required {
+		replaced := false
+		for i := range result {
+			if result[i].Name == value.Name {
+				result[i] = value
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func mergeVolumeMounts(base, required []corev1.VolumeMount) []corev1.VolumeMount {
+	result := append([]corev1.VolumeMount(nil), base...)
+	for _, value := range required {
+		replaced := false
+		for i := range result {
+			if result[i].Name == value.Name {
+				result[i] = value
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func mergeVolumes(base, required []corev1.Volume) []corev1.Volume {
+	result := append([]corev1.Volume(nil), base...)
+	for _, value := range required {
+		replaced := false
+		for i := range result {
+			if result[i].Name == value.Name {
+				result[i] = value
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func mergeLocalObjectReferences(base, required []corev1.LocalObjectReference) []corev1.LocalObjectReference {
+	result := append([]corev1.LocalObjectReference(nil), base...)
+	for _, value := range required {
+		found := false
+		for _, existing := range result {
+			if existing.Name == value.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func (r *SandboxSnapshotReconciler) ensureUnpauseJob(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot, sourcePodUID string) error {
 	if snapshot.Status.SourcePodName == "" || snapshot.Status.SourceNodeName == "" || len(snapshot.Status.Containers) == 0 {
 		return nil
 	}
@@ -435,19 +579,23 @@ func (r *SandboxSnapshotReconciler) ensureUnpauseJob(ctx context.Context, snapsh
 		return err
 	}
 
-	job, err := r.buildUnpauseJob(snapshot)
+	job, err := r.buildUnpauseJob(snapshot, sourcePodUID)
 	if err != nil {
 		return err
 	}
 	return r.Create(ctx, job)
 }
 
-func (r *SandboxSnapshotReconciler) buildUnpauseJob(snapshot *sandboxv1alpha1.SandboxSnapshot) (*batchv1.Job, error) {
+func (r *SandboxSnapshotReconciler) buildUnpauseJob(snapshot *sandboxv1alpha1.SandboxSnapshot, sourcePodUID string) (*batchv1.Job, error) {
 	var containerNames []string
 	for _, cs := range snapshot.Status.Containers {
 		containerNames = append(containerNames, cs.ContainerName)
 	}
 	args := append([]string{"unpause", snapshot.Status.SourcePodName, snapshot.Namespace}, containerNames...)
+	env := []corev1.EnvVar{{Name: "CONTAINERD_SOCKET", Value: ContainerdSocketPath}}
+	if sourcePodUID != "" {
+		env = append(env, corev1.EnvVar{Name: "SOURCE_POD_UID", Value: sourcePodUID})
+	}
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -476,9 +624,7 @@ func (r *SandboxSnapshotReconciler) buildUnpauseJob(snapshot *sandboxv1alpha1.Sa
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "containerd-sock", MountPath: ContainerdSocketPath},
 							},
-							Env: []corev1.EnvVar{
-								{Name: "CONTAINERD_SOCKET", Value: ContainerdSocketPath},
-							},
+							Env:             env,
 							SecurityContext: commitJobSecurityContext(),
 						},
 					},
@@ -587,6 +733,23 @@ func snapshotResultFromPod(pod *corev1.Pod) (*commitJobResult, bool, error) {
 		return &result, true, nil
 	}
 	return nil, false, nil
+}
+
+func imageCommitterEnvValue(job *batchv1.Job, name string) string {
+	if job == nil {
+		return ""
+	}
+	for _, container := range job.Spec.Template.Spec.Containers {
+		if container.Name != CommitJobContainerName {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name == name {
+				return env.Value
+			}
+		}
+	}
+	return ""
 }
 
 func (r *SandboxSnapshotReconciler) getJobName(snapshot *sandboxv1alpha1.SandboxSnapshot) string {

@@ -1,7 +1,7 @@
 ---
 title: Isolated Execution API
 authors:
-  - "@pjp"
+  - "@Pangjiping"
 creation-date: 2026-06-06
 last-updated: 2026-06-23
 status: implementing

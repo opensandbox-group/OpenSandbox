@@ -54,7 +54,7 @@ Example files in this repository:
 | `[store]` | No | Server-managed persistent metadata backend |
 | `[secure_runtime]` | No | gVisor / Kata / Firecracker |
 | `[renew_intent]` | No | Auto-renew on access |
-| `[otel]` | No | OTLP export for ingested SDK metrics |
+| `[otel]` | No | OTLP export for Server HTTP and ingested SDK metrics |
 
 ---
 
@@ -96,6 +96,7 @@ Example files in this repository:
 |-----|------|---------|-------------|
 | `type` | string | — | **`docker`** or **`kubernetes`**. Selects which runtime implementation loads. |
 | `execd_image` | string | — | OCI image containing the **execd** binary used to bootstrap command/file access inside the sandbox. |
+| `execd_run_as_init` | boolean | `false` | Run **execd as the sandbox init** (OSEP-0018): sets `EXECD_INIT` in the sandbox environment so `bootstrap.sh` `exec`s into `execd --init` and execd becomes PID 1 — reaping children, owning the container lifecycle, and exposing the hardening floor. Defaults to `false` (classic background-and-wait topology); intended to be flipped on after validation in production. |
 
 ---
 
@@ -111,6 +112,8 @@ Example files in this repository:
 | `no_new_privileges` | boolean | `true` | Sets `no-new-privileges` to block privilege escalation. |
 | `seccomp_profile` | string \| omitted | `null` | Seccomp profile name or **absolute path**; empty uses Docker default seccomp. |
 | `pids_limit` | integer \| null | `4096` | Max PIDs per sandbox container; set to **`null`** to disable the limit. |
+| `sandbox_env` | table | `{}` | Environment variables injected into **every** sandbox container; keys from a creation request override same-named keys. Docker-runtime counterpart of the Kubernetes pod template (e.g. `NODE_EXTRA_CA_CERTS` to trust a private CA, together with `sandbox_binds`). |
+| `sandbox_binds` | string[] | `[]` | Host bind mounts applied to **every** sandbox container, Docker `-v` syntax (`host:container[:mode]`); prepended to binds derived from a request's `volumes`. |
 | `port_range_min` | integer | `40000` | Lower bound of the host port range used by bridge-mode sandbox port allocation. Must be less than `port_range_max`. Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar). Narrow this range to match your firewall policy — e.g., 100 concurrent sandboxes ≈ 300 ports. |
 | `port_range_max` | integer | `60000` | Upper bound of the host port range. Range must span ≥ 100 ports for reliable allocation. |
 
@@ -204,6 +207,7 @@ Configures the **egress sidecar** image and enforcement mode. The server only at
 | `image` | string \| omitted | `null` | OCI image for the egress sidecar. **Required in config** when clients send **`networkPolicy`** (create request). |
 | `mode` | string | `"dns"` | Passed to the sidecar as `OPENSANDBOX_EGRESS_MODE`. Values: **`dns`** — DNS-proxy-based enforcement (CIDR/static IP rules **not** enforced); **`dns+nft`** — adds nftables where available so **CIDR/IP** rules can be enforced. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (especially on Kubernetes). **Default on**; set `false` only when you want IPv6 left up in the netns. Details in [IPv6 and egress](#ipv6-and-egress) below. |
+| `readiness_timeout_seconds` | float | `30.0` | **Docker only.** Maximum time to wait for the egress sidecar health endpoint to become ready. Must be greater than `0`. |
 
 ### IPv6 and egress
 
@@ -213,6 +217,7 @@ OpenSandbox egress does **not** treat IPv6 as a first-class, fully covered path�
 
 - `egress.image` must be set when using `networkPolicy`.
 - Outbound policy requires **`docker.network_mode = "bridge"`**; `networkPolicy` is rejected for incompatible network modes.
+- Increase `egress.readiness_timeout_seconds` when the sidecar needs more than 30 seconds to become ready in the deployment environment.
 
 **Kubernetes notes:**
 
@@ -300,7 +305,7 @@ Per-sandbox enablement uses create request extensions (see OSEP-0009 and `exampl
 
 ## `[otel]`
 
-Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the ingestion endpoint still accepts events and records them as noop.
+Optional OpenTelemetry metrics export for Server HTTP requests and SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the HTTP middleware and ingestion endpoint remain active but record as noops.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -308,6 +313,15 @@ Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency 
 | `endpoint` | string \| omitted | `null` | OTLP HTTP metrics endpoint. When omitted, uses `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`. |
 | `service_name` | string | `"opensandbox-server"` | `service.name` resource attribute. |
 | `export_interval_millis` | integer | `60000` | Periodic export interval (≥ 1000). |
+
+Exported metrics:
+
+| Metric | Type | Unit | Attributes | Description |
+|-----|------|------|------------|-------------|
+| `server.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | Server HTTP request latency. Histogram count provides request volume. |
+| `opensandbox.sandbox.create.duration` | Histogram | `ms` | `sdk.language`, `sdk.version`, `success` | SDK-reported creation latency from create start until ready or failure. |
+
+The HTTP metric uses the matched route template rather than the raw request path. Requests that do not reach a matched route, including early authentication failures and unmatched URLs, use `http_route=unknown`. Standard HTTP methods are recorded in uppercase, while extension methods use `http_method=OTHER` to keep attribute cardinality bounded. The metric never includes sandbox IDs, tenant IDs, API keys, request or response bodies, query strings, or other unbounded request data.
 
 ---
 

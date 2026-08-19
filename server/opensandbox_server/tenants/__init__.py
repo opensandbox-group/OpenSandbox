@@ -26,6 +26,11 @@ from opensandbox_server.tenants.http_provider import (
 from opensandbox_server.tenants.models import TenantEntry
 from opensandbox_server.tenants.provider import TenantProvider, TenantProviderUnavailable
 
+import logging
+from typing import Iterable
+
+logger = logging.getLogger(__name__)
+
 
 def validate_tenant_config(app_config) -> None:
     """Validate tenant configuration against runtime and auth settings.
@@ -49,6 +54,90 @@ def validate_tenant_config(app_config) -> None:
         )
 
 
+def validate_tenant_namespaces(
+    tenants: Iterable[TenantEntry], core_v1_api
+) -> None:
+    """Validate that every tenant namespace exists and is accessible.
+
+    Enforces the OSEP-0014 startup requirement that all tenant namespaces
+    exist and are accessible before the server accepts traffic (fail-fast).
+
+    Args:
+        tenants: Tenant entries to validate.
+        core_v1_api: A Kubernetes ``CoreV1Api`` used to read namespaces.
+
+    Raises:
+        ValueError: If any tenant namespace is missing or inaccessible. The
+            error aggregates all failing namespaces so operators can fix the
+            configuration in a single pass.
+    """
+    from kubernetes.client import ApiException
+
+    failures: list[str] = []
+    checked: set[str] = set()
+    for tenant in tenants:
+        namespace = tenant.namespace
+        if namespace in checked:
+            continue
+        checked.add(namespace)
+        try:
+            core_v1_api.read_namespace(name=namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                failures.append(
+                    f"tenant '{tenant.name}': namespace '{namespace}' does not exist"
+                )
+            elif exc.status in (401, 403):
+                failures.append(
+                    f"tenant '{tenant.name}': namespace '{namespace}' is not accessible "
+                    f"(HTTP {exc.status})"
+                )
+            else:
+                failures.append(
+                    f"tenant '{tenant.name}': failed to read namespace '{namespace}' "
+                    f"(HTTP {exc.status})"
+                )
+        except Exception as exc:  # noqa: BLE001 - surface any client error as fatal
+            failures.append(
+                f"tenant '{tenant.name}': failed to read namespace '{namespace}': {exc}"
+            )
+
+    if failures:
+        raise ValueError(
+            "Tenant namespace validation failed; all tenant namespaces must exist "
+            "and be accessible at startup:\n  - " + "\n  - ".join(failures)
+        )
+
+    logger.info("Validated %d tenant namespace(s) at startup", len(checked))
+
+
+def validate_tenant_namespaces_on_startup(provider, core_v1_api) -> None:
+    """Validate tenant namespaces at startup if the provider can enumerate them.
+
+    Enforces the OSEP-0014 fail-fast requirement that all tenant namespaces
+    exist and are accessible before the server accepts traffic. Providers that
+    resolve tenants per API key (e.g. the HTTP provider) cannot enumerate all
+    tenants at startup; validating their empty set would silently report
+    success, so validation is skipped with a warning instead.
+
+    Args:
+        provider: The configured tenant provider.
+        core_v1_api: A Kubernetes ``CoreV1Api`` used to read namespaces.
+
+    Raises:
+        ValueError: If any tenant namespace is missing or inaccessible (for
+            enumerable providers).
+    """
+    if not getattr(provider, "supports_enumeration", True):
+        logger.warning(
+            "Skipping tenant namespace startup validation: the tenant provider "
+            "cannot enumerate all tenants. Ensure tenant namespaces exist and "
+            "are accessible before issuing tenant API keys."
+        )
+        return
+    validate_tenant_namespaces(provider.list_tenants(), core_v1_api)
+
+
 __all__ = [
     "TenantEntry",
     "TenantProvider",
@@ -62,4 +151,6 @@ __all__ = [
     "set_current_tenant",
     "resolve_tenants_path",
     "validate_tenant_config",
+    "validate_tenant_namespaces",
+    "validate_tenant_namespaces_on_startup",
 ]

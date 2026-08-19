@@ -13,8 +13,14 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
+from docker.errors import DockerException
+from fastapi import HTTPException, status
+import pytest
+
+from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.docker.docker_diagnostics import (
     DockerDiagnosticsMixin,
     _parse_since_to_timestamp,
@@ -66,6 +72,82 @@ def test_get_sandbox_logs_returns_placeholder_for_empty_output() -> None:
     service = _DiagnosticsService(container)
 
     assert service.get_sandbox_logs("sbx-1") == "(no logs)"
+
+
+def test_get_sandbox_logs_maps_docker_errors_to_contract_response() -> None:
+    container = _container({"State": {}})
+    container.logs.side_effect = DockerException("daemon disconnected")
+    service = _DiagnosticsService(container)
+
+    with pytest.raises(HTTPException) as exc:
+        service.get_sandbox_logs("sbx-1")
+
+    assert exc.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    detail = cast(dict[str, str], exc.value.detail)
+    assert detail["code"] == SandboxErrorCodes.CONTAINER_QUERY_FAILED
+    assert detail["message"] == "Failed to read logs for sandbox sbx-1: daemon disconnected"
+
+
+def test_stable_log_diagnostics_policy_is_owned_by_docker_service() -> None:
+    container = _container({"State": {}})
+    lines = [f"line {index}" for index in range(101)]
+    container.logs.return_value = "\n".join(lines)
+    service = _DiagnosticsService(container)
+
+    result = service.get_sandbox_log_diagnostics("sbx-1", scope="ALL")
+
+    assert result.scope == "all"
+    assert result.content.splitlines() == lines[-100:]
+    assert result.truncated is True
+    assert result.warnings == (
+        "The current backend only contributes sandbox container logs to the all scope.",
+    )
+    container.logs.assert_called_once_with(tail=101, timestamps=True)
+
+
+def test_stable_event_diagnostics_policy_is_owned_by_docker_service() -> None:
+    service = _DiagnosticsService(_container({"State": {}}))
+    events = [f"event {index}" for index in range(51)]
+    service.get_sandbox_events = MagicMock(return_value="\n".join(events))
+
+    result = service.get_sandbox_event_diagnostics("sbx-1", scope="ALL")
+
+    assert result.scope == "all"
+    assert result.content.splitlines() == events[:50]
+    assert result.truncated is True
+    assert result.warnings == (
+        "The current backend only contributes runtime events to the all scope.",
+    )
+    service.get_sandbox_events.assert_called_once_with("sbx-1", limit=51)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "scope", "kind", "supported"),
+    [
+        ("get_sandbox_log_diagnostics", "lifecycle", "logs", "container, all"),
+        ("get_sandbox_event_diagnostics", "network", "events", "runtime, all"),
+    ],
+)
+def test_stable_diagnostics_reject_unsupported_docker_scopes(
+    method_name: str,
+    scope: str,
+    kind: str,
+    supported: str,
+) -> None:
+    container = _container({"State": {}})
+    service = _DiagnosticsService(container)
+
+    with pytest.raises(HTTPException) as exc:
+        getattr(service, method_name)("sbx-1", scope)
+
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert exc.value.detail == {
+        "code": "DIAGNOSTICS_SCOPE_UNSUPPORTED",
+        "message": (
+            f"Unsupported {kind} diagnostics scope {scope!r}. Supported scopes: {supported}."
+        ),
+    }
+    container.logs.assert_not_called()
 
 
 def test_get_sandbox_inspect_formats_state_resources_ports_and_safe_env() -> None:
