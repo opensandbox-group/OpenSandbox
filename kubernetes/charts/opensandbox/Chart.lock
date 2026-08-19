@@ -1,12 +1,12 @@
 dependencies:
 - name: opensandbox-controller
   repository: file://../opensandbox-controller
-  version: 0.2.0
+  version: 0.2.1
 - name: opensandbox-server
   repository: file://../opensandbox-server
   version: 0.1.0
 - name: opensandbox-node-agent
   repository: file://../opensandbox-node-agent
   version: 0.1.0
-digest: sha256:18ed87f3960e0df808eba7bd27455e416dc6330951281493bba4bb0ab0321512
-generated: "2026-07-30T14:58:20.116343+08:00"
+digest: sha256:9a8dfea166e50e4016bd850366a17e02a9052cb73f88375d934558c625dfb956
+generated: "2026-08-18T18:20:43.341958+08:00"

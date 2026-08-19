@@ -94,6 +94,11 @@ jobs:
         run: |
           make lint
 
+      - name: Lint Helm charts
+        working-directory: kubernetes
+        run: |
+          make helm-lint
+
       - name: Build binary
         working-directory: kubernetes
         run: |

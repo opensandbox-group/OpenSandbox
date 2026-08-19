@@ -62,8 +62,8 @@ controller:
     imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1"
     # -- PodTemplateSpec overlay for image-committer commit Job Pods.
     imageCommitterPodTemplate: {}
-    # -- Containerd socket path of host
-    containerdSocketPath: "/var/run/containerd/containerd.sock"
+    # -- Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing --containerd-socket-path flag.
+    containerdSocketPath: ""
     # -- Timeout duration for commit jobs
     commitJobTimeout: "10m"
     # -- OCI registry prefix used for snapshot images.

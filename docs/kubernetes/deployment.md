@@ -26,13 +26,13 @@ Install the controller and CRDs before the lifecycle server. The server runs in 
 Choose a published `opensandbox-server` chart from [GitHub Releases](https://github.com/opensandbox-group/OpenSandbox/releases?q=helm%2Fopensandbox-server&expanded=true), then set both versions from that release:
 
 ```sh
-APP_VERSION="<app-version>"
 CHART_VERSION="<chart-version>"
-CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${APP_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
+APP_VERSION="<app-version>"
+CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${CHART_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
 ```
 
 ::: info Versioning
-The release tag identifies the server application version, while the `.tgz` filename uses the Helm chart version. These versions are independent and are listed on each GitHub Release.
+The release tag and `.tgz` filename identify the Helm chart version. The server application version is independent and is listed on each GitHub Release.
 :::
 
 ### Configure API authentication

@@ -13,13 +13,17 @@ on:
           - opensandbox
           - opensandbox-node-agent
         default: 'opensandbox-controller'
+      chart_version:
+        description: 'Chart version to release (without v prefix, e.g., 0.1.0)'
+        required: true
+        default: '0.1.0'
       app_version:
         description: 'App version (without v prefix, e.g., 0.1.0)'
         required: true
         default: '0.1.0'
   push:
     tags:
-      - 'helm/**'  # Format: helm/<component>/<app_version>, e.g., helm/opensandbox-controller/0.1.0
+      - 'helm/**'  # Format: helm/<component>/<chart_version>, e.g., helm/opensandbox-controller/0.1.0
 
 jobs:
   release-preflight:
@@ -63,12 +67,13 @@ jobs:
             VERSION=${VERSION#v}
             
             echo "component=$COMPONENT" >> $GITHUB_OUTPUT
-            echo "app_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "chart_version=$VERSION" >> $GITHUB_OUTPUT
             echo "release_tag=$TAG_PATH" >> $GITHUB_OUTPUT
           else
             echo "component=${{ inputs.component }}" >> $GITHUB_OUTPUT
+            echo "chart_version=${{ inputs.chart_version }}" >> $GITHUB_OUTPUT
             echo "app_version=${{ inputs.app_version }}" >> $GITHUB_OUTPUT
-            echo "release_tag=helm/${{ inputs.component }}/${{ inputs.app_version }}" >> $GITHUB_OUTPUT
+            echo "release_tag=helm/${{ inputs.component }}/${{ inputs.chart_version }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Verify release tag on origin
@@ -120,10 +125,18 @@ jobs:
         run: |
           CHART_PATH="${{ steps.chart_path.outputs.path }}"
           CHART_VERSION=$(grep '^version:' $CHART_PATH/Chart.yaml | awk '{print $2}')
-          echo "version=$CHART_VERSION" >> $GITHUB_OUTPUT
-          echo "Chart version: $CHART_VERSION"
+          EXPECTED_CHART_VERSION="${{ steps.parse_tag.outputs.chart_version }}"
 
-      - name: Update Chart.yaml with app version
+          if [ "$CHART_VERSION" != "$EXPECTED_CHART_VERSION" ]; then
+            echo "::error::Chart.yaml version '$CHART_VERSION' does not match requested chart version '$EXPECTED_CHART_VERSION'."
+            exit 1
+          fi
+
+          echo "version=$CHART_VERSION" >> $GITHUB_OUTPUT
+          echo "Verified chart version: $CHART_VERSION"
+
+      - name: Update Chart.yaml with app version for manual release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           APP_VERSION="${{ steps.parse_tag.outputs.app_version }}"
           CHART_PATH="${{ steps.chart_path.outputs.path }}"
@@ -133,6 +146,14 @@ jobs:
           
           echo "Updated Chart.yaml:"
           cat $CHART_PATH/Chart.yaml
+
+      - name: Get app version from Chart.yaml
+        id: app_version
+        run: |
+          CHART_PATH="${{ steps.chart_path.outputs.path }}"
+          APP_VERSION=$(grep '^appVersion:' $CHART_PATH/Chart.yaml | awk '{print $2}' | tr -d '"')
+          echo "version=$APP_VERSION" >> $GITHUB_OUTPUT
+          echo "App version: $APP_VERSION"
 
       - name: Build dependencies (for opensandbox all-in-one chart)
         if: ${{ steps.parse_tag.outputs.component == 'opensandbox' }}
@@ -160,12 +181,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.parse_tag.outputs.release_tag }}
-          name: Helm Chart ${{ steps.parse_tag.outputs.component }} ${{ steps.chart_version.outputs.version }} (App v${{ steps.parse_tag.outputs.app_version }})
+          name: Helm Chart ${{ steps.parse_tag.outputs.component }} ${{ steps.chart_version.outputs.version }} (App v${{ steps.app_version.outputs.version }})
           body: |
             ## ${{ steps.parse_tag.outputs.component }} Helm Chart
             
             **Chart Version:** ${{ steps.chart_version.outputs.version }}
-            **App Version:** ${{ steps.parse_tag.outputs.app_version }}
+            **App Version:** ${{ steps.app_version.outputs.version }}
             
             ### Installation
             
@@ -195,7 +216,7 @@ jobs:
             ### What's Changed
             
             - Chart version: ${{ steps.chart_version.outputs.version }}
-            - App version: ${{ steps.parse_tag.outputs.app_version }}
+            - App version: ${{ steps.app_version.outputs.version }}
           files: |
             ${{ steps.parse_tag.outputs.component }}-*.tgz
           draft: false

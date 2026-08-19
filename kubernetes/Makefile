@@ -530,9 +530,13 @@ HELM_CHART_PATH ?= charts/opensandbox-controller
 HELM_CHART_VERSION ?= $(VERSION)
 
 .PHONY: helm-lint
-helm-lint: ## Lint the Helm chart
-	@echo "Linting Helm chart..."
-	helm lint $(HELM_CHART_PATH)
+helm-lint: ## Lint all Helm charts and verify dependencies
+	@echo "Linting Helm charts..."
+	helm lint charts/opensandbox-controller
+	helm lint charts/opensandbox-server
+	helm lint charts/opensandbox-node-agent
+	helm dependency build charts/opensandbox
+	helm lint charts/opensandbox
 
 .PHONY: helm-template
 helm-template: ## Generate Kubernetes manifests from Helm chart

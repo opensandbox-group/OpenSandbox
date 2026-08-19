@@ -446,10 +446,10 @@ Tag naming convention: `helm/{component}/{version}`
 
 This automatically triggers the workflow to:
 1. Parse the tag to extract component and version
-2. Update the version in the corresponding Chart.yaml
-3. Package the Helm Chart
-4. Create a GitHub Release
-5. Publish the .tgz package to the Release
+2. Verify the tag version matches the chart `version`
+3. Preserve the committed chart `appVersion`
+4. Package the Helm Chart
+5. Create a GitHub Release and publish the .tgz package
 
 Important versioning note:
 
@@ -457,9 +457,9 @@ Important versioning note:
   `helm/{component}/{version}` tags.
 - The chart `appVersion` is the default image/application version used by that
   chart release.
-- The `publish-helm-chart.yml` workflow updates `appVersion` for the published
-  release, but intentionally does not auto-bump the chart `version` inside
-  `Chart.yaml` on server release branches.
+- Tag-triggered publishing preserves the committed chart `appVersion` and
+  verifies that the tag matches the committed chart `version`. Manual runs can
+  override `appVersion` independently.
 - If you need a specific server image release, set the image tag explicitly
   (for example `--set server.image.tag=v0.1.13`) or publish a new Helm chart
   package version for the chart itself.

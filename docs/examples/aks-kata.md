@@ -130,7 +130,7 @@ kubectl rollout status deploy/opensandbox-controller-manager \
 ```
 
 ::: tip
-This example clears `controller.snapshot.containerdSocketPath` because the pinned controller image (`controller:v0.2.0`) does not accept the `--containerd-socket-path` flag. Current controller builds **do** accept it (see [`kubernetes/cmd/controller/main.go`](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/cmd/controller/main.go)); if your nodes use a non-default containerd socket and you deploy a controller image that supports the flag, set this value accordingly.
+`controller.snapshot.containerdSocketPath` defaults to `""` in the chart, which allows the controller to use its built-in default (`/var/run/containerd/containerd.sock`) without passing the `--containerd-socket-path` flag unless explicitly configured. If your nodes use a non-default containerd socket and you deploy a controller image that supports the flag, set this value accordingly.
 :::
 
 ## 5. Use `main.py`

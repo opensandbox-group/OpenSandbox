@@ -11,12 +11,12 @@ OpenSandbox Lifecycle API server: provides sandbox create/delete and other lifec
 
 ## Install from a GitHub Release
 
-Choose a published `opensandbox-server` chart from [GitHub Releases](https://github.com/opensandbox-group/OpenSandbox/releases?q=helm%2Fopensandbox-server&expanded=true). The release tag uses the application version, while the package filename uses the chart version shown in the release notes.
+Choose a published `opensandbox-server` chart from [GitHub Releases](https://github.com/opensandbox-group/OpenSandbox/releases?q=helm%2Fopensandbox-server&expanded=true). The release tag and package filename use the chart version shown in the release notes; the application version is listed separately.
 
 ```bash
-APP_VERSION="<app-version>"
 CHART_VERSION="<chart-version>"
-CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${APP_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
+APP_VERSION="<app-version>"
+CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${CHART_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
 
 helm show values "${CHART_URL}"
 ```
