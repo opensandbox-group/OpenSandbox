@@ -841,7 +841,7 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			utils.Run(cmd)
 		})
 
-		It("should set Phase=Succeed+PauseFailed when commit/push fails with invalid registry", func() {
+		It("should set Phase=Succeed+PauseFailed when commit/push fails with malformed registry credentials", func() {
 			const sandboxName = "test-pause-commit-fail"
 
 			By("creating BatchSandbox with template")
@@ -871,9 +871,10 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).To(Equal("Succeed"))
 			}, 2*time.Minute).Should(Succeed())
 
-			By("patching registry push secret to invalid value (invalid docker config)")
-			// Create an invalid docker config JSON (base64 encoded)
-			invalidConfig := `{"auths":{"docker-registry.default.svc.cluster.local:5000":{"username":"invalid","password":"wrong","auth":"aW52YWxpZDp3cm9uZw=="}}}`
+			By("patching registry push secret to malformed matching credentials")
+			// The matching auth entry is malformed so the image committer fails before
+			// entering containerd's remote authorization retry loop.
+			invalidConfig := `{"auths":{"docker-registry.default.svc.cluster.local:5000":{"auth":"not-base64"}}}`
 			encoded := base64.StdEncoding.EncodeToString([]byte(invalidConfig))
 			patchData := fmt.Sprintf(`{"data":{".dockerconfigjson":"%s"}}`, encoded)
 			cmd = exec.Command("kubectl", "patch", "secret", "registry-snapshot-push-secret", "-n", pauseResumeNamespace,
@@ -881,7 +882,7 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("triggering pause with invalid registry config")
+			By("triggering pause with malformed registry credentials")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
 				"-n", pauseResumeNamespace, "--type=merge",
 				"-p", `{"spec":{"pause":true}}`)

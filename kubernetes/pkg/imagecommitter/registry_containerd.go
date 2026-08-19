@@ -82,12 +82,12 @@ func (p DockerConfigCredentialProvider) Credential(_ context.Context, registryHo
 			decoded, err := base64.StdEncoding.DecodeString(entry.Auth)
 			if err != nil {
 				p.warn("decode registry auth for %s: %v", registryHost, err)
-				return RegistryCredential{}, nil
+				return RegistryCredential{}, fmt.Errorf("decode registry auth for %s: %w", registryHost, err)
 			}
 			parts := strings.SplitN(string(decoded), ":", 2)
 			if len(parts) != 2 {
 				p.warn("invalid registry auth for %s", registryHost)
-				return RegistryCredential{}, nil
+				return RegistryCredential{}, fmt.Errorf("invalid registry auth for %s", registryHost)
 			}
 			credential.Username, credential.Password = parts[0], parts[1]
 		}
