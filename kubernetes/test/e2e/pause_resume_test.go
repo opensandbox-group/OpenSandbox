@@ -889,20 +889,29 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(json.Unmarshal([]byte(output), &deployment)).To(Succeed())
 				g.Expect(deployment.Status.AvailableReplicas).To(Equal(0))
 
-				cmd = exec.Command("kubectl", "get", "endpoints", "docker-registry", "-n", pauseResumeNamespace, "-o", "json")
+				cmd = exec.Command("kubectl", "get", "endpointslice", "-l", "kubernetes.io/service-name=docker-registry",
+					"-n", pauseResumeNamespace, "-o", "json")
 				output, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				var endpoints struct {
-					Subsets []struct {
-						Addresses []struct{} `json:"addresses"`
-					} `json:"subsets"`
+				var endpointSlices struct {
+					Items []struct {
+						Endpoints []struct {
+							Conditions struct {
+								Ready *bool `json:"ready"`
+							} `json:"conditions"`
+						} `json:"endpoints"`
+					} `json:"items"`
 				}
-				g.Expect(json.Unmarshal([]byte(output), &endpoints)).To(Succeed())
-				addressCount := 0
-				for _, subset := range endpoints.Subsets {
-					addressCount += len(subset.Addresses)
+				g.Expect(json.Unmarshal([]byte(output), &endpointSlices)).To(Succeed())
+				readyCount := 0
+				for _, endpointSlice := range endpointSlices.Items {
+					for _, endpoint := range endpointSlice.Endpoints {
+						if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
+							readyCount++
+						}
+					}
 				}
-				g.Expect(addressCount).To(Equal(0))
+				g.Expect(readyCount).To(Equal(0))
 			}, 2*time.Minute).Should(Succeed())
 
 			By("triggering pause while the snapshot registry is unavailable")
