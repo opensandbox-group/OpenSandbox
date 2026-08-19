@@ -44,6 +44,7 @@ internal object PoolReconciler {
         onDiscardSandbox: (String) -> Unit = {},
         reconcileState: ReconcileState,
         warmingCount: Int,
+        rateLimitState: PoolRateLimitState? = null,
         submitWarmups: (Int) -> Unit,
     ): Boolean {
         val poolName = config.poolName
@@ -60,6 +61,7 @@ internal object PoolReconciler {
             onDiscardSandbox = onDiscardSandbox,
             reconcileState = reconcileState,
             warmingCount = warmingCount,
+            rateLimitState = rateLimitState,
             submitWarmups = submitWarmups,
         )
         // Do not release primary lock here; leader holds until renew fails or TTL expires.
@@ -72,6 +74,7 @@ internal object PoolReconciler {
         onDiscardSandbox: (String) -> Unit,
         reconcileState: ReconcileState,
         warmingCount: Int,
+        rateLimitState: PoolRateLimitState?,
         submitWarmups: (Int) -> Unit,
     ) {
         val poolName = config.poolName
@@ -101,17 +104,20 @@ internal object PoolReconciler {
                 warmupConcurrency = config.warmupConcurrency,
             )
 
-        if (plan.toSubmit == 0 || reconcileState.isBackoffActive(now)) {
+        val degradedBackoffActive = reconcileState.isBackoffActive(now)
+        val rateLimitActive = rateLimitState?.isActive(now) == true
+        if (plan.toSubmit == 0 || degradedBackoffActive || rateLimitActive) {
             stateStore.renewPrimaryLock(poolName, ownerId, ttl)
             logger.debug(
                 "Reconcile tick: pool_name={} idle={} warming={} deficit={} available_slots={} " +
-                    "to_submit=0 backoff={}",
+                    "to_submit=0 backoff={} rate_limited={}",
                 poolName,
                 counters.idleCount,
                 warmingCount,
                 plan.deficit,
                 plan.availableSlots,
-                reconcileState.isBackoffActive(now),
+                degradedBackoffActive,
+                rateLimitActive,
             )
             return
         }

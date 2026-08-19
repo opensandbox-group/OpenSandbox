@@ -24,6 +24,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyedException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolEmptyException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolNotRunningException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolStateStoreUnavailableException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.pool.AcquirePolicy
 import com.alibaba.opensandbox.sandbox.domain.pool.IdleEntry
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolConfig
@@ -36,6 +37,7 @@ import com.alibaba.opensandbox.sandbox.domain.pool.PoolStateStore
 import com.alibaba.opensandbox.sandbox.domain.pool.PooledSandboxCreateContext
 import com.alibaba.opensandbox.sandbox.domain.pool.PooledSandboxCreator
 import com.alibaba.opensandbox.sandbox.domain.pool.SandboxPreparer
+import com.alibaba.opensandbox.sandbox.infrastructure.pool.PoolRateLimitState
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.PoolReconciler
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.ReconcileState
 import com.alibaba.opensandbox.sandbox.internal.PoolTracer
@@ -643,7 +645,7 @@ class SandboxPool internal constructor(
             idleCount = counters.idleCount,
             maxIdle = resolveMaxIdle(),
             failureCount = reconcileState.failureCount,
-            backoffActive = reconcileState.isBackoffActive(),
+            backoffActive = reconcileState.isBackoffActive() || currentRun?.rateLimitState?.isActive() == true,
             lastError = reconcileState.lastError,
             inFlightOperations = currentRun?.inFlightOperations?.get() ?: 0,
         )
@@ -962,6 +964,7 @@ class SandboxPool internal constructor(
                         onDiscardSandbox = { sandboxId -> killSandboxBestEffort(sandboxId) },
                         reconcileState = reconcileState,
                         warmingCount = run.warmingCount.get(),
+                        rateLimitState = run.rateLimitState,
                         submitWarmups = { count -> submitWarmups(run, count) },
                     ),
                 )
@@ -1040,6 +1043,57 @@ class SandboxPool internal constructor(
                     e.message,
                 )
             }
+        }
+    }
+
+    private fun scheduleRateLimitReconcile(run: RunContext) {
+        if (!isCurrentRun(run) || lifecycleState.get() != LifecycleState.RUNNING) return
+        synchronized(run.rateLimitScheduleLock) {
+            if (!isCurrentRun(run) || lifecycleState.get() != LifecycleState.RUNNING) return
+            run.rateLimitReconcileTask?.cancel(false)
+            val sequence = ++run.rateLimitReconcileSequence
+            val delayNanos = run.rateLimitState.remainingDelay().toNanos()
+            try {
+                run.rateLimitReconcileTask =
+                    run.scheduler.schedule(
+                        { onRateLimitReconcileDue(run, sequence) },
+                        delayNanos,
+                        TimeUnit.NANOSECONDS,
+                    )
+            } catch (e: Exception) {
+                run.rateLimitReconcileTask = null
+                if (lifecycleState.get() == LifecycleState.RUNNING) {
+                    logger.debug(
+                        "Pool rate-limit reconcile submit rejected: pool_name={} error={}",
+                        config.poolName,
+                        e.message,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun onRateLimitReconcileDue(
+        run: RunContext,
+        sequence: Long,
+    ) {
+        synchronized(run.rateLimitScheduleLock) {
+            if (sequence != run.rateLimitReconcileSequence) return
+            run.rateLimitReconcileTask = null
+        }
+        if (!isCurrentRun(run) || lifecycleState.get() != LifecycleState.RUNNING) return
+        if (run.rateLimitState.isActive()) {
+            scheduleRateLimitReconcile(run)
+        } else {
+            requestReconcile(run)
+        }
+    }
+
+    private fun cancelRateLimitReconcile(run: RunContext) {
+        synchronized(run.rateLimitScheduleLock) {
+            run.rateLimitReconcileSequence++
+            run.rateLimitReconcileTask?.cancel(false)
+            run.rateLimitReconcileTask = null
         }
     }
 
@@ -1214,7 +1268,19 @@ class SandboxPool internal constructor(
             is WarmupOutcome.Success -> commitWarmupSandbox(run, outcome.sandboxId, trace)
             is WarmupOutcome.Failure -> {
                 if (isCurrentRun(run) && lifecycleState.get() == LifecycleState.RUNNING) {
-                    reconcileState.recordAsyncFailure(outcome.error.message)
+                    val error = outcome.error
+                    if (error is SandboxRateLimitException) {
+                        run.rateLimitState.recordRateLimit(error.retryAfter)
+                        scheduleRateLimitReconcile(run)
+                        logger.debug(
+                            "Pool warmup rate limited: pool_name={} retry_after_ms={} throttle_remaining_ms={}",
+                            config.poolName,
+                            error.retryAfter?.toMillis(),
+                            run.rateLimitState.remainingDelay().toMillis(),
+                        )
+                    } else {
+                        reconcileState.recordAsyncFailure(error.message)
+                    }
                 }
             }
             WarmupOutcome.Cancelled -> Unit
@@ -1818,6 +1884,7 @@ class SandboxPool internal constructor(
         } finally {
             run.commitLock.unlock()
         }
+        cancelRateLimitReconcile(run)
     }
 
     /**
@@ -1837,6 +1904,12 @@ class SandboxPool internal constructor(
         val warmingCount = AtomicInteger(0)
         val warmupSubmissionsOpen = AtomicBoolean(true)
         val reconcileQueued = AtomicBoolean(false)
+        val rateLimitState = PoolRateLimitState()
+        val rateLimitScheduleLock = Any()
+
+        @Volatile
+        var rateLimitReconcileTask: ScheduledFuture<*>? = null
+        var rateLimitReconcileSequence: Long = 0
 
         @Volatile
         var nextCompletionReconcileAtNanos: Long = 0

@@ -96,7 +96,17 @@ def test_parse_memory_limit_handles_units():
 def test_parse_nano_cpus():
     assert parse_nano_cpus("500m") == 500_000_000
     assert parse_nano_cpus("2") == 2_000_000_000
+    assert parse_nano_cpus("1.5") == 1_500_000_000
+    assert parse_nano_cpus("250.5m") == 250_500_000
     assert parse_nano_cpus("bad") is None
+
+
+@pytest.mark.parametrize(
+    "value", ["nan", "inf", "-inf", "1e10", "1e308", "1e309", "-1e309"]
+)
+def test_parse_nano_cpus_rejects_non_finite_and_overflow_values(value: str):
+    assert parse_nano_cpus(value) is None
+
 
 def test_parse_gpu_request():
     assert parse_gpu_request("1") == 1
