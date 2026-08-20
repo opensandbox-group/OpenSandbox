@@ -1079,6 +1079,13 @@ components:
             type: string
           description: Opaque extension data restored from provider-specific storage
 
+        allocation:
+          $ref: '#/components/schemas/AllocationSummary'
+          description: |
+            Current runtime-confirmed pool allocation. Omitted unless an active pool
+            allocation is confirmed; this is not a request echo, allocation history,
+            readiness signal, or Kubernetes introspection result.
+
         entrypoint:
           type: array
           items:
@@ -1104,6 +1111,23 @@ components:
         - status
         - createdAt
         - entrypoint
+    AllocationSummary:
+      type: object
+      description: Public summary of a confirmed active pool allocation.
+      properties:
+        mode:
+          type: string
+          enum: [pool]
+          description: Allocation mode.
+        poolRef:
+          type: string
+          description: Concrete pool reference currently allocated.
+        state:
+          type: string
+          enum: [allocated]
+          description: Current confirmed allocation state.
+      required: [mode, poolRef, state]
+      additionalProperties: false
     SandboxState:
       type: string
       description: |

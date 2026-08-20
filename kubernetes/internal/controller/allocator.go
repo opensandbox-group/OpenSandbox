@@ -269,6 +269,8 @@ func NewAnnoAllocationSyncer(client client.Client) AllocationSyncer {
 }
 
 func (syncer *annoAllocationSyncer) SetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, allocation *SandboxAllocation) error {
+	allocation.PoolRef = sandbox.Spec.PoolRef
+	allocation.Generation = sandbox.Generation
 	js, err := json.Marshal(allocation)
 	if err != nil {
 		return err

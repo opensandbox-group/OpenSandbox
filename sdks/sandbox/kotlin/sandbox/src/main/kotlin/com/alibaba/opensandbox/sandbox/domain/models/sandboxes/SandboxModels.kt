@@ -715,6 +715,7 @@ class Volume private constructor(
  * @property platform Effective platform used for sandbox provisioning
  * @property metadata Custom metadata attached to the sandbox
  * @property extensions Opaque extension data returned by the server
+ * @property allocation Current runtime-confirmed pool allocation, when available
  */
 class SandboxInfo(
     val id: String,
@@ -727,6 +728,45 @@ class SandboxInfo(
     val platform: PlatformSpec? = null,
     val metadata: Map<String, String>? = null,
     val extensions: Map<String, String>? = null,
+    val allocation: SandboxAllocation? = null,
+) {
+    constructor(
+        id: String,
+        status: SandboxStatus,
+        entrypoint: List<String>,
+        expiresAt: OffsetDateTime?,
+        createdAt: OffsetDateTime,
+        image: SandboxImageSpec?,
+        snapshotId: String?,
+        platform: PlatformSpec?,
+        metadata: Map<String, String>?,
+        extensions: Map<String, String>?,
+    ) : this(
+        id = id,
+        status = status,
+        entrypoint = entrypoint,
+        expiresAt = expiresAt,
+        createdAt = createdAt,
+        image = image,
+        snapshotId = snapshotId,
+        platform = platform,
+        metadata = metadata,
+        extensions = extensions,
+        allocation = null,
+    )
+}
+
+/**
+ * Current runtime-confirmed pool allocation for a sandbox.
+ *
+ * @property mode Confirmed allocation mode. Currently always `pool`.
+ * @property poolRef Concrete pool reference currently allocated to the sandbox.
+ * @property state Current confirmed allocation state. Currently always `allocated`.
+ */
+class SandboxAllocation(
+    val mode: String,
+    val poolRef: String,
+    val state: String,
 )
 
 /**

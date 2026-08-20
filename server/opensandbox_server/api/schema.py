@@ -566,6 +566,17 @@ class CreateSandboxResponse(BaseModel):
         populate_by_name = True
 
 
+class AllocationSummary(BaseModel):
+    """Current runtime-confirmed pool allocation summary."""
+    mode: Literal["pool"] = Field("pool", description="Allocation mode.")
+    pool_ref: str = Field(..., alias="poolRef", description="Concrete pool reference currently allocated.")
+    state: Literal["allocated"] = Field("allocated", description="Current confirmed allocation state.")
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
 class Sandbox(BaseModel):
     """
     Runtime execution environment provisioned from a container image.
@@ -591,6 +602,14 @@ class Sandbox(BaseModel):
     extensions: Optional[Dict[str, str]] = Field(
         None,
         description="Opaque extension data restored from provider-specific storage",
+    )
+    allocation: Optional[AllocationSummary] = Field(
+        None,
+        description=(
+            "Current runtime-confirmed pool allocation summary. Omitted unless the runtime confirms "
+            "an active pool allocation; it is not a request echo, allocation history, readiness signal, "
+            "or Kubernetes introspection result."
+        ),
     )
     entrypoint: Optional[List[str]] = Field(None, description="The command to execute as the sandbox's entry process")
     expires_at: Optional[datetime] = Field(

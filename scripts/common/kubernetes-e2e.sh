@@ -297,5 +297,9 @@ k8s_e2e_generate_sdk_and_run_kubernetes_mini() {
   make generate-api
   cd "${REPO_ROOT}/tests/python"
   uv sync --all-extras --refresh
-  make test-kubernetes-mini
+  if [ "${E2E_TEST_SUITE:-mini}" = "pool" ]; then
+    uv run pytest tests/test_sandbox_pool_e2e_sync.py tests/test_server_pool_e2e_sync.py
+  else
+    make test-kubernetes-mini
+  fi
 }

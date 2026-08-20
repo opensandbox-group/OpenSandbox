@@ -39,7 +39,9 @@ const (
 var AnnotationSandboxEndpoints = pkgutils.AnnotationEndpoints
 
 type SandboxAllocation struct {
-	Pods []string `json:"pods"`
+	Pods       []string `json:"pods"`
+	PoolRef    string   `json:"poolRef"`
+	Generation int64    `json:"generation"`
 }
 
 type AllocationRelease struct {

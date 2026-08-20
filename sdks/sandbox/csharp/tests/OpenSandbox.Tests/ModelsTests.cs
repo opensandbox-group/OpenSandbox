@@ -209,6 +209,21 @@ public class ModelsTests
     }
 
     [Fact]
+    public void AllocationSummary_ShouldStorePoolAllocation()
+    {
+        var allocation = new AllocationSummary
+        {
+            Mode = "pool",
+            PoolRef = "default/python",
+            State = "allocated"
+        };
+
+        allocation.Mode.Should().Be("pool");
+        allocation.PoolRef.Should().Be("default/python");
+        allocation.State.Should().Be("allocated");
+    }
+
+    [Fact]
     public void SandboxStatus_ShouldStoreProperties()
     {
         // Arrange & Act

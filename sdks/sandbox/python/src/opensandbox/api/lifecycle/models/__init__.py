@@ -16,6 +16,9 @@
 
 """Contains all the data models used in inputs/outputs"""
 
+from .allocation_summary import AllocationSummary
+from .allocation_summary_mode import AllocationSummaryMode
+from .allocation_summary_state import AllocationSummaryState
 from .create_sandbox_request import CreateSandboxRequest
 from .create_sandbox_request_env import CreateSandboxRequestEnv
 from .create_sandbox_request_extensions import CreateSandboxRequestExtensions
@@ -59,6 +62,9 @@ from .snapshot_status import SnapshotStatus
 from .volume import Volume
 
 __all__ = (
+    "AllocationSummary",
+    "AllocationSummaryMode",
+    "AllocationSummaryState",
     "CreateSandboxRequest",
     "CreateSandboxRequestEnv",
     "CreateSandboxRequestExtensions",

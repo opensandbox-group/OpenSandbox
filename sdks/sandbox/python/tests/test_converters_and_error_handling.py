@@ -662,6 +662,80 @@ def test_sandbox_model_converter_preserves_missing_metadata_default() -> None:
     converted = SandboxModelConverter.to_sandbox_info(api_sandbox)
     assert converted.metadata == {}
     assert converted.extensions is None
+    assert converted.allocation is None
+
+
+def test_sandbox_model_converter_maps_allocation() -> None:
+    from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+    from opensandbox.api.lifecycle.models.allocation_summary_mode import (
+        AllocationSummaryMode,
+    )
+    from opensandbox.api.lifecycle.models.allocation_summary_state import (
+        AllocationSummaryState,
+    )
+    from opensandbox.api.lifecycle.models.sandbox import Sandbox
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    api_sandbox = Sandbox(
+        id="sbx-1",
+        status=SandboxStatus(state="Running"),
+        created_at=datetime(2025, 1, 1),
+        entrypoint=["/bin/sh"],
+        allocation=AllocationSummary(
+            mode=AllocationSummaryMode.POOL,
+            pool_ref="default/python",
+            state=AllocationSummaryState.ALLOCATED,
+        ),
+    )
+
+    converted = SandboxModelConverter.to_sandbox_info(api_sandbox)
+    assert converted.allocation is not None
+    assert converted.allocation.mode == "pool"
+    assert converted.allocation.pool_ref == "default/python"
+    assert converted.allocation.state == "allocated"
+
+
+def test_sandbox_model_converter_maps_allocation_for_list_results() -> None:
+    from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+    from opensandbox.api.lifecycle.models.allocation_summary_mode import (
+        AllocationSummaryMode,
+    )
+    from opensandbox.api.lifecycle.models.allocation_summary_state import (
+        AllocationSummaryState,
+    )
+    from opensandbox.api.lifecycle.models.list_sandboxes_response import (
+        ListSandboxesResponse,
+    )
+    from opensandbox.api.lifecycle.models.pagination_info import PaginationInfo
+    from opensandbox.api.lifecycle.models.sandbox import Sandbox
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    api_response = ListSandboxesResponse(
+        items=[
+            Sandbox(
+                id="sbx-1",
+                status=SandboxStatus(state="Running"),
+                created_at=datetime(2025, 1, 1),
+                entrypoint=["/bin/sh"],
+                allocation=AllocationSummary(
+                    mode=AllocationSummaryMode.POOL,
+                    pool_ref="default/python",
+                    state=AllocationSummaryState.ALLOCATED,
+                ),
+            )
+        ],
+        pagination=PaginationInfo(
+            page=1,
+            page_size=10,
+            total_items=1,
+            total_pages=1,
+            has_next_page=False,
+        ),
+    )
+
+    converted = SandboxModelConverter.to_paged_sandbox_infos(api_response)
+    assert converted.sandbox_infos[0].allocation is not None
+    assert converted.sandbox_infos[0].allocation.pool_ref == "default/python"
 
 
 def test_sandbox_model_converter_supports_windows_platform_request() -> None:

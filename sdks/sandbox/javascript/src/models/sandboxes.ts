@@ -426,6 +426,24 @@ export interface SandboxStatus extends Record<string, unknown> {
   message?: string;
 }
 
+/**
+ * Current runtime-confirmed Pool allocation for a sandbox.
+ */
+export interface AllocationSummary extends Record<string, unknown> {
+  /**
+   * Confirmed allocation mode.
+   */
+  mode: "pool";
+  /**
+   * Concrete Pool reference currently allocated to the sandbox.
+   */
+  poolRef: string;
+  /**
+   * Current confirmed allocation state.
+   */
+  state: "allocated";
+}
+
 export interface SandboxInfo extends Record<string, unknown> {
   id: SandboxId;
   image?: ImageSpec;
@@ -435,6 +453,10 @@ export interface SandboxInfo extends Record<string, unknown> {
   metadata?: Record<string, string>;
   extensions?: Record<string, string>;
   status: SandboxStatus;
+  /**
+   * Current runtime-confirmed Pool allocation, when available.
+   */
+  allocation?: AllocationSummary;
   /**
    * Sandbox creation time.
    */

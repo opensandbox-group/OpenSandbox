@@ -1,0 +1,27 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: e2e-server-pool
+  namespace: opensandbox-e2e
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox-container
+          image: opensandbox/execd:e2e-local
+          command: ["/bootstrap.sh", "sleep", "3600"]
+          env:
+            - name: EXECD_INIT
+              value: "1"
+            # The execd image keeps the binary at /execd (no execd-installer
+            # on the Pool path); bootstrap.sh defaults to
+            # /opt/opensandbox/execd, so point it at the real path.
+            - name: EXECD
+              value: "/execd"
+  capacitySpec:
+    bufferMax: 2
+    bufferMin: 1
+    poolMax: 3
+    poolMin: 1
+  recycleStrategy:
+    type: Noop
