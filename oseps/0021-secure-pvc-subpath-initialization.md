@@ -40,11 +40,13 @@ status: draft
 ## Summary
 
 This proposal adds an opt-in, mount-scoped way to initialize a missing directory
-used as a Kubernetes PVC `subPath`. The public field is
-`Volume.createSubPathIfMissing`, defaulting to `false` beside `subPath`. The
-initial implementation is limited to Linux Kubernetes non-Pool PVC mounts and
-uses a server-owned, trusted, restricted init mechanism; the requested final
-mount remains read-only or read-write as requested.
+used as a Kubernetes PVC `subPath`. The only new volume/mount configuration
+field is `Volume.createSubPathIfMissing`, defaulting to `false` beside `subPath`.
+The compatibility protocol also defines a distinct public capability-aware
+create route and required header. The initial implementation is limited to
+Linux Kubernetes non-Pool PVC mounts and uses a server-owned, trusted,
+restricted init mechanism; the requested final mount remains read-only or
+read-write as requested.
 
 Omission preserves ordinary `subPath` behavior. There is no silent fallback to
 another runtime or to an unsafe directory-creation path, and a provider that
@@ -78,8 +80,8 @@ explicit and keeps the default fail-if-missing behavior intact.
 - Use secure file-descriptor-relative, no-follow traversal and a dedicated
   trusted initializer rather than exposing arbitrary execution controls.
 - Keep the existing `code`/`message` error envelope, with a minimal stable
-  volume error vocabulary, sanitized diagnostics, and explicit retryability
-  through the existing transport semantics.
+  volume error vocabulary and normative HTTP retry classification through the
+  existing transport semantics.
 - Make capability-aware rollout safe with old and mixed-version server
   replicas.
 - Leave PVC provisioning, deletion, ownership, permissions, and cleanup to
@@ -105,9 +107,10 @@ explicit and keeps the default fail-if-missing behavior intact.
 
 ## Requirements
 
-1. The only public option introduced by this OSEP is
+1. The only new volume/mount configuration field introduced by this OSEP is
    `Volume.createSubPathIfMissing: boolean`, beside `subPath`, with default
-   `false`.
+   `false`. The OSEP also defines a distinct public capability-aware create
+   route and required capability header as its compatibility protocol.
 2. The opt-in is valid initially only for a Linux Kubernetes PVC mount on the
    non-Pool path. Unsupported combinations are rejected before side effects.
 3. `subPath` is canonical relative path data. Absolute paths, empty segments,
@@ -127,8 +130,11 @@ explicit and keeps the default fail-if-missing behavior intact.
 8. The PVC must already exist and remain subject to the existing PVC lifecycle
    and namespace rules. This feature is not `createIfNotExists`; that behavior
    must remain `false`, and a request attempting to enable it is rejected.
-9. Initialization failures use stable error taxonomy and do not expose host
-   paths, secrets, pod details, or raw command output. Retryability is explicit.
+9. Initialization outcomes use the normative stable code/status mapping in
+   [Errors and diagnostics](#errors-and-diagnostics), retain the existing
+   `code`/`message` envelope, and do not expose host paths, secrets, pod
+   details, or raw command output. Clients classify retryability from the
+   status/category, and SDKs do not automatically replay create requests.
 10. Capability negotiation must work when clients encounter old or mixed
     server replicas, without requiring every replica to understand the new
     field.
@@ -221,7 +227,7 @@ direct Kubernetes operation by the client.
 
 ### Public interface
 
-The additive interface is:
+The only new volume/mount configuration field is:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -232,6 +238,12 @@ The field is valid only when `subPath` is present. `true` requests
 initialization; `false` and omission request ordinary runtime behavior. The
 API does not expose a separate initializer object or any execution parameters.
 Existing schema fields keep their current meaning, including `readOnly`.
+
+In addition to this configuration field, the compatibility protocol defines the
+distinct public capability-aware create route and required
+`OpenSandbox-Required-Capability` header described in
+[Capability-aware creation and rollout](#capability-aware-creation-and-rollout).
+Those are transport-protocol additions, not volume/mount configuration fields.
 
 Example of a read-write final mount:
 
@@ -343,28 +355,27 @@ may be created by this request.
 ### Errors and diagnostics
 
 The capability-aware route uses the existing error envelope with only `code`
-and `message`. This OSEP adds the following minimal stable volume codes:
+and `message`. This OSEP defines the following minimal stable volume categories
+and normative HTTP statuses:
 
-| Code | Meaning |
-| --- | --- |
-| `VOLUME_SUBPATH_UNSUPPORTED` | The requested runtime, OS, backend, Pool path, capability, or provider cannot honor the opt-in. |
-| `VOLUME_SUBPATH_INVALID` | The opt-in or path is malformed, non-canonical, unsafe, or otherwise invalid. |
-| `VOLUME_SUBPATH_INITIALIZATION_FAILED` | The trusted initializer could not safely prepare the requested path. |
+| Code | HTTP status | Meaning and retry classification |
+| --- | --- | --- |
+| `VOLUME_SUBPATH_INVALID` | 400 Bad Request | The opt-in or path is malformed, non-canonical, unsafe, or otherwise invalid. Do not retry without changing the request. |
+| `VOLUME_SUBPATH_UNSUPPORTED` | 412 Precondition Failed | The requested runtime, OS, backend, Pool path, capability, or provider cannot honor the opt-in. Do not retry unless capability/configuration changes. |
+| `VOLUME_SUBPATH_INITIALIZATION_FAILED` | 422 Unprocessable Content | Deterministic or terminal initialization failure, including a non-directory or symlink component, permission denial, or read-only filesystem. Do not automatically retry. |
+| `VOLUME_SUBPATH_INITIALIZATION_UNAVAILABLE` | 503 Service Unavailable | Transient or indeterminate storage/runtime initializer failure. Retry may be appropriate; include `Retry-After` when the retry delay is known. |
 
 Existing PVC validation, final mount, and sandbox-creation errors remain in
-their existing categories. Permission, storage, and other initialization
-causes are represented by `VOLUME_SUBPATH_INITIALIZATION_FAILED` with a
-sanitized `message`; detailed causes remain in server logs and standard
-diagnostics. The response must not add diagnostic IDs, retry fields, path
-fields, or other `ErrorResponse` properties, and must not expose host paths,
-kubeconfig details, service-account tokens, secrets, raw PodSpec, or
-unfiltered initializer output.
+their existing categories. The response must not add diagnostic IDs, retry
+fields, path fields, or other `ErrorResponse` properties, and must not expose
+host paths, kubeconfig details, service-account tokens, secrets, raw PodSpec,
+or unfiltered initializer output. Detailed causes remain in server logs and
+standard diagnostics with sanitized `message` text.
 
-Retryability must be explicit through the existing transport semantics rather
-than a new response property. The proposed distinction is a client-fix or
-unsupported result in the existing 4xx class and a transient provider failure
-in the existing 5xx class, but the final HTTP status mapping is a maintainer
-decision. The `code`/`message` envelope remains unchanged.
+Clients classify retryability using the HTTP status and stable code. SDKs and
+client helpers must not automatically replay a create request, including for
+503; an explicit caller may retry according to the category and any
+`Retry-After` value.
 
 ### Security model
 
@@ -435,7 +446,8 @@ These decisions constrain later implementation and review:
 - Final `readOnly`/read-write semantics and provider-specific unsupported
   errors.
 - A dedicated trusted initializer, secure descriptor-relative traversal,
-  request-local coalescing, and explicit retryability.
+  request-local coalescing, and the normative code/status retry classification;
+  SDKs do not automatically replay create requests.
 
 **Delete**
 
@@ -513,6 +525,8 @@ conformance must add focused tests at each boundary:
 - Unsupported runtime, OS, backend, Pool, and provider capability combinations
   return `VOLUME_SUBPATH_UNSUPPORTED` before pod, initializer, mount, or
   filesystem changes.
+- Invalid input returns `VOLUME_SUBPATH_INVALID` with HTTP 400; unsupported
+  capability returns `VOLUME_SUBPATH_UNSUPPORTED` with HTTP 412.
 - Existing directories remain byte-for-byte and metadata-for-metadata
   unchanged by the preparation operation.
 - Identical claim/path preparations may be coalesced; repeated and overlapping
@@ -525,9 +539,11 @@ conformance must add focused tests at each boundary:
 - Symlink components, symlink replacement races, non-directory components,
   and attempted root escapes are rejected using descriptor-relative no-follow
   operations.
-- Permission failures, read-only filesystems, transient I/O failures, and
-  indeterminate initializer outcomes map to the stable taxonomy with correct
-  retryability.
+- Non-directory, symlink, permission, and read-only filesystem failures return
+  `VOLUME_SUBPATH_INITIALIZATION_FAILED` with HTTP 422. Transient or
+  indeterminate I/O/runtime failures return
+  `VOLUME_SUBPATH_INITIALIZATION_UNAVAILABLE` with HTTP 503 and `Retry-After`
+  when known.
 - Already-created directories remain after a later component or final mount
   failure; a safe retry can reuse them.
 
@@ -545,6 +561,8 @@ conformance must add focused tests at each boundary:
   fail before sandbox-side effects.
 - Final mount failures preserve the requested mode and do not trigger
   directory rollback.
+- Clients classify retryability from the status/code mapping, and SDKs do not
+  automatically replay create requests.
 
 ### Compatibility tests
 
@@ -607,6 +625,11 @@ should describe missing-subpath behavior as runtime-dependent/fail-if-missing
 and defer opt-in secure initialization to this OSEP; no existing volume request
 is migrated automatically.
 
+The only new volume/mount configuration field is the mount-scoped boolean;
+requests that set it to `true` must use the distinct capability-aware route and
+required header. The route and header are compatibility protocol additions, not
+additional volume configuration.
+
 Rollout proceeds in this order:
 
 1. Implement and test the server/provider capability and the secure initializer
@@ -617,12 +640,13 @@ Rollout proceeds in this order:
 3. Configure routing so the additive route cannot reach an old replica. If that
    cannot be guaranteed while replicas are mixed, send no opt-in traffic.
 4. Enable client/orchestrator use only for explicit opt-in requests and retain
-   metrics for unsupported, invalid, partial, and retryable failures.
+   metrics for the four stable volume categories and their normative HTTP
+   statuses. SDKs must not automatically replay create requests.
 
 There is no data migration and no PVC migration. Existing directories are not
 rewritten. Operators must decide when the provider's restricted initializer and
-capability-aware route are ready; maintainers must decide the precise transport
-mapping for the error taxonomy before implementation begins.
+capability-aware route are ready; implementations must enforce the normative
+code/status mapping and no-automatic-replay rule before clients use the opt-in.
 
 ### Pre-publication note
 
