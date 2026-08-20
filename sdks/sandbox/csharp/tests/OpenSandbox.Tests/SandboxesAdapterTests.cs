@@ -79,10 +79,72 @@ public class SandboxesAdapterTests
         SandboxInfo sandbox = await adapter.GetSandboxAsync("sbx-1");
 
         sandbox.ExpiresAt.Should().BeNull();
+        sandbox.Allocation.Should().BeNull();
         sandbox.Platform.Should().NotBeNull();
         sandbox.Platform!.Arch.Should().Be("amd64");
         sandbox.Extensions.Should().ContainKey("opensandbox.extensions.custom-label")
             .WhoseValue.Should().Be("中文数据");
+    }
+
+    [Fact]
+    public async Task GetSandboxAsync_ShouldParseAllocation()
+    {
+        const string payload = """
+        {
+          "id": "sbx-pool",
+          "status": { "state": "Running" },
+          "entrypoint": ["/bin/sh"],
+          "createdAt": "2026-03-14T12:00:00Z",
+          "allocation": {
+            "mode": "pool",
+            "poolRef": "default/python",
+            "state": "allocated"
+          }
+        }
+        """;
+        var adapter = CreateAdapterWithJsonResponse(payload);
+
+        SandboxInfo sandbox = await adapter.GetSandboxAsync("sbx-pool");
+
+        sandbox.Allocation.Should().NotBeNull();
+        sandbox.Allocation!.Mode.Should().Be("pool");
+        sandbox.Allocation.PoolRef.Should().Be("default/python");
+        sandbox.Allocation.State.Should().Be("allocated");
+    }
+
+    [Fact]
+    public async Task ListSandboxesAsync_ShouldParseAllocation()
+    {
+        const string payload = """
+        {
+          "items": [
+            {
+              "id": "sbx-pool",
+              "status": { "state": "Running" },
+              "entrypoint": ["/bin/sh"],
+              "createdAt": "2026-03-14T12:00:00Z",
+              "allocation": {
+                "mode": "pool",
+                "poolRef": "default/python",
+                "state": "allocated"
+              }
+            },
+            {
+              "id": "sbx-legacy",
+              "status": { "state": "Running" },
+              "entrypoint": ["/bin/sh"],
+              "createdAt": "2026-03-14T12:00:00Z"
+            }
+          ]
+        }
+        """;
+        var adapter = CreateAdapterWithJsonResponse(payload);
+
+        ListSandboxesResponse response = await adapter.ListSandboxesAsync();
+
+        response.Items[0].Allocation.Should().NotBeNull();
+        response.Items[0].Allocation!.PoolRef.Should().Be("default/python");
+        response.Items[1].Allocation.Should().BeNull();
     }
 
     [Fact]

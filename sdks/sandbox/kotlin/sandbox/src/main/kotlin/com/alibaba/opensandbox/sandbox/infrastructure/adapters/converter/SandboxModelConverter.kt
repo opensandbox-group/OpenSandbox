@@ -43,6 +43,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageAuth
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxAllocation
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
@@ -322,6 +323,14 @@ internal object SandboxModelConverter {
             snapshotId = this.snapshotId,
             platform = this.platform?.toDomainPlatformSpec(),
             status = this.status.toSandboxStatus(),
+            allocation =
+                this.allocation?.let {
+                    SandboxAllocation(
+                        mode = it.mode.value,
+                        poolRef = it.poolRef,
+                        state = it.state.value,
+                    )
+                },
             metadata = metadata,
             extensions = extensions,
         )

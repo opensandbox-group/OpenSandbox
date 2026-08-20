@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
 
+from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
 from opensandbox.api.lifecycle.models.create_sandbox_response import (
     CreateSandboxResponse as ApiCreateSandboxResponse,
 )
@@ -43,6 +45,7 @@ from opensandbox.models.sandboxes import (
     OSSFS,
     PVC,
     Host,
+    SandboxAllocation,
     SandboxFilter,
     SandboxImageAuth,
     SandboxImageSpec,
@@ -102,9 +105,29 @@ def test_api_sandbox_tolerates_omitted_optional_fields() -> None:
             "createdAt": "2025-01-01T00:00:00Z",
         }
     )
+    assert sandbox.allocation is UNSET
     assert sandbox.metadata is UNSET
     assert sandbox.expires_at is UNSET
     assert sandbox.status.last_transition_at is UNSET
+
+
+def test_api_sandbox_parses_optional_allocation() -> None:
+    sandbox = ApiSandbox.from_dict(
+        {
+            "id": "sandbox-1",
+            "status": {"state": "Running"},
+            "entrypoint": ["/bin/sh"],
+            "createdAt": "2025-01-01T00:00:00Z",
+            "allocation": {
+                "mode": "pool",
+                "poolRef": "default/python",
+                "state": "allocated",
+            },
+        }
+    )
+
+    allocation = cast(AllocationSummary, sandbox.allocation)
+    assert allocation.pool_ref == "default/python"
 
 
 def test_sandbox_image_auth_rejects_blank_username_and_password() -> None:
@@ -154,6 +177,23 @@ def test_sandbox_info_supports_manual_cleanup_expiration() -> None:
 
     dumped = info.model_dump(by_alias=True, mode="json")
     assert dumped["expires_at"] is None
+
+
+def test_sandbox_info_exposes_optional_allocation() -> None:
+    info = SandboxInfo(
+        id=str(__import__("uuid").uuid4()),
+        status=SandboxStatus(state="RUNNING"),
+        entrypoint=["/bin/sh"],
+        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        allocation=SandboxAllocation(
+            mode="pool",
+            pool_ref="default/python",
+            state="allocated",
+        ),
+    )
+
+    assert info.allocation is not None
+    assert info.allocation.pool_ref == "default/python"
 
 
 def test_filesystem_models_aliases_and_validation() -> None:

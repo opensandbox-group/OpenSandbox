@@ -933,6 +933,12 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * @description Current runtime-confirmed pool allocation. Omitted unless an active pool
+             *     allocation is confirmed; this is not a request echo, allocation history,
+             *     readiness signal, or Kubernetes introspection result.
+             */
+            allocation?: components["schemas"]["AllocationSummary"];
+            /**
              * @description The command to execute as the sandbox's entry process.
              *     Always present in responses. For image-created sandboxes, this is copied
              *     from the creation request. For snapshot-created sandboxes, this is restored
@@ -949,6 +955,21 @@ export interface components {
              * @description Sandbox creation timestamp
              */
             createdAt: string;
+        };
+        /** @description Public summary of a confirmed active pool allocation. */
+        AllocationSummary: {
+            /**
+             * @description Allocation mode.
+             * @enum {string}
+             */
+            mode: "pool";
+            /** @description Concrete pool reference currently allocated. */
+            poolRef: string;
+            /**
+             * @description Current confirmed allocation state.
+             * @enum {string}
+             */
+            state: "allocated";
         };
         /**
          * @description High-level lifecycle state of the sandbox.

@@ -76,6 +76,7 @@ from opensandbox.models.sandboxes import (
     PagedSandboxInfos,
     PaginationInfo,
     PlatformSpec,
+    SandboxAllocation,
     SandboxCreateResponse,
     SandboxEndpoint,
     SandboxFilter,
@@ -121,6 +122,7 @@ __all__ = [
     "SearchEntry",
     # Sandbox models
     "SandboxInfo",
+    "SandboxAllocation",
     "SandboxStatus",
     "SandboxState",
     "NetworkPolicy",

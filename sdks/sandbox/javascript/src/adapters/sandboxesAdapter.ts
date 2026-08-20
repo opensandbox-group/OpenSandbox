@@ -23,6 +23,7 @@ import type {
   CreateSnapshotRequest,
   CreateSandboxRequest,
   CreateSandboxResponse,
+  AllocationSummary,
   Endpoint,
   ListSnapshotsParams,
   ListSnapshotsResponse,
@@ -64,6 +65,10 @@ type ApiListSnapshotsOk =
   LifecyclePaths["/snapshots"]["get"]["responses"][200]["content"]["application/json"];
 type ApiEndpointOk =
   LifecyclePaths["/sandboxes/{sandboxId}/endpoints/{port}"]["get"]["responses"][200]["content"]["application/json"];
+
+type ApiSandboxWithAllocation = ApiGetSandboxOk & {
+  allocation?: AllocationSummary;
+};
 
 function encodeMetadataFilter(metadata: Record<string, string>): string {
   // The Lifecycle API expects a single `metadata` query parameter whose value is `k=v&k2=v2`.
@@ -122,8 +127,10 @@ export class SandboxesAdapter implements Sandboxes {
   }
 
   private mapSandboxInfo(raw: ApiGetSandboxOk): SandboxInfo {
+    const { allocation, ...sandbox } = raw as ApiSandboxWithAllocation;
     return {
-      ...(raw ?? {}),
+      ...sandbox,
+      ...(allocation == null ? {} : { allocation }),
       createdAt: this.parseIsoDate("createdAt", raw?.createdAt),
       expiresAt: this.parseOptionalIsoDate("expiresAt", raw?.expiresAt),
     } as SandboxInfo;
