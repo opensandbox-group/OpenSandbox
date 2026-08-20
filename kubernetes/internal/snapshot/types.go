@@ -43,6 +43,7 @@ type ContainerTarget struct {
 type Request struct {
 	Version           string            `json:"version"`
 	PodName           string            `json:"podName"`
+	PodUID            string            `json:"podUid,omitempty"`
 	Namespace         string            `json:"namespace"`
 	Provider          string            `json:"provider"`
 	Containers        []ContainerTarget `json:"containers"`

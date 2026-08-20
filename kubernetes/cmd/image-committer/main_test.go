@@ -147,11 +147,39 @@ func TestValidateRootfsDiskCaptureRejectsWritableOverlayOnVolume(t *testing.T) {
 		Capture:     snapshot.QEMUDiskCaptureRootfs,
 	}}
 
-	if err := validateRootfsDiskCapture(disks, []string{"/ubuntu-storage"}); err == nil {
+	identity := func(path string) (string, error) { return path, nil }
+	if err := validateRootfsDiskCapture(disks, []string{"/ubuntu-storage"}, identity); err == nil {
 		t.Fatal("expected mounted writable overlay to be rejected")
 	}
-	if err := validateRootfsDiskCapture(disks, []string{"/ubuntu-storage-base"}); err != nil {
+	if err := validateRootfsDiskCapture(disks, []string{"/ubuntu-storage-base"}, identity); err != nil {
 		t.Fatalf("expected path-boundary-safe mount to be accepted: %v", err)
+	}
+}
+
+func TestValidateRootfsDiskCaptureRejectsSymlinkIntoVolume(t *testing.T) {
+	disks := []snapshot.QEMUDisk{{
+		ID:          "osdisk",
+		OverlayPath: "/vm/disk-link",
+		Capture:     snapshot.QEMUDiskCaptureRootfs,
+	}}
+	resolved := map[string]string{
+		"/vm/disk-link":     "/volume-data/state.qcow2",
+		"/mnt/data":         "/volume-data",
+		"/unrelated-volume": "/other-volume",
+	}
+	resolve := func(path string) (string, error) {
+		value, ok := resolved[path]
+		if !ok {
+			return "", errors.New("path not found")
+		}
+		return value, nil
+	}
+
+	if err := validateRootfsDiskCapture(disks, []string{"/mnt/data"}, resolve); err == nil {
+		t.Fatal("expected symlinked writable overlay under a volume mount to be rejected")
+	}
+	if err := validateRootfsDiskCapture(disks, []string{"/unrelated-volume"}, resolve); err != nil {
+		t.Fatalf("expected symlinked writable overlay outside volume mounts to be accepted: %v", err)
 	}
 }
 
@@ -168,10 +196,13 @@ func TestGetContainerIDByNerdctlReturnsRunningContainer(t *testing.T) {
 		if calls != 1 {
 			t.Fatalf("expected a single nerdctl lookup, got %d", calls)
 		}
+		if !contains(args, "label=io.kubernetes.pod.uid=pod-uid-1") {
+			t.Fatalf("lookup did not constrain the Pod UID: %v", args)
+		}
 		return []byte("container-running\n"), nil
 	}
 
-	containerID, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	containerID, err := getContainerIDByNerdctl("pod-1", "default", "pod-uid-1", "sandbox")
 	if err != nil {
 		t.Fatalf("expected running container lookup to succeed, got %v", err)
 	}
@@ -201,7 +232,7 @@ func TestGetContainerIDByNerdctlFallsBackToStoppedContainers(t *testing.T) {
 		}
 	}
 
-	containerID, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	containerID, err := getContainerIDByNerdctl("pod-1", "default", "pod-uid-1", "sandbox")
 	if err != nil {
 		t.Fatalf("expected stopped container fallback to succeed, got %v", err)
 	}
@@ -227,7 +258,7 @@ func TestGetContainerIDByNerdctlReturnsHelpfulErrorWhenBothLookupsAreEmpty(t *te
 		return []byte("\n"), nil
 	}
 
-	_, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	_, err := getContainerIDByNerdctl("pod-1", "default", "pod-uid-1", "sandbox")
 	if err == nil {
 		t.Fatal("expected lookup failure when both running and stopped container searches are empty")
 	}

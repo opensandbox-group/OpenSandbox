@@ -133,13 +133,13 @@ func TestCommitResolvesBeforePauseAndResumesBeforePush(t *testing.T) {
 	if len(result.Containers) != 2 || result.Containers[0].Name != "main" || result.Containers[1].Name != "stopped" {
 		t.Fatalf("unexpected result: %#v", result)
 	}
-	wantDigest := digest.FromString("config:registry.example.com/main:snap").String()
+	wantDigest := digest.FromString("manifest:registry.example.com/main:snap").String()
 	if result.Containers[0].Digest != wantDigest {
-		t.Fatalf("reported digest = %q, want config digest %q", result.Containers[0].Digest, wantDigest)
+		t.Fatalf("reported digest = %q, want manifest digest %q", result.Containers[0].Digest, wantDigest)
 	}
-	manifestDigest := digest.FromString("manifest:registry.example.com/main:snap").String()
-	if result.Containers[0].Digest == manifestDigest {
-		t.Fatalf("reported digest unexpectedly used manifest digest %q", manifestDigest)
+	configDigest := digest.FromString("config:registry.example.com/main:snap").String()
+	if result.Containers[0].Digest == configDigest {
+		t.Fatalf("reported digest unexpectedly used config digest %q", configDigest)
 	}
 }
 

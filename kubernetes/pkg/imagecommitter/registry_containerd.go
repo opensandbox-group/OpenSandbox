@@ -28,8 +28,10 @@ import (
 	"syscall"
 
 	containerd "github.com/containerd/containerd"
+	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -139,7 +141,27 @@ func (p *ContainerdImagePusher) Push(ctx context.Context, image LocalImage) (oci
 			return ocispec.Descriptor{}, fmt.Errorf("push image %s over plain HTTP: %w", image.Reference, err)
 		}
 	}
+	if err := p.recordDigestReference(ctx, image); err != nil {
+		return ocispec.Descriptor{}, err
+	}
 	return image.Target, nil
+}
+
+func (p *ContainerdImagePusher) recordDigestReference(ctx context.Context, image LocalImage) error {
+	digestReference, err := referenceWithDigest(image.Reference, image.Target)
+	if err != nil {
+		return err
+	}
+	imageRecord := images.Image{Name: digestReference, Target: image.Target}
+	if _, err := p.client.ImageService().Update(ctx, imageRecord); err != nil {
+		if !errdefs.IsNotFound(err) {
+			return fmt.Errorf("update digest image reference %s: %w", digestReference, err)
+		}
+		if _, err := p.client.ImageService().Create(ctx, imageRecord); err != nil {
+			return fmt.Errorf("create digest image reference %s: %w", digestReference, err)
+		}
+	}
+	return nil
 }
 
 func (p *ContainerdImagePusher) push(ctx context.Context, image LocalImage, host string, credential RegistryCredential, scheme string, skipVerify bool) error {

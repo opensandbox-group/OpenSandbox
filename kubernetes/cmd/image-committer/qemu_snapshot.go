@@ -76,7 +76,7 @@ func runQEMUSnapshot(request snapshot.Request, recovery *snapshotRecovery) error
 
 	containerIDs := make(map[string]string, len(request.Containers))
 	for _, container := range request.Containers {
-		containerID, err := getContainerIDByNerdctl(request.PodName, request.Namespace, container.Name)
+		containerID, err := getContainerIDByNerdctl(request.PodName, request.Namespace, request.PodUID, container.Name)
 		if err != nil {
 			return fmt.Errorf("find container %q: %w", container.Name, err)
 		}
@@ -261,7 +261,18 @@ func captureQEMUState(containerID string, request snapshot.QEMURequest, recovery
 		os.RemoveAll(workDir)
 		return nil, err
 	}
-	if err := validateRootfsDiskCapture(launch.Disks, request.VolumeMountPaths); err != nil {
+	resolvePath := func(path string) (string, error) {
+		output, err := runInContainer(containerID, remoteHelper, "resolve-path", path)
+		if err != nil {
+			return "", err
+		}
+		resolved := strings.TrimSpace(string(output))
+		if resolved == "" {
+			return "", fmt.Errorf("resolved container path %q is empty", path)
+		}
+		return resolved, nil
+	}
+	if err := validateRootfsDiskCapture(launch.Disks, request.VolumeMountPaths, resolvePath); err != nil {
 		os.RemoveAll(workDir)
 		return nil, err
 	}
@@ -371,12 +382,13 @@ func runRecoverQEMU(args []string) {
 		os.Exit(2)
 	}
 	podName, namespace := args[0], args[1]
+	podUID := strings.TrimSpace(os.Getenv("SOURCE_POD_UID"))
 	qemuContainerName, qmpSocket := args[2], args[3]
 	containerNames := args[4:]
 	containerIDs := make(map[string]string, len(containerNames))
 	errorsSeen := 0
 	for _, containerName := range containerNames {
-		containerID, err := getContainerIDByNerdctl(podName, namespace, containerName)
+		containerID, err := getContainerIDByNerdctl(podName, namespace, podUID, containerName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: failed to find container %q: %v\n", containerName, err)
 			errorsSeen++
@@ -433,11 +445,25 @@ func runInContainer(containerID string, commandAndArgs ...string) ([]byte, error
 	return output, nil
 }
 
-func validateRootfsDiskCapture(disks []snapshot.QEMUDisk, volumeMountPaths []string) error {
+type pathResolver func(string) (string, error)
+
+func validateRootfsDiskCapture(disks []snapshot.QEMUDisk, volumeMountPaths []string, resolve pathResolver) error {
+	resolvedMounts := make([]string, 0, len(volumeMountPaths))
+	for _, mountPath := range volumeMountPaths {
+		resolved, err := resolve(mountPath)
+		if err != nil {
+			return fmt.Errorf("resolve volume mount %q in source container: %w", mountPath, err)
+		}
+		resolvedMounts = append(resolvedMounts, resolved)
+	}
 	for _, disk := range disks {
-		for _, mountPath := range volumeMountPaths {
-			if pathWithinMount(disk.OverlayPath, mountPath) {
-				return fmt.Errorf("QEMU disk %q writable overlay %q is under volume mount %q; qemu-v1 requires it in the container rootfs", disk.ID, disk.OverlayPath, mountPath)
+		resolvedOverlay, err := resolve(disk.OverlayPath)
+		if err != nil {
+			return fmt.Errorf("resolve QEMU disk %q writable overlay %q in source container: %w", disk.ID, disk.OverlayPath, err)
+		}
+		for i, mountPath := range resolvedMounts {
+			if pathWithinMount(resolvedOverlay, mountPath) {
+				return fmt.Errorf("QEMU disk %q writable overlay %q resolves to %q under volume mount %q (resolved to %q); qemu-v1 requires it in the container rootfs", disk.ID, disk.OverlayPath, resolvedOverlay, volumeMountPaths[i], mountPath)
 			}
 		}
 	}

@@ -930,9 +930,19 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			}, 3*time.Minute).Should(Succeed())
 
 			By("tampering SandboxSnapshot with invalid image URI")
+			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
+				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.containers[0].imageDigest}")
+			digestOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			imageDigest := strings.TrimSpace(digestOutput)
+			Expect(imageDigest).NotTo(BeEmpty())
+			statusPatch := fmt.Sprintf(
+				`{"status":{"containers":[{"containerName":"sandbox-container","imageUri":"invalid.registry/unreachable/image:nonexistent","imageDigest":%q}]}}`,
+				imageDigest,
+			)
 			cmd = exec.Command("kubectl", "patch", "sandboxsnapshot", sandboxName+"-pause",
 				"-n", pauseResumeNamespace, "--type=merge", "--subresource=status",
-				"-p", `{"status":{"containers":[{"containerName":"sandbox-container","imageUri":"invalid.registry/unreachable/image:nonexistent"}]}}`)
+				"-p", statusPatch)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 

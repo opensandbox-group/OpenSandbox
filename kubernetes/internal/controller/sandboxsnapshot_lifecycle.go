@@ -110,7 +110,7 @@ func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot 
 	snapshot.Status.Format = snapshotFormat
 	snapshot.Status.Containers = containers
 
-	job, err := r.buildCommitJob(snapshot, workloadContract)
+	job, err := r.buildCommitJob(snapshot, string(pod.UID), workloadContract)
 	if err != nil {
 		msg := fmt.Sprintf("failed to build commit job: %v", err)
 		_ = r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "BuildCommitJobFailed", msg)
@@ -362,7 +362,7 @@ func commitJobSecurityContext(requiresHostPID bool) *corev1.SecurityContext {
 	return securityContext
 }
 
-func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.SandboxSnapshot, contracts ...snapshotcontract.WorkloadContract) (*batchv1.Job, error) {
+func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.SandboxSnapshot, sourcePodUID string, contracts ...snapshotcontract.WorkloadContract) (*batchv1.Job, error) {
 	jobName := r.getJobName(snapshot)
 	imageCommitterImage := r.imageCommitterImage()
 
@@ -424,6 +424,9 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 	}
 	args := append([]string{snapshot.Status.SourcePodName, snapshot.Namespace}, containerSpecs...)
 	env := []corev1.EnvVar{{Name: "CONTAINERD_SOCKET", Value: ContainerdSocketPath}}
+	if sourcePodUID != "" {
+		env = append(env, corev1.EnvVar{Name: "SOURCE_POD_UID", Value: sourcePodUID})
+	}
 	resources := corev1.ResourceRequirements{}
 	if workloadContract.Provider == snapshotcontract.ProviderQEMU {
 		vmStateImageURI, err := r.vmStateImageURI(snapshot)
@@ -433,6 +436,7 @@ func (r *SandboxSnapshotReconciler) buildCommitJob(snapshot *sandboxv1alpha1.San
 		request := snapshotcontract.Request{
 			Version:           snapshotcontract.RequestVersionV1,
 			PodName:           snapshot.Status.SourcePodName,
+			PodUID:            sourcePodUID,
 			Namespace:         snapshot.Namespace,
 			Provider:          workloadContract.Provider,
 			Containers:        make([]snapshotcontract.ContainerTarget, 0, len(snapshot.Status.Containers)),
@@ -557,6 +561,7 @@ func (r *SandboxSnapshotReconciler) applyImageCommitterPodTemplate(generated *co
 	commitContainer.Args = generatedContainer.Args
 	commitContainer.Env = mergeEnvVars(commitContainer.Env, generatedContainer.Env)
 	commitContainer.VolumeMounts = mergeVolumeMounts(commitContainer.VolumeMounts, generatedContainer.VolumeMounts)
+	commitContainer.Resources = mergeResourceRequirements(commitContainer.Resources, generatedContainer.Resources)
 	commitContainer.SecurityContext = generatedContainer.SecurityContext
 	commitContainer.TerminationMessagePath = "/dev/termination-log"
 	commitContainer.TerminationMessagePolicy = corev1.TerminationMessageReadFile
@@ -617,6 +622,36 @@ func mergeVolumeMounts(base, required []corev1.VolumeMount) []corev1.VolumeMount
 		}
 		if !replaced {
 			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func mergeResourceRequirements(base, required corev1.ResourceRequirements) corev1.ResourceRequirements {
+	result := *base.DeepCopy()
+	if result.Limits == nil && len(required.Limits) > 0 {
+		result.Limits = corev1.ResourceList{}
+	}
+	for name, quantity := range required.Limits {
+		result.Limits[name] = quantity.DeepCopy()
+	}
+	if result.Requests == nil && len(required.Requests) > 0 {
+		result.Requests = corev1.ResourceList{}
+	}
+	for name, quantity := range required.Requests {
+		result.Requests[name] = quantity.DeepCopy()
+	}
+	for _, claim := range required.Claims {
+		replaced := false
+		for i := range result.Claims {
+			if result.Claims[i].Name == claim.Name {
+				result.Claims[i] = claim
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			result.Claims = append(result.Claims, claim)
 		}
 	}
 	return result

@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot/qmp"
@@ -38,6 +39,8 @@ func main() {
 		runExport(os.Args[2:])
 	case "resume":
 		runResume(os.Args[2:])
+	case "resolve-path":
+		runResolvePath(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -46,6 +49,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage: qemu-checkpoint-helper <probe|export|resume> --socket <qmp.sock> [--timeout 5m]")
+	fmt.Fprintln(os.Stderr, "       qemu-checkpoint-helper resolve-path <path>")
 }
 
 func commandFlags(name string, args []string) (string, time.Duration) {
@@ -115,6 +119,18 @@ func runResume(args []string) {
 	if err := client.Continue(ctx); err != nil {
 		fatal(err)
 	}
+}
+
+func runResolvePath(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "ERROR: resolve-path requires exactly one path")
+		os.Exit(2)
+	}
+	resolved, err := filepath.EvalSymlinks(args[0])
+	if err != nil {
+		fatal(fmt.Errorf("resolve path %q: %w", args[0], err))
+	}
+	fmt.Println(resolved)
 }
 
 func fatal(err error) {

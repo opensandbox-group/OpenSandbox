@@ -28,9 +28,9 @@ import (
 	"strings"
 	"syscall"
 
+	snapshotcontract "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/imagecommitter"
 	imagecommittercli "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/imagecommitter/cli"
-	snapshotcontract "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 )
 
 var terminationMessagePath = "/dev/termination-log"
@@ -164,9 +164,10 @@ func nerdctlBaseArgs() []string {
 // Kubernetes injects standard labels on all containers:
 //   - io.kubernetes.pod.name
 //   - io.kubernetes.pod.namespace
+//   - io.kubernetes.pod.uid
 //   - io.kubernetes.container.name
-func getContainerIDByNerdctl(podName, podNamespace, containerName string) (string, error) {
-	containerID, err := lookupContainerIDByNerdctl(podName, podNamespace, containerName, false)
+func getContainerIDByNerdctl(podName, podNamespace, podUID, containerName string) (string, error) {
+	containerID, err := lookupContainerIDByNerdctl(podName, podNamespace, podUID, containerName, false)
 	if err != nil {
 		return "", err
 	}
@@ -174,7 +175,7 @@ func getContainerIDByNerdctl(podName, podNamespace, containerName string) (strin
 		return containerID, nil
 	}
 
-	containerID, err = lookupContainerIDByNerdctl(podName, podNamespace, containerName, true)
+	containerID, err = lookupContainerIDByNerdctl(podName, podNamespace, podUID, containerName, true)
 	if err != nil {
 		return "", err
 	}
@@ -190,7 +191,7 @@ func getContainerIDByNerdctl(podName, podNamespace, containerName string) (strin
 	)
 }
 
-func lookupContainerIDByNerdctl(podName, podNamespace, containerName string, includeStopped bool) (string, error) {
+func lookupContainerIDByNerdctl(podName, podNamespace, podUID, containerName string, includeStopped bool) (string, error) {
 	args := append(nerdctlBaseArgs(), "ps")
 	if includeStopped {
 		args = append(args, "-a")
@@ -199,6 +200,11 @@ func lookupContainerIDByNerdctl(podName, podNamespace, containerName string, inc
 		"-q",
 		"--filter", fmt.Sprintf("label=io.kubernetes.pod.name=%s", podName),
 		"--filter", fmt.Sprintf("label=io.kubernetes.pod.namespace=%s", podNamespace),
+	)
+	if podUID != "" {
+		args = append(args, "--filter", fmt.Sprintf("label=io.kubernetes.pod.uid=%s", podUID))
+	}
+	args = append(args,
 		"--filter", fmt.Sprintf("label=io.kubernetes.container.name=%s", containerName),
 	)
 	output, err := commandCombinedOutput("nerdctl", args...)

@@ -82,8 +82,8 @@ type LocalImage struct {
 	Reference string
 	// Target is the manifest descriptor pushed to the registry.
 	Target ocispec.Descriptor
-	// Config is the image config descriptor reported as the snapshot image
-	// digest for compatibility with the previous image-committer behavior.
+	// Config is the image config descriptor retained for image assembly and
+	// diagnostic logging.
 	Config ocispec.Descriptor
 }
 
@@ -99,8 +99,7 @@ type RegistryCredential struct {
 type ContainerResult struct {
 	Name  string `json:"name"`
 	Image string `json:"image"`
-	// Digest is the image config digest, preserving the image ID semantics of
-	// the previous image-committer implementation.
+	// Digest is the pushed OCI manifest digest used for immutable restores.
 	Digest string `json:"digest"`
 }
 
