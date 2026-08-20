@@ -25,6 +25,8 @@ spec:
           value: "Registry Realm"
         - name: REGISTRY_AUTH_HTPASSWD_PATH
           value: /auth/htpasswd
+        - name: REGISTRY_STORAGE_DELETE_ENABLED
+          value: "true"
         volumeMounts:
         - name: auth
           mountPath: /auth

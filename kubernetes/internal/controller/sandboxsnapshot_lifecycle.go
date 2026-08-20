@@ -174,27 +174,23 @@ func findJobCondition(conditions []batchv1.JobCondition, conditionType batchv1.J
 	return nil
 }
 
-// handleDeletion cleans up the commit job and removes the finalizer.
+// handleDeletion stops snapshot jobs, cleans up images, then removes the finalizer.
 func (r *SandboxSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	jobName := r.getJobName(snapshot)
-	job := &batchv1.Job{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: jobName}, job); err == nil {
-		if deleteErr := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); deleteErr != nil && !errors.IsNotFound(deleteErr) {
-			return ctrl.Result{}, deleteErr
-		}
-		log.Info("Deleted commit job", "job", jobName)
+	jobsPending, err := r.deleteSnapshotJobs(ctx, snapshot)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if jobsPending {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	unpauseJobName := r.getUnpauseJobName(snapshot)
-	unpauseJob := &batchv1.Job{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: unpauseJobName}, unpauseJob); err == nil {
-		if deleteErr := r.Delete(ctx, unpauseJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); deleteErr != nil && !errors.IsNotFound(deleteErr) {
-			return ctrl.Result{}, deleteErr
-		}
-		log.Info("Deleted unpause job", "job", unpauseJobName)
+	if err := r.deleteSnapshotImages(ctx, snapshot); err != nil {
+		return ctrl.Result{}, err
 	}
+
+	log.Info("Deleted snapshot registry images")
 
 	if controllerutil.ContainsFinalizer(snapshot, SandboxSnapshotFinalizer) {
 		if err := utils.UpdateFinalizer(r.Client, snapshot, utils.RemoveFinalizerOpType, SandboxSnapshotFinalizer); err != nil {
@@ -202,6 +198,75 @@ func (r *SandboxSnapshotReconciler) handleDeletion(ctx context.Context, snapshot
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+// deleteSnapshotJobs requests foreground deletion for both jobs and waits for
+// their owned Pods to disappear before registry cleanup. This closes the race
+// where a commit Job can finish pushing after a tag was observed as missing.
+func (r *SandboxSnapshotReconciler) deleteSnapshotJobs(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) (bool, error) {
+	pending := false
+	for _, jobName := range []string{r.getJobName(snapshot), r.getUnpauseJobName(snapshot)} {
+		job := &batchv1.Job{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: jobName}, job)
+		switch {
+		case err == nil:
+			pending = true
+			if job.DeletionTimestamp.IsZero() {
+				if deleteErr := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationForeground)); deleteErr != nil && !errors.IsNotFound(deleteErr) {
+					return false, deleteErr
+				}
+			}
+		case errors.IsNotFound(err):
+		default:
+			return false, err
+		}
+
+		pods := &corev1.PodList{}
+		if err := r.List(ctx, pods, client.InNamespace(snapshot.Namespace), client.MatchingLabels{"job-name": jobName}); err != nil {
+			return false, err
+		}
+		if len(pods.Items) > 0 {
+			pending = true
+		}
+	}
+	return pending, nil
+}
+
+func (r *SandboxSnapshotReconciler) deleteSnapshotImages(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) error {
+	if len(snapshot.Status.Containers) == 0 {
+		return nil
+	}
+
+	var registrySecret *corev1.Secret
+	if r.SnapshotPushSecret != "" {
+		registrySecret = &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: r.SnapshotPushSecret}, registrySecret); err != nil {
+			return fmt.Errorf("get snapshot registry secret %s/%s: %w", snapshot.Namespace, r.SnapshotPushSecret, err)
+		}
+	}
+
+	deleter := r.registryImageDeleter
+	if deleter == nil {
+		deleter = remoteRegistryImageDeleter{}
+	}
+	deleted := make(map[string]struct{}, len(snapshot.Status.Containers))
+	for _, container := range snapshot.Status.Containers {
+		if container.ImageURI == "" {
+			continue
+		}
+		imageReference := container.ImageURI
+		if container.ImageDigest != "" {
+			imageReference += "@" + container.ImageDigest
+		}
+		if _, exists := deleted[imageReference]; exists {
+			continue
+		}
+		if err := deleter.Delete(ctx, container.ImageURI, container.ImageDigest, registrySecret, r.SnapshotRegistryInsecure); err != nil {
+			return fmt.Errorf("delete snapshot image for container %s: %w", container.ContainerName, err)
+		}
+		deleted[imageReference] = struct{}{}
+	}
+	return nil
 }
 
 // findPodForSandbox finds the running pod belonging to a BatchSandbox.

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -69,6 +70,22 @@ func TestDockerConfigCredentialProviderFallsBackToAnonymousOnInvalidConfig(t *te
 	}
 	if warnings.Len() == 0 {
 		t.Fatal("expected invalid config warning")
+	}
+}
+
+func TestDockerConfigCredentialProviderRejectsMalformedMatchingAuth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"auths":{"registry.example.com":{"auth":"not-base64"}}}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := (DockerConfigCredentialProvider{Path: path}).Credential(context.Background(), "registry.example.com")
+	if err == nil {
+		t.Fatal("expected malformed matching auth to fail")
+	}
+	if !strings.Contains(err.Error(), "decode registry auth") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

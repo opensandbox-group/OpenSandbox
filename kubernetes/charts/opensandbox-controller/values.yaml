@@ -70,7 +70,7 @@ controller:
     registry: ""
     # -- Use insecure registry mode when pushing snapshot images.
     registryInsecure: false
-    # -- Secret name used by commit Jobs to push snapshot images.
+    # -- Secret name used to push and delete snapshot images.
     snapshotPushSecret: ""
     # -- Secret name for pulling the image-committer image in commit Jobs.
     # Required when imageCommitterImage is stored in a private registry.

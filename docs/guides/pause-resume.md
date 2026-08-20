@@ -156,7 +156,7 @@ Configure the controller manager deployment with snapshot flags:
 |-----|------|---------|-------------|
 | `--snapshot-registry` | string | `""` | **Required.** OCI registry prefix. Images are stored as `<registry>/<sandboxName>-<container>:snap-gen<N>`. |
 | `--snapshot-registry-insecure` | bool | `false` | Enables insecure registry mode for snapshot push operations. Use only for HTTP or self-signed local registries. |
-| `--snapshot-push-secret` | string | `""` | Kubernetes Secret name for pushing snapshots. Must be `kubernetes.io/dockerconfigjson` type. |
+| `--snapshot-push-secret` | string | `""` | Kubernetes Secret name for pushing and deleting snapshot images. Must be `kubernetes.io/dockerconfigjson` type, contain inline `auths` credentials for the registry, and permit manifest deletion. `credHelpers`/`credsStore` entries are not usable by the controller. |
 | `--image-committer-pod-template-file` | string | `""` | Path to a PodTemplateSpec overlay for commit Job Pods. |
 | `--resume-pull-secret` | string | `""` | Kubernetes Secret name injected into resumed sandboxes for pulling snapshot images. Can be the same as push secret. |
 | `--image-committer-image` | string | `"image-committer:dev"` | Image used by commit Jobs. |
@@ -190,6 +190,7 @@ Any OCI-compatible registry works (Docker Hub, GitHub Container Registry, Harbor
 
 - **Reachable from cluster nodes** (for the commit Job to push)
 - **Reachable from the Kubernetes API server / kubelet** (for image pull on resume)
+- **Configured to allow manifest deletion** (for snapshot cleanup)
 
 ### Step 2: Create the push secret
 
@@ -221,6 +222,9 @@ For development with a cluster-internal `registry:2` deployment:
 # Create a registry deployment
 kubectl create deployment docker-registry \
   --image=registry:2 --port=5000
+
+kubectl set env deployment/docker-registry \
+  REGISTRY_STORAGE_DELETE_ENABLED=true
 
 kubectl expose deployment docker-registry --port=5000
 
@@ -328,7 +332,12 @@ Any ServiceAccount or admission configuration referenced by the template must ex
 
 If the commit Job fails, the controller creates a best-effort `<snapshotName>-unpause` Job on the same node to unpause any source containers that may have been left paused by an abrupt committer exit.
 
-Deleting a `SandboxSnapshot` cleans up Kubernetes commit/unpause Jobs, but does not delete pushed OCI images from the registry. Repeated pause cycles create tags such as `snap-gen<N>`; configure registry retention or garbage collection externally.
+Deleting a `SandboxSnapshot` stops its commit/unpause Jobs, deletes pushed OCI manifests, and then removes the Kubernetes finalizer. Registry garbage collection may still be required to reclaim unreferenced blob storage. If the registry or credentials are permanently unavailable, remove the finalizer manually only after accepting that the image may need separate registry cleanup:
+
+```bash
+kubectl patch sandboxsnapshot <name> -n <namespace> --type=merge \
+  -p '{"metadata":{"finalizers":[]}}'
+```
 
 ### Monitoring
 

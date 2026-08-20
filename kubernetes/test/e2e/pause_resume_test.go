@@ -15,9 +15,10 @@
 package e2e
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,11 +124,30 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 	})
 
 	AfterAll(func() {
-		By("cleaning up Docker Registry")
-		cmd := exec.Command("kubectl", "delete", "deployment", "docker-registry", "-n", pauseResumeNamespace, "--ignore-not-found=true")
+		By("cleaning up any remaining batchsandboxes")
+		cmd := exec.Command("kubectl", "delete", "batchsandboxes", "--all", "-n", pauseResumeNamespace,
+			"--ignore-not-found=true", "--wait=false")
 		utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "service", "docker-registry", "-n", pauseResumeNamespace, "--ignore-not-found=true")
+
+		By("requesting cleanup of any remaining sandboxsnapshots")
+		cmd = exec.Command("kubectl", "delete", "sandboxsnapshots", "--all", "-n", pauseResumeNamespace,
+			"--ignore-not-found=true", "--wait=false")
 		utils.Run(cmd)
+
+		// Failure-path tests can intentionally leave snapshots whose image URI
+		// cannot be cleaned up. Exercise the documented operator escape hatch so
+		// teardown cannot block forever on their strict cleanup finalizers.
+		By("removing finalizers from snapshots that could not be cleaned up")
+		cmd = exec.Command("kubectl", "get", "sandboxsnapshots", "-n", pauseResumeNamespace,
+			"-o", "jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}")
+		remainingSnapshots, err := utils.Run(cmd)
+		if err == nil {
+			for _, snapshotName := range strings.Fields(remainingSnapshots) {
+				cmd = exec.Command("kubectl", "patch", "sandboxsnapshot", snapshotName, "-n", pauseResumeNamespace,
+					"--type=merge", "-p", `{"metadata":{"finalizers":[]}}`)
+				utils.Run(cmd)
+			}
+		}
 
 		By("cleaning up secrets")
 		for _, secret := range []string{"registry-auth", "registry-snapshot-push-secret", "registry-pull-secret"} {
@@ -135,12 +155,10 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			utils.Run(cmd)
 		}
 
-		By("cleaning up any remaining sandboxsnapshots")
-		cmd = exec.Command("kubectl", "delete", "sandboxsnapshots", "--all", "-n", pauseResumeNamespace, "--ignore-not-found=true")
+		By("cleaning up Docker Registry")
+		cmd = exec.Command("kubectl", "delete", "deployment", "docker-registry", "-n", pauseResumeNamespace, "--ignore-not-found=true")
 		utils.Run(cmd)
-
-		By("cleaning up any remaining batchsandboxes")
-		cmd = exec.Command("kubectl", "delete", "batchsandboxes", "--all", "-n", pauseResumeNamespace, "--ignore-not-found=true")
+		cmd = exec.Command("kubectl", "delete", "service", "docker-registry", "-n", pauseResumeNamespace, "--ignore-not-found=true")
 		utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -261,6 +279,12 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("Succeed"), "Internal pause snapshot should be ready after pause")
 
+			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
+				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.containers[0].imageUri}")
+			snapshotImageURI, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snapshotImageURI).NotTo(BeEmpty())
+
 			// --- Step 4: Resume - patch spec.pause=false ---
 			By("triggering resume by patching spec.pause=false")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
@@ -279,10 +303,15 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			}, 2*time.Minute).Should(Succeed())
 
 			By("verifying the reserved internal SandboxSnapshot is deleted after successful resume")
-			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
-				"-n", pauseResumeNamespace, "-o", "name")
-			output, err = utils.Run(cmd)
-			Expect(err).To(HaveOccurred(), "Internal pause snapshot should be deleted after successful resume")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
+					"-n", pauseResumeNamespace, "-o", "name")
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Internal pause snapshot should be deleted after successful resume")
+			}, 2*time.Minute).Should(Succeed())
+
+			By("verifying the deleted snapshot manifest is absent from the registry")
+			expectRegistryManifestMissing(snapshotImageURI)
 
 			// --- Step 5: Verify rootfs data persistence ---
 			By("getting resumed pod name")
@@ -811,7 +840,7 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			utils.Run(cmd)
 		})
 
-		It("should set Phase=Succeed+PauseFailed when commit/push fails with invalid registry", func() {
+		It("should set Phase=Succeed+PauseFailed when the snapshot registry is unavailable", func() {
 			const sandboxName = "test-pause-commit-fail"
 
 			By("creating BatchSandbox with template")
@@ -841,17 +870,51 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).To(Equal("Succeed"))
 			}, 2*time.Minute).Should(Succeed())
 
-			By("patching registry push secret to invalid value (invalid docker config)")
-			// Create an invalid docker config JSON (base64 encoded)
-			invalidConfig := `{"auths":{"docker-registry.default.svc.cluster.local:5000":{"username":"invalid","password":"wrong","auth":"aW52YWxpZDp3cm9uZw=="}}}`
-			encoded := base64.StdEncoding.EncodeToString([]byte(invalidConfig))
-			patchData := fmt.Sprintf(`{"data":{".dockerconfigjson":"%s"}}`, encoded)
-			cmd = exec.Command("kubectl", "patch", "secret", "registry-snapshot-push-secret", "-n", pauseResumeNamespace,
-				"--type=merge", "-p", patchData)
+			By("making the snapshot registry unavailable")
+			cmd = exec.Command("kubectl", "scale", "deployment", "docker-registry",
+				"-n", pauseResumeNamespace, "--replicas=0")
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("triggering pause with invalid registry config")
+			By("waiting for the snapshot registry to have no available replicas")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "docker-registry", "-n", pauseResumeNamespace, "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				var deployment struct {
+					Status struct {
+						AvailableReplicas int `json:"availableReplicas"`
+					} `json:"status"`
+				}
+				g.Expect(json.Unmarshal([]byte(output), &deployment)).To(Succeed())
+				g.Expect(deployment.Status.AvailableReplicas).To(Equal(0))
+
+				cmd = exec.Command("kubectl", "get", "endpointslice", "-l", "kubernetes.io/service-name=docker-registry",
+					"-n", pauseResumeNamespace, "-o", "json")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				var endpointSlices struct {
+					Items []struct {
+						Endpoints []struct {
+							Conditions struct {
+								Ready *bool `json:"ready"`
+							} `json:"conditions"`
+						} `json:"endpoints"`
+					} `json:"items"`
+				}
+				g.Expect(json.Unmarshal([]byte(output), &endpointSlices)).To(Succeed())
+				readyCount := 0
+				for _, endpointSlice := range endpointSlices.Items {
+					for _, endpoint := range endpointSlice.Endpoints {
+						if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
+							readyCount++
+						}
+					}
+				}
+				g.Expect(readyCount).To(Equal(0))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("triggering pause while the snapshot registry is unavailable")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
 				"-n", pauseResumeNamespace, "--type=merge",
 				"-p", `{"spec":{"pause":true}}`)
@@ -877,6 +940,53 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "batchsandbox", sandboxName, "-n", pauseResumeNamespace, "--ignore-not-found=true")
 			utils.Run(cmd)
+
+			By("restoring the snapshot registry")
+			cmd = exec.Command("kubectl", "scale", "deployment", "docker-registry",
+				"-n", pauseResumeNamespace, "--replicas=1")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the snapshot registry to become available")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "docker-registry", "-n", pauseResumeNamespace, "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				var deployment struct {
+					Status struct {
+						AvailableReplicas int `json:"availableReplicas"`
+					} `json:"status"`
+				}
+				g.Expect(json.Unmarshal([]byte(output), &deployment)).To(Succeed())
+				g.Expect(deployment.Status.AvailableReplicas).To(Equal(1))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("waiting for the snapshot registry endpoint to become ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "endpointslice", "-l", "kubernetes.io/service-name=docker-registry",
+					"-n", pauseResumeNamespace, "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				var endpointSlices struct {
+					Items []struct {
+						Endpoints []struct {
+							Conditions struct {
+								Ready *bool `json:"ready"`
+							} `json:"conditions"`
+						} `json:"endpoints"`
+					} `json:"items"`
+				}
+				g.Expect(json.Unmarshal([]byte(output), &endpointSlices)).To(Succeed())
+				readyCount := 0
+				for _, endpointSlice := range endpointSlices.Items {
+					for _, endpoint := range endpointSlice.Endpoints {
+						if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
+							readyCount++
+						}
+					}
+				}
+				g.Expect(readyCount).To(BeNumerically(">=", 1))
+			}, 2*time.Minute).Should(Succeed())
 
 			By("restoring registry push secret to valid credentials")
 			err = createDockerRegistrySecrets(pauseResumeNamespace)
@@ -1068,4 +1178,46 @@ func createDockerRegistrySecrets(namespace string) error {
 	}
 
 	return nil
+}
+
+func expectRegistryManifestMissing(imageURI string) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+	port := listener.Addr().(*net.TCPAddr).Port
+	Expect(listener.Close()).To(Succeed())
+
+	portForward := exec.Command("kubectl", "port-forward", "-n", pauseResumeNamespace,
+		"service/docker-registry", fmt.Sprintf("%d:5000", port))
+	Expect(portForward.Start()).To(Succeed())
+	defer func() {
+		_ = portForward.Process.Kill()
+		_ = portForward.Wait()
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	registryURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	Eventually(func(g Gomega) {
+		request, requestErr := http.NewRequest(http.MethodGet, registryURL+"/v2/", nil)
+		g.Expect(requestErr).NotTo(HaveOccurred())
+		request.SetBasicAuth(registryUsername, registryPassword)
+		response, requestErr := client.Do(request)
+		g.Expect(requestErr).NotTo(HaveOccurred())
+		defer response.Body.Close()
+		g.Expect(response.StatusCode).To(Equal(http.StatusOK))
+	}, 30*time.Second).Should(Succeed())
+
+	repositoryAndTag := strings.TrimPrefix(imageURI, registryServiceAddr+"/")
+	tagSeparator := strings.LastIndex(repositoryAndTag, ":")
+	Expect(tagSeparator).To(BeNumerically(">", 0), "snapshot image must include a tag")
+	manifestURL := fmt.Sprintf("%s/v2/%s/manifests/%s", registryURL, repositoryAndTag[:tagSeparator], repositoryAndTag[tagSeparator+1:])
+
+	for range 2 {
+		request, requestErr := http.NewRequest(http.MethodHead, manifestURL, nil)
+		Expect(requestErr).NotTo(HaveOccurred())
+		request.SetBasicAuth(registryUsername, registryPassword)
+		response, requestErr := client.Do(request)
+		Expect(requestErr).NotTo(HaveOccurred())
+		response.Body.Close()
+		Expect(response.StatusCode).To(Equal(http.StatusNotFound))
+	}
 }
