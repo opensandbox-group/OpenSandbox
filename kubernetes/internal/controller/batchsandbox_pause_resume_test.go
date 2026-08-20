@@ -1600,6 +1600,27 @@ func TestPersistRuntimeView_PreservesPauseFailedConditionFromLatestStatus(t *tes
 	assert.True(t, foundPauseFailed, "persistRuntimeView should preserve PauseFailed condition once informer cache catches up")
 }
 
+func TestUpdateStatus_ClearsPersistedFailedPodUIDs(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default"},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:         sandboxv1alpha1.BatchSandboxPhaseFailed,
+			FailedPodUIDs: []types.UID{"failed-pod-uid"},
+		},
+	}
+	r := newTestReconciler(bs)
+
+	desiredStatus := bs.Status.DeepCopy()
+	desiredStatus.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
+	desiredStatus.FailedPodUIDs = nil
+	require.NoError(t, r.updateStatus(context.Background(), bs, desiredStatus))
+
+	updated := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, updated))
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, updated.Status.Phase)
+	assert.Nil(t, updated.Status.FailedPodUIDs, "the merge patch must remove persisted failure provenance")
+}
+
 func TestPersistRuntimeView_SkipsStatusUpdateWhenRuntimeStatusUnchanged(t *testing.T) {
 	transitionTime := metav1.NewTime(time.Now().Add(-5 * time.Minute))
 	bs := &sandboxv1alpha1.BatchSandbox{

@@ -354,7 +354,20 @@ func (r *BatchSandboxReconciler) updateStatus(ctx context.Context, batchSandbox 
 	log := logf.FromContext(ctx)
 	mergedStatus := newStatus.DeepCopy()
 	mergedStatus.Conditions = mergeLifecycleConditions(mergedStatus.Conditions, batchSandbox.Status.Conditions)
-	patchData, err := json.Marshal(map[string]any{"status": mergedStatus})
+	statusPatch := make(map[string]any)
+	statusJSON, err := json.Marshal(mergedStatus)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status patch: %w", err)
+	}
+	if err := json.Unmarshal(statusJSON, &statusPatch); err != nil {
+		return fmt.Errorf("failed to unmarshal status patch: %w", err)
+	}
+	// JSON merge patches preserve fields omitted by omitempty. Explicitly clear
+	// recorded failure provenance when the desired status no longer has it.
+	if len(batchSandbox.Status.FailedPodUIDs) > 0 && len(mergedStatus.FailedPodUIDs) == 0 {
+		statusPatch["failedPodUIDs"] = nil
+	}
+	patchData, err := json.Marshal(map[string]any{"status": statusPatch})
 	if err != nil {
 		return fmt.Errorf("failed to marshal status patch: %w", err)
 	}
