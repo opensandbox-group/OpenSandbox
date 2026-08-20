@@ -30,9 +30,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot/registryimage"
-	"github.com/klauspost/compress/zstd"
 )
 
 const (

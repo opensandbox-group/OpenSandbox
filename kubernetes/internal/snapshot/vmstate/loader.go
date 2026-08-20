@@ -23,8 +23,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 )
 
 const fileMode = 0640

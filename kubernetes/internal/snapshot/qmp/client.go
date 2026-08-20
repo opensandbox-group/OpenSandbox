@@ -236,8 +236,8 @@ func (c *Client) ExportMigration(ctx context.Context, outputFD *os.File, pollInt
 				status.ErrorDesc = "QEMU migration failed without an error description"
 			}
 			return errors.New(status.ErrorDesc)
-		case "cancelled":
-			return errors.New("QEMU migration was cancelled")
+		case "cancelled": //nolint:misspell // QEMU QMP reports the British spelling
+			return errors.New("QEMU migration was canceled")
 		case "setup", "active", "postcopy-active", "pre-switchover", "device", "wait-unplug", "colo":
 			// Still progressing.
 		case "none":

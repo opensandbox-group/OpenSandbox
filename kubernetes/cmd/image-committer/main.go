@@ -104,15 +104,6 @@ type ContainerSpec struct {
 	URI  string
 }
 
-// parseContainerSpec parses a "container:uri" string into ContainerSpec.
-func parseContainerSpec(specStr string) (ContainerSpec, error) {
-	parts := strings.SplitN(specStr, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return ContainerSpec{}, fmt.Errorf("invalid container spec %q; expected container_name:uri", specStr)
-	}
-	return ContainerSpec{Name: parts[0], URI: parts[1]}, nil
-}
-
 // writeSnapshotResult writes the legacy rootfs snapshot result to the
 // Kubernetes termination message path.
 func writeSnapshotResult(containerSpecs []ContainerSpec, digests map[string]string) error {
