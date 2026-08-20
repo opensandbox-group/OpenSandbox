@@ -1878,6 +1878,92 @@ func TestBuildRuntimeView_AggregatesResumeFailures(t *testing.T) {
 	assert.Equal(t, "2/3 observed pods failed; primary reason=ImagePullBackOff; sample pod=imgpull-0", podFailed.Message)
 }
 
+func TestBuildRuntimeView_MarksResumeFailedWhenStaleCacheMissesResumingPhase(t *testing.T) {
+	// Under informer lag the cached phase may still be the pre-pause steady phase
+	// while a resume request is already in flight; pod failures must still surface
+	// ResumeFailed instead of only PodFailed.
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-bs",
+			Namespace:  "default",
+			Generation: 4,
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause: ptr.To(false),
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                   sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			PauseObservedGeneration: 3,
+		},
+	}
+
+	pods := []*corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Name: "imgpull-0", Namespace: "default"},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "ErrImagePull",
+						Message: "image not found",
+					},
+				},
+			}},
+		},
+	}}
+
+	view := buildRuntimeView(bs, pods)
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+
+	var resumeFailed *sandboxv1alpha1.BatchSandboxCondition
+	for i := range view.status.Conditions {
+		if view.status.Conditions[i].Type == sandboxv1alpha1.BatchSandboxConditionResumeFailed {
+			resumeFailed = &view.status.Conditions[i]
+			break
+		}
+	}
+	require.NotNil(t, resumeFailed, "resume in flight must mark ResumeFailed even when the cached phase lags")
+	assert.Equal(t, sandboxv1alpha1.ConditionTrue, resumeFailed.Status)
+	assert.Equal(t, "ErrImagePull", resumeFailed.Reason)
+}
+
+func TestBuildRuntimeView_SteadyFailureWithoutResumeInFlightKeepsResumeFailedAbsent(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-bs",
+			Namespace:  "default",
+			Generation: 3,
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause: ptr.To(false),
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                   sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			PauseObservedGeneration: 3,
+		},
+	}
+
+	pods := []*corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Name: "crash-0", Namespace: "default"},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "CrashLoopBackOff",
+						Message: "crash",
+					},
+				},
+			}},
+		},
+	}}
+
+	view := buildRuntimeView(bs, pods)
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+	for i := range view.status.Conditions {
+		assert.NotEqual(t, sandboxv1alpha1.BatchSandboxConditionResumeFailed, view.status.Conditions[i].Type,
+			"steady-state pod failures must not set ResumeFailed")
+	}
+}
+
 func TestBuildRuntimeView_PreservesConditionTransitionTimeWhenUnchanged(t *testing.T) {
 	transitionTime := metav1.NewTime(time.Now().Add(-5 * time.Minute))
 	bs := &sandboxv1alpha1.BatchSandbox{

@@ -980,16 +980,18 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("verifying ResumeFailed condition is set")
-			cmd = exec.Command("kubectl", "get", "batchsandbox", sandboxName,
-				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='ResumeFailed')].status}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("True"))
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", sandboxName,
+					"-n", pauseResumeNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='ResumeFailed')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, time.Minute, 2*time.Second).Should(Succeed())
 
 			By("verifying the reserved internal SandboxSnapshot is retained after failed resume")
 			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
 				"-n", pauseResumeNamespace, "-o", "name")
-			output, err = utils.Run(cmd)
+			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Internal pause snapshot should remain after failed resume")
 			Expect(strings.TrimSpace(output)).To(Equal("sandboxsnapshot.sandbox.opensandbox.io/" + sandboxName + "-pause"))
 

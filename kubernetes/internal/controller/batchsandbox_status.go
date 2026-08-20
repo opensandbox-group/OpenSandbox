@@ -199,6 +199,14 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 	}
 }
 
+// isResumeInFlight reports whether a resume request has been issued but not yet
+// acknowledged, mirroring the dispatch table's resume detection. It is used to
+// preserve resume failure semantics when the cached phase lags behind.
+func isResumeInFlight(batchSbx *sandboxv1alpha1.BatchSandbox) bool {
+	return batchSbx.Generation > batchSbx.Status.PauseObservedGeneration &&
+		batchSbx.Spec.Pause != nil && !*batchSbx.Spec.Pause
+}
+
 func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod) {
 	if summary, hasFailures := summarizePodFailures(pods); hasFailures {
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
@@ -216,6 +224,11 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	if summary, hasFailures := summarizePodFailures(pods); hasFailures {
 		if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseFailed {
 			setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
+			// Under informer lag a resume-in-progress failure can be observed while the
+			// cached phase is not Resuming; keep the resume failure semantics anyway.
+			if isResumeInFlight(batchSbx) {
+				setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
+			}
 			status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
 		}
 		return
