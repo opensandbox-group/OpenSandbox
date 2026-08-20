@@ -59,12 +59,19 @@ SANDBOX_READY_TIMEOUT_SECONDS = 120
 RELEASE_TIMEOUT_SECONDS = 120
 
 
-def _kubectl(*args: str, timeout: int = 60) -> str:
+def _kubectl(*args: str, timeout: int = 60, input: str | None = None) -> str:
     out = subprocess.run(
         ["kubectl", *args],
-        check=True, capture_output=True, text=True, timeout=timeout,
+        check=True, capture_output=True, text=True, timeout=timeout, input=input,
     )
     return out.stdout.strip()
+
+
+def _apply_pool() -> None:
+    manifest = POOL_YAML.read_text()
+    if E2E_NAMESPACE != "opensandbox-e2e":
+        manifest = manifest.replace("namespace: opensandbox-e2e", f"namespace: {E2E_NAMESPACE}")
+    _kubectl("apply", "-f", "-", input=manifest)
 
 
 def _pool_status_field(field: str) -> str:
@@ -100,7 +107,7 @@ class TestServerPoolLifecycleE2ESync:
     @pytest.fixture(scope="class", autouse=True)
     def server_pool(self) -> dict:
         """Apply the Pool CR, wait for warm buffer pods, and clean up."""
-        _kubectl("apply", "-f", str(POOL_YAML))
+        _apply_pool()
         sandboxes: list[SandboxSync] = []
         try:
             _eventually(

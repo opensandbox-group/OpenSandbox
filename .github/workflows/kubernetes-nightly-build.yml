@@ -265,7 +265,7 @@ jobs:
 
   publish-nightly-latest:
     name: Publish latest (${{ matrix.component }} nightly)
-    needs: [k8s-mini-e2e, execd-init-e2e]
+    needs: [k8s-mini-e2e, k8s-pool-e2e, execd-init-e2e]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
