@@ -21,6 +21,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -44,6 +45,9 @@ const (
 	vmStateRestoreVolumeName = "opensandbox-vmstate-restore"
 	vmStateRestoreInitName   = "opensandbox-vmstate-restore"
 	vmStateRestoreMountPath  = "/run/opensandbox/vmstate"
+	// vmStateRestoreHeadroomBytes covers the manifest file and the copied
+	// vmstate-loader binary stored next to the VM state payload.
+	vmStateRestoreHeadroomBytes int64 = 64 << 20
 )
 
 func internalPauseSnapshotName(batchSandboxName string) string {
@@ -673,7 +677,8 @@ func injectQEMURestore(template *corev1.PodTemplateSpec, snapshotObject *sandbox
 		return fmt.Errorf("QEMU restore container %q does not exist", qemuContainerName)
 	}
 
-	if err := ensureVMStateVolume(&template.Spec); err != nil {
+	volumeSizeLimit := vmStateRestoreStorageSize(vm.SizeBytes)
+	if err := ensureVMStateVolume(&template.Spec, volumeSizeLimit); err != nil {
 		return err
 	}
 	target := &template.Spec.Containers[containerIndex]
@@ -695,8 +700,17 @@ func injectQEMURestore(template *corev1.PodTemplateSpec, snapshotObject *sandbox
 			"--manifest-digest", vm.ManifestDigest,
 		},
 		VolumeMounts: []corev1.VolumeMount{{Name: vmStateRestoreVolumeName, MountPath: vmStateRestoreMountPath}},
+		// Reserve ephemeral storage for the copied VM state payload so the
+		// scheduler only places resumed Pods on nodes with enough local disk.
+		Resources: mergeResourceRequirements(corev1.ResourceRequirements{}, corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceEphemeralStorage: volumeSizeLimit.DeepCopy()},
+			Limits:   corev1.ResourceList{corev1.ResourceEphemeralStorage: volumeSizeLimit.DeepCopy()},
+		}),
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:                ptr.To(int64(0)),
+			RunAsUser: ptr.To(int64(0)),
+			// The init container runs as root even when the source Pod template
+			// sets pod-level runAsNonRoot, so override the inherited value.
+			RunAsNonRoot:             ptr.To(false),
 			AllowPrivilegeEscalation: ptr.To(false),
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		},
@@ -728,7 +742,7 @@ func injectQEMURestore(template *corev1.PodTemplateSpec, snapshotObject *sandbox
 	return nil
 }
 
-func ensureVMStateVolume(spec *corev1.PodSpec) error {
+func ensureVMStateVolume(spec *corev1.PodSpec, sizeLimit resource.Quantity) error {
 	for i := range spec.Volumes {
 		if spec.Volumes[i].Name != vmStateRestoreVolumeName {
 			continue
@@ -739,10 +753,22 @@ func ensureVMStateVolume(spec *corev1.PodSpec) error {
 		return nil
 	}
 	spec.Volumes = append(spec.Volumes, corev1.Volume{
-		Name:         vmStateRestoreVolumeName,
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		Name: vmStateRestoreVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+			SizeLimit: ptr.To(sizeLimit.DeepCopy()),
+		}},
 	})
 	return nil
+}
+
+// vmStateRestoreStorageSize sizes the restore emptyDir and the init container's
+// ephemeral storage. It covers the compressed payload recorded in the snapshot
+// plus headroom for the manifest and the copied vmstate-loader binary.
+func vmStateRestoreStorageSize(payloadSize int64) resource.Quantity {
+	if payloadSize < 0 {
+		payloadSize = 0
+	}
+	return *resource.NewQuantity(payloadSize+vmStateRestoreHeadroomBytes, resource.BinarySI)
 }
 
 func ensureVMStateMount(container *corev1.Container) error {

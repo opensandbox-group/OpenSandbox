@@ -2735,8 +2735,11 @@ func TestInjectQEMURestorePreservesUserInitContainersAndIsIdempotent(t *testing.
 			"sandbox.opensandbox.io/qemu-container": "main",
 		}},
 		Spec: corev1.PodSpec{
-			InitContainers: []corev1.Container{{Name: "download-ubuntu", Image: "ubuntu-seed:test"}},
-			Containers:     []corev1.Container{{Name: "main", Image: "qemu:test"}},
+			// A pod-level runAsNonRoot would be inherited by the injected init
+			// container unless it overrides the value explicitly.
+			SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)},
+			InitContainers:  []corev1.Container{{Name: "download-ubuntu", Image: "ubuntu-seed:test"}},
+			Containers:      []corev1.Container{{Name: "main", Image: "qemu:test"}},
 		},
 	}
 	snapshotObject := &sandboxv1alpha1.SandboxSnapshot{Status: sandboxv1alpha1.SandboxSnapshotStatus{
@@ -2769,12 +2772,24 @@ func TestInjectQEMURestorePreservesUserInitContainersAndIsIdempotent(t *testing.
 	assert.Equal(t, vmStateRestoreInitName, restore.Name)
 	assert.Equal(t, "registry.example/sandbox-vmstate@sha256:"+strings.Repeat("1", 64), restore.Image)
 	assert.Contains(t, restore.Args, "sha256:"+strings.Repeat("3", 64))
+	require.NotNil(t, restore.SecurityContext)
+	require.NotNil(t, restore.SecurityContext.RunAsUser)
+	assert.Equal(t, int64(0), *restore.SecurityContext.RunAsUser)
+	require.NotNil(t, restore.SecurityContext.RunAsNonRoot, "RunAsNonRoot must be set explicitly so a pod-level runAsNonRoot=true does not conflict with UID 0")
+	assert.False(t, *restore.SecurityContext.RunAsNonRoot)
 	assert.Equal(t, "shenlong-v1", template.Spec.NodeSelector["sandbox.opensandbox.io/qemu-node-class"])
 	require.Len(t, template.Spec.Volumes, 1)
 	require.Len(t, template.Spec.Containers[0].VolumeMounts, 1)
 	assert.Equal(t, vmStateRestoreMountPath, template.Spec.Containers[0].VolumeMounts[0].MountPath)
 	assert.Contains(t, template.Spec.Containers[0].Env, corev1.EnvVar{Name: "OPENSANDBOX_RESTORE_MODE", Value: "qemu-v1"})
 	assert.Contains(t, template.Spec.Containers[0].Env, corev1.EnvVar{Name: "OPENSANDBOX_VMSTATE_DIR", Value: vmStateRestoreMountPath})
+
+	expectedStorage := vmStateRestoreStorageSize(1024)
+	require.NotNil(t, template.Spec.Volumes[0].EmptyDir)
+	require.NotNil(t, template.Spec.Volumes[0].EmptyDir.SizeLimit, "restore emptyDir must reserve a size limit based on the recorded VM state size")
+	assert.Equal(t, expectedStorage.Value(), template.Spec.Volumes[0].EmptyDir.SizeLimit.Value())
+	assert.Equal(t, expectedStorage, restore.Resources.Requests[corev1.ResourceEphemeralStorage])
+	assert.Equal(t, expectedStorage, restore.Resources.Limits[corev1.ResourceEphemeralStorage])
 }
 
 // Ensure ctrl.Result type is used
