@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	stdjson "encoding/json"
 	gerrors "errors"
 	"fmt"
 	"os"
@@ -35,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -43,6 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -209,6 +212,18 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 			result = ctrl.Result{RequeueAfter: defaultRetryTime}
 		}
 
+		// Best-effort compatibility migration for allocations written before PoolRef
+		// was included in the alloc-status annotation. Do not let a patch failure
+		// interrupt scheduling, releasing, or scaling.
+		for _, sandbox := range batchSandboxes {
+			if err := r.backfillLegacyPoolAllocation(ctx, latestPool, sandbox, schedulePods, schedResult.LatestAllocation); err != nil {
+				logf.FromContext(ctx).Error(err, "Failed to backfill legacy pool allocation", "pool", latestPool.Name, "sandbox", sandbox.Name)
+				if result.RequeueAfter == 0 || result.RequeueAfter > defaultRetryTime {
+					result.RequeueAfter = defaultRetryTime
+				}
+			}
+		}
+
 		// 4. Handle pool upgrade
 		updateResult, err := r.updatePool(ctx, latestPool, schedulePods, schedResult.IdlePods)
 		if err != nil {
@@ -244,6 +259,156 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 	})
 
 	return result, err
+}
+
+// backfillLegacyPoolAllocation adds PoolRef and Generation to a verified legacy
+// allocation annotation. It intentionally leaves all newer or ambiguous records
+// untouched.
+func (r *PoolReconciler) backfillLegacyPoolAllocation(ctx context.Context, pool *sandboxv1alpha1.Pool, sandbox *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod, latestAllocation map[string]string) error {
+	if sandbox.Spec.PoolRef == "" || sandbox.Spec.PoolRef != pool.Name ||
+		!sandbox.DeletionTimestamp.IsZero() ||
+		!controllerutil.ContainsFinalizer(sandbox, FinalizerPoolAllocation) {
+		return nil
+	}
+
+	allocation, valid := parseLegacySandboxAllocation(sandbox)
+	if !valid {
+		return nil
+	}
+
+	releasePods, valid := validLegacyAllocationRelease(sandbox.GetAnnotations(), AnnoAllocReleaseKey)
+	if !valid {
+		return nil
+	}
+	releasedPods, valid := validLegacyAllocationRelease(sandbox.GetAnnotations(), AnnoAllocReleasedKey)
+	if !valid {
+		return nil
+	}
+	if allocationIntersects(allocation.Pods, releasePods) || allocationIntersects(allocation.Pods, releasedPods) {
+		return nil
+	}
+
+	poolPods := make(map[string]struct{}, len(pods))
+	for _, pod := range pods {
+		if pod != nil && pod.DeletionTimestamp.IsZero() && pod.Labels[LabelPoolName] == pool.Name {
+			poolPods[pod.Name] = struct{}{}
+		}
+	}
+	for _, podName := range allocation.Pods {
+		if _, ok := poolPods[podName]; !ok {
+			return nil
+		}
+		if latestAllocation[podName] != sandbox.Name {
+			return nil
+		}
+	}
+
+	allocation.PoolRef = pool.Name
+	allocation.Generation = sandbox.Generation
+	rawAllocation, err := json.Marshal(allocation)
+	if err != nil {
+		return err
+	}
+	patchData, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{AnnoAllocStatusKey: string(rawAllocation)},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	obj := &sandboxv1alpha1.BatchSandbox{}
+	obj.Name = sandbox.Name
+	obj.Namespace = sandbox.Namespace
+	return r.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData))
+}
+
+// parseLegacySandboxAllocation accepts only the historical pods-only JSON
+// shape. Explicit or partial newer evidence is never rewritten by migration.
+func parseLegacySandboxAllocation(sandbox *sandboxv1alpha1.BatchSandbox) (SandboxAllocation, bool) {
+	raw, ok := sandbox.GetAnnotations()[AnnoAllocStatusKey]
+	if !ok {
+		return SandboxAllocation{}, false
+	}
+	var payload map[string]stdjson.RawMessage
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
+		return SandboxAllocation{}, false
+	}
+	if _, exists := payload["poolRef"]; exists {
+		return SandboxAllocation{}, false
+	}
+	if _, exists := payload["generation"]; exists {
+		return SandboxAllocation{}, false
+	}
+	if len(payload) != 1 {
+		return SandboxAllocation{}, false
+	}
+	rawPods, ok := payload["pods"]
+	if !ok {
+		return SandboxAllocation{}, false
+	}
+	var pods []string
+	if err := json.Unmarshal(rawPods, &pods); err != nil || !validLegacyAllocationPods(pods) {
+		return SandboxAllocation{}, false
+	}
+	return SandboxAllocation{Pods: pods}, true
+}
+
+func validLegacyAllocationPods(pods []string) bool {
+	if len(pods) == 0 {
+		return false
+	}
+	return validUniqueDNS1123PodNames(pods)
+}
+
+// validLegacyAllocationRelease verifies that an optional release annotation has
+// an explicit, non-null pods list whose pod names are valid and unique.
+func validLegacyAllocationRelease(annotations map[string]string, key string) ([]string, bool) {
+	raw, ok := annotations[key]
+	if !ok {
+		return nil, true
+	}
+
+	var payload map[string]stdjson.RawMessage
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
+		return nil, false
+	}
+	rawPods, ok := payload["pods"]
+	if !ok {
+		return nil, false
+	}
+	var pods []string
+	if err := json.Unmarshal(rawPods, &pods); err != nil || pods == nil || !validUniqueDNS1123PodNames(pods) {
+		return nil, false
+	}
+	return pods, true
+}
+
+func validUniqueDNS1123PodNames(pods []string) bool {
+	seen := make(map[string]struct{}, len(pods))
+	for _, podName := range pods {
+		if podName == "" || len(validation.IsDNS1123Subdomain(podName)) != 0 {
+			return false
+		}
+		if _, ok := seen[podName]; ok {
+			return false
+		}
+		seen[podName] = struct{}{}
+	}
+	return true
+}
+
+func allocationIntersects(allocationPods, otherPods []string) bool {
+	allocationSet := make(map[string]struct{}, len(allocationPods))
+	for _, podName := range allocationPods {
+		allocationSet[podName] = struct{}{}
+	}
+	for _, podName := range otherPods {
+		if _, ok := allocationSet[podName]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *PoolReconciler) calculateRevision(pool *sandboxv1alpha1.Pool) (string, error) {

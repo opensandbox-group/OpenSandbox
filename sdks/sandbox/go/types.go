@@ -165,19 +165,45 @@ type CreateSandboxRequest struct {
 	Platform         *PlatformSpec          `json:"platform,omitempty"`
 }
 
+// AllocationMode identifies how the runtime allocated a sandbox.
+type AllocationMode string
+
+const (
+	// AllocationModePool indicates that the sandbox was allocated from a pool.
+	AllocationModePool AllocationMode = "pool"
+)
+
+// AllocationState describes the confirmed allocation state of a sandbox.
+type AllocationState string
+
+const (
+	// AllocationStateAllocated indicates that the pool allocation is active.
+	AllocationStateAllocated AllocationState = "allocated"
+)
+
+// AllocationSummary is the public summary of a confirmed active pool
+// allocation. It is present only when the runtime confirms an active pool
+// allocation.
+type AllocationSummary struct {
+	Mode    AllocationMode  `json:"mode"`
+	PoolRef string          `json:"poolRef"`
+	State   AllocationState `json:"state"`
+}
+
 // SandboxInfo represents a runtime execution environment provisioned from a
 // container image, as returned by the lifecycle API.
 type SandboxInfo struct {
-	ID         string            `json:"id"`
-	Image      *ImageSpec        `json:"image,omitempty"`
-	SnapshotID string            `json:"snapshotId,omitempty"`
-	Status     SandboxStatus     `json:"status"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
-	Extensions map[string]string `json:"extensions,omitempty"`
-	Entrypoint []string          `json:"entrypoint"`
-	ExpiresAt  *time.Time        `json:"expiresAt,omitempty"`
-	CreatedAt  time.Time         `json:"createdAt"`
-	Platform   *PlatformSpec     `json:"platform,omitempty"`
+	ID         string             `json:"id"`
+	Image      *ImageSpec         `json:"image,omitempty"`
+	SnapshotID string             `json:"snapshotId,omitempty"`
+	Status     SandboxStatus      `json:"status"`
+	Metadata   map[string]string  `json:"metadata,omitempty"`
+	Extensions map[string]string  `json:"extensions,omitempty"`
+	Entrypoint []string           `json:"entrypoint"`
+	ExpiresAt  *time.Time         `json:"expiresAt,omitempty"`
+	CreatedAt  time.Time          `json:"createdAt"`
+	Platform   *PlatformSpec      `json:"platform,omitempty"`
+	Allocation *AllocationSummary `json:"allocation,omitempty"`
 }
 
 type SnapshotState string

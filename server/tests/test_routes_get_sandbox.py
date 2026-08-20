@@ -18,7 +18,7 @@ from fastapi.exceptions import HTTPException
 from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
-from opensandbox_server.api.schema import ImageSpec, Sandbox, SandboxStatus
+from opensandbox_server.api.schema import AllocationSummary, ImageSpec, Sandbox, SandboxStatus
 
 
 def test_get_sandbox_returns_service_payload(
@@ -37,6 +37,7 @@ def test_get_sandbox_returns_service_payload(
                 image=ImageSpec(uri="python:3.11"),
                 status=SandboxStatus(state="Running"),
                 metadata={"team": "infra"},
+                allocation=AllocationSummary(poolRef="pool-runc"),
                 entrypoint=["python", "-V"],
                 expiresAt=now + timedelta(hours=1),
                 createdAt=now,
@@ -51,6 +52,11 @@ def test_get_sandbox_returns_service_payload(
     assert payload["id"] == "sbx-001"
     assert payload["status"]["state"] == "Running"
     assert payload["image"]["uri"] == "python:3.11"
+    assert payload["allocation"] == {
+        "mode": "pool",
+        "poolRef": "pool-runc",
+        "state": "allocated",
+    }
 
 
 def test_get_sandbox_propagates_not_found(
@@ -108,6 +114,7 @@ def test_get_sandbox_omits_none_fields(
     payload = response.json()
     assert "expiresAt" not in payload
     assert "metadata" not in payload
+    assert "allocation" not in payload
     assert "reason" not in payload["status"]
     assert "message" not in payload["status"]
     assert "lastTransitionAt" not in payload["status"]

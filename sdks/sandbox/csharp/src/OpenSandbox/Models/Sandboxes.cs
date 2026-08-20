@@ -713,6 +713,30 @@ public class SandboxStatus
 }
 
 /// <summary>
+/// Runtime-confirmed Pool allocation for a sandbox.
+/// </summary>
+public class AllocationSummary
+{
+    /// <summary>
+    /// Gets or sets the confirmed allocation mode. Currently, this is "pool".
+    /// </summary>
+    [JsonPropertyName("mode")]
+    public required string Mode { get; set; }
+
+    /// <summary>
+    /// Gets or sets the concrete Pool reference allocated to the sandbox.
+    /// </summary>
+    [JsonPropertyName("poolRef")]
+    public required string PoolRef { get; set; }
+
+    /// <summary>
+    /// Gets or sets the confirmed allocation state. Currently, this is "allocated".
+    /// </summary>
+    [JsonPropertyName("state")]
+    public required string State { get; set; }
+}
+
+/// <summary>
 /// Information about a sandbox.
 /// </summary>
 public class SandboxInfo
@@ -764,6 +788,12 @@ public class SandboxInfo
     /// </summary>
     [JsonPropertyName("platform")]
     public PlatformSpec? Platform { get; set; }
+
+    /// <summary>
+    /// Gets or sets the current runtime-confirmed Pool allocation, when available.
+    /// </summary>
+    [JsonPropertyName("allocation")]
+    public AllocationSummary? Allocation { get; set; }
 
     /// <summary>
     /// Gets or sets the sandbox creation time.

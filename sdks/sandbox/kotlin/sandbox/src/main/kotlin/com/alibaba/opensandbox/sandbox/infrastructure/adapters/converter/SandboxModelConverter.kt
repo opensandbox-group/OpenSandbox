@@ -38,6 +38,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PaginationInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxAllocation
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxCreateResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageAuth
@@ -322,6 +323,14 @@ internal object SandboxModelConverter {
             snapshotId = this.snapshotId,
             platform = this.platform?.toDomainPlatformSpec(),
             status = this.status.toSandboxStatus(),
+            allocation =
+                this.allocation?.let {
+                    SandboxAllocation(
+                        mode = it.mode.value,
+                        poolRef = it.poolRef,
+                        state = it.state.value,
+                    )
+                },
             metadata = metadata,
             extensions = extensions,
         )

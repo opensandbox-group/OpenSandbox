@@ -584,6 +584,18 @@ class SandboxStatus(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SandboxAllocation(BaseModel):
+    """Current runtime-confirmed Pool allocation for a sandbox."""
+
+    mode: Literal["pool"] = Field(description="Confirmed allocation mode.")
+    pool_ref: str = Field(
+        description="Concrete Pool reference currently allocated to the sandbox."
+    )
+    state: Literal["allocated"] = Field(
+        description="Current confirmed allocation state."
+    )
+
+
 class SnapshotStatus(BaseModel):
     """
     Status information for a snapshot.
@@ -648,6 +660,10 @@ class SandboxInfo(BaseModel):
     )
     platform: PlatformSpec | None = Field(
         default=None, description="Effective platform used for sandbox provisioning."
+    )
+    allocation: SandboxAllocation | None = Field(
+        default=None,
+        description="Current runtime-confirmed Pool allocation, when available.",
     )
     metadata: dict[str, str] | None = Field(default=None, description="Custom metadata")
     extensions: dict[str, str] | None = Field(

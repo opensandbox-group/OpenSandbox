@@ -80,6 +80,10 @@ jobs:
                 path === "tests/python/tests/test_execd_init_e2e.py" ||
                 path === "tests/python/tests/test_execd_hardening_e2e.py" ||
                 path === "tests/python/tests/test_execd_k8s_restart_recycle_e2e.py" ||
+                path === "tests/python/tests/test_sandbox_pool_e2e_sync.py" ||
+                path === "tests/python/tests/test_sandbox_pool_e2e_async.py" ||
+                path === "tests/python/tests/test_server_pool_e2e_sync.py" ||
+                path === "tests/python/tests/support/server-pool.yaml" ||
                 path === "server/opensandbox_server/examples/e2e.batchsandbox-template.yaml" ||
                 path.startsWith("components/execd/") ||
                 path.startsWith("kubernetes/charts/"),

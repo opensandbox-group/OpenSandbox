@@ -555,6 +555,11 @@ class SandboxesAdapterTest {
                 "image": {
                     "uri": "ubuntu:latest"
                 },
+                "allocation": {
+                    "mode": "pool",
+                    "poolRef": "default/python",
+                    "state": "allocated"
+                },
                 "metadata": {},
                 "extensions": {
                     "opensandbox.extensions.custom-label": "中文数据"
@@ -569,6 +574,9 @@ class SandboxesAdapterTest {
         assertEquals(sandboxId, result.id)
         assertEquals(SandboxState.RUNNING, result.status.state)
         assertEquals("ubuntu:latest", result.image!!.image)
+        assertEquals("pool", result.allocation!!.mode)
+        assertEquals("default/python", result.allocation!!.poolRef)
+        assertEquals("allocated", result.allocation!!.state)
         assertEquals("中文数据", result.extensions!!["opensandbox.extensions.custom-label"])
 
         val request = mockWebServer.takeRequest()
@@ -604,6 +612,7 @@ class SandboxesAdapterTest {
 
         assertEquals(sandboxId, result.id)
         assertEquals(null, result.expiresAt)
+        assertEquals(null, result.allocation)
     }
 
     @Test
@@ -647,12 +656,24 @@ class SandboxesAdapterTest {
         val responseBody =
             """
             {
-                "items": [],
+                "items": [
+                    {
+                        "id": "pooled-sandbox",
+                        "status": { "state": "Running" },
+                        "entrypoint": ["/bin/bash"],
+                        "createdAt": "2023-01-01T10:00:00Z",
+                        "allocation": {
+                            "mode": "pool",
+                            "poolRef": "default/python",
+                            "state": "allocated"
+                        }
+                    }
+                ],
                 "pagination": {
                     "page": 0,
                     "pageSize": 10,
-                    "totalItems": 0,
-                    "totalPages": 0,
+                    "totalItems": 1,
+                    "totalPages": 1,
                     "hasNextPage": false
                 }
             }
@@ -668,7 +689,9 @@ class SandboxesAdapterTest {
                 .pageSize(20)
                 .build()
 
-        sandboxesAdapter.listSandboxes(filter)
+        val result = sandboxesAdapter.listSandboxes(filter)
+
+        assertEquals("default/python", result.sandboxInfos.single().allocation!!.poolRef)
 
         val request = mockWebServer.takeRequest()
         val url = request.requestUrl
