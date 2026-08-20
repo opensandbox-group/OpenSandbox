@@ -23,3 +23,5 @@ spec:
     bufferMin: 1
     poolMax: 3
     poolMin: 1
+  recycleStrategy:
+    type: Noop

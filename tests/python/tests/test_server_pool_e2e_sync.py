@@ -166,14 +166,15 @@ class TestServerPoolLifecycleE2ESync:
     def test_03_destroy_releases_pod_back_to_pool(self, server_pool) -> None:
         sandbox = self._create_pooled_sandbox(server_pool)
 
-        assert int(_pool_status_field("allocated")) >= 1
+        allocated_before = int(_pool_status_field("allocated"))
+        assert allocated_before >= 1
 
         sandbox.destroy()
         server_pool["sandboxes"].remove(sandbox)
 
         _eventually(
-            "pool allocation returns to zero after sandbox destroy",
-            lambda: _pool_status_field("allocated") == "0",
+            "pool allocation drops after sandbox destroy",
+            lambda: int(_pool_status_field("allocated")) == allocated_before - 1,
             timeout_seconds=RELEASE_TIMEOUT_SECONDS,
         )
         assert int(_pool_status_field("available")) >= 1, (
