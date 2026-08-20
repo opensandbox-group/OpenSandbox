@@ -3,7 +3,7 @@ title: Secure Initialization of Missing PVC Volume SubPaths
 authors:
   - "@cwj2001"
 creation-date: 2026-08-19
-last-updated: 2026-08-19
+last-updated: 2026-08-20
 status: draft
 ---
 
@@ -26,9 +26,9 @@ status: draft
   - [Errors and diagnostics](#errors-and-diagnostics)
   - [Security model](#security-model)
   - [Runtime adapters](#runtime-adapters)
-   - [Pool incompatibility](#pool-incompatibility)
-   - [Retain, delete, and reject decisions](#retain-delete-and-reject-decisions)
-  - [Capability-aware creation and rollout](#capability-aware-creation-and-rollout)
+  - [Pool incompatibility](#pool-incompatibility)
+  - [Retain, delete, and reject decisions](#retain-delete-and-reject-decisions)
+  - [Feature-scoped creation and rollout](#feature-scoped-creation-and-rollout)
 - [Test Plan](#test-plan)
 - [Drawbacks](#drawbacks)
 - [Alternatives](#alternatives)
@@ -41,12 +41,14 @@ status: draft
 
 This proposal adds an opt-in, mount-scoped way to initialize a missing directory
 used as a Kubernetes PVC `subPath`. The only new volume/mount configuration
-field is `Volume.createSubPathIfMissing`, defaulting to `false` beside `subPath`.
-The compatibility protocol also defines a distinct public capability-aware
-create route and required header. The initial implementation is limited to
-Linux Kubernetes non-Pool PVC mounts and uses a server-owned, trusted,
-restricted init mechanism; the requested final mount remains read-only or
-read-write as requested.
+field is `Volume.createSubPathIfMissing`, defaulting to `false` beside the
+existing backend-neutral `subPath`. The compatibility protocol also defines a
+distinct feature-scoped create route. For an opt-in PVC mount,
+`pvc.createIfNotExists: false` MUST be explicitly present; omission is rejected
+before the existing PVC provisioning path. The initial implementation is
+limited to Linux Kubernetes non-Pool PVC mounts and uses a server-owned,
+trusted, restricted init mechanism; the requested final mount remains
+read-only or read-write as requested.
 
 Omission preserves ordinary `subPath` behavior. There is no silent fallback to
 another runtime or to an unsafe directory-creation path, and a provider that
@@ -77,12 +79,12 @@ explicit and keeps the default fail-if-missing behavior intact.
   mount, while permitting a server-owned init-only read-write preparation step
   where the platform requires it.
 - Validate all requests and provider capability before sandbox-side effects.
-- Use secure file-descriptor-relative, no-follow traversal and a dedicated
-  trusted initializer rather than exposing arbitrary execution controls.
+- Use Linux `openat2` containment and a dedicated trusted initializer rather
+  than exposing arbitrary execution controls.
 - Keep the existing `code`/`message` error envelope, with a minimal stable
   volume error vocabulary and normative HTTP retry classification through the
   existing transport semantics.
-- Make capability-aware rollout safe with old and mixed-version server
+- Make the feature-scoped route safe with old and mixed-version server
   replicas.
 - Leave PVC provisioning, deletion, ownership, permissions, and cleanup to
   their existing lifecycle owners unless explicitly covered by this proposal.
@@ -108,40 +110,62 @@ explicit and keeps the default fail-if-missing behavior intact.
 ## Requirements
 
 1. The only new volume/mount configuration field introduced by this OSEP is
-   `Volume.createSubPathIfMissing: boolean`, beside `subPath`, with default
-   `false`. The OSEP also defines a distinct public capability-aware create
-   route and required capability header as its compatibility protocol.
+   `Volume.createSubPathIfMissing: boolean`, beside the existing backend-neutral
+   `subPath`, with default `false`. The OSEP also defines a distinct public
+   feature-scoped create route as its compatibility protocol.
 2. The opt-in is valid initially only for a Linux Kubernetes PVC mount on the
-   non-Pool path. Unsupported combinations are rejected before side effects.
+   non-Pool path, placed on an operator-certified homogeneous Linux node pool
+   with an approved StorageClass/filesystem profile. Scheduler placement MUST
+   be constrained to that profile; an unavailable profile is rejected before
+   side effects.
 3. `subPath` is canonical relative path data. Absolute paths, empty segments,
    traversal, and other unsafe forms are rejected according to the validation
    rules below.
 4. The initializer must never follow symlinks or escape the PVC root, including
-   during concurrent replacement or traversal.
-5. Existing directories are left untouched. The operation creates only missing
-   path components needed for the requested subpath.
+   during concurrent replacement or traversal. Linux `openat2` with
+   `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
+   RESOLVE_NO_XDEV` is required; `O_NOFOLLOW`-only fallback is forbidden.
+5. The operation creates only missing path components needed for the requested
+   subpath and never chmods/chowns, alters ACLs, xattrs, or labels, renames,
+   deletes, replaces, or writes entries/content in pre-existing directories.
+   Creating a child necessarily changes the immediate existing parent directory
+   entries and may change its mtime/ctime; atime, mtime, ctime, and
+   provider-visible metadata are not guaranteed.
 6. Identical `(PVC claim, canonical subpath)` requests in one create operation
    may be coalesced internally. Existing mount semantics, including repeated or
    overlapping `subPath` mounts, remain unchanged unless already invalid.
 7. A read-only final volume mount remains read-only. The dedicated init
    container and its server-owned read-write PVC-root mount remain in the Pod
    spec, complete before workload containers start, and are unavailable to
-   workload containers.
+   workload containers. The init binary exits 0 only after preparation
+   succeeds; Kubernetes then starts the workload, and no post-exit server
+   interpretation can retrospectively keep it stopped.
 8. The PVC must already exist and remain subject to the existing PVC lifecycle
-   and namespace rules. This feature is not `createIfNotExists`; that behavior
-   must remain `false`, and a request attempting to enable it is rejected.
-9. Initialization outcomes use the normative stable code/status mapping in
-   [Errors and diagnostics](#errors-and-diagnostics), retain the existing
-   `code`/`message` envelope, and do not expose host paths, secrets, pod
-   details, or raw command output. Clients classify retryability from the
-   status/category, and SDKs do not automatically replay create requests.
-10. Capability negotiation must work when clients encounter old or mixed
-    server replicas, without requiring every replica to understand the new
-    field.
+   and namespace rules. For an opt-in request, the `pvc` object MUST explicitly
+   contain `createIfNotExists: false`; omission is rejected even though the
+   upstream default is true. Presence-aware validation occurs before the
+   existing PVC provisioning path, and `true` is rejected.
+9. The trusted init binary exits 0 only after preparation succeeds; reserved
+   exit 20 and 21 map to the normative 422 and 503 categories in
+   [Errors and diagnostics](#errors-and-diagnostics). Termination data is
+   diagnostic-only and cannot override the exit code. The existing
+   `code`/`message` envelope is retained, with no host paths, secrets, pod
+   details, or raw command output exposed. Current ordinary create misuse and
+   missing/true `pvc.createIfNotExists` return
+   `VOLUME::INVALID_PVC_SUBPATH_INITIALIZATION_REQUEST`/400 before side
+   effects. Clients classify retryability from the status/category, and SDKs
+   do not automatically replay create requests.
+10. New SDKs MUST invoke the feature-scoped route for opt-in requests. A raw
+    legacy server returns its normal 404/405 for that route and creates nothing;
+    only that result is mapped locally to a typed unsupported result, with no
+    automatic retry through the standard route. A current/new server that
+    cannot support the effective tuple returns the specified 412 error before
+    side effects.
 
 ## Proposal
 
-Add the following field to each existing `Volume` object:
+`Volume.subPath` remains the existing backend-neutral mount field. This OSEP
+adds `createSubPathIfMissing` only to the PVC mount contract:
 
 ```yaml
 volumes:
@@ -155,13 +179,14 @@ volumes:
     readOnly: true
 ```
 
-The field is a property of this mount, not of the PVC and not of the sandbox
-in general. A request with the field omitted is identical to an existing
-request with the same `subPath` and retains the provider's ordinary behavior.
-For the initial Kubernetes adapter, ordinary behavior for a missing subpath is
-to fail during mount preparation; an adapter may report its documented
-runtime-dependent behavior, but it must not infer opt-in initialization from
-omission.
+The boolean is a property of this PVC mount, not of the PVC resource and not of
+the sandbox in general. For an opt-in, the `pvc` object MUST explicitly contain
+`createIfNotExists: false`; an omitted field is rejected before the existing
+PVC provisioning path, even though the upstream default is true. A request with
+`createSubPathIfMissing` omitted is otherwise identical to an existing request
+with the same `subPath` and retains ordinary provider behavior. For the initial
+Kubernetes adapter, ordinary behavior for a missing subpath is to fail during
+mount preparation; the opt-in never changes that behavior by omission.
 
 ### Support boundary
 
@@ -171,6 +196,9 @@ The first supported tuple is:
 | --- | --- |
 | Runtime | Kubernetes on Linux |
 | Storage | Existing PVC in the sandbox namespace |
+| Node pool | Operator-certified homogeneous Linux node pool |
+| Storage profile | Operator-approved StorageClass/filesystem profile |
+| Placement | Scheduler constrained to the certified/profile-matched nodes |
 | Creation path | Non-Pool sandbox creation |
 | Selection | `subPath` present and canonical relative |
 | Option | `createSubPathIfMissing: true` |
@@ -189,24 +217,33 @@ direct Kubernetes operation by the client.
 - The subpath directory is data inside that PVC. It is not a Kubernetes object,
   is not independently retained by OpenSandbox, and is not deleted when a
   sandbox is deleted.
-- The initializer does not change the permissions or ownership of an existing
-  directory. It creates missing components with server-defined safe defaults;
-  callers cannot choose those defaults in this API.
+- The initializer never chmods/chowns, alters ACLs, xattrs, labels, renames,
+  deletes, replaces, or writes entries/content in pre-existing directories. It
+  creates missing components with server-defined safe defaults; callers cannot
+  choose those defaults in this API. Creating a child changes the immediate
+  existing parent directory entries and may change its mtime/ctime; atime,
+  mtime, ctime, and provider-visible metadata are not guaranteed.
 - The dedicated init container's read-write PVC-root mount is not a permission
   grant to workload containers. It remains in the Pod spec for the init
   container, completes before workload startup, and is not mounted into any
   workload container; workload containers receive only the requested final
   access mode.
 - `createIfNotExists` is not an alternative spelling or compatibility alias.
-  It must be false for this feature; true is invalid and must not be translated
-  into `createSubPathIfMissing`.
+  For opt-in requests it MUST be present and false; true or omission is invalid
+  and must not be translated into `createSubPathIfMissing`.
 - No public field may carry an image, command, PodSpec fragment, hook, UID, GID,
   mode, or equivalent execution or permission control.
 
 ### Risks and Mitigations
 
-- **Path escape or symlink attack:** use canonical relative validation followed
-  by descriptor-relative, no-follow traversal rooted at the mounted PVC.
+- **Path escape or symlink attack:** require Linux `openat2` with
+  `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
+  RESOLVE_NO_XDEV`, rooted at the mounted PVC. A missing operator-certified
+  node/storage profile returns
+  `VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED` with HTTP 412 before Pod
+  creation. A runtime `openat2`/filesystem failure after init starts uses exit
+  20 or 21 and the normal post-Pod precedence; never fall back to
+  `O_NOFOLLOW` alone.
 - **Unexpected write exposure:** keep the init container and its read-write
   mount server-owned, scope that mount only to the init container, and use a
   restricted non-privileged context. Kubernetes must complete the init
@@ -215,10 +252,13 @@ direct Kubernetes operation by the client.
   be prepared. Do not claim rollback; directories already created remain in
   the PVC and are safe to reuse on a retry.
 - **Mixed-version rollout:** send opt-in requests only through the distinct
-  capability-aware create route, whose routing and server enforcement are
-  atomic. Do not rely on semver or a preflight result.
+  feature-scoped create route, whose routing and server enforcement are atomic.
+  Do not rely on semver or a preflight result.
 - **Mount compatibility:** coalesce identical preparation requests internally,
   but preserve existing repeated and overlapping `subPath` mount semantics.
+- **Existing-directory effects:** protect pre-existing directory entries and
+  content as specified; allow the immediate parent entry and mtime/ctime effect
+  required to create a child, without promising provider metadata stability.
 - **Diagnostic disclosure:** retain detailed initialization causes in
   access-controlled server logs and standard diagnostics; return only the
   existing `code`/`message` envelope with sanitized text.
@@ -238,12 +278,13 @@ The field is valid only when `subPath` is present. `true` requests
 initialization; `false` and omission request ordinary runtime behavior. The
 API does not expose a separate initializer object or any execution parameters.
 Existing schema fields keep their current meaning, including `readOnly`.
+The `subPath` row is shown only for placement context; this OSEP does not
+redefine that backend-neutral field.
 
 In addition to this configuration field, the compatibility protocol defines the
-distinct public capability-aware create route and required
-`OpenSandbox-Required-Capability` header described in
-[Capability-aware creation and rollout](#capability-aware-creation-and-rollout).
-Those are transport-protocol additions, not volume/mount configuration fields.
+distinct public feature-scoped create route described in
+[Feature-scoped creation and rollout](#feature-scoped-creation-and-rollout).
+That is a transport-protocol addition, not a volume/mount configuration field.
 
 Example of a read-write final mount:
 
@@ -302,7 +343,10 @@ The following are contract invariants:
 7. **Existing mount semantics:** identical preparation requests may share one
    internal action, while repeated or overlapping `subPath` mounts retain their
    existing behavior and validation.
-8. **Trusted boundary:** only the server's dedicated initializer can perform
+8. **Exit gate:** the init binary exits 0 only after successful preparation;
+   exit 20 and 21 are the only reserved nonzero preparation categories. A
+   server cannot keep the workload stopped after exit 0 based on diagnostics.
+9. **Trusted boundary:** only the server's dedicated initializer can perform
    this preparation. A user image, user command, generic hook, or arbitrary
    PodSpec cannot opt into it.
 
@@ -311,17 +355,28 @@ The following are contract invariants:
 The provider must use an order that makes unsupported requests fail before
 side effects:
 
-1. Parse the request and reject malformed volume entries, invalid backend
-   combinations, `createIfNotExists: true`, or an opt-in without `subPath`.
-2. Determine the runtime, operating system, creation path, and provider
-   capability. If the complete requested tuple is unsupported, return an
-   unsupported-capability error before creating or modifying any resource.
+1. Parse the request with presence awareness. For every opt-in PVC volume,
+   require an explicitly present `pvc.createIfNotExists: false` before entering
+   the existing PVC provisioning/validation path; reject omission, `true`,
+    malformed volume entries, invalid backend combinations, or an opt-in
+    without `subPath` with
+    `VOLUME::INVALID_PVC_SUBPATH_INITIALIZATION_REQUEST`/400 when the route or
+    field combination is invalid.
+2. Determine the runtime, operating system, creation path, and configured
+   operator-certified node/StorageClass/filesystem profile. If that profile or
+   its required `openat2` policy is unavailable, return
+   `VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED` with HTTP 412 before
+   creating or modifying any resource. Do not claim that runtime filesystem
+   behavior is fully knowable preflight; failures observed after init starts
+   use exit 20 or 21 and normal post-Pod precedence.
 3. Validate the existing PVC reference and namespace using the ordinary PVC
    lifecycle rules. Do not create a PVC.
 4. Parse and canonicalize every requested `subPath`. Reject absolute paths,
    empty or ambiguous components, `.`/`..` components, NUL bytes, separator
-   tricks, and non-canonical representations. The canonical value is relative
-   to the PVC root and contains no leading separator.
+   tricks, non-canonical representations, and values beyond the bounded plan
+   limits. The canonical value is relative to the PVC root and contains no
+   leading separator. Invalid requests return
+   `VOLUME::INVALID_SUB_PATH` with HTTP 400.
 5. Construct the complete volume and mount plan using the existing volume
    validation rules. Coalesce identical claim/path preparation requests
    internally, but do not add source-ancestor overlap rejection or change the
@@ -336,15 +391,19 @@ side effects:
 8. Start the Pod with the init container and workload containers in the same
    Pod spec. Kubernetes starts the init container first and does not start
    workload containers until it completes.
-9. From the PVC root, the init container opens or creates each missing
-   component using descriptor-relative operations with no-follow semantics.
-   Re-check component types and containment while traversing; never resolve a
-   path by string concatenation or follow a symlink.
-10. Wait for the initializer result. On failure, return the stable category and
-    retryability, retain only sanitized diagnostics, and do not roll back
-    directories already created. On success, Kubernetes starts workload
-    containers with the exact requested final access mode; the read-write
-    PVC-root mount is unavailable to those workload containers.
+9. From the PVC root, the init container walks directory file descriptors using
+   `openat2` with the required resolution flags, `mkdirat` for missing
+   components, and FD-based directory type validation. Never invoke a shell or
+   reconstruct a path string.
+10. Observe the bounded structured initializer result for diagnostics, but use
+    the process exit status as the startup gate. Exit 0 means success; exit 20
+    maps to terminal 422 and exit 21 maps to unavailable 503. Absent, malformed,
+    oversized, or untrusted diagnostic data cannot override the exit status. An
+    unexpected nonzero status, OOM, or timeout remains an existing lifecycle
+    infrastructure error. On any failure, do not roll back directories already
+    created. On exit 0, Kubernetes starts workload containers with the exact
+    requested final access mode; no server interpretation after exit 0 can keep
+    them stopped, and the read-write PVC-root mount is unavailable to them.
 11. If final mount or sandbox creation fails after initialization, report that
     failure without deleting initialized directories. The operation remains
     safe to retry subject to normal idempotency and provider rules.
@@ -354,23 +413,48 @@ may be created by this request.
 
 ### Errors and diagnostics
 
-The capability-aware route uses the existing error envelope with only `code`
+The feature-scoped route uses the existing error envelope with only `code`
 and `message`. This OSEP defines the following minimal stable volume categories
 and normative HTTP statuses:
 
 | Code | HTTP status | Meaning and retry classification |
 | --- | --- | --- |
-| `VOLUME_SUBPATH_INVALID` | 400 Bad Request | The opt-in or path is malformed, non-canonical, unsafe, or otherwise invalid. Do not retry without changing the request. |
-| `VOLUME_SUBPATH_UNSUPPORTED` | 412 Precondition Failed | The requested runtime, OS, backend, Pool path, capability, or provider cannot honor the opt-in. Do not retry unless capability/configuration changes. |
-| `VOLUME_SUBPATH_INITIALIZATION_FAILED` | 422 Unprocessable Content | Deterministic or terminal initialization failure, including a non-directory or symlink component, permission denial, or read-only filesystem. Do not automatically retry. |
-| `VOLUME_SUBPATH_INITIALIZATION_UNAVAILABLE` | 503 Service Unavailable | Transient or indeterminate storage/runtime initializer failure. Retry may be appropriate; include `Retry-After` when the retry delay is known. |
+| `VOLUME::INVALID_SUB_PATH` | 400 Bad Request | A supplied `subPath` is malformed, non-canonical, unsafe, or otherwise invalid. Do not retry without changing the request. |
+| `VOLUME::INVALID_PVC_SUBPATH_INITIALIZATION_REQUEST` | 400 Bad Request | Opt-in was sent through ordinary create, omits `subPath`, or the opt-in PVC omitted `createIfNotExists` or set it to true. Do not retry without changing the request/route. |
+| `VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED` | 412 Precondition Failed | The effective runtime, OS, backend, Pool path, resolver, filesystem, or provider cannot honor the opt-in. Do not retry unless capability/configuration changes. |
+| `VOLUME::PVC_SUBPATH_INITIALIZATION_FAILED` | 422 Unprocessable Content | The trusted initializer returned a deterministic terminal result, including a non-directory or symlink component, permission denial, or read-only filesystem. Do not automatically retry. |
+| `VOLUME::PVC_SUBPATH_INITIALIZATION_UNAVAILABLE` | 503 Service Unavailable | The trusted initializer exits with reserved code 21 for a transient or indeterminate storage/runtime failure. Retry may be appropriate; include `Retry-After` when the retry delay is known. |
 
-Existing PVC validation, final mount, and sandbox-creation errors remain in
-their existing categories. The response must not add diagnostic IDs, retry
-fields, path fields, or other `ErrorResponse` properties, and must not expose
-host paths, kubeconfig details, service-account tokens, secrets, raw PodSpec,
-or unfiltered initializer output. Detailed causes remain in server logs and
-standard diagnostics with sanitized `message` text.
+The precedence is normative:
+
+1. Preflight path failures return `VOLUME::INVALID_SUB_PATH`/400; ordinary-route
+   opt-in misuse or missing/true `pvc.createIfNotExists` returns
+   `VOLUME::INVALID_PVC_SUBPATH_INITIALIZATION_REQUEST`/400. Unsupported
+   effective tuples return
+   `VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED`/412, both before side
+   effects.
+2. After the trusted init container starts, exit 20 decides
+   `VOLUME::PVC_SUBPATH_INITIALIZATION_FAILED`/422 and exit 21 decides
+   `VOLUME::PVC_SUBPATH_INITIALIZATION_UNAVAILABLE`/503. Diagnostic data cannot
+   change that decision.
+3. An unexpected nonzero status, image pull, scheduling, PVC attach, OOM, or
+   timeout before or without a reserved init result remains an existing
+   lifecycle infrastructure error, not a fabricated subpath 422/503. A final
+   main container mount failure remains the existing lifecycle error.
+4. No directory rollback is attempted for any later failure.
+
+The init result is bounded and structured, with a fixed version, a short token
+from a server-owned allowlist only, and reserved exit categories. Exit code `0`
+means success, `20` is the reserved terminal category (422), and `21` is the
+reserved unavailable category (503). The diagnostic result is emitted before
+exiting where possible, but absent, malformed, oversized, or untrusted data
+cannot override the exit code; any unexpected nonzero status remains an
+existing lifecycle infrastructure error. Raw initializer logs remain
+server-side; the API exposes only the existing `code`/`message` envelope with
+sanitized token-derived text. No diagnostic IDs, retry fields, path fields, or
+other `ErrorResponse` properties are added, and host paths, kubeconfig details,
+service-account tokens, secrets, raw PodSpec, and unfiltered output are never
+exposed.
 
 Clients classify retryability using the HTTP status and stable code. SDKs and
 client helpers must not automatically replay a create request, including for
@@ -380,25 +464,47 @@ client helpers must not automatically replay a create request, including for
 ### Security model
 
 The initializer is a dedicated trusted server component, not a user-provided
-container or hook. It is non-privileged and runs under a restricted context
-with only the minimum PVC access and filesystem capabilities needed to create
-directories. It has no network requirement, no access to unrelated host paths,
-and no caller-controlled executable or arguments. The implementation must
-follow the deployment's pod security policy and service-account boundaries.
+container or hook. Callers cannot control its executable, command, image,
+identity, privileges, or PodSpec. They supply only bounded, validated relative
+path data in a server-generated plan. The operator selects an immutable,
+digest-pinned initializer artifact. A fixed root identity is used only if
+necessary for mount-root access; it is server-selected and not caller
+configurable.
+
+The initializer has the fixed identity `runAsUser: 0`, `runAsGroup: 0`, and no
+supplemental groups. Its profile is `privileged: false`,
+`allowPrivilegeEscalation: false`, `automountServiceAccountToken: false`, with
+no host mounts, a read-only container root, RuntimeDefault seccomp, and
+`capabilities.drop: [ALL]` with no additions. If this fixed profile cannot
+access the PVC root, the initializer returns the terminal failure rather than
+relaxing the profile. It has explicit CPU, memory, and active-deadline limits.
+The initializer neither requires nor intentionally uses network access; this
+proposal does not claim per-container network isolation under the shared Pod
+network namespace. The server bounds plan path length, component length,
+component count, and total path count before creating the Pod. No generic POSIX
+ownership/permission repair is provided; pre-existing directory entries and
+content are protected as specified, while child creation may affect its
+immediate parent directory entries and mtime/ctime.
 
 Path handling has two independent stages: lexical canonicalization before any
 mount action, and secure filesystem traversal after the PVC is mounted. The
-second stage is authoritative. Every component is opened relative to an
-already-opened directory descriptor, with no-follow behavior and type checks;
-the implementation must not convert the untrusted relative path into an
-unanchored absolute path. Symlink components, unexpected non-directory
-components, mount-point escapes, and races that invalidate containment are
-rejected.
+second stage is authoritative. Linux `openat2` MUST use
+`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
+RESOLVE_NO_XDEV`. The feature is enabled only for an operator-certified,
+homogeneous Linux node pool and approved StorageClass/filesystem profile, with
+scheduler placement constrained to that profile. If the configured/certified
+profile is missing, return
+`VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED` with HTTP 412 before Pod
+creation. A runtime `openat2`/filesystem failure after init starts uses exit 20
+or 21 and normal post-Pod precedence; do not use an `O_NOFOLLOW`-only fallback.
 
-The initializer creates missing directories only. It does not recursively
-modify existing content and does not expose a mode, UID, or GID selector. The
-server owns safe creation policy. If a storage provider cannot enforce these
-properties, it is unsupported rather than being given a weaker fallback.
+The implementation walks directory file descriptors: use `mkdirat` for a
+missing component, then reopen it with `openat2` and validate the file
+descriptor is a directory before continuing; use `openat`/`openat2` for existing
+components with FD-based type validation. Never invoke a shell,
+reconstruct an absolute path, or validate containment using strings alone.
+Symlink components, unexpected non-directory components, mount-point escapes,
+and races that invalidate containment are rejected.
 
 ### Runtime adapters
 
@@ -420,8 +526,8 @@ platform-specific preparation:
   sandbox creation API; the provider performs the server-side preparation.
 
 An adapter that supports ordinary `subPath` but not secure initialization must
-return `VOLUME_SUBPATH_UNSUPPORTED` for `true`. It must not silently treat
-`true` as `false`.
+return `VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED` for `true`. It must not
+silently treat `true` as `false`.
 
 ### Pool incompatibility
 
@@ -467,49 +573,46 @@ These decisions constrain later implementation and review:
   paths, or failed initialization.
 - Symlink-following, string-only containment checks, or privileged host access.
 
-### Capability-aware creation and rollout
+### Feature-scoped creation and rollout
 
-Opt-in creation is normative only through the following additive route proposed
-by this OSEP; this path is new and is not an assertion about an existing
-OpenSandbox endpoint:
+Opt-in creation is normative only through this additive route proposed by this
+OSEP; it is new and is not an assertion about an existing OpenSandbox endpoint:
 
 ```http
-POST /v1/sandboxes/capability-aware-create
-OpenSandbox-Required-Capability: volume.subpath-initialization.v1
+POST /v1/sandboxes/with-subpath-initialization
+operationId: createSandboxWithSubPathInitialization
 ```
 
-The request body and successful response otherwise match the standard lifecycle
-create request and response. The `OpenSandbox-Required-Capability` header is
-required on this route and has the shown value for a request containing
-`createSubPathIfMissing: true`. The standard create route remains the route for
-ordinary requests; clients must not send this opt-in through that route.
+The route uses the same authentication, request body, and success response as
+ordinary sandbox create. It is allowed only when one or more volumes set
+`createSubPathIfMissing: true`; requests without that opt-in use ordinary
+create. The route is feature-scoped.
 
-Route dispatch and capability validation are server-enforced parts of one
+Route dispatch and effective-tuple validation are server-enforced parts of one
 create operation:
 
-- A legacy server that does not implement the additive route returns not-found
-  or method-not-allowed before PVC, initializer, Pod, or workload mutation. It
-  must not remap this route to ordinary create.
-- A capable server requires the header, validates the body, and resolves the
-  effective provider capability for the complete supported tuple atomically
-  before mutating a PVC mount, creating an initializer, or creating a
-  workload. An unavailable capability/provider is rejected with
-  `VOLUME_SUBPATH_UNSUPPORTED` before those side effects.
-- A capable server receiving the opt-in on the standard route rejects it with
-  `VOLUME_SUBPATH_UNSUPPORTED` before side effects. This does not make it safe
-  for clients to use the standard route against old servers; clients must use
-  the additive route.
-- A capability discovery endpoint, if provided, is advisory only. It cannot
-  authorize an opt-in create, and semver checks or a separate preflight cannot
-  replace route dispatch plus server-side enforcement.
-- If a deployment cannot route the additive route atomically to capable API
-  replicas while old and new replicas are mixed, it must send no opt-in
-  traffic. Operators may keep the feature disabled until routing is safe.
+- A current server that recognizes `createSubPathIfMissing: true` on ordinary
+  `POST /v1/sandboxes` MUST reject it with
+  `VOLUME::INVALID_PVC_SUBPATH_INITIALIZATION_REQUEST` and HTTP 400 before PVC,
+  workload, or directory side effects. Missing or true `pvc.createIfNotExists`
+  uses the same rejection. A legacy server may ignore an unknown field, so
+  opt-in callers MUST use this feature-scoped route.
+- A raw legacy server that does not implement this route returns its normal
+  404 or 405 before PVC, initializer, Pod, or workload mutation. It must not
+  remap the route to ordinary create.
+- New SDKs MUST invoke this route for opt-in requests. They map only that raw
+  legacy 404/405 response to a local typed unsupported result and do not retry
+  through the standard route automatically.
+- A current/new server that implements the route but cannot support the
+  effective runtime, OS, backend, Pool, resolver, filesystem, and provider
+  tuple returns `VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED` with HTTP 412
+  before PVC, initializer, Pod, or workload mutation.
+- If a deployment cannot route this feature-scoped route atomically to current
+  implementations while old and new API replicas are mixed, it sends no
+  opt-in traffic. Operators keep the feature disabled until routing is safe.
 
-The route, required header, and error behavior are the minimal negotiation
-contract; this OSEP does not define the rest of the lifecycle endpoint
-implementation. A false or omitted option continues to use ordinary create
-behavior.
+No capability discovery endpoint or generic capability route is part of this
+proposal. A false or omitted option continues to use ordinary create behavior.
 
 ## Test Plan
 
@@ -519,16 +622,25 @@ conformance must add focused tests at each boundary:
 ### Contract and validation tests
 
 - Omitted and `false` options preserve ordinary missing-subpath behavior.
-- `true` without `subPath`, `createIfNotExists: true`, absolute paths, empty
-  components, dot components, traversal, NUL bytes, and non-canonical paths
-  are rejected before any side effect.
-- Unsupported runtime, OS, backend, Pool, and provider capability combinations
-  return `VOLUME_SUBPATH_UNSUPPORTED` before pod, initializer, mount, or
-  filesystem changes.
-- Invalid input returns `VOLUME_SUBPATH_INVALID` with HTTP 400; unsupported
-  capability returns `VOLUME_SUBPATH_UNSUPPORTED` with HTTP 412.
-- Existing directories remain byte-for-byte and metadata-for-metadata
-  unchanged by the preparation operation.
+- `true` without `subPath`, or with `createIfNotExists: true`, is rejected with
+  `VOLUME::INVALID_PVC_SUBPATH_INITIALIZATION_REQUEST`/400 before any side
+  effect. A supplied absolute path, empty component, dot component, traversal,
+  NUL byte, or non-canonical path is rejected with `VOLUME::INVALID_SUB_PATH`/
+  400 before any side effect.
+- An opt-in PVC with omitted `createIfNotExists` is rejected with
+  `VOLUME::INVALID_PVC_SUBPATH_INITIALIZATION_REQUEST`/400 despite the
+  upstream default being true;
+  explicit `createIfNotExists: false` is accepted for the existing PVC path.
+- Unsupported runtime, OS, backend, Pool, resolver, filesystem, and provider
+  combinations return
+  `VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED` with HTTP 412 before pod,
+  initializer, mount, or filesystem changes.
+- Invalid input returns `VOLUME::INVALID_SUB_PATH` with HTTP 400.
+- Existing directories retain ownership, POSIX permission bits, ACLs, labels,
+  and contents; no chmod/chown, ACL/xattr/label change, rename, delete,
+  replacement, or entry/content write is permitted. Creating a child may
+  change the immediate parent entries and mtime/ctime; other metadata is not
+  asserted.
 - Identical claim/path preparations may be coalesced; repeated and overlapping
   `subPath` mounts retain existing volume semantics.
 
@@ -537,13 +649,26 @@ conformance must add focused tests at each boundary:
 - Missing one or more nested components are created beneath the opened PVC
   root.
 - Symlink components, symlink replacement races, non-directory components,
-  and attempted root escapes are rejected using descriptor-relative no-follow
-  operations.
+  and attempted root escapes are rejected using `openat2` with
+  `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
+  RESOLVE_NO_XDEV`; no `O_NOFOLLOW`-only fallback is accepted.
+- Missing certification, a non-homogeneous node pool, an unapproved
+  StorageClass/filesystem profile, or unconstrained scheduler placement returns
+  `VOLUME::PVC_SUBPATH_INITIALIZATION_UNSUPPORTED`/412 before Pod creation.
+- A runtime `openat2`/filesystem failure after init begins exits 20 or 21 and
+  follows the post-Pod precedence rather than being preflighted as 412.
 - Non-directory, symlink, permission, and read-only filesystem failures return
-  `VOLUME_SUBPATH_INITIALIZATION_FAILED` with HTTP 422. Transient or
+  `VOLUME::PVC_SUBPATH_INITIALIZATION_FAILED` with HTTP 422. Transient or
   indeterminate I/O/runtime failures return
-  `VOLUME_SUBPATH_INITIALIZATION_UNAVAILABLE` with HTTP 503 and `Retry-After`
+  `VOLUME::PVC_SUBPATH_INITIALIZATION_UNAVAILABLE` with HTTP 503 and `Retry-After`
   when known.
+- The init exits 20 for deterministic terminal preparation failure and 21 for
+  transient/indeterminate preparation failure. Missing or malformed diagnostic
+  data does not override either exit code; exit 0 starts the workload even when
+  diagnostic data is absent.
+- Unexpected nonzero init status, OOM, timeout, image pull, scheduling, or PVC
+  attach failures before or without a reserved init result remain existing
+  lifecycle infrastructure errors, not fabricated subpath errors.
 - Already-created directories remain after a later component or final mount
   failure; a safe retry can reuse them.
 
@@ -557,8 +682,9 @@ conformance must add focused tests at each boundary:
   read-write PVC-root mount is absent from workload container mounts and
   inaccessible to workload containers.
 - Existing PVC lifecycle is unchanged: no claim is created or deleted.
-- Pool requests, unsupported adapters, and old/mixed server capability results
-  fail before sandbox-side effects.
+- Pool requests, unsupported adapters, and raw legacy 404/405 responses from
+  the feature-scoped route fail before sandbox-side effects; current/new
+  unsupported tuples return 412.
 - Final mount failures preserve the requested mode and do not trigger
   directory rollback.
 - Clients classify retryability from the status/code mapping, and SDKs do not
@@ -566,12 +692,20 @@ conformance must add focused tests at each boundary:
 
 ### Compatibility tests
 
-- An opt-in request reaches its configured workspace only when capability
-  negotiation succeeds.
+- An opt-in request reaches its configured workspace only through the
+  feature-scoped route on a current implementation that supports the effective
+  tuple.
+- A current ordinary `POST /v1/sandboxes` carrying
+  `createSubPathIfMissing: true` is rejected with
+  `VOLUME::INVALID_PVC_SUBPATH_INITIALIZATION_REQUEST`/400 before PVC,
+  workload, or directory side effects; missing or true
+  `pvc.createIfNotExists` uses the same result.
 - Existing requests without the field continue to work without changes to
   image, command, environment, workspace, or artifact handling.
-- An old server, an unknown capability, and a mixed replica route each produce
-  an explicit unsupported result rather than silently changing the mount.
+- A raw legacy 404/405, an unsupported current tuple, and a mixed-replica route
+  each produce an explicit unsupported result rather than silently changing the
+  mount or retrying through standard create. SDKs surface the legacy result as
+  `SubPathInitializationUnsupportedError`.
 
 ## Drawbacks
 
@@ -607,8 +741,8 @@ The first implementation needs a Kubernetes/Linux provider capable of:
 - discovering and mounting an existing PVC for the preparation operation;
 - running one dedicated trusted initializer under the deployment's restricted,
   non-privileged security policy;
-- performing descriptor-relative, no-follow filesystem traversal; and
-- reporting versioned capability and sanitized error information through the
+- performing the required Linux `openat2` traversal; and
+- reporting effective-tuple support and sanitized error information through the
   existing lifecycle path.
 
 No public service, direct-client Kubernetes credential, registry, or generic
@@ -625,18 +759,26 @@ should describe missing-subpath behavior as runtime-dependent/fail-if-missing
 and defer opt-in secure initialization to this OSEP; no existing volume request
 is migrated automatically.
 
+An opt-in request is not permitted to inherit the upstream `pvc` default:
+`pvc.createIfNotExists: false` must be present. Requests that omit it are
+rejected before the existing PVC provisioning path; this requirement does not
+change ordinary requests that do not opt in.
+
 The only new volume/mount configuration field is the mount-scoped boolean;
-requests that set it to `true` must use the distinct capability-aware route and
-required header. The route and header are compatibility protocol additions, not
-additional volume configuration.
+requests that set it to `true` must use the distinct feature-scoped route. The
+route is a compatibility protocol addition, not additional volume
+configuration. Current standard-route misuse is a 400 before side effects;
+legacy feature-route 404/405 is surfaced as
+`SubPathInitializationUnsupportedError` and is never retried through standard
+create.
 
 Rollout proceeds in this order:
 
 1. Implement and test the server/provider capability and the secure initializer
    behind a disabled-by-default feature gate.
-2. Deploy the additive capability-aware route only to replicas that enforce its
-   required header and atomic provider check. Verify that legacy replicas return
-   not-found or method-not-allowed for that route without side effects.
+2. Deploy the additive feature-scoped route only to replicas that enforce its
+   atomic effective-tuple check. Verify that legacy replicas return not-found
+   or method-not-allowed for that route without side effects.
 3. Configure routing so the additive route cannot reach an old replica. If that
    cannot be guaranteed while replicas are mixed, send no opt-in traffic.
 4. Enable client/orchestrator use only for explicit opt-in requests and retain
@@ -645,7 +787,7 @@ Rollout proceeds in this order:
 
 There is no data migration and no PVC migration. Existing directories are not
 rewritten. Operators must decide when the provider's restricted initializer and
-capability-aware route are ready; implementations must enforce the normative
+feature-scoped route are ready; implementations must enforce the normative
 code/status mapping and no-automatic-replay rule before clients use the opt-in.
 
 ### Pre-publication note

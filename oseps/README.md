@@ -8,7 +8,7 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 |:----------------------------------------------------------:|:------------------------------------------:|:-------------:|:------------:|
 |       [OSEP-0001](0001-fqdn-based-egress-control.md)       |         FQDN-based Egress Control          |  implemented  |  2026-01-22  |
 | [OSEP-0002](0002-kubernetes-sigs-agent-sandbox-support.md) |   kubernetes-sigs/agent-sandbox Support    |  implemented  |  2026-01-23  |
-|   [OSEP-0003](0003-volume-and-volumebinding-support.md)    |               Volume Support               | implementing  |  2026-02-11  |
+|   [OSEP-0003](0003-volume-and-volumebinding-support.md)    |               Volume Support               | implementing  |  2026-08-20  |
 |       [OSEP-0004](0004-secure-container-runtime.md)        | Pluggable Secure Container Runtime Support |  implemented  |  2026-07-27  |
 |       [OSEP-0005](0005-client-side-sandbox-pool.md)        |          Client-Side Sandbox Pool          |  implemented  |  2026-07-27  |
 |           [OSEP-0006](0006-developer-console.md)           |  Developer Console for Sandbox Operations  | implementable |  2026-03-06  |
@@ -25,4 +25,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0017](0017-resilient-sdk-transport.md)                   |      Resilient SDK Transport                                              | implementing  |  2026-07-22  |
 | [OSEP-0018](0018-execd-as-sandbox-init.md)                     |      execd as Sandbox Init                                                |     draft     |  2026-07-27  |
 | [OSEP-0019](0019-node-agent-sandbox-collection.md)             |      Node Agent for Node-Level Sandbox Collection                         | implementing  |  2026-08-11  |
-| [OSEP-0021](0021-secure-pvc-subpath-initialization.md)         |      Secure Initialization of Missing PVC Volume SubPaths                 |     draft     |  2026-08-19  |
+| [OSEP-0021](0021-secure-pvc-subpath-initialization.md)         |      Secure Initialization of Missing PVC Volume SubPaths                 |     draft     |  2026-08-20  |
