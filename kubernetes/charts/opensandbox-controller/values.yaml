@@ -38,13 +38,13 @@ controller:
   logLevel: info
 
   # -- controller-runtime metrics endpoint (Prometheus). Disabled by default to
-  # preserve the current behavior (the binary defaults to --metrics-bind-address=0).
+  # preserve the current behavior (the binary defaults to `--metrics-bind-address=0`).
   metrics:
-    # -- Expose the controller-runtime /metrics endpoint (sets --metrics-bind-address)
+    # -- Expose the controller-runtime /metrics endpoint (sets `--metrics-bind-address`)
     enabled: false
     # -- Port for the metrics endpoint
     port: 8080
-    # -- Serve metrics over HTTPS with authn/authz (--metrics-secure). Set to false
+    # -- Serve metrics over HTTPS with authn/authz (`--metrics-secure`). Set to false
     # to serve plain HTTP for scraping without TLS/RBAC (e.g. PodMonitoring).
     secure: false
 
@@ -57,12 +57,12 @@ controller:
 
   # -- Pause/Resume snapshot configuration
   snapshot:
-    # -- Image used for commit operations
+    # -- Image used for commit operations.
     # DockerHub: opensandbox/image-committer:v0.1.1
     imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1"
     # -- PodTemplateSpec overlay for image-committer commit Job Pods.
     imageCommitterPodTemplate: {}
-    # -- Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing --containerd-socket-path flag.
+    # -- Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag.
     containerdSocketPath: ""
     # -- Timeout duration for commit jobs
     commitJobTimeout: "10m"

@@ -1,0 +1,104 @@
+name: Helm Release Smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/helm-release-test.yml'
+      - '.github/workflows/publish-helm-chart.yml'
+      - 'kubernetes/charts/**'
+      - 'scripts/release/*helm*.sh'
+      - 'sdks/code-interpreter/python/**'
+      - 'sdks/sandbox/python/**'
+      - 'tests/python/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exact-package-kind-smoke:
+    name: Exact package Kind smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KIND_NODE_IMAGE: kindest/node:v1.30.13@sha256:8673291894dc400e0fb4f57243f5fdc6e355ceaa765505e0e73941aa1b6e0b80
+      HELM_SMOKE_ARTIFACTS_DIR: /tmp/helm-smoke-diagnostics
+      SANDBOX_TEST_IMAGE: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.0'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.7.6'
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.13'
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.21.3'
+
+      - name: Install Kind
+        run: |
+          go install sigs.k8s.io/kind@v0.31.0
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+
+      - name: Package umbrella release candidate once
+        id: package
+        run: |
+          set -euo pipefail
+          chart_path="kubernetes/charts/opensandbox"
+          chart_version="$(awk '$1 == "version:" {gsub(/"/, "", $2); print $2; exit}' "$chart_path/Chart.yaml")"
+          app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' "$chart_path/Chart.yaml")"
+          package_name="opensandbox-${chart_version}.tgz"
+
+          helm dependency build "$chart_path"
+          helm lint "$chart_path"
+          mkdir -p dist
+          helm package "$chart_path" --destination dist
+          scripts/release/verify-helm-package.sh \
+            "dist/$package_name" opensandbox "$chart_version" "$app_version"
+          package_sha256="$(sha256sum "dist/$package_name" | awk '{print $1}')"
+          printf '%s  %s\n' "$package_sha256" "$package_name" >dist/SHA256SUMS
+          echo "package_name=$package_name" >>"$GITHUB_OUTPUT"
+
+      - name: Run exact-package Kind smoke
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.package_name }}
+        run: |
+          scripts/release/smoke-helm-release.sh \
+            --package "dist/$PACKAGE_NAME" -- scripts/release/run-helm-release-e2e.sh
+
+      - name: Upload candidate and diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/*.tgz
+            dist/SHA256SUMS
+            /tmp/helm-smoke-diagnostics
+          if-no-files-found: warn
+          retention-days: 14

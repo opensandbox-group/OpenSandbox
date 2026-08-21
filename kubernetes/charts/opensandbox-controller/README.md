@@ -52,75 +52,61 @@ kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 
 ## Parameters
 
-### Global Parameters
+The following table lists the configurable parameters of the chart and their default values.
 
-| Name | Description | Value |
-|------|-------------|-------|
-| `nameOverride` | Override the name of the chart | `""` |
-| `fullnameOverride` | Override the full name of the chart | `""` |
-| `namespaceOverride` | Override the namespace where resources will be created | `""` |
-
-### Controller Parameters
-
-| Name | Description | Value |
-|------|-------------|-------|
-| `controller.image.repository` | Controller image repository | `opensandbox.io/opensandbox-controller` |
-| `controller.image.pullPolicy` | Image pull policy | `IfNotPresent` |
-| `controller.image.tag` | Overrides the image tag (default is chart appVersion) | `""` |
-| `controller.replicaCount` | Number of controller replicas | `1` |
-| `controller.resources.limits.cpu` | CPU resource limits | `500m` |
-| `controller.resources.limits.memory` | Memory resource limits | `128Mi` |
-| `controller.resources.requests.cpu` | CPU resource requests | `10m` |
-| `controller.resources.requests.memory` | Memory resource requests | `64Mi` |
-| `controller.logLevel` | Can be one of 'debug', 'info', 'error' | `info` |
-| `controller.metrics.enabled` | Expose the controller-runtime `/metrics` endpoint (sets `--metrics-bind-address`) | `false` |
-| `controller.metrics.port` | Port for the metrics endpoint | `8080` |
-| `controller.metrics.secure` | Serve metrics over HTTPS with authn/authz (`--metrics-secure`); set `false` for plain HTTP scraping | `false` |
-| `controller.kubeClient.qps` | QPS for Kubernetes client rate limiter | `100` |
-| `controller.kubeClient.burst` | Burst for Kubernetes client rate limiter | `200` |
-| `controller.snapshot.imageCommitterImage` | Image used by snapshot commit Jobs | `image-committer:dev` |
-| `controller.snapshot.imageCommitterPodTemplate` | PodTemplateSpec overlay for snapshot commit Job Pods | `{}` |
-| `controller.snapshot.commitJobTimeout` | Timeout duration for snapshot commit Jobs | `10m` |
-| `controller.snapshot.registry` | OCI registry prefix used for snapshot images | `""` |
-| `controller.snapshot.registryInsecure` | Use insecure registry mode for snapshot pushes | `false` |
-| `controller.snapshot.snapshotPushSecret` | Secret name used by commit Jobs to push snapshots | `""` |
-| `controller.snapshot.imageCommitterPullSecret` | Secret name for pulling the image-committer image in commit Jobs (needed when it's in a private registry) | `""` |
-| `controller.snapshot.resumePullSecret` | Secret name injected into resumed sandboxes for image pulls | `""` |
-| `controller.leaderElection.enabled` | Enable leader election | `true` |
-| `controller.nodeSelector` | Node labels for pod assignment | `{}` |
-| `controller.tolerations` | Tolerations for pod assignment | `[]` |
-| `controller.affinity` | Affinity for pod assignment | `{}` |
-| `controller.podLabels` | Additional labels for controller pods | `{}` |
-| `controller.podAnnotations` | Additional annotations for controller pods | `{}` |
-| `controller.priorityClassName` | Priority class name for controller pods | `""` |
-
-### RBAC Parameters
-
-| Name | Description | Value |
-|------|-------------|-------|
-| `rbac.create` | Specifies whether RBAC resources should be created | `true` |
-| `serviceAccount.create` | Specifies whether a service account should be created | `true` |
-| `serviceAccount.annotations` | Annotations to add to the service account | `{}` |
-| `serviceAccount.name` | The name of the service account to use | `""` |
-
-### CRD Parameters
-
-| Name | Description | Value |
-|------|-------------|-------|
-| `crds.install` | Specifies whether CRDs should be installed | `true` |
-| `crds.keep` | Keep CRDs on chart uninstall | `true` |
-| `crds.annotations` | Annotations to add to CRDs | `{"helm.sh/resource-policy": "keep"}` |
-
-### Additional Parameters
-
-| Name | Description | Value |
-|------|-------------|-------|
-| `imagePullSecrets` | Image pull secrets for private registries | `[]` |
-| `extraEnv` | Additional environment variables | `[]` |
-| `extraVolumes` | Additional volumes | `[]` |
-| `extraVolumeMounts` | Additional volume mounts | `[]` |
-| `extraInitContainers` | Additional init containers | `[]` |
-| `extraContainers` | Additional sidecar containers | `[]` |
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| controller.affinity | object | `{}` | Affinity for controller pod assignment |
+| controller.containerSecurityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":false}` | Container security context |
+| controller.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller","tag":""}` | Controller image configuration |
+| controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
+| controller.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller"` | Controller image repository |
+| controller.image.tag | string | `""` | Overrides the image tag whose default is the chart appVersion |
+| controller.kubeClient | object | `{"burst":200,"qps":100}` | Kubernetes client rate limiter configuration |
+| controller.kubeClient.burst | int | `200` | Burst for Kubernetes client rate limiter. |
+| controller.kubeClient.qps | int | `100` | QPS for Kubernetes client rate limiter. |
+| controller.leaderElection | object | `{"enabled":true}` | Enable leader election for controller manager |
+| controller.livenessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/healthz","port":8081},"initialDelaySeconds":15,"periodSeconds":20,"successThreshold":1,"timeoutSeconds":1}` | Liveness probe configuration |
+| controller.logLevel | string | `"info"` | Log level for zap logger (debug, info, error) |
+| controller.metrics | object | `{"enabled":false,"port":8080,"secure":false}` | controller-runtime metrics endpoint (Prometheus). Disabled by default to preserve the current behavior (the binary defaults to `--metrics-bind-address=0`). |
+| controller.metrics.enabled | bool | `false` | Expose the controller-runtime /metrics endpoint (sets `--metrics-bind-address`) |
+| controller.metrics.port | int | `8080` | Port for the metrics endpoint |
+| controller.metrics.secure | bool | `false` | Serve metrics over HTTPS with authn/authz (`--metrics-secure`). Set to false to serve plain HTTP for scraping without TLS/RBAC (e.g. PodMonitoring). |
+| controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
+| controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
+| controller.podLabels | object | `{}` | Additional labels for controller pods |
+| controller.podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context |
+| controller.priorityClassName | string | `""` | Priority class name for controller pods |
+| controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration |
+| controller.replicaCount | int | `1` | Number of controller replicas |
+| controller.resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource requests and limits for the controller |
+| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
+| controller.snapshot.commitJobTimeout | string | `"10m"` | Timeout duration for commit jobs |
+| controller.snapshot.containerdSocketPath | string | `""` | Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag. |
+| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1"` | Image used for commit operations. DockerHub: opensandbox/image-committer:v0.1.1 |
+| controller.snapshot.imageCommitterPodTemplate | object | `{}` | PodTemplateSpec overlay for image-committer commit Job Pods. |
+| controller.snapshot.imageCommitterPullSecret | string | `""` | Secret name for pulling the image-committer image in commit Jobs. Required when imageCommitterImage is stored in a private registry. |
+| controller.snapshot.registry | string | `""` | OCI registry prefix used for snapshot images. |
+| controller.snapshot.registryInsecure | bool | `false` | Use insecure registry mode when pushing snapshot images. |
+| controller.snapshot.resumePullSecret | string | `""` | Secret name injected into resumed sandboxes for pulling snapshot images. |
+| controller.snapshot.snapshotPushSecret | string | `""` | Secret name used by commit Jobs to push snapshot images. |
+| controller.tolerations | list | `[]` | Tolerations for controller pod assignment |
+| crds.annotations | object | `{}` | Additional annotations to add to CRDs (will be merged with resource-policy if keep is true) |
+| crds.install | bool | `true` | Specifies whether CRDs should be installed |
+| crds.keep | bool | `true` | Keep CRDs on chart uninstall (adds helm.sh/resource-policy: keep annotation) |
+| extraContainers | list | `[]` | Additional sidecar containers |
+| extraEnv | list | `[]` | Additional environment variables for the controller |
+| extraInitContainers | list | `[]` | Additional init containers |
+| extraVolumeMounts | list | `[]` | Additional volume mounts for the controller |
+| extraVolumes | list | `[]` | Additional volumes for the controller |
+| fullnameOverride | string | `""` | Override the full name of the chart |
+| imagePullSecrets | list | `[]` | Image pull secrets for private registries |
+| nameOverride | string | `""` | Override the name of the chart |
+| namespaceOverride | string | `""` | Override the namespace where resources will be created If not set, defaults to "opensandbox-system" |
+| rbac.create | bool | `true` | Specifies whether RBAC resources should be created |
+| serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
+| serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
+| serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 
 ## Configuration Examples
 

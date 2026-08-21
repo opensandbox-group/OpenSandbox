@@ -448,30 +448,58 @@ This automatically triggers the workflow to:
 1. Parse the tag to extract component and version
 2. Verify the tag version matches the chart `version`
 3. Preserve the committed chart `appVersion`
-4. Package the Helm Chart
-5. Create a GitHub Release and publish the .tgz package
+4. Package the Helm chart once and hold that exact `.tgz` with its SHA-256
+5. Re-download and statically verify the held package
+6. For the `opensandbox` umbrella chart, install the same `.tgz` in Kind and
+   verify the core controller, server, authentication, and BatchSandbox
+   lifecycle
+7. Request approval through the `release` environment
+8. Attest the tested package and checksum, upload them to a draft GitHub
+   Release, verify the uploaded bytes, and publish the stable Release
 
 Important versioning note:
 
 - The Helm chart `version` is the chart package version and is released through
   `helm/{component}/{version}` tags.
+- Stable publication accepts `X.Y.Z` chart and app versions. Pre-release
+  versions require an explicit pre-release publication flow and are not marked
+  `production-ready` by this workflow.
 - The chart `appVersion` is the default image/application version used by that
   chart release.
 - Tag-triggered publishing preserves the committed chart `appVersion` and
-  verifies that the tag matches the committed chart `version`. Manual runs can
-  override `appVersion` independently.
+  verifies that the tag matches the committed chart `version`. Manual runs
+  confirm the committed `appVersion` instead of rewriting release source, and
+  must run from the exact existing Helm release tag.
 - If you need a specific server image release, set the image tag explicitly
   (for example `--set server.image.tag=v0.1.13`) or publish a new Helm chart
   package version for the chart itself.
 
 #### Option 2: Manual Trigger
 
-1. Visit the GitHub Actions page
-2. Select the "Publish Helm Chart" workflow
-3. Click "Run workflow"
-4. Select the component (e.g. opensandbox-controller)
-5. Enter chart_version (e.g. 0.1.0) and app_version (e.g. 0.0.1)
-6. Click Run
+Create and push the protected Helm tag first, then dispatch the workflow from
+that exact tag ref. For example:
+
+```bash
+gh workflow run publish-helm-chart.yml \
+  --repo opensandbox-group/OpenSandbox \
+  --ref helm/opensandbox-controller/0.1.0 \
+  -f component=opensandbox-controller \
+  -f chart_version=0.1.0 \
+  -f app_version=0.0.1
+```
+
+The workflow rejects a manual run whose selected `--ref` is not exactly
+`helm/{component}/{chart_version}`, or whose `app_version` does not match the
+committed chart metadata. This keeps the environment deployment, attestation
+source ref, packaged bytes, and GitHub Release tied to the same protected tag.
+
+Only the stable umbrella `opensandbox` Release is marked `production-ready`,
+and only after its exact package passes the Kind core-lifecycle gate.
+Standalone chart Releases are marked `package-verified`.
+
+Pull requests that change the release workflows, release-smoke scripts,
+umbrella chart, or Python lifecycle clients run the same exact-package Kind
+smoke through the `Helm Release Smoke` workflow before merge.
 
 ### Published URL Format
 

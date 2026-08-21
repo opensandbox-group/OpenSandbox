@@ -109,22 +109,57 @@ ConfigMap, and pod args. The two forms are mutually exclusive.
 
 ## Configuration
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `server.image.repository` | Server image repository | `sandbox-registry.../opensandbox/server` |
-| `server.image.tag` | Server image tag | See `values.yaml` |
-| `server.replicaCount` | Server replicas | `2` |
-| `server.env` | Additional environment variables, including Secret-backed API key configuration | `[]` |
-| `server.resources` | CPU/memory requests and limits | See values.yaml |
-| `namespaceOverride` | Deployment namespace | `opensandbox-system` |
-| `configToml` | Complete config.toml content, mounted at `/etc/opensandbox/config.toml` | See values.yaml |
-| `server.gateway.enabled` | When true: set server config to gateway and deploy components/ingress gateway | `false` |
-| `server.gateway.host` | config `gateway.address` (address returned to clients) | `opensandbox.example.com` |
-| `server.gateway.gatewayRouteMode` | server config and gateway route mode (header/uri) | `header` |
-| `server.gateway.env` | Additional environment variables for the ingress-gateway container (e.g. `OTEL_EXPORTER_OTLP_ENDPOINT`) | `[]` |
-| `server.gateway.secureAccess.keys` | OSEP-0011 signing key ring, plaintext in values | `[]` |
-| `server.gateway.secureAccess.existingSecret` | Name of a Secret holding `keys` + `active-key`; alternative to plaintext `keys` | `""` |
-| `server.gateway.*` | Gateway image, replicas, port, dataplaneNamespace, providerType, resources | See values.yaml |
+The following table lists the configurable parameters of the chart and their default values.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.22\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_enabled = true\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nsnapshot_create_timeout_seconds = 900\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.6\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. |
+| fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
+| imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |
+| nameOverride | string | `""` | Override the name of the chart |
+| namespaceOverride | string | `""` | Override the namespace (default: opensandbox-system) |
+| server.affinity | object | `{}` | Affinity for the server pod. |
+| server.containerSecurityContext | object | `{}` | Container-level security context for the server container. |
+| server.env | list | `[]` | Additional environment variables for the server container. |
+| server.gateway.affinity | object | `{}` | Affinity for the ingress gateway pod. |
+| server.gateway.containerSecurityContext | object | `{}` | Container-level security context for the ingress gateway container. |
+| server.gateway.dataplaneNamespace | string | `"opensandbox"` | Namespace where the gateway dataplane workloads run. |
+| server.gateway.enabled | bool | `false` | Whether to deploy the ingress gateway alongside the server. |
+| server.gateway.env | list | `[]` | Additional environment variables for the ingress-gateway container (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics). |
+| server.gateway.gatewayRouteMode | string | `"header"` | Gateway route mode: header or uri. |
+| server.gateway.host | string | `"opensandbox.example.com"` | Gateway host/address returned to clients when the gateway is enabled. |
+| server.gateway.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress","tag":"v1.0.10"}` | Gateway image configuration. |
+| server.gateway.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress"` | Gateway image repository. |
+| server.gateway.image.tag | string | `"v1.0.10"` | Gateway image tag. |
+| server.gateway.logLevel | string | `"info"` | Gateway log level. |
+| server.gateway.nodeSelector | object | `{}` | Node selector for the ingress gateway pod. |
+| server.gateway.podAnnotations | object | `{}` | Extra annotations for the ingress gateway pod. |
+| server.gateway.podLabels | object | `{}` | Extra labels for the ingress gateway pod. |
+| server.gateway.podSecurityContext | object | `{}` | Pod-level security context for the ingress gateway pod. |
+| server.gateway.port | int | `28888` | Gateway service port. |
+| server.gateway.priorityClassName | string | `""` | Priority class name for the ingress gateway pod. |
+| server.gateway.providerType | string | `"batchsandbox"` | Gateway provider type (e.g. batchsandbox). |
+| server.gateway.replicaCount | int | `2` | Number of gateway replicas. |
+| server.gateway.resources | object | `{"limits":{"cpu":"2","memory":"8Gi"},"requests":{"cpu":"1","memory":"4Gi"}}` | Resource requests and limits for the gateway. |
+| server.gateway.secureAccess.activeKey | string | `""` | Active signing key id, one character in [0-9a-z]. |
+| server.gateway.secureAccess.existingSecret | string | `""` | Name of an existing Secret holding the signing keys (keys + active-key), as an alternative to plaintext `keys` above (mutually exclusive). The Secret must carry two entries:   keys:       the key ring, "a=<base64-secret>[,b=<base64-secret>...]"   active-key: the active signing key id, one character in [0-9a-z] The chart wires it into both containers as environment variables (server: OPENSANDBOX_SECURE_ACCESS_*; gateway: $(...) expansion in the `--secure-access-keys` arg), so key material never appears in values, the server ConfigMap, or pod args. Env-sourced Secrets are read once at container start: after updating the Secret in place, `kubectl rollout restart` the server and gateway Deployments (or version the Secret name to get a spec-driven rollout). |
+| server.gateway.secureAccess.keys | list | `[]` | List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }. key_id must be exactly one character in [0-9a-z]. |
+| server.gateway.tolerations | list | `[]` | Tolerations for the ingress gateway pod. |
+| server.gateway.topologySpreadConstraints | list | `[]` | Topology spread constraints for the ingress gateway pod. |
+| server.image | object | `{"repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server","tag":"v0.2.2"}` | Server image configuration |
+| server.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server"` | Server image repository. |
+| server.image.tag | string | `"v0.2.2"` | Server image tag. Defaults to the chart appVersion when empty. |
+| server.nodeSelector | object | `{}` | Node selector for the server pod. |
+| server.podAnnotations | object | `{}` | Extra annotations for the server pod. |
+| server.podLabels | object | `{}` | Extra labels for the server pod. |
+| server.podSecurityContext | object | `{}` | Pod-level security context for the server pod. |
+| server.priorityClassName | string | `""` | Priority class name for the server pod. |
+| server.replicaCount | int | `2` | Number of server replicas |
+| server.resources | object | `{"limits":{"cpu":"2","memory":"8Gi"},"requests":{"cpu":"1","memory":"4Gi"}}` | Resource requests and limits |
+| server.tolerations | list | `[]` | Tolerations for the server pod. |
+| server.topologySpreadConstraints | list | `[]` | Topology spread constraints for the server pod. |
+| server.volumeMounts | list | `[]` | Additional volume mounts for the server container. |
+| server.volumes | list | `[]` | Additional volumes for the server pod. |
 
 Versioning note:
 

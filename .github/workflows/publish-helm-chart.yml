@@ -18,65 +18,118 @@ on:
         required: true
         default: '0.1.0'
       app_version:
-        description: 'App version (without v prefix, e.g., 0.1.0)'
+        description: 'Expected committed appVersion (without v prefix, e.g., 0.1.0)'
         required: true
-        default: '0.1.0'
   push:
     tags:
       - 'helm/**'  # Format: helm/<component>/<chart_version>, e.g., helm/opensandbox-controller/0.1.0
 
+permissions:
+  contents: read
+
+# Helm archives contain timestamps, so packaging the same source twice may not
+# produce the same bytes. Serialize every Helm publication and pass one held
+# artifact through validation and promotion instead of rebuilding it.
+concurrency:
+  group: publish-helm-chart
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   release-preflight:
     uses: ./.github/workflows/release-preflight.yml
+    with:
+      # The release environment protects the final publish job after the exact
+      # candidate package has passed its static and runtime gates.
+      require_approval: false
 
-  publish:
+  package:
+    name: Package release candidate
     needs: release-preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
+      contents: read
+    outputs:
+      component: ${{ steps.parse_tag.outputs.component }}
+      chart_version: ${{ steps.chart_version.outputs.version }}
+      app_version: ${{ steps.app_version.outputs.version }}
+      release_tag: ${{ steps.parse_tag.outputs.release_tag }}
+      source_sha: ${{ steps.verify_tag.outputs.source_sha }}
+      package_name: ${{ steps.package.outputs.package_name }}
+      package_sha256: ${{ steps.package.outputs.package_sha256 }}
+      artifact_id: ${{ steps.hold.outputs.artifact-id }}
+      artifact_digest: ${{ steps.hold.outputs.artifact-digest }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          persist-credentials: false
 
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
-          version: 'latest'
+          version: 'v3.21.3'
 
-      - name: Parse tag and set variables
+      - name: Parse release metadata
         id: parse_tag
+        env:
+          INPUT_COMPONENT: ${{ inputs.component }}
+          INPUT_CHART_VERSION: ${{ inputs.chart_version }}
+          INPUT_APP_VERSION: ${{ inputs.app_version }}
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/helm/* ]]; then
-            TAG_PATH="${{ github.ref }}"
-            TAG_PATH="${TAG_PATH#refs/tags/}"
-            
-            COMPONENT=$(echo "$TAG_PATH" | cut -d'/' -f2)
-            VERSION=$(echo "$TAG_PATH" | cut -d'/' -f3)
-            
-            # Remove 'v' prefix if present
-            VERSION=${VERSION#v}
-            
-            echo "component=$COMPONENT" >> $GITHUB_OUTPUT
-            echo "chart_version=$VERSION" >> $GITHUB_OUTPUT
-            echo "release_tag=$TAG_PATH" >> $GITHUB_OUTPUT
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            if [[ "$GITHUB_REF" != refs/tags/helm/* ]]; then
+              echo "::error::Push-triggered Helm releases must run from a helm/* tag."
+              exit 1
+            fi
+            tag_path="${GITHUB_REF#refs/tags/}"
+            IFS='/' read -r prefix component requested_version extra <<<"$tag_path"
+            if [[ "$prefix" != "helm" || -z "$component" || -z "$requested_version" || -n "$extra" ]]; then
+              echo "::error::Invalid Helm release tag: $tag_path"
+              exit 1
+            fi
+            if [[ "$requested_version" == v* ]]; then
+              echo "::error::Helm release tags use the canonical version without a v prefix: helm/<component>/X.Y.Z"
+              exit 1
+            fi
+            chart_version="$requested_version"
+            release_tag="$tag_path"
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            component="$INPUT_COMPONENT"
+            chart_version="${INPUT_CHART_VERSION#v}"
+            release_tag="helm/${component}/${chart_version}"
+            echo "app_version=${INPUT_APP_VERSION#v}" >>"$GITHUB_OUTPUT"
+            if [[ "$GITHUB_REF" != "refs/tags/${release_tag}" ]]; then
+              echo "::error::Manual Helm releases must be dispatched from the exact tag '${release_tag}', not '${GITHUB_REF}'."
+              exit 1
+            fi
           else
-            echo "component=${{ inputs.component }}" >> $GITHUB_OUTPUT
-            echo "chart_version=${{ inputs.chart_version }}" >> $GITHUB_OUTPUT
-            echo "app_version=${{ inputs.app_version }}" >> $GITHUB_OUTPUT
-            echo "release_tag=helm/${{ inputs.component }}/${{ inputs.chart_version }}" >> $GITHUB_OUTPUT
+            echo "::error::Unsupported event: $GITHUB_EVENT_NAME"
+            exit 1
           fi
 
+          case "$component" in
+            opensandbox-controller|opensandbox-server|opensandbox|opensandbox-node-agent) ;;
+            *)
+              echo "::error::Unknown Helm component: $component"
+              exit 1
+              ;;
+          esac
+          if [[ ! "$chart_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Stable Helm releases require an X.Y.Z chart version, got: $chart_version"
+            exit 1
+          fi
+
+          echo "component=$component" >>"$GITHUB_OUTPUT"
+          echo "chart_version=$chart_version" >>"$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >>"$GITHUB_OUTPUT"
+
       - name: Verify release tag on origin
+        id: verify_tag
         env:
           RELEASE_TAG: ${{ steps.parse_tag.outputs.release_tag }}
         run: |
@@ -87,139 +140,286 @@ jobs:
           if [[ -z "$remote_commit" ]]; then
             remote_commit="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 { print $1 }')"
           fi
-
           if [[ -z "$remote_commit" ]]; then
             echo "::error::Release tag '${RELEASE_TAG}' does not exist on origin. Have an authorized release manager push the protected tag before publishing the Helm chart."
             exit 1
           fi
-
           if [[ "$local_commit" != "$remote_commit" ]]; then
-            echo "::error::Current commit is ${local_commit}, but origin tag '${RELEASE_TAG}' resolves to ${remote_commit}. Refusing to publish the Helm chart."
+            echo "::error::Current commit is ${local_commit}, but origin tag '${RELEASE_TAG}' resolves to ${remote_commit}. Refusing to package the Helm chart."
             exit 1
           fi
 
+          echo "source_sha=$local_commit" >>"$GITHUB_OUTPUT"
           echo "Verified release tag '${RELEASE_TAG}' at ${remote_commit}."
 
       - name: Set chart path
         id: chart_path
+        env:
+          COMPONENT: ${{ steps.parse_tag.outputs.component }}
         run: |
-          COMPONENT="${{ steps.parse_tag.outputs.component }}"
-          
-          if [ "$COMPONENT" == "opensandbox-controller" ]; then
-            CHART_PATH="kubernetes/charts/opensandbox-controller"
-          elif [ "$COMPONENT" == "opensandbox-server" ]; then
-            CHART_PATH="kubernetes/charts/opensandbox-server"
-          elif [ "$COMPONENT" == "opensandbox" ]; then
-            CHART_PATH="kubernetes/charts/opensandbox"
-          elif [ "$COMPONENT" == "opensandbox-node-agent" ]; then
-            CHART_PATH="kubernetes/charts/opensandbox-node-agent"
-          else
-            echo "Error: Unknown component: $COMPONENT"
-            exit 1
-          fi
-          
-          echo "path=$CHART_PATH" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          case "$COMPONENT" in
+            opensandbox-controller) chart_path="kubernetes/charts/opensandbox-controller" ;;
+            opensandbox-server) chart_path="kubernetes/charts/opensandbox-server" ;;
+            opensandbox) chart_path="kubernetes/charts/opensandbox" ;;
+            opensandbox-node-agent) chart_path="kubernetes/charts/opensandbox-node-agent" ;;
+          esac
+          echo "path=$chart_path" >>"$GITHUB_OUTPUT"
 
-      - name: Get chart version from Chart.yaml
+      - name: Verify chart version
         id: chart_version
+        env:
+          CHART_PATH: ${{ steps.chart_path.outputs.path }}
+          EXPECTED_CHART_VERSION: ${{ steps.parse_tag.outputs.chart_version }}
         run: |
-          CHART_PATH="${{ steps.chart_path.outputs.path }}"
-          CHART_VERSION=$(grep '^version:' $CHART_PATH/Chart.yaml | awk '{print $2}')
-          EXPECTED_CHART_VERSION="${{ steps.parse_tag.outputs.chart_version }}"
-
-          if [ "$CHART_VERSION" != "$EXPECTED_CHART_VERSION" ]; then
-            echo "::error::Chart.yaml version '$CHART_VERSION' does not match requested chart version '$EXPECTED_CHART_VERSION'."
+          set -euo pipefail
+          chart_version="$(awk '$1 == "version:" {gsub(/"/, "", $2); print $2; exit}' "$CHART_PATH/Chart.yaml")"
+          if [[ "$chart_version" != "$EXPECTED_CHART_VERSION" ]]; then
+            echo "::error::Chart.yaml version '$chart_version' does not match requested chart version '$EXPECTED_CHART_VERSION'."
             exit 1
           fi
+          echo "version=$chart_version" >>"$GITHUB_OUTPUT"
 
-          echo "version=$CHART_VERSION" >> $GITHUB_OUTPUT
-          echo "Verified chart version: $CHART_VERSION"
-
-      - name: Update Chart.yaml with app version for manual release
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        run: |
-          APP_VERSION="${{ steps.parse_tag.outputs.app_version }}"
-          CHART_PATH="${{ steps.chart_path.outputs.path }}"
-          
-          # Only update appVersion, keep chart version as-is in Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"$APP_VERSION\"/" $CHART_PATH/Chart.yaml
-          
-          echo "Updated Chart.yaml:"
-          cat $CHART_PATH/Chart.yaml
-
-      - name: Get app version from Chart.yaml
+      - name: Read app version
         id: app_version
+        env:
+          CHART_PATH: ${{ steps.chart_path.outputs.path }}
+          EXPECTED_APP_VERSION: ${{ steps.parse_tag.outputs.app_version }}
         run: |
-          CHART_PATH="${{ steps.chart_path.outputs.path }}"
-          APP_VERSION=$(grep '^appVersion:' $CHART_PATH/Chart.yaml | awk '{print $2}' | tr -d '"')
-          echo "version=$APP_VERSION" >> $GITHUB_OUTPUT
-          echo "App version: $APP_VERSION"
+          set -euo pipefail
+          app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' "$CHART_PATH/Chart.yaml")"
+          if [[ ! "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Stable Helm releases require an X.Y.Z appVersion, got: $app_version"
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$app_version" != "$EXPECTED_APP_VERSION" ]]; then
+            echo "::error::Committed appVersion '$app_version' does not match requested app version '$EXPECTED_APP_VERSION'. Update and tag the chart source instead of mutating release metadata."
+            exit 1
+          fi
+          echo "version=$app_version" >>"$GITHUB_OUTPUT"
 
-      - name: Build dependencies (for opensandbox all-in-one chart)
+      - name: Build all-in-one dependencies
         if: ${{ steps.parse_tag.outputs.component == 'opensandbox' }}
-        run: |
-          CHART_PATH="${{ steps.chart_path.outputs.path }}"
-          echo "Building dependencies for all-in-one chart..."
-          helm dependency build $CHART_PATH
+        env:
+          CHART_PATH: ${{ steps.chart_path.outputs.path }}
+        run: helm dependency build "$CHART_PATH"
 
-      - name: Lint Helm chart
-        run: |
-          CHART_PATH="${{ steps.chart_path.outputs.path }}"
-          helm lint $CHART_PATH
+      - name: Lint chart source
+        env:
+          CHART_PATH: ${{ steps.chart_path.outputs.path }}
+        run: helm lint "$CHART_PATH"
 
-      - name: Package Helm chart
+      - name: Package exact release candidate
+        id: package
+        env:
+          APP_VERSION: ${{ steps.app_version.outputs.version }}
+          CHART_PATH: ${{ steps.chart_path.outputs.path }}
+          CHART_VERSION: ${{ steps.chart_version.outputs.version }}
+          COMPONENT: ${{ steps.parse_tag.outputs.component }}
         run: |
-          CHART_PATH="${{ steps.chart_path.outputs.path }}"
-          helm package $CHART_PATH
+          set -euo pipefail
+          mkdir -p dist
+          package_name="${COMPONENT}-${CHART_VERSION}.tgz"
+          helm package "$CHART_PATH" --destination dist
+          test -f "dist/$package_name"
+          test "$(find dist -maxdepth 1 -type f -name '*.tgz' | wc -l)" -eq 1
 
-      - name: Attest packaged Helm chart
+          scripts/release/verify-helm-package.sh \
+            "dist/$package_name" "$COMPONENT" "$CHART_VERSION" "$APP_VERSION"
+
+          package_sha256="$(sha256sum "dist/$package_name" | awk '{print $1}')"
+          printf '%s  %s\n' "$package_sha256" "$package_name" >dist/SHA256SUMS
+          echo "package_name=$package_name" >>"$GITHUB_OUTPUT"
+          echo "package_sha256=$package_sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Hold exact candidate privately
+        id: hold
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/${{ steps.package.outputs.package_name }}
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 45
+          compression-level: 0
+          overwrite: false
+
+  kind-gate:
+    name: Verify release candidate
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      tested_images: ${{ steps.runtime_evidence.outputs.tested_images }}
+    env:
+      KIND_NODE_IMAGE: kindest/node:v1.30.13@sha256:8673291894dc400e0fb4f57243f5fdc6e355ceaa765505e0e73941aa1b6e0b80
+      HELM_SMOKE_ARTIFACTS_DIR: /tmp/helm-smoke-diagnostics
+      SANDBOX_TEST_IMAGE: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download held candidate
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.package.outputs.artifact_id }}
+          path: dist
+          merge-multiple: true
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.21.3'
+
+      - name: Verify held bytes and package contract
+        env:
+          APP_VERSION: ${{ needs.package.outputs.app_version }}
+          CHART_VERSION: ${{ needs.package.outputs.chart_version }}
+          COMPONENT: ${{ needs.package.outputs.component }}
+          EXPECTED_SHA256: ${{ needs.package.outputs.package_sha256 }}
+          PACKAGE_NAME: ${{ needs.package.outputs.package_name }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c SHA256SUMS)
+          actual_sha256="$(sha256sum "dist/$PACKAGE_NAME" | awk '{print $1}')"
+          test "$actual_sha256" = "$EXPECTED_SHA256"
+          scripts/release/verify-helm-package.sh \
+            "dist/$PACKAGE_NAME" "$COMPONENT" "$CHART_VERSION" "$APP_VERSION"
+
+      - name: Set up Python
+        if: ${{ needs.package.outputs.component == 'opensandbox' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up Go
+        if: ${{ needs.package.outputs.component == 'opensandbox' }}
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.0'
+
+      - name: Set up uv
+        if: ${{ needs.package.outputs.component == 'opensandbox' }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.7.6'
+
+      - name: Set up kubectl
+        if: ${{ needs.package.outputs.component == 'opensandbox' }}
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.13'
+
+      - name: Install Kind
+        if: ${{ needs.package.outputs.component == 'opensandbox' }}
+        run: |
+          go install sigs.k8s.io/kind@v0.31.0
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+
+      - name: Run exact-package Kind smoke
+        if: ${{ needs.package.outputs.component == 'opensandbox' }}
+        env:
+          PACKAGE_NAME: ${{ needs.package.outputs.package_name }}
+        run: |
+          scripts/release/smoke-helm-release.sh \
+            --package "dist/$PACKAGE_NAME" -- scripts/release/run-helm-release-e2e.sh
+
+      - name: Record tested image identities
+        id: runtime_evidence
+        if: ${{ needs.package.outputs.component == 'opensandbox' }}
+        run: |
+          set -euo pipefail
+          evidence_file="$HELM_SMOKE_ARTIFACTS_DIR/tested-images.tsv"
+          test -s "$evidence_file"
+          {
+            echo 'tested_images<<__TESTED_IMAGES__'
+            cat "$evidence_file"
+            echo '__TESTED_IMAGES__'
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Upload Kind diagnostics
+        if: ${{ always() && needs.package.outputs.component == 'opensandbox' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-kind-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/helm-smoke-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    name: Approve and publish tested candidate
+    needs: [package, kind-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.package.outputs.release_tag }}
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download tested candidate
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.package.outputs.artifact_id }}
+          path: dist
+          merge-multiple: true
+
+      - name: Re-verify source and held bytes
+        env:
+          EXPECTED_SHA256: ${{ needs.package.outputs.package_sha256 }}
+          EXPECTED_SOURCE_SHA: ${{ needs.package.outputs.source_sha }}
+          PACKAGE_NAME: ${{ needs.package.outputs.package_name }}
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          local_commit="$(git rev-parse 'HEAD^{commit}')"
+          remote_commit="$(git ls-remote origin "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 { print $1 }')"
+          if [[ -z "$remote_commit" ]]; then
+            remote_commit="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 { print $1 }')"
+          fi
+          test "$local_commit" = "$EXPECTED_SOURCE_SHA"
+          test "$remote_commit" = "$EXPECTED_SOURCE_SHA"
+          (cd dist && sha256sum -c SHA256SUMS)
+          actual_sha256="$(sha256sum "dist/$PACKAGE_NAME" | awk '{print $1}')"
+          test "$actual_sha256" = "$EXPECTED_SHA256"
+
+      - name: Attest tested Helm package
         uses: actions/attest@v4
         with:
-          subject-path: ${{ steps.parse_tag.outputs.component }}-*.tgz
+          subject-path: dist/${{ needs.package.outputs.package_name }}
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Attest checksum manifest
+        uses: actions/attest@v4
         with:
-          tag_name: ${{ steps.parse_tag.outputs.release_tag }}
-          name: Helm Chart ${{ steps.parse_tag.outputs.component }} ${{ steps.chart_version.outputs.version }} (App v${{ steps.app_version.outputs.version }})
-          body: |
-            ## ${{ steps.parse_tag.outputs.component }} Helm Chart
-            
-            **Chart Version:** ${{ steps.chart_version.outputs.version }}
-            **App Version:** ${{ steps.app_version.outputs.version }}
-            
-            ### Installation
-            
-            直接从 GitHub Release 安装:
-            
-            ```bash
-            helm install ${{ steps.parse_tag.outputs.component }} \
-              https://github.com/${{ github.repository }}/releases/download/${{ steps.parse_tag.outputs.release_tag }}/${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}.tgz \
-              --namespace opensandbox-system \
-              --create-namespace
-            ```
-            
-            或者先下载后安装:
-            
-            ```bash
-            # 下载
-            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.parse_tag.outputs.release_tag }}/${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}.tgz
-            
-            # 安装
-            helm install ${{ steps.parse_tag.outputs.component }} ./${{ steps.parse_tag.outputs.component }}-${{ steps.chart_version.outputs.version }}.tgz \
-              --namespace opensandbox-system \
-              --create-namespace
-            ```
-            
-            ${{ steps.parse_tag.outputs.component == 'opensandbox' && '**Note**: This is an all-in-one chart that bundles controller and server. The packaged chart already includes all dependencies, no need to run `helm dependency build` when installing from release.' || '' }}
-            
-            ### What's Changed
-            
-            - Chart version: ${{ steps.chart_version.outputs.version }}
-            - App version: ${{ steps.app_version.outputs.version }}
-          files: |
-            ${{ steps.parse_tag.outputs.component }}-*.tgz
-          draft: false
-          prerelease: false
+          subject-path: dist/SHA256SUMS
+
+      - name: Publish verified release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+          COMPONENT: ${{ needs.package.outputs.component }}
+          CHART_VERSION: ${{ needs.package.outputs.chart_version }}
+          APP_VERSION: ${{ needs.package.outputs.app_version }}
+          PACKAGE_PATH: dist/${{ needs.package.outputs.package_name }}
+          CHECKSUM_PATH: dist/SHA256SUMS
+          EXPECTED_SHA256: ${{ needs.package.outputs.package_sha256 }}
+          SOURCE_SHA: ${{ needs.package.outputs.source_sha }}
+          RUNTIME_VERIFIED: ${{ needs.package.outputs.component == 'opensandbox' && 'true' || 'false' }}
+          RUNTIME_PROFILE: ${{ needs.package.outputs.component == 'opensandbox' && 'Kind Kubernetes v1.30.13 linux/amd64 core lifecycle' || 'package verification only' }}
+          TESTED_IMAGES: ${{ needs.kind-gate.outputs.tested_images }}
+        run: scripts/release/publish-helm-release.sh

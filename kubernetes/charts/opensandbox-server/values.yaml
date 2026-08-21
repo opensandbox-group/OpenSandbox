@@ -24,7 +24,9 @@ server:
 
   # -- Server image configuration
   image:
+    # -- Server image repository.
     repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server
+    # -- Server image tag. Defaults to the chart appVersion when empty.
     tag: "v0.2.2"
 
   # -- Number of server replicas
@@ -39,9 +41,13 @@ server:
       cpu: "1"
       memory: 4Gi
 
+  # -- Tolerations for the server pod.
   tolerations: []
+  # -- Affinity for the server pod.
   affinity: {}
+  # -- Additional volume mounts for the server container.
   volumeMounts: []
+  # -- Additional volumes for the server pod.
   volumes: []
   # -- Node selector for the server pod.
   nodeSelector: {}
@@ -60,20 +66,32 @@ server:
 
   # Gateway (components/ingress): when enabled, writes config [ingress] and deploys the gateway
   gateway:
+    # -- Whether to deploy the ingress gateway alongside the server.
     enabled: false
+    # -- Gateway host/address returned to clients when the gateway is enabled.
     host: opensandbox.example.com
+    # -- Gateway route mode: header or uri.
     gatewayRouteMode: "header"
+    # -- Gateway image configuration.
     image:
+      # -- Gateway image repository.
       repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress
+      # -- Gateway image tag.
       tag: "v1.0.10"
+    # -- Number of gateway replicas.
     replicaCount: 2
+    # -- Gateway service port.
     port: 28888
+    # -- Namespace where the gateway dataplane workloads run.
     dataplaneNamespace: "opensandbox"
+    # -- Gateway provider type (e.g. batchsandbox).
     providerType: "batchsandbox"
+    # -- Gateway log level.
     logLevel: "info"
     # -- Additional environment variables for the ingress-gateway container
     # (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics).
     env: []
+    # -- Resource requests and limits for the gateway.
     resources:
       limits:
         cpu: "2"
@@ -85,18 +103,19 @@ server:
     # When keys are provided, the server signs route tokens with the active key
     # and the ingress gateway verifies them.
     secureAccess:
+      # -- Active signing key id, one character in [0-9a-z].
       activeKey: ""
-      # List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }.
+      # -- List of signing keys. Each entry: { key_id: "a", key: "<base64-secret>" }.
       # key_id must be exactly one character in [0-9a-z].
       keys: []
-      # -- Name of an existing Secret holding the signing keys, as an
-      # alternative to plaintext `keys` above (mutually exclusive). The Secret
-      # must carry two entries:
+      # -- Name of an existing Secret holding the signing keys (keys + active-key),
+      # as an alternative to plaintext `keys` above (mutually exclusive).
+      # The Secret must carry two entries:
       #   keys:       the key ring, "a=<base64-secret>[,b=<base64-secret>...]"
       #   active-key: the active signing key id, one character in [0-9a-z]
       # The chart wires it into both containers as environment variables
       # (server: OPENSANDBOX_SECURE_ACCESS_*; gateway: $(...) expansion in the
-      # --secure-access-keys arg), so key material never appears in values,
+      # `--secure-access-keys` arg), so key material never appears in values,
       # the server ConfigMap, or pod args.
       # Env-sourced Secrets are read once at container start: after updating
       # the Secret in place, `kubectl rollout restart` the server and gateway
