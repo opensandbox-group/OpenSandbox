@@ -14,6 +14,8 @@
 
 package flag
 
+import "time"
+
 var (
 	// LogLevel controls the router log verbosity.
 	LogLevel string
@@ -34,4 +36,16 @@ var (
 	RenewIntentMinIntervalSec int
 
 	SecureAccessKeys string
+
+	// AuditEnabled enables reporting sandbox access requests to the audit webhook.
+	AuditEnabled bool
+
+	// AuditWebhookURL is the address that receives the audit events (requires AuditEnabled).
+	AuditWebhookURL string
+
+	// AuditQueueSize bounds the number of audit events pending delivery.
+	AuditQueueSize int
+
+	// AuditTimeout bounds each audit webhook delivery attempt.
+	AuditTimeout time.Duration
 )

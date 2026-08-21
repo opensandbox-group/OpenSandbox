@@ -16,6 +16,7 @@ package flag
 
 import (
 	"flag"
+	"time"
 )
 
 var (
@@ -36,6 +37,11 @@ func InitFlags() {
 	flag.IntVar(&RenewIntentMinIntervalSec, "renew-intent-min-interval", 60, "Min seconds between publishing intents for the same sandbox (client-side throttle)")
 
 	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "OSEP-0011 verification keys: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
+
+	flag.BoolVar(&AuditEnabled, "audit-enabled", false, "Enable reporting sandbox access requests to the audit webhook (default: false)")
+	flag.StringVar(&AuditWebhookURL, "audit-webhook-url", "", "The address to receive sandbox access request reports (required when audit is enabled)")
+	flag.IntVar(&AuditQueueSize, "audit-queue-size", 1024, "The max number of audit events pending delivery (default: 1024)")
+	flag.DurationVar(&AuditTimeout, "audit-timeout", 3*time.Second, "The timeout for each audit webhook delivery (default: 3s)")
 
 	flag.Parse()
 }

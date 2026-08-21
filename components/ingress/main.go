@@ -87,8 +87,22 @@ func main() {
 		secure = &signature.Verifier{Keys: keys}
 	}
 
+	// Create optional audit reporter for sandbox access requests
+	var auditReporter *proxy.AuditReporter
+	if flag.AuditEnabled {
+		if flag.AuditWebhookURL == "" {
+			log.Panicf("'-audit-enabled' requires '-audit-webhook-url' to be set.")
+		}
+		auditReporter = proxy.NewAuditReporter(flag.AuditWebhookURL, flag.AuditQueueSize, flag.AuditTimeout)
+		auditReporter.Start(ctx)
+		defer auditReporter.Stop()
+	}
+
 	// Create reverse proxy with sandbox provider
 	reverseProxy := proxy.NewProxy(ctx, sandboxProvider, proxy.Mode(flag.Mode), renewPublisher, secure)
+	if auditReporter != nil {
+		reverseProxy.EnableAudit(auditReporter)
+	}
 	http.Handle("/", reverseProxy)
 	http.HandleFunc("/status.ok", proxy.Healthz)
 

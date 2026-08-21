@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
@@ -32,6 +33,7 @@ type Proxy struct {
 	sandboxProvider      sandbox.Provider
 	mode                 Mode
 	renewIntentPublisher renewintent.Publisher
+	audit                *AuditReporter
 
 	secure *signature.Verifier
 }
@@ -43,6 +45,13 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		renewIntentPublisher: renewIntentPublisher,
 		secure:               secure,
 	}
+}
+
+// EnableAudit attaches an audit reporter; every successfully routed request
+// is reported to the reporter's webhook asynchronously.
+func (p *Proxy) EnableAudit(reporter *AuditReporter) *Proxy {
+	p.audit = reporter
+	return p
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +106,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slogger.Field{Key: "uri", Value: r.RequestURI},
 		slogger.Field{Key: "method", Value: r.Method},
 	).Infof("ingress requested")
+
+	if p.audit != nil {
+		p.audit.Report(AuditEvent{
+			SandboxID:   host.ingressKey,
+			URI:         r.RequestURI,
+			Method:      r.Method,
+			Target:      targetHost,
+			RequestTime: time.Now(),
+		})
+	}
+
 	p.serve(w, r)
 }
 

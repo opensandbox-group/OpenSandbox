@@ -1,6 +1,7 @@
 # OpenSandbox Ingress
 
 ## Overview
+
 - HTTP/WebSocket reverse proxy that routes to sandbox instances.
 - Watches sandbox CRs (BatchSandbox or AgentSandbox, chosen by `--provider-type`) across all namespaces:
   - BatchSandbox: reads endpoints from `sandbox.opensandbox.io/endpoints` annotation.
@@ -8,6 +9,7 @@
 - Exposes `/status.ok` health check; prints build metadata (version, commit, time, Go/platform) at startup.
 
 ## Quick Start
+
 ```bash
 go run main.go \
   --namespace <any-value-kept-for-compatibility> \
@@ -16,6 +18,7 @@ go run main.go \
   --port 28888 \
   --log-level info
 ```
+
 Endpoints: `/` (proxy), `/status.ok` (health).
 
 ## Routing Modes
@@ -27,10 +30,12 @@ The ingress supports two routing modes for discovering sandbox instances:
 Routes requests based on the `OpenSandbox-Ingress-To` header or the `Host` header.
 
 **Format:**
+
 - Header: `OpenSandbox-Ingress-To: <sandbox-id>-<port>`
 - Host: `<sandbox-id>-<port>.<domain>`
 
 **Example:**
+
 ```bash
 # Using OpenSandbox-Ingress-To header
 curl -H "OpenSandbox-Ingress-To: my-sandbox-8080" https://ingress.opensandbox.io/api/users
@@ -40,6 +45,7 @@ curl -H "Host: my-sandbox-8080.example.com" https://ingress.opensandbox.io/api/u
 ```
 
 **Parsing logic:**
+
 - Extracts sandbox ID and port from the format `<sandbox-id>-<port>`
 - The last segment after the last `-` is treated as the port
 - Everything before the last `-` is treated as the sandbox ID
@@ -53,6 +59,7 @@ Routes requests based on the URI path structure.
 `/<sandbox-id>/<sandbox-port>/<path-to-request>`
 
 **Example:**
+
 ```bash
 # Request to sandbox "my-sandbox" on port 8080, forwarding to /api/users
 curl https://ingress.opensandbox.io/my-sandbox/8080/api/users
@@ -62,12 +69,14 @@ wss://ingress.opensandbox.io/my-sandbox/8080/ws
 ```
 
 **Parsing logic:**
+
 - First path segment: sandbox ID
 - Second path segment: sandbox port
 - Remaining path: forwarded to the target sandbox as the request URI
 - If no remaining path is provided, defaults to `/`
 
 **Use cases:**
+
 - When you cannot modify HTTP headers
 - When you need path-based routing
 - For simpler client configuration without custom headers
@@ -78,15 +87,16 @@ When enabled, the ingress publishes **renew-intent** events to a Redis list on e
 
 **Requirements:** The server must have `renew_intent` (and Redis consumer for ingress mode) enabled; the sandbox must opt in via `extensions["access.renew.extend.seconds"]` (decimal integer string between **300** and **86400** seconds, see OSEP-0009). This feature is best-effort and disabled by default.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--renew-intent-enabled` | `false` | Enable publishing renew-intent events to Redis |
-| `--renew-intent-redis-dsn` | `redis://127.0.0.1:6379/0` | Redis DSN (may include `user:password@`) |
-| `--renew-intent-queue-key` | `opensandbox:renew:intent` | Redis List key for intent payloads |
-| `--renew-intent-queue-max-len` | `0` | Max list length (0 = no cap); LTRIM applied when &gt; 0 |
-| `--renew-intent-min-interval` | `60` | Min seconds between intents per sandbox (client-side throttle) |
+| Flag                           | Default                    | Description                                                    |
+| ------------------------------ | -------------------------- | -------------------------------------------------------------- |
+| `--renew-intent-enabled`       | `false`                    | Enable publishing renew-intent events to Redis                 |
+| `--renew-intent-redis-dsn`     | `redis://127.0.0.1:6379/0` | Redis DSN (may include `user:password@`)                       |
+| `--renew-intent-queue-key`     | `opensandbox:renew:intent` | Redis List key for intent payloads                             |
+| `--renew-intent-queue-max-len` | `0`                        | Max list length (0 = no cap); LTRIM applied when &gt; 0        |
+| `--renew-intent-min-interval`  | `60`                       | Min seconds between intents per sandbox (client-side throttle) |
 
 **Example (with Redis):**
+
 ```bash
 go run main.go \
   --namespace opensandbox \
@@ -95,7 +105,46 @@ go run main.go \
   --renew-intent-min-interval 120
 ```
 
+## Access Request Auditing
+
+The ingress can report every successfully routed sandbox access request to an external webhook asynchronously.
+
+| Flag                  | Default                           | Description                                                   |
+| --------------------- | --------------------------------- | ------------------------------------------------------------- |
+| `--audit-enabled`     | `false`                           | Enable reporting sandbox access requests to the audit webhook |
+| `--audit-webhook-url` | (empty)<br/>http://x.x.x.x/events | Webhook address receiving the reports (required when enabled) |
+| `--audit-queue-size`  | `1024`                            | Max number of events pending delivery                         |
+| `--audit-timeout`     | `3s`                              | Timeout for each webhook delivery                             |
+
+**Example:**
+
+```bash
+go run main.go \
+  --audit-enabled \
+  --audit-webhook-url http://audit-webhook:8080/events
+```
+
+**Reported payload** (POST, `application/json`):
+
+```json
+{
+  "sandbox_id": "my-sandbox",
+  "uri": "/api/users",
+  "method": "GET",
+  "target": "10.0.0.1:8080",
+  "request_time": "2026-08-20T09:24:12.252+08:00"
+}
+```
+
+**Behavior:**
+
+- Delivery is asynchronous: events are queued in memory and posted by a background worker; the request path never blocks.
+- When the queue is full (webhook slow or down), events are dropped and a warning is logged.
+- Delivery failures (non-2xx response, timeout) are logged and do not affect request forwarding.
+- Events are reported only for requests that were successfully routed to a sandbox (after endpoint resolution).
+
 ## Build
+
 ```bash
 cd components/ingress
 make build
@@ -104,7 +153,9 @@ VERSION=1.2.3 GIT_COMMIT=$(git rev-parse HEAD) BUILD_TIME=$(date -u +"%Y-%m-%dT%
 ```
 
 ## Docker Build
+
 Dockerfile already wires ldflags via build args:
+
 ```bash
 docker build \
   --build-arg VERSION=$(git describe --tags --always --dirty) \
@@ -114,13 +165,16 @@ docker build \
 ```
 
 ## Multi-arch Publish Script
+
 `build.sh` uses buildx to build/push linux/amd64 and linux/arm64:
+
 ```bash
 cd components/ingress
 TAG=local VERSION=1.2.3 GIT_COMMIT=abc BUILD_TIME=2025-01-01T00:00:00Z bash build.sh
 ```
 
 ## Runtime Requirements
+
 - Access to Kubernetes API (in-cluster or via KUBECONFIG).
 - If `--provider-type=batchsandbox`: BatchSandbox CRs in any namespace with `sandbox.opensandbox.io/endpoints` annotation containing Pod IPs.
 - If `--provider-type=agent-sandbox`: AgentSandbox CRs in any namespace with `status.serviceFQDN` populated.
@@ -128,6 +182,7 @@ TAG=local VERSION=1.2.3 GIT_COMMIT=abc BUILD_TIME=2025-01-01T00:00:00Z bash buil
 ## Implementation Notes
 
 ### Header Mode Behavior
+
 - Routing key priority: `OpenSandbox-Ingress-To` header first, otherwise Host parsing `<sandbox-name>-<port>.*`.
 - Sandbox name extracted from request is used to query the sandbox CR (BatchSandbox or AgentSandbox) via informer cache:
   - BatchSandbox → endpoints annotation.
@@ -135,12 +190,14 @@ TAG=local VERSION=1.2.3 GIT_COMMIT=abc BUILD_TIME=2025-01-01T00:00:00Z bash buil
 - The original request path is preserved and forwarded to the target sandbox.
 
 ### URI Mode Behavior
+
 - Routing information is extracted from the URI path: `/<sandbox-id>/<sandbox-port>/<path-to-request>`.
 - The sandbox ID and port are extracted from the first two path segments.
 - The remaining path (`/<path-to-request>`) is forwarded to the target sandbox as the request URI.
 - If no remaining path is provided, the request URI defaults to `/`.
 
 ### Commons
+
 - Error handling:
   - `ErrSandboxNotFound` (sandbox resource not exists) → HTTP 404
   - `ErrSandboxNotReady` (not enough replicas, missing endpoints, invalid config) → HTTP 503
@@ -148,13 +205,15 @@ TAG=local VERSION=1.2.3 GIT_COMMIT=abc BUILD_TIME=2025-01-01T00:00:00Z bash buil
 - WebSocket path forwards essential headers and X-Forwarded-*; HTTP path strips `OpenSandbox-Ingress-To` before proxying (header mode only).
 
 ## Development & Tests
+
 ```bash
 cd components/ingress
 go test ./...
 ```
+
 Key code:
+
 - `main.go`: entrypoint and handlers.
 - `pkg/proxy/`: HTTP/WebSocket proxy logic, sandbox endpoint resolution.
 - `pkg/sandbox/`: Sandbox provider abstraction and BatchSandbox implementation.
 - `version/`: build metadata output (populated via ldflags).
-
