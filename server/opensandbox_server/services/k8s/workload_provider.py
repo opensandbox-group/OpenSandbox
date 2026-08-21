@@ -55,6 +55,7 @@ class WorkloadProvider(ABC):
         credential_proxy_enabled: bool = False,
         resource_requests: Optional[Dict[str, str]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
+        read_only_root_filesystem: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Create a new workload resource.
@@ -78,6 +79,7 @@ class WorkloadProvider(ABC):
             egress_mode: Sidecar ``OPENSANDBOX_EGRESS_MODE`` (from app ``[egress].mode`` when using network policy).
             credential_proxy_enabled: Enable transparent MITM support required by Credential Vault injection.
             volumes: Optional list of volume mounts for the sandbox.
+            read_only_root_filesystem: Request to make the main container root filesystem read-only.
 
         Returns:
             Dict containing workload metadata (name, uid, etc.)

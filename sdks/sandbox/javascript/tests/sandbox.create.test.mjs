@@ -124,6 +124,27 @@ test("Sandbox.create forwards secureAccess", async () => {
   assert.equal(recordedRequests[0].secureAccess, true);
 });
 
+test("Sandbox.create preserves readOnlyRootFilesystem tri-state", async () => {
+  const omitted = createAdapterFactory();
+  await Sandbox.create({
+    adapterFactory: omitted.adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    skipHealthCheck: true,
+  });
+  assert.ok(!Object.hasOwn(omitted.recordedRequests[0], "readOnlyRootFilesystem"));
+
+  const explicitFalse = createAdapterFactory();
+  await Sandbox.create({
+    adapterFactory: explicitFalse.adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    readOnlyRootFilesystem: false,
+    skipHealthCheck: true,
+  });
+  assert.equal(explicitFalse.recordedRequests[0].readOnlyRootFilesystem, false);
+});
+
 test("Sandbox.create forwards credentialProxy", async () => {
   const { adapterFactory, recordedRequests } = createAdapterFactory();
 

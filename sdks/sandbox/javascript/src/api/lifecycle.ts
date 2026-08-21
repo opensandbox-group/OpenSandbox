@@ -849,6 +849,12 @@ export interface components {
              *     this is restored from the snapshot.
              */
             entrypoint: string[];
+            /**
+             * @description Actual read-only root filesystem state confirmed from the runtime.
+             *     Null means the runtime could not confirm the policy, such as an
+             *     opaque pre-created Pool workload.
+             */
+            readOnlyRootFilesystem?: boolean | null;
         };
         /** @description Optional settings for creating a sandbox snapshot. */
         CreateSnapshotRequest: {
@@ -945,6 +951,12 @@ export interface components {
              *     from the snapshot.
              */
             entrypoint: string[];
+            /**
+             * @description Actual read-only root filesystem state confirmed from the runtime.
+             *     Null means the runtime could not confirm the policy, such as an
+             *     opaque pre-created Pool workload.
+             */
+            readOnlyRootFilesystem?: boolean | null;
             /**
              * Format: date-time
              * @description Timestamp when sandbox will auto-terminate. Omitted when manual cleanup is enabled.
@@ -1224,6 +1236,13 @@ export interface components {
              * @default false
              */
             secureAccess: boolean;
+            /**
+             * @description Request a read-only root filesystem for the sandbox main container.
+             *     Set to true to enable it. When omitted or false, the provider and
+             *     template defaults are preserved. This field is not supported with
+             *     `extensions.poolRef`; configure the Pool template instead.
+             */
+            readOnlyRootFilesystem?: boolean | null;
             /**
              * @description Storage mounts for the sandbox. Each volume entry specifies a named backend-specific
              *     storage source and common mount settings. Exactly one backend type must be specified

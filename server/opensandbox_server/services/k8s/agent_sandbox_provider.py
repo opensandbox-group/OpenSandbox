@@ -143,6 +143,7 @@ class AgentSandboxProvider(WorkloadProvider):
         credential_proxy_enabled: bool = False,
         resource_requests: Optional[Dict[str, str]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
+        read_only_root_filesystem: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Create an agent-sandbox Sandbox CRD workload."""
         if is_windows_profile(platform):
@@ -166,6 +167,7 @@ class AgentSandboxProvider(WorkloadProvider):
             egress_env=egress_env,
             extensions=extensions,
             sandbox_id=sandbox_id,
+            read_only_root_filesystem=read_only_root_filesystem,
         )
 
         if volumes:
@@ -203,6 +205,18 @@ class AgentSandboxProvider(WorkloadProvider):
         else:
             sandbox["spec"]["shutdownTime"] = expires_at.isoformat()
         merged_pod_spec = sandbox.get("spec", {}).get("podTemplate", {}).get("spec", {})
+        if read_only_root_filesystem is True:
+            merged_containers = merged_pod_spec.get("containers") or []
+            if not merged_containers or not isinstance(merged_containers[0], dict):
+                raise ValueError(
+                    "Kubernetes template does not contain a main container for "
+                    "readOnlyRootFilesystem."
+                )
+            merged_security_context = merged_containers[0].get("securityContext")
+            if not isinstance(merged_security_context, dict):
+                merged_security_context = {}
+                merged_containers[0]["securityContext"] = merged_security_context
+            merged_security_context["readOnlyRootFilesystem"] = True
         ensure_egress_runtime_compatible(
             network_policy,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
@@ -261,6 +275,7 @@ class AgentSandboxProvider(WorkloadProvider):
         egress_env: Optional[Dict[str, Optional[str]]] = None,
         extensions: Optional[Dict[str, str]] = None,
         sandbox_id: Optional[str] = None,
+        read_only_root_filesystem: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Build pod spec dict for the Sandbox CRD."""
         disable_ipv6_for_egress = (
@@ -288,15 +303,14 @@ class AgentSandboxProvider(WorkloadProvider):
             has_network_policy=network_policy is not None,
             isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
             resource_requests=resource_requests,
+            read_only_root_filesystem=read_only_root_filesystem,
         )
         
         containers = [_container_to_dict(main_container)]
-        volumes: list[Dict[str, Any]] = [
-            {
-                "name": "opensandbox-bin",
-                "emptyDir": {},
-            }
-        ]
+        runtime_volume: Dict[str, Any] = {"name": "opensandbox-bin", "emptyDir": {}}
+        if read_only_root_filesystem is True:
+            runtime_volume["emptyDir"] = {"medium": "Memory", "sizeLimit": "64Mi"}
+        volumes: list[Dict[str, Any]] = [runtime_volume]
         if (extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
             volumes.append({
                 "name": "isolation-upper",

@@ -27,6 +27,7 @@ import json
 import logging
 import math
 import os
+import posixpath
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -94,6 +95,7 @@ from opensandbox_server.services.constants import (
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_HTTP_PORT_LABEL,
     SANDBOX_ID_LABEL,
+    SANDBOX_ENTRYPOINT_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_OSSFS_MOUNTS_LABEL,
@@ -577,6 +579,19 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
         metadata = self._metadata_store.get(resolved_id, labels)
         entrypoint = container.attrs.get("Config", {}).get("Cmd") or []
+        stored_entrypoint = labels.get(SANDBOX_ENTRYPOINT_LABEL)
+        if stored_entrypoint:
+            try:
+                parsed_entrypoint = json.loads(stored_entrypoint)
+                if isinstance(parsed_entrypoint, list) and all(
+                    isinstance(item, str) for item in parsed_entrypoint
+                ):
+                    entrypoint = parsed_entrypoint
+            except (TypeError, json.JSONDecodeError):
+                logger.warning(
+                    "Ignoring malformed stored entrypoint for sandbox %s",
+                    resolved_id,
+                )
         if isinstance(entrypoint, str):
             entrypoint = [entrypoint]
         image_tags = container.image.tags
@@ -599,6 +614,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             last_transition_at=last_transition_at,
         )
         platform_spec = self._resolve_platform_for_container(container, labels)
+        host_config = container.attrs.get("HostConfig", {}) or {}
+        read_only_root_filesystem = host_config.get("ReadonlyRootfs")
+        if not isinstance(read_only_root_filesystem, bool):
+            read_only_root_filesystem = False
 
         return Sandbox(
             id=resolved_id,
@@ -611,7 +630,24 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             entrypoint=entrypoint,
             expiresAt=expires_at,
             createdAt=created_at,
+            readOnlyRootFilesystem=read_only_root_filesystem,
         )
+
+    @staticmethod
+    def _validate_read_only_rootfs_binds(binds: list[str]) -> None:
+        runtime_path = OPENSANDBOX_RUNTIME_MOUNT_PATH.rstrip("/")
+        for bind in binds:
+            parts = bind.rsplit(":", 2)
+            container_path = parts[-2] if len(parts) == 3 else parts[-1]
+            normalized_path = posixpath.normpath(container_path)
+            if normalized_path == runtime_path or normalized_path.startswith(
+                runtime_path + "/"
+            ):
+                raise ValueError(
+                    f"Volume mount path '{container_path}' conflicts with the "
+                    f"server-managed {OPENSANDBOX_RUNTIME_MOUNT_PATH} runtime path "
+                    "when readOnlyRootFilesystem is enabled."
+                )
 
     def _prepare_creation_context(
         self,
@@ -723,6 +759,11 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         egress_token: Optional[str] = None
         requested_windows_profile = is_windows_platform(request.platform)
 
+        if requested_windows_profile and request.read_only_root_filesystem is True:
+            raise ValueError(
+                "readOnlyRootFilesystem is not supported for the Docker Windows profile."
+            )
+
         credential_proxy_enabled = bool(
             request.credential_proxy and request.credential_proxy.enabled
         )
@@ -771,6 +812,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             # pvc_inspect_cache carries Docker volume inspect data from the
             # validation phase, avoiding a redundant API call.
             volume_binds = self._build_volume_binds(request.volumes, pvc_inspect_cache)
+            if request.read_only_root_filesystem is True:
+                # Validate only operator/request mounts here. The egress runtime
+                # mount added below is server-owned and intentionally targets the
+                # managed writable runtime directory.
+                self._validate_read_only_rootfs_binds(
+                    list(self.app_config.docker.sandbox_binds or [])
+                    + list(volume_binds or [])
+                )
 
             host_config_kwargs: Dict[str, Any]
             exposed_ports: Optional[list[str]] = ["44772", "8080"]
@@ -785,10 +834,22 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 with self._docker_operation(
                     "create egress runtime volume", sandbox_id
                 ):
-                    self.docker_client.volumes.create(
-                        name=runtime_volume_name,
-                        labels={SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
-                    )
+                    runtime_volume_kwargs = {
+                        "name": runtime_volume_name,
+                        "labels": {SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
+                    }
+                    if request.read_only_root_filesystem is True:
+                        runtime_volume_kwargs.update(
+                            {
+                                "driver": "local",
+                                "driver_opts": {
+                                    "type": "tmpfs",
+                                    "device": "tmpfs",
+                                    "o": "size=64m,exec",
+                                },
+                            }
+                        )
+                    self.docker_client.volumes.create(**runtime_volume_kwargs)
                 auto_created_volumes = list(auto_created_volumes or [])
                 auto_created_volumes.append(runtime_volume_name)
                 labels[SANDBOX_MANAGED_VOLUMES_LABEL] = json.dumps(
@@ -874,6 +935,23 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             all_binds = list(self.app_config.docker.sandbox_binds or []) + (volume_binds or [])
             if all_binds:
                 host_config_kwargs["binds"] = all_binds
+            if request.read_only_root_filesystem is True:
+                host_config_kwargs["read_only"] = True
+                if runtime_volume_name is None:
+                    tmpfs = dict(host_config_kwargs.get("tmpfs") or {})
+                    tmpfs[OPENSANDBOX_RUNTIME_MOUNT_PATH] = "size=64m,exec"
+                    host_config_kwargs["tmpfs"] = tmpfs
+                # execd keeps command output descriptors under os.TempDir().
+                # Keep the user-visible /tmp read-only while placing these
+                # server-managed files on the writable runtime mount.
+                environment = [
+                    entry for entry in environment if not entry.startswith("TMPDIR=")
+                ]
+                environment.append(f"TMPDIR={OPENSANDBOX_RUNTIME_MOUNT_PATH}")
+                labels[SANDBOX_ENTRYPOINT_LABEL] = json.dumps(
+                    request.entrypoint,
+                    separators=(",", ":"),
+                )
             if requested_windows_profile:
                 host_config_kwargs = apply_windows_runtime_host_config_defaults(
                     host_config_kwargs,
@@ -914,6 +992,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 host_config_kwargs,
                 container_exposed_ports,
                 request.platform,
+                read_only_root_filesystem=request.read_only_root_filesystem is True,
             )
         except Exception:
             if sidecar_container is not None:
@@ -940,6 +1019,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             self._schedule_expiration(sandbox_id, expires_at)
 
         effective_platform = self._resolve_platform_for_container(created_container, labels)
+        host_config = created_container.attrs.get("HostConfig", {}) or {}
+        read_only_root_filesystem = host_config.get("ReadonlyRootfs")
+        if not isinstance(read_only_root_filesystem, bool):
+            read_only_root_filesystem = False
         return CreateSandboxResponse(
             id=sandbox_id,
             status=status_info,
@@ -949,6 +1032,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             expiresAt=expires_at,
             createdAt=created_at,
             entrypoint=request.entrypoint,
+            readOnlyRootFilesystem=read_only_root_filesystem,
         )
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:

@@ -144,6 +144,11 @@ class CreateSandboxRequest:
                 accessible without the additional access token for backward
                 compatibility.
                  Default: False.
+            read_only_root_filesystem (bool | None | Unset): Request a read-only root filesystem for the sandbox main
+                container.
+                Set to true to enable it. When omitted or false, the provider and
+                template defaults are preserved. This field is not supported with
+                `extensions.poolRef`; configure the Pool template instead.
             volumes (list[Volume] | Unset): Storage mounts for the sandbox. Each volume entry specifies a named backend-
                 specific
                 storage source and common mount settings. Exactly one backend type must be specified
@@ -177,6 +182,7 @@ class CreateSandboxRequest:
     network_policy: NetworkPolicy | Unset = UNSET
     credential_proxy: CredentialProxyConfig | Unset = UNSET
     secure_access: bool | Unset = False
+    read_only_root_filesystem: bool | None | Unset = UNSET
     volumes: list[Volume] | Unset = UNSET
     extensions: CreateSandboxRequestExtensions | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -228,6 +234,12 @@ class CreateSandboxRequest:
 
         secure_access = self.secure_access
 
+        read_only_root_filesystem: bool | None | Unset
+        if isinstance(self.read_only_root_filesystem, Unset):
+            read_only_root_filesystem = UNSET
+        else:
+            read_only_root_filesystem = self.read_only_root_filesystem
+
         volumes: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.volumes, Unset):
             volumes = []
@@ -266,6 +278,8 @@ class CreateSandboxRequest:
             field_dict["credentialProxy"] = credential_proxy
         if secure_access is not UNSET:
             field_dict["secureAccess"] = secure_access
+        if read_only_root_filesystem is not UNSET:
+            field_dict["readOnlyRootFilesystem"] = read_only_root_filesystem
         if volumes is not UNSET:
             field_dict["volumes"] = volumes
         if extensions is not UNSET:
@@ -357,6 +371,15 @@ class CreateSandboxRequest:
 
         secure_access = d.pop("secureAccess", UNSET)
 
+        def _parse_read_only_root_filesystem(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        read_only_root_filesystem = _parse_read_only_root_filesystem(d.pop("readOnlyRootFilesystem", UNSET))
+
         _volumes = d.pop("volumes", UNSET)
         volumes: list[Volume] | Unset = UNSET
         if _volumes is not UNSET:
@@ -386,6 +409,7 @@ class CreateSandboxRequest:
             network_policy=network_policy,
             credential_proxy=credential_proxy,
             secure_access=secure_access,
+            read_only_root_filesystem=read_only_root_filesystem,
             volumes=volumes,
             extensions=extensions,
         )

@@ -669,6 +669,11 @@ class SandboxInfo(BaseModel):
     extensions: dict[str, str] | None = Field(
         default=None, description="Opaque extension data returned by the server"
     )
+    read_only_root_filesystem: bool | None = Field(
+        default=None,
+        alias="readOnlyRootFilesystem",
+        description="Actual read-only root filesystem state confirmed by the runtime.",
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -684,6 +689,11 @@ class SandboxCreateResponse(BaseModel):
     )
     extensions: dict[str, str] | None = Field(
         default=None, description="Opaque extension data returned by the server"
+    )
+    read_only_root_filesystem: bool | None = Field(
+        default=None,
+        alias="readOnlyRootFilesystem",
+        description="Actual read-only root filesystem state confirmed by the runtime.",
     )
 
 

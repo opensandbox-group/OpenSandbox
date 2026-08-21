@@ -22,6 +22,7 @@ Mixed into DockerSandboxService.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -75,6 +76,122 @@ logger = logging.getLogger(__name__)
 
 class DockerContainerOpsMixin:
     """Mixin providing image management, platform resolution, and container creation."""
+
+    _READ_ONLY_ROOTFS_BOOTSTRAP_TIMEOUT_SECONDS = 2.0
+
+    def _verify_read_only_rootfs_container(
+        self,
+        container,
+        sandbox_id: str,
+        *,
+        require_running: bool,
+        require_bootstrap_started: bool = False,
+    ) -> None:
+        """Verify the rootfs policy and, after injection, bootstrap takeover."""
+        deadline = time.monotonic() + (
+            self._READ_ONLY_ROOTFS_BOOTSTRAP_TIMEOUT_SECONDS
+            if require_bootstrap_started
+            else 0
+        )
+        while True:
+            try:
+                container.reload()
+            except DockerException as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+                        "message": (
+                            "Failed to inspect the read-only sandbox container: "
+                            f"{str(exc)}"
+                        ),
+                    },
+                ) from exc
+
+            host_config = container.attrs.get("HostConfig", {}) or {}
+            if host_config.get("ReadonlyRootfs") is not True:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+                        "message": (
+                            "Docker did not apply ReadonlyRootfs=true "
+                            "to the sandbox container."
+                        ),
+                    },
+                )
+
+            state = container.attrs.get("State", {}) or {}
+            if require_running and state.get("Running") is not True:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+                        "message": (
+                            "The read-only sandbox startup gate or bootstrap "
+                            f"exited before sandbox {sandbox_id} became ready."
+                        ),
+                    },
+                )
+
+            if not require_bootstrap_started:
+                return
+
+            try:
+                process_info = container.top()
+            except DockerException as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+                        "message": (
+                            "Failed to inspect the read-only sandbox bootstrap "
+                            f"process: {str(exc)}"
+                        ),
+                    },
+                ) from exc
+
+            if self._has_started_sandbox_bootstrap(process_info):
+                return
+
+            if time.monotonic() >= deadline:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+                        "message": (
+                            "The read-only sandbox startup gate did not hand off "
+                            f"to bootstrap for sandbox {sandbox_id}."
+                        ),
+                    },
+                )
+            time.sleep(0.05)
+
+    @staticmethod
+    def _has_started_sandbox_bootstrap(process_info: Any) -> bool:
+        """Return whether PID 1 has been replaced by bootstrap or execd."""
+        if not isinstance(process_info, dict):
+            return False
+        titles = process_info.get("Titles") or []
+        processes = process_info.get("Processes") or []
+        if not isinstance(titles, list) or not isinstance(processes, list):
+            return False
+        try:
+            pid_index = titles.index("PID")
+            command_index = next(
+                titles.index(column) for column in ("CMD", "COMMAND") if column in titles
+            )
+        except (ValueError, StopIteration):
+            return False
+        for process in processes:
+            if not isinstance(process, list):
+                continue
+            if len(process) <= max(pid_index, command_index):
+                continue
+            command = str(process[command_index])
+            if BOOTSTRAP_PATH in command or "/opt/opensandbox/execd" in command:
+                return True
+        return False
 
     def _normalize_platform_key(self, platform: Optional[PlatformSpec]) -> str:
         if platform is None:
@@ -393,6 +510,7 @@ class DockerContainerOpsMixin:
         host_config_kwargs: Dict[str, Any],
         exposed_ports: Optional[list[str]],
         platform: Optional[PlatformSpec],
+        read_only_root_filesystem: bool = False,
     ):
         requested_windows_platform = is_windows_platform(platform)
         bootstrap_command = normalize_bootstrap_command(
@@ -405,10 +523,25 @@ class DockerContainerOpsMixin:
         container = None
         container_id: Optional[str] = None
         try:
+            if read_only_root_filesystem:
+                gate_script = (
+                    'while [ ! -x "$0" ]; do sleep 0.1; done; '
+                    'exec "$0" "$@"'
+                )
+                container_entrypoint = ["/bin/sh", "-c"]
+                container_command = [
+                    gate_script,
+                    BOOTSTRAP_PATH,
+                    *bootstrap_command,
+                ]
+            else:
+                container_entrypoint = [BOOTSTRAP_PATH]
+                container_command = bootstrap_command
+
             with self._docker_operation("create sandbox container", sandbox_id):
                 container_kwargs = {
                     "image": image_uri,
-                    "command": bootstrap_command,
+                    "command": container_command,
                     "ports": (
                         [normalize_container_port_spec(p) for p in exposed_ports]
                         if exposed_ports
@@ -420,7 +553,7 @@ class DockerContainerOpsMixin:
                     "host_config": host_config,
                 }
                 if not requested_windows_platform:
-                    container_kwargs["entrypoint"] = [BOOTSTRAP_PATH]
+                    container_kwargs["entrypoint"] = container_entrypoint
                 if docker_platform is not None:
                     container_kwargs["platform"] = docker_platform
 
@@ -469,10 +602,33 @@ class DockerContainerOpsMixin:
                     "sandbox=%s | skip linux bootstrap/runtime injection for windows profile",
                     sandbox_id,
                 )
+                with self._docker_operation("start sandbox container", sandbox_id):
+                    container.start()
             else:
-                self._prepare_sandbox_runtime(container, sandbox_id, runtime_platform)
-            with self._docker_operation("start sandbox container", sandbox_id):
-                container.start()
+                if read_only_root_filesystem:
+                    with self._docker_operation("start sandbox gate", sandbox_id):
+                        container.start()
+                    self._verify_read_only_rootfs_container(
+                        container,
+                        sandbox_id,
+                        require_running=True,
+                    )
+                    self._prepare_sandbox_runtime(
+                        container,
+                        sandbox_id,
+                        runtime_platform,
+                        runtime_directory_exists=True,
+                    )
+                    self._verify_read_only_rootfs_container(
+                        container,
+                        sandbox_id,
+                        require_running=True,
+                        require_bootstrap_started=True,
+                    )
+                else:
+                    self._prepare_sandbox_runtime(container, sandbox_id, runtime_platform)
+                    with self._docker_operation("start sandbox container", sandbox_id):
+                        container.start()
             return container
         except Exception as exc:
             if container is not None:

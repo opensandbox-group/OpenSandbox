@@ -331,6 +331,7 @@ class Sandbox internal constructor(
          * @param networkPolicy Optional outbound network policy (egress)
          * @param credentialProxy Optional Credential Vault proxy startup settings
          * @param secureAccess Whether to enable secured access for sandbox endpoints
+         * @param readOnlyRootFilesystem Whether to request a read-only root filesystem for the main container
          * @param connectionConfig Connection configuration
          * @param healthCheck Custom health check function (optional)
          * @param healthCheckPollingInterval Polling interval for readiness/health check
@@ -352,6 +353,7 @@ class Sandbox internal constructor(
             networkPolicy: NetworkPolicy?,
             credentialProxy: CredentialProxyConfig?,
             secureAccess: Boolean,
+            readOnlyRootFilesystem: Boolean?,
             connectionConfig: ConnectionConfig,
             healthCheck: ((Sandbox) -> Boolean)? = null,
             healthCheckPollingInterval: Duration,
@@ -388,6 +390,7 @@ class Sandbox internal constructor(
                                 volumes = volumes,
                                 platform = platform,
                                 secureAccess = secureAccess,
+                                readOnlyRootFilesystem = readOnlyRootFilesystem,
                                 snapshotId = snapshotId,
                                 resourceRequests = resourceRequests,
                             )
@@ -987,6 +990,9 @@ class Sandbox internal constructor(
          */
         private var secureAccess: Boolean = false
 
+        /** Requests a read-only root filesystem for the main container. */
+        private var readOnlyRootFilesystem: Boolean? = null
+
         /**
          * Optional runtime platform constraint used for sandbox provisioning.
          */
@@ -1270,6 +1276,15 @@ class Sandbox internal constructor(
         }
 
         /**
+         * Requests a read-only root filesystem for the main container.
+         * Null preserves provider/template defaults.
+         */
+        fun readOnlyRootFilesystem(enabled: Boolean? = true): Builder {
+            this.readOnlyRootFilesystem = enabled
+            return this
+        }
+
+        /**
          * Sets an explicit runtime platform constraint.
          */
         fun platform(platform: PlatformSpec): Builder {
@@ -1480,6 +1495,7 @@ class Sandbox internal constructor(
                 networkPolicy = networkPolicy,
                 credentialProxy = credentialProxy,
                 secureAccess = secureAccess,
+                readOnlyRootFilesystem = readOnlyRootFilesystem,
                 extensions = extensions,
                 connectionConfig = connectionConfig ?: ConnectionConfig.builder().build(),
                 healthCheckPollingInterval = healthCheckPollingInterval,

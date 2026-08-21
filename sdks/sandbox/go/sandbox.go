@@ -78,6 +78,10 @@ type SandboxCreateOptions struct {
 	// "windows", "arch": "amd64"}). When nil the server applies its default.
 	Platform *PlatformSpec
 
+	// ReadOnlyRootFilesystem requests a read-only root filesystem for the main container.
+	// Nil preserves provider/template defaults; false is sent explicitly when provided.
+	ReadOnlyRootFilesystem *bool
+
 	// SkipHealthCheck skips the WaitUntilReady call after creation.
 	SkipHealthCheck bool
 
@@ -138,20 +142,21 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 	started := time.Now()
 
 	req := CreateSandboxRequest{
-		Image:            nil,
-		SnapshotID:       opts.SnapshotID,
-		Entrypoint:       entrypoint,
-		ResourceLimits:   limits,
-		ResourceRequests: opts.ResourceRequests,
-		Timeout:          timeout,
-		Env:              opts.Env,
-		SecureAccess:     opts.SecureAccess,
-		Metadata:         opts.Metadata,
-		NetworkPolicy:    opts.NetworkPolicy,
-		CredentialProxy:  opts.CredentialProxy,
-		Volumes:          opts.Volumes,
-		Extensions:       opts.Extensions,
-		Platform:         opts.Platform,
+		Image:                  nil,
+		SnapshotID:             opts.SnapshotID,
+		Entrypoint:             entrypoint,
+		ResourceLimits:         limits,
+		ResourceRequests:       opts.ResourceRequests,
+		Timeout:                timeout,
+		Env:                    opts.Env,
+		SecureAccess:           opts.SecureAccess,
+		Metadata:               opts.Metadata,
+		NetworkPolicy:          opts.NetworkPolicy,
+		CredentialProxy:        opts.CredentialProxy,
+		Volumes:                opts.Volumes,
+		Extensions:             opts.Extensions,
+		Platform:               opts.Platform,
+		ReadOnlyRootFilesystem: opts.ReadOnlyRootFilesystem,
 	}
 	if opts.Image != "" {
 		req.Image = &ImageSpec{URI: opts.Image, Auth: opts.ImageAuth}

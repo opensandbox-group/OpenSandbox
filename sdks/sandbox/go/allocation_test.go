@@ -54,6 +54,23 @@ func TestSandboxInfoAllocationAbsentIsOmitted(t *testing.T) {
 	}
 }
 
+func TestReadOnlyRootFilesystemJSONPreservesFalseAndNull(t *testing.T) {
+	falseValue := false
+	req, err := json.Marshal(CreateSandboxRequest{
+		ResourceLimits:         ResourceLimits{},
+		ReadOnlyRootFilesystem: &falseValue,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(req), `"readOnlyRootFilesystem":false`)
+
+	var info SandboxInfo
+	err = json.Unmarshal([]byte(`{"id":"sbx-1","readOnlyRootFilesystem":null}`), &info)
+	require.NoError(t, err)
+	if info.ReadOnlyRootFilesystem != nil {
+		t.Fatalf("null readOnlyRootFilesystem should unmarshal to nil, got %v", *info.ReadOnlyRootFilesystem)
+	}
+}
+
 func TestLifecycleClientAllocationInGetAndListResponses(t *testing.T) {
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

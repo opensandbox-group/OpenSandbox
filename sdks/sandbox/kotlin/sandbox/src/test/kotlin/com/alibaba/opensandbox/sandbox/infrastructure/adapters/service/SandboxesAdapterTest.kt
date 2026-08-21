@@ -84,7 +84,8 @@ class SandboxesAdapterTest {
                 "platform": { "os": "linux", "arch": "amd64" },
                 "expiresAt": "2023-01-01T11:00:00Z",
                 "createdAt": "2023-01-01T10:00:00Z",
-                "entrypoint": ["bash"]
+                "entrypoint": ["bash"],
+                "readOnlyRootFilesystem": null
             }
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
@@ -121,6 +122,7 @@ class SandboxesAdapterTest {
                 secureAccess = true,
                 snapshotId = null,
                 credentialProxy = CredentialProxyConfig.enabled(),
+                readOnlyRootFilesystem = false,
             )
 
         // Verify request
@@ -153,10 +155,12 @@ class SandboxesAdapterTest {
         assertNotNull(gotCredentialProxy, "credentialProxy should be present in createSandbox request")
         assertEquals("true", gotCredentialProxy!!["enabled"]!!.jsonPrimitive.content)
         assertEquals("true", payload["secureAccess"]!!.jsonPrimitive.content)
+        assertEquals("false", payload["readOnlyRootFilesystem"]!!.jsonPrimitive.content)
 
         // Verify response
         assertEquals("550e8400-e29b-41d4-a716-446655440000", result.id)
         assertEquals("amd64", result.platform?.arch)
+        assertEquals(null, result.readOnlyRootFilesystem)
     }
 
     @Test

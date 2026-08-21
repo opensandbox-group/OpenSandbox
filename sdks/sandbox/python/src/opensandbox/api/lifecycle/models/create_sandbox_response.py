@@ -64,6 +64,10 @@ class CreateSandboxResponse:
               request must fail explicitly.
         expires_at (datetime.datetime | Unset): Timestamp when sandbox will auto-terminate. Omitted when manual cleanup
             is enabled.
+        read_only_root_filesystem (bool | None | Unset): Actual read-only root filesystem state confirmed from the
+            runtime.
+            Null means the runtime could not confirm the policy, such as an
+            opaque pre-created Pool workload.
     """
 
     id: str
@@ -74,6 +78,7 @@ class CreateSandboxResponse:
     extensions: CreateSandboxResponseExtensions | Unset = UNSET
     platform: PlatformSpec | Unset = UNSET
     expires_at: datetime.datetime | Unset = UNSET
+    read_only_root_filesystem: bool | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,6 +106,12 @@ class CreateSandboxResponse:
         if not isinstance(self.expires_at, Unset):
             expires_at = self.expires_at.isoformat()
 
+        read_only_root_filesystem: bool | None | Unset
+        if isinstance(self.read_only_root_filesystem, Unset):
+            read_only_root_filesystem = UNSET
+        else:
+            read_only_root_filesystem = self.read_only_root_filesystem
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -119,6 +130,8 @@ class CreateSandboxResponse:
             field_dict["platform"] = platform
         if expires_at is not UNSET:
             field_dict["expiresAt"] = expires_at
+        if read_only_root_filesystem is not UNSET:
+            field_dict["readOnlyRootFilesystem"] = read_only_root_filesystem
 
         return field_dict
 
@@ -166,6 +179,15 @@ class CreateSandboxResponse:
         else:
             expires_at = isoparse(_expires_at)
 
+        def _parse_read_only_root_filesystem(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        read_only_root_filesystem = _parse_read_only_root_filesystem(d.pop("readOnlyRootFilesystem", UNSET))
+
         create_sandbox_response = cls(
             id=id,
             status=status,
@@ -175,6 +197,7 @@ class CreateSandboxResponse:
             extensions=extensions,
             platform=platform,
             expires_at=expires_at,
+            read_only_root_filesystem=read_only_root_filesystem,
         )
 
         create_sandbox_response.additional_properties = d

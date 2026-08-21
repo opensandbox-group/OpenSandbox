@@ -419,6 +419,18 @@ allocated warm pod cannot gain new volumes. See the
 [Kubernetes PVC guide](/examples/kubernetes-pvc-volume-mount#pool-mode-pre-mount-a-shared-pvc).
 :::
 
+::: tip Read-only root filesystem
+For template-mode sandboxes, set `readOnlyRootFilesystem: true` in the
+lifecycle request. The main container receives
+`securityContext.readOnlyRootFilesystem: true`; the execd init container and
+the `opensandbox-bin` runtime volume remain writable, and explicit user volume
+mounts keep their individual `readOnly` values. Pool allocations reject this
+request-level field because their Pods already exist. Set the equivalent
+security context in the Pool template when all warm Pods should use a
+read-only root filesystem. The lifecycle response returns `null` when a Pool
+workload's effective policy cannot be confirmed.
+:::
+
 #### Pooled Sandbox with Heterogeneous Tasks
 Create a batch of sandboxes with process-based heterogeneous tasks. For task execution to work properly, the task-executor must be deployed as a sidecar container in the pool template and share the process namespace with the sandbox container:
 

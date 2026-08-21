@@ -179,6 +179,11 @@ export interface SandboxCreateOptions {
    * Whether to enable secured access for sandbox endpoints.
    */
   secureAccess?: boolean;
+  /**
+   * Requests a read-only root filesystem for the sandbox main container.
+   * Omit the value to preserve provider/template defaults.
+   */
+  readOnlyRootFilesystem?: boolean;
 
   /**
    * Resource limits applied to the sandbox container.
@@ -401,6 +406,9 @@ export class Sandbox {
       resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
       resourceRequests: opts.resourceRequests,
       secureAccess: opts.secureAccess ?? false,
+      ...(opts.readOnlyRootFilesystem === undefined
+        ? {}
+        : { readOnlyRootFilesystem: opts.readOnlyRootFilesystem }),
       env: opts.env ?? {},
       metadata: opts.metadata ?? {},
       networkPolicy: opts.networkPolicy

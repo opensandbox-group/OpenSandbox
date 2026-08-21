@@ -161,4 +161,9 @@ def test_prepare_sandbox_runtime_distributes_session_gate(mock_docker):
     ) as copy_gate:
         service._prepare_sandbox_runtime(mock_container, "test-sandbox")
 
-    copy_gate.assert_called_once_with(mock_container, "test-sandbox", None)
+    copy_gate.assert_called_once_with(
+        mock_container,
+        "test-sandbox",
+        None,
+        runtime_directory_exists=False,
+    )

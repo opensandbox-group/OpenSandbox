@@ -947,6 +947,15 @@ components:
             this is copied from the creation request. For snapshot-created sandboxes,
             this is restored from the snapshot.
 
+        readOnlyRootFilesystem:
+          oneOf:
+            - type: boolean
+            - type: 'null'
+          description: |
+            Actual read-only root filesystem state confirmed from the runtime.
+            Null means the runtime could not confirm the policy, such as an
+            opaque pre-created Pool workload.
+
       required:
         - id
         - status
@@ -1095,6 +1104,15 @@ components:
             Always present in responses. For image-created sandboxes, this is copied
             from the creation request. For snapshot-created sandboxes, this is restored
             from the snapshot.
+
+        readOnlyRootFilesystem:
+          oneOf:
+            - type: boolean
+            - type: 'null'
+          description: |
+            Actual read-only root filesystem state confirmed from the runtime.
+            Null means the runtime could not confirm the policy, such as an
+            opaque pre-created Pool workload.
 
         expiresAt:
           type: string
@@ -1412,6 +1430,16 @@ components:
             calling the sandbox. When omitted or false, endpoints remain
             accessible without the additional access token for backward
             compatibility.
+
+        readOnlyRootFilesystem:
+          oneOf:
+            - type: boolean
+            - type: 'null'
+          description: |
+            Request a read-only root filesystem for the sandbox main container.
+            Set to true to enable it. When omitted or false, the provider and
+            template defaults are preserved. This field is not supported with
+            `extensions.poolRef`; configure the Pool template instead.
 
         volumes:
           type: array

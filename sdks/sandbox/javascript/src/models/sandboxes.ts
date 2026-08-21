@@ -465,6 +465,10 @@ export interface SandboxInfo extends Record<string, unknown> {
    * Sandbox expiration time (server-side TTL).
    */
   expiresAt: Date | null;
+  /**
+   * Actual read-only root filesystem state confirmed by the runtime.
+   */
+  readOnlyRootFilesystem?: boolean | null;
 }
 
 export interface CreateSandboxRequest extends Record<string, unknown> {
@@ -476,6 +480,10 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    * Whether to require secure access headers for sandbox endpoint access.
    */
   secureAccess?: boolean;
+  /**
+   * Requests a read-only root filesystem for the sandbox main container.
+   */
+  readOnlyRootFilesystem?: boolean | null;
   /**
    * Timeout in seconds (server semantics).
    */
@@ -514,6 +522,10 @@ export interface CreateSandboxResponse extends Record<string, unknown> {
    */
   createdAt: Date;
   entrypoint: string[];
+  /**
+   * Actual read-only root filesystem state confirmed by the runtime.
+   */
+  readOnlyRootFilesystem?: boolean | null;
 }
 
 export type SnapshotState = "Creating" | "Deleting" | "Ready" | "Failed" | string;

@@ -182,6 +182,7 @@ class SandboxModelConverter:
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        read_only_root_filesystem: bool | None = None,
     ) -> CreateSandboxRequest:
         """Convert domain parameters to API CreateSandboxRequest."""
         from opensandbox.api.lifecycle.models.create_sandbox_request import (
@@ -314,6 +315,11 @@ class SandboxModelConverter:
             extensions=api_extensions,
             volumes=api_volumes,
             secure_access=secure_access,
+            read_only_root_filesystem=(
+                read_only_root_filesystem
+                if read_only_root_filesystem is not None
+                else UNSET
+            ),
         )
         if timeout is None:
             # Preserve an explicit manual-cleanup request as JSON null.
@@ -449,6 +455,13 @@ class SandboxModelConverter:
             extensions=SandboxModelConverter._additional_properties_to_dict(
                 getattr(api_response, "extensions", None)
             ),
+            readOnlyRootFilesystem=(
+                None
+                if isinstance(
+                    getattr(api_response, "read_only_root_filesystem", None), Unset
+                )
+                else getattr(api_response, "read_only_root_filesystem", None)
+            ),
         )
 
     @staticmethod
@@ -532,6 +545,13 @@ class SandboxModelConverter:
             entrypoint=api_sandbox.entrypoint,
             metadata=metadata,
             extensions=extensions,
+            readOnlyRootFilesystem=(
+                None
+                if isinstance(
+                    getattr(api_sandbox, "read_only_root_filesystem", None), Unset
+                )
+                else getattr(api_sandbox, "read_only_root_filesystem", None)
+            ),
         )
 
     @staticmethod

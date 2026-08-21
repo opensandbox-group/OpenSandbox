@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from datetime import datetime, timezone
+
 import pytest
 from pydantic import ValidationError
 
 from opensandbox_server.api.schema import (
     CreateSandboxRequest,
+    CreateSandboxResponse,
     CreateSnapshotRequest,
     CredentialProxyConfig,
     Host,
@@ -31,8 +34,54 @@ from opensandbox_server.api.schema import (
     Snapshot,
     SnapshotFilter,
     SnapshotStatus,
+    Sandbox,
     Volume,
 )
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+def test_create_sandbox_request_preserves_read_only_root_filesystem_tristate(value):
+    request = CreateSandboxRequest.model_validate(
+        {
+            "image": {"uri": "python:3.11"},
+            "resourceLimits": {},
+            "entrypoint": ["/bin/sh"],
+            "readOnlyRootFilesystem": value,
+        }
+    )
+
+    assert request.read_only_root_filesystem is value
+    assert request.model_dump(by_alias=True, exclude_unset=True)[
+        "readOnlyRootFilesystem"
+    ] is value
+
+
+def test_create_sandbox_request_omits_unset_read_only_root_filesystem():
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        entrypoint=["/bin/sh"],
+    )
+
+    assert "readOnlyRootFilesystem" not in request.model_dump(
+        by_alias=True, exclude_unset=True
+    )
+
+
+def test_sandbox_responses_accept_explicit_null_read_only_root_filesystem():
+    common = {
+        "id": "sandbox-1",
+        "status": {"state": "Running"},
+        "createdAt": datetime.now(timezone.utc),
+        "entrypoint": ["/bin/sh"],
+        "readOnlyRootFilesystem": None,
+    }
+
+    create_response = CreateSandboxResponse.model_validate(common)
+    sandbox = Sandbox.model_validate(common)
+
+    assert create_response.read_only_root_filesystem is None
+    assert sandbox.read_only_root_filesystem is None
 
 
 

@@ -141,6 +141,7 @@ class SandboxesAdapter(Sandboxes):
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        read_only_root_filesystem: bool | None = None,
     ) -> SandboxCreateResponse:
         """Create a new sandbox instance with the specified configuration."""
         logger.info(
@@ -165,6 +166,7 @@ class SandboxesAdapter(Sandboxes):
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
+                read_only_root_filesystem=read_only_root_filesystem,
             )
 
             client = await self._get_client()

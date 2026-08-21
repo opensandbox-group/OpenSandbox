@@ -41,13 +41,19 @@ def build_security_context_from_dict(
         )
 
     privileged = security_context_dict.get("privileged")
+    read_only_root_filesystem = security_context_dict.get("readOnlyRootFilesystem")
 
-    if capabilities is None and privileged is None:
+    if (
+        capabilities is None
+        and privileged is None
+        and read_only_root_filesystem is None
+    ):
         return None
 
     return V1SecurityContext(
         capabilities=capabilities,
         privileged=privileged,
+        read_only_root_filesystem=read_only_root_filesystem,
     )
 
 
@@ -71,6 +77,9 @@ def serialize_security_context_to_dict(
 
     if security_context.privileged is not None:
         result["privileged"] = security_context.privileged
+
+    if security_context.read_only_root_filesystem is not None:
+        result["readOnlyRootFilesystem"] = security_context.read_only_root_filesystem
 
     if getattr(security_context, "seccomp_profile", None) is not None:
         sp = security_context.seccomp_profile
