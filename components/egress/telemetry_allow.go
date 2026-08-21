@@ -23,15 +23,12 @@ import (
 // telemetryAllowRules returns an always-allow egress rule for the OTLP
 // destination the exporter will dial, so metric export works under the default
 // deny-all policy without operator-provided allowlist rules. The destination
-// is the endpoint env var
-// (OTEL_EXPORTER_OTLP_METRICS_ENDPOINT / OTEL_EXPORTER_OTLP_ENDPOINT, URL form
-// as required by otlpmetrichttp) or, only when neither is set, the exporter
-// fallback node IP (HOST_IP / /etc/hostinfo). A set-but-unparseable endpoint
-// is not treated as unset: the exporter never falls back to the node IP in
-// that case, so no rule is injected. The rule targets the host (any port),
-// matching the egress rule model. Operators can still block the target via
-// deny.always, which takes precedence. Returns nil when no OTLP destination
-// is configured.
+// is the endpoint env URL (OTEL_EXPORTER_OTLP_METRICS_ENDPOINT /
+// OTEL_EXPORTER_OTLP_ENDPOINT, as required by otlpmetrichttp) or, only when
+// neither is set, the exporter fallback node IP (HOST_IP / /etc/hostinfo). A
+// set-but-unparseable endpoint never falls back to the node IP, so no rule is
+// injected. Operators can still block the target via deny.always, which takes
+// precedence. Returns nil when no OTLP destination is configured.
 func telemetryAllowRules() []policy.EgressRule {
 	host, port, ok := inttelemetry.OTLPEndpointHostPort()
 	if !ok {

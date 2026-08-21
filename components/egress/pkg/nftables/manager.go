@@ -61,10 +61,6 @@ type Manager struct {
 	tracker *connectionTracker
 }
 
-func NewManager() *Manager {
-	return newManager(defaultRunner, Options{BlockDoT: true})
-}
-
 func NewManagerWithRunner(r runner) *Manager {
 	return newManager(r, Options{BlockDoT: true})
 }
@@ -149,20 +145,15 @@ func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 }
 
 // StartConnectionRefresh keeps DNS-learned IPs authorized while a TCP
-// connection to them is active. The normal set timeout remains as the grace
-// period after the connection closes.
+// connection to them is active; the set timeout remains as the grace period
+// after the connection closes.
 //
-// Renewal is intentionally best-effort:
-//   - an active connection first observed after its entry expires is restored
-//     on the next poll, so reconnects may fail for up to one refresh interval;
-//   - a connection that starts and closes entirely between polls cannot be
-//     observed and requires a later DNS lookup to restore its expired entry;
-//   - delayed polls or nft failures can extend the temporary reconnect gap;
-//   - only TCP is tracked here; UDP and QUIC rely on DNS-driven entry refresh.
-//
-// Existing connections survive these gaps through conntrack. A successful
-// observation renews the entry for the full timeout, and the final observation
-// after close provides the same bounded grace period for reconnects.
+// Renewal is best-effort: a connection that starts and closes between polls
+// is never observed (needs a later DNS lookup), an entry expired before its
+// first observation is restored on the next poll, and nft failures extend the
+// gap. Only TCP is tracked; UDP and QUIC rely on DNS-driven refresh. Existing
+// connections survive these gaps through conntrack, and the final observation
+// after close provides the bounded reconnect grace period.
 func (m *Manager) StartConnectionRefresh(ctx context.Context) {
 	m.tracker.start(ctx, m.opts.ConnectionRefreshInterval, m)
 }

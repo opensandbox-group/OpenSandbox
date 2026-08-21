@@ -37,12 +37,16 @@ func (c *captureSubscriber) HandleBlocked(_ context.Context, ev BlockedEvent) {
 
 type blockingSubscriber struct {
 	block chan struct{}
+	recv  chan BlockedEvent
 }
 
 func (b *blockingSubscriber) HandleBlocked(_ context.Context, ev BlockedEvent) {
 	// Block until the channel is closed to simulate a slow consumer and trigger backpressure.
 	<-b.block
-	_ = ev
+	select {
+	case b.recv <- ev:
+	default:
+	}
 }
 
 func TestBroadcasterFanout(t *testing.T) {
@@ -80,21 +84,33 @@ func TestBroadcasterDropsWhenSubscriberBackedUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Small queue; blocking subscriber will hold the first event.
+	// Small queue; blocking subscriber holds the first event it handles.
 	b := NewBroadcaster(ctx, BroadcasterConfig{QueueSize: 1})
 	block := make(chan struct{})
-	sub := &blockingSubscriber{block: block}
+	sub := &blockingSubscriber{block: block, recv: make(chan BlockedEvent, 8)}
 	b.AddSubscriber(sub)
 
 	ev1 := BlockedEvent{Hostname: "first.example", Timestamp: time.Now()}
 	ev2 := BlockedEvent{Hostname: "second.example", Timestamp: time.Now()}
 
 	b.Publish(ev1)
-	// This publish should drop because subscriber is blocked and queue size is 1.
+	// This publish should drop because the subscriber is busy and the queue is full.
 	b.Publish(ev2)
 
-	// Allow subscriber to drain and exit.
+	// Allow subscriber to drain whatever was queued.
 	close(block)
+
+	select {
+	case got := <-sub.recv:
+		require.Equal(t, ev1.Hostname, got.Hostname, "first event must be delivered")
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "subscriber did not receive the first event")
+	}
+	select {
+	case dropped := <-sub.recv:
+		require.FailNow(t, "second event should have been dropped, got %s", dropped.Hostname)
+	case <-time.After(200 * time.Millisecond):
+	}
 
 	b.Close()
 }

@@ -295,18 +295,6 @@ func (p *Proxy) shouldFailoverAfterResponse(resp *dns.Msg) (tryNext bool, reason
 	}
 }
 
-func (p *Proxy) UpstreamHost() string {
-	list := p.forwardUpstreams()
-	if len(list) == 0 {
-		return ""
-	}
-	host, _, err := net.SplitHostPort(list[0])
-	if err != nil {
-		return ""
-	}
-	return host
-}
-
 // UpdatePolicy replaces the user policy from POST/GET /policy (not the always file overlay). Nil → default deny-all.
 func (p *Proxy) UpdatePolicy(newPolicy *policy.NetworkPolicy) {
 	p.policyMu.Lock()

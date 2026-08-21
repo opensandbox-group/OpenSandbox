@@ -124,10 +124,10 @@ RUN chown mitmproxy:mitmproxy /var/lib/mitmproxy/.mitmproxy/config.yaml \
 COPY --from=builder /out/egress /opt/opensandbox-egress/egress
 COPY --from=builder /out/opensandbox-supervisor /opt/opensandbox-egress/supervisor
 # Pre-start hook: reap any mitmdump left over from a previous crashed
-# egress so the new launch can bind the transparent-MITM listen port.
-# Intentionally does NOT touch iptables/nft rules — the sidecar shares
-# a network namespace with the workload, so leaving rules in place keeps
-# egress filtering active across the supervisor's backoff window.
+# egress, and remove stale DNS-redirect iptables rules + opensandbox_dns_redirect
+# nft tables left pointing at a dead proxy. The `inet opensandbox` policy table
+# is intentionally NOT touched — the nftables manager prepends its own delete
+# and recreates the table on every ApplyStatic, so it is idempotent.
 COPY components/egress/scripts/cleanup.sh /opt/opensandbox-egress/cleanup.sh
 RUN chmod 0755 /opt/opensandbox-egress/cleanup.sh \
             /opt/opensandbox-egress/egress \
@@ -137,9 +137,9 @@ RUN chmod 0755 /opt/opensandbox-egress/cleanup.sh \
 COPY components/egress/mitmscripts /var/egress/mitmscripts
 
 # Supervisor wraps the egress binary: restarts on crash with backoff and
-# forwards SIGTERM gracefully. The cleanup hook runs only as pre-start;
-# running it on post-exit would tear down enforcement during the backoff
-# window and leave the workload unprotected.
+# forwards SIGTERM gracefully. The cleanup hook runs only as pre-start; the
+# next egress process re-installs all redirect rules itself after startup,
+# so there is nothing to run on post-exit.
 # Expects OPENSANDBOX_NETWORK_POLICY env at runtime.
 ENTRYPOINT ["/opt/opensandbox-egress/supervisor", \
             "--pre-start=/opt/opensandbox-egress/cleanup.sh", \

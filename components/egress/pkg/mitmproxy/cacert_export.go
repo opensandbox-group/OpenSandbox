@@ -63,13 +63,10 @@ func waitMitmCACertPath(confDirEnv, home string) (string, error) {
 }
 
 // PurgeStaleExportedCA removes any mitmproxy-ca-cert.pem left on the shared
-// volume by a previous generation of this egress container. mitmproxy's CA
-// lives in the egress container's ephemeral confdir, so an egress container
-// restart rotates the CA while the previous public cert is still on the
-// (pod-scoped) shared volume; without this purge, an agent container starting
-// alongside us would pass its bootstrap readiness check on the stale file
-// and install a CA that no longer matches what mitmproxy will sign with.
-// See upstream issue #1370. Must be called as early as possible in main().
+// volume by a previous egress generation: a restart rotates the CA in the
+// ephemeral confdir, and the stale cert would let an agent pass its bootstrap
+// readiness check and install a CA mitmproxy no longer signs with (issue #1370).
+// Must be called as early as possible in main().
 func PurgeStaleExportedCA() {
 	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		return
