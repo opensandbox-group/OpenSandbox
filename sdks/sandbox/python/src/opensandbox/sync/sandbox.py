@@ -493,6 +493,7 @@ class SandboxSync:
         credential_proxy: CredentialProxyConfig | None = None,
         extensions: dict[str, str] | None = None,
         secure_access: bool = False,
+        read_only_root_filesystem: bool | None = None,
         entrypoint: list[str] | None = None,
         volumes: list[Volume] | None = None,
         connection_config: ConnectionConfigSync | None = None,
@@ -515,6 +516,7 @@ class SandboxSync:
             extensions: Opaque extension parameters passed through to the server as-is.
                 Prefer namespaced keys (e.g. ``storage.id``).
             secure_access: Whether to enable secured access for sandbox endpoints.
+            read_only_root_filesystem: Request a read-only root filesystem for the main container.
             entrypoint: Command to run as entrypoint
             volumes: Optional list of volumes to mount in the sandbox.
             connection_config: Connection configuration
@@ -559,22 +561,25 @@ class SandboxSync:
 
         try:
             sandbox_service = factory.create_sandbox_service()
-            response = sandbox_service.create_sandbox(
-                spec=image,
-                entrypoint=entrypoint,
-                env=env,
-                metadata=metadata,
-                timeout=timeout,
-                resource=resource,
-                network_policy=network_policy,
-                credential_proxy=credential_proxy,
-                extensions=extensions,
-                volumes=volumes,
-                platform=platform,
-                secure_access=secure_access,
-                snapshot_id=snapshot_id,
-                resource_requests=resource_requests,
-            )
+            create_kwargs: dict[str, Any] = {
+                "spec": image,
+                "entrypoint": entrypoint,
+                "env": env,
+                "metadata": metadata,
+                "timeout": timeout,
+                "resource": resource,
+                "network_policy": network_policy,
+                "credential_proxy": credential_proxy,
+                "extensions": extensions,
+                "volumes": volumes,
+                "platform": platform,
+                "secure_access": secure_access,
+                "snapshot_id": snapshot_id,
+                "resource_requests": resource_requests,
+            }
+            if read_only_root_filesystem is not None:
+                create_kwargs["read_only_root_filesystem"] = read_only_root_filesystem
+            response = sandbox_service.create_sandbox(**create_kwargs)
             sandbox_id = response.id
             execd_endpoint = sandbox_service.get_sandbox_endpoint(
                 response.id, DEFAULT_EXECD_PORT, config.use_server_proxy

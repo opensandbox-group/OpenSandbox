@@ -177,6 +177,30 @@ public class SandboxesAdapterTests
     }
 
     [Fact]
+    public async Task CreateSandboxAsync_ShouldParseNullReadOnlyRootFilesystem()
+    {
+        const string payload = """
+        {
+          "id": "sbx-2",
+          "status": { "state": "Pending" },
+          "createdAt": "2026-03-14T12:00:00Z",
+          "entrypoint": ["python"],
+          "readOnlyRootFilesystem": null
+        }
+        """;
+        var adapter = CreateAdapterWithJsonResponse(payload);
+
+        CreateSandboxResponse response = await adapter.CreateSandboxAsync(new CreateSandboxRequest
+        {
+            Image = new ImageSpec { Uri = "python:3.11" },
+            ResourceLimits = new Dictionary<string, string>(),
+            Entrypoint = new List<string> { "python" }
+        });
+
+        response.ReadOnlyRootFilesystem.Should().BeNull();
+    }
+
+    [Fact]
     public async Task CreateSandboxAsync_ShouldSerializeSecureAccess()
     {
         var handler = new CaptureCreateRequestHandler();

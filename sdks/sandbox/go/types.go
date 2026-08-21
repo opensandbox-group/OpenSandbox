@@ -149,20 +149,21 @@ type CredentialProxyConfig struct {
 
 // CreateSandboxRequest is the request body for creating a new sandbox.
 type CreateSandboxRequest struct {
-	Image            *ImageSpec             `json:"image,omitempty"`
-	SnapshotID       string                 `json:"snapshotId,omitempty"`
-	Timeout          *int                   `json:"timeout,omitempty"`
-	ResourceLimits   ResourceLimits         `json:"resourceLimits"`
-	ResourceRequests ResourceLimits         `json:"resourceRequests,omitempty"`
-	Env              map[string]string      `json:"env,omitempty"`
-	SecureAccess     bool                   `json:"secureAccess,omitempty"`
-	Metadata         map[string]string      `json:"metadata,omitempty"`
-	Entrypoint       []string               `json:"entrypoint,omitempty"`
-	NetworkPolicy    *NetworkPolicy         `json:"networkPolicy,omitempty"`
-	CredentialProxy  *CredentialProxyConfig `json:"credentialProxy,omitempty"`
-	Volumes          []Volume               `json:"volumes,omitempty"`
-	Extensions       map[string]string      `json:"extensions,omitempty"`
-	Platform         *PlatformSpec          `json:"platform,omitempty"`
+	Image                  *ImageSpec             `json:"image,omitempty"`
+	SnapshotID             string                 `json:"snapshotId,omitempty"`
+	Timeout                *int                   `json:"timeout,omitempty"`
+	ResourceLimits         ResourceLimits         `json:"resourceLimits"`
+	ResourceRequests       ResourceLimits         `json:"resourceRequests,omitempty"`
+	Env                    map[string]string      `json:"env,omitempty"`
+	SecureAccess           bool                   `json:"secureAccess,omitempty"`
+	Metadata               map[string]string      `json:"metadata,omitempty"`
+	Entrypoint             []string               `json:"entrypoint,omitempty"`
+	NetworkPolicy          *NetworkPolicy         `json:"networkPolicy,omitempty"`
+	CredentialProxy        *CredentialProxyConfig `json:"credentialProxy,omitempty"`
+	Volumes                []Volume               `json:"volumes,omitempty"`
+	Extensions             map[string]string      `json:"extensions,omitempty"`
+	Platform               *PlatformSpec          `json:"platform,omitempty"`
+	ReadOnlyRootFilesystem *bool                  `json:"readOnlyRootFilesystem,omitempty"`
 }
 
 // AllocationMode identifies how the runtime allocated a sandbox.
@@ -193,17 +194,18 @@ type AllocationSummary struct {
 // SandboxInfo represents a runtime execution environment provisioned from a
 // container image, as returned by the lifecycle API.
 type SandboxInfo struct {
-	ID         string             `json:"id"`
-	Image      *ImageSpec         `json:"image,omitempty"`
-	SnapshotID string             `json:"snapshotId,omitempty"`
-	Status     SandboxStatus      `json:"status"`
-	Metadata   map[string]string  `json:"metadata,omitempty"`
-	Extensions map[string]string  `json:"extensions,omitempty"`
-	Entrypoint []string           `json:"entrypoint"`
-	ExpiresAt  *time.Time         `json:"expiresAt,omitempty"`
-	CreatedAt  time.Time          `json:"createdAt"`
-	Platform   *PlatformSpec      `json:"platform,omitempty"`
-	Allocation *AllocationSummary `json:"allocation,omitempty"`
+	ID                     string             `json:"id"`
+	Image                  *ImageSpec         `json:"image,omitempty"`
+	SnapshotID             string             `json:"snapshotId,omitempty"`
+	Status                 SandboxStatus      `json:"status"`
+	Metadata               map[string]string  `json:"metadata,omitempty"`
+	Extensions             map[string]string  `json:"extensions,omitempty"`
+	Entrypoint             []string           `json:"entrypoint"`
+	ExpiresAt              *time.Time         `json:"expiresAt,omitempty"`
+	CreatedAt              time.Time          `json:"createdAt"`
+	Platform               *PlatformSpec      `json:"platform,omitempty"`
+	Allocation             *AllocationSummary `json:"allocation,omitempty"`
+	ReadOnlyRootFilesystem *bool              `json:"readOnlyRootFilesystem,omitempty"`
 }
 
 type SnapshotState string

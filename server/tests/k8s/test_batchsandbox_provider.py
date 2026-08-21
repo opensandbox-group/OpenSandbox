@@ -538,6 +538,33 @@ spec:
         # Verify EXECD is automatically injected
         assert env_dict["EXECD"] == "/opt/opensandbox/execd"
 
+    def test_create_workload_preserves_tmpdir_without_read_only_rootfs(
+        self, mock_k8s_client
+    ):
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={"TMPDIR": "/user/tmp"},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        env_dict = {
+            item["name"]: item["value"]
+            for item in body["spec"]["template"]["spec"]["containers"][0]["env"]
+        }
+        assert env_dict["TMPDIR"] == "/user/tmp"
+
     def test_create_workload_merges_template_volumes_and_mounts(self, mock_k8s_client, tmp_path):
         template_file = tmp_path / "template.yaml"
         template_file.write_text(
@@ -690,6 +717,106 @@ spec:
             "runAsNonRoot": True,
             "seccompProfile": {"type": "Unconfined"},
         }
+
+    def test_create_workload_read_only_rootfs_keeps_init_writable(self, mock_k8s_client):
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="execd:latest",
+            read_only_root_filesystem=True,
+        )
+
+        pod_spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"][
+            "spec"
+        ]["template"]["spec"]
+        assert pod_spec["containers"][0]["securityContext"][
+            "readOnlyRootFilesystem"
+        ] is True
+        assert {env["name"]: env["value"] for env in pod_spec["containers"][0]["env"]}[
+            "TMPDIR"
+        ] == "/opt/opensandbox"
+        assert "securityContext" not in pod_spec["initContainers"][0]
+        assert pod_spec["volumes"] == [
+            {
+                "name": "opensandbox-bin",
+                "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"},
+            }
+        ]
+
+    def test_create_workload_read_only_rootfs_replaces_null_template_security_context(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          securityContext: null
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="execd:latest",
+            read_only_root_filesystem=True,
+        )
+
+        container = mock_k8s_client.create_custom_object.call_args.kwargs["body"][
+            "spec"
+        ]["template"]["spec"]["containers"][0]
+        assert container["securityContext"]["readOnlyRootFilesystem"] is True
+        assert {env["name"]: env["value"] for env in container["env"]}["TMPDIR"] == (
+            "/opt/opensandbox"
+        )
+
+    def test_create_workload_poolref_rejects_explicit_read_only_rootfs(
+        self, mock_k8s_client
+    ):
+        provider = BatchSandboxProvider(mock_k8s_client)
+
+        with pytest.raises(ValueError, match="readOnlyRootFilesystem"):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=None,
+                execd_image="execd:latest",
+                extensions={"poolRef": "my-pool"},
+                read_only_root_filesystem=False,
+            )
+
+        mock_k8s_client.create_custom_object.assert_not_called()
 
     def test_create_workload_merges_template_security_context_with_runtime_network_policy(
         self, mock_k8s_client, tmp_path

@@ -796,6 +796,12 @@ public class SandboxInfo
     public AllocationSummary? Allocation { get; set; }
 
     /// <summary>
+    /// Gets or sets the actual read-only root filesystem state confirmed by the runtime.
+    /// </summary>
+    [JsonPropertyName("readOnlyRootFilesystem")]
+    public bool? ReadOnlyRootFilesystem { get; set; }
+
+    /// <summary>
     /// Gets or sets the sandbox creation time.
     /// </summary>
     [JsonPropertyName("createdAt")]
@@ -875,6 +881,13 @@ public class CreateSandboxRequest
     /// </summary>
     [JsonPropertyName("secureAccess")]
     public bool? SecureAccess { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether to request a read-only root filesystem for the main container.
+    /// </summary>
+    [JsonPropertyName("readOnlyRootFilesystem")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ReadOnlyRootFilesystem { get; set; }
 
     /// <summary>
     /// Gets or sets the custom metadata tags.
@@ -965,6 +978,12 @@ public class CreateSandboxResponse
     /// </summary>
     [JsonPropertyName("entrypoint")]
     public required IReadOnlyList<string> Entrypoint { get; set; }
+
+    /// <summary>
+    /// Gets or sets the actual read-only root filesystem state confirmed by the runtime.
+    /// </summary>
+    [JsonPropertyName("readOnlyRootFilesystem")]
+    public bool? ReadOnlyRootFilesystem { get; set; }
 }
 
 /// <summary>

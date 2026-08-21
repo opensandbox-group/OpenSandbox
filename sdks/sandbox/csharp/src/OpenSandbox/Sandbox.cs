@@ -204,6 +204,7 @@ public sealed class Sandbox : IAsyncDisposable
             ResourceRequests = options.ResourceRequests,
             Env = options.Env,
             SecureAccess = options.SecureAccess,
+            ReadOnlyRootFilesystem = options.ReadOnlyRootFilesystem,
             Metadata = options.Metadata,
             Platform = options.Platform,
             NetworkPolicy = options.NetworkPolicy != null

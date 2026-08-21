@@ -143,6 +143,7 @@ class BatchSandboxProvider(WorkloadProvider):
         credential_proxy_enabled: bool = False,
         resource_requests: Optional[Dict[str, str]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
+        read_only_root_filesystem: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Create a BatchSandbox in template mode or pool mode."""
         extensions = extensions or {}
@@ -171,6 +172,11 @@ class BatchSandboxProvider(WorkloadProvider):
                 raise ValueError(
                     "Pool mode does not support credentialProxy.enabled. "
                     "Disable credential proxy or use template mode."
+                )
+            if read_only_root_filesystem is not None:
+                raise ValueError(
+                    "readOnlyRootFilesystem cannot be used with poolRef; "
+                    "configure the Pool template instead."
                 )
             return self._create_workload_from_pool(
                 batchsandbox_name=sandbox_id,
@@ -215,15 +221,14 @@ class BatchSandboxProvider(WorkloadProvider):
             isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
             image_pull_policy=self.image_pull_policy,
             resource_requests=resource_requests or None,
+            read_only_root_filesystem=read_only_root_filesystem,
         )
         
         containers = [_container_to_dict(main_container)]
-        pod_volumes = [
-            {
-                "name": "opensandbox-bin",
-                "emptyDir": {}
-            }
-        ]
+        runtime_volume: Dict[str, Any] = {"name": "opensandbox-bin", "emptyDir": {}}
+        if read_only_root_filesystem is True:
+            runtime_volume["emptyDir"] = {"medium": "Memory", "sizeLimit": "64Mi"}
+        pod_volumes = [runtime_volume]
         if (extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
             pod_volumes.append({
                 "name": "isolation-upper",
@@ -313,6 +318,18 @@ class BatchSandboxProvider(WorkloadProvider):
             batchsandbox, extra_volumes, extra_mounts, extra_security_context
         )
         merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
+        if read_only_root_filesystem is True:
+            merged_containers = merged_pod_spec.get("containers") or []
+            if not merged_containers or not isinstance(merged_containers[0], dict):
+                raise ValueError(
+                    "Kubernetes template does not contain a main container for "
+                    "readOnlyRootFilesystem."
+                )
+            merged_security_context = merged_containers[0].get("securityContext")
+            if not isinstance(merged_security_context, dict):
+                merged_security_context = {}
+                merged_containers[0]["securityContext"] = merged_security_context
+            merged_security_context["readOnlyRootFilesystem"] = True
         ensure_egress_runtime_compatible(
             network_policy,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),

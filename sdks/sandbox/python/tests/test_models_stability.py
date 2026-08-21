@@ -21,10 +21,14 @@ from typing import cast
 import pytest
 
 from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+from opensandbox.api.lifecycle.models.create_sandbox_request import (
+    CreateSandboxRequest as ApiCreateSandboxRequest,
+)
 from opensandbox.api.lifecycle.models.create_sandbox_response import (
     CreateSandboxResponse as ApiCreateSandboxResponse,
 )
 from opensandbox.api.lifecycle.models.image_spec import ImageSpec as ApiImageSpec
+from opensandbox.api.lifecycle.models.resource_limits import ResourceLimits
 from opensandbox.api.lifecycle.models.sandbox import Sandbox as ApiSandbox
 from opensandbox.api.lifecycle.types import UNSET
 from opensandbox.models import CredentialSubstitution
@@ -93,6 +97,28 @@ def test_api_create_sandbox_response_tolerates_omitted_optional_fields() -> None
     assert response.metadata is UNSET
     assert response.expires_at is UNSET
     assert response.status.last_transition_at is UNSET
+
+
+def test_api_read_only_root_filesystem_preserves_omitted_false_and_null() -> None:
+    omitted = ApiCreateSandboxRequest(resource_limits=ResourceLimits())
+    explicit_false = ApiCreateSandboxRequest(
+        resource_limits=ResourceLimits(),
+        read_only_root_filesystem=False,
+    )
+
+    assert "readOnlyRootFilesystem" not in omitted.to_dict()
+    assert explicit_false.to_dict()["readOnlyRootFilesystem"] is False
+
+    response = ApiCreateSandboxResponse.from_dict(
+        {
+            "id": "sandbox-1",
+            "status": {"state": "Running"},
+            "createdAt": "2025-01-01T00:00:00Z",
+            "entrypoint": ["/bin/sh"],
+            "readOnlyRootFilesystem": None,
+        }
+    )
+    assert response.read_only_root_filesystem is None
 
 
 def test_api_sandbox_tolerates_omitted_optional_fields() -> None:

@@ -716,6 +716,7 @@ class Volume private constructor(
  * @property metadata Custom metadata attached to the sandbox
  * @property extensions Opaque extension data returned by the server
  * @property allocation Current runtime-confirmed pool allocation, when available
+ * @property readOnlyRootFilesystem Actual read-only root filesystem state confirmed by the runtime
  */
 class SandboxInfo(
     val id: String,
@@ -729,6 +730,7 @@ class SandboxInfo(
     val metadata: Map<String, String>? = null,
     val extensions: Map<String, String>? = null,
     val allocation: SandboxAllocation? = null,
+    val readOnlyRootFilesystem: Boolean? = null,
 ) {
     constructor(
         id: String,
@@ -753,6 +755,7 @@ class SandboxInfo(
         metadata = metadata,
         extensions = extensions,
         allocation = null,
+        readOnlyRootFilesystem = null,
     )
 }
 
@@ -790,11 +793,13 @@ class SandboxStatus(
  * @property id Unique identifier of the newly created sandbox
  * @property platform Effective platform used for sandbox provisioning
  * @property extensions Opaque extension data returned by the server
+ * @property readOnlyRootFilesystem Actual read-only root filesystem state confirmed by the runtime
  */
 class SandboxCreateResponse(
     val id: String,
     val platform: PlatformSpec? = null,
     val extensions: Map<String, String>? = null,
+    val readOnlyRootFilesystem: Boolean? = null,
 )
 
 /**

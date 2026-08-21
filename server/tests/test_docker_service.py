@@ -45,6 +45,7 @@ from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_ID_LABEL,
+    SANDBOX_ENTRYPOINT_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_OSSFS_MOUNTS_LABEL,
@@ -191,6 +192,104 @@ async def test_create_sandbox_applies_security_defaults(mock_docker):
     assert "no-new-privileges:true" in host_config.get("security_opt", [])
     assert host_config.get("cap_drop") == service.app_config.docker.drop_capabilities
     assert host_config.get("pids_limit") == service.app_config.docker.pids_limit
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_read_only_sandbox_uses_runtime_tmpfs_and_gate_order(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.create_host_config.return_value = {"ReadonlyRootfs": True}
+    mock_client.api.create_container.return_value = {"Id": "cid"}
+    container = MagicMock()
+    container.attrs = {
+        "HostConfig": {"ReadonlyRootfs": True},
+        "State": {"Running": True},
+        "Config": {"Labels": {}},
+    }
+    container.image.attrs = {"Os": "linux", "Architecture": "amd64"}
+    events = []
+    container.start.side_effect = lambda: events.append("start")
+    container.reload.side_effect = lambda: events.append("reload")
+    container.top.return_value = {
+        "Titles": ["PID", "CMD"],
+        "Processes": [["1", "/bin/sh /opt/opensandbox/bootstrap.sh python app.py"]],
+    }
+    mock_client.containers.get.return_value = container
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        metadata={},
+        entrypoint=["python", "app.py"],
+        readOnlyRootFilesystem=True,
+    )
+
+    def prepare(*_args, **_kwargs):
+        events.append("prepare")
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime", side_effect=prepare),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 40001),
+                "8080": ("0.0.0.0", 40002),
+            },
+        ),
+    ):
+        response = await service.create_sandbox(request)
+
+    host_config_kwargs = mock_client.api.create_host_config.call_args.kwargs
+    assert host_config_kwargs["read_only"] is True
+    assert host_config_kwargs["tmpfs"] == {
+        OPENSANDBOX_RUNTIME_MOUNT_PATH: "size=64m,exec"
+    }
+    container_kwargs = mock_client.api.create_container.call_args.kwargs
+    assert container_kwargs["entrypoint"] == ["/bin/sh", "-c"]
+    assert container_kwargs["command"][1] == OPENSANDBOX_RUNTIME_MOUNT_PATH + "/bootstrap.sh"
+    assert f"TMPDIR={OPENSANDBOX_RUNTIME_MOUNT_PATH}" in container_kwargs["environment"]
+    assert events == ["start", "reload", "prepare", "reload"]
+    assert response.read_only_root_filesystem is True
+    assert SANDBOX_ENTRYPOINT_LABEL in container_kwargs["labels"]
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_read_only_sandbox_inspect_mismatch_cleans_up(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.create_host_config.return_value = {"ReadonlyRootfs": False}
+    mock_client.api.create_container.return_value = {"Id": "cid"}
+    container = MagicMock()
+    container.attrs = {
+        "HostConfig": {"ReadonlyRootfs": False},
+        "State": {"Running": True},
+        "Config": {"Labels": {}},
+    }
+    container.image.attrs = {"Os": "linux", "Architecture": "amd64"}
+    mock_client.containers.get.return_value = container
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        entrypoint=["/bin/sh"],
+        readOnlyRootFilesystem=True,
+    )
+
+    with patch.object(service, "_ensure_image_available"):
+        with pytest.raises(HTTPException) as exc_info:
+            await service.create_sandbox(request)
+
+    assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert "ReadonlyRootfs=true" in exc_info.value.detail["message"]
+    container.remove.assert_called_once_with(force=True)
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -1674,6 +1773,7 @@ def test_container_to_sandbox_returns_extensions(mock_docker):
             "FinishedAt": "0001-01-01T00:00:00Z",
             "ExitCode": 0,
         },
+        "HostConfig": {"ReadonlyRootfs": True},
     }
     container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
 
@@ -1684,6 +1784,7 @@ def test_container_to_sandbox_returns_extensions(mock_docker):
         "opensandbox.extensions.custom": "value",
     }
     assert sandbox.metadata is None
+    assert sandbox.read_only_root_filesystem is True
 
 
 @pytest.mark.asyncio
@@ -3899,6 +4000,7 @@ def _mock_container(
     image: str = "python:3.11",
     finished_at: str = "0001-01-01T00:00:00Z",
     extra_labels: dict | None = None,
+    read_only_root_filesystem: bool = False,
 ) -> MagicMock:
     """Build a MagicMock container matching what ``_container_to_sandbox``
     expects to read from ``container.attrs`` and ``container.image``."""
@@ -3918,6 +4020,7 @@ def _mock_container(
             "ExitCode": exit_code,
             "FinishedAt": finished_at,
         },
+        "HostConfig": {"ReadonlyRootfs": read_only_root_filesystem},
     }
     container.status = docker_status
     container.image.tags = [image]
@@ -3949,7 +4052,16 @@ def test_list_sandboxes_uses_low_level_summary_endpoint(mock_docker):
     test_list_sandboxes_skips_concurrently_deleted_sandbox)."""
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
-    _wire_list_mocks(mock_client, [_mock_container("sbx-1", entrypoint=["python", "app.py"])])
+    _wire_list_mocks(
+        mock_client,
+        [
+            _mock_container(
+                "sbx-1",
+                entrypoint=["python", "app.py"],
+                read_only_root_filesystem=True,
+            )
+        ],
+    )
     mock_docker.from_env.return_value = mock_client
 
     service = DockerSandboxService(config=_app_config())
@@ -3969,6 +4081,7 @@ def test_list_sandboxes_uses_low_level_summary_endpoint(mock_docker):
     assert item.status.state == "Running"
     # Full fidelity: entrypoint from Config.Cmd, image from image.tags.
     assert item.entrypoint == ["python", "app.py"]
+    assert item.read_only_root_filesystem is True
     assert item.image is not None
     assert item.image.uri == "python:3.11"
 

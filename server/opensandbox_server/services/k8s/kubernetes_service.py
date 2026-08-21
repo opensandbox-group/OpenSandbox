@@ -66,6 +66,7 @@ from opensandbox_server.services.k8s.status_helpers import (
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
     _extract_platform_from_workload,
+    _extract_read_only_root_filesystem,
 )
 from opensandbox_server.services.signing import (
     build_canonical_bytes,
@@ -364,6 +365,18 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         "credentialProxy.enabled cannot be used together with "
                         "extensions.poolRef because pooled pods are pre-created. "
                         "Disable credential proxy or use template mode."
+                    ),
+                },
+            )
+        if request.read_only_root_filesystem is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "readOnlyRootFilesystem cannot be used together with "
+                        "extensions.poolRef because pooled pods are pre-created. "
+                        "Configure the Pool template instead."
                     ),
                 },
             )
@@ -878,6 +891,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     egress_env=context.egress_env,
                     volumes=request.volumes,
                     platform=request.platform,
+                    read_only_root_filesystem=request.read_only_root_filesystem,
                 )
                 workload_left_alive = True
             except ValueError:
@@ -954,6 +968,22 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     raw_ann = getattr(md, "annotations", None) if md else None
                     annotations = raw_ann if isinstance(raw_ann, dict) else {}
 
+                read_only_root_filesystem = _extract_read_only_root_filesystem(
+                    workload,
+                    pool_mode=bool((request.extensions or {}).get("poolRef")),
+                )
+                if request.read_only_root_filesystem is True and read_only_root_filesystem is not True:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail={
+                            "code": SandboxErrorCodes.K8S_API_ERROR,
+                            "message": (
+                                "Kubernetes workload did not apply "
+                                "readOnlyRootFilesystem=true to the main container."
+                            ),
+                        },
+                    )
+
                 response = CreateSandboxResponse(
                     id=sandbox_id,
                     status=SandboxStatus(
@@ -968,6 +998,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     extensions=extract_extensions_from_mapping(annotations),
                     entrypoint=request.entrypoint,
                     platform=effective_platform or request.platform,
+                    readOnlyRootFilesystem=read_only_root_filesystem,
                 )
                 # Reached success — the caller now owns the sandbox lifecycle
                 # and any PVCs we created. delete_sandbox is responsible for

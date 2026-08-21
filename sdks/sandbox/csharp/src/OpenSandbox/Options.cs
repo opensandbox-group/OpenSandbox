@@ -101,6 +101,12 @@ public class SandboxCreateOptions
     public bool SecureAccess { get; set; }
 
     /// <summary>
+    /// Gets or sets whether to request a read-only root filesystem for the main container.
+    /// Null preserves provider/template defaults.
+    /// </summary>
+    public bool? ReadOnlyRootFilesystem { get; set; }
+
+    /// <summary>
     /// Gets or sets the resource limits.
     /// </summary>
     public IReadOnlyDictionary<string, string>? Resource { get; set; }
