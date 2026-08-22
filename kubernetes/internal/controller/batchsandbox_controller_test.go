@@ -471,6 +471,92 @@ var _ = Describe("BatchSandbox Controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 	})
+
+	// Issue #969 – BatchSandbox Ready lag after Pod Ready
+	Context("When a pod transitions to Ready, BatchSandbox should become Ready quickly", func() {
+		const resourceBaseName = "test-ready-lag"
+
+		ctx := context.Background()
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceBaseName,
+			Namespace: "default",
+		}
+
+		BeforeEach(func() {
+			typeNamespacedName.Name = fmt.Sprintf("%s-%s", resourceBaseName, rand.String(5))
+			resource := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      typeNamespacedName.Name,
+					Namespace: typeNamespacedName.Namespace,
+				},
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					Template: &v1.PodTemplateSpec{
+						Spec: v1.PodSpec{
+							Containers: []v1.Container{
+								{Name: "main", Image: "example.com"},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).Should(Succeed())
+		})
+
+		AfterEach(func() {
+			resource := &sandboxv1alpha1.BatchSandbox{}
+			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			if errors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		})
+
+		It("should transition to Succeed within 10s of the pod becoming Ready (#969)", func() {
+			// Wait until the controller has created the pod.
+			var podName string
+			Eventually(func(g Gomega) {
+				podList := &corev1.PodList{}
+				g.Expect(k8sClient.List(ctx, podList, &client.ListOptions{Namespace: typeNamespacedName.Namespace})).To(Succeed())
+				var found *corev1.Pod
+				for i := range podList.Items {
+					po := &podList.Items[i]
+					bs := &sandboxv1alpha1.BatchSandbox{}
+					if err := k8sClient.Get(ctx, typeNamespacedName, bs); err != nil {
+						continue
+					}
+					if metav1.IsControlledBy(po, bs) {
+						found = po
+						break
+					}
+				}
+				g.Expect(found).NotTo(BeNil(), "pod should be created by controller")
+				podName = found.Name
+			}, timeout, interval).Should(Succeed())
+
+			// Mark the pod as Running + Ready.
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: typeNamespacedName.Namespace, Name: podName}, pod)).To(Succeed())
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.PodIP = "10.0.0.1"
+			pod.Status.Conditions = []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			// BatchSandbox must reach Succeed within 10 s of the pod becoming Ready.
+			// With the fix the controller reacts to the Pod update event immediately;
+			// the 5 s Pending requeue is the worst-case fallback.
+			Eventually(func(g Gomega) {
+				bs := &sandboxv1alpha1.BatchSandbox{}
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, bs)).To(Succeed())
+				g.Expect(bs.Status.Phase).To(Equal(sandboxv1alpha1.BatchSandboxPhaseSucceed),
+					"BatchSandbox should be Succeed soon after pod becomes Ready")
+			}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
+		})
+	})
 })
 
 func randomIPv4() net.IP {
