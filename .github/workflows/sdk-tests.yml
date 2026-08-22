@@ -39,7 +39,7 @@ jobs:
       area: sdk
 
   cli-quality:
-    name: CLI Quality
+    name: CLI Quality And Tests
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
@@ -71,30 +71,6 @@ jobs:
         working-directory: cli
         run: |
           uv run pyright
-
-  cli-tests:
-    name: CLI Tests
-    needs: changes
-    if: needs.changes.outputs.relevant == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Install dependencies
-        working-directory: cli
-        run: |
-          uv sync
 
       - name: Run tests
         working-directory: cli
@@ -111,55 +87,7 @@ jobs:
             cli/reports/**
 
   python-sdk-quality:
-    name: Python SDK Quality (${{ matrix.package_name }})
-    needs: changes
-    if: needs.changes.outputs.relevant == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package_name: sandbox
-            package_dir: sdks/sandbox/python
-          - package_name: code-interpreter
-            package_dir: sdks/code-interpreter/python
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Install dependencies
-        working-directory: ${{ matrix.package_dir }}
-        run: |
-          uv sync
-
-      - name: Generate API
-        if: matrix.package_name == 'sandbox'
-        working-directory: sdks/sandbox/python
-        run: |
-          uv run python scripts/generate_api.py
-
-      - name: Run ruff
-        working-directory: ${{ matrix.package_dir }}
-        run: |
-          uv run ruff check
-
-      - name: Run pyright
-        working-directory: ${{ matrix.package_dir }}
-        run: |
-          uv run pyright
-
-  python-sdk-tests:
-    name: Python SDK Tests (${{ matrix.package_name }})
+    name: Python SDK Quality And Tests (${{ matrix.package_name }})
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
@@ -197,6 +125,16 @@ jobs:
         working-directory: sdks/sandbox/python
         run: |
           uv run python scripts/generate_api.py
+
+      - name: Run ruff
+        working-directory: ${{ matrix.package_dir }}
+        run: |
+          uv run ruff check
+
+      - name: Run pyright
+        working-directory: ${{ matrix.package_dir }}
+        run: |
+          uv run pyright
 
       - name: Run tests
         working-directory: ${{ matrix.package_dir }}
@@ -281,20 +219,10 @@ jobs:
             ${{ matrix.package_dir }}/reports/**
 
   kotlin-sdk-quality:
-    name: Kotlin SDK Quality And Tests (${{ matrix.package_name }})
+    name: Kotlin SDK Quality And Tests
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package_name: sandbox
-            package_dir: sdks/sandbox/kotlin
-            test_task: :sandbox:test
-          - package_name: code-interpreter
-            package_dir: sdks/sandbox/kotlin
-            test_task: :code-interpreter:test
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -309,18 +237,18 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
 
       - name: Run quality checks and tests
-        working-directory: ${{ matrix.package_dir }}
+        working-directory: sdks/sandbox/kotlin
         run: |
-          ./gradlew spotlessCheck ${{ matrix.test_task }}
+          ./gradlew spotlessCheck :sandbox:test :code-interpreter:test
 
       - name: Upload Kotlin reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kotlin-${{ matrix.package_name }}-reports
+          name: kotlin-reports
           path: |
-            ${{ matrix.package_dir }}/**/build/test-results/test/**
-            ${{ matrix.package_dir }}/**/build/reports/tests/test/**
+            sdks/sandbox/kotlin/**/build/test-results/test/**
+            sdks/sandbox/kotlin/**/build/reports/tests/test/**
 
   csharp-sdk-quality:
     name: C# SDK Quality And Tests (${{ matrix.package_name }})
@@ -420,9 +348,7 @@ jobs:
     needs:
       - changes
       - cli-quality
-      - cli-tests
       - python-sdk-quality
-      - python-sdk-tests
       - javascript-sdk-quality
       - kotlin-sdk-quality
       - csharp-sdk-quality
@@ -434,9 +360,7 @@ jobs:
           RELEVANT: ${{ needs.changes.outputs.relevant }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           CLI_QUALITY_RESULT: ${{ needs.cli-quality.result }}
-          CLI_TESTS_RESULT: ${{ needs.cli-tests.result }}
           PYTHON_QUALITY_RESULT: ${{ needs.python-sdk-quality.result }}
-          PYTHON_TESTS_RESULT: ${{ needs.python-sdk-tests.result }}
           JAVASCRIPT_RESULT: ${{ needs.javascript-sdk-quality.result }}
           KOTLIN_RESULT: ${{ needs.kotlin-sdk-quality.result }}
           CSHARP_RESULT: ${{ needs.csharp-sdk-quality.result }}
@@ -447,7 +371,7 @@ jobs:
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$CLI_QUALITY_RESULT" == "success" && "$CLI_TESTS_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$PYTHON_TESTS_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
+            [[ "$CLI_QUALITY_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$CLI_TESTS_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$PYTHON_TESTS_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
           fi
