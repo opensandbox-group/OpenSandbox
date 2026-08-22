@@ -97,7 +97,12 @@ jobs:
           cache: "pnpm"
           cache-dependency-path: tests/javascript/pnpm-lock.yaml
 
-      - name: Check pnpm-lock.yaml is in sync
+      - name: Check pnpm-lock.yaml is in sync (tests/javascript)
         working-directory: tests/javascript
+        run: |
+          pnpm install --frozen-lockfile --lockfile-only --ignore-scripts
+
+      - name: Check pnpm-lock.yaml is in sync (docs)
+        working-directory: docs
         run: |
           pnpm install --frozen-lockfile --lockfile-only --ignore-scripts
