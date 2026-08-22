@@ -177,6 +177,7 @@ spec:
                       - PauseFailed
                       - ResumeFailed
                       - PodFailed
+                      - InvalidShardPatch
                       type: string
                   required:
                   - status

@@ -25,6 +25,82 @@ import (
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
+func TestDefaultTaskSchedulingStrategy_ValidateShardTaskPatches(t *testing.T) {
+	tests := []struct {
+		name     string
+		batchSbx *sandboxv1alpha1.BatchSandbox
+		wantErr  bool
+	}{
+		{
+			name: "no shard task patches - valid",
+			batchSbx: &sandboxv1alpha1.BatchSandbox{
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid shard task patch with string args",
+			batchSbx: &sandboxv1alpha1.BatchSandbox{
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{},
+					ShardTaskPatches: []runtime.RawExtension{
+						{Raw: []byte(`{"spec":{"process":{"command":["sleep"],"args":["3600"]}}}`)},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid shard task patch - args as integer instead of string array",
+			batchSbx: &sandboxv1alpha1.BatchSandbox{
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{},
+					ShardTaskPatches: []runtime.RawExtension{
+						{Raw: []byte(`{"spec":{"process":{"args":3600}}}`)},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid shard task patch - malformed JSON",
+			batchSbx: &sandboxv1alpha1.BatchSandbox{
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{},
+					ShardTaskPatches: []runtime.RawExtension{
+						{Raw: []byte(`{"invalid json`)},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "second patch invalid - returns error with correct index",
+			batchSbx: &sandboxv1alpha1.BatchSandbox{
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{},
+					ShardTaskPatches: []runtime.RawExtension{
+						{Raw: []byte(`{"spec":{"process":{"args":["valid"]}}}`)},
+						{Raw: []byte(`{"spec":{"process":{"args":3600}}}`)},
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewDefaultTaskSchedulingStrategy(tt.batchSbx)
+			err := s.ValidateShardTaskPatches()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateShardTaskPatches() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestDefaultTaskSchedulingStrategy_NeedTaskScheduling(t *testing.T) {
 	tests := []struct {
 		name     string

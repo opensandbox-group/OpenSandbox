@@ -25,6 +25,10 @@ type TaskSchedulingStrategy interface {
 	// NeedTaskScheduling determines whether the BatchSandbox requires task scheduling.
 	NeedTaskScheduling() bool
 
+	// ValidateShardTaskPatches checks that all shardTaskPatches can be merged into
+	// a TaskTemplateSpec without type errors. Returns nil when all patches are valid.
+	ValidateShardTaskPatches() error
+
 	// GenerateTaskSpecs generates the complete list of task specifications for the BatchSandbox.
 	GenerateTaskSpecs() ([]*api.Task, error)
 }

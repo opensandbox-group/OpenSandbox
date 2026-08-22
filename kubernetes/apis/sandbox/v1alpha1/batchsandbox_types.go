@@ -41,7 +41,7 @@ const (
 )
 
 // BatchSandboxConditionType represents the type of BatchSandbox condition.
-// +kubebuilder:validation:Enum=Ready;Progressing;Paused;PauseFailed;ResumeFailed;PodFailed
+// +kubebuilder:validation:Enum=Ready;Progressing;Paused;PauseFailed;ResumeFailed;PodFailed;InvalidShardPatch
 type BatchSandboxConditionType string
 
 const (
@@ -57,6 +57,9 @@ const (
 	BatchSandboxConditionResumeFailed BatchSandboxConditionType = "ResumeFailed"
 	// BatchSandboxConditionPodFailed is set when the sandbox pod enters a failed state.
 	BatchSandboxConditionPodFailed BatchSandboxConditionType = "PodFailed"
+	// BatchSandboxConditionInvalidShardPatch is set when a shardTaskPatch cannot be merged
+	// into TaskTemplateSpec due to a type mismatch or invalid JSON structure.
+	BatchSandboxConditionInvalidShardPatch BatchSandboxConditionType = "InvalidShardPatch"
 )
 
 // BatchSandboxCondition represents a condition of a BatchSandbox
