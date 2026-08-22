@@ -178,11 +178,41 @@ class InlineCredentialSource(BaseModel):
         return v
 
 
+class HTTPCredentialSource(BaseModel):
+    """
+    Credential source that fetches material from an HTTP endpoint.
+
+    The endpoint must return a JSON response with a ``value`` field.
+    Optional ``url``, ``headers``, and ``ttl`` fields in the response
+    control subsequent fetch behavior and caching.
+    """
+
+    url: str = Field(description="HTTP endpoint URL to fetch the credential from.")
+    method: str = Field(default="GET", description="HTTP method. Defaults to GET.")
+    headers: dict[str, str] | None = Field(
+        default=None, description="Optional static headers sent with the request."
+    )
+    type: Literal["http"] = Field(
+        default="http",
+        description="Credential source type.",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def url_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("HTTP credential source URL cannot be empty")
+        return v
+
+
+CredentialSourceType = InlineCredentialSource | HTTPCredentialSource
+
+
 class Credential(BaseModel):
     """Sandbox-local Credential Vault credential."""
 
     name: str = Field(description="Sandbox-local credential name.")
-    source: InlineCredentialSource | dict[str, str] = Field(
+    source: CredentialSourceType | dict[str, str] = Field(
         description="Write-only credential source."
     )
 
@@ -196,7 +226,11 @@ class Credential(BaseModel):
     @model_validator(mode="after")
     def normalize_source(self) -> "Credential":
         if isinstance(self.source, dict):
-            self.source = InlineCredentialSource.model_validate(self.source)
+            source_type = self.source.get("type", "inline")
+            if source_type == "http":
+                self.source = HTTPCredentialSource.model_validate(self.source)
+            else:
+                self.source = InlineCredentialSource.model_validate(self.source)
         return self
 
 

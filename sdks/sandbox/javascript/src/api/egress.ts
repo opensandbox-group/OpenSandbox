@@ -503,12 +503,30 @@ export interface components {
         };
         Credential: {
             name: string;
-            source: components["schemas"]["InlineCredentialSource"];
+            source: components["schemas"]["InlineCredentialSource"] | components["schemas"]["HTTPCredentialSource"];
         };
         InlineCredentialSource: {
-            /** @enum {string} */
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
             type: "inline";
             value: string;
+        };
+        HTTPCredentialSource: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "http";
+            /** @description HTTP endpoint URL to fetch the credential from. */
+            url: string;
+            /** @description HTTP method. Defaults to GET when omitted. */
+            method?: string;
+            /** @description Optional static headers sent with the request. */
+            headers?: {
+                [key: string]: string;
+            };
         };
         CredentialBinding: {
             name: string;

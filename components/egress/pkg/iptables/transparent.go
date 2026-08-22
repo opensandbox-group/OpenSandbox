@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
@@ -29,6 +30,7 @@ func transparentHTTPRules(localPort int, mitmUID uint32, dports, op string) [][]
 	uid := strconv.FormatUint(uint64(mitmUID), 10)
 	loopRules := [][]string{
 		{"iptables", "-t", "nat", op, "OUTPUT", "-p", "tcp", "-d", "127.0.0.0/8", "-j", "RETURN"},
+		{"iptables", "-t", "nat", op, "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", constants.CredentialFetchMarkHex, "-j", "RETURN"},
 	}
 	redir := [][]string{
 		{

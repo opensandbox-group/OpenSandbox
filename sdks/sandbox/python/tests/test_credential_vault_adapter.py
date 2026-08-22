@@ -24,6 +24,7 @@ from opensandbox.adapters.egress_adapter import EgressAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import SandboxApiException
+from opensandbox.models import Credential, HTTPCredentialSource
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.egress_adapter import EgressAdapterSync
 
@@ -147,6 +148,24 @@ async def test_async_credential_vault_create_patch_and_list_bindings() -> None:
     with pytest.raises(SandboxApiException) as exc_info:
         await adapter.get_credential("missing")
     assert exc_info.value.status_code == 404
+
+
+def test_http_credential_source_serialization() -> None:
+    cred = Credential(
+        name="vault-token",
+        source=HTTPCredentialSource(url="https://vault.example.com/cred", method="POST"),
+    )
+    serialized = cred.model_dump(mode="json")
+    assert serialized["source"]["type"] == "http"
+    assert serialized["source"]["url"] == "https://vault.example.com/cred"
+    assert serialized["source"]["method"] == "POST"
+
+    cred_from_dict = Credential(
+        name="vault-token-2",
+        source={"type": "http", "url": "https://vault.example.com/cred"},
+    )
+    assert isinstance(cred_from_dict.source, HTTPCredentialSource)
+    assert cred_from_dict.source.url == "https://vault.example.com/cred"
 
 
 def test_sync_credential_vault_get_and_delete() -> None:

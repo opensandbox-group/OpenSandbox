@@ -46,12 +46,19 @@ class CredentialProxyConfig private constructor(
 }
 
 /**
+ * Marker interface for credential source types.
+ */
+sealed interface CredentialSource {
+    val type: String
+}
+
+/**
  * Write-only inline credential material for Credential Vault.
  */
 class InlineCredentialSource private constructor(
     val value: String,
-    val type: String,
-) {
+    override val type: String,
+) : CredentialSource {
     companion object {
         const val TYPE_INLINE = "inline"
 
@@ -86,11 +93,64 @@ class InlineCredentialSource private constructor(
 }
 
 /**
+ * Credential source that fetches material from an HTTP endpoint.
+ *
+ * The endpoint must return a JSON response with a "value" field.
+ * Optional "url", "headers", and "ttl" fields in the response
+ * control subsequent fetch behavior and caching.
+ */
+class HTTPCredentialSource private constructor(
+    val url: String,
+    val method: String,
+    val headers: Map<String, String>?,
+    override val type: String,
+) : CredentialSource {
+    companion object {
+        const val TYPE_HTTP = "http"
+
+        @JvmStatic
+        fun builder(): Builder = Builder()
+
+        @JvmStatic
+        fun of(url: String): HTTPCredentialSource = builder().url(url).build()
+    }
+
+    class Builder {
+        private var url: String? = null
+        private var method: String = "GET"
+        private var headers: Map<String, String>? = null
+        private var type: String = TYPE_HTTP
+
+        fun url(url: String): Builder {
+            require(url.isNotBlank()) { "HTTP credential source URL cannot be empty" }
+            this.url = url
+            return this
+        }
+
+        fun method(method: String): Builder {
+            require(method.isNotBlank()) { "HTTP credential source method cannot be blank" }
+            this.method = method
+            return this
+        }
+
+        fun headers(headers: Map<String, String>): Builder {
+            this.headers = headers.toMap()
+            return this
+        }
+
+        fun build(): HTTPCredentialSource {
+            val urlValue = url ?: throw IllegalArgumentException("HTTP credential source URL must be specified")
+            return HTTPCredentialSource(url = urlValue, method = method, headers = headers, type = type)
+        }
+    }
+}
+
+/**
  * Sandbox-local Credential Vault credential.
  */
 class Credential private constructor(
     val name: String,
-    val source: InlineCredentialSource,
+    val source: CredentialSource,
 ) {
     companion object {
         @JvmStatic
@@ -99,7 +159,7 @@ class Credential private constructor(
 
     class Builder {
         private var name: String? = null
-        private var source: InlineCredentialSource? = null
+        private var source: CredentialSource? = null
 
         fun name(name: String): Builder {
             require(name.isNotBlank()) { "Credential name cannot be blank" }
@@ -107,13 +167,28 @@ class Credential private constructor(
             return this
         }
 
-        fun source(source: InlineCredentialSource): Builder {
+        fun source(source: CredentialSource): Builder {
             this.source = source
+            return this
+        }
+
+        fun source(source: InlineCredentialSource): Builder {
+            this.source = source as CredentialSource
+            return this
+        }
+
+        fun source(source: HTTPCredentialSource): Builder {
+            this.source = source as CredentialSource
             return this
         }
 
         fun inlineSource(value: String): Builder {
             this.source = InlineCredentialSource.of(value)
+            return this
+        }
+
+        fun httpSource(url: String): Builder {
+            this.source = HTTPCredentialSource.of(url)
             return this
         }
 

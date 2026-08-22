@@ -96,6 +96,25 @@ export interface InlineCredentialSource extends Record<string, unknown> {
   value: string;
 }
 
+/**
+ * Credential source that fetches material from an HTTP endpoint.
+ *
+ * The endpoint must return a JSON response with a "value" field.
+ * Optional "url", "headers", and "ttl" fields in the response
+ * control subsequent fetch behavior and caching.
+ */
+export interface HTTPCredentialSource extends Record<string, unknown> {
+  type: "http";
+  /** HTTP endpoint URL to fetch the credential from. */
+  url: string;
+  /** HTTP method. Defaults to GET. */
+  method?: string;
+  /** Optional static headers sent with the request. */
+  headers?: Record<string, string>;
+}
+
+export type CredentialSource = InlineCredentialSource | HTTPCredentialSource;
+
 export interface Credential extends Record<string, unknown> {
   /**
    * Sandbox-local credential name.
@@ -104,7 +123,7 @@ export interface Credential extends Record<string, unknown> {
   /**
    * Write-only credential source.
    */
-  source: InlineCredentialSource;
+  source: CredentialSource;
 }
 
 export type CredentialMatchScheme = "https" | "http";

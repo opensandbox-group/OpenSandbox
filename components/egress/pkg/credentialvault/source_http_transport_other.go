@@ -12,18 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package constants
+//go:build !linux
 
-const (
-	MarkValue = 0x1
-	MarkHex   = "0x1"
+package credentialvault
 
-	// CredentialFetchMarkValue bypasses iptables transparent HTTP redirect
-	// without bypassing nft egress policy (unlike MarkValue which does both).
-	CredentialFetchMarkValue = 0x2
-	CredentialFetchMarkHex   = "0x2"
-)
+import "net/http"
 
-const (
-	EgressAuthTokenHeader = "OPENSANDBOX-EGRESS-AUTH"
-)
+func httpSourceTransport() http.RoundTripper {
+	return &http.Transport{DialContext: defaultTransportDialer().DialContext}
+}

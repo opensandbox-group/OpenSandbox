@@ -522,7 +522,14 @@ components:
         name:
           type: string
         source:
-          $ref: '#/components/schemas/InlineCredentialSource'
+          oneOf:
+            - $ref: '#/components/schemas/InlineCredentialSource'
+            - $ref: '#/components/schemas/HTTPCredentialSource'
+          discriminator:
+            propertyName: type
+            mapping:
+              inline: '#/components/schemas/InlineCredentialSource'
+              http: '#/components/schemas/HTTPCredentialSource'
       additionalProperties: false
     InlineCredentialSource:
       type: object
@@ -534,6 +541,25 @@ components:
         value:
           type: string
           writeOnly: true
+      additionalProperties: false
+    HTTPCredentialSource:
+      type: object
+      required: [type, url]
+      properties:
+        type:
+          type: string
+          enum: [http]
+        url:
+          type: string
+          description: HTTP endpoint URL to fetch the credential from.
+        method:
+          type: string
+          description: HTTP method. Defaults to GET when omitted.
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Optional static headers sent with the request.
       additionalProperties: false
     CredentialBinding:
       type: object

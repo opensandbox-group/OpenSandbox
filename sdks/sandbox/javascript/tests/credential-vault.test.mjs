@@ -253,6 +253,32 @@ test("Egress declarations keep Credential Vault optional for custom adapters", a
   assert.match(egressStack, /\bcredentialVault\??: CredentialVault/);
 });
 
+test("Credential Vault accepts HTTP credential source", async () => {
+  const { adapter, requests } = createAdapter();
+
+  await adapter.create({
+    credentials: [
+      {
+        name: "vault-token",
+        source: {
+          type: "http",
+          url: "https://vault.example.com/cred",
+          method: "POST",
+          headers: { "X-Auth": "bootstrap" },
+        },
+      },
+    ],
+    bindings: [binding],
+  });
+
+  const body = requests[0].body;
+  const source = body.credentials[0].source;
+  assert.equal(source.type, "http");
+  assert.equal(source.url, "https://vault.example.com/cred");
+  assert.equal(source.method, "POST");
+  assert.deepEqual(source.headers, { "X-Auth": "bootstrap" });
+});
+
 async function readDistDeclarations() {
   const distDir = new URL("../dist/", import.meta.url);
   const entries = await readdir(distDir);

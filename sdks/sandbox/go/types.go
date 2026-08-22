@@ -298,6 +298,8 @@ type CredentialSourceType string
 const (
 	// CredentialSourceInline carries write-only inline credential material.
 	CredentialSourceInline CredentialSourceType = "inline"
+	// CredentialSourceHTTP fetches credential material from an HTTP endpoint.
+	CredentialSourceHTTP CredentialSourceType = "http"
 )
 
 // InlineCredentialSource contains write-only credential material. Values sent
@@ -318,11 +320,33 @@ func (s InlineCredentialSource) MarshalJSON() ([]byte, error) {
 	return json.Marshal(source)
 }
 
+// HTTPCredentialSource fetches credential material from an HTTP endpoint.
+// The endpoint must return a JSON response with a "value" field containing
+// the credential. Optional "url", "headers", and "ttl" fields in the
+// response control subsequent fetch behavior and caching.
+type HTTPCredentialSource struct {
+	Type    CredentialSourceType `json:"type"`
+	URL     string               `json:"url"`
+	Method  string               `json:"method,omitempty"`
+	Headers map[string]string    `json:"headers,omitempty"`
+}
+
+// MarshalJSON defaults the type field so callers can omit it.
+func (s HTTPCredentialSource) MarshalJSON() ([]byte, error) {
+	type httpCredentialSource HTTPCredentialSource
+	source := httpCredentialSource(s)
+	if source.Type == "" {
+		source.Type = CredentialSourceHTTP
+	}
+	return json.Marshal(source)
+}
+
 // Credential is a sandbox-local Credential Vault credential create/update
-// model.
+// model. Source accepts InlineCredentialSource, HTTPCredentialSource, or any
+// type serializable to a JSON object with a "type" discriminator.
 type Credential struct {
-	Name   string                 `json:"name"`
-	Source InlineCredentialSource `json:"source"`
+	Name   string `json:"name"`
+	Source any    `json:"source"`
 }
 
 // CredentialScheme is a request scheme matched by a Credential Vault binding.

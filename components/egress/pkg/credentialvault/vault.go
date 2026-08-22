@@ -358,13 +358,18 @@ func (v *Store) ActiveSnapshotWithContext(ctx context.Context) (ActiveSnapshot, 
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// Share a single credential-value cache across the entire snapshot render
+	// so header injection and body/path/query substitutions always see the
+	// same plaintext for the same credential name, even for zero-TTL HTTP
+	// sources whose next Resolve would otherwise return a different token.
+	resolver := newRenderResolver(v.credentials)
 	for _, name := range names {
 		b := v.bindings[name]
-		headers, values, err := renderInjectionHeaders(ctx, b.Auth, v.credentials)
+		headers, values, err := renderInjectionHeaders(ctx, b.Auth, resolver)
 		if err != nil {
 			return ActiveSnapshot{}, err
 		}
-		substitutions, substitutionValues, err := renderSubstitutions(ctx, b.Auth, v.credentials)
+		substitutions, substitutionValues, err := renderSubstitutions(ctx, b.Auth, resolver)
 		if err != nil {
 			return ActiveSnapshot{}, err
 		}
@@ -633,12 +638,41 @@ func resolveCredentialValue(ctx context.Context, name string, credentials map[st
 	return c.Source.Resolve(ctx)
 }
 
-func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[string]record) ([]InjectionHeader, []string, error) {
+// renderResolver memoises credential resolution for the duration of a single
+// ActiveSnapshot render. This guarantees that the injected header and any
+// substitutions for the same credential name see the same plaintext value
+// within one snapshot even for zero-TTL HTTP sources whose value would
+// otherwise change between separate Resolve calls.
+type renderResolver struct {
+	credentials map[string]record
+	cache       map[string]string
+}
+
+func newRenderResolver(credentials map[string]record) *renderResolver {
+	return &renderResolver{
+		credentials: credentials,
+		cache:       make(map[string]string),
+	}
+}
+
+func (r *renderResolver) resolve(ctx context.Context, name string) (string, error) {
+	if v, ok := r.cache[name]; ok {
+		return v, nil
+	}
+	v, err := resolveCredentialValue(ctx, name, r.credentials)
+	if err != nil {
+		return "", err
+	}
+	r.cache[name] = v
+	return v, nil
+}
+
+func renderInjectionHeaders(ctx context.Context, auth Auth, resolver *renderResolver) ([]InjectionHeader, []string, error) {
 	var headers []InjectionHeader
 	var redactions []string
 	switch auth.Type {
 	case "bearer":
-		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
+		value, err := resolver.resolve(ctx, auth.Credential)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -646,7 +680,7 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 		headers = append(headers, InjectionHeader{Name: "Authorization", Value: rendered})
 		redactions = append(redactions, value, rendered)
 	case "basic":
-		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
+		value, err := resolver.resolve(ctx, auth.Credential)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -654,7 +688,7 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 		headers = append(headers, InjectionHeader{Name: "Authorization", Value: rendered})
 		redactions = append(redactions, value, rendered)
 	case "apiKey":
-		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
+		value, err := resolver.resolve(ctx, auth.Credential)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -662,7 +696,7 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 		redactions = append(redactions, value)
 	case "customHeaders":
 		for _, h := range auth.Headers {
-			value, err := resolveCredentialValue(ctx, h.Credential, credentials)
+			value, err := resolver.resolve(ctx, h.Credential)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -676,11 +710,11 @@ func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[stri
 	return headers, redactions, nil
 }
 
-func renderSubstitutions(ctx context.Context, auth Auth, credentials map[string]record) ([]InjectionSubstitution, []string, error) {
+func renderSubstitutions(ctx context.Context, auth Auth, resolver *renderResolver) ([]InjectionSubstitution, []string, error) {
 	substitutions := make([]InjectionSubstitution, 0, len(auth.Substitutions))
 	redactions := make([]string, 0, len(auth.Substitutions)*6)
 	for _, substitution := range auth.Substitutions {
-		value, err := resolveCredentialValue(ctx, substitution.Credential, credentials)
+		value, err := resolver.resolve(ctx, substitution.Credential)
 		if err != nil {
 			return nil, nil, err
 		}

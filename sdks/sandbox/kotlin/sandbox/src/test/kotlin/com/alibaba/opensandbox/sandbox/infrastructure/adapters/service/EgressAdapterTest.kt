@@ -28,6 +28,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMutatio
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialSubstitution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultPatchRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CustomHeaderEntry
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.HTTPCredentialSource
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -357,6 +358,66 @@ class EgressAdapterTest {
         assertEquals(1, state.credentials.size)
         assertFalse(state.credentials.single().javaClass.declaredFields.any { it.name == "value" })
         assertTrue(state.bindings.single().auth?.name == null)
+    }
+
+    @Test
+    fun `create serializes HTTP credential source correctly`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(201)
+                .setBody(vaultStateResponse()),
+        )
+
+        egressAdapter.create(
+            credentials =
+                listOf(
+                    Credential.builder()
+                        .name("vault-token")
+                        .httpSource("https://vault.example.com/cred")
+                        .build(),
+                ),
+            bindings = emptyList(),
+        )
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        val source = payload["credentials"]!!.jsonArray[0].jsonObject["source"]!!.jsonObject
+        assertEquals("http", source["type"]!!.jsonPrimitive.content)
+        assertEquals("https://vault.example.com/cred", source["url"]!!.jsonPrimitive.content)
+        assertEquals("GET", source["method"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `create serializes HTTP credential source with method and headers`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(201)
+                .setBody(vaultStateResponse()),
+        )
+
+        egressAdapter.create(
+            credentials =
+                listOf(
+                    Credential.builder()
+                        .name("vault-token")
+                        .source(
+                            HTTPCredentialSource.builder()
+                                .url("https://vault.example.com/cred")
+                                .method("POST")
+                                .headers(mapOf("X-Auth" to "bootstrap"))
+                                .build(),
+                        )
+                        .build(),
+                ),
+            bindings = emptyList(),
+        )
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        val source = payload["credentials"]!!.jsonArray[0].jsonObject["source"]!!.jsonObject
+        assertEquals("http", source["type"]!!.jsonPrimitive.content)
+        assertEquals("POST", source["method"]!!.jsonPrimitive.content)
+        assertEquals("bootstrap", source["headers"]!!.jsonObject["X-Auth"]!!.jsonPrimitive.content)
     }
 
     private fun credential(name: String): Credential =

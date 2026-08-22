@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from attrs import define as _attrs_define
 
 if TYPE_CHECKING:
+    from ..models.http_credential_source import HTTPCredentialSource
     from ..models.inline_credential_source import InlineCredentialSource
 
 
@@ -33,16 +34,22 @@ class Credential:
     """
     Attributes:
         name (str):
-        source (InlineCredentialSource):
+        source (HTTPCredentialSource | InlineCredentialSource):
     """
 
     name: str
-    source: InlineCredentialSource
+    source: HTTPCredentialSource | InlineCredentialSource
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.inline_credential_source import InlineCredentialSource
+
         name = self.name
 
-        source = self.source.to_dict()
+        source: dict[str, Any]
+        if isinstance(self.source, InlineCredentialSource):
+            source = self.source.to_dict()
+        else:
+            source = self.source.to_dict()
 
         field_dict: dict[str, Any] = {}
 
@@ -57,12 +64,28 @@ class Credential:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.http_credential_source import HTTPCredentialSource
         from ..models.inline_credential_source import InlineCredentialSource
 
         d = dict(src_dict)
         name = d.pop("name")
 
-        source = InlineCredentialSource.from_dict(d.pop("source"))
+        def _parse_source(data: object) -> HTTPCredentialSource | InlineCredentialSource:
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                source_type_0 = InlineCredentialSource.from_dict(data)
+
+                return source_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            if not isinstance(data, dict):
+                raise TypeError()
+            source_type_1 = HTTPCredentialSource.from_dict(data)
+
+            return source_type_1
+
+        source = _parse_source(d.pop("source"))
 
         credential = cls(
             name=name,

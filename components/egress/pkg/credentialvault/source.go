@@ -20,6 +20,11 @@ import (
 	"fmt"
 )
 
+const (
+	SourceTypeInline = "inline"
+	SourceTypeHTTP   = "http"
+)
+
 // CredentialSource resolves credential material from a configured source.
 // Implementations must be safe for concurrent use.
 type CredentialSource interface {
@@ -47,7 +52,8 @@ func NewSourceRegistry() *SourceRegistry {
 	r := &SourceRegistry{
 		factories: make(map[string]CredentialSourceFactory),
 	}
-	r.Register("inline", inlineSourceFactory)
+	r.Register(SourceTypeInline, inlineSourceFactory)
+	r.Register(SourceTypeHTTP, httpSourceFactory)
 	return r
 }
 
@@ -85,7 +91,7 @@ func (r *SourceRegistry) SupportedTypes() []string {
 
 func extractSourceType(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
-		return "inline", nil
+		return SourceTypeInline, nil
 	}
 	var envelope struct {
 		Type string `json:"type"`
@@ -94,7 +100,7 @@ func extractSourceType(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("parse credential source: %w", err)
 	}
 	if envelope.Type == "" {
-		return "inline", nil
+		return SourceTypeInline, nil
 	}
 	return envelope.Type, nil
 }

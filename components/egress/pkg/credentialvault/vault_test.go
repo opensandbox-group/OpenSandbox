@@ -15,12 +15,30 @@
 package credentialvault
 
 import (
+	"context"
 	"encoding/json"
+	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
 )
+
+// countingSource returns a different value on every Resolve call. It exists
+// only so tests can prove ActiveSnapshot memoises credential values across
+// renderInjectionHeaders/renderSubstitutions calls within a single snapshot.
+type countingSource struct {
+	prefix string
+	calls  atomic.Int32
+}
+
+func (s *countingSource) Type() string { return "counting" }
+
+func (s *countingSource) Resolve(context.Context) (string, error) {
+	n := s.calls.Add(1)
+	return s.prefix + "-v" + strconv.Itoa(int(n)), nil
+}
 
 func mustMarshal(v any) json.RawMessage {
 	data, err := json.Marshal(v)
@@ -377,4 +395,114 @@ ignore_hosts: ['^example\.com$', ".*\.internal$"]
 `))
 
 	require.Nil(t, parseMitmproxyIgnoreHosts("ignore_hosts: []"))
+}
+
+// TestActiveSnapshotResolvesCredentialOncePerRender proves that a credential
+// backed by a source whose Resolve returns a different value on every call
+// still contributes the same value to both its header injection and its
+// substitution within one ActiveSnapshot render, and to every binding that
+// references the same credential. Without per-render memoisation, a zero-TTL
+// HTTP source would inject one token in Authorization and a different token
+// into a body/query placeholder for the same outbound request.
+func TestActiveSnapshotResolvesCredentialOncePerRender(t *testing.T) {
+	src := &countingSource{prefix: "tok"}
+	registry := NewSourceRegistry()
+	registry.Register("counting", func(json.RawMessage) (CredentialSource, error) {
+		return src, nil
+	})
+
+	store := NewStoreWithRegistry(nil, func() bool { return true }, registry)
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"api.example.com"}]}`)
+
+	_, err := store.Create(CreateRequest{
+		Credentials: []Credential{
+			{
+				Name:   "rotating",
+				Source: mustMarshal(map[string]string{"type": "counting"}),
+			},
+		},
+		Bindings: []Binding{
+			// Binding A: injects the credential as an apiKey header AND uses
+			// it in a body substitution. Both surfaces must agree.
+			{
+				Name: "primary",
+				Match: Match{
+					Hosts:   []string{"api.example.com"},
+					Methods: []string{"POST"},
+					Paths:   []string{"/v1/tokens"},
+				},
+				Auth: Auth{
+					Type:       "apiKey",
+					Name:       "X-Api-Key",
+					Credential: "rotating",
+					Substitutions: []Substitution{
+						{
+							Credential:  "rotating",
+							Placeholder: "__tok__",
+							In:          []string{"body"},
+						},
+					},
+				},
+			},
+			// Binding B: references the same credential from a second binding
+			// so per-render memoisation is exercised across bindings too.
+			{
+				Name: "secondary",
+				Match: Match{
+					Hosts:   []string{"api.example.com"},
+					Methods: []string{"GET"},
+					Paths:   []string{"/v1/status"},
+				},
+				Auth: Auth{
+					Type:       "bearer",
+					Credential: "rotating",
+				},
+			},
+		},
+	}, pol)
+	require.NoError(t, err)
+
+	// Reset call counter so we can distinguish create-time resolution (none
+	// happens today for inline sources, but be defensive) from render.
+	src.calls.Store(0)
+
+	snap, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	require.Len(t, snap.Bindings, 2)
+
+	// The source must be resolved exactly once for the whole snapshot render.
+	require.Equal(t, int32(1), src.calls.Load(),
+		"source must be resolved once per render even when referenced by multiple bindings and surfaces")
+
+	// Find bindings by name (ordering in ActiveSnapshot follows sort of
+	// binding names).
+	var primary, secondary ActiveBinding
+	for _, b := range snap.Bindings {
+		switch b.Name {
+		case "primary":
+			primary = b
+		case "secondary":
+			secondary = b
+		}
+	}
+
+	require.Equal(t, "tok-v1", primary.Headers[0].Value,
+		"apiKey header should carry the single resolved value")
+	require.Equal(t, "tok-v1", primary.Substitutions[0].Value,
+		"substitution must see the same value as the header within one render")
+	require.Equal(t, "Bearer tok-v1", secondary.Headers[0].Value,
+		"a second binding referencing the same credential must see the same value")
+
+	// A subsequent snapshot performs a fresh render and therefore does its
+	// own single resolve, producing the next value from the source.
+	snap2, err := store.ActiveSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, int32(2), src.calls.Load(),
+		"a new snapshot render resolves the credential exactly once again")
+	for _, b := range snap2.Bindings {
+		if b.Name == "primary" {
+			require.Equal(t, "tok-v2", b.Headers[0].Value)
+			require.Equal(t, "tok-v2", b.Substitutions[0].Value)
+		}
+	}
 }

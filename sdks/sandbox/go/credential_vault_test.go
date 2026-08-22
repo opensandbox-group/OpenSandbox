@@ -392,6 +392,52 @@ func TestCreateSandboxRequestIncludesCredentialProxy(t *testing.T) {
 	require.Equal(t, true, req.CredentialProxy.Enabled)
 }
 
+func TestHTTPCredentialSourceDefaultsTypeWhenMarshaled(t *testing.T) {
+	body, err := json.Marshal(HTTPCredentialSource{URL: "https://vault.example.com/cred"})
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, "http", got["type"])
+	require.Equal(t, "https://vault.example.com/cred", got["url"])
+}
+
+func TestHTTPCredentialSourceMarshaledWithMethodAndHeaders(t *testing.T) {
+	body, err := json.Marshal(HTTPCredentialSource{
+		URL:     "https://vault.example.com/cred",
+		Method:  "POST",
+		Headers: map[string]string{"X-Auth": "bootstrap"},
+	})
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, "http", got["type"])
+	require.Equal(t, "POST", got["method"])
+	require.Equal(t, map[string]any{"X-Auth": "bootstrap"}, got["headers"])
+}
+
+func TestCredentialWithHTTPSourceSerializesCorrectly(t *testing.T) {
+	cred := Credential{
+		Name: "vault-token",
+		Source: HTTPCredentialSource{
+			URL:     "https://vault.example.com/cred",
+			Method:  "POST",
+			Headers: map[string]string{"X-Auth": "bootstrap"},
+		},
+	}
+	body, err := json.Marshal(cred)
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, "vault-token", got["name"])
+	source := got["source"].(map[string]any)
+	require.Equal(t, "http", source["type"])
+	require.Equal(t, "https://vault.example.com/cred", source["url"])
+	require.Equal(t, "POST", source["method"])
+}
+
 func sampleCredentialVaultCreateRequest() CredentialVaultCreateRequest {
 	return CredentialVaultCreateRequest{
 		Credentials: []Credential{

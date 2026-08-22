@@ -162,7 +162,43 @@ public class InlineCredentialSource
 }
 
 /// <summary>
+/// Credential source that fetches material from an HTTP endpoint.
+/// The endpoint must return a JSON response with a "value" field.
+/// Optional "url", "headers", and "ttl" fields in the response
+/// control subsequent fetch behavior and caching.
+/// </summary>
+public class HTTPCredentialSource
+{
+    /// <summary>
+    /// Gets or sets the credential source type.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "http";
+
+    /// <summary>
+    /// Gets or sets the HTTP endpoint URL.
+    /// </summary>
+    [JsonPropertyName("url")]
+    public required string Url { get; set; }
+
+    /// <summary>
+    /// Gets or sets the HTTP method. Defaults to GET.
+    /// </summary>
+    [JsonPropertyName("method")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Method { get; set; }
+
+    /// <summary>
+    /// Gets or sets optional static headers sent with the request.
+    /// </summary>
+    [JsonPropertyName("headers")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyDictionary<string, string>? Headers { get; set; }
+}
+
+/// <summary>
 /// Sandbox-local Credential Vault credential.
+/// Source accepts <see cref="InlineCredentialSource"/> or <see cref="HTTPCredentialSource"/>.
 /// </summary>
 public class Credential
 {
@@ -176,7 +212,7 @@ public class Credential
     /// Gets or sets the write-only credential source.
     /// </summary>
     [JsonPropertyName("source")]
-    public required InlineCredentialSource Source { get; set; }
+    public required object Source { get; set; }
 }
 
 /// <summary>

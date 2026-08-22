@@ -25,7 +25,7 @@ type inlineSource struct {
 	value string
 }
 
-func (s *inlineSource) Type() string                              { return "inline" }
+func (s *inlineSource) Type() string                              { return SourceTypeInline }
 func (s *inlineSource) Resolve(_ context.Context) (string, error) { return s.value, nil }
 
 // inlineSourceFactory creates an inlineSource from the raw JSON "source"
