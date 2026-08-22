@@ -91,6 +91,10 @@ Maven Central signing keys are held only in GitHub Actions secrets.
 
 ## Verify Source Releases
 
+> Source archives are produced only for releases before 2026-08 (when the
+> `release-generic.yml` workflow was removed). Newer releases have no source
+> archive; skip this section for them.
+
 Set the release tag first:
 
 ```bash

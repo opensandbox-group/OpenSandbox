@@ -231,36 +231,14 @@ If `--dry-run` is enabled, the script never creates/pushes tags and never create
 
 ## GitHub Actions Entry
 
-You can trigger the same flow in GitHub Actions from:
+The GitHub Actions dispatch entry for this flow (`release-generic.yml`) was
+removed because it had no callers; the release process uses tag pushes that
+trigger the `publish-*` workflows directly. Run `scripts/release/create-release.sh`
+locally to create release tags and GitHub Releases:
 
-- `.github/workflows/release-generic.yml`
-
-Inputs exposed in the workflow dispatch form:
-
-- `target`
-- `version`
-- `from_tag` (optional)
-- `initial_release` (boolean)
-- `dry_run` (boolean, default `true`)
-
-Dry-run in GitHub Actions:
-
-- set `dry_run=true`
-- check logs for:
-  - computed tag (`New tag`)
-  - range (`Computed range`)
-  - preview body (`Generated release notes preview`)
-
-Recommended first run in UI:
-
-- set `dry_run=true`
-- verify the generated release notes preview in logs
-- have an authorized release manager create and push the release tag from
-  `main`
-- select that tag as the workflow ref and rerun with `dry_run=false`
-
-When `dry_run=false`, `.github/workflows/release-generic.yml` uploads an
-explicit `opensandbox-<tag>.tar.gz` source archive and `SHA256SUMS` file to the
-GitHub Release, then signs both files with GitHub/Sigstore provenance
-attestations. See [Release Verification](release-verification.md) for user
-verification commands and release signing coverage.
+When `dry_run=false`, `scripts/release/create-release.sh` creates the tag and
+the GitHub Release. Source archives (`opensandbox-<tag>.tar.gz` + `SHA256SUMS`)
+were previously uploaded by the removed `release-generic.yml` workflow; releases
+created after its removal no longer carry source archives. See
+[Release Verification](release-verification.md) for user verification commands
+and release signing coverage.
