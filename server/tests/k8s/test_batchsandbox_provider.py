@@ -2049,6 +2049,8 @@ class TestBatchSandboxProviderEgress:
         caps = sidecar.get("securityContext", {}).get("capabilities", {})
         assert "NET_ADMIN" in caps.get("add", [])
         assert sidecar.get("securityContext", {}).get("privileged") is not True
+        assert sidecar["securityContext"]["runAsNonRoot"] is False
+        assert sidecar["securityContext"]["runAsUser"] == 0
         assert "command" not in sidecar
         assert sidecar["readinessProbe"]["httpGet"]["path"] == "/healthz"
         assert sidecar["readinessProbe"]["httpGet"]["port"] == 18080
@@ -2059,6 +2061,8 @@ class TestBatchSandboxProviderEgress:
         assert execd_init["name"] == "execd-installer"
         assert execd_init["image"] == "execd:latest"
         assert execd_init.get("securityContext", {}).get("privileged") is True
+        assert execd_init["securityContext"]["runAsNonRoot"] is False
+        assert execd_init["securityContext"]["runAsUser"] == 0
         assert "/proc/sys/net/ipv6/conf/all/disable_ipv6" in execd_init["args"][0]
 
         main = next(c for c in containers if c["name"] == "sandbox")

@@ -112,6 +112,58 @@ class TestBatchSandboxTemplateManager:
         result = BatchSandboxTemplateManager._deep_merge(base, override)
         
         assert result == {"spec": {"tolerations": [{"key": "b"}]}}
+
+    def test_deep_merge_merges_named_kubernetes_objects(self):
+        base = {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "sandbox",
+                        "securityContext": {
+                            "allowPrivilegeEscalation": False,
+                            "capabilities": {"drop": ["ALL"]},
+                        },
+                        "resources": {"limits": {"memory": "6Gi"}},
+                    },
+                    {"name": "template-sidecar", "image": "template:latest"},
+                ]
+            }
+        }
+        override = {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "sandbox",
+                        "image": "runtime:latest",
+                        "resources": {"requests": {"cpu": "100m"}},
+                    },
+                    {"name": "runtime-sidecar", "image": "runtime-sidecar:latest"},
+                ]
+            }
+        }
+
+        result = BatchSandboxTemplateManager._deep_merge(base, override)
+
+        assert result["spec"]["containers"] == [
+            {
+                "name": "sandbox",
+                "image": "runtime:latest",
+                "securityContext": {
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["ALL"]},
+                },
+                "resources": {
+                    "limits": {"memory": "6Gi"},
+                    "requests": {"cpu": "100m"},
+                },
+            },
+            {"name": "template-sidecar", "image": "template:latest"},
+            {"name": "runtime-sidecar", "image": "runtime-sidecar:latest"},
+        ]
+
+        # The merge must not mutate either input template.
+        assert "image" not in base["spec"]["containers"][0]
+        assert "securityContext" not in override["spec"]["containers"][0]
     
     def test_deep_merge_none_values_do_not_override(self):
         base = {"spec": {"expireTime": "2024-12-31"}}

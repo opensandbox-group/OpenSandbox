@@ -102,7 +102,59 @@ class BaseSandboxTemplateManager:
                 result[key] = BaseSandboxTemplateManager._deep_merge(
                     result[key], override_value
                 )
+            elif BaseSandboxTemplateManager._are_named_object_lists(
+                result[key], override_value
+            ):
+                result[key] = BaseSandboxTemplateManager._merge_named_object_lists(
+                    result[key], override_value
+                )
             else:
                 result[key] = BaseSandboxTemplateManager._deep_copy(override_value)
+
+        return result
+
+    @staticmethod
+    def _are_named_object_lists(base: Any, override: Any) -> bool:
+        """Return whether both values are non-empty lists keyed by unique names.
+
+        Kubernetes uses ``name`` as the merge key for containers, init
+        containers, environment variables, volumes, and several related pod
+        fields. Restricting this behavior to unambiguously named object lists
+        keeps ordinary lists, such as commands and tolerations, replace-only.
+        """
+        if not isinstance(base, list) or not isinstance(override, list):
+            return False
+        if not base or not override:
+            return False
+
+        for items in (base, override):
+            names = [item.get("name") for item in items if isinstance(item, dict)]
+            if len(names) != len(items):
+                return False
+            if any(not isinstance(name, str) or not name for name in names):
+                return False
+            if len(set(names)) != len(names):
+                return False
+
+        return True
+
+    @staticmethod
+    def _merge_named_object_lists(
+        base: list[Dict[str, Any]], override: list[Dict[str, Any]]
+    ) -> list[Dict[str, Any]]:
+        """Merge runtime objects into template objects with the same name."""
+        result = BaseSandboxTemplateManager._deep_copy(base)
+        indexes = {item["name"]: index for index, item in enumerate(result)}
+
+        for override_item in override:
+            name = override_item["name"]
+            if name in indexes:
+                index = indexes[name]
+                result[index] = BaseSandboxTemplateManager._deep_merge(
+                    result[index], override_item
+                )
+            else:
+                indexes[name] = len(result)
+                result.append(BaseSandboxTemplateManager._deep_copy(override_item))
 
         return result

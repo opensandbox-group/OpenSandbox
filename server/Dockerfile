@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM python:3.10-slim AS builder
+FROM python:3.10-alpine AS builder
 
 # Optional: inject the release version when .git is unavailable so hatch-vcs
 # resolves the real version instead of falling back to 0.1.0.dev0. Passed by
@@ -28,9 +28,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache curl ca-certificates
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:/root/.cargo/bin:${PATH}"
@@ -44,7 +42,7 @@ COPY LICENSE README.md ./
 # Install the project itself into the venv (deps already synced)
 RUN uv pip install --no-deps --editable .
 
-FROM python:3.10-slim AS runtime
+FROM python:3.10-alpine AS runtime
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -54,6 +52,15 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     SANDBOX_CONFIG_PATH=/etc/opensandbox/config.toml
 
 WORKDIR /app
+
+# The service runs entirely from the copied virtualenv. The base image's
+# system setuptools is build tooling, not a runtime dependency, and its
+# vendored packages needlessly expand the production vulnerability surface.
+RUN rm -rf \
+    /usr/local/lib/python3.10/site-packages/_distutils_hack \
+    /usr/local/lib/python3.10/site-packages/pkg_resources \
+    /usr/local/lib/python3.10/site-packages/setuptools \
+    /usr/local/lib/python3.10/site-packages/setuptools-*.dist-info
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/opensandbox_server /app/opensandbox_server

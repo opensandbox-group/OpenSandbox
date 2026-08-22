@@ -41,13 +41,22 @@ def build_security_context_from_dict(
         )
 
     privileged = security_context_dict.get("privileged")
+    run_as_non_root = security_context_dict.get("runAsNonRoot")
+    run_as_user = security_context_dict.get("runAsUser")
 
-    if capabilities is None and privileged is None:
+    if (
+        capabilities is None
+        and privileged is None
+        and run_as_non_root is None
+        and run_as_user is None
+    ):
         return None
 
     return V1SecurityContext(
         capabilities=capabilities,
         privileged=privileged,
+        run_as_non_root=run_as_non_root,
+        run_as_user=run_as_user,
     )
 
 
@@ -71,6 +80,12 @@ def serialize_security_context_to_dict(
 
     if security_context.privileged is not None:
         result["privileged"] = security_context.privileged
+
+    if getattr(security_context, "run_as_non_root", None) is not None:
+        result["runAsNonRoot"] = security_context.run_as_non_root
+
+    if getattr(security_context, "run_as_user", None) is not None:
+        result["runAsUser"] = security_context.run_as_user
 
     if getattr(security_context, "seccomp_profile", None) is not None:
         sp = security_context.seccomp_profile

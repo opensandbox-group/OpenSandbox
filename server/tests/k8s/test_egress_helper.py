@@ -221,7 +221,7 @@ class TestEgressSidecarViaApply:
         assert "egress" in policy_dict
 
     def test_security_context_adds_net_admin_not_privileged(self):
-        """Egress sidecar uses NET_ADMIN only (IPv6 is disabled in execd init when egress is on)."""
+        """Egress uses the narrow NET_ADMIN + root exception, not privileged mode."""
         egress_image = "opensandbox/egress:v1.1.6"
         network_policy = NetworkPolicy(
             default_action="deny",
@@ -233,6 +233,8 @@ class TestEgressSidecarViaApply:
         security_context = container["securityContext"]
         assert security_context.get("privileged") is not True
         assert "NET_ADMIN" in security_context.get("capabilities", {}).get("add", [])
+        assert security_context["runAsNonRoot"] is False
+        assert security_context["runAsUser"] == 0
 
     def test_no_command_uses_image_entrypoint(self):
         container = _egress_container(
@@ -513,7 +515,11 @@ class TestPrepExecdInitForEgress:
     def test_returns_privileged_security_dict_and_prefixed_script(self):
         base = "cp ./execd /opt/opensandbox/execd"
         script, sc = prep_execd_init_for_egress(base)
-        assert sc == {"privileged": True}
+        assert sc == {
+            "privileged": True,
+            "runAsNonRoot": False,
+            "runAsUser": 0,
+        }
         assert "/proc/sys/net/ipv6/conf/all/disable_ipv6" in script
         assert script.endswith(base)
 
