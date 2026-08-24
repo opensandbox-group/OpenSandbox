@@ -104,17 +104,20 @@ to `false`.
 
 ## What is traced
 
-Each warmup task produces **one trace** with a root span and four sequential
-phase spans (siblings under the root, so each phase duration stands alone for
-comparison):
+Each warmup task produces **one trace** with a root span and six possible phase types
+(siblings under the root, so each phase duration stands alone for comparison).
+Readiness phase types may produce multiple spans because each delayed retry is traced
+separately; optional stages are absent when they are not configured:
 
 | Span name | Covers |
 |-----------|--------|
 | `pool.warmup` (root) | Task submission → sandbox committed to idle. Backdated to submission time, so the queue wait before the first phase is visible as the gap before the first child span |
-| `pool.warmup.create` | Sandbox create API call, endpoint resolution, and readiness wait |
-| `pool.warmup.prepare` | The configured `warmupSandboxPreparer` (user init script / setup work) |
+| `pool.warmup.create` | Sandbox creator invocation. The built-in lifecycle path makes one HTTP attempt; readiness is no longer part of this span |
+| `pool.warmup.readiness_check` | One pre-prepare readiness attempt (`warmupHealthCheck` or `ping`) |
+| `pool.warmup.prepare` | The single invocation of `warmupSandboxPreparer` (user init script / setup work) |
+| `pool.warmup.post_prepare_check` | One optional post-prepare validation attempt |
 | `pool.warmup.renew` | TTL renewal right before committing the sandbox |
-| `pool.warmup.commit` | Primary-lock renewal + `putIdle` against the state store (runs on the pool scheduler thread) |
+| `pool.warmup.commit` | Primary-lock renewal + `putIdle` against the state store |
 
 Root span attributes (these are your drill-down dimensions):
 
@@ -123,9 +126,11 @@ Root span attributes (these are your drill-down dimensions):
 | `pool.name` | Pool name |
 | `pool.owner` | Pool owner id |
 | `pool.run.generation` | Pool run generation |
+| `pool.leader.epoch` | Leader epoch captured when this warmup was admitted |
 | `sandbox.id` | Sandbox id (success only) |
 | `sandbox.image` | Creation image (success only) |
 | `result` | `success` or `failure` |
+| `drop.reason` | Cancellation / stale-epoch / commit rejection reason (dropped warmups only) |
 
 Failures are recorded with `recordException` on the root span plus
 `result=failure`; the `pool.warmup.commit` span is not emitted for failed
@@ -170,13 +175,16 @@ directly. The reliable paths are:
 
 ```
 pool.warmup root duration (p50/p95/p99) per pool.name
-  └─ phase spans: pool.warmup.create / prepare / renew / commit
+  └─ phase spans: create / readiness_check / prepare / post_prepare_check / renew / commit
        └─ single trace: root start gap = queue wait, then each phase duration
 ```
 
 | Symptom | Likely cause |
 |---------|--------------|
-| Long gap before the first child span | Warmup tasks queued — `warmupConcurrency` too low, or the executor is busy with cleanup kills |
-| `pool.warmup.create` slow | Lifecycle server slow (image pull / execd startup) or readiness polling takes long |
+| Long gap before `pool.warmup.create` | Create tasks waiting for an executor thread; compare `warmupCreateQps` with create latency |
+| Long gap between create and the first readiness span | Expected `warmupHealthCheckInitialDelay`, or delayed-stage capacity exhausted because `warmupConcurrency` is too low |
+| `pool.warmup.create` slow | Lifecycle create API slow (for example image pull / execd startup) |
+| Repeated or slow `pool.warmup.readiness_check` | Sandbox startup or the configured readiness predicate is the bottleneck |
 | `pool.warmup.prepare` slow | Your `warmupSandboxPreparer` work is the bottleneck |
+| Repeated or slow `pool.warmup.post_prepare_check` | Prepared service is not yet healthy, or its validation predicate is slow |
 | `pool.warmup.renew` / `pool.warmup.commit` slow | State store (e.g. Redis) round-trips |

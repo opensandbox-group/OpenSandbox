@@ -77,6 +77,22 @@ class HttpClientProvider(
 
     val httpClient: OkHttpClient by httpClientLazy
 
+    // A staged warmup already retries health through its DelayQueue. Clone the
+    // regular client so the warmup-only probe shares its dispatcher, connection
+    // pool, headers, tracing, timeouts, and logging while skipping both retry
+    // owners for exactly one HTTP attempt.
+    private val singleAttemptClientLazy =
+        lazy {
+            httpClient.newBuilder()
+                .apply {
+                    interceptors().removeAll { it is RetryInterceptor }
+                }
+                .retryOnConnectionFailure(false)
+                .build()
+        }
+
+    internal val singleAttemptClient: OkHttpClient by singleAttemptClientLazy
+
     // 2. Explicit lazy definition for authenticated client
     private val authenticatedClientLazy =
         lazy {
@@ -121,6 +137,10 @@ class HttpClientProvider(
      * false), this is a no-op — the caller relies on OkHttp defaults.
      */
     private fun OkHttpClient.Builder.addRetryInterceptor(): OkHttpClient.Builder {
+        if (!config.retryOnConnectionFailure) {
+            retryOnConnectionFailure(false)
+            return this
+        }
         if (config.retryPolicy.wrapsTransport()) {
             retryOnConnectionFailure(false)
             addInterceptor(RetryInterceptor(config.retryPolicy))

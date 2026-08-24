@@ -23,8 +23,8 @@ package com.alibaba.opensandbox.sandbox.domain.pool
  * @property lifecycleState Detailed pool lifecycle state.
  * @property idleCount Number of idle sandboxes in the store.
  * @property maxIdle Current max idle target visible to this pool.
- * @property failureCount Number of consecutive reconcile failures currently tracked.
- * @property backoffActive Whether reconcile create attempts are currently suppressed by degraded backoff or an active warmup rate-limit throttle.
+ * @property failureCount Number of consecutive warmup or commit failures currently tracked.
+ * @property backoffActive Compatibility field. Always false because fixed create admission replaces replenish backoff.
  * @property lastError Last error message if pool is DEGRADED or after failure; null otherwise.
  * @property inFlightOperations Number of pool operations currently in flight on this node.
  */

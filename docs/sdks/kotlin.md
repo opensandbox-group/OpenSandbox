@@ -240,7 +240,10 @@ SandboxPool pool = SandboxPool.builder()
     .poolName("demo-pool")
     .ownerId("worker-1")
     .maxIdle(3)
+    .warmupCreateQps(10)
+    .warmupConcurrency(128)
     .warmupReadyTimeout(Duration.ofSeconds(45))
+    .warmupHealthCheckInitialDelay(Duration.ofSeconds(2))
     .stateStore(new InMemoryPoolStateStore()) // single-node store
     .connectionConfig(config)
     .creationSpec(
@@ -262,6 +265,33 @@ try {
 }
 pool.shutdown(true);
 ```
+
+::: warning Staged warmup scheduling
+Kotlin reconciles on a fixed one-second cadence; `reconcileInterval(...)` has been
+removed. `warmupCreateQps(...)` (default `10`) caps new warmup creates admitted per
+tick, while `warmupConcurrency(...)` (default `128`) independently limits concurrent
+post-create health-check and prepare work. Built-in warmup creates make one HTTP attempt
+and do not honor the normal transport retry policy or a special HTTP-429 throttle. A
+custom `PooledSandboxCreator` must use `context.createConnectionConfig` and honor
+`context.skipHealthCheck` to preserve those semantics. Direct creates made by
+`acquire()` are unchanged.
+:::
+
+The post-create pipeline is staged:
+
+1. Create a sandbox without the builder's inline readiness loop.
+2. Wait `warmupHealthCheckInitialDelay` (default zero), then check readiness every
+   `warmupHealthCheckPollingInterval` (default `500 ms`) until
+   `warmupReadyTimeout` (default `30 s`). The deadline receives one final check.
+3. Run `warmupSandboxPreparer` once. If `warmupPostPrepareHealthCheck` is configured,
+   retry it at the same polling interval until
+   `warmupPostPrepareHealthCheckTimeout` (default `30 s`) without rerunning the
+   preparer.
+4. Renew the sandbox TTL and commit its ID to the idle buffer.
+
+`degradedThreshold` (default `3`) still controls the `HEALTHY → DEGRADED` diagnostic
+state, but Kotlin no longer pauses replenish with exponential backoff;
+`snapshot().backoffActive` is always `false`.
 
 ::: tip AcquirePolicy
 `AcquirePolicy` controls what happens when the idle buffer is empty **or** the first idle candidate fails its readiness check:
@@ -298,19 +328,20 @@ poolManager.destroy(
 - When a pool namespace is being destroyed or has been destroyed, `acquire()` throws `PoolDestroyedException` and does not fall back to direct create.
 - `maxIdle` is the target/cap for ready idle sandboxes. It is not a global limit on borrowed sandboxes or sandboxes created by `AcquirePolicy.DIRECT_CREATE`.
 - `ownerId` is the lock owner identity (node/process id), not the pool identifier. If omitted, SDK auto-generates a UUID-based default.
-- Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool.
+- Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool. Add `warmupPostPrepareHealthCheck(...)` when the prepared service needs a separate validation window; retries never rerun the preparer.
 :::
 
 ::: tip Observing warmup performance
 To trace the warmup path, enable `ConnectionConfig.builder().enableTracing(true)` and add an
 OpenTelemetry SDK + exporter to your application. Each warmup becomes one trace
-(`pool.warmup` root span plus `create` / `prepare` / `renew` / `commit` phases) with
+(`pool.warmup` root span plus `create` / `readiness_check` / `prepare` /
+`post_prepare_check` / `renew` / `commit` phases) with
 `trace_id` / `span_id` published to the SLF4J MDC, so you can look up a sandbox's
 warmup by searching logs for its `sandbox_id`. See [SDK Tracing (Pool Warmup)](/guides/sdk-tracing).
 :::
 
 ::: tip Distributed Deployment
-For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. Configure `primaryLockTtl` greater than `warmupReadyTimeout` plus expected warmup preparer time and buffer, otherwise leadership may expire while a node is creating idle sandboxes.
+For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. Kotlin renews the primary lease independently of staged warmup work, at an interval no greater than one third of `primaryLockTtl`; a task is discarded if the lease epoch changes before commit.
 
 In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass.
 
