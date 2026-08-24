@@ -188,7 +188,60 @@ func ptyWriteStdin(t *testing.T, conn *websocket.Conn, text string) {
 	require.NoError(t, conn.WriteMessage(websocket.BinaryMessage, frame))
 }
 
+type errorPTYCreateRunner struct {
+	codeExecutionRunner
+	attemptedSessionID string
+}
+
+func (r *errorPTYCreateRunner) CreatePTYSession(id, _, _ string) (runtime.PTYSession, error) {
+	r.attemptedSessionID = id
+	return nil, errors.New("forced PTY creation failure")
+}
+
 // --- Tests ---
+
+func TestCreatePTYSessionReturnsOnlyErrorWhenCreationFails(t *testing.T) {
+	underlying := runtime.NewController("", "")
+	runner := &errorPTYCreateRunner{codeExecutionRunner: underlying}
+	previous := codeRunner
+	codeRunner = runner
+	t.Cleanup(func() { codeRunner = previous })
+
+	req := httptest.NewRequest(http.MethodPost, "/pty", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	buildPTYRouter().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.True(t, json.Valid(rec.Body.Bytes()), "response must contain exactly one JSON value: %q", rec.Body.String())
+
+	var response model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Equal(t, model.ErrorCodeRuntimeError, response.Code)
+	require.Equal(t, "error creating pty session: forced PTY creation failure", response.Message)
+	require.NotContains(t, rec.Body.String(), "session_id")
+	require.NotEmpty(t, runner.attemptedSessionID)
+	require.Nil(t, underlying.GetPTYSession(runner.attemptedSessionID))
+}
+
+func TestCreatePTYSessionReturns201OnSuccess(t *testing.T) {
+	runner := runtime.NewController("", "")
+	previous := codeRunner
+	codeRunner = runner
+	t.Cleanup(func() { codeRunner = previous })
+
+	req := httptest.NewRequest(http.MethodPost, "/pty", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	buildPTYRouter().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	require.True(t, json.Valid(rec.Body.Bytes()))
+
+	var response model.CreatePTYSessionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.NotEmpty(t, response.SessionID)
+	require.NotNil(t, runner.GetPTYSession(response.SessionID))
+	require.NoError(t, runner.DeletePTYSession(response.SessionID))
+}
 
 func TestPTYWS_UnknownSessionReturns404(t *testing.T) {
 	srv := newPTYTestServer(t)
