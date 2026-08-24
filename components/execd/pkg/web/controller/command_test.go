@@ -20,7 +20,9 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 	"github.com/stretchr/testify/require"
@@ -55,6 +57,34 @@ func TestBuildExecuteCommandRequestForwardsEnvsBackground(t *testing.T) {
 
 	require.Equal(t, runtime.BackgroundCommand, execReq.Language)
 	require.True(t, reflect.DeepEqual(execReq.Envs, envs), "expected envs to be forwarded")
+}
+
+func TestRunCommandReturnsBeforeGracefulShutdownTimeoutAfterCompletion(t *testing.T) {
+	previousRunner := codeRunner
+	previousTimeout := flag.ApiGracefulShutdownTimeout
+	codeRunner = &fakeCodeRunner{
+		execute: func(request *runtime.ExecuteCodeRequest) error {
+			request.Hooks.OnExecuteComplete(time.Millisecond)
+			return nil
+		},
+	}
+	flag.ApiGracefulShutdownTimeout = 200 * time.Millisecond
+	t.Cleanup(func() {
+		codeRunner = previousRunner
+		flag.ApiGracefulShutdownTimeout = previousTimeout
+	})
+
+	body := []byte(`{"command":"true","timeout":0}`)
+	ctx, w := newTestContext(http.MethodPost, "/command", body)
+	ctrl := NewCodeInterpretingController(ctx)
+
+	start := time.Now()
+	ctrl.RunCommand()
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
+	require.Less(t, elapsed, flag.ApiGracefulShutdownTimeout/2)
 }
 
 func setupCommandController(method, path string) (*CodeInterpretingController, *httptest.ResponseRecorder) {
