@@ -71,7 +71,7 @@ seccomp_profile = ""
 mode = "direct"
 
 [egress]
-image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.6"
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.7"
 mode = "dns"
 readiness_timeout_seconds = 30.0
 
