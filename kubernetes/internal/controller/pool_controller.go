@@ -535,8 +535,53 @@ func (r *PoolReconciler) doAllocate(ctx context.Context, pool *sandboxv1alpha1.P
 	// 1. Compute latest allocated pods per sandbox (merge current + newly allocated).
 	toSyncMap := r.getLatestAllocated(ctx, pool, batchSandboxes, toAllocate)
 
-	// 2. Concurrently sync each sandbox's Allocated annotation (AddFinalizer is called inside SyncSandboxAllocation).
-	return r.syncSandboxConcurrently(ctx, batchSandboxes, toSyncMap, r.Allocator.SyncSandboxAllocation, "allocated")
+	// 2. Label newly allocated pods before publishing them through the sandbox allocation annotation.
+	// BatchSandbox reconciliation can start work as soon as that annotation is visible.
+	newPodAllocation := make(map[string]string)
+	for sandboxName, podNames := range toAllocate {
+		if _, willSync := toSyncMap[sandboxName]; !willSync {
+			continue
+		}
+		for _, podName := range podNames {
+			newPodAllocation[podName] = sandboxName
+		}
+	}
+	newlyAllocatedPods := make([]*corev1.Pod, 0, len(newPodAllocation))
+	missingPods := make(map[string]struct{}, len(newPodAllocation))
+	for podName := range newPodAllocation {
+		missingPods[podName] = struct{}{}
+	}
+	for _, pod := range pods {
+		if _, newlyAllocated := newPodAllocation[pod.Name]; newlyAllocated {
+			newlyAllocatedPods = append(newlyAllocatedPods, pod)
+			delete(missingPods, pod.Name)
+		}
+	}
+	if len(missingPods) > 0 {
+		missingPodNames := make([]string, 0, len(missingPods))
+		for podName := range missingPods {
+			missingPodNames = append(missingPodNames, podName)
+		}
+		sort.Strings(missingPodNames)
+		return fmt.Errorf("newly allocated pool pods not found: %v", missingPodNames)
+	}
+	if err := r.syncPodSandboxLabels(ctx, newlyAllocatedPods, newPodAllocation); err != nil {
+		return err
+	}
+
+	// 3. Concurrently sync each sandbox's Allocated annotation (AddFinalizer is called inside SyncSandboxAllocation).
+	if err := r.syncSandboxConcurrently(ctx, batchSandboxes, toSyncMap, r.Allocator.SyncSandboxAllocation, "allocated"); err != nil {
+		// SyncSandboxAllocation rolls its in-memory entry back when annotation
+		// publication fails. Converge labels to that final store view so a Pod
+		// never retains identity for an allocation that was not published, while
+		// preserving labels for concurrently successful publications.
+		finalAllocation, getErr := r.Allocator.GetPoolAllocation(ctx, pool)
+		if getErr != nil {
+			return gerrors.Join(err, fmt.Errorf("failed to get allocation for label rollback: %w", getErr))
+		}
+		return gerrors.Join(err, r.syncPodSandboxLabels(ctx, pods, finalAllocation))
+	}
+	return nil
 }
 
 // getLatestAllocated computes the latest allocated pods for each sandbox by merging current allocation with new pods to allocate.
@@ -810,6 +855,9 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 	if err != nil {
 		return nil, err
 	}
+	if err := r.syncPodSandboxLabels(ctx, pods, latestAllocation); err != nil {
+		return nil, err
+	}
 	idlePods := make([]string, 0)
 	for _, pod := range pods {
 		if _, ok := latestAllocation[pod.Name]; !ok {
@@ -825,6 +873,61 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 
 	log.Info("Schedule result", "pool", pool.Name, "toDeletePods", toDeletePods, "supplyCnt", allocAction.PodSupplement)
 	return result, nil
+}
+
+// syncPodSandboxLabels converges pool pod identity labels to the allocator's
+// final allocation view without changing allocation or scheduling decisions.
+func (r *PoolReconciler) syncPodSandboxLabels(ctx context.Context, pods []*corev1.Pod, podAllocation map[string]string) error {
+	errCh := make(chan error, len(pods))
+	sem := make(chan struct{}, syncSandboxAllocConcurrency)
+	var wg sync.WaitGroup
+
+	for _, pod := range pods {
+		sandboxName, allocated := podAllocation[pod.Name]
+		currentSandbox, hasLabel := pod.Labels[LabelBatchSandboxNameKey]
+		if (allocated && hasLabel && currentSandbox == sandboxName) || (!allocated && !hasLabel) {
+			continue
+		}
+
+		// Acquire before starting the goroutine so a large reconciliation does
+		// not create one blocked goroutine per Pod.
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(pod *corev1.Pod, sandboxName string, allocated bool) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			updated := pod.DeepCopy()
+			if allocated {
+				if updated.Labels == nil {
+					updated.Labels = make(map[string]string)
+				}
+				updated.Labels[LabelBatchSandboxNameKey] = sandboxName
+			} else {
+				delete(updated.Labels, LabelBatchSandboxNameKey)
+			}
+			if err := r.Patch(ctx, updated, client.MergeFrom(pod)); err != nil {
+				// A disappearing idle/released Pod needs no cleanup. A newly
+				// allocated Pod disappearing before its identity is written must
+				// stop allocation publication.
+				if !errors.IsNotFound(err) || allocated {
+					errCh <- fmt.Errorf("failed to sync sandbox label on pod %s: %w", pod.Name, err)
+				}
+				return
+			}
+			// Keep this reconcile's list snapshot current so the final convergence
+			// pass does not repeat the same patch.
+			pod.Labels = updated.Labels
+		}(pod, sandboxName, allocated)
+	}
+
+	wg.Wait()
+	close(errCh)
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return gerrors.Join(errs...)
 }
 
 func (r *PoolReconciler) updatePool(ctx context.Context, pool *sandboxv1alpha1.Pool, pods []*corev1.Pod, idlePods []string) (*UpdateResult, error) {

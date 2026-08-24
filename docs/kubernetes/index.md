@@ -34,6 +34,13 @@ The Pool custom resource maintains a pool of pre-warmed compute resources to ena
 - Automatic resource allocation and deallocation based on demand
 - Real-time status monitoring showing total, allocated, and available resources
 
+When a warm Pod is allocated, the controller labels it with
+`batch-sandbox.sandbox.opensandbox.io/name=<BatchSandbox name>` before it
+publishes the allocation annotation. The same label is already present on
+non-pooled Pods. Operators and node-local telemetry can therefore use one stable
+BatchSandbox identity in either lifecycle mode. The controller removes the
+label when a warm Pod returns to the idle pool, before it can be reused.
+
 ### Pod Eviction
 Pool supports graceful pod eviction for scenarios like node maintenance or resource reclamation:
 
