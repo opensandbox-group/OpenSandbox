@@ -20,6 +20,8 @@ import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.transport.RetryInterceptor
 import com.alibaba.opensandbox.sandbox.transport.RetryPolicy
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
 
@@ -42,6 +44,47 @@ class HttpClientProviderTest {
                 assertFalse(provider.sseClient.retryOnConnectionFailure)
                 assertFalse(provider.sseClient.interceptors.any { it is RetryInterceptor })
             }
+        }
+    }
+
+    @Test
+    fun `staged warmup health client is single attempt and shares transport resources`() {
+        HttpClientProvider(ConnectionConfig.builder().build().copyForStagedWarmup()).use { provider ->
+            assertTrue(provider.httpClient.interceptors.any { it is RetryInterceptor })
+            assertFalse(provider.singleAttemptClient.retryOnConnectionFailure)
+            assertFalse(provider.singleAttemptClient.interceptors.any { it is RetryInterceptor })
+            assertSame(provider.httpClient.dispatcher, provider.singleAttemptClient.dispatcher)
+            assertSame(provider.httpClient.connectionPool, provider.singleAttemptClient.connectionPool)
+        }
+    }
+
+    @Test
+    fun `single attempt config disables policy retry and OkHttp recovery without changing public disabled policy`() {
+        val retrying =
+            ConnectionConfig.builder()
+                .retryPolicy(RetryPolicy(retryableStatusCodesNonIdempotent = setOf(429)))
+                .build()
+        HttpClientProvider(retrying).use { provider ->
+            assertFalse(provider.authenticatedClient.retryOnConnectionFailure)
+            assertTrue(provider.authenticatedClient.interceptors.any { it is RetryInterceptor })
+        }
+        HttpClientProvider(retrying.copyForSingleAttempt()).use { provider ->
+            assertFalse(provider.authenticatedClient.retryOnConnectionFailure)
+            assertFalse(provider.authenticatedClient.interceptors.any { it is RetryInterceptor })
+        }
+
+        val publicDisabled =
+            ConnectionConfig.builder()
+                .retryPolicy(RetryPolicy.disabled())
+                .build()
+
+        HttpClientProvider(publicDisabled).use { provider ->
+            assertTrue(provider.authenticatedClient.retryOnConnectionFailure)
+            assertFalse(provider.authenticatedClient.interceptors.any { it is RetryInterceptor })
+        }
+        HttpClientProvider(publicDisabled.copyForSingleAttempt()).use { provider ->
+            assertFalse(provider.authenticatedClient.retryOnConnectionFailure)
+            assertFalse(provider.authenticatedClient.interceptors.any { it is RetryInterceptor })
         }
     }
 }

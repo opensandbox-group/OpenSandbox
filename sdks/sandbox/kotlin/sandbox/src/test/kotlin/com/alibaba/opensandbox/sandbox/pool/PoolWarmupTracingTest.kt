@@ -100,13 +100,14 @@ class PoolWarmupTracingTest {
                             every { sandbox.id } returns "warmup-trace-1"
                         }
                     },
-                ).warmupSkipHealthCheck()
+                ).warmupHealthCheck { true }
                 .warmupSandboxPreparer(
                     SandboxPreparer {
                         capturedTraceId.set(MDC.get(PoolTracer.MDC_TRACE_ID))
                         capturedSpanId.set(MDC.get(PoolTracer.MDC_SPAN_ID))
                     },
-                ).reconcileInterval(Duration.ofSeconds(30))
+                )
+                .warmupPostPrepareHealthCheck { true }
                 .drainTimeout(Duration.ofSeconds(2))
                 .build()
 
@@ -118,6 +119,7 @@ class PoolWarmupTracingTest {
             assertEquals("trace-pool", root.attributes[AttributeKey.stringKey(PoolTracer.ATTR_POOL_NAME)])
             assertEquals("trace-owner", root.attributes[AttributeKey.stringKey(PoolTracer.ATTR_POOL_OWNER)])
             assertEquals(1L, root.attributes[AttributeKey.longKey(PoolTracer.ATTR_POOL_RUN_GENERATION)])
+            assertEquals(1L, root.attributes[AttributeKey.longKey(PoolTracer.ATTR_POOL_LEADER_EPOCH)])
             assertEquals("warmup-trace-1", root.attributes[AttributeKey.stringKey(PoolTracer.ATTR_SANDBOX_ID)])
             assertEquals("ubuntu:22.04", root.attributes[AttributeKey.stringKey(PoolTracer.ATTR_SANDBOX_IMAGE)])
             assertEquals("success", root.attributes[AttributeKey.stringKey(PoolTracer.ATTR_RESULT)])
@@ -128,7 +130,9 @@ class PoolWarmupTracingTest {
 
             val names = spans.map { it.name }.toSet()
             assertTrue(names.contains(PoolTracer.WARMUP_CREATE_SPAN))
+            assertTrue(names.contains(PoolTracer.WARMUP_READINESS_CHECK_SPAN))
             assertTrue(names.contains(PoolTracer.WARMUP_PREPARE_SPAN))
+            assertTrue(names.contains(PoolTracer.WARMUP_POST_PREPARE_CHECK_SPAN))
             assertTrue(names.contains(PoolTracer.WARMUP_RENEW_SPAN))
             assertTrue(names.contains(PoolTracer.WARMUP_COMMIT_SPAN))
 
@@ -139,11 +143,15 @@ class PoolWarmupTracingTest {
                 assertEquals(root.traceId, span.traceId, "all spans must share the warmup trace id")
             }
             val create = spans.single { it.name == PoolTracer.WARMUP_CREATE_SPAN }
+            val readiness = spans.single { it.name == PoolTracer.WARMUP_READINESS_CHECK_SPAN }
             val prepare = spans.single { it.name == PoolTracer.WARMUP_PREPARE_SPAN }
+            val postPrepare = spans.single { it.name == PoolTracer.WARMUP_POST_PREPARE_CHECK_SPAN }
             val renew = spans.single { it.name == PoolTracer.WARMUP_RENEW_SPAN }
             val commit = spans.single { it.name == PoolTracer.WARMUP_COMMIT_SPAN }
             assertEquals(root.spanId, create.parentSpanId)
+            assertEquals(root.spanId, readiness.parentSpanId)
             assertEquals(root.spanId, prepare.parentSpanId)
+            assertEquals(root.spanId, postPrepare.parentSpanId)
             assertEquals(root.spanId, renew.parentSpanId)
             assertEquals(root.spanId, commit.parentSpanId)
 
@@ -184,13 +192,13 @@ class PoolWarmupTracingTest {
                         throw RuntimeException("create boom")
                     },
                 ).warmupSkipHealthCheck()
-                .reconcileInterval(Duration.ofSeconds(30))
                 .drainTimeout(Duration.ofMillis(200))
                 .build()
 
         pool.start()
         try {
             awaitCondition { pool.snapshot().failureCount >= 1 }
+            awaitCondition { spanExporter.finishedSpanItems.any { it.name == PoolTracer.WARMUP_ROOT_SPAN } }
             val spans = spanExporter.finishedSpanItems
             val root = spans.single { it.name == PoolTracer.WARMUP_ROOT_SPAN }
             assertEquals("failure", root.attributes[AttributeKey.stringKey(PoolTracer.ATTR_RESULT)])
@@ -229,7 +237,7 @@ class PoolWarmupTracingTest {
                     SandboxPreparer {
                         store.failRenewPrimaryLock = true
                     },
-                ).reconcileInterval(Duration.ofSeconds(30))
+                )
                 .drainTimeout(Duration.ofSeconds(2))
                 .build()
 
@@ -273,7 +281,6 @@ class PoolWarmupTracingTest {
                         }
                     },
                 ).warmupSkipHealthCheck()
-                .reconcileInterval(Duration.ofSeconds(30))
                 .drainTimeout(Duration.ofSeconds(2))
                 .build()
 

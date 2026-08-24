@@ -36,9 +36,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Verifies the pool-level shared connection pool: created by default,
- * reused by warmup and acquire paths, evicted on shutdown, and never created
- * when the user provides their own pool.
+ * Verifies the pool-level shared connection pool: created by default for foreground paths,
+ * excluded from default staged warmup, evicted on shutdown, and never created when the user
+ * provides their own pool.
  */
 class SandboxPoolSharedConnectionTest {
     private lateinit var lifecycle: MockWebServer
@@ -114,7 +114,6 @@ class SandboxPoolSharedConnectionTest {
                     .entrypoint("tail", "-f", "/dev/null")
                     .build(),
             )
-            .reconcileInterval(Duration.ofMillis(100))
             .idleTimeout(Duration.ofMinutes(30))
             .acquireSkipHealthCheck(false)
             .build()
@@ -147,27 +146,35 @@ class SandboxPoolSharedConnectionTest {
     }
 
     @Test
-    fun `warmup and acquire reuse the shared pool instead of fresh connections`() {
+    fun `default warmup owns per-sandbox pools while acquire uses the shared pool`() {
         val pool = buildPool(maxIdle = 4, warmupConcurrency = 2)
         val shared = pool.sharedConnectionPoolForTests()!!
         pool.start()
         try {
             waitForIdle(pool, 4)
-            // 4 sandboxes were created over HTTP; with a shared pool the
-            // connections stay in the pool instead of being opened fresh per
-            // sandbox. The bound is loose to stay robust on all platforms.
-            assertTrue(shared.idleConnectionCount() > 0, "shared pool should hold idle connections after warmup")
-            assertTrue(
-                shared.connectionCount() <= 6,
-                "expected connection reuse, got ${shared.connectionCount()} connections",
-            )
+            assertEquals(0, shared.connectionCount(), "default warmup must not use the foreground shared pool")
 
-            // Acquire reuses the same shared pool.
+            // The acquired sandbox is reconstructed with the foreground shared pool.
             val sb = pool.acquire(Duration.ofMinutes(10))
             assertTrue(sb.id.startsWith("sbx-"))
+            assertTrue(shared.idleConnectionCount() > 0, "acquire should populate the foreground shared pool")
             sb.kill()
         } finally {
             pool.shutdown(graceful = false)
+        }
+    }
+
+    @Test
+    fun `warmup honors an explicitly user-provided pool`() {
+        val userPool = ConnectionPool(8, 1, TimeUnit.MINUTES)
+        val pool = buildPool(userPool = userPool, maxIdle = 2, warmupConcurrency = 2)
+        pool.start()
+        try {
+            waitForIdle(pool, 2)
+            assertTrue(userPool.idleConnectionCount() > 0, "explicit user pool should remain in warmup config")
+        } finally {
+            pool.shutdown(graceful = false)
+            userPool.evictAll()
         }
     }
 
@@ -178,6 +185,7 @@ class SandboxPoolSharedConnectionTest {
         pool.start()
         try {
             waitForIdle(pool, 2)
+            pool.acquire(Duration.ofMinutes(10)).close()
             assertTrue(shared.idleConnectionCount() > 0)
         } finally {
             pool.shutdown(graceful = false)

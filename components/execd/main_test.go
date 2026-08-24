@@ -20,14 +20,129 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
 
 type fakeIsolatedRunnerCloser struct {
 	closeFn func() error
+}
+
+func TestStartLifecycleReportsStartupStatus(t *testing.T) {
+	tests := []struct {
+		name           string
+		timeoutSeconds int
+		helperResult   string
+		wantStatus     string
+		wantError      bool
+	}{
+		{name: "default timeout", helperResult: "success", wantStatus: "running 60\ndone 0\n"},
+		{name: "hook failure", timeoutSeconds: 2, helperResult: "failure", wantStatus: "running 2\ndone 1\n", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			statusFile := filepath.Join(t.TempDir(), "lifecycle-status")
+			if err := os.WriteFile(statusFile, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &lifecycle.Config{PreStart: &lifecycle.Hook{
+				Command: []string{
+					os.Args[0], "-test.run=^TestLifecycleStartupCommandHelper$", "--", test.helperResult,
+				},
+				TimeoutSeconds: test.timeoutSeconds,
+			}}
+
+			manager, err := startLifecycle(context.Background(), cfg, statusFile)
+			if (err != nil) != test.wantError {
+				t.Fatalf("startLifecycle() error = %v, wantError %v", err, test.wantError)
+			}
+			if manager != nil {
+				manager.Stop()
+			}
+			raw, err := os.ReadFile(statusFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(raw); got != test.wantStatus {
+				t.Fatalf("lifecycle status = %q, want %q", got, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestLifecycleStartupCommandHelper(*testing.T) {
+	switch os.Args[len(os.Args)-1] {
+	case "failure":
+		os.Exit(2)
+	case "wait":
+		time.Sleep(time.Hour)
+	}
+}
+
+func TestStartLifecycleCancellationStatus(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		removeStatusFile bool
+	}{
+		{name: "reported shutdown"},
+		{name: "status failure", removeStatusFile: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			statusFile := filepath.Join(t.TempDir(), "lifecycle-status")
+			if err := os.WriteFile(statusFile, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cfg := &lifecycle.Config{PreStart: &lifecycle.Hook{Command: []string{
+				os.Args[0], "-test.run=^TestLifecycleStartupCommandHelper$", "--", "wait",
+			}}}
+			result := make(chan error, 1)
+			go func() {
+				_, err := startLifecycle(ctx, cfg, statusFile)
+				result <- err
+			}()
+
+			deadline := time.After(2 * time.Second)
+			for {
+				raw, err := os.ReadFile(statusFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(raw) > 0 {
+					break
+				}
+				select {
+				case <-deadline:
+					t.Fatal("preStart did not report running status")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if test.removeStatusFile {
+				if err := os.Remove(statusFile); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cancel()
+			select {
+			case err := <-result:
+				if test.removeStatusFile {
+					if errors.Is(err, errStartupShutdown) || !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("startLifecycle() error = %v, want status-file failure", err)
+					}
+				} else if !errors.Is(err, errStartupShutdown) {
+					t.Fatalf("startLifecycle() error = %v, want %v", err, errStartupShutdown)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("startLifecycle did not return after cancellation")
+			}
+		})
+	}
 }
 
 func (f *fakeIsolatedRunnerCloser) Close() error {
@@ -165,6 +280,7 @@ func TestServeHTTPUntilShutdownReturnsAfterContextCancellation(t *testing.T) {
 			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusNoContent)
 			}),
+			func() error { return nil },
 		)
 	}()
 
@@ -184,5 +300,53 @@ func TestServeHTTPUntilShutdownReturnsAfterContextCancellation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("HTTP server did not stop after shutdown cancellation")
+	}
+}
+
+func TestServeHTTPUntilShutdownServesDuringStartup(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	startupStarted := make(chan struct{})
+	finishStartup := make(chan struct{})
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serveHTTPUntilShutdown(
+			ctx,
+			listener,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}),
+			func() error {
+				close(startupStarted)
+				<-finishStartup
+				return nil
+			},
+		)
+	}()
+
+	<-startupStarted
+	response, err := http.Get("http://" + listener.Addr().String())
+	if err != nil {
+		close(finishStartup)
+		cancel()
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+
+	close(finishStartup)
+	cancel()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP server did not stop after startup completed")
 	}
 }

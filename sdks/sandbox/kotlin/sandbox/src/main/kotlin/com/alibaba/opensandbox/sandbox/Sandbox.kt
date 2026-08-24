@@ -193,6 +193,7 @@ class Sandbox internal constructor(
          *
          * @param operationName Operation name for logging
          * @param connectionConfig Connection configuration
+         * @param initializationConnectionConfig Optional configuration used only by [initAction]
          * @param healthCheck Custom health check function
          * @param timeout Timeout for readiness check
          * @param healthCheckPollingInterval Polling interval for health check
@@ -203,6 +204,7 @@ class Sandbox internal constructor(
         private fun initializeSandbox(
             operationName: String,
             connectionConfig: ConnectionConfig,
+            initializationConnectionConfig: ConnectionConfig? = null,
             healthCheck: ((Sandbox) -> Boolean)?,
             timeout: Duration,
             healthCheckPollingInterval: Duration,
@@ -214,12 +216,21 @@ class Sandbox internal constructor(
 
             val httpClientProvider = HttpClientProvider(connectionConfig)
             val factory = AdapterFactory(httpClientProvider)
+            val initializationProvider = initializationConnectionConfig?.let(::HttpClientProvider)
+            val initializationFactory = initializationProvider?.let(::AdapterFactory) ?: factory
             var initResult: InitializationResult? = null
             var sandboxService: Sandboxes? = null
+            var initializationSandboxService: Sandboxes? = null
 
             try {
-                sandboxService = factory.createSandboxes()
-                initResult = initAction(sandboxService)
+                initializationSandboxService = initializationFactory.createSandboxes()
+                initResult = initAction(initializationSandboxService)
+                sandboxService =
+                    if (initializationProvider == null) {
+                        initializationSandboxService
+                    } else {
+                        factory.createSandboxes()
+                    }
 
                 val sandboxId = initResult.id
 
@@ -276,13 +287,14 @@ class Sandbox internal constructor(
                 // usable by restoring the flag only after remote/local resources are released.
                 val restoreInterrupt = Thread.interrupted() || failure.isCausedByInterruption()
                 try {
-                    if (initResult is InitializationResult.NewSandbox && sandboxService != null) {
+                    val cleanupSandboxService = sandboxService ?: initializationSandboxService
+                    if (initResult is InitializationResult.NewSandbox && cleanupSandboxService != null) {
                         try {
                             logger.warn(
                                 "Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {}",
                                 initResult.id,
                             )
-                            sandboxService.killSandbox(initResult.id)
+                            cleanupSandboxService.killSandbox(initResult.id)
                         } catch (cleanupFailure: Throwable) {
                             logger.error(
                                 "Failed to clean up sandbox {} after creation failure",
@@ -314,6 +326,12 @@ class Sandbox internal constructor(
                             cause = failure,
                         )
                     }
+                }
+            } finally {
+                try {
+                    initializationProvider?.close()
+                } catch (cleanupFailure: Throwable) {
+                    logger.warn("Failed to close initialization HTTP client", cleanupFailure)
                 }
             }
         }
@@ -353,6 +371,7 @@ class Sandbox internal constructor(
             credentialProxy: CredentialProxyConfig?,
             secureAccess: Boolean,
             connectionConfig: ConnectionConfig,
+            initializationConnectionConfig: ConnectionConfig? = null,
             healthCheck: ((Sandbox) -> Boolean)? = null,
             healthCheckPollingInterval: Duration,
             extensions: Map<String, String>,
@@ -369,6 +388,7 @@ class Sandbox internal constructor(
                     initializeSandbox(
                         operationName = "create sandbox with startup source $startupSource (timeout: $timeoutLabel)",
                         connectionConfig = connectionConfig,
+                        initializationConnectionConfig = initializationConnectionConfig,
                         healthCheck = healthCheck,
                         timeout = readyTimeout,
                         healthCheckPollingInterval = healthCheckPollingInterval,
@@ -1016,6 +1036,7 @@ class Sandbox internal constructor(
          * Connection config
          */
         private var connectionConfig: ConnectionConfig? = null
+        private var initializationConnectionConfig: ConnectionConfig? = null
 
         /**
          * Sets the sandbox image for the sandbox.
@@ -1443,6 +1464,19 @@ class Sandbox internal constructor(
         }
 
         /**
+         * Uses a separate transport only for the lifecycle create request.
+         *
+         * The returned [Sandbox] retains [connectionConfig] configured through
+         * [connectionConfig]. This is primarily intended for pooled custom creators that use
+         * [com.alibaba.opensandbox.sandbox.domain.pool.PooledSandboxCreateContext.createConnectionConfig]
+         * to disable create retries without changing subsequent sandbox operations.
+         */
+        fun initializationConnectionConfig(connectionConfig: ConnectionConfig): Builder {
+            this.initializationConnectionConfig = connectionConfig
+            return this
+        }
+
+        /**
          * Creates and starts the sandbox with the configured parameters.
          *
          * This method performs the following steps:
@@ -1482,6 +1516,7 @@ class Sandbox internal constructor(
                 secureAccess = secureAccess,
                 extensions = extensions,
                 connectionConfig = connectionConfig ?: ConnectionConfig.builder().build(),
+                initializationConnectionConfig = initializationConnectionConfig,
                 healthCheckPollingInterval = healthCheckPollingInterval,
                 healthCheck = healthCheck,
                 skipHealthCheck = skipHealthCheck,

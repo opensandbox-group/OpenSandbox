@@ -28,9 +28,9 @@ import java.util.concurrent.TimeUnit
  *
  * Tracing is opt-in via [ConnectionConfig.enableTracing]. When enabled, each
  * warmup task produces one trace rooted at a [WARMUP_ROOT_SPAN] span with
- * per-phase child spans (create / prepare / renew / commit). The root span
- * starts at task submission time so queue-waiting time is visible as the gap
- * before the first child span.
+ * per-phase child spans (create / readiness / prepare / post-prepare check /
+ * renew / commit). The root span starts at task submission time so
+ * queue-waiting time is visible as the gap before the first child span.
  *
  * While a warmup trace is current, `trace_id` and `span_id` are published to
  * the SLF4J [MDC] so application logs emitted by the pool (which already
@@ -59,6 +59,7 @@ internal class PoolTracer private constructor(
         poolName: String,
         ownerId: String,
         runGeneration: Long,
+        leaderEpoch: Long,
         submittedEpochNanos: Long,
     ): WarmupTrace? {
         val t = tracer ?: return null
@@ -67,6 +68,7 @@ internal class PoolTracer private constructor(
                 .setAttribute(ATTR_POOL_NAME, poolName)
                 .setAttribute(ATTR_POOL_OWNER, ownerId)
                 .setAttribute(ATTR_POOL_RUN_GENERATION, runGeneration)
+                .setAttribute(ATTR_POOL_LEADER_EPOCH, leaderEpoch)
                 .setStartTimestamp(submittedEpochNanos, TimeUnit.NANOSECONDS)
                 .startSpan()
         return WarmupTrace(root)
@@ -94,7 +96,9 @@ internal class PoolTracer private constructor(
     companion object {
         const val WARMUP_ROOT_SPAN = "pool.warmup"
         const val WARMUP_CREATE_SPAN = "pool.warmup.create"
+        const val WARMUP_READINESS_CHECK_SPAN = "pool.warmup.readiness_check"
         const val WARMUP_PREPARE_SPAN = "pool.warmup.prepare"
+        const val WARMUP_POST_PREPARE_CHECK_SPAN = "pool.warmup.post_prepare_check"
         const val WARMUP_RENEW_SPAN = "pool.warmup.renew"
         const val WARMUP_COMMIT_SPAN = "pool.warmup.commit"
 
@@ -104,6 +108,7 @@ internal class PoolTracer private constructor(
         const val ATTR_POOL_NAME = "pool.name"
         const val ATTR_POOL_OWNER = "pool.owner"
         const val ATTR_POOL_RUN_GENERATION = "pool.run.generation"
+        const val ATTR_POOL_LEADER_EPOCH = "pool.leader.epoch"
         const val ATTR_SANDBOX_ID = "sandbox.id"
         const val ATTR_SANDBOX_IMAGE = "sandbox.image"
         const val ATTR_RESULT = "result"

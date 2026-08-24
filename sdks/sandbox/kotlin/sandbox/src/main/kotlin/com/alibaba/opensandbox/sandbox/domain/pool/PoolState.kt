@@ -29,7 +29,7 @@ enum class PoolState {
     /** Pool is operating normally. */
     HEALTHY,
 
-    /** Replenish is failing; backoff applied; acquire still served from existing idle. */
+    /** Replenish is failing; acquire is still served from existing idle. */
     DEGRADED,
 
     /** Graceful shutdown in progress; no new replenish, waiting for in-flight ops. */

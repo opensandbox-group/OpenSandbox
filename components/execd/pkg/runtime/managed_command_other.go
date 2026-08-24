@@ -14,22 +14,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Init mode is Linux-only (OSEP-0018). Off Linux, execd keeps today's
-// behavior; the managedProcess fallback for Unix platforms lives in
-// initmode_other_unix.go.
-
 package runtime
 
-import "github.com/alibaba/opensandbox/execd/pkg/log"
+import (
+	"os/exec"
+	"sync/atomic"
+)
 
-// PrepareInitMode is unsupported off Linux; execd keeps today's behavior.
-func PrepareInitMode() func([]string) error {
-	log.Warn("init mode is unsupported on this platform; continuing without init duties")
-	return func([]string) error { return nil }
+type directManagedCommand struct {
+	cmd    *exec.Cmd
+	exited atomic.Bool
 }
 
-// InitModeReport reports the init mode actually in effect for the
-// capabilities endpoint.
-func InitModeReport() (mode string, signalShield bool) {
-	return "none", false
+func (c *directManagedCommand) Wait() error {
+	err := c.cmd.Wait()
+	c.exited.Store(true)
+	return err
+}
+
+func (c *directManagedCommand) ExitCode() int {
+	if c.cmd.ProcessState == nil {
+		return -1
+	}
+	return c.cmd.ProcessState.ExitCode()
+}
+
+func (c *directManagedCommand) Cancel(cancel func()) {
+	if !c.exited.Load() {
+		cancel()
+	}
+}
+
+func startManagedCommand(cmd *exec.Cmd) (managedCommand, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &directManagedCommand{cmd: cmd}, nil
 }

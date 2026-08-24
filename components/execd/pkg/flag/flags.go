@@ -48,4 +48,8 @@ var (
 	// subreaper) is decided by bootstrap.sh via EXECD_INIT, which passes
 	// this flag when it execs into execd.
 	InitMode bool
+
+	// LifecycleStartupStatusFile is an internal bootstrap synchronization file.
+	// Execd writes the preStart result after its HTTP server is available.
+	LifecycleStartupStatusFile string
 )

@@ -13,6 +13,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/pelletier/go-toml/v2 v2.2.2
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/shirou/gopsutil v3.21.11+incompatible
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.43.0
