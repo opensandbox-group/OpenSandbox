@@ -44,6 +44,7 @@ from opensandbox.models.sandboxes import (
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxLifecycle,
     SandboxMetrics,
     SandboxRenewResponse,
     SnapshotInfo,
@@ -513,6 +514,7 @@ class Sandbox:
         health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
         health_check_polling_interval: timedelta = timedelta(milliseconds=200),
         skip_health_check: bool = False,
+        lifecycle: SandboxLifecycle | None = None,
     ) -> "Sandbox":
         """
         Create a new sandbox instance with the specified configuration.
@@ -536,6 +538,7 @@ class Sandbox:
             health_check: Custom async health check function
             health_check_polling_interval: Time between health check attempts
             skip_health_check: If True, do NOT wait for sandbox readiness/health; returned instance may not be ready yet.
+            lifecycle: Optional pre-start and periodic lifecycle hooks.
 
         Returns:
             Fully configured and ready Sandbox instance
@@ -587,6 +590,7 @@ class Sandbox:
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
+                lifecycle=lifecycle,
             )
             sandbox_id = response.id
 

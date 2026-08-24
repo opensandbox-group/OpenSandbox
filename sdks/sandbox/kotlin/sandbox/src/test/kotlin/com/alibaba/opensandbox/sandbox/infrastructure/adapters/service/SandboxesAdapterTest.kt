@@ -20,12 +20,15 @@ import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.LifecycleHook
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PeriodicLifecycleHook
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
@@ -121,6 +124,22 @@ class SandboxesAdapterTest {
                 secureAccess = true,
                 snapshotId = null,
                 credentialProxy = CredentialProxyConfig.enabled(),
+                lifecycle =
+                    SandboxLifecycle.builder()
+                        .preStart(
+                            LifecycleHook.builder()
+                                .command("/opt/hooks/restore.sh")
+                                .timeoutSeconds(30)
+                                .build(),
+                        )
+                        .periodic(
+                            PeriodicLifecycleHook.builder()
+                                .name("checkpoint")
+                                .schedule("*/5 * * * *")
+                                .command("/opt/hooks/checkpoint.sh")
+                                .build(),
+                        )
+                        .build(),
             )
 
         // Verify request
@@ -140,6 +159,15 @@ class SandboxesAdapterTest {
         val gotDefaultAction = gotNetworkPolicy!!["defaultAction"]
         assertNotNull(gotDefaultAction, "defaultAction should be present in networkPolicy")
         assertEquals("deny", gotDefaultAction!!.jsonPrimitive.content)
+        val gotLifecycle = payload["lifecycle"]!!.jsonObject
+        assertEquals(
+            "/opt/hooks/restore.sh",
+            gotLifecycle["preStart"]!!.jsonObject["command"]!!.jsonArray[0].jsonPrimitive.content,
+        )
+        assertEquals(
+            "checkpoint",
+            gotLifecycle["periodic"]!!.jsonArray[0].jsonObject["name"]!!.jsonPrimitive.content,
+        )
         val egressArray = gotNetworkPolicy["egress"]!!.jsonArray
         assertEquals(1, egressArray.size)
         val rule = egressArray[0].jsonObject

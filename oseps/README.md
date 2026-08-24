@@ -27,3 +27,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0019](0019-node-agent-sandbox-collection.md)             |      Node Agent for Node-Level Sandbox Collection                         | implementing  |  2026-08-11  |
 | [OSEP-0020](0020-sandbox-lifecycle-hooks.md)                   |      Sandbox Lifecycle Hooks                                             | implementing  |  2026-08-21  |
 | [OSEP-0021](0021-scalable-asynchronous-client-side-pool-warmup.md) |      Scalable Asynchronous Client-Side Pool Warmup                      |     draft     |  2026-08-19  |
+| [OSEP-0022](0022-multi-sandbox-egress-control-plane.md)        |      Multi-Sandbox Egress Control Plane                                  | implementing  |  2026-08-21  |

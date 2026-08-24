@@ -14,6 +14,8 @@
 
 """Shared constants for sandbox services."""
 
+from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
+
 RESERVED_LABEL_PREFIX = "opensandbox.io/"
 
 SANDBOX_ID_LABEL = "opensandbox.io/id"
@@ -176,6 +178,7 @@ __all__ = [
     "ALLOWED_EGRESS_ENV_VARS",
     "OPENSANDBOX_RUNTIME_VOLUME_NAME",
     "OPENSANDBOX_RUNTIME_MOUNT_PATH",
+    "OPENSANDBOX_LIFECYCLE",
     "SandboxErrorCodes",
     "SnapshotErrorCodes",
 ]

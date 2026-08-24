@@ -14,8 +14,8 @@ configs:
       execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.22"
 
       [egress]
-      image = "opensandbox/egress:v1.1.6"
-      # image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.6"
+      image = "opensandbox/egress:v1.1.7"
+      # image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.7"
       readiness_timeout_seconds = 30.0
 
       [docker]

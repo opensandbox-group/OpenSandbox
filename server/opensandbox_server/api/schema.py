@@ -24,6 +24,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, RootModel, model_validator
 
+from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
 
 # ============================================================================
 # Image Specification
@@ -136,6 +137,66 @@ class CredentialProxyConfig(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+class LifecycleHook(BaseModel):
+    """Command executed by execd before the user entrypoint starts."""
+
+    command: List[str] = Field(..., min_length=1)
+    timeout_seconds: Optional[int] = Field(None, alias="timeoutSeconds", ge=1, le=300)
+
+    @model_validator(mode="after")
+    def validate_command(self) -> "LifecycleHook":
+        if not self.command[0].strip():
+            raise ValueError("Lifecycle hook command must not be empty.")
+        return self
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
+class PeriodicLifecycleHook(BaseModel):
+    """Named command scheduled by execd while the sandbox is running."""
+
+    name: str = Field(..., min_length=1)
+    schedule: str = Field(..., min_length=1)
+    command: List[str] = Field(..., min_length=1)
+    timeout_seconds: Optional[int] = Field(None, alias="timeoutSeconds", ge=1, le=300)
+
+    @model_validator(mode="after")
+    def normalize_and_validate(self) -> "PeriodicLifecycleHook":
+        self.name = self.name.strip()
+        self.schedule = self.schedule.strip()
+        if not self.name:
+            raise ValueError("Periodic lifecycle hook name must not be blank.")
+        if not self.schedule:
+            raise ValueError("Periodic lifecycle hook schedule must not be blank.")
+        if not self.command[0].strip():
+            raise ValueError("Periodic lifecycle hook command must not be empty.")
+        return self
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
+class SandboxLifecycle(BaseModel):
+    """Extensible lifecycle configuration transported internally to execd."""
+
+    pre_start: Optional[LifecycleHook] = Field(None, alias="preStart")
+    periodic: Optional[List[PeriodicLifecycleHook]] = None
+
+    @model_validator(mode="after")
+    def validate_periodic_names(self) -> "SandboxLifecycle":
+        names = [hook.name for hook in self.periodic or []]
+        if len(names) != len(set(names)):
+            raise ValueError("Periodic lifecycle hook names must be unique.")
+        return self
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
 
 
 # ============================================================================
@@ -443,6 +504,10 @@ class CreateSandboxRequest(BaseModel):
         None,
         description="Custom key-value metadata for management, filtering, and tagging",
     )
+    lifecycle: Optional[SandboxLifecycle] = Field(
+        None,
+        description="Optional declarative lifecycle hooks executed by execd.",
+    )
     entrypoint: Optional[List[str]] = Field(
         None,
         min_length=1,
@@ -493,10 +558,18 @@ class CreateSandboxRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_and_entrypoint(self) -> "CreateSandboxRequest":
+        if self.env and OPENSANDBOX_LIFECYCLE in self.env:
+            raise ValueError(
+                f"Environment variable '{OPENSANDBOX_LIFECYCLE}' is reserved. "
+                "Use the lifecycle request field instead."
+            )
+
         # When poolRef is set, image/snapshotId/entrypoint/resourceLimits are
         # all defined in the Pool CRD and not required from the caller.
         has_pool_ref = bool((self.extensions or {}).get("poolRef", "").strip())
         if has_pool_ref:
+            if self.lifecycle is not None:
+                raise ValueError("lifecycle cannot be used together with poolRef.")
             # Reject conflicting fields that would be ignored in pool mode
             if bool((self.snapshot_id or "").strip()):
                 raise ValueError("snapshotId cannot be used together with poolRef.")

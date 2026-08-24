@@ -16,6 +16,12 @@
 
 set -e
 
+EXECD_WATCHDOG_PID=""
+LIFECYCLE_STATUS_DIR=""
+LIFECYCLE_STATUS_FILE=""
+LIFECYCLE_WATCHDOG_TIMEOUT_FILE=""
+LIFECYCLE_WATCHDOG_READY_FILE=""
+
 _forward_signal() {
 	sig="$1"
 	pid="$2"
@@ -25,16 +31,149 @@ _forward_signal() {
 	kill "-$sig" "$pid" 2>/dev/null || true
 }
 
+_process_state() {
+	if [ -r "/proc/$1/stat" ]; then
+		sed -e 's/^.*) //' -e 's/ .*$//' "/proc/$1/stat" 2>/dev/null || true
+	else
+		ps -o stat= -p "$1" 2>/dev/null \
+			| sed -n '1{s/^[[:space:]]*//; s/^\(.\).*$/\1/; p;}' \
+			|| true
+	fi
+}
+
+_stop_execd_watchdog() {
+	if [ -n "${EXECD_WATCHDOG_PID:-}" ]; then
+		if [ -n "${LIFECYCLE_WATCHDOG_READY_FILE:-}" ] \
+			&& [ ! -s "$LIFECYCLE_WATCHDOG_READY_FILE" ]; then
+			kill -KILL "$EXECD_WATCHDOG_PID" 2>/dev/null || true
+		else
+			kill -TERM "$EXECD_WATCHDOG_PID" 2>/dev/null || true
+		fi
+		wait "$EXECD_WATCHDOG_PID" 2>/dev/null || true
+		EXECD_WATCHDOG_PID=""
+	fi
+}
+
+_start_execd_watchdog() {
+	_watchdog_delay="$1"
+	_watchdog_message="$2"
+	_watchdog_mark_timeout="${3:-1}"
+	_watchdog_grace_delay="${4:-0}"
+	_watchdog_signal="${5-TERM}"
+	_watchdog_execd_pid="$EXECD_PID"
+	_watchdog_timeout_file="${LIFECYCLE_WATCHDOG_TIMEOUT_FILE:-}"
+	_watchdog_ready_file="${LIFECYCLE_WATCHDOG_READY_FILE:-}"
+	_stop_execd_watchdog
+	if [ "$_watchdog_mark_timeout" -eq 1 ] \
+		&& [ -n "$_watchdog_timeout_file" ] \
+		&& [ -s "$_watchdog_timeout_file" ]; then
+		return 1
+	fi
+	if [ -n "$_watchdog_ready_file" ] \
+		&& ! ( : > "$_watchdog_ready_file" ) 2>/dev/null; then
+		return 1
+	fi
+	(
+		# This child must never run the parent's cleanup or shutdown traps.
+		trap - EXIT TERM INT
+		_watchdog_cancelled=0
+		_watchdog_sleep_pid=""
+		_watchdog_spawning_sleep=0
+		trap '_watchdog_cancelled=1; if [ -n "${_watchdog_sleep_pid:-}" ]; then kill -KILL "$_watchdog_sleep_pid" 2>/dev/null || true; elif [ "${_watchdog_spawning_sleep:-0}" -eq 0 ]; then exit 0; fi' TERM INT
+		if [ -n "$_watchdog_ready_file" ] \
+			&& ! printf 'ready\n' > "$_watchdog_ready_file"; then
+			exit 1
+		fi
+		_watchdog_sleep() {
+			if [ "$_watchdog_cancelled" -ne 0 ]; then
+				return 1
+			fi
+			_watchdog_spawning_sleep=1
+			sleep "$1" &
+			_watchdog_sleep_pid=$!
+			_watchdog_spawning_sleep=0
+			if [ "$_watchdog_cancelled" -ne 0 ]; then
+				kill -KILL "$_watchdog_sleep_pid" 2>/dev/null || true
+			fi
+			wait "$_watchdog_sleep_pid" || true
+			_watchdog_sleep_pid=""
+			if [ "$_watchdog_cancelled" -ne 0 ]; then
+				return 1
+			fi
+		}
+		_watchdog_sleep "$_watchdog_delay" || exit 0
+		if [ "$_watchdog_grace_delay" != "0" ]; then
+			_watchdog_sleep "$_watchdog_grace_delay" || exit 0
+		fi
+		if [ "$_watchdog_cancelled" -ne 0 ]; then
+			exit 0
+		fi
+		if [ "$_watchdog_mark_timeout" -eq 1 ] && [ -n "$_watchdog_timeout_file" ]; then
+			if ! printf 'timed-out\n' > "$_watchdog_timeout_file"; then
+				_forward_signal KILL "$_watchdog_execd_pid"
+				echo "error: failed to record lifecycle startup watchdog timeout" >&2 || true
+				exit 1
+			fi
+		fi
+		if [ -n "$_watchdog_message" ]; then
+			echo "error: $_watchdog_message" >&2 || true
+		fi
+		if [ -n "$_watchdog_signal" ]; then
+			_forward_signal "$_watchdog_signal" "$_watchdog_execd_pid"
+		fi
+		_watchdog_sleep 10 || exit 0
+		_forward_signal KILL "$_watchdog_execd_pid"
+	) &
+	EXECD_WATCHDOG_PID=$!
+	if [ -n "$_watchdog_ready_file" ]; then
+		_watchdog_ready_attempts=0
+		_watchdog_ready_limit=100
+		_watchdog_ready_delay=0.1
+		while [ ! -s "$_watchdog_ready_file" ] && [ "$_watchdog_ready_attempts" -lt "$_watchdog_ready_limit" ]; do
+			_watchdog_state="$(_process_state "$EXECD_WATCHDOG_PID")"
+			if [ "$_watchdog_state" = "Z" ]; then
+				break
+			fi
+			if ! kill -0 "$EXECD_WATCHDOG_PID" 2>/dev/null; then
+				break
+			fi
+			if ! sleep "$_watchdog_ready_delay" 2>/dev/null; then
+				# POSIX sleep only requires integer operands. Keep the same
+				# ten-second total bound when fractional sleep is unavailable.
+				_watchdog_ready_delay=1
+				_watchdog_ready_limit=10
+				sleep 1
+			fi
+			_watchdog_ready_attempts=$((_watchdog_ready_attempts + 1))
+		done
+		if [ ! -s "$_watchdog_ready_file" ]; then
+			kill -KILL "$EXECD_WATCHDOG_PID" 2>/dev/null || true
+			wait "$EXECD_WATCHDOG_PID" 2>/dev/null || true
+			EXECD_WATCHDOG_PID=""
+			return 1
+		fi
+	fi
+}
+
 _shutdown_children() {
 	sig="$1"
+	_stop_execd_watchdog
 	_forward_signal "$sig" "${CMD_PID:-}"
 	_forward_signal "$sig" "${EXECD_PID:-}"
+	if [ -n "${EXECD_PID:-}" ] && [ -n "${LIFECYCLE_STATUS_FILE:-}" ]; then
+		# The signal was already forwarded above; this watchdog only bounds
+		# graceful shutdown before escalating to KILL.
+		if ! _start_execd_watchdog 0 "" 0 0 ""; then
+			_forward_signal KILL "$EXECD_PID"
+		fi
+	fi
 	if [ -n "${CMD_PID:-}" ]; then
 		wait "$CMD_PID" 2>/dev/null || true
 	fi
 	if [ -n "${EXECD_PID:-}" ]; then
 		wait "$EXECD_PID" 2>/dev/null || true
 	fi
+	_cleanup_lifecycle_status
 	exit 0
 }
 
@@ -48,6 +187,43 @@ is_truthy() {
 	*) return 1 ;;
 	esac
 }
+
+has_lifecycle_config() {
+	# Keep this in sync with pkg/lifecycle/config.go's transport env, explicit
+	# path env, and default persisted path.
+	if [ -n "$(printf '%s' "${OPENSANDBOX_LIFECYCLE:-}" | tr -d '[:space:]')" ]; then
+		return 0
+	fi
+	if [ -n "${EXECD_LIFECYCLE_CONFIG:-}" ]; then
+		return 0
+	fi
+	if [ -n "${HOME:-}" ] && [ -e "$HOME/.execd/lifecycle.toml" ]; then
+		return 0
+	fi
+	return 1
+}
+
+_cleanup_lifecycle_status() {
+	_stop_execd_watchdog
+	if [ -n "${LIFECYCLE_STATUS_FILE:-}" ]; then
+		rm -f "$LIFECYCLE_STATUS_FILE"
+		LIFECYCLE_STATUS_FILE=""
+	fi
+	if [ -n "${LIFECYCLE_WATCHDOG_TIMEOUT_FILE:-}" ]; then
+		rm -f "$LIFECYCLE_WATCHDOG_TIMEOUT_FILE"
+		LIFECYCLE_WATCHDOG_TIMEOUT_FILE=""
+	fi
+	if [ -n "${LIFECYCLE_WATCHDOG_READY_FILE:-}" ]; then
+		rm -f "$LIFECYCLE_WATCHDOG_READY_FILE"
+		LIFECYCLE_WATCHDOG_READY_FILE=""
+	fi
+	if [ -n "${LIFECYCLE_STATUS_DIR:-}" ]; then
+		rmdir "$LIFECYCLE_STATUS_DIR" 2>/dev/null || true
+		LIFECYCLE_STATUS_DIR=""
+	fi
+}
+
+trap '_cleanup_lifecycle_status' EXIT
 
 _sudo() {
 	if [ "$(id -u)" -eq 0 ]; then
@@ -349,9 +525,147 @@ if is_truthy "${EXECD_INIT:-}"; then
 	exec "$EXECD" --init -- "$@"
 fi
 
-"$EXECD" &
+if has_lifecycle_config; then
+	if ! LIFECYCLE_STATUS_DIR="$(
+		umask 077
+		mktemp -d "${TMPDIR:-/tmp}/execd-lifecycle.XXXXXX" 2>/dev/null \
+			|| mktemp -d /tmp/execd-lifecycle.XXXXXX 2>/dev/null
+	)"; then
+		echo "error: failed to create lifecycle startup status directory" >&2
+		exit 1
+	fi
+	LIFECYCLE_STATUS_FILE="${LIFECYCLE_STATUS_DIR}/status"
+	LIFECYCLE_WATCHDOG_TIMEOUT_FILE="${LIFECYCLE_STATUS_DIR}/watchdog-timeout"
+	LIFECYCLE_WATCHDOG_READY_FILE="${LIFECYCLE_STATUS_DIR}/watchdog-ready"
+	if ! (
+		umask 077 \
+			&& : > "$LIFECYCLE_STATUS_FILE" \
+			&& : > "$LIFECYCLE_WATCHDOG_TIMEOUT_FILE" \
+			&& : > "$LIFECYCLE_WATCHDOG_READY_FILE"
+	); then
+		echo "error: failed to create lifecycle startup synchronization files" >&2
+		exit 1
+	fi
+	"$EXECD" --lifecycle-startup-status-file "$LIFECYCLE_STATUS_FILE" &
+else
+	"$EXECD" &
+fi
 EXECD_PID=$!
 
+# The same long-running execd starts serving HTTP, executes preStart, then
+# reports the result through this private bootstrap synchronization file.
+if [ -n "$LIFECYCLE_STATUS_FILE" ]; then
+	if ! _start_execd_watchdog 10 "execd did not report lifecycle startup within 10 seconds"; then
+		echo "error: failed to arm the lifecycle startup watchdog" >&2
+		_forward_signal TERM "$EXECD_PID"
+		_forward_signal KILL "$EXECD_PID"
+		wait "$EXECD_PID" 2>/dev/null || true
+		EXECD_PID=""
+		exit 1
+	fi
+	_lifecycle_running_seen=0
+	_lifecycle_done=0
+	_prestart_status=""
+	while [ "$_lifecycle_done" -eq 0 ]; do
+		_lifecycle_status=""
+		if [ ! -r "$LIFECYCLE_STATUS_FILE" ]; then
+			echo "error: lifecycle startup status file is missing or unreadable" >&2
+			_lifecycle_done=1
+			_prestart_status=1
+		elif ! {
+			while IFS= read -r _lifecycle_status_line; do
+				_lifecycle_status="$_lifecycle_status_line"
+			done < "$LIFECYCLE_STATUS_FILE"
+		} 2>/dev/null; then
+			echo "error: lifecycle startup status file is missing or unreadable" >&2
+			_lifecycle_done=1
+			_prestart_status=1
+		fi
+		case "$_lifecycle_status" in
+		"running "*)
+			if [ "$_lifecycle_running_seen" -eq 0 ]; then
+				_prestart_timeout="${_lifecycle_status#running }"
+				# execd reports a validated positive timeout of at most ten digits.
+				# Treat any other value as corrupt before passing it to sleep.
+				case "$_prestart_timeout" in
+				"" | *[!0-9]* | 0* | ???????????*) _lifecycle_done=1; _prestart_status=1 ;;
+				*)
+					_lifecycle_running_seen=1
+					if ! _start_execd_watchdog \
+						"$_prestart_timeout" \
+						"lifecycle preStart did not report completion after its timeout and 10-second grace" \
+						1 10; then
+						_lifecycle_done=1
+						_prestart_status=1
+					fi
+					;;
+				esac
+			fi
+			;;
+		"done "*)
+			_prestart_status="${_lifecycle_status#done }"
+			_lifecycle_done=1
+			;;
+		"") ;;
+		*) _lifecycle_done=1; _prestart_status=1 ;;
+		esac
+		if [ "$_lifecycle_done" -ne 0 ]; then
+			break
+		fi
+		_execd_state="$(_process_state "$EXECD_PID")"
+		if ! kill -0 "$EXECD_PID" 2>/dev/null || [ "$_execd_state" = "Z" ]; then
+			_stop_execd_watchdog
+			set +e
+			wait "$EXECD_PID"
+			_execd_status=$?
+			set -e
+			EXECD_PID=""
+			_cleanup_lifecycle_status
+			if [ "$_execd_status" -eq 0 ]; then
+				_execd_status=1
+			fi
+			exit "$_execd_status"
+		fi
+		# Execd reports the effective hook timeout before running preStart. The
+		# external watchdog also bounds a hung daemon that never reports a result.
+		sleep 0.1 2>/dev/null || sleep 1
+	done
+	_stop_execd_watchdog
+	if [ -n "${LIFECYCLE_WATCHDOG_TIMEOUT_FILE:-}" ] \
+		&& [ -s "$LIFECYCLE_WATCHDOG_TIMEOUT_FILE" ]; then
+		_prestart_status=1
+	fi
+	case "${_prestart_status:-}" in
+	0 | [1-9] | [1-9][0-9] | [1-9][0-9][0-9])
+		if [ "$_prestart_status" -gt 255 ]; then
+			_prestart_status=1
+		fi
+		;;
+	*) _prestart_status=1 ;;
+	esac
+	if [ "$_prestart_status" -ne 0 ]; then
+		if ! _start_execd_watchdog 0 "" 0; then
+			echo "error: failed to start execd shutdown watchdog" >&2
+			# Failing to arm the bounded escalation path must not leave execd
+			# running or turn this failure path into an unbounded wait.
+			_forward_signal TERM "$EXECD_PID"
+			_forward_signal KILL "$EXECD_PID"
+		fi
+		set +e
+		wait "$EXECD_PID"
+		_execd_status=$?
+		_stop_execd_watchdog
+		set -e
+		EXECD_PID=""
+		_cleanup_lifecycle_status
+		echo "error: lifecycle preStart failed (status $_prestart_status, execd exit $_execd_status)" >&2
+		exit "$_prestart_status"
+	fi
+	_cleanup_lifecycle_status
+	unset _prestart_status _execd_status
+fi
+
+unset OPENSANDBOX_LIFECYCLE EXECD_LIFECYCLE_CONFIG
 "$@" &
 CMD_PID=$!
 

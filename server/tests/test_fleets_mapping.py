@@ -24,10 +24,12 @@ import pytest
 from opensandbox_server.api.schema import (
     CredentialProxyConfig,
     ImageSpec,
+    LifecycleHook,
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
     ResourceLimits,
+    SandboxLifecycle,
     Volume,
 )
 from opensandbox_server.services.fleets.create_mapping import (
@@ -148,6 +150,14 @@ def test_map_create_request_renew_extension_goes_to_reserved_metadata():
         ),
         ("secureAccess", {"secure_access": True}),
         ("volumes", {"volumes": [_host_volume()]}),
+        (
+            "lifecycle",
+            {
+                "lifecycle": SandboxLifecycle(
+                    preStart=LifecycleHook(command=["true"]),
+                )
+            },
+        ),
     ],
 )
 def test_map_create_request_rejects_unsupported_fields(field_name, payload):

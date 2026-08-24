@@ -31,6 +31,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
@@ -354,6 +355,7 @@ class Sandbox internal constructor(
          * @param healthCheckPollingInterval Polling interval for readiness/health check
          * @param extensions Optional extension parameters for server-side customized behaviors
          * @param volumes Optional list of volume mounts for persistent storage
+         * @param lifecycle Optional pre-start and periodic lifecycle hooks
          * @return Fully configured and ready Sandbox instance
          * @throws SandboxException if sandbox creation or initialization fails
          */
@@ -378,6 +380,7 @@ class Sandbox internal constructor(
             skipHealthCheck: Boolean,
             volumes: List<Volume>?,
             resourceRequests: Map<String, String>? = null,
+            lifecycle: SandboxLifecycle? = null,
         ): Sandbox {
             val timeoutLabel = if (timeout != null) "${timeout.seconds}s" else "manual-cleanup"
             val startupSource = imageSpec?.image ?: snapshotId
@@ -410,6 +413,7 @@ class Sandbox internal constructor(
                                 secureAccess = secureAccess,
                                 snapshotId = snapshotId,
                                 resourceRequests = resourceRequests,
+                                lifecycle = lifecycle,
                             )
                         createdSandboxId = response.id
                         InitializationResult.NewSandbox(response.id)
@@ -1012,6 +1016,9 @@ class Sandbox internal constructor(
          */
         private var platform: PlatformSpec? = null
 
+        /** Optional pre-start and periodic lifecycle hooks. */
+        private var lifecycle: SandboxLifecycle? = null
+
         /**
          * Optional list of volume mounts for persistent storage.
          */
@@ -1308,6 +1315,20 @@ class Sandbox internal constructor(
             return this
         }
 
+        /** Sets lifecycle hooks applied when this sandbox starts. */
+        fun lifecycle(lifecycle: SandboxLifecycle): Builder {
+            this.lifecycle = lifecycle
+            return this
+        }
+
+        /** Configures lifecycle hooks applied when this sandbox starts. */
+        fun lifecycle(configure: SandboxLifecycle.Builder.() -> Unit): Builder {
+            val builder = SandboxLifecycle.builder()
+            builder.configure()
+            this.lifecycle = builder.build()
+            return this
+        }
+
         /**
          * Adds a single volume mount.
          *
@@ -1522,6 +1543,7 @@ class Sandbox internal constructor(
                 skipHealthCheck = skipHealthCheck,
                 volumes = if (volumes.isEmpty()) null else volumes.toList(),
                 resourceRequests = resourceRequests,
+                lifecycle = lifecycle,
             )
         }
     }

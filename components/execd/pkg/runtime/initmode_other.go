@@ -22,9 +22,10 @@ package runtime
 
 import "github.com/alibaba/opensandbox/execd/pkg/log"
 
-// StartInitMode is unsupported off Linux; execd keeps today's behavior.
-func StartInitMode(entryArgs []string) {
+// PrepareInitMode is unsupported off Linux; execd keeps today's behavior.
+func PrepareInitMode() func([]string) error {
 	log.Warn("init mode is unsupported on this platform; continuing without init duties")
+	return func([]string) error { return nil }
 }
 
 // InitModeReport reports the init mode actually in effect for the

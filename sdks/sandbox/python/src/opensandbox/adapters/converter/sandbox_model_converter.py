@@ -60,6 +60,7 @@ from opensandbox.models.sandboxes import (
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxLifecycle,
     SandboxRenewResponse,
     SandboxStatus,
     SnapshotInfo,
@@ -182,6 +183,7 @@ class SandboxModelConverter:
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        lifecycle: SandboxLifecycle | None = None,
     ) -> CreateSandboxRequest:
         """Convert domain parameters to API CreateSandboxRequest."""
         from opensandbox.api.lifecycle.models.create_sandbox_request import (
@@ -215,6 +217,9 @@ class SandboxModelConverter:
             PlatformSpec as ApiPlatformSpec,
         )
         from opensandbox.api.lifecycle.models.resource_limits import ResourceLimits
+        from opensandbox.api.lifecycle.models.sandbox_lifecycle import (
+            SandboxLifecycle as ApiSandboxLifecycle,
+        )
         from opensandbox.api.lifecycle.types import UNSET
 
         # Convert env dict to API model
@@ -284,6 +289,21 @@ class SandboxModelConverter:
                 }
             )
 
+        api_lifecycle = UNSET
+        if lifecycle is not None:
+            if not isinstance(lifecycle, SandboxLifecycle):
+                raise TypeError(
+                    "lifecycle must be a SandboxLifecycle or None, "
+                    f"got {type(lifecycle).__name__}"
+                )
+            if lifecycle.pre_start is not None or lifecycle.periodic:
+                lifecycle_payload = lifecycle.model_dump(
+                    by_alias=True, exclude_none=True
+                )
+                if not lifecycle_payload.get("periodic"):
+                    lifecycle_payload.pop("periodic", None)
+                api_lifecycle = ApiSandboxLifecycle.from_dict(lifecycle_payload)
+
         # Convert volumes to API model
         api_volumes = UNSET
         if volumes is not None and len(volumes) > 0:
@@ -306,6 +326,7 @@ class SandboxModelConverter:
             entrypoint=entrypoint if entrypoint is not None else UNSET,
             env=api_env,
             metadata=api_metadata,
+            lifecycle=api_lifecycle,
             resource_limits=api_resource_limits,
             resource_requests=api_resource_requests,
             platform=api_platform,

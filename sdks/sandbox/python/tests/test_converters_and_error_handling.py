@@ -50,10 +50,13 @@ from opensandbox.exceptions import (
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import (
     CredentialProxyConfig,
+    LifecycleHook,
     NetworkPolicy,
     NetworkRule,
+    PeriodicLifecycleHook,
     PlatformSpec,
     SandboxImageSpec,
+    SandboxLifecycle,
 )
 
 
@@ -559,6 +562,19 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
         extensions={},
         volumes=None,
         credential_proxy=CredentialProxyConfig(enabled=True),
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(
+                command=["/opt/hooks/restore.sh"],
+                timeoutSeconds=30,
+            ),
+            periodic=[
+                PeriodicLifecycleHook(
+                    name="checkpoint",
+                    schedule="@hourly",
+                    command=["/opt/hooks/checkpoint.sh"],
+                )
+            ],
+        ),
     )
     d = req.to_dict()
     assert d["image"]["uri"] == "python:3.11"
@@ -569,9 +585,59 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
     assert d["networkPolicy"]["defaultAction"] == "deny"
     assert d["networkPolicy"]["egress"] == [{"action": "allow", "target": "pypi.org"}]
     assert d["credentialProxy"] == {"enabled": True}
+    assert d["lifecycle"] == {
+        "preStart": {
+            "command": ["/opt/hooks/restore.sh"],
+            "timeoutSeconds": 30,
+        },
+        "periodic": [
+            {
+                "name": "checkpoint",
+                "schedule": "@hourly",
+                "command": ["/opt/hooks/checkpoint.sh"],
+            }
+        ],
+    }
 
     renew = SandboxModelConverter.to_api_renew_request(datetime(2025, 1, 1))
     assert renew.expires_at.tzinfo is timezone.utc
+
+
+def test_sandbox_model_converter_omits_empty_lifecycle() -> None:
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["python"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=None,
+        lifecycle=SandboxLifecycle(),
+    )
+
+    assert "lifecycle" not in req.to_dict()
+
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["python"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=None,
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(command=["true"]),
+            periodic=[],
+        ),
+    )
+
+    assert req.to_dict()["lifecycle"] == {"preStart": {"command": ["true"]}}
 
 
 def test_platform_spec_accepts_windows() -> None:

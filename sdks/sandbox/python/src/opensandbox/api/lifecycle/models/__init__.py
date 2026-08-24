@@ -34,6 +34,7 @@ from .error_response import ErrorResponse
 from .host import Host
 from .image_spec import ImageSpec
 from .image_spec_auth import ImageSpecAuth
+from .lifecycle_hook import LifecycleHook
 from .list_sandboxes_response import ListSandboxesResponse
 from .list_snapshots_response import ListSnapshotsResponse
 from .metrics_event import MetricsEvent
@@ -46,6 +47,7 @@ from .ossfs import OSSFS
 from .ossfs_version import OSSFSVersion
 from .pagination_info import PaginationInfo
 from .patch_sandbox_metadata_request import PatchSandboxMetadataRequest
+from .periodic_lifecycle_hook import PeriodicLifecycleHook
 from .platform_spec import PlatformSpec
 from .platform_spec_arch import PlatformSpecArch
 from .platform_spec_os import PlatformSpecOs
@@ -55,6 +57,7 @@ from .renew_sandbox_expiration_response import RenewSandboxExpirationResponse
 from .resource_limits import ResourceLimits
 from .sandbox import Sandbox
 from .sandbox_extensions import SandboxExtensions
+from .sandbox_lifecycle import SandboxLifecycle
 from .sandbox_metadata import SandboxMetadata
 from .sandbox_status import SandboxStatus
 from .snapshot import Snapshot
@@ -80,6 +83,7 @@ __all__ = (
     "Host",
     "ImageSpec",
     "ImageSpecAuth",
+    "LifecycleHook",
     "ListSandboxesResponse",
     "ListSnapshotsResponse",
     "MetricsEvent",
@@ -92,6 +96,7 @@ __all__ = (
     "OSSFSVersion",
     "PaginationInfo",
     "PatchSandboxMetadataRequest",
+    "PeriodicLifecycleHook",
     "PlatformSpec",
     "PlatformSpecArch",
     "PlatformSpecOs",
@@ -101,6 +106,7 @@ __all__ = (
     "ResourceLimits",
     "Sandbox",
     "SandboxExtensions",
+    "SandboxLifecycle",
     "SandboxMetadata",
     "SandboxStatus",
     "Snapshot",

@@ -143,6 +143,12 @@ jobs:
           chmod +x tests/sigterm_forward.sh
           ./tests/sigterm_forward.sh
 
+      - name: Lifecycle bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: bash tests/lifecycle.sh
+
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
         shell: bash

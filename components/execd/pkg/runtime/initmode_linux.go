@@ -233,6 +233,8 @@ func (r *reaper) drain() {
 // share one launch path regardless of mode.
 type managedProcess struct {
 	cmd         *exec.Cmd
+	stateMu     sync.Mutex
+	exited      bool
 	preReap     func()
 	noHardening bool
 	stripEnv    []string // nil = default blacklist; explicit list overrides
@@ -260,16 +262,44 @@ func (mp *managedProcess) deliver(ws syscall.WaitStatus) {
 
 func (mp *managedProcess) Wait() error {
 	if initReaper == nil {
-		return mp.cmd.Wait()
+		return waitCommandWithExitBarrier(mp.cmd, func(_ error) {
+			// Success marks exit before reap. A failed barrier cannot prove
+			// ownership, so also disable signaling rather than risk PID reuse.
+			mp.stateMu.Lock()
+			mp.exited = true
+			mp.stateMu.Unlock()
+		})
 	}
 	<-mp.done
 	return mp.exitErr
+}
+
+func (mp *managedProcess) Cancel(cancel func()) {
+	if initReaper == nil {
+		mp.stateMu.Lock()
+		defer mp.stateMu.Unlock()
+		if !mp.exited {
+			cancel()
+		}
+		return
+	}
+
+	// Keep the reaper lock across signal delivery so the PID/PGID cannot be
+	// recycled. cancel must only deliver a signal and must not block.
+	initReaper.mu.Lock()
+	defer initReaper.mu.Unlock()
+	if initReaper.owned[mp.pid()] == mp {
+		cancel()
+	}
 }
 
 // ExitCode returns the process exit code, or -1 if it has not exited (or was
 // killed by a signal), matching os.ProcessState.ExitCode semantics.
 func (mp *managedProcess) ExitCode() int {
 	if initReaper == nil {
+		if mp.cmd.ProcessState == nil {
+			return -1
+		}
 		return mp.cmd.ProcessState.ExitCode()
 	}
 	select {
@@ -303,11 +333,15 @@ func withoutHardening() launchOption {
 
 // bootstrapEnv overrides the env strip for the user entrypoint: its scripts
 // may need JUPYTER_TOKEN/EXECD_ENVS to configure themselves (e.g. the
-// code-interpreter entrypoint), but EXECD_ACCESS_TOKEN must never reach the
-// long-lived entrypoint (its Jupyter kernels are user code).
+// code-interpreter entrypoint), but credentials and lifecycle transport must
+// never reach the long-lived entrypoint (its Jupyter kernels are user code).
 func bootstrapEnv() launchOption {
 	return func(mp *managedProcess) {
-		mp.stripEnv = []string{"EXECD_ACCESS_TOKEN"}
+		mp.stripEnv = []string{
+			"EXECD_ACCESS_TOKEN",
+			"OPENSANDBOX_LIFECYCLE",
+			"EXECD_LIFECYCLE_CONFIG",
+		}
 	}
 }
 
@@ -383,12 +417,10 @@ func exitStatusError(ws syscall.WaitStatus) error {
 	return &processExitError{code: -1, msg: fmt.Sprintf("signal: %v", ws.Signal())}
 }
 
-// StartInitMode activates init duties: non-dumpable self, subreaper fallback
-// when not PID 1, the reaper, the user entrypoint, signal forwarding, and the
-// container lifecycle owner. It returns once the entrypoint is launched; the
-// process is torn down via os.Exit when the entrypoint exits or SIGTERM
-// arrives.
-func StartInitMode(entryArgs []string) {
+// PrepareInitMode activates the init/reaper duties and registers signal
+// handling before any managed child starts. The returned function launches
+// the user entrypoint after execd has started serving and preStart succeeds.
+func PrepareInitMode() func([]string) error {
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		log.Warn("init: PR_SET_DUMPABLE(0) failed: %v", err)
 	}
@@ -410,21 +442,53 @@ func StartInitMode(entryArgs []string) {
 	// hitting the runtime default handler.
 	sigCh := make(chan os.Signal, 8)
 	signal.Notify(sigCh, initForwardedSignals...)
+	entryCh := make(chan *managedProcess, 1)
+	safego.Go(func() { forwardInitSignalsWhenReady(entryCh, sigCh) })
 
-	entry := launchEntrypoint(entryArgs)
-	if entry == nil {
-		signal.Stop(sigCh)
-		return
-	}
-	safego.Go(func() { forwardInitSignals(entry, sigCh) })
-	safego.Go(func() { waitEntrypointExit(entry) })
-}
-
-func launchEntrypoint(args []string) *managedProcess {
-	if len(args) == 0 {
-		log.Warn("init: --init set but no user command provided; no entrypoint to supervise")
+	return func(entryArgs []string) error {
+		if len(entryArgs) == 0 {
+			log.Warn("init: --init set but no user command provided; no entrypoint to supervise")
+			entryCh <- nil
+			return nil
+		}
+		entry, err := launchEntrypoint(entryArgs)
+		if err != nil {
+			entryCh <- nil
+			return err
+		}
+		entryCh <- entry
+		safego.Go(func() { waitEntrypointExit(entry) })
 		return nil
 	}
+}
+
+func forwardInitSignalsWhenReady(
+	entryCh <-chan *managedProcess,
+	sigCh chan os.Signal,
+) {
+	termPending := false
+	for {
+		select {
+		case entry := <-entryCh:
+			if entry == nil {
+				signal.Stop(sigCh)
+				return
+			}
+			if termPending {
+				terminateInit(entry)
+				return
+			}
+			forwardInitSignals(entry, sigCh)
+			return
+		case sig := <-sigCh:
+			if sig == syscall.SIGTERM {
+				termPending = true
+			}
+		}
+	}
+}
+
+func launchEntrypoint(args []string) (*managedProcess, error) {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = os.Stdin
@@ -432,11 +496,10 @@ func launchEntrypoint(args []string) *managedProcess {
 	cmd.Stderr = os.Stderr
 	mp, err := launchManaged(cmd, bootstrapEnv())
 	if err != nil {
-		log.Error("init: failed to start user entrypoint %q: %v", args[0], err)
-		os.Exit(1)
+		return nil, fmt.Errorf("start user entrypoint %q: %w", args[0], err)
 	}
 	log.Info("init: user entrypoint started pid=%d argv=%v", mp.pid(), args)
-	return mp
+	return mp, nil
 }
 
 // waitEntrypointExit owns the container lifecycle: when the entrypoint exits,

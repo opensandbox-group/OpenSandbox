@@ -216,6 +216,18 @@ override it.
 | `OPENSANDBOX_ID` | Authoritative sandbox id stamped into eBPF audit records (`sandbox_id`) and metrics; the server injects it on Docker/Kubernetes task-template paths. Kubernetes pool allocations that skip the task template (default entrypoint, no env, no init mode) cannot inject it, and the eBPF layer reports `unsupported` attribution on that path. |
 | `OPENSANDBOX_EXECD_METRICS_EXTRA_ATTRS` | Optional extra metric attrs (`k=v,k2=v2`). |
 
+### Lifecycle hook trust boundary
+
+`execd` runs configured `preStart` and `periodic` commands directly as its own
+OS user in the sandbox's existing container namespaces. Lifecycle hooks do not
+use isolated-session confinement.
+
+Lifecycle hooks are trusted setup and maintenance code, not a security or
+policy boundary. The default persisted config at
+`$HOME/.execd/lifecycle.toml` is writable by execd's user, and a root sandbox
+workload can modify or remove it. Do not use hooks for tamper-resistant
+auditing or mandatory controls against sandbox workloads.
+
 ### Isolation Config File
 
 Isolated sessions read an optional TOML file given by `--isolation-config`

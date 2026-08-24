@@ -242,6 +242,24 @@ paths:
                     cpu: "500m"
                     memory: "512Mi"
                   entrypoint: ["python", "/workspace/app.py"]
+              lifecycle-hooks:
+                summary: Restore content before startup and checkpoint it periodically
+                value:
+                  image:
+                    uri: python:3.11
+                  resourceLimits:
+                    cpu: "500m"
+                    memory: "512Mi"
+                  entrypoint: ["python", "/app/main.py"]
+                  lifecycle:
+                    preStart:
+                      command: ["/opt/hooks/restore.sh"]
+                      timeoutSeconds: 60
+                    periodic:
+                      - name: checkpoint
+                        schedule: "*/5 * * * *"
+                        command: ["/opt/hooks/checkpoint.sh"]
+                        timeoutSeconds: 60
       responses:
         '202':
           description: |
@@ -1239,6 +1257,78 @@ components:
           description: Target CPU architecture (for example `amd64` or `arm64`).
           example: arm64
       additionalProperties: false
+    LifecycleHook:
+      type: object
+      required: [command]
+      description: |
+        A lifecycle command executed directly as an argv array. No implicit shell
+        expansion is performed. Use an explicit shell command such as
+        `["sh", "-c", "..."]` when shell syntax is required.
+      properties:
+        command:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: Command and arguments to execute.
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+          description: Maximum execution time in seconds, up to 300. The server defaults to 60 when omitted.
+      additionalProperties: false
+    PeriodicLifecycleHook:
+      type: object
+      required: [name, schedule, command]
+      description: A named lifecycle command scheduled inside the sandbox by execd.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Name unique among periodic hooks in this sandbox.
+        schedule:
+          type: string
+          minLength: 1
+          description: |
+            Five-field cron expression or descriptor such as `@hourly` or
+            `@every 30s`. An `@every` interval must be a whole number of
+            seconds with a minimum of one second.
+        command:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: Command and arguments to execute without implicit shell expansion.
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+          description: Maximum execution time in seconds, up to 300. The server defaults to 60 when omitted.
+      additionalProperties: false
+    SandboxLifecycle:
+      type: object
+      description: |
+        Extensible container for sandbox lifecycle hooks. All fields are optional.
+        Future lifecycle events are added as new optional fields without changing
+        the semantics of existing fields.
+
+        This release supports only `preStart` and `periodic`.
+      properties:
+        preStart:
+          $ref: '#/components/schemas/LifecycleHook'
+          description: |
+            Runs in execd after its HTTP server is ready and before the user
+            entrypoint on every sandbox container start. A failed or timed-out
+            hook prevents the user entrypoint from starting.
+        periodic:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeriodicLifecycleHook'
+          description: |
+            Scheduled hooks run by execd while the sandbox is running. Runs of
+            the same named hook never overlap; a scheduled run is skipped when
+            its previous run is still active.
+      additionalProperties: false
     PatchSandboxMetadataRequest:
       type: object
       description: |
@@ -1354,6 +1444,18 @@ components:
             project: "data-processing"
             team: "ml"
             environment: "staging"
+
+        lifecycle:
+          $ref: '#/components/schemas/SandboxLifecycle'
+          description: |
+            Optional declarative sandbox lifecycle hooks. This release supports
+            `preStart` and `periodic`. The server transports this configuration to
+            execd; callers must not depend on the internal transport mechanism.
+            The configuration is not included in Sandbox responses.
+
+            Not supported together with `extensions.poolRef`, because pooled
+            sandboxes have already started execd before allocation. Runtimes that
+            do not implement lifecycle hook transport reject this field.
 
         entrypoint:
           type: array

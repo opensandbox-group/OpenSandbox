@@ -21,11 +21,19 @@ from typing import cast
 import pytest
 
 from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+from opensandbox.api.lifecycle.models.create_sandbox_request import (
+    CreateSandboxRequest as ApiCreateSandboxRequest,
+)
 from opensandbox.api.lifecycle.models.create_sandbox_response import (
     CreateSandboxResponse as ApiCreateSandboxResponse,
 )
 from opensandbox.api.lifecycle.models.image_spec import ImageSpec as ApiImageSpec
+from opensandbox.api.lifecycle.models.lifecycle_hook import LifecycleHook
+from opensandbox.api.lifecycle.models.periodic_lifecycle_hook import (
+    PeriodicLifecycleHook,
+)
 from opensandbox.api.lifecycle.models.sandbox import Sandbox as ApiSandbox
+from opensandbox.api.lifecycle.models.sandbox_lifecycle import SandboxLifecycle
 from opensandbox.api.lifecycle.types import UNSET
 from opensandbox.models import CredentialSubstitution
 from opensandbox.models.execd import (
@@ -53,6 +61,43 @@ from opensandbox.models.sandboxes import (
     SandboxStatus,
     Volume,
 )
+from opensandbox.models.sandboxes import (
+    LifecycleHook as DomainLifecycleHook,
+)
+from opensandbox.models.sandboxes import (
+    PeriodicLifecycleHook as DomainPeriodicLifecycleHook,
+)
+
+
+@pytest.mark.parametrize("hook_type", [DomainLifecycleHook, DomainPeriodicLifecycleHook])
+def test_lifecycle_hooks_reject_timeout_above_maximum(hook_type: type) -> None:
+    kwargs: dict[str, object] = {"command": ["true"], "timeoutSeconds": 300}
+    if hook_type is DomainPeriodicLifecycleHook:
+        kwargs.update(name="sync", schedule="@hourly")
+
+    assert hook_type.model_validate(kwargs).timeout_seconds == 300
+
+    kwargs["timeoutSeconds"] = 301
+    with pytest.raises(ValueError, match="less than or equal to 300"):
+        hook_type.model_validate(kwargs)
+
+
+def test_lifecycle_hooks_reject_blank_commands_and_normalize_periodic_text() -> None:
+    with pytest.raises(ValueError, match="command must not be empty"):
+        DomainLifecycleHook(command=[" "])
+
+    periodic = DomainPeriodicLifecycleHook(
+        name=" sync ",
+        schedule=" @hourly ",
+        command=["true"],
+    )
+    assert periodic.name == "sync"
+    assert periodic.schedule == "@hourly"
+
+    with pytest.raises(ValueError, match="fields must not be blank"):
+        DomainPeriodicLifecycleHook(name=" ", schedule="@hourly", command=["true"])
+    with pytest.raises(ValueError, match="command must not be empty"):
+        DomainPeriodicLifecycleHook(name="sync", schedule="@hourly", command=[" "])
 
 
 def test_sandbox_image_spec_supports_positional_image() -> None:
@@ -93,6 +138,34 @@ def test_api_create_sandbox_response_tolerates_omitted_optional_fields() -> None
     assert response.metadata is UNSET
     assert response.expires_at is UNSET
     assert response.status.last_transition_at is UNSET
+
+
+def test_api_create_sandbox_request_serializes_lifecycle_hooks() -> None:
+    request = ApiCreateSandboxRequest(
+        lifecycle=SandboxLifecycle(
+            pre_start=LifecycleHook(command=["/opt/hooks/restore.sh"]),
+            periodic=[
+                PeriodicLifecycleHook(
+                    name="checkpoint",
+                    schedule="*/5 * * * *",
+                    command=["/opt/hooks/checkpoint.sh"],
+                )
+            ],
+        )
+    )
+
+    assert request.to_dict()["lifecycle"] == {
+        "preStart": {
+            "command": ["/opt/hooks/restore.sh"],
+        },
+        "periodic": [
+            {
+                "name": "checkpoint",
+                "schedule": "*/5 * * * *",
+                "command": ["/opt/hooks/checkpoint.sh"],
+            }
+        ],
+    }
 
 
 def test_api_sandbox_tolerates_omitted_optional_fields() -> None:

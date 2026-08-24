@@ -198,6 +198,48 @@ public class SandboxesAdapterTests
     }
 
     [Fact]
+    public async Task CreateSandboxAsync_ShouldSerializeLifecycleHooks()
+    {
+        var handler = new CaptureCreateRequestHandler();
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        _ = await adapter.CreateSandboxAsync(new CreateSandboxRequest
+        {
+            ResourceLimits = new Dictionary<string, string>(),
+            Lifecycle = new SandboxLifecycle
+            {
+                PreStart = new LifecycleHook
+                {
+                    Command = ["/opt/hooks/restore.sh"],
+                    TimeoutSeconds = 300
+                },
+                Periodic =
+                [
+                    new PeriodicLifecycleHook
+                    {
+                        Name = "checkpoint",
+                        Schedule = "@hourly",
+                        Command = ["/opt/hooks/checkpoint.sh"]
+                    }
+                ]
+            }
+        });
+
+        handler.RequestBody.Should().NotBeNullOrEmpty();
+        using var json = JsonDocument.Parse(handler.RequestBody!);
+        var lifecycle = json.RootElement.GetProperty("lifecycle");
+        var preStart = lifecycle.GetProperty("preStart");
+        preStart.GetProperty("command")[0].GetString().Should().Be("/opt/hooks/restore.sh");
+        preStart.GetProperty("timeoutSeconds").GetInt32().Should().Be(300);
+        var periodic = lifecycle.GetProperty("periodic")[0];
+        periodic.GetProperty("name").GetString().Should().Be("checkpoint");
+        periodic.GetProperty("schedule").GetString().Should().Be("@hourly");
+        periodic.GetProperty("command")[0].GetString().Should().Be("/opt/hooks/checkpoint.sh");
+    }
+
+    [Fact]
     public async Task PatchSandboxMetadataAsync_ShouldSendMetadataBodyAndPreserveNull()
     {
         var handler = new CapturePatchMetadataRequestHandler();

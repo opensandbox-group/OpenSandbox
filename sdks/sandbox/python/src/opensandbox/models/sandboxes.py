@@ -25,6 +25,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+_MAX_LIFECYCLE_HOOK_TIMEOUT_SECONDS = 300
+
 
 class SandboxImageAuth(BaseModel):
     """
@@ -157,6 +159,75 @@ class CredentialProxyConfig(BaseModel):
         default=False,
         description="Enable transparent MITM support required by Credential Vault injection.",
     )
+
+
+class LifecycleHook(BaseModel):
+    """Command executed by execd before the user entrypoint starts."""
+
+    command: list[str] = Field(min_length=1)
+    timeout_seconds: int | None = Field(
+        default=None,
+        alias="timeoutSeconds",
+        ge=1,
+        le=_MAX_LIFECYCLE_HOOK_TIMEOUT_SECONDS,
+        description="Maximum execution time in seconds, up to 300. The server defaults to 60.",
+    )
+
+    @field_validator("command")
+    @classmethod
+    def command_must_not_be_blank(cls, value: list[str]) -> list[str]:
+        if not value[0].strip():
+            raise ValueError("Lifecycle hook command must not be empty")
+        return value
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class PeriodicLifecycleHook(BaseModel):
+    """Named command scheduled by execd while the sandbox is running."""
+
+    name: str = Field(min_length=1)
+    schedule: str = Field(min_length=1)
+    command: list[str] = Field(min_length=1)
+    timeout_seconds: int | None = Field(
+        default=None,
+        alias="timeoutSeconds",
+        ge=1,
+        le=_MAX_LIFECYCLE_HOOK_TIMEOUT_SECONDS,
+        description="Maximum execution time in seconds, up to 300. The server defaults to 60.",
+    )
+
+    @field_validator("name", "schedule")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Periodic lifecycle hook fields must not be blank")
+        return value.strip()
+
+    @field_validator("command")
+    @classmethod
+    def command_must_not_be_blank(cls, value: list[str]) -> list[str]:
+        if not value[0].strip():
+            raise ValueError("Periodic lifecycle hook command must not be empty")
+        return value
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class SandboxLifecycle(BaseModel):
+    """Optional lifecycle hooks applied when a sandbox is created."""
+
+    pre_start: LifecycleHook | None = Field(default=None, alias="preStart")
+    periodic: list[PeriodicLifecycleHook] | None = None
+
+    @model_validator(mode="after")
+    def periodic_names_must_be_unique(self) -> "SandboxLifecycle":
+        names = [hook.name for hook in self.periodic or []]
+        if len(names) != len(set(names)):
+            raise ValueError("Periodic lifecycle hook names must be unique")
+        return self
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
 class InlineCredentialSource(BaseModel):

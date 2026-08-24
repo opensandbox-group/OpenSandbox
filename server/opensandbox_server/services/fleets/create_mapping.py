@@ -236,6 +236,11 @@ def _canonical_quantity(value: str) -> decimal.Decimal:
 
 def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
     """Reject pod-identity-dependent fields that have no shared-Fastlet meaning."""
+    if request.lifecycle is not None:
+        raise UnsupportedFieldError(
+            "lifecycle",
+            "lifecycle hooks are not supported by the fleets backend",
+        )
     if request.snapshot_id:
         raise UnsupportedFieldError("snapshotId", "snapshots are not supported on fleets")
     if request.platform is not None:
