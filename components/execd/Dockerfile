@@ -141,11 +141,11 @@ RUN CGO_ENABLED=0 go build -tags ebpf -trimpath -buildvcs=false \
 
 FROM alpine:latest
 
-COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/bwrap/bwrap /usr/local/bin/bwrap
-COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/opensandbox-session-gate /usr/local/libexec/opensandbox-session-gate
-COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/opensandbox-session-gate /opt/opensandbox/opensandbox-session-gate
-COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/opensandbox-launcher /usr/local/libexec/opensandbox-launcher
-COPY --from=bwrap-builder --chown=0:0 --chmod=0555 /build/opensandbox-launcher /opt/opensandbox/opensandbox-launcher
+COPY --from=bwrap-builder --chown=0:0 /build/bwrap/bwrap /usr/local/bin/bwrap
+COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-session-gate /usr/local/libexec/opensandbox-session-gate
+COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-session-gate /opt/opensandbox/opensandbox-session-gate
+COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-launcher /usr/local/libexec/opensandbox-launcher
+COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-launcher /opt/opensandbox/opensandbox-launcher
 COPY --from=builder /build/execd .
 COPY --from=builder /build/execd.exe ./execd.exe
 COPY --from=builder /build/opensandbox-supervisor ./opensandbox-supervisor
@@ -155,6 +155,11 @@ COPY components/execd/install.bat ./install.bat
 
 # Defensive: force execd-related files executable for all users regardless
 # of source checkout permissions.
-RUN chmod a+x ./execd ./execd.exe ./execd-ebpf ./opensandbox-supervisor ./bootstrap.sh
+RUN chmod a+x ./execd ./execd.exe ./execd-ebpf ./opensandbox-supervisor ./bootstrap.sh \
+    /usr/local/bin/bwrap \
+    /usr/local/libexec/opensandbox-session-gate \
+    /opt/opensandbox/opensandbox-session-gate \
+    /usr/local/libexec/opensandbox-launcher \
+    /opt/opensandbox/opensandbox-launcher
 
 ENTRYPOINT ["./execd"]
