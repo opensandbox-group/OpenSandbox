@@ -347,7 +347,7 @@ class NetworkPolicy private constructor(
         fun build(): NetworkPolicy {
             return NetworkPolicy(
                 defaultAction = defaultAction,
-                egress = if (egress.isEmpty()) null else egress.toList(),
+                egress = egress.toList(),
             )
         }
     }
