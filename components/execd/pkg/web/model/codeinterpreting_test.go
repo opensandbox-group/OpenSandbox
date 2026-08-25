@@ -16,6 +16,7 @@ package model
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,6 +60,69 @@ func TestRunCommandRequestValidateCwd(t *testing.T) {
 	err := req.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "working directory")
+}
+
+func TestRunCommandRequestValidateCwdFromRequestEnv(t *testing.T) {
+	const (
+		requestOnlyKey = "OPENSANDBOX_TEST_MODEL_REQUEST_ONLY_CWD"
+		overrideKey    = "OPENSANDBOX_TEST_MODEL_OVERRIDE_CWD"
+		missingKey     = "OPENSANDBOX_TEST_MODEL_MISSING_CWD"
+	)
+
+	unsetModelEnvForTest(t, requestOnlyKey)
+	for _, background := range []bool{false, true} {
+		req := RunCommandRequest{
+			Command:    "pwd",
+			Cwd:        "$" + requestOnlyKey,
+			Background: background,
+			Envs:       map[string]string{requestOnlyKey: t.TempDir()},
+		}
+		require.NoError(t, req.Validate())
+	}
+
+	processFile := filepath.Join(t.TempDir(), "process-file")
+	require.NoError(t, os.WriteFile(processFile, []byte("x"), 0o600))
+	t.Setenv(overrideKey, processFile)
+	req := RunCommandRequest{
+		Command: "pwd",
+		Cwd:     "$" + overrideKey,
+		Envs:    map[string]string{overrideKey: t.TempDir()},
+	}
+	require.NoError(t, req.Validate())
+
+	unsetModelEnvForTest(t, missingKey)
+	req = RunCommandRequest{Command: "pwd", Cwd: "$" + missingKey}
+	err := req.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "undefined environment variables")
+
+	nonexistent := filepath.Join(t.TempDir(), "missing")
+	req = RunCommandRequest{
+		Command: "pwd",
+		Cwd:     "$TARGET",
+		Envs:    map[string]string{"TARGET": nonexistent},
+	}
+	err = req.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not exist")
+
+	req.Envs["TARGET"] = processFile
+	err = req.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a directory")
+}
+
+func unsetModelEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	previous, existed := os.LookupEnv(key)
+	require.NoError(t, os.Unsetenv(key))
+	t.Cleanup(func() {
+		if existed {
+			require.NoError(t, os.Setenv(key, previous))
+			return
+		}
+		require.NoError(t, os.Unsetenv(key))
+	})
 }
 
 func ptr32(v uint32) *uint32 { return &v }
