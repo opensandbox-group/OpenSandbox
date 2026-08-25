@@ -269,6 +269,10 @@ class BatchSandboxProvider(WorkloadProvider):
             "containers": containers,
             "volumes": pod_volumes,
         }
+        # Add the template's volumes before the request's own, so a request cannot
+        # take a template volume name and have the template's source dropped as a
+        # duplicate while template mounts keep pointing at that name.
+        _append_unique_by_name(pod_spec, "volumes", extra_volumes)
         if windows_profile:
             apply_windows_profile_overrides(
                 pod_spec=pod_spec,
@@ -278,15 +282,9 @@ class BatchSandboxProvider(WorkloadProvider):
                 disable_ipv6_for_egress=disable_ipv6_for_egress,
                 resource_requests=resource_requests or None,
             )
-            template = self.template_manager.get_base_template()
-            template_spec = (
-                template.get("spec", {})
-                .get("template", {})
-                .get("spec", {})
-            )
             apply_windows_profile_arch_selector(
                 pod_spec=pod_spec,
-                template_spec=template_spec if isinstance(template_spec, dict) else {},
+                template_spec=self._template_pod_spec(),
                 platform=platform,
             )
         else:
@@ -343,9 +341,7 @@ class BatchSandboxProvider(WorkloadProvider):
             batchsandbox["spec"].pop("expireTime", None)
         else:
             batchsandbox["spec"]["expireTime"] = expires_at.isoformat()
-        self._merge_pod_spec_extras(
-            batchsandbox, extra_volumes, extra_mounts, extra_security_context
-        )
+        self._merge_pod_spec_extras(batchsandbox, extra_mounts, extra_security_context)
         merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
         ensure_egress_runtime_compatible(
             network_policy,
@@ -404,15 +400,9 @@ class BatchSandboxProvider(WorkloadProvider):
         if platform is None:
             return
 
-        template = self.template_manager.get_base_template()
-        template_spec = (
-            template.get("spec", {})
-            .get("template", {})
-            .get("spec", {})
-        )
         WorkloadProvider.apply_platform_node_selector(
             pod_spec=pod_spec,
-            template_spec=template_spec if isinstance(template_spec, dict) else {},
+            template_spec=self._template_pod_spec(),
             platform=platform,
         )
 
@@ -480,6 +470,19 @@ class BatchSandboxProvider(WorkloadProvider):
             "kind": "BatchSandbox",
         }
 
+    def _template_pod_spec(self) -> Dict[str, Any]:
+        """Return the template's pod spec, treating absent and explicit-null alike.
+
+        ``or {}`` instead of ``.get(key, {})``: a key written with no value (a bare
+        ``spec:`` line) parses as None, which ``.get`` would hand back unchanged.
+        """
+        template = self.template_manager.get_base_template()
+        if not isinstance(template, dict):
+            return {}
+        spec = template.get("spec") or {}
+        pod_spec = (spec.get("template") or {}).get("spec") or {}
+        return pod_spec if isinstance(pod_spec, dict) else {}
+
     def _extract_template_pod_extras(
         self,
     ) -> tuple[
@@ -494,20 +497,21 @@ class BatchSandboxProvider(WorkloadProvider):
         entry without a name describes the main container. securityContext is taken
         from the main container only.
         """
-        template = self.template_manager.get_base_template()
-        spec = template.get("spec", {}) if isinstance(template, dict) else {}
-        template_spec = spec.get("template", {}).get("spec", {})
+        template_spec = self._template_pod_spec()
         extra_volumes = template_spec.get("volumes") or []
         if not isinstance(extra_volumes, list):
             extra_volumes = []
 
         extra_mounts: Dict[str, list[Dict[str, Any]]] = {}
         extra_security_context: Optional[Dict[str, Any]] = None
-        for container in template_spec.get("containers") or []:
+        containers = template_spec.get("containers") or []
+        for container in containers if isinstance(containers, list) else []:
+            if not isinstance(container, dict):
+                continue
             name = container.get("name") or MAIN_CONTAINER_NAME
             mounts = container.get("volumeMounts") or []
             if isinstance(mounts, list) and mounts:
-                extra_mounts[name] = mounts
+                extra_mounts.setdefault(name, []).extend(mounts)
             if name == MAIN_CONTAINER_NAME:
                 security_context = container.get("securityContext")
                 if isinstance(security_context, dict):
@@ -518,23 +522,28 @@ class BatchSandboxProvider(WorkloadProvider):
     def _merge_pod_spec_extras(
         self,
         batchsandbox: Dict[str, Any],
-        extra_volumes: list[Dict[str, Any]],
         extra_mounts: Dict[str, list[Dict[str, Any]]],
         extra_security_context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Merge template-provided volumes, mounts, and securityContext into runtime pod spec."""
+        """Merge template-provided mounts and securityContext into runtime pod spec."""
         try:
             spec = batchsandbox["spec"]["template"]["spec"]
         except KeyError:
             return
 
-        _append_unique_by_name(spec, "volumes", extra_volumes)
-
-        containers = spec.get("containers", []) or []
-        if not containers or not isinstance(containers, list):
+        containers = spec.get("containers") or []
+        if not isinstance(containers, list) or not containers:
             return
-        main_container = containers[0]
-        if extra_security_context and isinstance(main_container, dict):
+        main_container = next(
+            (
+                container
+                for container in containers
+                if isinstance(container, dict)
+                and container.get("name") == MAIN_CONTAINER_NAME
+            ),
+            None,
+        )
+        if extra_security_context and main_container is not None:
             # The template's container securityContext is a base default: merge it
             # into the runtime container's own securityContext (runtime leaves win,
             # nested dicts merge so template members like capabilities.add survive),
@@ -547,9 +556,11 @@ class BatchSandboxProvider(WorkloadProvider):
             else:
                 main_container["securityContext"] = extra_security_context
         for container in containers:
-            _append_unique_by_name(
-                container, "volumeMounts", extra_mounts.get(container.get("name"), [])
-            )
+            if not isinstance(container, dict):
+                continue
+            name = container.get("name")
+            if isinstance(name, str):
+                _append_unique_by_name(container, "volumeMounts", extra_mounts.get(name, []))
 
     def _build_task_template(
         self,

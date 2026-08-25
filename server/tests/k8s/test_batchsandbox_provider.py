@@ -773,6 +773,68 @@ spec:
         assert "egress-rules" in [m["name"] for m in sidecar["volumeMounts"]]
         assert "egress-rules" not in [m["name"] for m in main["volumeMounts"]]
 
+    def test_create_workload_rejects_request_volume_taking_a_template_volume_name(
+        self, mock_k8s_client, tmp_path
+    ):
+        """A request may not claim a template volume name.
+
+        Otherwise the template's own source is dropped as a duplicate while the
+        template's mount stays, handing the sidecar's rules directory to storage the
+        request controls.
+        """
+        from opensandbox_server.api.schema import Volume, Host
+
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      volumes:
+        - name: egress-rules
+          configMap:
+            name: opensandbox-egress-rules
+      containers:
+        - name: egress
+          volumeMounts:
+            - name: egress-rules
+              mountPath: /var/egress/rules
+              readOnly: true
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        with pytest.raises(ValueError, match="conflicts with an internal volume"):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+                network_policy=NetworkPolicy(
+                    egress=[NetworkRule(action="allow", target="example.com")]
+                ),
+                egress_image="opensandbox/egress:v1.1.7",
+                volumes=[
+                    Volume(
+                        name="egress-rules",
+                        host=Host(path="/tmp/attacker"),
+                        mount_path="/mnt/rules",
+                    )
+                ],
+            )
+
+        mock_k8s_client.create_custom_object.assert_not_called()
+
     def test_create_workload_treats_unnamed_template_container_as_main(
         self, mock_k8s_client, tmp_path
     ):

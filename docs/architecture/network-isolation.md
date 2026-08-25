@@ -107,6 +107,8 @@ spec:
 
 Template containers are matched to sandbox pod containers by name, so a `containers` entry named `egress` contributes mounts to the egress sidecar without having to describe the rest of it. See [BatchSandbox template merge](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#batchsandbox-template-merge) for what a template can and cannot change.
 
+The ConfigMap becomes the whole content of `/var/egress/rules`, so every rule file the sidecar should read has to be a key in it — add `allow.always` and `log_skip.always` to the same ConfigMap if you use them.
+
 The template is read at server startup, so this one-time edit needs a server restart. After that, changing the rules is a single `kubectl apply` on the ConfigMap: no image rebuild, no server config change, no restart. Existing sandboxes pick the change up on the sidecar's next reload; allow for the kubelet's ConfigMap refresh interval on top of that.
 
 ::: tip Available with the BatchSandbox provider

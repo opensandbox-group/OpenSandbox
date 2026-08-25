@@ -170,7 +170,9 @@ Container entries are matched **by name**: `sandbox` is the container running th
 
 Merging is additive and never overwrites: an entry whose `name` the pod already declares is skipped, and the runtime's own value wins on conflicting `securityContext` leaves. Everything else in a template container entry — `image`, `env`, `resources`, probes — is **not** applied; the same goes for template `initContainers`.
 
-Top-level fields the server does not set itself (`tolerations`, `nodeSelector`, `affinity`, `restartPolicy`, …) merge normally. The file is read at startup, so changes to it need a server restart.
+Volume names declared in the template are reserved for the whole fleet: a sandbox creation request that asks for a volume of the same name is rejected, so a request cannot substitute its own storage behind a mount the template set up.
+
+Top-level fields the server does not set itself (`tolerations`, `restartPolicy`, `priorityClassName`, …) merge normally. `nodeSelector` and `affinity` merge too, but a request asking for a `platform` that the template's own scheduling constraints rule out is rejected rather than merged. The file is read at startup, so changes to it need a server restart.
 
 ### `kubernetes.execd_init_resources`
 

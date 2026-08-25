@@ -26,6 +26,7 @@ from uuid import UUID
 
 from kubernetes.client import ApiException
 
+from opensandbox_server.services.k8s.provider_common import MAIN_CONTAINER_NAME
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import SnapshotRuntimeStatus
 
@@ -41,7 +42,6 @@ PUBLIC_SNAPSHOT_SCOPE_LABEL = "opensandbox.io/snapshot-scope"
 PUBLIC_SNAPSHOT_ID_LABEL = "opensandbox.io/snapshot-id"
 PUBLIC_SNAPSHOT_SOURCE_SANDBOX_ID_LABEL = "opensandbox.io/source-sandbox-id"
 PUBLIC_SNAPSHOT_SCOPE_VALUE = "public"
-MAIN_CONTAINER_NAME = "sandbox"
 DEFAULT_WAIT_TIMEOUT_SECONDS = 15 * 60
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 
