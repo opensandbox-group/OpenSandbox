@@ -128,7 +128,7 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 | `kubeconfig_path` | string \| omitted | `null` | Path to kubeconfig (expandable, e.g. `~/.kube/config`). In-cluster configs often leave this unset and rely on in-cluster credentials. |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
 | `workload_provider` | string \| omitted | `null` | One of: **`batchsandbox`**, **`agent-sandbox`**. If omitted, the **first registered** provider is used (currently **`batchsandbox`**). |
-| `batchsandbox_template_file` | string \| omitted | `null` | Path to **BatchSandbox** CR YAML template when `workload_provider = "batchsandbox"`. |
+| `batchsandbox_template_file` | string \| omitted | `null` | Path to **BatchSandbox** CR YAML template when `workload_provider = "batchsandbox"`. See [BatchSandbox template merge](#batchsandbox-template-merge). |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | Image pull policy for the BatchSandbox main container. Values: **`Always`**, **`IfNotPresent`**, **`Never`**. |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max time to wait for a new sandbox to become ready (e.g. IP assigned), in seconds. |
 | `pool_acquisition_timeout_seconds` | integer | `30` | Max cumulative time to wait while Pool capacity prevents allocation. This does not extend `sandbox_create_timeout_seconds`. |
@@ -155,6 +155,22 @@ Kubernetes workloads are created by a **workload provider**. There is **no** `[b
 | Extra TOML table | None | **`[agent_sandbox]`** is required (see below) |
 
 **BatchSandbox-only config keys in `config.py`:** `batchsandbox_template_file` and `image_pull_policy` on `KubernetesRuntimeConfig`. Everything else in the `[kubernetes]` table (namespace, kubeconfig, informer, API QPS, `sandbox_create_*`, `execd_init_resources`, …) applies to **whichever** provider you select.
+
+### BatchSandbox template merge
+
+The file at `kubernetes.batchsandbox_template_file` is a partial **BatchSandbox** CR merged into every sandbox manifest. The server owns the pod's containers, so a template does not replace them — three pieces are read out of it and merged in:
+
+| Template field | Merged into |
+|---|---|
+| `spec.template.spec.volumes` | the pod's `volumes` |
+| `spec.template.spec.containers[].volumeMounts` | the **same-named** pod container's `volumeMounts` |
+| `spec.template.spec.containers[].securityContext` | the main container's `securityContext` (main container only) |
+
+Container entries are matched **by name**: `sandbox` is the container running the sandbox image, `egress` is the egress sidecar (present only when a network policy is requested). An entry with no `name` describes the main container. An entry naming a container the pod does not have is ignored.
+
+Merging is additive and never overwrites: an entry whose `name` the pod already declares is skipped, and the runtime's own value wins on conflicting `securityContext` leaves. Everything else in a template container entry — `image`, `env`, `resources`, probes — is **not** applied; the same goes for template `initContainers`.
+
+Top-level fields the server does not set itself (`tolerations`, `nodeSelector`, `affinity`, `restartPolicy`, …) merge normally. The file is read at startup, so changes to it need a server restart.
 
 ### `kubernetes.execd_init_resources`
 

@@ -16,3 +16,18 @@ spec:
       restartPolicy: Never
       tolerations:
         - operator: "Exists"
+      # Pod-level volumes and per-container volumeMounts declared here are merged
+      # into every sandbox pod. Template containers are matched to pod containers
+      # by name ("sandbox" runs the sandbox image, "egress" is the egress sidecar),
+      # so the entry below adds a mount to the sidecar - for example to supply
+      # always-rules from a ConfigMap instead of a custom image.
+      # volumes:
+      #   - name: egress-rules
+      #     configMap:
+      #       name: opensandbox-egress-rules
+      # containers:
+      #   - name: egress
+      #     volumeMounts:
+      #       - name: egress-rules
+      #         mountPath: /var/egress/rules
+      #         readOnly: true

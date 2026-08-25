@@ -44,6 +44,10 @@ from opensandbox_server.services.k8s.security_context import (
 # Default entrypoint auto-filled by the SDK when user does not provide one.
 DEFAULT_ENTRYPOINT = ["tail", "-f", "/dev/null"]
 
+# Name of the container running the user's sandbox image. Operators match against
+# it in pod templates, so treat it as a stable name rather than an internal detail.
+MAIN_CONTAINER_NAME = "sandbox"
+
 _GPU_RESOURCE_LIMIT_KEY = "gpu"
 # Canonical extended-resource name advertised by the NVIDIA device plugin.
 # Hardcoded for parity with the Docker runtime fix (#775), which targets
@@ -221,7 +225,7 @@ def _build_main_container(
         )
 
     return V1Container(
-        name="sandbox",
+        name=MAIN_CONTAINER_NAME,
         image=image_spec.uri,
         image_pull_policy=image_pull_policy,
         command=["/opt/opensandbox/bootstrap.sh"] + entrypoint,

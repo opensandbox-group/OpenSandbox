@@ -42,6 +42,7 @@ from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
 from opensandbox_server.services.validators import ensure_egress_runtime_compatible
 from opensandbox_server.services.k8s.provider_common import (
     DEFAULT_ENTRYPOINT,
+    MAIN_CONTAINER_NAME,
     _build_execd_init_container,
     _build_main_container,
     _container_to_dict,
@@ -93,6 +94,25 @@ def _merge_security_context(
         else:
             merged[key] = runtime_value
     return merged
+
+
+def _append_unique_by_name(
+    owner: Dict[str, Any], key: str, extras: list[Dict[str, Any]]
+) -> None:
+    """Append template entries under ``key``, skipping names ``owner`` already declares."""
+    items = owner.get(key) or []
+    if not isinstance(items, list) or not extras:
+        return
+    existing = {item.get("name") for item in items if isinstance(item, dict)}
+    for extra in extras:
+        if not isinstance(extra, dict):
+            continue
+        name = extra.get("name")
+        if not name or name in existing:
+            continue
+        items.append(extra)
+        existing.add(name)
+    owner[key] = items
 
 
 class BatchSandboxProvider(WorkloadProvider):
@@ -462,40 +482,44 @@ class BatchSandboxProvider(WorkloadProvider):
 
     def _extract_template_pod_extras(
         self,
-    ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Extract extra template volumes, mounts, and container securityContext for runtime merge."""
+    ) -> tuple[
+        list[Dict[str, Any]],
+        Dict[str, list[Dict[str, Any]]],
+        Optional[Dict[str, Any]],
+    ]:
+        """Extract template volumes, per-container mounts, and the main container securityContext.
+
+        Template containers are matched to pod containers by name, so an entry can
+        also add mounts to a container the template does not otherwise describe. An
+        entry without a name describes the main container. securityContext is taken
+        from the main container only.
+        """
         template = self.template_manager.get_base_template()
         spec = template.get("spec", {}) if isinstance(template, dict) else {}
         template_spec = spec.get("template", {}).get("spec", {})
-        extra_volumes = template_spec.get("volumes", []) or []
-
-        extra_mounts: list[Dict[str, Any]] = []
-        extra_security_context: Optional[Dict[str, Any]] = None
-        containers = template_spec.get("containers", []) or []
-        if containers:
-            target = None
-            for container in containers:
-                if container.get("name") == "sandbox":
-                    target = container
-                    break
-            if target is None:
-                target = containers[0]
-            extra_mounts = target.get("volumeMounts", []) or []
-            security_context = target.get("securityContext")
-            if isinstance(security_context, dict):
-                extra_security_context = security_context
-
+        extra_volumes = template_spec.get("volumes") or []
         if not isinstance(extra_volumes, list):
             extra_volumes = []
-        if not isinstance(extra_mounts, list):
-            extra_mounts = []
+
+        extra_mounts: Dict[str, list[Dict[str, Any]]] = {}
+        extra_security_context: Optional[Dict[str, Any]] = None
+        for container in template_spec.get("containers") or []:
+            name = container.get("name") or MAIN_CONTAINER_NAME
+            mounts = container.get("volumeMounts") or []
+            if isinstance(mounts, list) and mounts:
+                extra_mounts[name] = mounts
+            if name == MAIN_CONTAINER_NAME:
+                security_context = container.get("securityContext")
+                if isinstance(security_context, dict):
+                    extra_security_context = security_context
+
         return extra_volumes, extra_mounts, extra_security_context
 
     def _merge_pod_spec_extras(
         self,
         batchsandbox: Dict[str, Any],
         extra_volumes: list[Dict[str, Any]],
-        extra_mounts: list[Dict[str, Any]],
+        extra_mounts: Dict[str, list[Dict[str, Any]]],
         extra_security_context: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Merge template-provided volumes, mounts, and securityContext into runtime pod spec."""
@@ -504,18 +528,7 @@ class BatchSandboxProvider(WorkloadProvider):
         except KeyError:
             return
 
-        volumes = spec.get("volumes", []) or []
-        if isinstance(volumes, list) and extra_volumes:
-            existing = {v.get("name") for v in volumes if isinstance(v, dict)}
-            for vol in extra_volumes:
-                if not isinstance(vol, dict):
-                    continue
-                name = vol.get("name")
-                if not name or name in existing:
-                    continue
-                volumes.append(vol)
-                existing.add(name)
-            spec["volumes"] = volumes
+        _append_unique_by_name(spec, "volumes", extra_volumes)
 
         containers = spec.get("containers", []) or []
         if not containers or not isinstance(containers, list):
@@ -533,18 +546,10 @@ class BatchSandboxProvider(WorkloadProvider):
                 )
             else:
                 main_container["securityContext"] = extra_security_context
-        mounts = main_container.get("volumeMounts", []) or []
-        if isinstance(mounts, list) and extra_mounts:
-            existing = {m.get("name") for m in mounts if isinstance(m, dict)}
-            for mnt in extra_mounts:
-                if not isinstance(mnt, dict):
-                    continue
-                name = mnt.get("name")
-                if not name or name in existing:
-                    continue
-                mounts.append(mnt)
-                existing.add(name)
-            main_container["volumeMounts"] = mounts
+        for container in containers:
+            _append_unique_by_name(
+                container, "volumeMounts", extra_mounts.get(container.get("name"), [])
+            )
 
     def _build_task_template(
         self,

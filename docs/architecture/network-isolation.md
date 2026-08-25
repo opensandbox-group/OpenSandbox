@@ -71,7 +71,51 @@ Common example values:
 
 Supported target types: IP addresses (e.g., `10.0.0.5`), CIDR ranges (e.g., `10.0.0.0/8`), or domain names (e.g., `internal.service.local`, with `*.` wildcard prefix support).
 
-#### 3. Build a Custom Image Based on the Official Egress Image
+#### 3. Deliver the Rule File to the Sidecar
+
+The sidecar reads `deny.always` from `/var/egress/rules/` inside its own container. There are two ways to put it there.
+
+##### Option A: Mount It from a ConfigMap (recommended on Kubernetes)
+
+Pod CIDR, Service CIDR and node CIDR are properties of the cluster, so keeping them in a ConfigMap lets you change them with `kubectl apply` alone.
+
+Create the ConfigMap in the namespace where sandbox pods run:
+
+```bash
+kubectl create configmap opensandbox-egress-rules \
+  --from-file=deny.always \
+  -n opensandbox
+```
+
+Then declare the volume and the sidecar mount in the BatchSandbox template referenced by `kubernetes.batchsandbox_template_file`:
+
+```yaml
+spec:
+  template:
+    spec:
+      volumes:
+        - name: egress-rules
+          configMap:
+            name: opensandbox-egress-rules
+      containers:
+        - name: egress
+          volumeMounts:
+            - name: egress-rules
+              mountPath: /var/egress/rules
+              readOnly: true
+```
+
+Template containers are matched to sandbox pod containers by name, so a `containers` entry named `egress` contributes mounts to the egress sidecar without having to describe the rest of it. See [BatchSandbox template merge](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#batchsandbox-template-merge) for what a template can and cannot change.
+
+The template is read at server startup, so this one-time edit needs a server restart. After that, changing the rules is a single `kubectl apply` on the ConfigMap: no image rebuild, no server config change, no restart. Existing sandboxes pick the change up on the sidecar's next reload; allow for the kubelet's ConfigMap refresh interval on top of that.
+
+::: tip Available with the BatchSandbox provider
+The template merge described here applies to `kubernetes.workload_provider = "batchsandbox"` (the default). With the `agent-sandbox` provider, use Option B.
+:::
+
+##### Option B: Bake It into a Custom Egress Image
+
+Use this when there is no BatchSandbox template to extend — the Docker runtime, or the `agent-sandbox` provider.
 
 Create a `Dockerfile` that embeds the `deny.always` file into the image:
 
@@ -88,9 +132,7 @@ docker build -t registry.example.com/opensandbox/egress:hardened .
 docker push registry.example.com/opensandbox/egress:hardened
 ```
 
-#### 4. Update the Server Configuration
-
-In the OpenSandbox server configuration, point the `[egress]` `image` to the custom image:
+Then point the `[egress]` `image` at the custom image in the server configuration:
 
 ```toml
 [egress]
@@ -98,9 +140,7 @@ image = "registry.example.com/opensandbox/egress:hardened"
 mode = "dns+nft"
 ```
 
-After this configuration is applied, all newly created sandboxes will use the egress sidecar image that includes the `deny.always` rules. No changes to individual sandbox creation requests are needed.
-
-> Note: the `deny.always` file is hot-reloaded every minute. To change the rules (e.g., after a cluster CIDR change), update the `deny.always` file, rebuild the image, and perform a rolling update of the server configuration.
+Changing the rules means editing the file, rebuilding the image, pushing it, and rolling out the new tag in the server configuration.
 
 ### Effects
 
@@ -170,7 +210,7 @@ sandbox = await Sandbox.create(
 |-----------|---------------------|---------------------------|
 | Enforcement | Yes (user cannot override) | No (user can modify policy) |
 | User awareness | Transparent (platform-level) | Requires explicit declaration |
-| Operational cost | Low (one-time image build, global effect) | High (declare per sandbox) |
+| Operational cost | Low (one-time setup, global effect; rule changes are a `kubectl apply` when the file comes from a ConfigMap) | High (declare per sandbox) |
 | Cluster CIDR exposure | Not exposed to users | Must be exposed to users |
 | Use case | Platform-wide default isolation, recommended | Whitelist mode, fine-grained control |
 
