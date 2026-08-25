@@ -95,6 +95,25 @@ def _merge_security_context(
     return merged
 
 
+def _append_volume_mounts(
+    container: Dict[str, Any], extra_mounts: list[Dict[str, Any]]
+) -> None:
+    """Append template mounts to a container, skipping names it already mounts."""
+    mounts = container.get("volumeMounts", []) or []
+    if not isinstance(mounts, list) or not extra_mounts:
+        return
+    existing = {m.get("name") for m in mounts if isinstance(m, dict)}
+    for mnt in extra_mounts:
+        if not isinstance(mnt, dict):
+            continue
+        name = mnt.get("name")
+        if not name or name in existing:
+            continue
+        mounts.append(mnt)
+        existing.add(name)
+    container["volumeMounts"] = mounts
+
+
 class BatchSandboxProvider(WorkloadProvider):
     """Workload provider for BatchSandbox CRDs."""
     
@@ -197,7 +216,12 @@ class BatchSandboxProvider(WorkloadProvider):
                 annotations=annotations,
             )
 
-        extra_volumes, extra_mounts, extra_security_context = self._extract_template_pod_extras()
+        (
+            extra_volumes,
+            extra_mounts,
+            extra_security_context,
+            extra_sidecar_mounts,
+        ) = self._extract_template_pod_extras()
 
         if windows_profile:
             validate_windows_profile_resource_limits(resource_limits)
@@ -324,7 +348,11 @@ class BatchSandboxProvider(WorkloadProvider):
         else:
             batchsandbox["spec"]["expireTime"] = expires_at.isoformat()
         self._merge_pod_spec_extras(
-            batchsandbox, extra_volumes, extra_mounts, extra_security_context
+            batchsandbox,
+            extra_volumes,
+            extra_mounts,
+            extra_security_context,
+            extra_sidecar_mounts,
         )
         merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
         ensure_egress_runtime_compatible(
@@ -462,8 +490,18 @@ class BatchSandboxProvider(WorkloadProvider):
 
     def _extract_template_pod_extras(
         self,
-    ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Extract extra template volumes, mounts, and container securityContext for runtime merge."""
+    ) -> tuple[
+        list[Dict[str, Any]],
+        list[Dict[str, Any]],
+        Optional[Dict[str, Any]],
+        Dict[str, list[Dict[str, Any]]],
+    ]:
+        """Extract extra template volumes, mounts, and container securityContext for runtime merge.
+
+        Mounts declared on template containers other than the main one are returned
+        keyed by container name, so a template entry can also add mounts to a
+        runtime sidecar the template itself does not describe.
+        """
         template = self.template_manager.get_base_template()
         spec = template.get("spec", {}) if isinstance(template, dict) else {}
         template_spec = spec.get("template", {}).get("spec", {})
@@ -471,6 +509,7 @@ class BatchSandboxProvider(WorkloadProvider):
 
         extra_mounts: list[Dict[str, Any]] = []
         extra_security_context: Optional[Dict[str, Any]] = None
+        extra_sidecar_mounts: Dict[str, list[Dict[str, Any]]] = {}
         containers = template_spec.get("containers", []) or []
         if containers:
             target = None
@@ -484,12 +523,19 @@ class BatchSandboxProvider(WorkloadProvider):
             security_context = target.get("securityContext")
             if isinstance(security_context, dict):
                 extra_security_context = security_context
+            for container in containers:
+                if container is target or not isinstance(container, dict):
+                    continue
+                name = container.get("name")
+                mounts = container.get("volumeMounts", []) or []
+                if name and isinstance(mounts, list) and mounts:
+                    extra_sidecar_mounts[name] = mounts
 
         if not isinstance(extra_volumes, list):
             extra_volumes = []
         if not isinstance(extra_mounts, list):
             extra_mounts = []
-        return extra_volumes, extra_mounts, extra_security_context
+        return extra_volumes, extra_mounts, extra_security_context, extra_sidecar_mounts
 
     def _merge_pod_spec_extras(
         self,
@@ -497,6 +543,7 @@ class BatchSandboxProvider(WorkloadProvider):
         extra_volumes: list[Dict[str, Any]],
         extra_mounts: list[Dict[str, Any]],
         extra_security_context: Optional[Dict[str, Any]] = None,
+        extra_sidecar_mounts: Optional[Dict[str, list[Dict[str, Any]]]] = None,
     ) -> None:
         """Merge template-provided volumes, mounts, and securityContext into runtime pod spec."""
         try:
@@ -533,18 +580,16 @@ class BatchSandboxProvider(WorkloadProvider):
                 )
             else:
                 main_container["securityContext"] = extra_security_context
-        mounts = main_container.get("volumeMounts", []) or []
-        if isinstance(mounts, list) and extra_mounts:
-            existing = {m.get("name") for m in mounts if isinstance(m, dict)}
-            for mnt in extra_mounts:
-                if not isinstance(mnt, dict):
-                    continue
-                name = mnt.get("name")
-                if not name or name in existing:
-                    continue
-                mounts.append(mnt)
-                existing.add(name)
-            main_container["volumeMounts"] = mounts
+        _append_volume_mounts(main_container, extra_mounts)
+
+        if not extra_sidecar_mounts:
+            return
+        for container in containers[1:]:
+            if not isinstance(container, dict):
+                continue
+            name = container.get("name")
+            if isinstance(name, str):
+                _append_volume_mounts(container, extra_sidecar_mounts.get(name, []))
 
     def _build_task_template(
         self,

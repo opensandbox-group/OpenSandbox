@@ -648,6 +648,121 @@ spec:
         assert mount_names.count("opensandbox-bin") == 1
         assert "sandbox-shared-data" in mount_names
 
+    def test_create_workload_merges_template_mounts_into_egress_sidecar(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      volumes:
+        - name: egress-rules
+          configMap:
+            name: opensandbox-egress-rules
+      containers:
+        - name: sandbox
+          volumeMounts:
+            - name: sandbox-only
+              mountPath: /data
+        - name: egress
+          volumeMounts:
+            - name: egress-rules
+              mountPath: /var/egress/rules
+              readOnly: true
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+            network_policy=NetworkPolicy(egress=[NetworkRule(action="allow", target="example.com")]),
+            egress_image="opensandbox/egress:v1.1.7",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        spec = body["spec"]["template"]["spec"]
+
+        assert "egress-rules" in [v["name"] for v in spec["volumes"]]
+
+        sidecar = next(c for c in spec["containers"] if c["name"] == "egress")
+        assert {
+            "name": "egress-rules",
+            "mountPath": "/var/egress/rules",
+            "readOnly": True,
+        } in sidecar["volumeMounts"]
+        # The runtime mount the sidecar already declares is preserved.
+        assert {
+            "name": OPENSANDBOX_RUNTIME_VOLUME_NAME,
+            "mountPath": OPENSANDBOX_RUNTIME_MOUNT_PATH,
+        } in sidecar["volumeMounts"]
+        # Sidecar mounts do not leak into the main container, and vice versa.
+        main = next(c for c in spec["containers"] if c["name"] == "sandbox")
+        main_mount_names = [m["name"] for m in main["volumeMounts"]]
+        assert "egress-rules" not in main_mount_names
+        assert "sandbox-only" in main_mount_names
+        assert "sandbox-only" not in [m["name"] for m in sidecar["volumeMounts"]]
+
+    def test_create_workload_ignores_template_mounts_for_absent_container(
+        self, mock_k8s_client, tmp_path
+    ):
+        """A template entry for a container the runtime does not create is a no-op."""
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          volumeMounts: []
+        - name: egress
+          volumeMounts:
+            - name: egress-rules
+              mountPath: /var/egress/rules
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        containers = body["spec"]["template"]["spec"]["containers"]
+
+        assert [c["name"] for c in containers] == ["sandbox"]
+        assert "egress-rules" not in [
+            m["name"] for m in containers[0].get("volumeMounts", [])
+        ]
+
     def test_create_workload_applies_template_container_security_context(self, mock_k8s_client, tmp_path):
         template_file = tmp_path / "template.yaml"
         template_file.write_text(

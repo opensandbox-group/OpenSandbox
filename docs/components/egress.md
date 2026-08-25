@@ -101,6 +101,8 @@ Rule precedence: `deny.always` > `allow.always` > user policy (API/env).
 
 Always-rules are hot-reloaded: the sidecar polls the files once per minute and applies changes without restart.
 
+On Kubernetes, these files can be supplied from a ConfigMap mounted into the sidecar rather than baked into the egress image, so platform-wide rules change with `kubectl apply`. See [Network Isolation](/architecture/network-isolation).
+
 ### Service Mesh Compatibility
 
 ::: warning Not Supported with Transparent Mesh Sidecars
