@@ -201,6 +201,125 @@ class SystemAddonRedactionTest(unittest.TestCase):
         self.assertEqual(("request", "GET", system.ACTIVE_VAULT_PATH), calls[1])
         self.assertEqual(("close", None, None), calls[-1])
 
+    def test_active_vault_timeout_rejects_request_without_upstream_forwarding(self) -> None:
+        system = _load_system_module()
+
+        class TimeoutConnection:
+            def __init__(self, socket_path: str, timeout: float) -> None:
+                pass
+
+            def request(self, method: str, path: str) -> None:
+                raise TimeoutError("timed out")
+
+            def close(self) -> None:
+                pass
+
+        system.UnixSocketHTTPConnection = TimeoutConnection
+        flow = _Flow()
+        flow.response = None
+
+        system.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(503, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
+    def test_expired_vault_cache_is_not_reused_after_lookup_failure(self) -> None:
+        system = _load_system_module()
+        system._vault_cache = system.ActiveVault(
+            1,
+            [
+                {
+                    "name": "gitlab-api",
+                    "match": {"hosts": ["code.example.com"]},
+                    "headers": [{"name": "Private-Token", "value": "stale-secret"}],
+                }
+            ],
+            ["stale-secret"],
+        )
+        system._vault_cache_loaded_at = 0.0
+
+        class TimeoutConnection:
+            def __init__(self, socket_path: str, timeout: float) -> None:
+                pass
+
+            def request(self, method: str, path: str) -> None:
+                raise TimeoutError("timed out")
+
+            def close(self) -> None:
+                pass
+
+        system.UnixSocketHTTPConnection = TimeoutConnection
+        flow = _Flow()
+        flow.response = None
+
+        system.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(503, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
+    def test_active_vault_http_error_rejects_request_without_upstream_forwarding(self) -> None:
+        system = _load_system_module()
+
+        class ErrorResponse:
+            status = 500
+
+            def read(self) -> bytes:
+                return b""
+
+        class ErrorConnection:
+            def __init__(self, socket_path: str, timeout: float) -> None:
+                pass
+
+            def request(self, method: str, path: str) -> None:
+                pass
+
+            def getresponse(self) -> ErrorResponse:
+                return ErrorResponse()
+
+            def close(self) -> None:
+                pass
+
+        system.UnixSocketHTTPConnection = ErrorConnection
+        flow = _Flow()
+        flow.response = None
+
+        system.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(503, flow.response.status_code)
+
+    def test_missing_active_vault_remains_an_authoritative_pass_through(self) -> None:
+        system = _load_system_module()
+
+        class MissingResponse:
+            status = 404
+
+            def read(self) -> bytes:
+                return b""
+
+        class MissingConnection:
+            def __init__(self, socket_path: str, timeout: float) -> None:
+                pass
+
+            def request(self, method: str, path: str) -> None:
+                pass
+
+            def getresponse(self) -> MissingResponse:
+                return MissingResponse()
+
+            def close(self) -> None:
+                pass
+
+        system.UnixSocketHTTPConnection = MissingConnection
+        flow = _Flow()
+        flow.response = None
+
+        system.requestheaders(flow)
+
+        self.assertIsNone(flow.response)
+
     def test_request_injection_log_does_not_include_secret_value(self) -> None:
         system = _load_system_module()
         flow = _Flow()
