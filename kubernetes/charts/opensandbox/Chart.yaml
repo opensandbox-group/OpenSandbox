@@ -16,8 +16,8 @@ apiVersion: v2
 name: opensandbox
 description: All-in-one Helm chart for deploying OpenSandbox controller and server
 type: application
-version: 0.2.2
-appVersion: "0.2.2"
+version: 0.2.3
+appVersion: "0.2.3"
 
 keywords:
   - sandbox
