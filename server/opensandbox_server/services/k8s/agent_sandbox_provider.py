@@ -446,6 +446,12 @@ class AgentSandboxProvider(WorkloadProvider):
             state = "Running"
         elif reason == "SandboxExpired":
             state = "Terminated"
+        elif reason == "PodSucceeded":
+            state = "Terminated"
+            message = message or "Sandbox pod completed successfully."
+        elif reason == "PodFailed":
+            state = "Failed"
+            message = message or "Sandbox pod failed."
         elif cond_status == "False" and self.is_platform_unschedulable(
             reason,
             message,
