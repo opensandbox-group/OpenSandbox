@@ -31,6 +31,8 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
@@ -39,8 +41,10 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/sandboxnft"
 	"github.com/alibaba/opensandbox/egress/pkg/slotsource"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
@@ -48,6 +52,19 @@ import (
 // canceled or a fatal error occurs.
 func runFleetProfile(ctx context.Context) {
 	log.Infof("egress profile: fleet (multi-sandbox control plane)")
+
+	otelShutdown, err := telemetry.Init(ctx)
+	if err != nil {
+		log.Warnf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
+		otelShutdown = nil
+	}
+	if otelShutdown != nil {
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			_ = otelShutdown(shutdownCtx)
+		}()
+	}
 
 	slotDir := envOrDefault(constants.EnvSlotStoreDir, constants.DefaultSlotStoreDir)
 	pollSec := constants.EnvIntOrDefault(constants.EnvSlotPollInterval, constants.DefaultSlotPollIntervalSeconds)
@@ -59,13 +76,21 @@ func runFleetProfile(ctx context.Context) {
 		log.Fatalf("failed to load always allow/deny rule files: %v", err)
 	}
 
-	nftMgr := fleetnft.NewApplier(nil)
+	podNft := fleetnft.NewApplier(nil, fleetDoHOptions())
+	sandboxNft := sandboxnft.NewApplier(nil, sandboxDoHOptions())
+	nftMgr := &fleetEnforcer{pod: podNft, sandbox: sandboxNft}
 	// Recovery: wipe stale rules from a previous egress generation BEFORE
 	// rescanning, so no dead subject's policy survives into a new sandbox.
-	if err := nftMgr.ApplyReset(ctx); err != nil {
+	if err := podNft.ApplyReset(ctx); err != nil {
 		log.Fatalf("fleet nftables reset failed: %v", err)
 	}
 	log.Infof("fleet nftables table reset (stale rules cleared)")
+	// The sandbox layer needs the same wipe: sandbox netns can outlive the
+	// egress process, and their OUTPUT tables are the ONLY enforcement for
+	// host-local traffic (never seen by the Pod forward hook). Reset every
+	// netns the previous generation could have installed into — from the
+	// slot store and from the shared netns mount dir.
+	wipeSandboxTables(ctx, src, sandboxNft)
 
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	pendingTTL := time.Duration(constants.EnvIntOrDefault(constants.EnvPendingPushTTL, constants.DefaultPendingPushTTL)) * time.Second
@@ -124,6 +149,12 @@ func runFleetProfile(ctx context.Context) {
 	fleetSrv.StartPendingSweep(ctx)
 	controllerErr := controller.StartWatch(ctx, src)
 
+	// Per-subject connection refresh: active TCP connections keep their
+	// dynamic leases alive (bucketed by source IP from the Pod netns
+	// conntrack table); the sandbox-netns mirror is refreshed in lockstep.
+	nftMgr.StartConnectionRefresh(ctx)
+	log.Infof("fleet connection refresh started (bucketed per subject, every 30s)")
+
 	// Block until shutdown or a fatal control-plane failure (slot store
 	// unreadable = fail closed: the daemon must exit, not run unenforced).
 	select {
@@ -149,4 +180,120 @@ func runFleetProfile(ctx context.Context) {
 	}
 	log.Infof("fleet profile shutdown complete")
 	_ = os.Stderr.Sync()
+}
+
+// fleetDoHOptions parses the shared DoH-443 blocking env for the fleet
+// profile: OPENSANDBOX_EGRESS_BLOCK_DOH_443 (strict all-443 drop when the
+// blocklist is empty) + OPENSANDBOX_EGRESS_DOH_BLOCKLIST (comma-separated
+// IP/CIDR list), same semantics as the sidecar profile.
+func fleetDoHOptions() fleetnft.Options {
+	opts := fleetnft.Options{BlockDoH443: constants.IsTruthy(os.Getenv(constants.EnvBlockDoH443))}
+	if raw := strings.TrimSpace(os.Getenv(constants.EnvDoHBlocklist)); raw != "" {
+		opts.DoHBlocklistV4, opts.DoHBlocklistV6 = parseDoHBlocklist(raw)
+	}
+	return opts
+}
+
+// sandboxDoHOptions mirrors fleetDoHOptions for the per-sandbox netns layer,
+// so both layers carry identical encrypted-DNS blocking.
+func sandboxDoHOptions() sandboxnft.Options {
+	opts := sandboxnft.Options{BlockDoH443: constants.IsTruthy(os.Getenv(constants.EnvBlockDoH443))}
+	if raw := strings.TrimSpace(os.Getenv(constants.EnvDoHBlocklist)); raw != "" {
+		opts.DoHBlocklistV4, opts.DoHBlocklistV6 = parseDoHBlocklist(raw)
+	}
+	return opts
+}
+
+// fleetEnforcer composes the two enforcement layers per subject: the
+// authoritative Pod-netns forward hook (pkg/fleetnft) plus the per-sandbox
+// netns OUTPUT defense in depth (pkg/sandboxnft). It implements the
+// fleetNftApplier surface, so the policy server and the DNS callback stay
+// layer-agnostic. Pod first, sandbox second: the authoritative layer is
+// always in place before the defense-in-depth layer, and a sandbox-layer
+// failure fails the operation (the subject stays denying / on the old
+// policy) instead of activating with a gap.
+type fleetEnforcer struct {
+	pod     *fleetnft.Applier
+	sandbox *sandboxnft.Applier
+}
+
+var _ fleetNftApplier = (*fleetEnforcer)(nil)
+
+func (e *fleetEnforcer) ApplyDenyFirst(ctx context.Context, s subject.Subject, slot slotsource.Slot) error {
+	if err := e.pod.ApplyDenyFirst(ctx, s, slot); err != nil {
+		return err
+	}
+	return e.sandbox.ApplyDenyFirst(ctx, s, slot)
+}
+
+func (e *fleetEnforcer) ApplyPolicy(ctx context.Context, s subject.Subject, pol *policy.NetworkPolicy) error {
+	if err := e.pod.ApplyPolicy(ctx, s, pol); err != nil {
+		return err
+	}
+	return e.sandbox.ApplyPolicy(ctx, s, pol)
+}
+
+// ApplyDispatchUpdate is Pod-netns dispatch plus the sandbox-layer
+// reconciliation: an unchanged-fencing slot update that moved the netns path
+// or gateway must reinstall the subject's sandbox table (with its current
+// policy) so the defense-in-depth layer stays aligned.
+func (e *fleetEnforcer) ApplyDispatchUpdate(ctx context.Context, s subject.Subject, slot slotsource.Slot) error {
+	if err := e.pod.ApplyDispatchUpdate(ctx, s, slot); err != nil {
+		return err
+	}
+	return e.sandbox.ApplySlotUpdate(ctx, s, slot)
+}
+
+func (e *fleetEnforcer) Remove(ctx context.Context, s subject.Subject) error {
+	podErr := e.pod.Remove(ctx, s)
+	// Best effort: the sandbox rules die with the netns; a gone netns is
+	// expected and must never fail the unload.
+	_ = e.sandbox.Remove(ctx, s)
+	return podErr
+}
+
+// AddResolvedIPs mirrors DNS-learned leases into both layers.
+func (e *fleetEnforcer) AddResolvedIPs(ctx context.Context, s subject.Subject, ips []nftables.ResolvedIP) error {
+	if err := e.pod.AddResolvedIPs(ctx, s, ips); err != nil {
+		return err
+	}
+	return e.sandbox.AddResolvedIPs(ctx, s, ips)
+}
+
+// StartConnectionRefresh launches the per-subject refresh loop; the sandbox
+// layer is refreshed in lockstep through the mirror callback.
+func (e *fleetEnforcer) StartConnectionRefresh(ctx context.Context) {
+	e.pod.StartConnectionRefresh(ctx, e.sandbox.AddResolvedIPs)
+}
+
+// wipeSandboxTables deletes the sandbox-layer table in every netns the
+// previous egress generation could have installed into: the slot store is the
+// authoritative list, and the shared netns mount dir covers slots whose files
+// are already gone. Best effort — a missing netns or table is expected.
+func wipeSandboxTables(ctx context.Context, src slotsource.Source, sandboxNft *sandboxnft.Applier) {
+	var paths []string
+	if slots, err := src.List(ctx); err == nil {
+		for _, slot := range slots {
+			paths = append(paths, slot.HostNetnsPath)
+		}
+	} else {
+		log.Warnf("slot store unreadable during recovery (slot-driven sandbox wipe skipped): %v", err)
+	}
+	paths = append(paths, netnsMountEntries()...)
+	sandboxNft.Reset(ctx, paths)
+	log.Infof("fleet sandbox tables reset (%d netns path(s))", len(paths))
+}
+
+// netnsMountEntries lists the shared netns mount dir (OSEP-0022 deployment
+// precondition: /var/run/netns or equivalent).
+func netnsMountEntries() []string {
+	entries, err := os.ReadDir(constants.DefaultNetnsMountDir)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, filepath.Join(constants.DefaultNetnsMountDir, e.Name()))
+	}
+	return out
 }

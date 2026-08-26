@@ -47,6 +47,10 @@ const (
 	DefaultSlotStoreDir            = "/run/fast-sandbox/network"
 	DefaultPendingPushTTL          = 30
 	DefaultSlotPollIntervalSeconds = 1
+	// DefaultNetnsMountDir is where per-sandbox netns paths are mounted for
+	// host-domain consumers (egress runs nsenter --net=<path> against them);
+	// the deployment precondition of OSEP-0022.
+	DefaultNetnsMountDir = "/var/run/netns"
 )
 
 const (

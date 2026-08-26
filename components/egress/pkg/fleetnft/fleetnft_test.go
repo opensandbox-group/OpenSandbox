@@ -374,3 +374,65 @@ func TestOverlappingIntervalsNormalized(t *testing.T) {
 	require.Contains(t, script, "add element inet opensandbox-fleet subj_s_u_1_deny_v4 { 10.99.0.0/24 }")
 	assert.NotContains(t, script, "10.99.0.9", "strict subnet inside a CIDR must be normalized away")
 }
+
+func TestDoHBlockRulesWithBlocklist(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{
+		BlockDoH443:    true,
+		DoHBlocklistV4: []string{"10.99.0.9", "10.99.0.0/24"},
+		DoHBlocklistV6: []string{"2001:db8::/32"},
+	})
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	script := runner.last()
+	// global interval sets + per-family drop rules in the master chain
+	require.Contains(t, script, "add set inet opensandbox-fleet doh_block_v4 { type ipv4_addr; flags interval; }")
+	require.Contains(t, script, "add set inet opensandbox-fleet doh_block_v6 { type ipv6_addr; flags interval; }")
+	require.Contains(t, script, "add rule inet opensandbox-fleet dispatch ip daddr @doh_block_v4 tcp dport 443 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fleet dispatch ip6 daddr @doh_block_v6 tcp dport 443 drop")
+	// overlapping 10.99.0.9 inside 10.99.0.0/24 is normalized away
+	require.Contains(t, script, "add element inet opensandbox-fleet doh_block_v4 { 10.99.0.0/24 }")
+	assert.NotContains(t, script, "10.99.0.9", "strict subnet inside a doh blocklist CIDR must be normalized away")
+	// blocklist mode is NOT strict: no bare 443 drop
+	assert.NotContains(t, script, "add rule inet opensandbox-fleet dispatch tcp dport 443 drop")
+}
+
+func TestDoHStrictModeDropsAll443(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{BlockDoH443: true})
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	script := runner.last()
+	require.Contains(t, script, "add rule inet opensandbox-fleet dispatch tcp dport 443 drop")
+	assert.NotContains(t, script, "doh_block", "strict mode has no blocklist sets")
+}
+
+func TestDoHDisabledByDefault(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	script := runner.last()
+	assert.NotContains(t, script, "doh_block", "DoH-443 must be off unless enabled")
+	assert.NotContains(t, script, "dport 443", "DoH-443 must be off unless enabled")
+}
+
+// TestDoHRulesSurviveRebuild: the DoH rules are part of the table header, so
+// every rebuild (last-subject removal, startup reset) must keep them.
+func TestDoHRulesSurviveRebuild(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{BlockDoH443: true, DoHBlocklistV4: []string{"10.99.0.2"}})
+	ctx := context.Background()
+	s := subject.FromSandboxUID("u-1")
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.Remove(ctx, s))
+	require.Contains(t, runner.last(), "add set inet opensandbox-fleet doh_block_v4", "empty-table swap must keep DoH rules")
+	require.NoError(t, a.ApplyReset(ctx))
+	require.Contains(t, runner.last(), "add rule inet opensandbox-fleet dispatch ip daddr @doh_block_v4 tcp dport 443 drop", "reset must keep DoH rules")
+}

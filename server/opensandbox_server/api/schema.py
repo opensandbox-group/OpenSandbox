@@ -143,7 +143,7 @@ class LifecycleHook(BaseModel):
     """Command executed by execd before the user entrypoint starts."""
 
     command: List[str] = Field(..., min_length=1)
-    timeout_seconds: Optional[int] = Field(None, alias="timeoutSeconds", ge=1, le=300)
+    timeout_seconds: Optional[int] = Field(None, alias="timeoutSeconds", ge=1, le=10800)
 
     @model_validator(mode="after")
     def validate_command(self) -> "LifecycleHook":

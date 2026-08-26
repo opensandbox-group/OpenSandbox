@@ -931,7 +931,7 @@ public class LifecycleHook
     public required IReadOnlyList<string> Command { get; set; }
 
     /// <summary>
-    /// Gets or sets the execution timeout in seconds. The maximum is 300 seconds.
+    /// Gets or sets the execution timeout in seconds. The maximum is 3 hours (10800 seconds).
     /// </summary>
     [JsonPropertyName("timeoutSeconds")]
     public int? TimeoutSeconds { get; set; }

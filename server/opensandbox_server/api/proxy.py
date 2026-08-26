@@ -562,10 +562,6 @@ async def _proxy_websocket_request(
         await _fail_client_websocket(websocket, status.WS_1011_INTERNAL_ERROR, "")
 
 
-@router.api_route(
-    "/sandboxes/{sandbox_id}/proxy/{port}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-)
 async def proxy_sandbox_endpoint_root(
     request: Request,
     sandbox_id: str,
@@ -575,10 +571,6 @@ async def proxy_sandbox_endpoint_root(
     return await _proxy_http_request(request, sandbox_id, port, "")
 
 
-@router.api_route(
-    "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-)
 async def proxy_sandbox_endpoint_request(
     request: Request,
     sandbox_id: str,
@@ -587,6 +579,39 @@ async def proxy_sandbox_endpoint_request(
 ):
     """Proxy HTTP requests to sandbox-backed services."""
     return await _proxy_http_request(request, sandbox_id, port, full_path)
+
+
+_PROXY_HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH")
+
+# Keep the multi-method route first for runtime dispatch so 405 responses retain
+# the complete Allow header. The method-specific routes provide unique OpenAPI IDs.
+router.add_api_route(
+    "/sandboxes/{sandbox_id}/proxy/{port}",
+    proxy_sandbox_endpoint_root,
+    methods=list(_PROXY_HTTP_METHODS),
+    include_in_schema=False,
+)
+
+for _method in _PROXY_HTTP_METHODS:
+    router.add_api_route(
+        "/sandboxes/{sandbox_id}/proxy/{port}",
+        proxy_sandbox_endpoint_root,
+        methods=[_method],
+    )
+
+router.add_api_route(
+    "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
+    proxy_sandbox_endpoint_request,
+    methods=list(_PROXY_HTTP_METHODS),
+    include_in_schema=False,
+)
+
+for _method in _PROXY_HTTP_METHODS:
+    router.add_api_route(
+        "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
+        proxy_sandbox_endpoint_request,
+        methods=[_method],
+    )
 
 
 @router.websocket("/sandboxes/{sandbox_id}/proxy/{port}")

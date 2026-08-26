@@ -4,7 +4,7 @@ authors:
   - "@Pangjiping"
   - "@peijianping"
 creation-date: 2026-08-17
-last-updated: 2026-08-21
+last-updated: 2026-08-26
 status: implementing
 ---
 
@@ -86,7 +86,7 @@ Related: [#1458](https://github.com/opensandbox-group/OpenSandbox/issues/1458) (
 | R1 | Hooks declared in `CreateSandboxRequest.lifecycle`; all optional |
 | R2 | `preStart` executes in-sandbox before the entrypoint, with no server round trip; not PATCHable |
 | R3 | `prePause`/`postResume` are triggered by an event-only server POST (`/v1/lifecycle/run`); `preTerminate` runs in-sandbox on SIGTERM; `periodic` runs on an execd ticker |
-| R4 | `timeoutSeconds` (1–300, default 60) per hook. `failurePolicy`: `Abort` default for `prePause`/`postResume`; `preTerminate`/`periodic` fixed `Continue` (`Abort` rejected) |
+| R4 | `timeoutSeconds` defaults to 60. `preStart` accepts 1–10800 seconds; all other hooks accept 1–300 seconds. `failurePolicy`: `Abort` default for `prePause`/`postResume`; `preTerminate`/`periodic` fixed `Continue` (`Abort` rejected) |
 | R5 | Abort: hook failure/timeout, lifecycle startup failure, or required execd lifecycle status being unreachable aborts the transition, leaving the pre-transition state with a machine-readable reason |
 | R6 | Hooks never block **termination**: `preTerminate` runs only while `Running`; `Paused`/`Failed` sandboxes skip hooks (no SIGTERM handler / no pod) |
 | R7 | `periodic` runs on cron inside execd without server liveness dependency; in-flight run of the same `name` skips the tick (no queueing) |

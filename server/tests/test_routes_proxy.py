@@ -14,6 +14,7 @@
 
 import asyncio
 import gzip
+import warnings
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -149,6 +150,66 @@ class _FakeWebSocketConnector:
                 return False
 
         return _ContextManager()
+
+
+def test_proxy_openapi_operation_ids_are_unique(client: TestClient) -> None:
+    app = cast(Any, client.app)
+    app.openapi_schema = None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        schema = app.openapi()
+
+    proxy_paths = {
+        "/sandboxes/{sandbox_id}/proxy/{port}",
+        "/sandboxes/{sandbox_id}/proxy/{port}/{full_path}",
+        "/v1/sandboxes/{sandbox_id}/proxy/{port}",
+        "/v1/sandboxes/{sandbox_id}/proxy/{port}/{full_path}",
+    }
+    proxy_methods = {"get", "post", "put", "delete", "patch"}
+    operation_ids = [
+        schema["paths"][path][method]["operationId"]
+        for path in proxy_paths
+        for method in proxy_methods
+    ]
+    duplicate_warnings = [
+        str(item.message)
+        for item in caught
+        if "Duplicate Operation ID" in str(item.message)
+        and "proxy_sandbox_endpoint" in str(item.message)
+    ]
+
+    assert len(operation_ids) == 20
+    assert len(set(operation_ids)) == len(operation_ids)
+    assert duplicate_warnings == []
+
+
+@pytest.mark.parametrize(
+    "request_path",
+    [
+        "/sandboxes/sbx-123/proxy/44772",
+        "/sandboxes/sbx-123/proxy/44772/nested/path",
+        "/v1/sandboxes/sbx-123/proxy/44772",
+        "/v1/sandboxes/sbx-123/proxy/44772/nested/path",
+    ],
+)
+def test_proxy_method_not_allowed_lists_all_supported_methods(
+    client: TestClient,
+    auth_headers: dict,
+    request_path: str,
+) -> None:
+    response = client.options(
+        request_path,
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 405
+    assert set(response.headers["allow"].split(", ")) == {
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+    }
 
 
 def test_proxy_forwards_filtered_headers_and_query(

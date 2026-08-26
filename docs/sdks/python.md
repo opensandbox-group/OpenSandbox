@@ -288,7 +288,7 @@ sandbox = await Sandbox.create(
 )
 ```
 
-The Server validates `timeout_seconds`; when omitted it defaults to 60 seconds. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+The Server validates `timeout_seconds`; `pre_start` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
 
 ## Usage Examples
 

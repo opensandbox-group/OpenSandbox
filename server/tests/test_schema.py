@@ -89,38 +89,44 @@ class TestSandboxLifecycle:
             )
 
     @pytest.mark.parametrize(
-        "hook",
+        ("hook", "expected"),
         [
-            LifecycleHook(command=["true"], timeoutSeconds=300),
-            PeriodicLifecycleHook(
-                name="sync",
-                schedule="@hourly",
-                command=["true"],
-                timeoutSeconds=300,
+            (LifecycleHook(command=["true"], timeoutSeconds=10800), 10800),
+            (
+                PeriodicLifecycleHook(
+                    name="sync",
+                    schedule="@hourly",
+                    command=["true"],
+                    timeoutSeconds=300,
+                ),
+                300,
             ),
         ],
     )
-    def test_lifecycle_accepts_maximum_timeout(self, hook):
-        assert hook.timeout_seconds == 300
+    def test_lifecycle_accepts_maximum_timeout(self, hook, expected):
+        assert hook.timeout_seconds == expected
 
     @pytest.mark.parametrize(
-        "payload",
+        ("payload", "maximum"),
         [
-            {"preStart": {"command": ["true"], "timeoutSeconds": 301}},
-            {
-                "periodic": [
-                    {
-                        "name": "sync",
-                        "schedule": "@hourly",
-                        "command": ["true"],
-                        "timeoutSeconds": 301,
-                    }
-                ]
-            },
+            ({"preStart": {"command": ["true"], "timeoutSeconds": 10801}}, 10800),
+            (
+                {
+                    "periodic": [
+                        {
+                            "name": "sync",
+                            "schedule": "@hourly",
+                            "command": ["true"],
+                            "timeoutSeconds": 301,
+                        }
+                    ]
+                },
+                300,
+            ),
         ],
     )
-    def test_lifecycle_rejects_timeout_above_maximum(self, payload):
-        with pytest.raises(ValidationError, match="less than or equal to 300"):
+    def test_lifecycle_rejects_timeout_above_maximum(self, payload, maximum):
+        with pytest.raises(ValidationError, match=f"less than or equal to {maximum}"):
             SandboxLifecycle.model_validate(payload)
 
     @pytest.mark.parametrize("duplicate_name", ["sync", " sync "])
