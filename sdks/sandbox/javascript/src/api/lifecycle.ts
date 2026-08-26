@@ -1086,7 +1086,7 @@ export interface components {
         LifecycleHook: {
             /** @description Command and arguments to execute. */
             command: string[];
-            /** @description Maximum execution time in seconds, up to 300. The server defaults to 60 when omitted. */
+            /** @description Maximum execution time in seconds, up to 3 hours (10800 seconds) for `preStart`. The server defaults to 60 when omitted. */
             timeoutSeconds?: number;
         };
         /** @description A named lifecycle command scheduled inside the sandbox by execd. */

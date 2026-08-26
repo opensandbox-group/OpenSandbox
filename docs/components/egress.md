@@ -267,7 +267,27 @@ unchanged; both profiles are mutually exclusive deployment forms.
   source IP, and per-query policy is dispatched by source IP.
 - **Enforcement**: nftables `hook forward` in the Pod netns with a
   drop-by-default master chain; per-subject chains and static sets are swapped
-  atomically. Dynamic DNS-learned sets carry bounded leases.
+  atomically. Dynamic DNS-learned sets carry bounded leases. A second,
+  per-sandbox netns OUTPUT chain mirrors each subject's policy as defense in
+  depth (installed from the host via `nsenter --net=<slot.hostNetnsPath>`),
+  and a per-subject connection refresh loop (Pod netns conntrack, bucketed by
+  source IP, every 30s, one batched transaction per tick) keeps the dynamic
+  leases of active connections alive in both layers. Only TCP sessions are
+  renewed; UDP/QUIC (HTTP/3) relies on the DNS lease TTLs — same limitation
+  as the sidecar profile. A sandbox-layer mirror miss marks the IPs pending
+  and redelivers them on the next tick, so a transient failure can never
+  self-lock a subject until the lease expires.
+- **Encrypted-DNS blocking**: DoT 853 is always dropped in the master chain.
+  With `OPENSANDBOX_EGRESS_BLOCK_DOH_443=true`, TCP 443 to the
+  `OPENSANDBOX_EGRESS_DOH_BLOCKLIST` IP/CIDR list is dropped too — same
+  semantics as the sidecar profile, applied globally to every subject.
+  > Warning: when the blocklist is empty (strict mode) ALL TCP 443 is
+  > dropped globally, ahead of every per-subject allow verdict — an explicit
+  > policy allow cannot override it. Only TCP is blocked: UDP/QUIC
+  > (HTTP/3, DoH-over-UDP) is not intercepted by this mechanism.
+- **Telemetry**: OpenTelemetry metrics are exported exactly as in the sidecar
+  profile; nft updates are attributed per fleet operation (`deny_first`,
+  `static_apply`, `dynamic_add`, `dispatch_update`, `reset`, `remove`).
 - **Credentials**: memory-only, per subject; complete vault revisions are
   pushed over the proxy route (OSEP-0012 model). No Secret volume, no egress
   disk state.

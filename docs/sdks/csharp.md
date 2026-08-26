@@ -96,7 +96,7 @@ await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 });
 ```
 
-The Server validates `TimeoutSeconds`; when omitted it defaults to 60 seconds. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+The Server validates `TimeoutSeconds`; `PreStart` accepts 1–10800 seconds, while `Periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
 
 ## Usage Examples
 

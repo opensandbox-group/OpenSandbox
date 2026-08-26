@@ -188,6 +188,58 @@ class SandboxesAdapterTest {
     }
 
     @Test
+    fun `createSandbox should send an empty egress array when the policy carries no rules`() {
+        // A policy with no rules is the natural shape when the platform enforces the
+        // real rules itself and the caller only needs the sidecar injected. Serializing
+        // the empty list as null made the server reject the request with 422.
+        val responseBody =
+            """
+            {
+                "id": "no-rule-policy-sandbox",
+                "status": { "state": "Running" },
+                "platform": { "os": "linux", "arch": "amd64" },
+                "expiresAt": "2023-01-01T11:00:00Z",
+                "createdAt": "2023-01-01T10:00:00Z",
+                "entrypoint": ["bash"]
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        val networkPolicy =
+            NetworkPolicy.builder()
+                .defaultAction(NetworkPolicy.DefaultAction.ALLOW)
+                .build()
+        assertEquals(emptyList<NetworkRule>(), networkPolicy.egress)
+
+        sandboxesAdapter.createSandbox(
+            spec = SandboxImageSpec.builder().image("ubuntu:latest").build(),
+            entrypoint = listOf("bash"),
+            env = emptyMap(),
+            metadata = emptyMap(),
+            timeout = Duration.ofSeconds(600),
+            resource = emptyMap(),
+            platform = null,
+            networkPolicy = networkPolicy,
+            extensions = emptyMap(),
+            volumes = null,
+            secureAccess = false,
+            credentialProxy = null,
+        )
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        val gotNetworkPolicy = payload["networkPolicy"]!!.jsonObject
+        assertEquals("allow", gotNetworkPolicy["defaultAction"]!!.jsonPrimitive.content)
+
+        val gotEgress = gotNetworkPolicy["egress"]!!
+        assertTrue(
+            gotEgress !is JsonNull,
+            "egress must not serialize to null: the server declares it a plain list and rejects null with 422",
+        )
+        assertEquals(0, gotEgress.jsonArray.size)
+    }
+
+    @Test
     fun `createSandbox should forward windows platform in request`() {
         val responseBody =
             """

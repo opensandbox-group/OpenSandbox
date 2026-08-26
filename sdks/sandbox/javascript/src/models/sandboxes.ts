@@ -470,7 +470,7 @@ export interface SandboxInfo extends Record<string, unknown> {
 export interface LifecycleHook extends Record<string, unknown> {
   /** Command and arguments executed without implicit shell expansion. */
   command: string[];
-  /** Maximum execution time in seconds, up to 300. Defaults to 60. */
+  /** Maximum execution time in seconds, up to 3 hours (10800 seconds). Defaults to 60. */
   timeoutSeconds?: number;
 }
 

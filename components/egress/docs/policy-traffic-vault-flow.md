@@ -62,8 +62,20 @@ server's reconciliation re-pushes policies.
 
 ## 3. Data plane: outbound traffic flow
 
-Two paths per sandbox: DNS via the rewritten resolv.conf, and everything else
-via the Pod netns `forward` hook. Dispatch is a verdict map keyed by
+Two enforcement layers per sandbox: the authoritative Pod netns `forward`
+hook (below), plus a per-sandbox netns OUTPUT chain mirroring the same policy
+as defense in depth (`nsenter` from the host, table `opensandbox-fleet-ns`).
+The sandbox layer allows loopback, DNS to the slot gateway only (dport 53,
+gateway-scoped — the Pod layer enforces DNS policy via the proxy), and the
+mirrored deny/dyn/allow verdicts; it catches traffic the forward hook never
+sees (sandbox → host-local destinations take the INPUT path). DNS-learned
+leases are refreshed in lockstep between both layers by the per-subject
+connection refresh loop (Pod netns conntrack, bucketed by source IP, one
+batched transaction per tick). Only TCP sessions are renewed — UDP/QUIC
+(HTTP/3) relies on DNS lease TTLs; a sandbox-layer mirror miss marks the IPs
+pending and redelivers them on the next tick.
+
+Dispatch is a verdict map keyed by
 `ip saddr . iifname` (the host veth binding is defense in depth against UDP
 spoofing); the master chain defaults to **drop** so unregistered sources are
 denied before their slot is even observed.

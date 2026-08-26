@@ -42,6 +42,7 @@ package fleetnft
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/slotsource"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
 // TableName is the fleet-profile nftables table, kept distinct from the
@@ -68,6 +70,9 @@ const (
 	nftTTLSlackSec = 60
 	minTTLSec      = 60
 	maxTTLSec      = 360
+
+	dohBlockV4Set = "doh_block_v4"
+	dohBlockV6Set = "doh_block_v6"
 )
 
 // Runner executes an nft script; the default invokes `nft -f -`.
@@ -88,6 +93,21 @@ func DefaultRunner(ctx context.Context, script string) ([]byte, error) {
 // deny-first rules have not been installed yet.
 var ErrUnknownSubject = fmt.Errorf("fleetnft: subject rules not installed")
 
+// Options carries fleet-profile-wide enforcement toggles, loaded once at
+// startup and applied to every table (re)build.
+type Options struct {
+	// BlockDoH443 drops TCP 443 to the DoH blocklist (or all TCP 443 when
+	// no blocklist is provided — strict mode). Same semantics as the sidecar
+	// profile's OPENSANDBOX_EGRESS_BLOCK_DOH_443: the rules are global, in
+	// the master dispatch chain, so they apply to every subject regardless
+	// of policy.
+	BlockDoH443 bool
+	// DoHBlocklistV4/V6 are IP/CIDR lists of known DoH endpoints (from
+	// OPENSANDBOX_EGRESS_DOH_BLOCKLIST); tcp 443 to them is dropped.
+	DoHBlocklistV4 []string
+	DoHBlocklistV6 []string
+}
+
 // installedSubject tracks the enforcement state the applier owns in memory;
 // it is the source for table rebuilds (subject removal) and the idempotency
 // guard for deny-first installs.
@@ -101,16 +121,37 @@ type installedSubject struct {
 type Applier struct {
 	mu         sync.Mutex
 	run        Runner
+	opts       Options
 	tableReady bool
 	subjects   map[subject.Subject]installedSubject
+
+	// Per-subject dynamic-lease mirror used by the connection refresh loop
+	// (refresh.go): which IPs each subject's dyn sets currently authorize and
+	// when they expire. Kept in sync by AddResolvedIPs and cleared on
+	// deny-first resets and unloads.
+	states     map[subject.Subject]*refreshState
+	conntrack  func(context.Context) ([]conntrackEntry, error) // injectable for tests
+	now        func() time.Time                                // injectable for tests
+	sandboxMir func(context.Context, subject.Subject, []nftables.ResolvedIP) error
 }
 
-// NewApplier returns an Applier using r (nil selects DefaultRunner).
-func NewApplier(r Runner) *Applier {
+// NewApplier returns an Applier using r (nil selects DefaultRunner). Pass
+// Options (DoH-443 blocking) to enable profile-wide master-chain rules.
+func NewApplier(r Runner, opts ...Options) *Applier {
 	if r == nil {
 		r = DefaultRunner
 	}
-	return &Applier{run: r, subjects: make(map[subject.Subject]installedSubject)}
+	a := &Applier{
+		run:       r,
+		subjects:  make(map[subject.Subject]installedSubject),
+		states:    make(map[subject.Subject]*refreshState),
+		conntrack: readConntrack,
+		now:       time.Now,
+	}
+	if len(opts) > 0 {
+		a.opts = opts[0]
+	}
+	return a
 }
 
 // ApplyReset atomically swaps the ruleset for an EMPTY master drop chain:
@@ -125,13 +166,33 @@ func (a *Applier) ApplyReset(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var b strings.Builder
-	writeTableHeader(&b)
+	if err := a.writeTableHeader(&b); err != nil {
+		return err
+	}
 	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpReset)
 		return err
 	}
 	a.tableReady = true
 	a.subjects = make(map[subject.Subject]installedSubject)
+	a.states = make(map[subject.Subject]*refreshState)
+	a.recordRuleCountLocked()
+	telemetry.RecordNftablesUpdate()
 	return nil
+}
+
+// recordRuleCountLocked refreshes the egress.nftables.rules.count gauge:
+// summed across every installed subject's policy (0 for deny-first), so
+// deny-first installs, dispatch updates, and rebuilds never leave the gauge
+// drifting from the real rule count.
+func (a *Applier) recordRuleCountLocked() {
+	var total int64
+	for _, inst := range a.subjects {
+		if inst.pol != nil {
+			total += telemetry.NftRuleCountFromPolicy(inst.pol)
+		}
+	}
+	telemetry.SetNftablesRuleCount(total)
 }
 
 // applyWithMissingTableFallback runs the script; if the batch fails because
@@ -169,7 +230,9 @@ func (a *Applier) ApplyDenyFirst(ctx context.Context, s subject.Subject, slot sl
 	defer a.mu.Unlock()
 	var b strings.Builder
 	if !a.tableReady {
-		writeTableHeader(&b)
+		if err := a.writeTableHeader(&b); err != nil {
+			return err
+		}
 		a.tableReady = true
 	}
 	if _, ok := a.subjects[s]; ok {
@@ -184,9 +247,13 @@ func (a *Applier) ApplyDenyFirst(ctx context.Context, s subject.Subject, slot sl
 	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
 		// The batch is atomic: on failure nothing was installed, so keep the
 		// flag consistent (the controller retries).
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDenyFirst)
 		return err
 	}
 	a.subjects[s] = installedSubject{slot: slot}
+	delete(a.states, s) // deny-first: no policy, no leases (nft dyn sets were flushed)
+	a.recordRuleCountLocked()
+	telemetry.RecordNftablesUpdate()
 	return nil
 }
 
@@ -208,10 +275,13 @@ func (a *Applier) ApplyPolicy(ctx context.Context, s subject.Subject, pol *polic
 		return err
 	}
 	if _, err := a.run(ctx, b.String()); err != nil {
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
 		return err
 	}
 	inst.pol = pol
 	a.subjects[s] = inst
+	a.recordRuleCountLocked()
+	telemetry.RecordNftablesUpdate()
 	return nil
 }
 
@@ -231,25 +301,61 @@ func (a *Applier) AddResolvedIPs(ctx context.Context, s subject.Subject, ips []n
 	if b.Len() == 0 {
 		return nil
 	}
-	_, err := a.run(ctx, b.String())
-	return err
+	if _, err := a.run(ctx, b.String()); err != nil {
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
+		return err
+	}
+	a.trackDynamicIPs(s, ips)
+	telemetry.RecordNftablesUpdate()
+	return nil
+}
+
+// trackDynamicIPs mirrors the just-added leases into the refresh state, so
+// the connection refresh loop knows which IPs each subject's dyn sets carry
+// and when they expire (same clamping as the nft elements written above).
+func (a *Applier) trackDynamicIPs(s subject.Subject, ips []nftables.ResolvedIP) {
+	st := a.states[s]
+	if st == nil {
+		st = &refreshState{}
+		a.states[s] = st
+	}
+	now := a.now()
+	for _, r := range ips {
+		addr := r.Addr.Unmap()
+		if !addr.IsValid() {
+			continue
+		}
+		if st.dyn == nil {
+			st.dyn = make(map[netip.Addr]time.Time)
+		}
+		st.dyn[addr] = now.Add(clampTTL(r.TTL))
+	}
 }
 
 // ApplyDispatchUpdate re-adds the dispatch rule for a changed slot (e.g. the
 // host veth moved on an EventUpdated with unchanged fencing) WITHOUT touching
 // the subject's policy content. A stale rule from the previous slot key never
 // matches (the iifname is bound), and duplicates are cleared by the next
-// table rebuild (rebind reset, remove, or ApplyReset).
+// table rebuild (rebind reset, remove, or ApplyReset). The stored slot is
+// replaced with the updated one so the connection-refresh bucketing keeps
+// matching the subject's (possibly moved) source IP.
 func (a *Applier) ApplyDispatchUpdate(ctx context.Context, s subject.Subject, slot slotsource.Slot) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, ok := a.subjects[s]; !ok {
+	inst, ok := a.subjects[s]
+	if !ok {
 		return ErrUnknownSubject
 	}
 	var b strings.Builder
 	writeDispatchRule(&b, s, slot)
-	_, err := a.run(ctx, b.String())
-	return err
+	if _, err := a.run(ctx, b.String()); err != nil {
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDispatch)
+		return err
+	}
+	inst.slot = slot
+	a.subjects[s] = inst
+	telemetry.RecordNftablesUpdate()
+	return nil
 }
 
 // Remove deletes a subject's enforcement. nftables deletes rules only by
@@ -267,17 +373,25 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 		return nil
 	}
 	delete(a.subjects, s)
+	delete(a.states, s)
 	if len(a.subjects) == 0 {
 		var b strings.Builder
-		writeTableHeader(&b)
+		if err := a.writeTableHeader(&b); err != nil {
+			return err
+		}
 		if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
+			telemetry.RecordNftablesUpdateFailed(telemetry.NftOpRemove)
 			return err
 		}
 		a.tableReady = true
+		a.recordRuleCountLocked()
+		telemetry.RecordNftablesUpdate()
 		return nil
 	}
 	var b strings.Builder
-	writeTableHeader(&b)
+	if err := a.writeTableHeader(&b); err != nil {
+		return err
+	}
 	for subj, inst := range a.subjects {
 		var err error
 		if inst.pol == nil {
@@ -290,9 +404,12 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 		}
 	}
 	if _, err := a.run(ctx, b.String()); err != nil {
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpRemove)
 		return err
 	}
 	a.tableReady = true
+	a.recordRuleCountLocked()
+	telemetry.RecordNftablesUpdate()
 	return nil
 }
 
@@ -325,7 +442,10 @@ func removeDeleteTableLine(script string) string {
 
 // writeTableHeader writes the idempotent table + master dispatch chain
 // header. The chain policy is drop: unregistered sandbox sources are denied.
-func writeTableHeader(b *strings.Builder) {
+// The DoH-443 blocking rules (when enabled) are global — they live in the
+// master chain ahead of the dispatch jumps, so they apply to every subject
+// regardless of policy, matching the sidecar profile's semantics.
+func (a *Applier) writeTableHeader(b *strings.Builder) error {
 	fmt.Fprintf(b, "delete table inet %s\n", TableName)
 	fmt.Fprintf(b, "add table inet %s\n", TableName)
 	fmt.Fprintf(b, "add chain inet %s %s { type filter hook forward priority %d; policy drop; }\n",
@@ -333,6 +453,37 @@ func writeTableHeader(b *strings.Builder) {
 	fmt.Fprintf(b, "add rule inet %s %s ct state established,related accept\n", TableName, dispatchChain)
 	fmt.Fprintf(b, "add rule inet %s %s tcp dport 853 drop\n", TableName, dispatchChain)
 	fmt.Fprintf(b, "add rule inet %s %s udp dport 853 drop\n", TableName, dispatchChain)
+	if !a.opts.BlockDoH443 {
+		return nil
+	}
+	return a.writeDoHBlockFragment(b)
+}
+
+// writeDoHBlockFragment emits the DoH-443 blocking sets and rules. With a
+// blocklist: interval sets + per-family drop rules. Without one (strict
+// mode): a bare drop of all tcp 443. Mirrors the sidecar manager's
+// BlockDoH443 handling.
+func (a *Applier) writeDoHBlockFragment(b *strings.Builder) error {
+	if len(a.opts.DoHBlocklistV4) == 0 && len(a.opts.DoHBlocklistV6) == 0 {
+		// strict: drop all 443 when enabled but no blocklist provided
+		fmt.Fprintf(b, "add rule inet %s %s tcp dport 443 drop\n", TableName, dispatchChain)
+		return nil
+	}
+	if len(a.opts.DoHBlocklistV4) > 0 {
+		fmt.Fprintf(b, "add set inet %s %s { type ipv4_addr; flags interval; }\n", TableName, dohBlockV4Set)
+		if err := writeSetElements(b, dohBlockV4Set, a.opts.DoHBlocklistV4); err != nil {
+			return fmt.Errorf("doh blocklist v4: %w", err)
+		}
+		fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s tcp dport 443 drop\n", TableName, dispatchChain, dohBlockV4Set)
+	}
+	if len(a.opts.DoHBlocklistV6) > 0 {
+		fmt.Fprintf(b, "add set inet %s %s { type ipv6_addr; flags interval; }\n", TableName, dohBlockV6Set)
+		if err := writeSetElements(b, dohBlockV6Set, a.opts.DoHBlocklistV6); err != nil {
+			return fmt.Errorf("doh blocklist v6: %w", err)
+		}
+		fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s tcp dport 443 drop\n", TableName, dispatchChain, dohBlockV6Set)
+	}
+	return nil
 }
 
 // writeSubjectDenyFirstFragment installs a subject in deny-first state:
