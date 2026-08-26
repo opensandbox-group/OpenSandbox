@@ -20,9 +20,12 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from fastapi import status
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
 from starlette.types import Message
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 from websockets.typing import Origin
 
 import opensandbox_server.api.proxy as proxy_api
@@ -935,6 +938,59 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
     assert lowered_headers["x-forwarded-for"] == "testclient"
     assert lowered_headers["opensandbox-ingress-to"] == "sbx-123-44772"
     assert lowered_headers["x-trace"] == "trace-ws"
+
+
+@pytest.mark.parametrize(
+    ("backend_code", "expected_client_code", "expected_reason"),
+    [
+        (status.WS_1006_ABNORMAL_CLOSURE, status.WS_1011_INTERNAL_ERROR, ""),
+        (status.WS_1000_NORMAL_CLOSURE, status.WS_1000_NORMAL_CLOSURE, "backend stopped"),
+        (4001, 4001, "backend stopped"),
+    ],
+)
+def test_proxy_maps_backend_close_codes_to_valid_client_frames(
+    backend_code: int,
+    expected_client_code: int,
+    expected_reason: str,
+) -> None:
+    backend_error = (
+        ConnectionClosedError(None, None)
+        if backend_code == status.WS_1006_ABNORMAL_CLOSURE
+        else ConnectionClosedError(Close(backend_code, "backend stopped"), None)
+    )
+
+    class _SerializingClientWebSocket:
+        def __init__(self) -> None:
+            self.close_calls: list[tuple[int, str]] = []
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            Close(code, reason).serialize()
+            self.close_calls.append((code, reason))
+
+    class _ClosingBackendWebSocket:
+        async def recv(self) -> str:
+            raise backend_error
+
+    class _FakeCancelScope:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    client_websocket = _SerializingClientWebSocket()
+    cancel_scope = _FakeCancelScope()
+
+    asyncio.run(
+        proxy_api._relay_backend_messages(
+            cast(Any, client_websocket),
+            cast(Any, _ClosingBackendWebSocket()),
+            cast(Any, cancel_scope),
+        )
+    )
+
+    assert client_websocket.close_calls == [(expected_client_code, expected_reason)]
+    assert cancel_scope.cancelled is True
 
 
 def test_proxy_maps_connect_error_to_502(

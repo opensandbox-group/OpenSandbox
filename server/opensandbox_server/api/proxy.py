@@ -450,8 +450,11 @@ async def _relay_backend_messages(
                 await websocket.send_text(payload)
     except websockets.ConnectionClosed as exc:
         try:
+            close_code = exc.code or status.WS_1000_NORMAL_CLOSURE
+            if close_code == status.WS_1006_ABNORMAL_CLOSURE:
+                close_code = status.WS_1011_INTERNAL_ERROR
             await websocket.close(
-                code=exc.code or status.WS_1000_NORMAL_CLOSURE,
+                code=close_code,
                 reason=exc.reason or "",
             )
         except RuntimeError:
