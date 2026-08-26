@@ -146,7 +146,7 @@ Boolean rules that keep the eras mechanically distinguishable:
 1. **Umbrella git tags** are v-less: `opensandbox/1.4.0`.
 2. **Container image tags** carry a `release-` prefix:
    `opensandbox/execd:release-1.4.0`. Chosen because pre-umbrella
-   images (`opensandbox/execd:v1.0.22`) sit in the same registry
+   images (`opensandbox/execd:v1.1.0`) sit in the same registry
    repositories; the prefix eliminates any collision or ambiguity
    at a glance.
 3. **Package-registry artifacts** use bare `X.Y.Z`. PyPI, npm,
