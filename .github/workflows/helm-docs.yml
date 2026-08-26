@@ -1,0 +1,47 @@
+name: Helm Docs Check
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'kubernetes/charts/**'
+      - 'kubernetes/Makefile'
+      - '.github/workflows/helm-docs.yml'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  helm-docs:
+    name: Verify chart documentation is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install helm-docs
+        run: |
+          HELM_DOCS_VERSION="1.14.2"
+          curl -sSfL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" -o /tmp/helm-docs.tar.gz
+          tar -xzf /tmp/helm-docs.tar.gz -C /tmp
+          sudo mv /tmp/helm-docs /usr/local/bin/helm-docs
+          helm-docs --version
+
+      - name: Generate chart documentation
+        working-directory: kubernetes
+        run: |
+          make helm-docs
+
+      - name: Verify no drift
+        run: |
+          if [ -n "$(git status --porcelain -- kubernetes/charts)" ]; then
+            echo "::error::Helm chart documentation is out of date. Run 'make helm-docs' in kubernetes/ and commit the generated README.md files."
+            git diff -- kubernetes/charts
+            exit 1
+          fi
+          echo "Chart documentation is up to date."

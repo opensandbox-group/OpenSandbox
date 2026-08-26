@@ -99,7 +99,7 @@ jobs:
           chmod +x tests/smoke-dns-upstream-probe.sh
           ./tests/smoke-dns-upstream-probe.sh
 
-  bench:
+  fleet-smoke:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
@@ -107,26 +107,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Run bench test
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.9'
+
+      - name: Install nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables
+
+      - name: Run fleet profile smoke test (dns+nft)
         working-directory: components/egress
         run: |
-          chmod +x tests/bench-dns-nft.sh
-          ./tests/bench-dns-nft.sh
-        env:
-          BENCH_SAMPLE_SIZE: "20"
+          chmod +x tests/smoke-fleet.sh
+          sudo env "PATH=$PATH" ./tests/smoke-fleet.sh
 
-      - name: Upload egress logs
-        if: always()
+      - name: Upload fleet egress logs
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: egress-log-for-bench
-          path: /tmp/egress-logs/
+          name: fleet-egress-log
+          path: /tmp/fleet-egress.log
           retention-days: 5
 
   required:
     name: Egress CI
     if: always()
-    needs: [changes, test, smoke, bench]
+    needs: [changes, test, smoke, fleet-smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -135,14 +141,14 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           TEST_RESULT: ${{ needs.test.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
-          BENCH_RESULT: ${{ needs.bench.result }}
+          FLEET_SMOKE_RESULT: ${{ needs.fleet-smoke.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$TEST_RESULT" == "success" && "$SMOKE_RESULT" == "success" && "$BENCH_RESULT" == "success" ]]
+            [[ "$TEST_RESULT" == "success" && "$SMOKE_RESULT" == "success" && "$FLEET_SMOKE_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$SMOKE_RESULT" == "skipped" && "$BENCH_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$SMOKE_RESULT" == "skipped" && "$FLEET_SMOKE_RESULT" == "skipped" ]]
           fi

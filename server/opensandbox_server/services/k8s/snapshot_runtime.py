@@ -252,6 +252,16 @@ class KubernetesSnapshotRuntime:
         phase = status.get("phase")
 
         if phase == "Succeed":
+            if status.get("format") == "qemu-v1":
+                return SnapshotRuntimeStatus(
+                    state=SnapshotState.FAILED,
+                    reason="snapshot_restore_qemu_not_supported",
+                    message=(
+                        "QEMU VMState restore is currently supported only by "
+                        "BatchSandbox pause/resume; the public snapshot API does "
+                        "not yet persist the complete Pod template restore plan."
+                    ),
+                )
             image_status = self._select_restore_image(status.get("containers") or [])
             if image_status.state == SnapshotState.FAILED:
                 return image_status

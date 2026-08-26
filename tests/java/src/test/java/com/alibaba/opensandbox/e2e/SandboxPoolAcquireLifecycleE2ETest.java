@@ -321,7 +321,6 @@ public class SandboxPoolAcquireLifecycleE2ETest extends BaseE2ETest {
                         .acquireHealthCheckPollingInterval(Duration.ofMillis(50))
                         .warmupReadyTimeout(Duration.ofMinutes(2))
                         .warmupHealthCheckPollingInterval(Duration.ofMillis(100))
-                        .reconcileInterval(Duration.ofSeconds(1))
                         .drainTimeout(Duration.ofSeconds(2));
         if (acquireHealthCheck != null) {
             builder.acquireHealthCheck(acquireHealthCheck::apply);

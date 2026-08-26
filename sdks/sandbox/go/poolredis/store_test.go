@@ -57,6 +57,8 @@ func cleanupPool(t *testing.T, store *RedisPoolStateStore, poolName string) {
 		store.PrimaryLockKey(poolName),
 		store.maxIdleKey(poolName),
 		store.idleTTLKey(poolName),
+		store.destroyStateKey(poolName),
+		store.destroyOwnerKey(poolName),
 	}
 	store.client.Del(ctx, keys...)
 }
@@ -496,5 +498,222 @@ func TestRedisStore_WrapsClientFailures(t *testing.T) {
 	}
 	if storeErr.Operation != "GetMaxIdle" {
 		t.Errorf("Operation = %q, want %q", storeErr.Operation, "GetMaxIdle")
+	}
+}
+
+// ---------- Destroy Fence And Tombstone Tests ----------
+
+func TestRedisStore_GetDestroyState_DefaultsToActive(t *testing.T) {
+	store := newRedisTestStore(t)
+	ctx := context.Background()
+	poolName := "destroy-" + t.Name()
+	t.Cleanup(func() { cleanupPool(t, store, poolName) })
+
+	state, err := store.GetDestroyState(ctx, poolName)
+	if err != nil {
+		t.Fatalf("GetDestroyState error: %v", err)
+	}
+	if state != opensandbox.PoolDestroyStateActive {
+		t.Errorf("state = %s, want ACTIVE", state)
+	}
+}
+
+func TestRedisStore_BeginDestroy_FencesWrites(t *testing.T) {
+	store := newRedisTestStore(t)
+	ctx := context.Background()
+	poolName := "destroy-" + t.Name()
+	t.Cleanup(func() { cleanupPool(t, store, poolName) })
+
+	if err := store.BeginDestroy(ctx, poolName, "owner-1"); err != nil {
+		t.Fatalf("BeginDestroy error: %v", err)
+	}
+
+	state, err := store.GetDestroyState(ctx, poolName)
+	if err != nil {
+		t.Fatalf("GetDestroyState error: %v", err)
+	}
+	if state != opensandbox.PoolDestroyStateDestroying {
+		t.Fatalf("state = %s, want DESTROYING", state)
+	}
+
+	writes := map[string]func() error{
+		"PutIdle":         func() error { return store.PutIdle(ctx, poolName, "sb-fenced") },
+		"SetMaxIdle":      func() error { return store.SetMaxIdle(ctx, poolName, 3) },
+		"SetIdleEntryTTL": func() error { return store.SetIdleEntryTTL(ctx, poolName, time.Hour) },
+	}
+	for name, write := range writes {
+		var destroyed *opensandbox.PoolDestroyedError
+		if err := write(); !errors.As(err, &destroyed) {
+			t.Errorf("%s error = %v, want *PoolDestroyedError", name, err)
+		} else if destroyed.State != opensandbox.PoolDestroyStateDestroying {
+			t.Errorf("%s error state = %s, want DESTROYING", name, destroyed.State)
+		}
+	}
+
+	acquired, err := store.TryAcquirePrimaryLock(ctx, poolName, "owner-2", time.Minute)
+	if err != nil {
+		t.Fatalf("TryAcquirePrimaryLock error: %v", err)
+	}
+	if acquired {
+		t.Error("TryAcquirePrimaryLock succeeded on a fenced namespace, want false")
+	}
+
+	renewed, err := store.RenewPrimaryLock(ctx, poolName, "owner-2", time.Minute)
+	if err != nil {
+		t.Fatalf("RenewPrimaryLock error: %v", err)
+	}
+	if renewed {
+		t.Error("RenewPrimaryLock succeeded on a fenced namespace, want false")
+	}
+}
+
+func TestRedisStore_BeginDestroy_RejectsTombstoned(t *testing.T) {
+	store := newRedisTestStore(t)
+	ctx := context.Background()
+	poolName := "destroy-" + t.Name()
+	t.Cleanup(func() { cleanupPool(t, store, poolName) })
+
+	if err := store.BeginDestroy(ctx, poolName, "owner-1"); err != nil {
+		t.Fatalf("BeginDestroy error: %v", err)
+	}
+	// Re-entrant while DESTROYING so a retrying owner can make progress.
+	if err := store.BeginDestroy(ctx, poolName, "owner-1"); err != nil {
+		t.Fatalf("second BeginDestroy error: %v", err)
+	}
+	if err := store.MarkDestroyed(ctx, poolName, "owner-1", time.Hour); err != nil {
+		t.Fatalf("MarkDestroyed error: %v", err)
+	}
+
+	var destroyed *opensandbox.PoolDestroyedError
+	if err := store.BeginDestroy(ctx, poolName, "owner-2"); !errors.As(err, &destroyed) {
+		t.Fatalf("BeginDestroy on a tombstoned namespace = %v, want *PoolDestroyedError", err)
+	}
+}
+
+func TestRedisStore_ClearPoolState_KeepsFence(t *testing.T) {
+	store := newRedisTestStore(t)
+	ctx := context.Background()
+	poolName := "destroy-" + t.Name()
+	t.Cleanup(func() { cleanupPool(t, store, poolName) })
+
+	if err := store.SetMaxIdle(ctx, poolName, 4); err != nil {
+		t.Fatalf("SetMaxIdle error: %v", err)
+	}
+	if err := store.PutIdle(ctx, poolName, "sb-1"); err != nil {
+		t.Fatalf("PutIdle error: %v", err)
+	}
+	if err := store.BeginDestroy(ctx, poolName, "owner-1"); err != nil {
+		t.Fatalf("BeginDestroy error: %v", err)
+	}
+	if err := store.ClearPoolState(ctx, poolName); err != nil {
+		t.Fatalf("ClearPoolState error: %v", err)
+	}
+
+	counters, err := store.SnapshotCounters(ctx, poolName)
+	if err != nil {
+		t.Fatalf("SnapshotCounters error: %v", err)
+	}
+	if counters.IdleCount != 0 {
+		t.Errorf("idle count = %d, want 0", counters.IdleCount)
+	}
+	maxIdle, err := store.GetMaxIdle(ctx, poolName)
+	if err != nil {
+		t.Fatalf("GetMaxIdle error: %v", err)
+	}
+	if maxIdle != 0 {
+		t.Errorf("maxIdle = %d, want 0", maxIdle)
+	}
+	state, err := store.GetDestroyState(ctx, poolName)
+	if err != nil {
+		t.Fatalf("GetDestroyState error: %v", err)
+	}
+	if state != opensandbox.PoolDestroyStateDestroying {
+		t.Errorf("state = %s, want DESTROYING (ClearPoolState must not lift the fence)", state)
+	}
+}
+
+func TestRedisStore_MarkDestroyed_TombstoneTTLExpires(t *testing.T) {
+	store := newRedisTestStore(t)
+	ctx := context.Background()
+	poolName := "destroy-" + t.Name()
+	t.Cleanup(func() { cleanupPool(t, store, poolName) })
+
+	if err := store.BeginDestroy(ctx, poolName, "owner-1"); err != nil {
+		t.Fatalf("BeginDestroy error: %v", err)
+	}
+	if err := store.MarkDestroyed(ctx, poolName, "owner-1", 200*time.Millisecond); err != nil {
+		t.Fatalf("MarkDestroyed error: %v", err)
+	}
+
+	state, err := store.GetDestroyState(ctx, poolName)
+	if err != nil {
+		t.Fatalf("GetDestroyState error: %v", err)
+	}
+	if state != opensandbox.PoolDestroyStateDestroyed {
+		t.Fatalf("state = %s, want DESTROYED", state)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		state, err = store.GetDestroyState(ctx, poolName)
+		if err != nil {
+			t.Fatalf("GetDestroyState error: %v", err)
+		}
+		if state == opensandbox.PoolDestroyStateActive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state = %s after the tombstone TTL, want ACTIVE", state)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := store.PutIdle(ctx, poolName, "sb-rebound"); err != nil {
+		t.Errorf("PutIdle after tombstone expiry error: %v", err)
+	}
+}
+
+func TestRedisStore_MarkDestroyed_ZeroTTLNeverExpires(t *testing.T) {
+	store := newRedisTestStore(t)
+	ctx := context.Background()
+	poolName := "destroy-" + t.Name()
+	t.Cleanup(func() { cleanupPool(t, store, poolName) })
+
+	if err := store.MarkDestroyed(ctx, poolName, "owner-1", 0); err != nil {
+		t.Fatalf("MarkDestroyed error: %v", err)
+	}
+
+	ttl, err := store.client.PTTL(ctx, store.destroyStateKey(poolName)).Result()
+	if err != nil {
+		t.Fatalf("PTTL error: %v", err)
+	}
+	// -1 is Redis' answer for a key that exists with no expiry.
+	if ttl != -1*time.Nanosecond && ttl >= 0 {
+		t.Errorf("tombstone PTTL = %v, want no expiry", ttl)
+	}
+
+	state, err := store.GetDestroyState(ctx, poolName)
+	if err != nil {
+		t.Fatalf("GetDestroyState error: %v", err)
+	}
+	if state != opensandbox.PoolDestroyStateDestroyed {
+		t.Errorf("state = %s, want DESTROYED", state)
+	}
+}
+
+func TestRedisStore_MarkDestroyed_RejectsInvalidInput(t *testing.T) {
+	store := newRedisTestStore(t)
+	ctx := context.Background()
+	poolName := "destroy-" + t.Name()
+	t.Cleanup(func() { cleanupPool(t, store, poolName) })
+
+	if err := store.MarkDestroyed(ctx, poolName, "", time.Hour); err == nil {
+		t.Error("MarkDestroyed with a blank owner succeeded, want error")
+	}
+	if err := store.MarkDestroyed(ctx, poolName, "owner-1", -time.Second); err == nil {
+		t.Error("MarkDestroyed with a negative TTL succeeded, want error")
+	}
+	if err := store.BeginDestroy(ctx, poolName, ""); err == nil {
+		t.Error("BeginDestroy with a blank owner succeeded, want error")
 	}
 }

@@ -69,7 +69,7 @@ func (r *RunCommandRequest) Validate() error {
 	if r.Gid != nil && r.Uid == nil {
 		return errors.New("uid is required when gid is provided")
 	}
-	return runtime.ValidateWorkingDir(r.Cwd)
+	return runtime.ValidateWorkingDirWithEnv(r.Cwd, r.Envs)
 }
 
 type ServerStreamEventType string

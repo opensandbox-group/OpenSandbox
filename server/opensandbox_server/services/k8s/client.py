@@ -365,16 +365,30 @@ class K8sClient:
 
         The pinned kubernetes-client picks ``application/json-patch+json`` by
         default (first entry in the generated content-type list) which would
-        reject our merge-shaped body. Force strategic-merge so list fields
-        like ``ownerReferences`` merge by key.
+        reject our merge-shaped body. Its generated high-level method does not
+        accept a content-type override, so use the underlying ``ApiClient`` to
+        preserve strategic-merge semantics for list fields like
+        ``ownerReferences``.
         """
         if self._write_limiter:
             self._write_limiter.acquire()
-        return self.get_core_v1_api().patch_namespaced_persistent_volume_claim(
-            name=name,
-            namespace=namespace,
+        api_client = self.get_core_v1_api().api_client
+        return api_client.call_api(
+            "/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}",
+            "PATCH",
+            path_params={"namespace": namespace, "name": name},
+            query_params=[],
+            header_params={
+                "Accept": "application/json",
+                "Content-Type": "application/strategic-merge-patch+json",
+            },
             body=body,
-            _content_type="application/strategic-merge-patch+json",
+            post_params=[],
+            files={},
+            response_type="V1PersistentVolumeClaim",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            collection_formats={},
         )
 
     # ------------------------------------------------------------------

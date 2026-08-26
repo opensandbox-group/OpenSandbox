@@ -64,6 +64,11 @@ public abstract class BaseE2ETest {
     }
 
     protected static ConnectionConfig createConnectionConfig(boolean useServerProxy) {
+        return createConnectionConfig(useServerProxy, false);
+    }
+
+    protected static ConnectionConfig createConnectionConfig(
+            boolean useServerProxy, boolean enableTracing) {
         String protocol = configValue(PROP_PROTOCOL, ENV_PROTOCOL, "http");
         return ConnectionConfig.builder()
                 .apiKey(configValue(PROP_API_KEY, ENV_API_KEY, "e2e-test"))
@@ -71,6 +76,7 @@ public abstract class BaseE2ETest {
                 .requestTimeout(Duration.ofMinutes(3))
                 .protocol(protocol)
                 .useServerProxy(useServerProxy || shouldUseServerProxy())
+                .enableTracing(enableTracing)
                 .build();
     }
 

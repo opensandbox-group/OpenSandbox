@@ -116,9 +116,6 @@ func TestShouldFailoverAfterResponse(t *testing.T) {
 	try, _ := p2.shouldFailoverAfterResponse(emptyOK)
 	require.False(t, try, "empty NOERROR should not failover")
 
-	try, _ = p2.shouldFailoverAfterResponse(emptyOK)
-	require.False(t, try, "empty NOERROR on last upstream should not failover")
-
 	emptyNODATA := new(dns.Msg)
 	emptyNODATA.Rcode = dns.RcodeSuccess
 	emptyNODATA.Ns = []dns.RR{

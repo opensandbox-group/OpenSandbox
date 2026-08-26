@@ -62,6 +62,12 @@ type Proxy struct {
 	// Optional: async fan-out for denied lookups (e.g. webhook).
 	blockedBroadcaster *events.Broadcaster
 
+	// queryPolicySelector, when set, resolves the per-query policy (and
+	// per-query resolved-IP callback) from the client's source address. This
+	// is the fleet-profile dispatch seam: one shared listener, N
+	// subject policies. nil keeps the single-policy behavior unchanged.
+	queryPolicySelector func(remoteAddr netip.Addr) *QueryPolicy
+
 	// Hosts whose successful outbound DNS log line should be suppressed (audit
 	// errors are still logged). Loaded once at startup; nil means "log all".
 	logSkip atomic.Pointer[policy.DomainSet]
@@ -171,10 +177,26 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	domain := q.Name
 	host := normalizeDNSHost(domain)
 
-	p.policyMu.RLock()
-	currentPolicy := p.effectivePolicy
-	p.policyMu.RUnlock()
-	if currentPolicy != nil && currentPolicy.Evaluate(domain) == policy.ActionDeny {
+	policyToEval := p.currentPolicy()
+	notifyResolved := p.onResolved
+	if sel := p.queryPolicySelector; sel != nil {
+		qp := sel(requestRemoteAddr(w))
+		if qp == nil {
+			// Unknown source: fail closed (NXDOMAIN), never fall back to a
+			// default policy that could open the subject.
+			telemetry.RecordDNSDenied()
+			resp := new(dns.Msg)
+			resp.SetRcode(r, dns.RcodeNameError)
+			_ = w.WriteMsg(resp)
+			return
+		}
+		policyToEval = qp.Policy
+		notifyResolved = qp.OnResolved
+		if notifyResolved == nil {
+			notifyResolved = p.onResolved
+		}
+	}
+	if policyToEval != nil && policyToEval.Evaluate(domain) == policy.ActionDeny {
 		telemetry.RecordDNSDenied()
 		p.publishBlocked(domain)
 		resp := new(dns.Msg)
@@ -199,8 +221,44 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if !p.shouldSkipOutboundLog(host) {
 		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
 	}
-	p.maybeNotifyResolved(domain, resp)
+	p.maybeNotifyResolvedWith(domain, resp, notifyResolved)
 	_ = w.WriteMsg(resp)
+}
+
+// requestRemoteAddr extracts the client IP from a DNS response writer.
+func requestRemoteAddr(w dns.ResponseWriter) netip.Addr {
+	host, _, err := net.SplitHostPort(w.RemoteAddr().String())
+	if err != nil {
+		host = w.RemoteAddr().String()
+	}
+	ip, err := netip.ParseAddr(strings.TrimSpace(host))
+	if err != nil {
+		return netip.Addr{}
+	}
+	return ip.Unmap()
+}
+
+// currentPolicy returns the single-instance effective policy (sidecar mode).
+func (p *Proxy) currentPolicy() *policy.NetworkPolicy {
+	p.policyMu.RLock()
+	defer p.policyMu.RUnlock()
+	return p.effectivePolicy
+}
+
+// QueryPolicy carries the per-query policy and the per-subject resolved-IP
+// callback selected by SetQueryPolicySelector. OnResolved may be nil; the
+// proxy then falls back to the proxy-wide callback.
+type QueryPolicy struct {
+	Policy     *policy.NetworkPolicy
+	OnResolved func(domain string, ips []nftables.ResolvedIP)
+}
+
+// SetQueryPolicySelector installs the per-query policy dispatch (fleet
+// profile). Passing nil restores the single-policy behavior; the selector is
+// invoked on the serveDNS goroutine. A nil *QueryPolicy result denies the
+// query (fail closed).
+func (p *Proxy) SetQueryPolicySelector(sel func(remoteAddr netip.Addr) *QueryPolicy) {
+	p.queryPolicySelector = sel
 }
 
 // SetLogSkip replaces the set of hosts whose successful DNS outbound log line
@@ -218,17 +276,23 @@ func (p *Proxy) shouldSkipOutboundLog(host string) bool {
 	return ds.Match(host)
 }
 
-// maybeNotifyResolved calls onResolved before w.WriteMsg so dynamic nft allows are installed
+// maybeNotifyResolvedWith calls the per-query resolved callback (falling back
+// to the proxy-wide one) before w.WriteMsg so dynamic nft allows are installed
 // before the client receives the answer and may open a connection.
-func (p *Proxy) maybeNotifyResolved(domain string, resp *dns.Msg) {
-	if p.onResolved == nil {
+func (p *Proxy) maybeNotifyResolvedWith(domain string, resp *dns.Msg, fn func(string, []nftables.ResolvedIP)) {
+	if fn == nil {
 		return
 	}
 	ips := extractResolvedIPs(resp)
 	if len(ips) == 0 {
 		return
 	}
-	p.onResolved(domain, ips)
+	fn(domain, ips)
+}
+
+// maybeNotifyResolved calls the proxy-wide resolved callback.
+func (p *Proxy) maybeNotifyResolved(domain string, resp *dns.Msg) {
+	p.maybeNotifyResolvedWith(domain, resp, p.onResolved)
 }
 
 // forward returns the response, or the bounded failure reason (a telemetry.DNSFailure*
@@ -293,18 +357,6 @@ func (p *Proxy) shouldFailoverAfterResponse(resp *dns.Msg) (tryNext bool, reason
 		}
 		return true, rcStr
 	}
-}
-
-func (p *Proxy) UpstreamHost() string {
-	list := p.forwardUpstreams()
-	if len(list) == 0 {
-		return ""
-	}
-	host, _, err := net.SplitHostPort(list[0])
-	if err != nil {
-		return ""
-	}
-	return host
 }
 
 // UpdatePolicy replaces the user policy from POST/GET /policy (not the always file overlay). Nil → default deny-all.

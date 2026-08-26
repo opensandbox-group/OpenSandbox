@@ -26,6 +26,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -57,7 +59,13 @@ var (
 	DurationStore                 = requeueduration.DurationStore{}
 )
 
-const batchSandboxFirstPodIndex = 0
+const (
+	batchSandboxFirstPodIndex = 0
+	poolAllocationRetryTime   = 5 * time.Second
+	poolAutoAssignRef         = "*"
+)
+
+const poolCapacityExhaustedReason = poolassign.FailureCodeCapacityExhausted
 
 type taskScheduleResult struct {
 	Running, Failed, Succeed, Unknown, Pending int32
@@ -137,9 +145,30 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if profileName := poolStrategy.AssignProfile(); profileName != "" {
 		updated, err := r.assignPool(ctx, batchSbx, profileName)
 		if err != nil {
+			var noEligiblePoolErr *poolassign.NoEligiblePoolError
+			if gerrors.As(err, &noEligiblePoolErr) && noEligiblePoolErr.CapacityExhausted() {
+				if statusErr := r.setPoolAllocationPending(
+					ctx,
+					batchSbx,
+					true,
+					"All otherwise eligible Pools are at capacity",
+				); statusErr != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to publish pool capacity status: %w", statusErr)
+				}
+				return ctrl.Result{RequeueAfter: poolAllocationRetryTime}, nil
+			}
+			if statusErr := r.setPoolAllocationPending(ctx, batchSbx, false, ""); statusErr != nil {
+				return ctrl.Result{}, gerrors.Join(
+					fmt.Errorf("failed to auto-assign pool: %w", err),
+					fmt.Errorf("failed to clear pool capacity status: %w", statusErr),
+				)
+			}
 			return ctrl.Result{}, fmt.Errorf("failed to auto-assign pool: %w", err)
 		}
 		if updated {
+			if err := r.setPoolAllocationPending(ctx, batchSbx, false, ""); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to clear pool capacity status: %w", err)
+			}
 			return ctrl.Result{}, nil
 		}
 	}
@@ -196,6 +225,14 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	runtimeView := buildRuntimeView(batchSbx, pods)
+	poolAllocationPending, err := r.applyFixedPoolCapacityCondition(ctx, batchSbx, runtimeView.status)
+	if err != nil {
+		aggErrors = append(aggErrors, err)
+	}
+	if poolAllocationPending {
+		DurationStore.Push(req.String(), poolAllocationRetryTime)
+		log.Info("Sandbox is waiting for Pool capacity", "pool", batchSbx.Spec.PoolRef)
+	}
 	// Ensure PauseObservedGeneration is up-to-date so the status patch ACKs the
 	// current generation without requiring a dedicated API call.
 	// Skip during Resuming: a newer generation may carry a queued pause request
@@ -233,6 +270,134 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		requeueAfter = requeue
 	}
 	return reconcile.Result{RequeueAfter: requeueAfter}, gerrors.Join(aggErrors...)
+}
+
+func (r *BatchSandboxReconciler) setPoolAllocationPending(
+	ctx context.Context,
+	batchSbx *sandboxv1alpha1.BatchSandbox,
+	pending bool,
+	message string,
+) error {
+	var updated *sandboxv1alpha1.BatchSandbox
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &sandboxv1alpha1.BatchSandbox{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(batchSbx), latest); err != nil {
+			return err
+		}
+		newStatus := latest.Status.DeepCopy()
+		conditionStatus := sandboxv1alpha1.ConditionFalse
+		reason := ""
+		if pending {
+			conditionStatus = sandboxv1alpha1.ConditionTrue
+			reason = poolCapacityExhaustedReason
+		}
+		setConditionInStatus(
+			newStatus,
+			sandboxv1alpha1.BatchSandboxConditionPoolAllocationPending,
+			conditionStatus,
+			reason,
+			message,
+		)
+		if equality.Semantic.DeepEqual(*newStatus, latest.Status) {
+			return nil
+		}
+		latest.Status = *newStatus
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		updated = latest
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if updated != nil {
+		r.StatusRVExpectation.Expect(updated)
+	}
+	return nil
+}
+
+func (r *BatchSandboxReconciler) applyFixedPoolCapacityCondition(
+	ctx context.Context,
+	batchSbx *sandboxv1alpha1.BatchSandbox,
+	status *sandboxv1alpha1.BatchSandboxStatus,
+) (bool, error) {
+	if status.Phase != "" && status.Phase != sandboxv1alpha1.BatchSandboxPhasePending {
+		setConditionInStatus(
+			status,
+			sandboxv1alpha1.BatchSandboxConditionPoolAllocationPending,
+			sandboxv1alpha1.ConditionFalse,
+			"",
+			"",
+		)
+		return false, nil
+	}
+	if batchSbx.Spec.PoolRef == "" || batchSbx.Spec.PoolRef == poolAutoAssignRef {
+		setConditionInStatus(
+			status,
+			sandboxv1alpha1.BatchSandboxConditionPoolAllocationPending,
+			sandboxv1alpha1.ConditionFalse,
+			"",
+			"",
+		)
+		return false, nil
+	}
+
+	desired := int32(1)
+	if batchSbx.Spec.Replicas != nil {
+		desired = *batchSbx.Spec.Replicas
+	}
+	remaining := desired - status.Allocated
+	if remaining <= 0 {
+		setConditionInStatus(
+			status,
+			sandboxv1alpha1.BatchSandboxConditionPoolAllocationPending,
+			sandboxv1alpha1.ConditionFalse,
+			"",
+			"",
+		)
+		return false, nil
+	}
+
+	pool := &sandboxv1alpha1.Pool{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: batchSbx.Namespace, Name: batchSbx.Spec.PoolRef}, pool); err != nil {
+		if errors.IsNotFound(err) {
+			setConditionInStatus(
+				status,
+				sandboxv1alpha1.BatchSandboxConditionPoolAllocationPending,
+				sandboxv1alpha1.ConditionFalse,
+				"",
+				"",
+			)
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to inspect pool %s/%s capacity: %w", batchSbx.Namespace, batchSbx.Spec.PoolRef, err)
+	}
+
+	available := max(pool.Spec.CapacitySpec.PoolMax-pool.Status.Allocated, 0)
+	exhausted := available < remaining
+	conditionStatus := sandboxv1alpha1.ConditionFalse
+	reason := ""
+	message := ""
+	if exhausted {
+		conditionStatus = sandboxv1alpha1.ConditionTrue
+		reason = poolCapacityExhaustedReason
+		message = fmt.Sprintf(
+			"Pool %s has insufficient capacity for %d remaining replica(s): poolMax=%d, allocated=%d",
+			pool.Name,
+			remaining,
+			pool.Spec.CapacitySpec.PoolMax,
+			pool.Status.Allocated,
+		)
+	}
+	setConditionInStatus(
+		status,
+		sandboxv1alpha1.BatchSandboxConditionPoolAllocationPending,
+		conditionStatus,
+		reason,
+		message,
+	)
+	return exhausted, nil
 }
 
 func calPodIndex(poolStrategy strategy.PoolStrategy, batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod) (map[string]int, error) {

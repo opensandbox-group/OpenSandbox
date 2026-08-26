@@ -60,7 +60,7 @@
   <!-- DEGRADED -->
   <rect x="860" y="380" width="160" height="80" rx="12" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
   <text x="940" y="413" class="state-name" text-anchor="middle" fill="#92400e">DEGRADED</text>
-  <text x="940" y="436" class="state-hint" text-anchor="middle">exponential backoff</text>
+  <text x="940" y="436" class="state-hint" text-anchor="middle">backoff: Python / Go only</text>
 
   <!-- HEALTHY -> DEGRADED -->
   <path d="M 830 300 Q 900 340 890 378" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#a4-arrow-red)"/>

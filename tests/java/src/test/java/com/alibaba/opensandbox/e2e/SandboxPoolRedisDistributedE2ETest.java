@@ -65,7 +65,6 @@ import redis.clients.jedis.JedisPooled;
 @Tag("e2e")
 @DisplayName("SandboxPool E2E Tests (Redis Distributed)")
 public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
-    private static final Duration RECONCILE_INTERVAL = Duration.ofSeconds(1);
     private static final Duration PRIMARY_LOCK_TTL = Duration.ofSeconds(4);
     private static final Duration DRAIN_TIMEOUT = Duration.ofMillis(200);
     private static final Duration AWAIT_TIMEOUT = Duration.ofMinutes(2);
@@ -169,7 +168,8 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
                 Duration.ofSeconds(1),
                 () -> poolA.snapshot().getIdleCount() == 0);
 
-        Thread.sleep(RECONCILE_INTERVAL.multipliedBy(3).toMillis());
+        // Observe three fixed one-second reconcile periods to ensure the pool stays drained.
+        Thread.sleep(Duration.ofSeconds(3).toMillis());
         assertEquals(
                 0, poolA.snapshot().getIdleCount(), "idle should stay at zero after resize(0)");
         assertThrows(
@@ -243,7 +243,6 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         String ownerB = "owner-b-" + tag;
         String lockKey = poolKey(poolName, "lock");
         Duration lockTtl = Duration.ofSeconds(3);
-        Duration reconcileInterval = Duration.ofMillis(250);
         sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
 
         CountDownLatch leaderWarmupEntered = new CountDownLatch(1);
@@ -253,7 +252,6 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
         SandboxPool poolA =
                 createPoolBuilder(poolName, ownerA, storeA, 1)
-                        .reconcileInterval(reconcileInterval)
                         .primaryLockTtl(lockTtl)
                         .warmupSandboxPreparer(
                                 sandbox -> {
@@ -263,7 +261,6 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
                         .build();
         SandboxPool poolB =
                 createPoolBuilder(poolName, ownerB, storeB, 1)
-                        .reconcileInterval(reconcileInterval)
                         .primaryLockTtl(lockTtl)
                         .warmupSandboxPreparer(sandbox -> followerWarmupCalls.incrementAndGet())
                         .build();
@@ -325,7 +322,6 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         String ownerB = "owner-b-" + tag;
         String lockKey = poolKey(poolName, "lock");
         Duration lockTtl = Duration.ofSeconds(3);
-        Duration reconcileInterval = Duration.ofMillis(250);
         sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
 
         CountDownLatch leaderWarmupEntered = new CountDownLatch(1);
@@ -339,7 +335,6 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
         SandboxPool poolA =
                 createPoolBuilder(poolName, ownerA, storeA, 1)
-                        .reconcileInterval(reconcileInterval)
                         .primaryLockTtl(lockTtl)
                         .drainTimeout(Duration.ofMillis(300))
                         .warmupSandboxPreparer(
@@ -352,7 +347,6 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
                         .build();
         SandboxPool poolB =
                 createPoolBuilder(poolName, ownerB, storeB, 1)
-                        .reconcileInterval(reconcileInterval)
                         .primaryLockTtl(lockTtl)
                         .warmupSandboxPreparer(
                                 sandbox -> {
@@ -602,14 +596,8 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
 
         RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
         RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
-        SandboxPool poolA =
-                createPoolBuilder(poolName, ownerA, storeA, 1)
-                        .reconcileInterval(Duration.ofMinutes(5))
-                        .build();
-        SandboxPool poolB =
-                createPoolBuilder(poolName, "owner-b-" + tag, storeB, 1)
-                        .reconcileInterval(Duration.ofMinutes(5))
-                        .build();
+        SandboxPool poolA = createPoolBuilder(poolName, ownerA, storeA, 1).build();
+        SandboxPool poolB = createPoolBuilder(poolName, "owner-b-" + tag, storeB, 1).build();
         pools.add(poolA);
         pools.add(poolB);
         poolA.start();
@@ -639,9 +627,7 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         assertThrows(PoolDestroyedException.class, () -> poolA.resize(1));
 
         SandboxPool replacement =
-                createPoolBuilder(poolName, "owner-replacement-" + tag, storeB, 1)
-                        .reconcileInterval(Duration.ofMinutes(5))
-                        .build();
+                createPoolBuilder(poolName, "owner-replacement-" + tag, storeB, 1).build();
         assertThrows(PoolDestroyedException.class, replacement::start);
     }
 
@@ -655,14 +641,8 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
 
         RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
         RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
-        SandboxPool poolA =
-                createPoolBuilder(poolName, "owner-a-" + tag, storeA, 1)
-                        .reconcileInterval(Duration.ofMinutes(5))
-                        .build();
-        SandboxPool poolB =
-                createPoolBuilder(poolName, "owner-b-" + tag, storeB, 1)
-                        .reconcileInterval(Duration.ofMinutes(5))
-                        .build();
+        SandboxPool poolA = createPoolBuilder(poolName, "owner-a-" + tag, storeA, 1).build();
+        SandboxPool poolB = createPoolBuilder(poolName, "owner-b-" + tag, storeB, 1).build();
         pools.add(poolA);
         pools.add(poolB);
         poolA.start();
@@ -702,9 +682,7 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         assertThrows(PoolDestroyedException.class, () -> poolA.resize(1));
 
         SandboxPool replacement =
-                createPoolBuilder(poolName, "owner-replacement-" + tag, storeB, 1)
-                        .reconcileInterval(Duration.ofMinutes(5))
-                        .build();
+                createPoolBuilder(poolName, "owner-replacement-" + tag, storeB, 1).build();
         assertThrows(PoolDestroyedException.class, replacement::start);
     }
 
@@ -937,7 +915,6 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
                 .stateStore(store)
                 .connectionConfig(sharedConnectionConfig)
                 .creationSpec(creationSpec)
-                .reconcileInterval(RECONCILE_INTERVAL)
                 .primaryLockTtl(PRIMARY_LOCK_TTL)
                 .drainTimeout(DRAIN_TIMEOUT);
     }

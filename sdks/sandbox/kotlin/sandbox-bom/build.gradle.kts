@@ -29,5 +29,6 @@ dependencies {
         api(libs.okhttp)
         api(libs.okhttp.logging)
         api(libs.slf4j.api)
+        api(libs.opentelemetry.api)
     }
 }

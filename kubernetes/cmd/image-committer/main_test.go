@@ -15,12 +15,15 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 )
 
 func TestGetImageDigestReturnsErrorOnInspectFailure(t *testing.T) {
@@ -63,8 +66,9 @@ func TestGetImageDigestReturnsErrorOnEmptyInspectOutput(t *testing.T) {
 func TestGetImageDigestReturnsDigest(t *testing.T) {
 	original := commandCombinedOutput
 	t.Cleanup(func() { commandCombinedOutput = original })
+	want := "sha256:" + strings.Repeat("a", 64)
 	commandCombinedOutput = func(_ string, _ ...string) ([]byte, error) {
-		return []byte("sha256:abc123\n"), nil
+		return []byte(`[{"Image":{"Target":{"digest":"` + want + `"}}}]`), nil
 	}
 
 	digest, err := getImageDigest("registry.example.com/test/image:snap")
@@ -72,8 +76,110 @@ func TestGetImageDigestReturnsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected digest extraction to succeed, got %v", err)
 	}
-	if digest != "sha256:abc123" {
+	if digest != want {
 		t.Fatalf("unexpected digest %q", digest)
+	}
+}
+
+func TestGetImageDigestAcceptsDirectNativeTarget(t *testing.T) {
+	original := commandCombinedOutput
+	t.Cleanup(func() { commandCombinedOutput = original })
+	want := "sha256:" + strings.Repeat("b", 64)
+	commandCombinedOutput = func(_ string, _ ...string) ([]byte, error) {
+		return []byte(`[{"Target":{"digest":"` + want + `"}}]`), nil
+	}
+
+	digest, err := getImageDigest("registry.example.com/test/image:snap")
+	if err != nil {
+		t.Fatalf("expected digest extraction to succeed, got %v", err)
+	}
+	if digest != want {
+		t.Fatalf("unexpected digest %q", digest)
+	}
+}
+
+func TestParseQEMUSnapshotRequest(t *testing.T) {
+	request := snapshot.Request{
+		Version:           snapshot.RequestVersionV1,
+		PodName:           "sandbox-0",
+		Namespace:         "default",
+		Provider:          snapshot.ProviderQEMU,
+		Containers:        []snapshot.ContainerTarget{{Name: "main", ImageURI: "registry/sandbox:snapshot"}},
+		VMStateImageURI:   "registry/sandbox-vmstate:snapshot",
+		LeaveSourceFrozen: true,
+		QEMU:              &snapshot.QEMURequest{ContainerName: "main", QMPSocketPath: "/run/qemu/qmp.sock", LaunchManifestPath: "/run/qemu/launch.json"},
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseSnapshotRequest([]string{"--request-base64", base64.StdEncoding.EncodeToString(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.QEMU == nil || parsed.QEMU.QMPSocketPath != "/run/qemu/qmp.sock" {
+		t.Fatalf("unexpected parsed request: %#v", parsed)
+	}
+	if !parsed.LeaveSourceFrozen {
+		t.Fatal("expected leaveSourceFrozen to survive request decoding")
+	}
+}
+
+func TestPathWithinMountUsesPathBoundaries(t *testing.T) {
+	for _, testCase := range []struct {
+		path, mount string
+		want        bool
+	}{
+		{"/var/lib/opensandbox/vm/disk.qcow2", "/var/lib/opensandbox", true},
+		{"/ubuntu-storage2/disk.qcow2", "/ubuntu-storage", false},
+		{"/ubuntu-storage/disk.qcow2", "/ubuntu-storage", true},
+	} {
+		if got := pathWithinMount(testCase.path, testCase.mount); got != testCase.want {
+			t.Errorf("pathWithinMount(%q, %q)=%v, want %v", testCase.path, testCase.mount, got, testCase.want)
+		}
+	}
+}
+
+func TestValidateRootfsDiskCaptureRejectsWritableOverlayOnVolume(t *testing.T) {
+	disks := []snapshot.QEMUDisk{{
+		ID:          "osdisk",
+		OverlayPath: "/ubuntu-storage/state.qcow2",
+		Capture:     snapshot.QEMUDiskCaptureRootfs,
+	}}
+
+	identity := func(path string) (string, error) { return path, nil }
+	if err := validateRootfsDiskCapture(disks, []string{"/ubuntu-storage"}, identity); err == nil {
+		t.Fatal("expected mounted writable overlay to be rejected")
+	}
+	if err := validateRootfsDiskCapture(disks, []string{"/ubuntu-storage-base"}, identity); err != nil {
+		t.Fatalf("expected path-boundary-safe mount to be accepted: %v", err)
+	}
+}
+
+func TestValidateRootfsDiskCaptureRejectsSymlinkIntoVolume(t *testing.T) {
+	disks := []snapshot.QEMUDisk{{
+		ID:          "osdisk",
+		OverlayPath: "/vm/disk-link",
+		Capture:     snapshot.QEMUDiskCaptureRootfs,
+	}}
+	resolved := map[string]string{
+		"/vm/disk-link":     "/volume-data/state.qcow2",
+		"/mnt/data":         "/volume-data",
+		"/unrelated-volume": "/other-volume",
+	}
+	resolve := func(path string) (string, error) {
+		value, ok := resolved[path]
+		if !ok {
+			return "", errors.New("path not found")
+		}
+		return value, nil
+	}
+
+	if err := validateRootfsDiskCapture(disks, []string{"/mnt/data"}, resolve); err == nil {
+		t.Fatal("expected symlinked writable overlay under a volume mount to be rejected")
+	}
+	if err := validateRootfsDiskCapture(disks, []string{"/unrelated-volume"}, resolve); err != nil {
+		t.Fatalf("expected symlinked writable overlay outside volume mounts to be accepted: %v", err)
 	}
 }
 
@@ -90,18 +196,18 @@ func TestGetContainerIDByNerdctlReturnsRunningContainer(t *testing.T) {
 		if calls != 1 {
 			t.Fatalf("expected a single nerdctl lookup, got %d", calls)
 		}
+		if !contains(args, "label=io.kubernetes.pod.uid=pod-uid-1") {
+			t.Fatalf("lookup did not constrain the Pod UID: %v", args)
+		}
 		return []byte("container-running\n"), nil
 	}
 
-	container, err := getContainerByNerdctl("pod-1", "default", "sandbox")
+	containerID, err := getContainerIDByNerdctl("pod-1", "default", "pod-uid-1", "sandbox")
 	if err != nil {
 		t.Fatalf("expected running container lookup to succeed, got %v", err)
 	}
-	if container.ID != "container-running" {
-		t.Fatalf("unexpected container ID %q", container.ID)
-	}
-	if !container.Running {
-		t.Fatal("expected container to be reported as running")
+	if containerID != "container-running" {
+		t.Fatalf("unexpected container ID %q", containerID)
 	}
 }
 
@@ -126,15 +232,12 @@ func TestGetContainerIDByNerdctlFallsBackToStoppedContainers(t *testing.T) {
 		}
 	}
 
-	container, err := getContainerByNerdctl("pod-1", "default", "sandbox")
+	containerID, err := getContainerIDByNerdctl("pod-1", "default", "pod-uid-1", "sandbox")
 	if err != nil {
 		t.Fatalf("expected stopped container fallback to succeed, got %v", err)
 	}
-	if container.ID != "container-stopped" {
-		t.Fatalf("unexpected container ID %q", container.ID)
-	}
-	if container.Running {
-		t.Fatal("expected stopped container to be reported as stopped")
+	if containerID != "container-stopped" {
+		t.Fatalf("unexpected container ID %q", containerID)
 	}
 	if len(calls) != 2 {
 		t.Fatalf("expected two nerdctl lookups, got %d", len(calls))
@@ -155,7 +258,7 @@ func TestGetContainerIDByNerdctlReturnsHelpfulErrorWhenBothLookupsAreEmpty(t *te
 		return []byte("\n"), nil
 	}
 
-	_, err := getContainerIDByNerdctl("pod-1", "default", "sandbox")
+	_, err := getContainerIDByNerdctl("pod-1", "default", "pod-uid-1", "sandbox")
 	if err == nil {
 		t.Fatal("expected lookup failure when both running and stopped container searches are empty")
 	}
@@ -171,51 +274,6 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func TestSyncRunningContainerFilesystemsSyncsEveryRunningContainerAndSkipsStopped(t *testing.T) {
-	original := commandCombinedOutput
-	t.Cleanup(func() { commandCombinedOutput = original })
-	t.Setenv("CONTAINERD_SOCKET", "/test/containerd.sock")
-	t.Setenv("CONTAINERD_NAMESPACE", "test-ns")
-
-	var calls [][]string
-	commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
-		if name != "nerdctl" {
-			t.Fatalf("unexpected command %q", name)
-		}
-		calls = append(calls, append([]string(nil), args...))
-		if contains(args, "container-main") {
-			return []byte("guest sync failed"), errors.New("exit status 1")
-		}
-		return nil, nil
-	}
-
-	err := syncRunningContainerFilesystems(
-		[]ContainerSpec{{Name: "main"}, {Name: "sidecar"}, {Name: "stopped"}},
-		map[string]discoveredContainer{
-			"main":    {ID: "container-main", Running: true},
-			"sidecar": {ID: "container-sidecar", Running: true},
-			"stopped": {ID: "container-stopped"},
-		},
-	)
-
-	if err == nil {
-		t.Fatal("expected a running container sync failure to be reported")
-	}
-	if !strings.Contains(err.Error(), `container "main"`) || !strings.Contains(err.Error(), "guest sync failed") {
-		t.Fatalf("expected contextual sync failure, got %q", err)
-	}
-	if len(calls) != 2 {
-		t.Fatalf("expected every running container and no stopped containers to be synced, got %d calls", len(calls))
-	}
-	wantMain := []string{"--address", "/test/containerd.sock", "--namespace", "test-ns", "exec", "container-main", "sync"}
-	wantSidecar := []string{"--address", "/test/containerd.sock", "--namespace", "test-ns", "exec", "container-sidecar", "sync"}
-	for i, want := range [][]string{wantMain, wantSidecar} {
-		if strings.Join(calls[i], "\x00") != strings.Join(want, "\x00") {
-			t.Fatalf("unexpected nerdctl call %d: got %v, want %v", i+1, calls[i], want)
-		}
-	}
 }
 
 func TestWriteSnapshotResultWritesTerminationMessage(t *testing.T) {
@@ -242,7 +300,7 @@ func TestWriteSnapshotResultWritesTerminationMessage(t *testing.T) {
 		t.Fatalf("failed to read termination message: %v", err)
 	}
 
-	var result snapshotResult
+	var result snapshot.Result
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatalf("termination message is not valid JSON: %v", err)
 	}

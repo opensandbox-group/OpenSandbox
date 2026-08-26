@@ -147,7 +147,7 @@ spec:
                 format: int32
                 type: integer
               conditions:
-                description: Conditions records operation failure context
+                description: Conditions records lifecycle and operational state details.
                 items:
                   description: BatchSandboxCondition represents a condition of a BatchSandbox
                   properties:
@@ -177,6 +177,7 @@ spec:
                       - PauseFailed
                       - ResumeFailed
                       - PodFailed
+                      - PoolAllocationPending
                       type: string
                   required:
                   - status

@@ -24,6 +24,21 @@ from __future__ import annotations
 import re
 import time
 
+from docker.errors import DockerException
+from fastapi import HTTPException, status
+
+from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.diagnostics import (
+    DiagnosticResult,
+    limit_diagnostic_lines,
+    unsupported_scope_error,
+)
+
+_SUPPORTED_LOG_SCOPES = ("container", "all")
+_SUPPORTED_EVENT_SCOPES = ("runtime", "all")
+_STABLE_LOG_LINE_LIMIT = 100
+_STABLE_EVENT_LINE_LIMIT = 50
+
 
 def _parse_since_to_timestamp(since: str) -> int:
     """Parse a human-readable duration string (e.g. '10m', '1h') into a Unix timestamp.
@@ -44,6 +59,72 @@ def _parse_since_to_timestamp(since: str) -> int:
 class DockerDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Docker backend."""
 
+    def get_sandbox_log_diagnostics(
+        self,
+        sandbox_id: str,
+        scope: str,
+    ) -> DiagnosticResult:
+        """Collect stable log diagnostics using Docker capabilities."""
+        normalized_scope = scope.strip().lower()
+        if normalized_scope not in _SUPPORTED_LOG_SCOPES:
+            raise unsupported_scope_error("logs", scope, _SUPPORTED_LOG_SCOPES)
+
+        content = self.get_sandbox_logs(
+            sandbox_id,
+            tail=_STABLE_LOG_LINE_LIMIT + 1,
+            since=None,
+            container=None,
+        )
+        content, truncated = limit_diagnostic_lines(
+            content,
+            _STABLE_LOG_LINE_LIMIT,
+            keep_tail=True,
+        )
+        warnings: tuple[str, ...] = ()
+        if normalized_scope == "all":
+            warnings = (
+                "The current backend only contributes sandbox container logs to the all scope.",
+            )
+        return DiagnosticResult(
+            sandbox_id=sandbox_id,
+            kind="logs",
+            scope=normalized_scope,
+            content=content,
+            truncated=truncated,
+            warnings=warnings,
+        )
+
+    def get_sandbox_event_diagnostics(
+        self,
+        sandbox_id: str,
+        scope: str,
+    ) -> DiagnosticResult:
+        """Collect stable event diagnostics using Docker capabilities."""
+        normalized_scope = scope.strip().lower()
+        if normalized_scope not in _SUPPORTED_EVENT_SCOPES:
+            raise unsupported_scope_error("events", scope, _SUPPORTED_EVENT_SCOPES)
+
+        content = self.get_sandbox_events(
+            sandbox_id,
+            limit=_STABLE_EVENT_LINE_LIMIT + 1,
+        )
+        content, truncated = limit_diagnostic_lines(
+            content,
+            _STABLE_EVENT_LINE_LIMIT,
+            keep_tail=False,
+        )
+        warnings: tuple[str, ...] = ()
+        if normalized_scope == "all":
+            warnings = ("The current backend only contributes runtime events to the all scope.",)
+        return DiagnosticResult(
+            sandbox_id=sandbox_id,
+            kind="events",
+            scope=normalized_scope,
+            content=content,
+            truncated=truncated,
+            warnings=warnings,
+        )
+
     def get_sandbox_logs(
         self,
         sandbox_id: str,
@@ -59,7 +140,16 @@ class DockerDiagnosticsMixin:
         kwargs: dict = {"tail": tail, "timestamps": True}
         if since:
             kwargs["since"] = _parse_since_to_timestamp(since)
-        output = docker_container.logs(**kwargs)
+        try:
+            output = docker_container.logs(**kwargs)
+        except DockerException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.CONTAINER_QUERY_FAILED,
+                    "message": f"Failed to read logs for sandbox {sandbox_id}: {exc}",
+                },
+            ) from exc
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
         return output or "(no logs)"

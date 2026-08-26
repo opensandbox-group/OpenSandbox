@@ -39,22 +39,6 @@ func Register(h Hook) {
 	hooks = append(hooks, h)
 }
 
-func RegisterFunc(name string, fn func(ctx context.Context) error) {
-	if fn == nil {
-		return
-	}
-	Register(funcHook{name: name, fn: fn})
-}
-
-type funcHook struct {
-	name string
-	fn   func(context.Context) error
-}
-
-func (f funcHook) Name() string { return f.name }
-
-func (f funcHook) Run(ctx context.Context) error { return f.fn(ctx) }
-
 func RunPost(ctx context.Context) error {
 	mu.Lock()
 	list := append([]Hook(nil), hooks...)

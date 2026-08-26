@@ -64,6 +64,40 @@ catch (SandboxException ex)
 }
 ```
 
+## Lifecycle Hooks
+
+Set `Lifecycle` in `SandboxCreateOptions`. `PreStart` completes before the entrypoint starts, while `Periodic` hooks run on their schedules after startup.
+
+```csharp
+using OpenSandbox.Models;
+
+await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "ubuntu:24.04",
+    Lifecycle = new SandboxLifecycle
+    {
+        PreStart = new LifecycleHook
+        {
+            Command = new[] { "sh", "-c", "echo ready > /tmp/prestart.done" },
+            TimeoutSeconds = 120,
+        },
+        Periodic = new[]
+        {
+            new PeriodicLifecycleHook
+            {
+                Name = "checkpoint",
+                Schedule = "@every 5m",
+                Command = new[] { "sh", "-c", "date -u >> /tmp/checkpoints.log" },
+                TimeoutSeconds = 120,
+            },
+        },
+    },
+});
+```
+
+The Server validates `TimeoutSeconds`; when omitted it defaults to 60 seconds. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+
 ## Usage Examples
 
 ### 1. Lifecycle Management

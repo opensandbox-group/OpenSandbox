@@ -21,6 +21,7 @@ using Kubernetes resources for sandbox lifecycle management.
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
@@ -60,6 +61,7 @@ from opensandbox_server.services.k8s.k8s_diagnostics import K8sDiagnosticsMixin
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
 from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
 from opensandbox_server.services.k8s.status_helpers import (
+    _is_pool_capacity_exhausted_status,
     _is_unschedulable_status,
     _normalize_create_status,
 )
@@ -237,6 +239,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         sandbox_id: str,
         timeout_seconds: int = 60,
         poll_interval_seconds: float = 1.0,
+        pool_acquisition_timeout_seconds: float | None = None,
     ) -> Dict[str, Any]:
         """
         Wait for Pod to be Running and have an IP address.
@@ -245,6 +248,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             sandbox_id: Sandbox ID
             timeout_seconds: Maximum time to wait in seconds
             poll_interval_seconds: Time between polling attempts
+            pool_acquisition_timeout_seconds: Maximum cumulative time to wait
+                while the controller reports exhausted Pool capacity
             
         Returns:
             Workload dict when Pod is Running with IP
@@ -259,6 +264,14 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         start_time = time.time()
         last_state = None
         last_message = None
+        pool_capacity_started_at: float | None = None
+        pool_capacity_blocked_seconds = 0.0
+        if pool_acquisition_timeout_seconds is None:
+            pool_acquisition_timeout_seconds = float(timeout_seconds)
+        effective_pool_acquisition_timeout_seconds = min(
+            pool_acquisition_timeout_seconds,
+            float(timeout_seconds),
+        )
         
         while time.time() - start_time < timeout_seconds:
             try:
@@ -277,6 +290,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     self.workload_provider.get_status(workload)
                 )
                 current_state = status_info["state"]
+                current_reason = status_info["reason"]
                 current_message = status_info["message"]
 
                 if current_state != last_state or current_message != last_message:
@@ -295,9 +309,33 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                             "code": SandboxErrorCodes.INVALID_PARAMETER,
                             "message": (
                                 f"Sandbox {sandbox_id} is unschedulable: "
-                                f"{current_message or status_info.get('reason') or 'no scheduler details'}"
+                                f"{current_message or current_reason or 'no scheduler details'}"
                             ),
                         },
+                    )
+
+                now = time.time()
+                pool_capacity_exhausted = _is_pool_capacity_exhausted_status(
+                    status_info
+                )
+                if pool_capacity_exhausted:
+                    if pool_capacity_started_at is None:
+                        pool_capacity_started_at = now
+                elif pool_capacity_started_at is not None:
+                    pool_capacity_blocked_seconds += now - pool_capacity_started_at
+                    pool_capacity_started_at = None
+
+                current_pool_capacity_blocked_seconds = pool_capacity_blocked_seconds
+                if pool_capacity_started_at is not None:
+                    current_pool_capacity_blocked_seconds += (
+                        now - pool_capacity_started_at
+                    )
+                if (
+                    current_pool_capacity_blocked_seconds
+                    >= effective_pool_acquisition_timeout_seconds
+                ):
+                    raise self._pool_capacity_exhausted_error(
+                        pool_acquisition_timeout_seconds
                     )
 
             except HTTPException:
@@ -310,7 +348,17 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
             await asyncio.sleep(poll_interval_seconds)
 
-        elapsed = time.time() - start_time
+        end_time = time.time()
+        elapsed = end_time - start_time
+        if pool_capacity_started_at is not None:
+            pool_capacity_blocked_seconds += end_time - pool_capacity_started_at
+        if (
+            pool_capacity_blocked_seconds
+            >= effective_pool_acquisition_timeout_seconds
+        ):
+            raise self._pool_capacity_exhausted_error(
+                pool_acquisition_timeout_seconds
+            )
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={
@@ -320,6 +368,20 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
                 ),
             },
+        )
+
+    @staticmethod
+    def _pool_capacity_exhausted_error(
+        pool_acquisition_timeout_seconds: float,
+    ) -> HTTPException:
+        retry_after_seconds = max(1, math.ceil(pool_acquisition_timeout_seconds))
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED,
+                "message": "No Pool capacity became available before the acquisition timeout.",
+            },
+            headers={"Retry-After": str(retry_after_seconds)},
         )
 
     def _ensure_network_policy_support(self, request: CreateSandboxRequest) -> None:
@@ -937,10 +999,13 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             )
 
             try:
+                kubernetes_config = self.app_config.kubernetes
+                assert kubernetes_config is not None
                 workload = await self._wait_for_sandbox_ready(
                     sandbox_id=sandbox_id,
-                    timeout_seconds=self.app_config.kubernetes.sandbox_create_timeout_seconds,
-                    poll_interval_seconds=self.app_config.kubernetes.sandbox_create_poll_interval_seconds,
+                    timeout_seconds=kubernetes_config.sandbox_create_timeout_seconds,
+                    poll_interval_seconds=kubernetes_config.sandbox_create_poll_interval_seconds,
+                    pool_acquisition_timeout_seconds=kubernetes_config.pool_acquisition_timeout_seconds,
                 )
                 
                 status_info = _normalize_create_status(

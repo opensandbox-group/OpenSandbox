@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenTelemetry metrics helpers for SDK lifecycle telemetry."""
+"""OpenTelemetry metrics helpers for Server and SDK lifecycle telemetry."""
 
 from __future__ import annotations
 
@@ -46,9 +46,34 @@ _CREATE_DURATION_BOUNDARIES = (
     30000.0,
     60000.0,
 )
+_HTTP_REQUEST_DURATION_HISTOGRAM_NAME = "server.http.request.duration"
+_HTTP_REQUEST_DURATION_UNIT = "ms"
+_HTTP_REQUEST_DURATION_DESCRIPTION = (
+    "Server HTTP request duration by method, route template, and status code"
+)
+_HTTP_REQUEST_METHODS = frozenset(
+    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"}
+)
+_HTTP_REQUEST_DURATION_BOUNDARIES = (
+    1.0,
+    5.0,
+    10.0,
+    25.0,
+    50.0,
+    100.0,
+    250.0,
+    500.0,
+    1000.0,
+    2500.0,
+    5000.0,
+    10000.0,
+    30000.0,
+    60000.0,
+)
 
 _meter_provider: Optional[MeterProvider] = None
 _create_duration_histogram = None
+_http_request_duration_histogram = None
 
 
 def _histogram_from_provider(provider: MeterProvider):
@@ -59,15 +84,24 @@ def _histogram_from_provider(provider: MeterProvider):
     )
 
 
+def _http_request_histogram_from_provider(provider: MeterProvider):
+    return provider.get_meter("opensandbox.server").create_histogram(
+        name=_HTTP_REQUEST_DURATION_HISTOGRAM_NAME,
+        unit=_HTTP_REQUEST_DURATION_UNIT,
+        description=_HTTP_REQUEST_DURATION_DESCRIPTION,
+    )
+
+
 def setup_otel_metrics(config: OtelConfig) -> None:
     """Configure OTEL metrics export when enabled; otherwise keep recording as noop."""
-    global _meter_provider, _create_duration_histogram
+    global _meter_provider, _create_duration_histogram, _http_request_duration_histogram
 
     # Disabled: do not attach instruments to any global provider (may already export).
     if not config.enabled:
         _create_duration_histogram = None
+        _http_request_duration_histogram = None
         logger.info(
-            "OpenTelemetry metrics export disabled; SDK events are accepted but not exported"
+            "OpenTelemetry metrics export disabled; Server and SDK metrics are noops"
         )
         return
 
@@ -97,7 +131,13 @@ def setup_otel_metrics(config: OtelConfig) -> None:
             aggregation=ExplicitBucketHistogramAggregation(
                 boundaries=list(_CREATE_DURATION_BOUNDARIES)
             ),
-        )
+        ),
+        View(
+            instrument_name=_HTTP_REQUEST_DURATION_HISTOGRAM_NAME,
+            aggregation=ExplicitBucketHistogramAggregation(
+                boundaries=list(_HTTP_REQUEST_DURATION_BOUNDARIES)
+            ),
+        ),
     ]
     provider = MeterProvider(
         resource=resource,
@@ -109,7 +149,7 @@ def setup_otel_metrics(config: OtelConfig) -> None:
     if isinstance(current, MeterProvider):
         logger.warning(
             "A global MeterProvider is already installed; opensandbox will export "
-            "create-latency metrics via its own provider and will not replace the global one"
+            "metrics via its own provider and will not replace the global one"
         )
     else:
         metrics.set_meter_provider(provider)
@@ -118,6 +158,7 @@ def setup_otel_metrics(config: OtelConfig) -> None:
     # even when set_meter_provider() cannot override a preexisting global provider.
     _meter_provider = provider
     _create_duration_histogram = _histogram_from_provider(provider)
+    _http_request_duration_histogram = _http_request_histogram_from_provider(provider)
     logger.info(
         "OpenTelemetry metrics enabled (service=%s, endpoint=%s)",
         config.service_name,
@@ -127,10 +168,11 @@ def setup_otel_metrics(config: OtelConfig) -> None:
 
 def shutdown_otel_metrics() -> None:
     """Flush and shut down the configured MeterProvider if any."""
-    global _meter_provider, _create_duration_histogram
+    global _meter_provider, _create_duration_histogram, _http_request_duration_histogram
     provider = _meter_provider
     _meter_provider = None
     _create_duration_histogram = None
+    _http_request_duration_histogram = None
     if provider is None:
         return
     try:
@@ -164,3 +206,30 @@ def record_sandbox_create_duration(
         )
     except Exception:
         logger.exception("Failed to record sandbox create duration metric")
+
+
+def record_http_request_duration(
+    *,
+    duration_ms: float,
+    method: str,
+    route: str,
+    status_code: int,
+) -> None:
+    """Record a low-cardinality Server HTTP duration sample. Never raises."""
+    hist = _http_request_duration_histogram
+    if hist is None:
+        return
+    normalized_method = method.upper()
+    if normalized_method not in _HTTP_REQUEST_METHODS:
+        normalized_method = "OTHER"
+    try:
+        hist.record(
+            duration_ms,
+            attributes={
+                "http_method": normalized_method,
+                "http_route": route or "unknown",
+                "http_status_code": status_code,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to record Server HTTP request duration metric")

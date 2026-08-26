@@ -129,7 +129,11 @@ def _build_execd_init_container(
         "(test ! -e /usr/local/libexec/opensandbox-session-gate || "
         "(cp /usr/local/libexec/opensandbox-session-gate "
         "/opt/opensandbox/opensandbox-session-gate && "
-        "chmod 0555 /opt/opensandbox/opensandbox-session-gate))"
+        "chmod 0555 /opt/opensandbox/opensandbox-session-gate)) && "
+        "(test ! -e /usr/local/libexec/opensandbox-launcher || "
+        "(cp /usr/local/libexec/opensandbox-launcher "
+        "/opt/opensandbox/opensandbox-launcher && "
+        "chmod 0555 /opt/opensandbox/opensandbox-launcher))"
     )
     security_context = None
     if disable_ipv6_for_egress:

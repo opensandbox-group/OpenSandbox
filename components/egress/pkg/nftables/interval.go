@@ -44,6 +44,12 @@ func normalizeNFTIntervalSet(elems []string) ([]string, error) {
 	return out, nil
 }
 
+// NormalizeIntervalSet is the exported form used by the fleet profile
+// ruleset builder (pkg/fleetnft), which shares the interval-set semantics.
+func NormalizeIntervalSet(elems []string) ([]string, error) {
+	return normalizeNFTIntervalSet(elems)
+}
+
 func parseAsPrefix(s string) (netip.Prefix, error) {
 	if p, err := netip.ParsePrefix(s); err == nil {
 		return p, nil

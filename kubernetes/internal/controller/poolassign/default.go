@@ -42,8 +42,9 @@ func (a *defaultAssigner) AssignPool(ctx context.Context, sbx *sandboxv1alpha1.B
 	var candidates []*sandboxv1alpha1.Pool
 	var rejections []PoolRejection
 	for _, pool := range pools {
-		if reasons := a.collectRejections(ctx, sbx, pool, predicates); len(reasons) > 0 {
-			rejections = append(rejections, PoolRejection{PoolName: pool.Name, Reasons: reasons})
+		if rejection := a.collectRejections(ctx, sbx, pool, predicates); len(rejection.Reasons) > 0 {
+			rejection.PoolName = pool.Name
+			rejections = append(rejections, rejection)
 		} else {
 			candidates = append(candidates, pool)
 		}
@@ -69,20 +70,25 @@ func (a *defaultAssigner) AssignPool(ctx context.Context, sbx *sandboxv1alpha1.B
 	return best.Name, nil
 }
 
-func (a *defaultAssigner) collectRejections(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, predicates []Predicate) []string {
-	var reasons []string
+func (a *defaultAssigner) collectRejections(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, predicates []Predicate) PoolRejection {
+	var rejection PoolRejection
 	for _, p := range predicates {
 		if !p.Predicate(ctx, sbx, pool) {
+			reason := "predicate failed"
 			if pr, ok := p.(PredicateWithReason); ok {
-				if reason := pr.Reason(ctx, sbx, pool); reason != "" {
-					reasons = append(reasons, reason)
-					continue
+				if detail := pr.Reason(ctx, sbx, pool); detail != "" {
+					reason = detail
 				}
 			}
-			reasons = append(reasons, "predicate failed")
+			rejection.Reasons = append(rejection.Reasons, reason)
+			failureCode := ""
+			if coded, ok := p.(PredicateWithFailureCode); ok {
+				failureCode = coded.FailureCode()
+			}
+			rejection.FailureCodes = append(rejection.FailureCodes, failureCode)
 		}
 	}
-	return reasons
+	return rejection
 }
 
 func (a *defaultAssigner) weightedScore(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, scorers []weightedScorer) float64 {

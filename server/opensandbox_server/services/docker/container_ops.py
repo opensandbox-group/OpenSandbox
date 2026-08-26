@@ -307,12 +307,16 @@ class DockerContainerOpsMixin:
         apply_access_renew_extend_seconds_to_mapping(labels, request.extensions)
         apply_extensions_to_mapping(labels, request.extensions)
 
-        env_dict = request.env or {}
+        # Config-level defaults apply to every sandbox; request keys win.
+        env_dict = {**(self.app_config.docker.sandbox_env or {}), **(request.env or {})}
         environment = []
         for key, value in env_dict.items():
             if value is None:
                 continue
             environment.append(f"{key}={value}")
+        if self.app_config and self.app_config.runtime.execd_run_as_init:
+            environment.append("EXECD_INIT=1")
+        environment.append(f"OPENSANDBOX_ID={sandbox_id}")
         return labels, environment
 
     def _resolve_image_auth(

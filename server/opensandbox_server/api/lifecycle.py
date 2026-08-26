@@ -74,6 +74,16 @@ snapshot_service = create_snapshot_service(sandbox_service)
         400: {"model": ErrorResponse, "description": "The request was invalid or malformed"},
         401: {"model": ErrorResponse, "description": "Authentication credentials are missing or invalid"},
         409: {"model": ErrorResponse, "description": "The operation conflicts with the current state"},
+        429: {
+            "model": ErrorResponse,
+            "description": "Pool capacity remained unavailable before the acquisition timeout",
+            "headers": {
+                "Retry-After": {
+                    "description": "Suggested delay in seconds before retrying",
+                    "schema": {"type": "integer", "minimum": 1},
+                }
+            },
+        },
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )

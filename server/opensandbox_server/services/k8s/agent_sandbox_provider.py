@@ -94,6 +94,7 @@ class AgentSandboxProvider(WorkloadProvider):
         )
         self.ingress_config = app_config.ingress if app_config else None
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
+        self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
@@ -273,6 +274,9 @@ class AgentSandboxProvider(WorkloadProvider):
             disable_ipv6_for_egress=disable_ipv6_for_egress,
         )
         main_env = dict(env)
+        main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self.execd_run_as_init:
+            main_env["EXECD_INIT"] = "1"
         if credential_proxy_enabled:
             main_env[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] = "true"
 

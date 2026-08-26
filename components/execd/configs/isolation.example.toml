@@ -82,3 +82,53 @@ allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 #   # Other potentially dangerous
 #   "userfaultfd", "kexec_load", "kexec_file_load", "acct",
 # ]
+
+# Hardening floor (OSEP-0018 §4). Default OFF — omit the section for today's
+# behavior. When enabled, every user-code process (entrypoint, /command,
+# /code, PTY) is launched through the opensandbox-launcher native helper with
+# reduced capabilities, no_new_privs, and the seccomp floor; combined with
+# init mode via bootstrap.sh EXECD_INIT + --init.
+#
+# [hardening]
+# enabled = true
+#
+#   # Capabilities the workload retains (raised in the ambient set).
+#   # Default: drop all. Names use the CAP_ prefix.
+#   keep_capabilities = []
+#
+# NOTE: with [hardening] enabled, [seccomp] deny must NOT list "execve" —
+# it is reserved for the launcher's final exec (execveat stays allowed).
+# Missing runtime support (no CAP_SETPCAP, launcher binary absent) is
+# reported on GET /v1/isolated/capabilities under "hardening" and skipped,
+# never fatal.
+
+# Landlock filesystem confinement (OSEP-0018 §5) on top of [hardening].
+# Default OFF. When enabled, user-code processes are allowlisted: system
+# paths read+exec, /proc/self and well-known read-only proc files, the
+# needed /dev device files, /tmp, /run, and allowed_writable — everything
+# else is denied. A kernel without Landlock (ABI < 1) degrades to
+# "unsupported" and is skipped.
+#
+# [landlock]
+# enabled = true
+#
+#   # Extra writable paths beyond the built-in set (read+write+create).
+#   extra_writable = ["/var/cache"]
+#
+#   # Extra read-only paths beyond the built-in set (read+exec).
+#   extra_readable = ["/opt/readonly"]
+
+# eBPF observation (OSEP-0018 §5). Default OFF. Requires the execd-ebpf
+# build variant (CGO + cilium/ebpf), CAP_BPF + CAP_PERFMON, and a
+# BTF-capable kernel (5.10+ with CONFIG_DEBUG_INFO_BTF). Observation is
+# scoped to the sandbox cgroup and written as JSONL to a rotating audit
+# file. Missing prerequisites degrade to "unsupported" and are skipped.
+#
+# [ebpf]
+# enabled = true
+#
+#   # Event kinds to record. Default: all three.
+#   observe = ["exec", "connect", "privilege"]
+#
+#   # Append-only JSONL audit sink (rotated). Default below.
+#   audit_file = "/var/log/opensandbox/ebpf-audit.jsonl"

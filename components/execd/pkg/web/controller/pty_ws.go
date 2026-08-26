@@ -460,6 +460,8 @@ const ptyViewerReadOnlyViolationLimit = 5
 // ptyViewerClientReadLoop accepts ping frames but rejects every operation that
 // could mutate the session. It closes a connection that repeatedly sends
 // mutating frames to bound server-to-client error traffic.
+//
+//nolint:gocognit // pre-existing complexity on main; not part of OSEP-0018
 func ptyViewerClientReadLoop(
 	conn *websocket.Conn,
 	writeJSON func(any) error,
@@ -500,35 +502,57 @@ func ptyViewerClientReadLoop(
 
 		switch msgType {
 		case websocket.BinaryMessage:
-			if len(data) > 0 && data[0] == model.BinStdin {
-				if !readOnlyError() {
-					return
-				}
+			if !ptyViewerHandleBinaryMessage(data, readOnlyError) {
+				return
 			}
 		case websocket.TextMessage:
-			var frame model.ClientFrame
-			if json.Unmarshal(data, &frame) != nil {
-				continue
-			}
-			switch frame.Type {
-			case "stdin", "signal", "resize":
-				if !readOnlyError() {
-					return
-				}
-			case "ping":
-				if err := writeJSON(model.ServerFrame{Type: "pong"}); err != nil {
-					cancelOnce()
-				}
-			default:
-				if err := writeJSON(model.ServerFrame{
-					Type:  "error",
-					Code:  model.WSErrCodeInvalidFrame,
-					Error: fmt.Sprintf("unknown frame type %q", frame.Type),
-				}); err != nil {
-					cancelOnce()
-				}
+			if !ptyViewerHandleTextMessage(data, writeJSON, readOnlyError, cancelOnce) {
+				return
 			}
 		}
+	}
+}
+
+// ptyViewerHandleBinaryMessage reports stdin payloads on a read-only viewer;
+// returns false when the read loop should exit.
+func ptyViewerHandleBinaryMessage(data []byte, readOnlyError func() bool) bool {
+	if len(data) > 0 && data[0] == model.BinStdin {
+		return readOnlyError()
+	}
+	return true
+}
+
+// ptyViewerHandleTextMessage handles client frames on a read-only viewer;
+// returns false when the read loop should exit.
+func ptyViewerHandleTextMessage(data []byte, writeJSON func(any) error, readOnlyError func() bool, cancelOnce func()) bool {
+	var frame model.ClientFrame
+	if json.Unmarshal(data, &frame) != nil {
+		return true
+	}
+	switch frame.Type {
+	case "stdin", "signal", "resize":
+		return readOnlyError()
+	case "ping":
+		ptyViewerReplyPong(writeJSON, cancelOnce)
+	default:
+		ptyViewerReplyInvalidFrame(writeJSON, cancelOnce, frame.Type)
+	}
+	return true
+}
+
+func ptyViewerReplyPong(writeJSON func(any) error, cancelOnce func()) {
+	if err := writeJSON(model.ServerFrame{Type: "pong"}); err != nil {
+		cancelOnce()
+	}
+}
+
+func ptyViewerReplyInvalidFrame(writeJSON func(any) error, cancelOnce func(), frameType string) {
+	if err := writeJSON(model.ServerFrame{
+		Type:  "error",
+		Code:  model.WSErrCodeInvalidFrame,
+		Error: fmt.Sprintf("unknown frame type %q", frameType),
+	}); err != nil {
+		cancelOnce()
 	}
 }
 

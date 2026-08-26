@@ -143,7 +143,7 @@ PoolReconciler.Reconcile
 ```
 
 Allocation state is stored in memory (`InMemoryAllocationStore`) and persisted to BatchSandbox annotations:
-- `sandbox.opensandbox.io/alloc-status`: `{"pods":["pod-1","pod-2"]}`
+- `sandbox.opensandbox.io/alloc-status`: current pool allocation. Legacy `{"pods":["pod-1","pod-2"]}` remains accepted and readable. Current controller writes include additive `poolRef` and `generation` fields, for example `{"pods":["pod-1","pod-2"],"poolRef":"pool-a","generation":42}`. `generation` records the BatchSandbox generation associated with the write; it is not an evidence-freshness predicate.
 - `sandbox.opensandbox.io/alloc-release`: `{"pods":["pod-3"]}`
 
 On startup, `InMemoryAllocationStore.Recover` rebuilds the in-memory state from all BatchSandbox annotations.
@@ -408,10 +408,10 @@ The controller communicates allocation state through annotations on BatchSandbox
 
 | Annotation Key | JSON Shape | Writer | Reader |
 |---|---|---|---|
-| `sandbox.opensandbox.io/alloc-status` | `{"pods":["pod-1"]}` | `allocator.go` via `apis.go` | `batchsandbox_controller.go` |
+| `sandbox.opensandbox.io/alloc-status` | Legacy: `{"pods":["pod-1"]}`; current writer: `{"pods":["pod-1"],"poolRef":"pool-a","generation":42}` | `allocator.go` via `apis.go` | `batchsandbox_controller.go` |
 | `sandbox.opensandbox.io/alloc-release` | `{"pods":["pod-3"]}` | `batchsandbox_controller.go` | `allocator.go` |
 
-When changing annotation shapes, update all readers and writers, and add migration logic if the change is not backward-compatible.
+The `poolRef` and `generation` fields in `alloc-status` are additive. Continue to accept and read the legacy pods-only shape. `generation` traces the BatchSandbox generation for the annotation write; do not use it as an evidence-freshness predicate. When changing annotation shapes, update all readers and writers, and add migration logic if the change is not backward-compatible.
 
 ## Build and Deploy
 

@@ -257,6 +257,39 @@ For async pools, pass a `redis.asyncio` client to `AsyncRedisPoolStateStore`.
   does not bypass shared state.
 :::
 
+## Lifecycle Hooks
+
+Pass a `SandboxLifecycle` when creating a sandbox. `pre_start` completes before the entrypoint starts, while `periodic` hooks run on their schedules after startup.
+
+```python
+from opensandbox.models.sandboxes import (
+    LifecycleHook,
+    PeriodicLifecycleHook,
+    SandboxLifecycle,
+)
+
+sandbox = await Sandbox.create(
+    "ubuntu:24.04",
+    connection_config=config,
+    lifecycle=SandboxLifecycle(
+        pre_start=LifecycleHook(
+            command=["sh", "-c", "echo ready > /tmp/prestart.done"],
+            timeout_seconds=120,
+        ),
+        periodic=[
+            PeriodicLifecycleHook(
+                name="checkpoint",
+                schedule="@every 5m",
+                command=["sh", "-c", "date -u >> /tmp/checkpoints.log"],
+                timeout_seconds=120,
+            )
+        ],
+    ),
+)
+```
+
+The Server validates `timeout_seconds`; when omitted it defaults to 60 seconds. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+
 ## Usage Examples
 
 ### 1. Lifecycle Management

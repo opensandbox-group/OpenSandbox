@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,63 @@ func TestSandbox_Close(t *testing.T) {
 func TestSandboxManager_Close(t *testing.T) {
 	mgr := &SandboxManager{}
 	require.NoError(t, mgr.Close(), "Close should return nil")
+}
+
+func TestCreateSandbox_ForwardsLifecycle(t *testing.T) {
+	timeout := 300
+	var received *SandboxLifecycle
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			var request CreateSandboxRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			received = request.Lifecycle
+			jsonResponse(w, http.StatusCreated, SandboxInfo{
+				ID:        "sbx-lifecycle",
+				Status:    SandboxStatus{State: StateRunning},
+				CreatedAt: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sbx-lifecycle":
+			jsonResponse(w, http.StatusOK, SandboxInfo{
+				ID:        "sbx-lifecycle",
+				Status:    SandboxStatus{State: StateRunning},
+				CreatedAt: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/endpoints/"):
+			jsonResponse(w, http.StatusOK, Endpoint{Endpoint: srv.URL})
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	_, err := CreateSandbox(context.Background(), ConnectionConfig{
+		Domain:         srv.URL,
+		DisableMetrics: true,
+	}, SandboxCreateOptions{
+		Image:           "python:3.12",
+		SkipHealthCheck: true,
+		Lifecycle: &SandboxLifecycle{
+			PreStart: &LifecycleHook{
+				Command:        []string{"/opt/hooks/restore.sh"},
+				TimeoutSeconds: &timeout,
+			},
+			Periodic: []PeriodicLifecycleHook{{
+				Name:     "checkpoint",
+				Schedule: "@hourly",
+				Command:  []string{"/opt/hooks/checkpoint.sh"},
+			}},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, received)
+	require.NotNil(t, received.PreStart)
+	require.Equal(t, []string{"/opt/hooks/restore.sh"}, received.PreStart.Command)
+	require.NotNil(t, received.PreStart.TimeoutSeconds)
+	require.Equal(t, 300, *received.PreStart.TimeoutSeconds)
+	require.Len(t, received.Periodic, 1)
+	require.Equal(t, "checkpoint", received.Periodic[0].Name)
 }
 
 func TestSandbox_Kill(t *testing.T) {

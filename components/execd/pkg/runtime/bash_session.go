@@ -32,10 +32,20 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
+
+func containsStr(list []string, s string) bool {
+	for _, item := range list {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
 
 const (
 	envDumpStartMarker = "__ENV_DUMP_START__"
@@ -117,9 +127,14 @@ func newBashSession(cwd string) *bashSession {
 		StartupTimeout: 5 * time.Second,
 	}
 
+	// The session env snapshot is exported into the wrapped script at the
+	// top, after the launcher has stripped the process environment — so it
+	// must not carry execd's own config/credential vars or a session user
+	// could recover them with a plain `echo`.
+	blacklist := isolation.ExecdConfigEnvBlacklist()
 	env := make(map[string]string)
 	for _, kv := range os.Environ() {
-		if k, v, ok := splitEnvPair(kv); ok {
+		if k, v, ok := splitEnvPair(kv); ok && !containsStr(blacklist, k) {
 			env[k] = v
 		}
 	}
@@ -211,20 +226,29 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	// Do not pass envSnapshot via cmd.Env to avoid "argument list too long" when session env is large.
 	// Child inherits parent env (nil => default in Go). The script file already has "export K=V" for
 	// all session vars at the top, so the session environment is applied when the script runs.
-	stdout, err := cmd.StdoutPipe()
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = cmd.Stdout
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stdoutW
 
-	if err := cmd.Start(); err != nil {
+	mp, err := launchManaged(cmd)
+	if err != nil {
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
 		log.Error("start %s session failed: %v (command: %q)", shell, err, log.SanitizeCommand(request.Code))
 		return fmt.Errorf("start %s: %w", shell, err)
 	}
+	// The child holds its own copy of the write end; closing ours lets the
+	// scanner below see EOF as soon as the child (and its descendants that
+	// inherited stdout) exit.
+	_ = stdoutW.Close()
+	defer stdoutR.Close()
 	defer s.untrackCurrentProcess()
 	s.trackCurrentProcess(cmd.Process.Pid)
 
-	scanner := bufio.NewScanner(stdout)
+	scanner := bufio.NewScanner(stdoutR)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 
 	var (
@@ -259,7 +283,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	}
 
 	scanErr := scanner.Err()
-	waitErr := cmd.Wait()
+	waitErr := mp.Wait()
 
 	if scanErr != nil {
 		log.Error("read stdout failed: %v (command: %q)", scanErr, log.SanitizeCommand(request.Code))
@@ -271,9 +295,9 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		return fmt.Errorf("timeout after %s", wait)
 	}
 
-	if exitCode == nil && cmd.ProcessState != nil {
-		code := cmd.ProcessState.ExitCode() //nolint:staticcheck
-		exitCode = &code                    //nolint:ineffassign
+	if exitCode == nil && mp.ExitCode() >= 0 {
+		code := mp.ExitCode()
+		exitCode = &code
 	}
 
 	updatedEnv := parseExportDump(envLines)
@@ -286,8 +310,8 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	}
 	s.mu.Unlock()
 
-	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.As(waitErr, &exitErr) {
+	var exitCodeErr exitCoder
+	if waitErr != nil && !errors.As(waitErr, &exitCodeErr) {
 		log.Error("command wait failed: %v (command: %q)", waitErr, log.SanitizeCommand(request.Code))
 		return waitErr
 	}

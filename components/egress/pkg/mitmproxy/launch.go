@@ -42,12 +42,11 @@ const listenHostLoopback = "127.0.0.1"
 // (COPY components/egress/mitmscripts /var/egress/mitmscripts). Always loaded.
 const systemScriptPath = "/var/egress/mitmscripts/system.py"
 
-// Config: mitmdump --mode transparent. Static options (mode, connection_strategy,
-// listen_host, stream_large_bodies, ignore_hosts,
-// ssl_verify_upstream_trusted_confdir) live in
-// /var/lib/mitmproxy/.mitmproxy/config.yaml and are auto-loaded by mitmdump.
-// This struct carries only per-launch dynamic values that override those
-// defaults via `--set`.
+// Config carries only per-launch dynamic values, applied via `--set`. Static
+// options (mode, listen_host, connection_strategy, stream_large_bodies,
+// ignore_hosts, ssl_verify_upstream_trusted_confdir) are auto-loaded by
+// mitmdump from /var/lib/mitmproxy/.mitmproxy/config.yaml (shipped from
+// components/egress/mitmproxy/config.yaml).
 type Config struct {
 	ListenPort int
 	UserName   string

@@ -30,6 +30,7 @@ export { ConnectionConfig } from "./config/connection.js";
 export type { ConnectionConfigOptions, ConnectionProtocol } from "./config/connection.js";
 
 export type {
+  AllocationSummary,
   Credential,
   CredentialAuth,
   CredentialAuthMetadata,
@@ -55,6 +56,7 @@ export type {
   Endpoint,
   Host,
   InlineCredentialSource,
+  LifecycleHook,
   ListSnapshotsParams,
   ListSnapshotsResponse,
   ListSandboxesParams,
@@ -63,6 +65,7 @@ export type {
   NetworkRule,
   NetworkRuleAction,
   OSSFS,
+  PeriodicLifecycleHook,
   PlatformSpec,
   PVC,
   RenewSandboxExpirationRequest,
@@ -72,6 +75,7 @@ export type {
   SnapshotStatus,
   SandboxId,
   SandboxInfo,
+  SandboxLifecycle,
   SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";

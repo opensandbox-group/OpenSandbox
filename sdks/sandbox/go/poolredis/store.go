@@ -56,6 +56,10 @@ end
 `)
 
 	putIdleScript = redis.NewScript(`
+local destroy_state = redis.call('GET', KEYS[3])
+if destroy_state then
+  return -1
+end
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 local expires_at = now_ms + tonumber(ARGV[2])
@@ -94,6 +98,10 @@ return discarded_alive
 `)
 
 	acquireLockScript = redis.NewScript(`
+local destroy_state = redis.call('GET', KEYS[2])
+if destroy_state then
+  return 0
+end
 local current = redis.call('GET', KEYS[1])
 if not current then
   redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
@@ -106,6 +114,10 @@ return 0
 `)
 
 	renewLockScript = redis.NewScript(`
+local destroy_state = redis.call('GET', KEYS[2])
+if destroy_state then
+  return 0
+end
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   redis.call('PEXPIRE', KEYS[1], ARGV[2])
   return 1
@@ -138,6 +150,39 @@ for i = 1, #entries, 2 do
   end
 end
 return count
+`)
+
+	// setFencedValueScript writes a single pool setting, refusing the write when
+	// the namespace carries a destroy fence or tombstone.
+	setFencedValueScript = redis.NewScript(`
+local destroy_state = redis.call('GET', KEYS[2])
+if destroy_state then
+  return -1
+end
+redis.call('SET', KEYS[1], ARGV[1])
+return 1
+`)
+
+	beginDestroyScript = redis.NewScript(`
+local destroy_state = redis.call('GET', KEYS[1])
+if destroy_state == ARGV[2] then
+  return -1
+end
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SET', KEYS[2], ARGV[3])
+return 1
+`)
+
+	markDestroyedScript = redis.NewScript(`
+local ttl_ms = tonumber(ARGV[3])
+if ttl_ms and ttl_ms > 0 then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ttl_ms)
+  redis.call('SET', KEYS[2], ARGV[2], 'PX', ttl_ms)
+else
+  redis.call('SET', KEYS[1], ARGV[1])
+  redis.call('SET', KEYS[2], ARGV[2])
+end
+return 1
 `)
 )
 
@@ -257,14 +302,14 @@ func (s *RedisPoolStateStore) PutIdle(ctx context.Context, poolName string, sand
 		return err
 	}
 
-	keys := []string{s.idleListKey(poolName), s.idleExpiresKey(poolName)}
+	keys := []string{s.idleListKey(poolName), s.idleExpiresKey(poolName), s.destroyStateKey(poolName)}
 	argv := []interface{}{sandboxID, strconv.FormatInt(idleTTLMs, 10)}
 
-	_, err = putIdleScript.Run(ctx, s.client, keys, argv...).Result()
+	result, err := putIdleScript.Run(ctx, s.client, keys, argv...).Int64()
 	if err != nil && err != redis.Nil {
 		return &opensandbox.PoolStateStoreUnavailableError{Operation: "PutIdle", Cause: err}
 	}
-	return nil
+	return s.destroyedErrorIfFenced(ctx, poolName, result)
 }
 
 // RemoveIdle atomically removes a sandbox from the idle pool. Idempotent.
@@ -289,7 +334,7 @@ func (s *RedisPoolStateStore) TryAcquirePrimaryLock(ctx context.Context, poolNam
 		ttlMs = 1
 	}
 	result, err := acquireLockScript.Run(ctx, s.client,
-		[]string{s.PrimaryLockKey(poolName)},
+		[]string{s.PrimaryLockKey(poolName), s.destroyStateKey(poolName)},
 		ownerID, strconv.FormatInt(ttlMs, 10)).Int64()
 	if err != nil && err != redis.Nil {
 		return false, &opensandbox.PoolStateStoreUnavailableError{Operation: "TryAcquirePrimaryLock", Cause: err}
@@ -304,7 +349,7 @@ func (s *RedisPoolStateStore) RenewPrimaryLock(ctx context.Context, poolName str
 		ttlMs = 1
 	}
 
-	keys := []string{s.PrimaryLockKey(poolName)}
+	keys := []string{s.PrimaryLockKey(poolName), s.destroyStateKey(poolName)}
 	argv := []interface{}{ownerID, strconv.FormatInt(ttlMs, 10)}
 
 	result, err := renewLockScript.Run(ctx, s.client, keys, argv...).Int64()
@@ -433,11 +478,7 @@ func (s *RedisPoolStateStore) GetMaxIdle(ctx context.Context, poolName string) (
 
 // SetMaxIdle persists the maxIdle value for the pool.
 func (s *RedisPoolStateStore) SetMaxIdle(ctx context.Context, poolName string, maxIdle int) error {
-	err := s.client.Set(ctx, s.maxIdleKey(poolName), strconv.Itoa(maxIdle), 0).Err()
-	if err != nil {
-		return &opensandbox.PoolStateStoreUnavailableError{Operation: "SetMaxIdle", Cause: err}
-	}
-	return nil
+	return s.setFencedValue(ctx, poolName, "SetMaxIdle", s.maxIdleKey(poolName), strconv.Itoa(maxIdle))
 }
 
 // SetIdleEntryTTL persists the idle entry TTL for the pool.
@@ -446,11 +487,121 @@ func (s *RedisPoolStateStore) SetIdleEntryTTL(ctx context.Context, poolName stri
 	if ms < 1 {
 		ms = 1
 	}
-	err := s.client.Set(ctx, s.idleTTLKey(poolName), strconv.FormatInt(ms, 10), 0).Err()
+	return s.setFencedValue(ctx, poolName, "SetIdleEntryTTL", s.idleTTLKey(poolName), strconv.FormatInt(ms, 10))
+}
+
+func (s *RedisPoolStateStore) setFencedValue(ctx context.Context, poolName string, operation string, key string, value string) error {
+	keys := []string{key, s.destroyStateKey(poolName)}
+
+	result, err := setFencedValueScript.Run(ctx, s.client, keys, value).Int64()
+	if err != nil && err != redis.Nil {
+		return &opensandbox.PoolStateStoreUnavailableError{Operation: operation, Cause: err}
+	}
+	return s.destroyedErrorIfFenced(ctx, poolName, result)
+}
+
+// GetDestroyState returns the destroy state of the pool namespace. An expired
+// tombstone has already been dropped by Redis and reads back as ACTIVE.
+func (s *RedisPoolStateStore) GetDestroyState(ctx context.Context, poolName string) (opensandbox.PoolDestroyState, error) {
+	val, err := s.client.Get(ctx, s.destroyStateKey(poolName)).Result()
+	if err == redis.Nil {
+		return opensandbox.PoolDestroyStateActive, nil
+	}
 	if err != nil {
-		return &opensandbox.PoolStateStoreUnavailableError{Operation: "SetIdleEntryTTL", Cause: err}
+		return opensandbox.PoolDestroyStateActive, &opensandbox.PoolStateStoreUnavailableError{Operation: "GetDestroyState", Cause: err}
+	}
+	switch val {
+	case opensandbox.PoolDestroyStateDestroying.String():
+		return opensandbox.PoolDestroyStateDestroying, nil
+	case opensandbox.PoolDestroyStateDestroyed.String():
+		return opensandbox.PoolDestroyStateDestroyed, nil
+	default:
+		return opensandbox.PoolDestroyStateActive, nil
+	}
+}
+
+// BeginDestroy writes the DESTROYING fence. Returns *opensandbox.PoolDestroyedError
+// if the namespace already carries a live tombstone.
+func (s *RedisPoolStateStore) BeginDestroy(ctx context.Context, poolName string, ownerID string) error {
+	if ownerID == "" {
+		return fmt.Errorf("opensandbox: ownerID must not be blank")
+	}
+	keys := []string{s.destroyStateKey(poolName), s.destroyOwnerKey(poolName)}
+	argv := []interface{}{
+		opensandbox.PoolDestroyStateDestroying.String(),
+		opensandbox.PoolDestroyStateDestroyed.String(),
+		ownerID,
+	}
+
+	result, err := beginDestroyScript.Run(ctx, s.client, keys, argv...).Int64()
+	if err != nil && err != redis.Nil {
+		return &opensandbox.PoolStateStoreUnavailableError{Operation: "BeginDestroy", Cause: err}
+	}
+	if result == -1 {
+		return &opensandbox.PoolDestroyedError{PoolName: poolName, State: opensandbox.PoolDestroyStateDestroyed}
 	}
 	return nil
+}
+
+// ClearPoolState deletes the pool's coordination keys, leaving the destroy keys
+// in place so the fence survives the cleanup.
+func (s *RedisPoolStateStore) ClearPoolState(ctx context.Context, poolName string) error {
+	err := s.client.Del(ctx,
+		s.idleListKey(poolName),
+		s.idleExpiresKey(poolName),
+		s.PrimaryLockKey(poolName),
+		s.maxIdleKey(poolName),
+		s.idleTTLKey(poolName),
+	).Err()
+	if err != nil && err != redis.Nil {
+		return &opensandbox.PoolStateStoreUnavailableError{Operation: "ClearPoolState", Cause: err}
+	}
+	return nil
+}
+
+// MarkDestroyed writes the DESTROYED tombstone. A zero tombstoneTTL writes a
+// tombstone that never expires.
+func (s *RedisPoolStateStore) MarkDestroyed(ctx context.Context, poolName string, ownerID string, tombstoneTTL time.Duration) error {
+	if ownerID == "" {
+		return fmt.Errorf("opensandbox: ownerID must not be blank")
+	}
+	if tombstoneTTL < 0 {
+		return fmt.Errorf("opensandbox: tombstoneTTL must not be negative, got %v", tombstoneTTL)
+	}
+
+	// A sub-millisecond TTL would round to zero and be read as "never expires",
+	// so clamp it to the smallest expiry Redis can represent.
+	ttlMs := tombstoneTTL.Milliseconds()
+	if tombstoneTTL > 0 && ttlMs < 1 {
+		ttlMs = 1
+	}
+
+	keys := []string{s.destroyStateKey(poolName), s.destroyOwnerKey(poolName)}
+	argv := []interface{}{
+		opensandbox.PoolDestroyStateDestroyed.String(),
+		ownerID,
+		strconv.FormatInt(ttlMs, 10),
+	}
+
+	_, err := markDestroyedScript.Run(ctx, s.client, keys, argv...).Result()
+	if err != nil && err != redis.Nil {
+		return &opensandbox.PoolStateStoreUnavailableError{Operation: "MarkDestroyed", Cause: err}
+	}
+	return nil
+}
+
+// destroyedErrorIfFenced converts the -1 sentinel returned by the fenced-write
+// scripts into a *opensandbox.PoolDestroyedError carrying the observed state.
+func (s *RedisPoolStateStore) destroyedErrorIfFenced(ctx context.Context, poolName string, scriptResult int64) error {
+	if scriptResult != -1 {
+		return nil
+	}
+	state, err := s.GetDestroyState(ctx, poolName)
+	if err != nil {
+		// The write was refused; report that rather than the follow-up read failure.
+		state = opensandbox.PoolDestroyStateDestroying
+	}
+	return &opensandbox.PoolDestroyedError{PoolName: poolName, State: state}
 }
 
 // resolveIdleTTL reads the configured idle TTL from Redis (in ms).
@@ -499,6 +650,14 @@ func (s *RedisPoolStateStore) maxIdleKey(poolName string) string {
 
 func (s *RedisPoolStateStore) idleTTLKey(poolName string) string {
 	return s.poolKey(poolName, "idleTtlMillis")
+}
+
+func (s *RedisPoolStateStore) destroyStateKey(poolName string) string {
+	return s.poolKey(poolName, "destroy:state")
+}
+
+func (s *RedisPoolStateStore) destroyOwnerKey(poolName string) string {
+	return s.poolKey(poolName, "destroy:owner")
 }
 
 // Compile-time interface check.

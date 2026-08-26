@@ -70,6 +70,33 @@ try {
 }
 ```
 
+## Lifecycle Hooks
+
+Set `lifecycle` in `Sandbox.create`. `preStart` completes before the entrypoint starts, while `periodic` hooks run on their schedules after startup.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu:24.04",
+  lifecycle: {
+    preStart: {
+      command: ["sh", "-c", "echo ready > /tmp/prestart.done"],
+      timeoutSeconds: 120,
+    },
+    periodic: [
+      {
+        name: "checkpoint",
+        schedule: "@every 5m",
+        command: ["sh", "-c", "date -u >> /tmp/checkpoints.log"],
+        timeoutSeconds: 120,
+      },
+    ],
+  },
+});
+```
+
+The Server validates `timeoutSeconds`; when omitted it defaults to 60 seconds. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+
 ## Usage Examples
 
 ### 1. Lifecycle Management

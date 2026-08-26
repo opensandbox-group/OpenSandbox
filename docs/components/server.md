@@ -70,6 +70,29 @@ opensandbox-server init-config ~/.sandbox.toml --example docker
    Topics covered there include: Docker `network_mode` / `host_ip` (e.g. server in Docker Compose), `[egress]` when clients send `networkPolicy`, `[ingress]`, `[secure_runtime]`, Kubernetes `workload_provider` / `batchsandbox_template_file`, `[agent_sandbox]`, TTL caps, `[renew_intent]`.
    The server-wide persistence backend is configured under `[store]`; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records.
 
+### OpenTelemetry metrics
+
+The Server can export metrics through OTLP when `[otel].enabled = true`. It uses
+the configured OTLP HTTP endpoint and does not expose a Prometheus `/metrics`
+listener.
+
+| Metric | Type | Unit | Attributes |
+|---|---|---|---|
+| `server.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` |
+| `opensandbox.sandbox.create.duration` | Histogram | `ms` | `sdk.language`, `sdk.version`, `success` |
+
+HTTP metrics use matched route templates such as `/v1/sandboxes/{sandbox_id}`,
+not raw paths. Requests that do not reach a matched route, including early
+authentication failures, use `http_route=unknown`. Sandbox IDs, tenant IDs,
+API keys, bodies, and query strings are never metric attributes. Standard HTTP
+methods are recorded in uppercase, while extension methods use
+`http_method=OTHER` to keep attribute cardinality bounded.
+
+The HTTP histogram's sample count can be used for request rate, its status-code
+attribute for error rate, and its buckets for latency percentiles. See the
+[Server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel)
+for the complete `[otel]` settings.
+
 ### Run the server
 
 ```bash

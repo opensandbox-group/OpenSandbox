@@ -50,10 +50,13 @@ from opensandbox.exceptions import (
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import (
     CredentialProxyConfig,
+    LifecycleHook,
     NetworkPolicy,
     NetworkRule,
+    PeriodicLifecycleHook,
     PlatformSpec,
     SandboxImageSpec,
+    SandboxLifecycle,
 )
 
 
@@ -559,6 +562,19 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
         extensions={},
         volumes=None,
         credential_proxy=CredentialProxyConfig(enabled=True),
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(
+                command=["/opt/hooks/restore.sh"],
+                timeoutSeconds=30,
+            ),
+            periodic=[
+                PeriodicLifecycleHook(
+                    name="checkpoint",
+                    schedule="@hourly",
+                    command=["/opt/hooks/checkpoint.sh"],
+                )
+            ],
+        ),
     )
     d = req.to_dict()
     assert d["image"]["uri"] == "python:3.11"
@@ -569,9 +585,59 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
     assert d["networkPolicy"]["defaultAction"] == "deny"
     assert d["networkPolicy"]["egress"] == [{"action": "allow", "target": "pypi.org"}]
     assert d["credentialProxy"] == {"enabled": True}
+    assert d["lifecycle"] == {
+        "preStart": {
+            "command": ["/opt/hooks/restore.sh"],
+            "timeoutSeconds": 30,
+        },
+        "periodic": [
+            {
+                "name": "checkpoint",
+                "schedule": "@hourly",
+                "command": ["/opt/hooks/checkpoint.sh"],
+            }
+        ],
+    }
 
     renew = SandboxModelConverter.to_api_renew_request(datetime(2025, 1, 1))
     assert renew.expires_at.tzinfo is timezone.utc
+
+
+def test_sandbox_model_converter_omits_empty_lifecycle() -> None:
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["python"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=None,
+        lifecycle=SandboxLifecycle(),
+    )
+
+    assert "lifecycle" not in req.to_dict()
+
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["python"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=None,
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(command=["true"]),
+            periodic=[],
+        ),
+    )
+
+    assert req.to_dict()["lifecycle"] == {"preStart": {"command": ["true"]}}
 
 
 def test_platform_spec_accepts_windows() -> None:
@@ -662,6 +728,80 @@ def test_sandbox_model_converter_preserves_missing_metadata_default() -> None:
     converted = SandboxModelConverter.to_sandbox_info(api_sandbox)
     assert converted.metadata == {}
     assert converted.extensions is None
+    assert converted.allocation is None
+
+
+def test_sandbox_model_converter_maps_allocation() -> None:
+    from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+    from opensandbox.api.lifecycle.models.allocation_summary_mode import (
+        AllocationSummaryMode,
+    )
+    from opensandbox.api.lifecycle.models.allocation_summary_state import (
+        AllocationSummaryState,
+    )
+    from opensandbox.api.lifecycle.models.sandbox import Sandbox
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    api_sandbox = Sandbox(
+        id="sbx-1",
+        status=SandboxStatus(state="Running"),
+        created_at=datetime(2025, 1, 1),
+        entrypoint=["/bin/sh"],
+        allocation=AllocationSummary(
+            mode=AllocationSummaryMode.POOL,
+            pool_ref="default/python",
+            state=AllocationSummaryState.ALLOCATED,
+        ),
+    )
+
+    converted = SandboxModelConverter.to_sandbox_info(api_sandbox)
+    assert converted.allocation is not None
+    assert converted.allocation.mode == "pool"
+    assert converted.allocation.pool_ref == "default/python"
+    assert converted.allocation.state == "allocated"
+
+
+def test_sandbox_model_converter_maps_allocation_for_list_results() -> None:
+    from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+    from opensandbox.api.lifecycle.models.allocation_summary_mode import (
+        AllocationSummaryMode,
+    )
+    from opensandbox.api.lifecycle.models.allocation_summary_state import (
+        AllocationSummaryState,
+    )
+    from opensandbox.api.lifecycle.models.list_sandboxes_response import (
+        ListSandboxesResponse,
+    )
+    from opensandbox.api.lifecycle.models.pagination_info import PaginationInfo
+    from opensandbox.api.lifecycle.models.sandbox import Sandbox
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    api_response = ListSandboxesResponse(
+        items=[
+            Sandbox(
+                id="sbx-1",
+                status=SandboxStatus(state="Running"),
+                created_at=datetime(2025, 1, 1),
+                entrypoint=["/bin/sh"],
+                allocation=AllocationSummary(
+                    mode=AllocationSummaryMode.POOL,
+                    pool_ref="default/python",
+                    state=AllocationSummaryState.ALLOCATED,
+                ),
+            )
+        ],
+        pagination=PaginationInfo(
+            page=1,
+            page_size=10,
+            total_items=1,
+            total_pages=1,
+            has_next_page=False,
+        ),
+    )
+
+    converted = SandboxModelConverter.to_paged_sandbox_infos(api_response)
+    assert converted.sandbox_infos[0].allocation is not None
+    assert converted.sandbox_infos[0].allocation.pool_ref == "default/python"
 
 
 def test_sandbox_model_converter_supports_windows_platform_request() -> None:

@@ -303,6 +303,33 @@ pool, err := opensandbox.NewSandboxPoolBuilder().
 - Configure `PrimaryLockTTL` greater than `WarmupReadyTimeout` plus expected warmup preparer time.
 :::
 
+## Lifecycle Hooks
+
+Set `Lifecycle` in `SandboxCreateOptions`. `PreStart` completes before the entrypoint starts, while `Periodic` hooks run on their schedules after startup.
+
+```go
+hookTimeout := 120
+sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
+    Image: "ubuntu:24.04",
+    Lifecycle: &opensandbox.SandboxLifecycle{
+        PreStart: &opensandbox.LifecycleHook{
+            Command:        []string{"sh", "-c", "echo ready > /tmp/prestart.done"},
+            TimeoutSeconds: &hookTimeout,
+        },
+        Periodic: []opensandbox.PeriodicLifecycleHook{
+            {
+                Name:           "checkpoint",
+                Schedule:       "@every 5m",
+                Command:        []string{"sh", "-c", "date -u >> /tmp/checkpoints.log"},
+                TimeoutSeconds: &hookTimeout,
+            },
+        },
+    },
+})
+```
+
+The Server validates `TimeoutSeconds`; when omitted it defaults to 60 seconds. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+
 ## API Reference
 
 ### LifecycleClient

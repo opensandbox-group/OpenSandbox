@@ -426,6 +426,24 @@ export interface SandboxStatus extends Record<string, unknown> {
   message?: string;
 }
 
+/**
+ * Current runtime-confirmed Pool allocation for a sandbox.
+ */
+export interface AllocationSummary extends Record<string, unknown> {
+  /**
+   * Confirmed allocation mode.
+   */
+  mode: "pool";
+  /**
+   * Concrete Pool reference currently allocated to the sandbox.
+   */
+  poolRef: string;
+  /**
+   * Current confirmed allocation state.
+   */
+  state: "allocated";
+}
+
 export interface SandboxInfo extends Record<string, unknown> {
   id: SandboxId;
   image?: ImageSpec;
@@ -436,6 +454,10 @@ export interface SandboxInfo extends Record<string, unknown> {
   extensions?: Record<string, string>;
   status: SandboxStatus;
   /**
+   * Current runtime-confirmed Pool allocation, when available.
+   */
+  allocation?: AllocationSummary;
+  /**
    * Sandbox creation time.
    */
   createdAt: Date;
@@ -443,6 +465,38 @@ export interface SandboxInfo extends Record<string, unknown> {
    * Sandbox expiration time (server-side TTL).
    */
   expiresAt: Date | null;
+}
+
+export interface LifecycleHook extends Record<string, unknown> {
+  /** Command and arguments executed without implicit shell expansion. */
+  command: string[];
+  /** Maximum execution time in seconds, up to 300. Defaults to 60. */
+  timeoutSeconds?: number;
+}
+
+export interface PeriodicLifecycleHook extends Record<string, unknown> {
+  /** Name unique among periodic hooks in this sandbox. */
+  name: string;
+  /** Five-field cron expression or descriptor such as `@hourly` or `@every 30s`. */
+  schedule: string;
+  /** Command and arguments executed without implicit shell expansion. */
+  command: string[];
+  /** Maximum execution time in seconds, up to 300. Defaults to 60. */
+  timeoutSeconds?: number;
+}
+
+/** Extensible container for sandbox lifecycle hooks. */
+export interface SandboxLifecycle extends Record<string, unknown> {
+  /**
+   * Runs after execd is ready and before the user entrypoint on every container
+   * start. A failed or timed-out hook prevents the user entrypoint from starting.
+   */
+  preStart?: LifecycleHook;
+  /**
+   * Scheduled hooks run while the sandbox is running. Runs of the same named hook
+   * never overlap; a scheduled run is skipped while its previous run is active.
+   */
+  periodic?: PeriodicLifecycleHook[];
 }
 
 export interface CreateSandboxRequest extends Record<string, unknown> {
@@ -462,6 +516,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
   resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
+  lifecycle?: SandboxLifecycle;
   /**
    * Optional outbound network policy for the sandbox.
    */

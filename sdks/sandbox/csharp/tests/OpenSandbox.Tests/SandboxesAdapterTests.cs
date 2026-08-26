@@ -79,10 +79,72 @@ public class SandboxesAdapterTests
         SandboxInfo sandbox = await adapter.GetSandboxAsync("sbx-1");
 
         sandbox.ExpiresAt.Should().BeNull();
+        sandbox.Allocation.Should().BeNull();
         sandbox.Platform.Should().NotBeNull();
         sandbox.Platform!.Arch.Should().Be("amd64");
         sandbox.Extensions.Should().ContainKey("opensandbox.extensions.custom-label")
             .WhoseValue.Should().Be("中文数据");
+    }
+
+    [Fact]
+    public async Task GetSandboxAsync_ShouldParseAllocation()
+    {
+        const string payload = """
+        {
+          "id": "sbx-pool",
+          "status": { "state": "Running" },
+          "entrypoint": ["/bin/sh"],
+          "createdAt": "2026-03-14T12:00:00Z",
+          "allocation": {
+            "mode": "pool",
+            "poolRef": "default/python",
+            "state": "allocated"
+          }
+        }
+        """;
+        var adapter = CreateAdapterWithJsonResponse(payload);
+
+        SandboxInfo sandbox = await adapter.GetSandboxAsync("sbx-pool");
+
+        sandbox.Allocation.Should().NotBeNull();
+        sandbox.Allocation!.Mode.Should().Be("pool");
+        sandbox.Allocation.PoolRef.Should().Be("default/python");
+        sandbox.Allocation.State.Should().Be("allocated");
+    }
+
+    [Fact]
+    public async Task ListSandboxesAsync_ShouldParseAllocation()
+    {
+        const string payload = """
+        {
+          "items": [
+            {
+              "id": "sbx-pool",
+              "status": { "state": "Running" },
+              "entrypoint": ["/bin/sh"],
+              "createdAt": "2026-03-14T12:00:00Z",
+              "allocation": {
+                "mode": "pool",
+                "poolRef": "default/python",
+                "state": "allocated"
+              }
+            },
+            {
+              "id": "sbx-legacy",
+              "status": { "state": "Running" },
+              "entrypoint": ["/bin/sh"],
+              "createdAt": "2026-03-14T12:00:00Z"
+            }
+          ]
+        }
+        """;
+        var adapter = CreateAdapterWithJsonResponse(payload);
+
+        ListSandboxesResponse response = await adapter.ListSandboxesAsync();
+
+        response.Items[0].Allocation.Should().NotBeNull();
+        response.Items[0].Allocation!.PoolRef.Should().Be("default/python");
+        response.Items[1].Allocation.Should().BeNull();
     }
 
     [Fact]
@@ -133,6 +195,48 @@ public class SandboxesAdapterTests
         handler.RequestBody.Should().NotBeNullOrEmpty();
         using var json = JsonDocument.Parse(handler.RequestBody!);
         json.RootElement.GetProperty("secureAccess").GetBoolean().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CreateSandboxAsync_ShouldSerializeLifecycleHooks()
+    {
+        var handler = new CaptureCreateRequestHandler();
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        _ = await adapter.CreateSandboxAsync(new CreateSandboxRequest
+        {
+            ResourceLimits = new Dictionary<string, string>(),
+            Lifecycle = new SandboxLifecycle
+            {
+                PreStart = new LifecycleHook
+                {
+                    Command = ["/opt/hooks/restore.sh"],
+                    TimeoutSeconds = 300
+                },
+                Periodic =
+                [
+                    new PeriodicLifecycleHook
+                    {
+                        Name = "checkpoint",
+                        Schedule = "@hourly",
+                        Command = ["/opt/hooks/checkpoint.sh"]
+                    }
+                ]
+            }
+        });
+
+        handler.RequestBody.Should().NotBeNullOrEmpty();
+        using var json = JsonDocument.Parse(handler.RequestBody!);
+        var lifecycle = json.RootElement.GetProperty("lifecycle");
+        var preStart = lifecycle.GetProperty("preStart");
+        preStart.GetProperty("command")[0].GetString().Should().Be("/opt/hooks/restore.sh");
+        preStart.GetProperty("timeoutSeconds").GetInt32().Should().Be(300);
+        var periodic = lifecycle.GetProperty("periodic")[0];
+        periodic.GetProperty("name").GetString().Should().Be("checkpoint");
+        periodic.GetProperty("schedule").GetString().Should().Be("@hourly");
+        periodic.GetProperty("command")[0].GetString().Should().Be("/opt/hooks/checkpoint.sh");
     }
 
     [Fact]

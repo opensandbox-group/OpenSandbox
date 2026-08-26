@@ -55,7 +55,20 @@ The server accepts the event with `204` and, when `[otel]` is enabled, records a
 | JavaScript / TypeScript | After `Sandbox.create` completes or fails |
 | Go | After `CreateSandbox` completes or fails |
 | C# | After `Sandbox.CreateAsync` completes or fails |
-| Kotlin | After `Sandbox.builder()...build()` completes or fails |
+| Kotlin | After standalone `Sandbox.builder()...build()` or a pool direct-create fallback completes or fails |
+
+::: info Kotlin staged pool warmup
+Kotlin staged warmup deliberately does **not** emit the legacy
+`sandbox.create` event. Its create phase returns before readiness polling,
+optional preparation, post-prepare validation, renewal, and idle commit, so
+reporting that partial phase as the existing end-to-end create histogram would
+give the metric a different meaning from standalone create.
+
+This exclusion applies only to staged warmup. Standalone create and pool
+direct-create fallback keep reporting normally. Use the pool's structured
+summary logs and optional [warmup tracing](/guides/sdk-tracing) to observe the
+complete staged-warmup lifecycle.
+:::
 
 ## How to disable
 

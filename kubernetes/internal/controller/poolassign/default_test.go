@@ -16,6 +16,7 @@ package assign
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -289,6 +290,52 @@ func TestDefaultAssigner_AssignPool(t *testing.T) {
 		}
 		if name != "pool-big" {
 			t.Errorf("AssignPool() = %q, want %q (pool with PoolMax<replicas must be filtered)", name, "pool-big")
+		}
+	})
+}
+
+func TestNoEligiblePoolErrorCapacityClassification(t *testing.T) {
+	ctx := context.Background()
+	assigner := NewDefaultAssigner(DefaultProfile())
+	sbx := makeSBX("sbx-1", "nginx")
+
+	t.Run("all otherwise matching pools are full", func(t *testing.T) {
+		_, err := assigner.AssignPool(ctx, sbx, []*sandboxv1alpha1.Pool{
+			makePool("pool-a", "nginx", 2, 2),
+			makePool("pool-b", "nginx", 1, 1),
+		})
+		var noEligible *NoEligiblePoolError
+		if !errors.As(err, &noEligible) {
+			t.Fatalf("expected NoEligiblePoolError, got %v", err)
+		}
+		if !noEligible.CapacityExhausted() {
+			t.Fatalf("expected capacity exhaustion, got %#v", noEligible.Rejections)
+		}
+	})
+
+	t.Run("profile mismatch is not capacity exhaustion", func(t *testing.T) {
+		_, err := assigner.AssignPool(ctx, sbx, []*sandboxv1alpha1.Pool{
+			makePool("pool-redis", "redis", 2, 0),
+		})
+		var noEligible *NoEligiblePoolError
+		if !errors.As(err, &noEligible) {
+			t.Fatalf("expected NoEligiblePoolError, got %v", err)
+		}
+		if noEligible.CapacityExhausted() {
+			t.Fatalf("profile mismatch was misclassified as capacity exhaustion: %#v", noEligible.Rejections)
+		}
+	})
+
+	t.Run("pool failing capacity and image is not otherwise eligible", func(t *testing.T) {
+		_, err := assigner.AssignPool(ctx, sbx, []*sandboxv1alpha1.Pool{
+			makePool("pool-full-redis", "redis", 2, 2),
+		})
+		var noEligible *NoEligiblePoolError
+		if !errors.As(err, &noEligible) {
+			t.Fatalf("expected NoEligiblePoolError, got %v", err)
+		}
+		if noEligible.CapacityExhausted() {
+			t.Fatalf("multi-predicate mismatch was misclassified as capacity exhaustion: %#v", noEligible.Rejections)
 		}
 	})
 }
