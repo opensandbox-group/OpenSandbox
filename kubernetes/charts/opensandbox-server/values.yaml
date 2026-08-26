@@ -41,6 +41,12 @@ server:
       cpu: "1"
       memory: 4Gi
 
+  service:
+    # -- Service type for the server. Set to NodePort or LoadBalancer to reach the server from outside the cluster.
+    type: ClusterIP
+    # -- Node port to bind when type is not ClusterIP. Empty lets Kubernetes allocate one from the cluster node-port range.
+    nodePort: ""
+
   # -- Tolerations for the server pod.
   tolerations: []
   # -- Affinity for the server pod.
