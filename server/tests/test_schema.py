@@ -23,6 +23,8 @@ from opensandbox_server.api.schema import (
     ImageSpec,
     ListSnapshotsRequest,
     LifecycleHook,
+    NetworkPolicy,
+    NetworkRule,
     OSSFS,
     PaginationInfo,
     PaginationRequest,
@@ -844,3 +846,54 @@ class TestCreateSandboxRequestPoolMode:
             CreateSandboxRequest(
                 extensions={"poolRef": "   "},
             )
+
+
+class TestNetworkRule:
+    """NetworkRule.target became optional so a rule can be scoped by `ports`
+    alone; these guard the target/ports combinations the API is meant to
+    accept or reject, and that pass-through to the egress sidecar (see
+    server/opensandbox_server/services/{docker/networking,k8s/egress_helper}.py,
+    which serialize with exclude_none=True) drops unset fields instead of
+    sending literal nulls.
+    """
+
+    def test_requires_target_or_ports(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow"})
+
+    def test_rejects_more_than_256_ports(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "ports": list(range(1, 258))})
+
+    def test_accepts_exactly_256_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "ports": list(range(1, 257))})
+        assert len(rule.ports) == 256
+
+    def test_port_only_rule_omits_target(self):
+        rule = NetworkRule.model_validate({"action": "deny", "ports": [25]})
+        assert rule.target is None
+        assert rule.ports == [25]
+
+    def test_target_with_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "10.0.0.5", "ports": [22, 80]})
+        assert rule.target == "10.0.0.5"
+        assert rule.ports == [22, 80]
+
+    def test_domain_only_rule_still_requires_target(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "example.com"})
+        assert rule.target == "example.com"
+        assert rule.ports is None
+
+    def test_serialization_omits_unset_target_and_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "example.com"})
+        assert rule.model_dump(by_alias=True, exclude_none=True) == {
+            "action": "allow",
+            "target": "example.com",
+        }
+
+    def test_network_policy_round_trips_port_only_rule(self):
+        policy = NetworkPolicy.model_validate(
+            {"defaultAction": "deny", "egress": [{"action": "deny", "ports": [25]}]}
+        )
+        dumped = policy.model_dump(by_alias=True, exclude_none=True)
+        assert dumped["egress"] == [{"action": "deny", "ports": [25]}]

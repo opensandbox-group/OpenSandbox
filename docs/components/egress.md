@@ -155,6 +155,45 @@ curl -XDELETE http://127.0.0.1:18080/policy \
   -d '["*.example.com"]'
 ```
 
+### Port-Scoped Rules
+
+An egress rule's `target` may be omitted when `ports` is set, so a rule can scope
+by TCP destination port alone (across all IPv4/IPv6 destinations) instead of
+always pairing with an FQDN, IP, or CIDR. `target` and `ports` may also be
+combined to scope an IP or CIDR rule to specific ports.
+
+```bash
+curl -XPOST http://127.0.0.1:18080/policy \
+  -d '{
+    "defaultAction": "allow",
+    "egress": [
+      { "action": "deny", "ports": [25] },
+      { "action": "allow", "target": "10.0.0.5", "ports": [22] }
+    ]
+  }'
+```
+
+The first rule denies outbound traffic to port 25 regardless of destination.
+The second allows `10.0.0.5` on port 22 only (traffic to that host on any
+other port falls through to the rest of the policy). A deny rule, port-scoped
+or not, always wins over an allow rule for the same destination — the same
+fail-closed precedence already used for plain IP/CIDR rules.
+
+Current limitations:
+
+- **TCP only.** UDP port scoping is not supported.
+- **Max 256 ports per rule.** Split a larger set across multiple rules.
+- **No domain + ports combination.** Domain rules are evaluated at the DNS
+  proxy layer, which has no port dimension; a rule that sets both a domain
+  `target` and `ports` is rejected during policy validation.
+- **Not removable via `DELETE /policy`.** That endpoint removes rules by
+  `target` string, and a port-only rule has none. Replace the whole policy
+  with `POST`/`PUT` to drop a port-only rule.
+- **Single-sandbox nftables enforcement only.** The fleet profile's
+  per-sandbox netns mirror and Pod-level forward hook (see
+  [Fleet Profile](#fleet-profile-multi-sandbox-control-plane)) do not yet
+  enforce port-scoped rules.
+
 ### Experimental: Transparent MITM (mitmproxy)
 
 ::: warning Experimental

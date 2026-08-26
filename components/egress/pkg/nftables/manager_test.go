@@ -230,6 +230,72 @@ func TestApplyStatic_NormalizesOverlappingAllow(t *testing.T) {
 	expectContains(t, rendered, "add element inet opensandbox allow_v4 { 100.64.0.0/10 }")
 }
 
+func TestApplyStatic_PortOnlyRuleMatchesAllDestinations(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	p, err := policy.ParsePolicy(`{
+		"defaultAction":"allow",
+		"egress":[{"action":"deny","ports":[25]}]
+	}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+	expectContains(t, rendered, "add rule inet opensandbox egress tcp dport { 25 } drop")
+}
+
+func TestApplyStatic_TargetWithPortsScopesThatTargetOnly(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	p, err := policy.ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"10.0.0.5","ports":[22,80]},
+			{"action":"deny","target":"2001:db8::/32","ports":[8080]}
+		]
+	}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+	expectContains(t, rendered, "add rule inet opensandbox egress ip daddr 10.0.0.5 tcp dport { 22, 80 } accept")
+	expectContains(t, rendered, "add rule inet opensandbox egress ip6 daddr 2001:db8::/32 tcp dport { 8080 } drop")
+	// A rule with Ports must not also open a blanket allow for its target on
+	// every port: it must not appear in the allow_v4 set element line.
+	require.NotContains(t, rendered, "add element inet opensandbox allow_v4 { 10.0.0.5 }")
+}
+
+func TestApplyStatic_PortScopedDenyWinsOverPlainAllow(t *testing.T) {
+	var rendered string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		rendered = script
+		return nil, nil
+	})
+	// A blanket allow for 10.0.0.5 plus a port-scoped deny on port 22 for
+	// everyone: the port-scoped deny must be emitted (and therefore take
+	// effect, since nft "drop"/"accept" are terminal) before the plain
+	// allow_v4 set rule that would otherwise let 10.0.0.5:22 through.
+	p, err := policy.ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"10.0.0.5"},
+			{"action":"deny","ports":[22]}
+		]
+	}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), p))
+
+	portDenyRule := "add rule inet opensandbox egress tcp dport { 22 } drop"
+	allowSetRule := "add rule inet opensandbox egress ip daddr @allow_v4 accept"
+	portDenyIndex := strings.Index(rendered, portDenyRule)
+	allowSetIndex := strings.Index(rendered, allowSetRule)
+	require.NotEqual(t, -1, portDenyIndex, "expected rendered ruleset to contain %q", portDenyRule)
+	require.NotEqual(t, -1, allowSetIndex, "expected rendered ruleset to contain %q", allowSetRule)
+	require.Less(t, portDenyIndex, allowSetIndex, "port-scoped deny must be evaluated before the plain allow set")
+}
+
 func TestRefreshActiveConnections_RenewsKnownActiveIP(t *testing.T) {
 	var scripts []string
 	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {

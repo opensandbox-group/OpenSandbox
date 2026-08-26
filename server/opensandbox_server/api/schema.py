@@ -88,15 +88,33 @@ class ResourceLimits(RootModel[Dict[str, str]]):
 
 class NetworkRule(BaseModel):
     """
-    Egress rule: allow/deny a specific domain or wildcard.
+    Egress rule: allow/deny a domain, wildcard, IP/CIDR, and/or a set of TCP ports.
     """
 
     action: str = Field(..., description="Whether to allow or deny matching targets (allow | deny).")
-    target: str = Field(
-        ...,
-        description="FQDN or wildcard domain (e.g., 'example.com', '*.example.com').",
+    target: Optional[str] = Field(
+        None,
+        description=(
+            "FQDN, wildcard domain (e.g., 'example.com', '*.example.com'), IP address, or CIDR. "
+            "May be omitted when `ports` is set; otherwise required."
+        ),
         min_length=1,
     )
+    ports: Optional[List[int]] = Field(
+        None,
+        max_length=256,
+        description=(
+            "Restricts this rule to specific TCP destination ports (1-65535). Omitted target with "
+            "ports set applies to all destinations; a domain target with ports is rejected. TCP "
+            "only, max 256 ports per rule."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_target_or_ports(self) -> "NetworkRule":
+        if not self.target and not self.ports:
+            raise ValueError("NetworkRule requires target, ports, or both.")
+        return self
 
     class Config:
         populate_by_name = True
