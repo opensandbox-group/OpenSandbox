@@ -32,7 +32,7 @@ level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.22"
+execd_image = "opensandbox/execd:v1.1.0"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
