@@ -19,12 +19,28 @@ This module defines data models based on the OpenAPI specification
 for request/response validation and serialization.
 """
 
+import ipaddress
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, RootModel, model_validator
+from pydantic import BaseModel, Field, RootModel, field_validator, model_validator
 
 from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
+
+
+def _is_ip_or_cidr(value: str) -> bool:
+    """Mirror policy.go's target-kind detection: a target is IP/CIDR if it
+    parses as either; anything else (including domains) is not."""
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    try:
+        ipaddress.ip_network(value, strict=False)
+        return True
+    except ValueError:
+        return False
 
 # ============================================================================
 # Image Specification
@@ -110,10 +126,29 @@ class NetworkRule(BaseModel):
         ),
     )
 
+    @field_validator("ports")
+    @classmethod
+    def validate_ports(cls, ports: Optional[List[int]]) -> Optional[List[int]]:
+        # Mirrors policy.go's normalizePorts: range + duplicate checks, so an
+        # invalid list is rejected here instead of surfacing as an egress
+        # sidecar startup failure during Docker/Kubernetes provisioning.
+        if ports is None:
+            return ports
+        seen: set[int] = set()
+        for port in ports:
+            if port < 1 or port > 65535:
+                raise ValueError(f"NetworkRule port {port} out of range 1-65535.")
+            if port in seen:
+                raise ValueError(f"NetworkRule has duplicate port {port}.")
+            seen.add(port)
+        return ports
+
     @model_validator(mode="after")
     def validate_target_or_ports(self) -> "NetworkRule":
         if not self.target and not self.ports:
             raise ValueError("NetworkRule requires target, ports, or both.")
+        if self.target and self.ports and not _is_ip_or_cidr(self.target):
+            raise ValueError("NetworkRule ports are not supported for domain targets yet.")
         return self
 
     class Config:

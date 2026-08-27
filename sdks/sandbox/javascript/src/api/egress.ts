@@ -460,7 +460,6 @@ export interface components {
             /**
              * @description Restricts this rule to specific TCP destination ports.
              *
-             *     - Omitted or empty: the rule is not port-scoped (existing behavior).
              *     - `target` omitted, `ports` set: the rule applies to these ports
              *       across all IPv4/IPv6 destinations.
              *     - `target` is an IP or CIDR, `ports` set: the rule applies to that
@@ -470,7 +469,11 @@ export interface components {
              *       port dimension; combining them is not supported yet.
              *
              *     TCP only for now; UDP port scoping is not supported. A rule must
-             *     set `target`, `ports`, or both. Max 256 ports per rule.
+             *     set `target`, `ports`, or both (enforced by the server/sidecar,
+             *     not expressible as a plain-object OpenAPI constraint without an
+             *     `anyOf` that this repo's Python/TypeScript generators do not
+             *     translate into a useful type — see PR discussion). Max 256
+             *     ports per rule.
              */
             ports?: number[];
         };

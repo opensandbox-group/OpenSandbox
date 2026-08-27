@@ -879,6 +879,36 @@ class TestNetworkRule:
         assert rule.target == "10.0.0.5"
         assert rule.ports == [22, 80]
 
+    def test_cidr_target_with_ports(self):
+        rule = NetworkRule.model_validate({"action": "deny", "target": "10.0.0.0/8", "ports": [22]})
+        assert rule.target == "10.0.0.0/8"
+
+    def test_ipv6_target_with_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "2001:db8::1", "ports": [443]})
+        assert rule.target == "2001:db8::1"
+
+    def test_rejects_domain_target_with_ports(self):
+        """Regression: the sidecar (policy.go normalizePolicy) already rejects
+        domain+ports, but the server validator did not mirror it, so an
+        invalid request would pass the API and only fail once Docker/K8s
+        started the egress sidecar with it — surfacing as a sandbox creation
+        failure instead of a clean 422 from the create-sandbox request."""
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "example.com", "ports": [443]})
+
+    def test_rejects_wildcard_domain_target_with_ports(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "*.example.com", "ports": [443]})
+
+    def test_rejects_out_of_range_ports(self):
+        for bad_port in (0, -1, 65536):
+            with pytest.raises(ValidationError):
+                NetworkRule.model_validate({"action": "allow", "ports": [bad_port]})
+
+    def test_rejects_duplicate_ports(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "ports": [443, 443]})
+
     def test_domain_only_rule_still_requires_target(self):
         rule = NetworkRule.model_validate({"action": "allow", "target": "example.com"})
         assert rule.target == "example.com"
