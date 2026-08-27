@@ -21,6 +21,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -32,12 +33,22 @@ import (
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/strategy"
+	snapshotcontract "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
 	controllerutils "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/controller"
 )
 
 const internalPauseSnapshotSuffix = "-pause"
 const supportedPauseReplicas int32 = 1
+
+const (
+	vmStateRestoreVolumeName = "opensandbox-vmstate-restore"
+	vmStateRestoreInitName   = "opensandbox-vmstate-restore"
+	vmStateRestoreMountPath  = "/run/opensandbox/vmstate"
+	// vmStateRestoreHeadroomBytes covers the manifest file and the copied
+	// vmstate-loader binary stored next to the VM state payload.
+	vmStateRestoreHeadroomBytes int64 = 64 << 20
+)
 
 func internalPauseSnapshotName(batchSandboxName string) string {
 	// TODO: handle Kubernetes resource name length limits for long BatchSandbox names.
@@ -542,7 +553,34 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 
 	imageMap := make(map[string]string)
 	for _, c := range snapshot.Status.Containers {
-		imageMap[c.ContainerName] = c.ImageURI
+		if snapshot.Status.Format == "" && c.ImageDigest == "" {
+			// Snapshots created before format/digest publication are kept
+			// restorable for compatibility. New snapshots always use digests.
+			imageMap[c.ContainerName] = c.ImageURI
+			continue
+		}
+		immutableImage, err := snapshotcontract.ImmutableImageReference(c.ImageURI, c.ImageDigest)
+		if err != nil {
+			msg := fmt.Sprintf("invalid immutable snapshot image for container %s: %v", c.ContainerName, err)
+			_ = r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhasePaused, "")
+			_ = r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, "InvalidSnapshotImage", msg)
+			return ctrl.Result{}, nil
+		}
+		imageMap[c.ContainerName] = immutableImage
+	}
+	if snapshot.Status.Format == sandboxv1alpha1.SandboxSnapshotFormatQEMUV1 {
+		if bs.Spec.Template == nil {
+			msg := "qemu-v1 restore requires a concrete pod template"
+			_ = r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhasePaused, "")
+			_ = r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, "InvalidQEMURestore", msg)
+			return ctrl.Result{}, nil
+		}
+		if err := injectQEMURestore(bs.Spec.Template.DeepCopy(), snapshot); err != nil {
+			msg := fmt.Sprintf("invalid QEMU restore plan: %v", err)
+			_ = r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhasePaused, "")
+			_ = r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, "InvalidQEMURestore", msg)
+			return ctrl.Result{}, nil
+		}
 	}
 
 	var patched *sandboxv1alpha1.BatchSandbox
@@ -558,6 +596,9 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 				if img, ok := imageMap[latest.Spec.Template.Spec.Containers[i].Name]; ok {
 					latest.Spec.Template.Spec.Containers[i].Image = img
 				}
+			}
+			if err := injectQEMURestore(latest.Spec.Template, snapshot); err != nil {
+				return err
 			}
 			ensureImagePullSecret(latest.Spec.Template, r.ResumePullSecret)
 		}
@@ -582,6 +623,180 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 	}
 
 	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+func injectQEMURestore(template *corev1.PodTemplateSpec, snapshotObject *sandboxv1alpha1.SandboxSnapshot) error {
+	if snapshotObject.Status.Format == "" || snapshotObject.Status.Format == sandboxv1alpha1.SandboxSnapshotFormatRootfsV1 {
+		return nil
+	}
+	if snapshotObject.Status.Format != sandboxv1alpha1.SandboxSnapshotFormatQEMUV1 {
+		return fmt.Errorf("unsupported snapshot format %q", snapshotObject.Status.Format)
+	}
+	vm := snapshotObject.Status.VirtualMachine
+	if vm == nil {
+		return fmt.Errorf("qemu-v1 snapshot has no virtualMachine result")
+	}
+	immutableImage, err := snapshotcontract.ImmutableImageReference(vm.ImageURI, vm.ImageDigest)
+	if err != nil {
+		return fmt.Errorf("invalid immutable VM state image: %w", err)
+	}
+	manifest := snapshotcontract.VMStateManifest{
+		FormatVersion: snapshotcontract.VMStateFormatVersion1,
+		PayloadDigest: vm.PayloadDigest,
+		PayloadSize:   vm.SizeBytes,
+		Compression:   vm.Compression,
+		Compatibility: snapshotcontract.QEMUCompatibility{
+			Architecture:      vm.Compatibility.Architecture,
+			QEMUVersion:       vm.Compatibility.QEMUVersion,
+			MachineType:       vm.Compatibility.MachineType,
+			CPUModel:          vm.Compatibility.CPUModel,
+			VCPUs:             vm.Compatibility.VCPUs,
+			MemoryBytes:       vm.Compatibility.MemoryBytes,
+			QEMUConfigDigest:  vm.Compatibility.QEMUConfigDigest,
+			RequiredNodeClass: vm.Compatibility.RequiredNodeClass,
+		},
+	}
+	if err := manifest.Validate(); err != nil {
+		return fmt.Errorf("invalid VM state manifest summary: %w", err)
+	}
+	if _, err := snapshotcontract.ParseSHA256Digest(vm.ManifestDigest); err != nil {
+		return fmt.Errorf("invalid VM state manifest digest: %w", err)
+	}
+	qemuContainerName := template.Annotations[snapshotcontract.AnnotationQEMUContainer]
+	if qemuContainerName == "" {
+		return fmt.Errorf("QEMU restore template is missing annotation %q", snapshotcontract.AnnotationQEMUContainer)
+	}
+	containerIndex := -1
+	for i := range template.Spec.Containers {
+		if template.Spec.Containers[i].Name == qemuContainerName {
+			containerIndex = i
+			break
+		}
+	}
+	if containerIndex < 0 {
+		return fmt.Errorf("QEMU restore container %q does not exist", qemuContainerName)
+	}
+
+	volumeSizeLimit := vmStateRestoreStorageSize(vm.SizeBytes)
+	if err := ensureVMStateVolume(&template.Spec, volumeSizeLimit); err != nil {
+		return err
+	}
+	target := &template.Spec.Containers[containerIndex]
+	if err := ensureVMStateMount(target); err != nil {
+		return err
+	}
+	setContainerEnv(target, "OPENSANDBOX_RESTORE_MODE", snapshotcontract.VMStateFormatVersion1)
+	setContainerEnv(target, "OPENSANDBOX_VMSTATE_DIR", vmStateRestoreMountPath)
+
+	restoreInit := corev1.Container{
+		Name:            vmStateRestoreInitName,
+		Image:           immutableImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{"/usr/local/bin/vmstate-loader"},
+		Args: []string{
+			"restore",
+			"--source", "/opensandbox/checkpoint",
+			"--target", vmStateRestoreMountPath,
+			"--manifest-digest", vm.ManifestDigest,
+		},
+		VolumeMounts: []corev1.VolumeMount{{Name: vmStateRestoreVolumeName, MountPath: vmStateRestoreMountPath}},
+		// Reserve ephemeral storage for the copied VM state payload so the
+		// scheduler only places resumed Pods on nodes with enough local disk.
+		Resources: mergeResourceRequirements(corev1.ResourceRequirements{}, corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceEphemeralStorage: volumeSizeLimit.DeepCopy()},
+			Limits:   corev1.ResourceList{corev1.ResourceEphemeralStorage: volumeSizeLimit.DeepCopy()},
+		}),
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser: ptr.To(int64(0)),
+			// The init container runs as root even when the source Pod template
+			// sets pod-level runAsNonRoot, so override the inherited value.
+			RunAsNonRoot:             ptr.To(false),
+			AllowPrivilegeEscalation: ptr.To(false),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		},
+	}
+	initIndex := -1
+	for i := range template.Spec.InitContainers {
+		if template.Spec.InitContainers[i].Name == vmStateRestoreInitName {
+			initIndex = i
+			break
+		}
+	}
+	if initIndex < 0 {
+		// Kubernetes executes init containers in list order, so this preserves all
+		// user init containers and runs VM state restore last.
+		template.Spec.InitContainers = append(template.Spec.InitContainers, restoreInit)
+	} else {
+		template.Spec.InitContainers[initIndex] = restoreInit
+	}
+
+	if vm.Compatibility.RequiredNodeClass != "" {
+		if template.Spec.NodeSelector == nil {
+			template.Spec.NodeSelector = make(map[string]string)
+		}
+		if existing := template.Spec.NodeSelector[snapshotcontract.LabelQEMUNodeClass]; existing != "" && existing != vm.Compatibility.RequiredNodeClass {
+			return fmt.Errorf("QEMU node class %q conflicts with template selector %q", vm.Compatibility.RequiredNodeClass, existing)
+		}
+		template.Spec.NodeSelector[snapshotcontract.LabelQEMUNodeClass] = vm.Compatibility.RequiredNodeClass
+	}
+	return nil
+}
+
+func ensureVMStateVolume(spec *corev1.PodSpec, sizeLimit resource.Quantity) error {
+	for i := range spec.Volumes {
+		if spec.Volumes[i].Name != vmStateRestoreVolumeName {
+			continue
+		}
+		if spec.Volumes[i].EmptyDir == nil {
+			return fmt.Errorf("reserved VM state restore volume %q is not an emptyDir", vmStateRestoreVolumeName)
+		}
+		return nil
+	}
+	spec.Volumes = append(spec.Volumes, corev1.Volume{
+		Name: vmStateRestoreVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+			SizeLimit: ptr.To(sizeLimit.DeepCopy()),
+		}},
+	})
+	return nil
+}
+
+// vmStateRestoreStorageSize sizes the restore emptyDir and the init container's
+// ephemeral storage. It covers the compressed payload recorded in the snapshot
+// plus headroom for the manifest and the copied vmstate-loader binary.
+func vmStateRestoreStorageSize(payloadSize int64) resource.Quantity {
+	if payloadSize < 0 {
+		payloadSize = 0
+	}
+	return *resource.NewQuantity(payloadSize+vmStateRestoreHeadroomBytes, resource.BinarySI)
+}
+
+func ensureVMStateMount(container *corev1.Container) error {
+	for i := range container.VolumeMounts {
+		mount := &container.VolumeMounts[i]
+		if mount.Name == vmStateRestoreVolumeName {
+			if mount.MountPath != vmStateRestoreMountPath {
+				return fmt.Errorf("reserved VM state volume is already mounted at %q", mount.MountPath)
+			}
+			return nil
+		}
+		if mount.MountPath == vmStateRestoreMountPath {
+			return fmt.Errorf("VM state restore path %q is already used by volume %q", vmStateRestoreMountPath, mount.Name)
+		}
+	}
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: vmStateRestoreVolumeName, MountPath: vmStateRestoreMountPath})
+	return nil
+}
+
+func setContainerEnv(container *corev1.Container, name, value string) {
+	for i := range container.Env {
+		if container.Env[i].Name == name {
+			container.Env[i].Value = value
+			container.Env[i].ValueFrom = nil
+			return
+		}
+	}
+	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
 }
 
 func (r *BatchSandboxReconciler) ackPauseGeneration(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) error {

@@ -21,8 +21,16 @@ import base64
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
-from opensandbox.exceptions import PoolStateStoreUnavailableException
-from opensandbox.pool_types import IdleEntry, StoreCounters, TakeIdleResult
+from opensandbox.exceptions import (
+    PoolDestroyedException,
+    PoolStateStoreUnavailableException,
+)
+from opensandbox.pool_types import (
+    IdleEntry,
+    PoolDestroyState,
+    StoreCounters,
+    TakeIdleResult,
+)
 
 try:
     from redis import Redis
@@ -40,6 +48,7 @@ _REQUIRED_REDIS_METHODS = (
     "hlen",
     "lrange",
     "hgetall",
+    "delete",
 )
 
 
@@ -77,6 +86,10 @@ end
 """
 
     _PUT_IDLE_SCRIPT = """
+local destroy_state = redis.call('GET', KEYS[3])
+if destroy_state then
+  return -1
+end
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 local expires_at = now_ms + tonumber(ARGV[2])
@@ -91,7 +104,26 @@ redis.call('HSET', KEYS[2], ARGV[1], expires_at)
 return 1
 """
 
+    _ACQUIRE_LOCK_SCRIPT = """
+local destroy_state = redis.call('GET', KEYS[2])
+if destroy_state then
+  return 0
+end
+if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2]) then
+  return 1
+end
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  return 1
+end
+return 0
+"""
+
     _RENEW_LOCK_SCRIPT = """
+local destroy_state = redis.call('GET', KEYS[2])
+if destroy_state then
+  return 0
+end
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   redis.call('PEXPIRE', KEYS[1], ARGV[2])
   return 1
@@ -125,6 +157,25 @@ for i = 1, #entries, 2 do
   end
 end
 return discarded_alive
+"""
+
+    _SET_VALUE_SCRIPT = """
+local destroy_state = redis.call('GET', KEYS[2])
+if destroy_state then
+  return -1
+end
+redis.call('SET', KEYS[1], ARGV[1])
+return 1
+"""
+
+    _BEGIN_DESTROY_SCRIPT = """
+local destroy_state = redis.call('GET', KEYS[1])
+if destroy_state == ARGV[2] then
+  return -1
+end
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SET', KEYS[2], ARGV[3])
+return 1
 """
 
     def __init__(self, redis: Redis, key_prefix: str = DEFAULT_KEY_PREFIX) -> None:
@@ -169,11 +220,13 @@ return discarded_alive
         self._execute(
             "put_idle",
             pool_name,
-            lambda: self._redis.eval(
+            lambda: self._eval_fenced_write(
+                pool_name,
+                3,
                 self._PUT_IDLE_SCRIPT,
-                2,
                 self._idle_list_key(pool_name),
                 self._idle_expires_key(pool_name),
+                self._destroy_state_key(pool_name),
                 sandbox_id,
                 str(ttl_millis),
             ),
@@ -194,16 +247,19 @@ return discarded_alive
     ) -> bool:
         _validate_owner_and_ttl(owner_id, ttl)
 
-        def op() -> bool:
-            acquired = self._redis.set(
+        result = self._execute(
+            "try_acquire_primary_lock",
+            pool_name,
+            lambda: self._redis.eval(
+                self._ACQUIRE_LOCK_SCRIPT,
+                2,
                 self._primary_lock_key(pool_name),
+                self._destroy_state_key(pool_name),
                 owner_id,
-                nx=True,
-                px=max(1, _millis(ttl)),
-            )
-            return bool(acquired) or self.renew_primary_lock(pool_name, owner_id, ttl)
-
-        return self._execute("try_acquire_primary_lock", pool_name, op)
+                str(max(1, _millis(ttl))),
+            ),
+        )
+        return result == 1 or result == b"1"
 
     def renew_primary_lock(
         self, pool_name: str, owner_id: str, ttl: timedelta
@@ -214,8 +270,9 @@ return discarded_alive
             pool_name,
             lambda: self._redis.eval(
                 self._RENEW_LOCK_SCRIPT,
-                1,
+                2,
                 self._primary_lock_key(pool_name),
+                self._destroy_state_key(pool_name),
                 owner_id,
                 str(max(1, _millis(ttl))),
             ),
@@ -321,7 +378,14 @@ return discarded_alive
         self._execute(
             "set_max_idle",
             pool_name,
-            lambda: self._redis.set(self._max_idle_key(pool_name), str(max_idle)),
+            lambda: self._eval_fenced_write(
+                pool_name,
+                2,
+                self._SET_VALUE_SCRIPT,
+                self._max_idle_key(pool_name),
+                self._destroy_state_key(pool_name),
+                str(max_idle),
+            ),
         )
 
     def set_idle_entry_ttl(self, pool_name: str, idle_ttl: timedelta) -> None:
@@ -330,10 +394,90 @@ return discarded_alive
         self._execute(
             "set_idle_entry_ttl",
             pool_name,
-            lambda: self._redis.set(
-                self._idle_ttl_key(pool_name), str(max(1, _millis(idle_ttl)))
+            lambda: self._eval_fenced_write(
+                pool_name,
+                2,
+                self._SET_VALUE_SCRIPT,
+                self._idle_ttl_key(pool_name),
+                self._destroy_state_key(pool_name),
+                str(max(1, _millis(idle_ttl))),
             ),
         )
+
+    def get_destroy_state(self, pool_name: str) -> PoolDestroyState:
+        value = self._execute(
+            "get_destroy_state",
+            pool_name,
+            lambda: self._redis.get(self._destroy_state_key(pool_name)),
+        )
+        if value is None:
+            return PoolDestroyState.ACTIVE
+        decoded = _decode(value)
+        if decoded == PoolDestroyState.DESTROYING.value:
+            return PoolDestroyState.DESTROYING
+        if decoded == PoolDestroyState.DESTROYED.value:
+            return PoolDestroyState.DESTROYED
+        return PoolDestroyState.ACTIVE
+
+    def begin_destroy(self, pool_name: str, owner_id: str) -> None:
+        if not owner_id or not owner_id.strip():
+            raise ValueError("owner_id must not be blank")
+
+        def op() -> None:
+            result = self._redis.eval(
+                self._BEGIN_DESTROY_SCRIPT,
+                2,
+                self._destroy_state_key(pool_name),
+                self._destroy_owner_key(pool_name),
+                PoolDestroyState.DESTROYING.value,
+                PoolDestroyState.DESTROYED.value,
+                owner_id,
+            )
+            if result == -1 or result == b"-1":
+                raise PoolDestroyedException(
+                    f"Pool namespace is already DESTROYED: pool_name={pool_name}"
+                )
+
+        self._execute("begin_destroy", pool_name, op)
+
+    def clear_pool_state(self, pool_name: str) -> None:
+        self._execute(
+            "clear_pool_state",
+            pool_name,
+            lambda: self._redis.delete(
+                self._idle_list_key(pool_name),
+                self._idle_expires_key(pool_name),
+                self._primary_lock_key(pool_name),
+                self._max_idle_key(pool_name),
+                self._idle_ttl_key(pool_name),
+            ),
+        )
+
+    def mark_destroyed(
+        self, pool_name: str, owner_id: str, tombstone_ttl: timedelta | None
+    ) -> None:
+        if not owner_id or not owner_id.strip():
+            raise ValueError("owner_id must not be blank")
+        if tombstone_ttl is not None and tombstone_ttl.total_seconds() <= 0:
+            raise ValueError("tombstone_ttl must be positive")
+
+        def op() -> None:
+            if tombstone_ttl is None:
+                self._redis.set(
+                    self._destroy_state_key(pool_name),
+                    PoolDestroyState.DESTROYED.value,
+                )
+                self._redis.set(self._destroy_owner_key(pool_name), owner_id)
+            else:
+                px = max(1, _millis(tombstone_ttl))
+                self._redis.set(
+                    self._destroy_state_key(pool_name),
+                    PoolDestroyState.DESTROYED.value,
+                    px=px,
+                )
+                self._redis.set(self._destroy_owner_key(pool_name), owner_id, px=px)
+
+        self._execute("mark_destroyed", pool_name, op)
 
     def _resolve_idle_ttl(self, pool_name: str) -> timedelta:
         value = self._execute(
@@ -363,6 +507,23 @@ return discarded_alive
     def _idle_ttl_key(self, pool_name: str) -> str:
         return self._pool_key(pool_name, "idleTtlMillis")
 
+    def _destroy_state_key(self, pool_name: str) -> str:
+        return self._pool_key(pool_name, "destroy:state")
+
+    def _destroy_owner_key(self, pool_name: str) -> str:
+        return self._pool_key(pool_name, "destroy:owner")
+
+    def _eval_fenced_write(
+        self, pool_name: str, numkeys: int, script: str, *args: str
+    ) -> Any:
+        result = self._redis.eval(script, numkeys, *args)
+        if result == -1 or result == b"-1":
+            state = self.get_destroy_state(pool_name)
+            raise PoolDestroyedException(
+                f"Pool namespace is {state.value}: pool_name={pool_name}"
+            )
+        return result
+
     def _pool_key(self, pool_name: str, suffix: str) -> str:
         if not pool_name or not pool_name.strip():
             raise ValueError("pool_name must not be blank")
@@ -372,7 +533,7 @@ return discarded_alive
     def _execute(self, operation: str, pool_name: str, block: Any) -> Any:
         try:
             return block()
-        except ValueError:
+        except (ValueError, PoolDestroyedException):
             raise
         except Exception as exc:
             raise PoolStateStoreUnavailableException(

@@ -350,7 +350,7 @@ func newTestSyncer(sandbox *sandboxv1alpha1.BatchSandbox) (*annoAllocationSyncer
 
 func TestSetAllocation_AddsFinalizer(t *testing.T) {
 	sandbox := &sandboxv1alpha1.BatchSandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "sbx1", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx1", Namespace: "default", Generation: 7},
 		Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: "pool1"},
 	}
 	syncer, sbx := newTestSyncer(sandbox)
@@ -358,6 +358,12 @@ func TestSetAllocation_AddsFinalizer(t *testing.T) {
 	err := syncer.SetAllocation(context.Background(), sbx, &SandboxAllocation{Pods: []string{"pod1"}})
 	assert.NoError(t, err)
 	assert.Contains(t, sbx.Finalizers, FinalizerPoolAllocation)
+
+	allocation, err := syncer.GetAllocation(context.Background(), sbx)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"pod1"}, allocation.Pods)
+	assert.Equal(t, "pool1", allocation.PoolRef)
+	assert.Equal(t, int64(7), allocation.Generation)
 }
 
 func TestSetReleased_FinalizerBehavior(t *testing.T) {

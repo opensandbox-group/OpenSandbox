@@ -73,6 +73,19 @@ func (t *taskNode) IsResourceReleased() bool {
 	return t.sState == stateReleased
 }
 
+// GetTerminatedMessage returns the failure message from the task status, including
+// lifecycle hook stderr output. It is used by the controller to populate
+// BatchSandboxStatus.TaskLastErrorMessage.
+func (t *taskNode) GetTerminatedMessage() string {
+	if t.Status == nil {
+		return ""
+	}
+	if t.Status.ProcessStatus != nil && t.Status.ProcessStatus.Terminated != nil {
+		return t.Status.ProcessStatus.Terminated.Message
+	}
+	return ""
+}
+
 func (t *taskNode) isTaskCompleted() bool {
 	return t.tState == SucceedTaskState || t.tState == FailedTaskState
 }
@@ -141,9 +154,10 @@ type taskClient interface {
 }
 
 const (
-	defaultTimeout        time.Duration = 3 * time.Second
-	defaultTaskPort                     = "5758"
-	defaultSchConcurrency int           = 10
+	defaultTimeout                  time.Duration = 3 * time.Second
+	defaultUnboundedPreStartTimeout time.Duration = 30 * time.Minute
+	defaultTaskPort                               = "5758"
+	defaultSchConcurrency           int           = 10
 )
 
 func newTaskClient(ip string) taskClient {
@@ -441,11 +455,33 @@ func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint str
 }
 
 func setTask(client taskClient, task *api.Task, log logr.Logger) (*api.Task, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	ctx, cancel := contextForSetTask(task)
 	defer cancel()
 	verboseLog := log.V(3)
 	if verboseLog.Enabled() {
 		verboseLog.Info("client set task", "task", utils.DumpJSON(task))
 	}
 	return client.Set(ctx, task)
+}
+
+func contextForSetTask(task *api.Task) (context.Context, context.CancelFunc) {
+	timeout, ok := setTaskTimeout(task)
+	if !ok {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+func setTaskTimeout(task *api.Task) (time.Duration, bool) {
+	if task != nil &&
+		task.Process != nil &&
+		task.Process.Lifecycle != nil &&
+		task.Process.Lifecycle.PreStart != nil {
+		timeoutSeconds := task.Process.Lifecycle.PreStart.TimeoutSeconds
+		if timeoutSeconds == nil || *timeoutSeconds <= 0 {
+			return defaultUnboundedPreStartTimeout + defaultTimeout, true
+		}
+		return time.Duration(*timeoutSeconds)*time.Second + defaultTimeout, true
+	}
+	return defaultTimeout, true
 }

@@ -59,11 +59,6 @@ func (c *Controller) CreateContext(req *CreateContextRequest) (string, error) {
 	}
 	c.storeJupyterKernel(session.ID, kernel)
 
-	err = c.setWorkingDir(kernel, req)
-	if err != nil {
-		return "", fmt.Errorf("failed to setup working dir: %w", err)
-	}
-
 	return session.ID, nil
 }
 

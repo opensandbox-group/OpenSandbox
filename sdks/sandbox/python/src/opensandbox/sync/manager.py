@@ -81,9 +81,10 @@ class SandboxManagerSync:
         """
         self._sandbox_service = sandbox_service
         self._connection_config = connection_config
-        self._diagnostics_service = diagnostics_service or AdapterFactorySync(
-            connection_config
-        ).create_diagnostics_service()
+        self._diagnostics_service = (
+            diagnostics_service
+            or AdapterFactorySync(connection_config).create_diagnostics_service()
+        )
 
     @property
     def connection_config(self) -> ConnectionConfigSync:
@@ -91,7 +92,9 @@ class SandboxManagerSync:
         return self._connection_config
 
     @classmethod
-    def create(cls, connection_config: ConnectionConfigSync | None = None) -> "SandboxManagerSync":
+    def create(
+        cls, connection_config: ConnectionConfigSync | None = None
+    ) -> "SandboxManagerSync":
         """
         Create a SandboxManagerSync instance with the provided configuration (blocking).
 
@@ -102,7 +105,9 @@ class SandboxManagerSync:
         Returns:
             Configured sandbox manager instance
         """
-        config = (connection_config or ConnectionConfigSync()).with_transport_if_missing()
+        config = (
+            connection_config or ConnectionConfigSync()
+        ).with_transport_if_missing()
         factory = AdapterFactorySync(config)
         sandbox_service = factory.create_sandbox_service()
         diagnostics_service = factory.create_diagnostics_service()
@@ -136,7 +141,7 @@ class SandboxManagerSync:
         Raises:
             SandboxException: if the operation fails
         """
-        logger.debug("Getting info for sandbox: %s", sandbox_id)
+        logger.debug(f"Getting info for sandbox: {sandbox_id}")
         return self._sandbox_service.get_sandbox_info(sandbox_id)
 
     def get_diagnostic_logs(
@@ -175,7 +180,7 @@ class SandboxManagerSync:
 
         String values add or replace keys; None deletes keys.
         """
-        logger.info("Patching metadata for sandbox: %s", sandbox_id)
+        logger.info(f"Patching metadata for sandbox: {sandbox_id}")
         return self._sandbox_service.patch_sandbox_metadata(sandbox_id, patch)
 
     def kill_sandbox(self, sandbox_id: str) -> None:
@@ -188,11 +193,13 @@ class SandboxManagerSync:
         Raises:
             SandboxException: if the operation fails
         """
-        logger.info("Terminating sandbox: %s", sandbox_id)
+        logger.info(f"Terminating sandbox: {sandbox_id}")
         self._sandbox_service.kill_sandbox(sandbox_id)
-        logger.info("Successfully terminated sandbox: %s", sandbox_id)
+        logger.info(f"Successfully terminated sandbox: {sandbox_id}")
 
-    def renew_sandbox(self, sandbox_id: str, timeout: timedelta) -> SandboxRenewResponse:
+    def renew_sandbox(
+        self, sandbox_id: str, timeout: timedelta
+    ) -> SandboxRenewResponse:
         """
         Renew expiration time for a single sandbox.
 
@@ -207,8 +214,10 @@ class SandboxManagerSync:
         """
         # Use timezone-aware UTC datetime to avoid cross-timezone ambiguity.
         new_expiration = datetime.now(timezone.utc) + timeout
-        logger.info("Renew expiration for sandbox %s to %s", sandbox_id, new_expiration)
-        return self._sandbox_service.renew_sandbox_expiration(sandbox_id, new_expiration)
+        logger.info(f"Renew expiration for sandbox {sandbox_id} to {new_expiration}")
+        return self._sandbox_service.renew_sandbox_expiration(
+            sandbox_id, new_expiration
+        )
 
     def pause_sandbox(self, sandbox_id: str) -> None:
         """
@@ -220,7 +229,7 @@ class SandboxManagerSync:
         Raises:
             SandboxException: if the operation fails
         """
-        logger.info("Pausing sandbox: %s", sandbox_id)
+        logger.info(f"Pausing sandbox: {sandbox_id}")
         self._sandbox_service.pause_sandbox(sandbox_id)
 
     def resume_sandbox(self, sandbox_id: str) -> None:
@@ -233,7 +242,7 @@ class SandboxManagerSync:
         Raises:
             SandboxException: if the operation fails
         """
-        logger.info("Resuming sandbox: %s", sandbox_id)
+        logger.info(f"Resuming sandbox: {sandbox_id}")
         self._sandbox_service.resume_sandbox(sandbox_id)
 
     def create_snapshot(self, sandbox_id: str, name: str | None = None) -> SnapshotInfo:
@@ -266,7 +275,9 @@ class SandboxManagerSync:
         try:
             self._connection_config.close_transport_if_owned()
         except Exception as e:
-            logger.warning("Error closing resources for sandbox manager: %s", e, exc_info=True)
+            logger.warning(
+                f"Error closing resources for sandbox manager: {e}", exc_info=True
+            )
 
     def __enter__(self) -> "SandboxManagerSync":
         """Sync context manager entry."""

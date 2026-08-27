@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="560" viewBox="0 0 1100 560" role="img" aria-labelledby="title desc">
+  <title id="title">Isolation Session Run Flow</title>
+  <desc id="desc">A POST /run request: execd acquires the per-session runMu, writes the user code to bash stdin, streams stdout back as SSE, then detects the end marker and emits complete.</desc>
+  <defs>
+    <marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 22px; font-weight: 700; fill: #1e40af; }
+      .actor-title { font-size: 15px; font-weight: 700; fill: #1e3a5f; }
+      .actor-sub { font-size: 12px; font-weight: 600; fill: #64748b; }
+      .step-num { font-size: 14px; font-weight: 700; fill: #ffffff; }
+      .step-label { font-size: 14px; font-weight: 700; fill: #1e3a5f; }
+      .mono { font-size: 12px; font-weight: 600; fill: #374151; }
+      .line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+  </defs>
+
+  <rect width="1100" height="560" fill="#ffffff"/>
+  <text class="title" x="30" y="40">POST /session/{id}/run  —  request flow</text>
+
+  <!-- Actors -->
+  <rect x="50" y="70" width="200" height="55" rx="8" ry="8" fill="#ddd6fe" stroke="#6d28d9" stroke-width="2"/>
+  <text class="actor-title" x="150" y="95" text-anchor="middle">Client</text>
+  <text class="actor-sub" x="150" y="113" text-anchor="middle">SDK / curl</text>
+
+  <rect x="330" y="70" width="200" height="55" rx="8" ry="8" fill="#a7f3d0" stroke="#047857" stroke-width="2"/>
+  <text class="actor-title" x="430" y="95" text-anchor="middle">execd</text>
+  <text class="actor-sub" x="430" y="113" text-anchor="middle">per-session runMu</text>
+
+  <rect x="610" y="70" width="240" height="55" rx="8" ry="8" fill="#ffffff" stroke="#1e3a5f" stroke-width="2"/>
+  <text class="actor-title" x="730" y="95" text-anchor="middle">bwrap → bash</text>
+  <text class="actor-sub" x="730" y="113" text-anchor="middle">long-lived shell (PID 1 in ns)</text>
+
+  <!-- Lifelines -->
+  <line x1="150" y1="125" x2="150" y2="530" stroke="#6d28d9" stroke-width="1.5" stroke-dasharray="4 6"/>
+  <line x1="430" y1="125" x2="430" y2="530" stroke="#047857" stroke-width="1.5" stroke-dasharray="4 6"/>
+  <line x1="730" y1="125" x2="730" y2="530" stroke="#1e3a5f" stroke-width="1.5" stroke-dasharray="4 6"/>
+
+  <!-- Step 1 -->
+  <circle cx="70" cy="170" r="13" fill="#6d28d9"/>
+  <text class="step-num" x="70" y="175" text-anchor="middle">1</text>
+  <text class="step-label" x="92" y="167">POST .../run  { code, envs, timeout }</text>
+  <path class="line" d="M 150 195 H 420" stroke="#6d28d9" stroke-width="2.5" marker-end="url(#a-purple)"/>
+
+  <!-- Step 2 -->
+  <circle cx="345" cy="230" r="13" fill="#047857"/>
+  <text class="step-num" x="345" y="235" text-anchor="middle">2</text>
+  <text class="step-label" x="368" y="227">acquire per-session runMu</text>
+  <text class="mono" x="368" y="245">(concurrent runs queue here)</text>
+
+  <!-- Step 3 -->
+  <circle cx="345" cy="290" r="13" fill="#047857"/>
+  <text class="step-num" x="345" y="295" text-anchor="middle">3</text>
+  <text class="step-label" x="368" y="287">write to bash stdin pipe</text>
+  <text class="mono" x="368" y="305">  export KEY=VAL       # from envs</text>
+  <text class="mono" x="368" y="323">  &lt;user code&gt;</text>
+  <text class="mono" x="368" y="341">  echo &lt;END_MARKER&gt; $?</text>
+  <path class="line" d="M 450 350 H 720" stroke="#047857" stroke-width="2.5" marker-end="url(#a-green)"/>
+
+  <!-- bash exec block -->
+  <rect x="618" y="370" width="230" height="50" rx="6" ry="6" fill="#eff6ff" stroke="#1e3a5f" stroke-width="1.5"/>
+  <text class="step-label" x="630" y="392">bash executes in namespaces</text>
+  <text class="mono" x="630" y="410">writes → overlay upper dir</text>
+
+  <!-- Step 4 -->
+  <circle cx="345" cy="450" r="13" fill="#047857"/>
+  <text class="step-num" x="345" y="455" text-anchor="middle">4</text>
+  <text class="step-label" x="368" y="447">stream stdout as SSE</text>
+  <path class="line" d="M 720 430 H 450" stroke="#047857" stroke-width="2.5" marker-end="url(#a-green)"/>
+  <path class="line" d="M 410 470 H 170" stroke="#6d28d9" stroke-width="2.5" marker-end="url(#a-purple)"/>
+
+  <!-- Step 5 -->
+  <circle cx="345" cy="510" r="13" fill="#047857"/>
+  <text class="step-num" x="345" y="515" text-anchor="middle">5</text>
+  <text class="step-label" x="368" y="507">detect END_MARKER → SSE complete</text>
+  <text class="mono" x="368" y="525">release runMu, reset idle timer</text>
+  <path class="line" d="M 410 525 H 170" stroke="#6d28d9" stroke-width="2.5" marker-end="url(#a-purple)"/>
+</svg>

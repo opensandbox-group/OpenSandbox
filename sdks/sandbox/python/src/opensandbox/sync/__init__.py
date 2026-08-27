@@ -21,4 +21,8 @@ from opensandbox.sync.manager import SandboxManagerSync
 from opensandbox.sync.pool import SandboxPoolSync
 from opensandbox.sync.sandbox import SandboxSync
 
-__all__ = ["SandboxSync", "SandboxManagerSync", "SandboxPoolSync"]
+__all__ = [
+    "SandboxSync",
+    "SandboxManagerSync",
+    "SandboxPoolSync",
+]

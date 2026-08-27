@@ -45,7 +45,10 @@ from opensandbox_server.api.schema import (
     Snapshot,
     SnapshotFilter,
 )
-from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.constants import (
+    OPEN_SANDBOX_INGRESS_HEADER,
+    SandboxErrorCodes,
+)
 from opensandbox_server.services.factory import create_sandbox_service
 from opensandbox_server.services.snapshot_service import create_snapshot_service
 
@@ -71,6 +74,16 @@ snapshot_service = create_snapshot_service(sandbox_service)
         400: {"model": ErrorResponse, "description": "The request was invalid or malformed"},
         401: {"model": ErrorResponse, "description": "Authentication credentials are missing or invalid"},
         409: {"model": ErrorResponse, "description": "The operation conflicts with the current state"},
+        429: {
+            "model": ErrorResponse,
+            "description": "Pool capacity remained unavailable before the acquisition timeout",
+            "headers": {
+                "Retry-After": {
+                    "description": "Suggested delay in seconds before retrying",
+                    "schema": {"type": "integer", "minimum": 1},
+                }
+            },
+        },
         500: {"model": ErrorResponse, "description": "An unexpected server error occurred"},
     },
 )
@@ -431,6 +444,7 @@ def create_snapshot(
 )
 def list_snapshots(
     sandbox_id: Optional[str] = Query(None, alias="sandboxId", description="Filter snapshots by source sandbox identifier"),
+    name: Optional[str] = Query(None, description="Filter snapshots by exact snapshot name"),
     state: Optional[List[str]] = Query(None, description="Filter by snapshot lifecycle state. Pass multiple times for OR logic."),
     page: int = Query(1, ge=1, description="Page number for pagination"),
     page_size: int = Query(20, ge=1, le=200, alias="pageSize", description="Number of items per page"),
@@ -440,7 +454,7 @@ def list_snapshots(
     List snapshots with optional filtering and pagination.
     """
     request = ListSnapshotsRequest(
-        filter=SnapshotFilter(sandboxId=sandbox_id, state=state),
+        filter=SnapshotFilter(sandboxId=sandbox_id, name=name, state=state),
         pagination=PaginationRequest(page=page, pageSize=page_size),
     )
     return snapshot_service.list_snapshots(request)
@@ -564,12 +578,26 @@ def get_sandbox_endpoint(
     endpoint = sandbox_service.get_endpoint(sandbox_id, port, expires=expires)
 
     if use_server_proxy:
-        # Prefer configured external address when available.
-        base_url = str(request.base_url).rstrip("/")
+        # Prefer configured external address when available (it is the full
+        # external base and may already carry a path prefix).
         eip = (get_config().server.eip or "").strip().rstrip("/")
         if eip:
             base_url = eip
+        else:
+            # Reflect how the client reached this API: same host AND same mount
+            # prefix (the API is served both bare and under /v1). Dropping the
+            # prefix pointed proxied traffic at whatever backend owns the root
+            # path on shared hosts (breaking HTTP with redirects and WebSocket
+            # handshakes outright).
+            mount_prefix = request.url.path.split("/sandboxes/", 1)[0]
+            base_url = str(request.base_url).rstrip("/") + mount_prefix
         base_url = base_url.replace("https://", "").replace("http://", "")
         endpoint.endpoint = f"{base_url}/sandboxes/{sandbox_id}/proxy/{port}"
+        if endpoint.headers:
+            endpoint.headers = {
+                key: value
+                for key, value in endpoint.headers.items()
+                if key.lower() != OPEN_SANDBOX_INGRESS_HEADER.lower()
+            } or None
 
     return endpoint

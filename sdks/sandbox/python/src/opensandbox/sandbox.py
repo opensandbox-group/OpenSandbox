@@ -33,6 +33,7 @@ from opensandbox.exceptions import (
     SandboxInternalException,
     SandboxReadyTimeoutException,
 )
+from opensandbox.internal.lifecycle_metrics import report_sandbox_create_metric
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
@@ -43,6 +44,7 @@ from opensandbox.models.sandboxes import (
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxLifecycle,
     SandboxMetrics,
     SandboxRenewResponse,
     SnapshotInfo,
@@ -107,9 +109,8 @@ class Sandbox:
     result = await sandbox.commands.run("python script.py")
     print(result.logs.stdout[0].text)  # Output: Hello World
 
-    # Always clean up resources
-    await sandbox.kill()
-    await sandbox.close()
+    # Always terminate the remote sandbox and close local resources
+    await sandbox.destroy()
     ```
     """
 
@@ -138,9 +139,10 @@ class Sandbox:
         self._metrics_service = metrics_service
         self._egress_service = egress_service
         self._connection_config = connection_config
-        self._diagnostics_service = diagnostics_service or AdapterFactory(
-            connection_config
-        ).create_diagnostics_service()
+        self._diagnostics_service = (
+            diagnostics_service
+            or AdapterFactory(connection_config).create_diagnostics_service()
+        )
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
 
@@ -148,9 +150,7 @@ class Sandbox:
     def isolation(self) -> IsolationService:
         """Provides access to namespace-isolated session operations (OSEP-0013)."""
         if self._isolated_service is None:
-            raise SandboxInternalException(
-                "isolated service not initialized"
-            )
+            raise SandboxInternalException("isolated service not initialized")
         return self._isolated_service
 
     @property
@@ -296,7 +296,9 @@ class Sandbox:
         logger.info(
             f"Renewing sandbox {self.id} timeout, estimated expiration: {new_expiration}"
         )
-        return await self._sandbox_service.renew_sandbox_expiration(self.id, new_expiration)
+        return await self._sandbox_service.renew_sandbox_expiration(
+            self.id, new_expiration
+        )
 
     async def patch_metadata(self, patch: dict[str, str | None]) -> SandboxInfo:
         """
@@ -353,8 +355,8 @@ class Sandbox:
             SandboxException: if pause operation fails
         """
         logger.info(f"Pausing sandbox: {self.id}")
+        self._sandbox_service.invalidate_endpoint_cache(self.id)
         await self._sandbox_service.pause_sandbox(self.id)
-
 
     async def kill(self) -> None:
         """
@@ -369,6 +371,7 @@ class Sandbox:
             SandboxException: if termination fails
         """
         logger.info(f"Killing sandbox: {self.id}")
+        self._sandbox_service.invalidate_endpoint_cache(self.id)
         await self._sandbox_service.kill_sandbox(self.id)
 
     async def close(self) -> None:
@@ -388,9 +391,23 @@ class Sandbox:
             logger.debug(f"Closed resources for sandbox {self.id}")
         except Exception as e:
             logger.warning(
-                f"Error closing resources for sandbox {self.id}: {e}",
-                exc_info=True
+                f"Error closing resources for sandbox {self.id}: {e}", exc_info=True
             )
+
+    async def destroy(self) -> None:
+        """
+        Terminate the remote sandbox and close local resources.
+
+        Local resources are always closed, even if terminating the remote sandbox
+        fails. Any termination error is re-raised after local cleanup completes.
+
+        Raises:
+            SandboxException: if termination fails
+        """
+        try:
+            await self.kill()
+        finally:
+            await self.close()
 
     async def is_healthy(self) -> bool:
         """
@@ -466,22 +483,9 @@ class Sandbox:
             f"ConnectionConfig(domain={self.connection_config.get_domain()}, "
             f"use_server_proxy={self.connection_config.use_server_proxy})"
         )
-        if self.connection_config.use_server_proxy:
-            hint = (
-                "Hint: server proxy mode is enabled. Check server-to-sandbox connectivity "
-                "and server API key/auth configuration."
-            )
-        else:
-            hint = (
-                "Hint: direct sandbox endpoint access is enabled. If the SDK cannot directly "
-                "reach sandbox network/ports, set ConnectionConfig(use_server_proxy=True). "
-                "For Docker bridge deployments where server runs in a container, also configure "
-                "server [docker].host_ip to a host-reachable address."
-            )
-
         final_message = (
             f"Sandbox health check timed out after {timeout.total_seconds()}s "
-            f"({attempt} attempts). {error_detail}. {connection_detail}. {hint}"
+            f"({attempt} attempts). {error_detail}. {connection_detail}."
         )
 
         logger.error(final_message)
@@ -510,6 +514,7 @@ class Sandbox:
         health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
         health_check_polling_interval: timedelta = timedelta(milliseconds=200),
         skip_health_check: bool = False,
+        lifecycle: SandboxLifecycle | None = None,
     ) -> "Sandbox":
         """
         Create a new sandbox instance with the specified configuration.
@@ -533,6 +538,7 @@ class Sandbox:
             health_check: Custom async health check function
             health_check_polling_interval: Time between health check attempts
             skip_health_check: If True, do NOT wait for sandbox readiness/health; returned instance may not be ready yet.
+            lifecycle: Optional pre-start and periodic lifecycle hooks.
 
         Returns:
             Fully configured and ready Sandbox instance
@@ -556,15 +562,16 @@ class Sandbox:
             image = SandboxImageSpec(image=image)
 
         startup_source = image.image if image is not None else snapshot_id
-        timeout_log = "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
+        timeout_log = (
+            "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
+        )
         logger.info(
-            "Creating sandbox with startup source: %s (timeout: %s)",
-            startup_source,
-            timeout_log,
+            f"Creating sandbox with startup source: {startup_source} (timeout: {timeout_log})"
         )
         factory = AdapterFactory(config)
         sandbox_id: str | None = None
         sandbox_service: Sandboxes | None = None
+        create_started = time.monotonic()
 
         try:
             sandbox_service = factory.create_sandbox_service()
@@ -583,14 +590,17 @@ class Sandbox:
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
+                lifecycle=lifecycle,
             )
             sandbox_id = response.id
 
-            execd_endpoint = await sandbox_service.get_sandbox_endpoint(
-                response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
-            )
-            egress_endpoint = await sandbox_service.get_sandbox_endpoint(
-                response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+            execd_endpoint, egress_endpoint = await asyncio.gather(
+                sandbox_service.get_sandbox_endpoint(
+                    response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                ),
+                sandbox_service.get_sandbox_endpoint(
+                    response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                ),
             )
 
             sandbox = cls(
@@ -602,33 +612,47 @@ class Sandbox:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
-                isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
 
             if not skip_health_check:
                 await sandbox.check_ready(ready_timeout, health_check_polling_interval)
-                logger.info("Sandbox %s is ready", sandbox.id)
+                logger.info(f"Sandbox {sandbox.id} is ready")
             else:
                 logger.info(
-                    "Sandbox %s created (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox.id,
+                    f"Sandbox {sandbox.id} created (skip_health_check=true, sandbox may not be ready yet)"
                 )
+
+            report_sandbox_create_metric(
+                config,
+                sandbox_id=sandbox.id,
+                image=startup_source,
+                create_duration_ms=int((time.monotonic() - create_started) * 1000),
+                success=True,
+            )
 
             return sandbox
         except BaseException as e:
+            report_sandbox_create_metric(
+                config,
+                sandbox_id=sandbox_id,
+                image=startup_source,
+                create_duration_ms=int((time.monotonic() - create_started) * 1000),
+                success=False,
+            )
             if sandbox_id and sandbox_service:
                 try:
                     logger.warning(
-                        "Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: %s",
-                        sandbox_id,
+                        f"Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {sandbox_id}"
                     )
                     await sandbox_service.kill_sandbox(sandbox_id)
                 except Exception as cleanup_ex:
                     logger.error(
-                        "Failed to clean up sandbox %s after creation failure",
-                        sandbox_id,
+                        f"Failed to clean up sandbox {sandbox_id} after creation failure",
                         exc_info=cleanup_ex,
                     )
 
@@ -684,11 +708,13 @@ class Sandbox:
 
         try:
             sandbox_service = factory.create_sandbox_service()
-            execd_endpoint = await sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
-            )
-            egress_endpoint = await sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+            execd_endpoint, egress_endpoint = await asyncio.gather(
+                sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                ),
+                sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                ),
             )
 
             sandbox = cls(
@@ -700,20 +726,23 @@ class Sandbox:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
-                isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
 
             if not skip_health_check:
-                await sandbox.check_ready(connect_timeout, health_check_polling_interval)
+                await sandbox.check_ready(
+                    connect_timeout, health_check_polling_interval
+                )
             else:
                 logger.info(
-                    "Connected to sandbox %s (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox_id,
+                    f"Connected to sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
-            logger.info("Connected to sandbox %s", sandbox_id)
+            logger.info(f"Connected to sandbox {sandbox_id}")
             return sandbox
         except Exception as e:
             await config.close_transport_if_owned()
@@ -724,13 +753,13 @@ class Sandbox:
 
     @classmethod
     async def resume(
-            cls,
-            sandbox_id: str,
-            connection_config: ConnectionConfig | None = None,
-            health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
-            resume_timeout: timedelta = timedelta(seconds=30),
-            health_check_polling_interval: timedelta = timedelta(milliseconds=200),
-            skip_health_check: bool = False,
+        cls,
+        sandbox_id: str,
+        connection_config: ConnectionConfig | None = None,
+        health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
+        resume_timeout: timedelta = timedelta(seconds=30),
+        health_check_polling_interval: timedelta = timedelta(milliseconds=200),
+        skip_health_check: bool = False,
     ) -> "Sandbox":
         """
         Resume a paused sandbox by ID and return a new, usable Sandbox instance.
@@ -754,18 +783,20 @@ class Sandbox:
 
         config = (connection_config or ConnectionConfig()).with_transport_if_missing()
 
-        logger.info("Resuming sandbox: %s", sandbox_id)
+        logger.info(f"Resuming sandbox: {sandbox_id}")
         factory = AdapterFactory(config)
 
         try:
             sandbox_service = factory.create_sandbox_service()
             await sandbox_service.resume_sandbox(sandbox_id)
 
-            execd_endpoint = await sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
-            )
-            egress_endpoint = await sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+            execd_endpoint, egress_endpoint = await asyncio.gather(
+                sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                ),
+                sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                ),
             )
 
             sandbox = cls(
@@ -777,7 +808,9 @@ class Sandbox:
                 metrics_service=factory.create_metrics_service(execd_endpoint),
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
-                isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                isolated_service=factory.create_isolated_session_service(
+                    execd_endpoint
+                ),
                 connection_config=config,
                 custom_health_check=health_check,
             )
@@ -786,8 +819,7 @@ class Sandbox:
                 await sandbox.check_ready(resume_timeout, health_check_polling_interval)
             else:
                 logger.info(
-                    "Resumed sandbox %s (skip_health_check=true, sandbox may not be ready yet)",
-                    sandbox_id,
+                    f"Resumed sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
             return sandbox

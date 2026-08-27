@@ -16,9 +16,11 @@
 HTTP and WebSocket proxy routes for reaching services inside sandboxes via the lifecycle API.
 """
 
+import hmac
 import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import Optional
+from urllib.parse import urlsplit
 
 import anyio
 import httpx
@@ -26,14 +28,18 @@ import websockets
 from fastapi import APIRouter, Request, WebSocket, status
 from fastapi.exceptions import HTTPException
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection
+from websockets.frames import EXTERNAL_CLOSE_CODES
 from websockets.typing import Origin
 
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_SECURE_ACCESS_HEADER
+from opensandbox_server.tenants.context import set_current_tenant
+from opensandbox_server.tenants.provider import TenantProviderUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +55,27 @@ HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 
+# Uvicorn adds this to client-facing responses. Forwarding the backend value as
+# well would produce a duplicate field on the wire.
+SERVER_GENERATED_RESPONSE_HEADERS = {
+    "server",
+}
+
 # Headers that shouldn't be forwarded to untrusted/internal backends
 SENSITIVE_HEADERS = {
     "authorization",
     "cookie",
     SANDBOX_API_KEY_HEADER.lower(),
+    OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower(),
+}
+
+FORWARDED_HEADERS = {
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-forwarded-proto",
+    "x-real-ip",
 }
 
 # Handled by websockets on the outbound handshake; do not duplicate on additional_headers
@@ -103,7 +125,7 @@ def _filter_proxy_headers(
     Endpoint-resolved headers are merged for routing, except secure-access
     credentials which callers must explicitly provide on server-proxy requests.
     """
-    excluded = set(HOP_BY_HOP_HEADERS) | set(SENSITIVE_HEADERS)
+    excluded = set(HOP_BY_HOP_HEADERS) | set(SENSITIVE_HEADERS) | set(FORWARDED_HEADERS)
     if extra_excluded:
         excluded.update(extra_excluded)
     if connection_header:
@@ -121,7 +143,7 @@ def _filter_proxy_headers(
         endpoint_header_excluded = {
             OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower(),
             OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(),
-        }
+        } | FORWARDED_HEADERS
         forwarded.update(
             {
                 key: value
@@ -132,25 +154,161 @@ def _filter_proxy_headers(
     return forwarded
 
 
+def _set_forwarded_headers(
+    headers: dict[str, str], request: Request | WebSocket
+) -> None:
+    """Rebuild proxy headers from the connection observed by this server."""
+    scheme = request.url.scheme.lower()
+    if scheme == "ws":
+        scheme = "http"
+    elif scheme == "wss":
+        scheme = "https"
+    headers["X-Forwarded-Proto"] = scheme
+
+    inbound_host = request.headers.get("host", "")
+    if inbound_host:
+        headers["X-Forwarded-Host"] = inbound_host
+    if request.client:
+        headers["X-Forwarded-For"] = request.client.host
+
+
+def _rewrite_proxy_location(
+    location: str,
+    request: Request,
+    sandbox_id: str,
+    port: int,
+) -> str:
+    """Keep root-relative redirects inside the current sandbox proxy route."""
+    if not location.startswith("/") or location.startswith("//"):
+        return location
+
+    proxy_suffix = f"/sandboxes/{sandbox_id}/proxy/{port}"
+    eip = (lifecycle.get_config().server.eip or "").strip().rstrip("/")
+    if eip:
+        external_url = eip if "://" in eip else f"//{eip}"
+        external_prefix = urlsplit(external_url).path.rstrip("/")
+        return f"{external_prefix}{proxy_suffix}{location}"
+
+    proxy_start = request.url.path.find(proxy_suffix)
+    if proxy_start < 0:
+        return location
+    proxy_path = request.url.path[: proxy_start + len(proxy_suffix)]
+    return f"{proxy_path}{location}"
+
+
 def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None:
     proxy_renew = getattr(request.app.state, "proxy_renew_coordinator", None)
     if proxy_renew is not None:
         proxy_renew.schedule(sandbox_id)
 
 
-async def _stream_backend_response(resp: httpx.Response) -> AsyncIterator[bytes]:
-    """
-    Yield backend body chunks without httpx content decoding and always close the response.
+async def _authenticate_websocket_tenant(websocket: WebSocket) -> bool:
+    """Authenticate WebSocket connections in multi-tenant mode.
 
-    httpx requires ``await resp.aclose()`` for ``stream=True`` responses so connections
-    return to the pool; Starlette's StreamingResponse does not do this automatically.
-    Use ``aiter_raw`` so forwarded ``content-encoding`` headers still match the body bytes.
+    BaseHTTPMiddleware only intercepts HTTP requests, so WebSocket
+    connections must be authenticated here to establish tenant context.
+    Returns True if the request is authorized (or single-tenant mode).
     """
+    import asyncio
+
+    provider = getattr(websocket.app.state, "tenant_provider", None)
+    if provider is None:
+        return True
+
+    api_key = websocket.headers.get(SANDBOX_API_KEY_HEADER)
+    if not api_key:
+        await _fail_client_websocket(
+            websocket, status.WS_1008_POLICY_VIOLATION, "missing API key"
+        )
+        return False
+
     try:
-        async for chunk in resp.aiter_raw():
-            yield chunk
-    finally:
+        tenant = await asyncio.to_thread(provider.lookup, api_key)
+    except TenantProviderUnavailable:
+        await _fail_client_websocket(
+            websocket, status.WS_1011_INTERNAL_ERROR, "tenant provider unavailable"
+        )
+        return False
+
+    if tenant is None:
+        await _fail_client_websocket(
+            websocket, status.WS_1008_POLICY_VIOLATION, "invalid API key"
+        )
+        return False
+
+    set_current_tenant(tenant)
+    return True
+
+
+async def _close_backend_response(resp: httpx.Response) -> None:
+    """Return a streamed backend response to httpx's pool, even during cancellation."""
+    with anyio.CancelScope(shield=True):
         await resp.aclose()
+
+
+async def _stream_backend_response(resp: httpx.Response) -> AsyncIterator[bytes]:
+    """Yield raw backend chunks so content-encoding still matches the body bytes."""
+    async for chunk in resp.aiter_raw():
+        yield chunk
+
+
+class _ProxyStreamingResponse(StreamingResponse):
+    """Streaming response that owns and always releases its httpx response."""
+
+    def __init__(
+        self,
+        resp: httpx.Response,
+        *,
+        status_code: int,
+        headers: Mapping[str, str],
+    ) -> None:
+        self._backend_response = resp
+        super().__init__(
+            content=_stream_backend_response(resp),
+            status_code=status_code,
+            headers=headers,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # The body iterator may never start if the downstream disconnects
+            # while Starlette sends response headers. Keep ownership here so
+            # that connection is still returned to the shared httpx pool.
+            await _close_backend_response(self._backend_response)
+
+
+def _verify_secure_access(endpoint: Endpoint, caller_headers: Mapping[str, str]) -> None:
+    """Enforce OpenSandbox-Secure-Access validation on server-proxy requests.
+
+    When endpoint resolution returns a secure-access token, the caller must
+    supply the same header value.  Raises 401 for missing or mismatched tokens.
+    Uses constant-time comparison to avoid timing side-channels.
+    """
+    if not endpoint.headers:
+        return
+    expected_token = endpoint.headers.get(OPEN_SANDBOX_SECURE_ACCESS_HEADER)
+    if not expected_token:
+        return
+    caller_token = None
+    for key, value in caller_headers.items():
+        if key.lower() == OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower():
+            caller_token = value
+            break
+    if not caller_token or not hmac.compare_digest(
+        caller_token.encode(), expected_token.encode()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "MISSING_OR_INVALID_SECURE_ACCESS",
+                "message": (
+                    "This sandbox requires the "
+                    f"{OPEN_SANDBOX_SECURE_ACCESS_HEADER} header for access."
+                ),
+            },
+        )
 
 
 async def _proxy_http_request(
@@ -159,8 +317,9 @@ async def _proxy_http_request(
     port: int,
     full_path: str,
 ) -> StreamingResponse:
-    _schedule_proxy_renew(request, sandbox_id)
     endpoint = lifecycle.sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
+    _verify_secure_access(endpoint, request.headers)
+    _schedule_proxy_renew(request, sandbox_id)
     query_string = request.url.query
     target_url = _build_proxy_target_url(endpoint, full_path, query_string, websocket=False)
     client: httpx.AsyncClient = request.app.state.http_client
@@ -178,19 +337,9 @@ async def _proxy_http_request(
             endpoint.headers,
             connection_header=request.headers.get("connection"),
         )
-        # Inject standard reverse-proxy headers. Check for existing values
-        # case-insensitively so an already-present header with any casing
-        # (e.g. lowercase "x-forwarded-proto" from an upstream edge) is
-        # preserved and we don't emit a duplicate with different casing,
-        # which would break chain-safe semantics for downstream backends.
-        existing_lower = {key.lower() for key in headers}
-        if "x-forwarded-proto" not in existing_lower:
-            headers["X-Forwarded-Proto"] = request.url.scheme
-        inbound_host = request.headers.get("host", "")
-        if inbound_host and "x-forwarded-host" not in existing_lower:
-            headers["X-Forwarded-Host"] = inbound_host
-        if request.client and "x-forwarded-for" not in existing_lower:
-            headers["X-Forwarded-For"] = request.client.host
+        # Forwarded headers are stripped above and rebuilt from the connection
+        # observed by this trusted proxy, so clients cannot spoof transport state.
+        _set_forwarded_headers(headers, request)
 
         stream_body = request.method in ("POST", "PUT", "PATCH", "DELETE")
         req = client.build_request(
@@ -203,25 +352,36 @@ async def _proxy_http_request(
 
         resp = await client.send(req, stream=True)
 
-        hop_by_hop = set(HOP_BY_HOP_HEADERS)
-        connection_header = resp.headers.get("connection")
-        if connection_header:
-            hop_by_hop.update(
-                header.strip().lower()
-                for header in connection_header.split(",")
-                if header.strip()
-            )
-        response_headers = {
-            key: value
-            for key, value in resp.headers.items()
-            if key.lower() not in hop_by_hop
-        }
+        try:
+            hop_by_hop = set(HOP_BY_HOP_HEADERS)
+            connection_header = resp.headers.get("connection")
+            if connection_header:
+                hop_by_hop.update(
+                    header.strip().lower()
+                    for header in connection_header.split(",")
+                    if header.strip()
+                )
+            response_header_exclusions = hop_by_hop | SERVER_GENERATED_RESPONSE_HEADERS
+            response_headers = {
+                key: (
+                    _rewrite_proxy_location(value, request, sandbox_id, port)
+                    if key.lower() == "location"
+                    else value
+                )
+                for key, value in resp.headers.items()
+                if key.lower() not in response_header_exclusions
+            }
 
-        return StreamingResponse(
-            content=_stream_backend_response(resp),
-            status_code=resp.status_code,
-            headers=response_headers,
-        )
+            return _ProxyStreamingResponse(
+                resp,
+                status_code=resp.status_code,
+                headers=response_headers,
+            )
+        except BaseException:
+            # Until ownership passes to _ProxyStreamingResponse, any failure
+            # after client.send() must release the acquired pool connection.
+            await _close_backend_response(resp)
+            raise
     except httpx.ConnectError as e:
         raise HTTPException(
             status_code=502,
@@ -250,6 +410,15 @@ async def _fail_client_websocket(websocket: WebSocket, code: int, reason: str = 
         await websocket.close(code=code, reason=reason[:123])
     except RuntimeError:
         pass
+
+
+def _client_websocket_close_code(code: int | None) -> int:
+    """Map non-transmittable close codes to a legal client close code."""
+    if code is None:
+        return status.WS_1000_NORMAL_CLOSURE
+    if code in EXTERNAL_CLOSE_CODES or 3000 <= code < 5000:
+        return code
+    return status.WS_1011_INTERNAL_ERROR
 
 
 async def _relay_client_messages(
@@ -292,7 +461,7 @@ async def _relay_backend_messages(
     except websockets.ConnectionClosed as exc:
         try:
             await websocket.close(
-                code=exc.code or status.WS_1000_NORMAL_CLOSURE,
+                code=_client_websocket_close_code(exc.code),
                 reason=exc.reason or "",
             )
         except RuntimeError:
@@ -307,7 +476,8 @@ async def _proxy_websocket_request(
     port: int,
     full_path: str,
 ) -> None:
-    _schedule_proxy_renew(websocket, sandbox_id)
+    if not await _authenticate_websocket_tenant(websocket):
+        return
 
     try:
         endpoint = lifecycle.sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
@@ -325,6 +495,17 @@ async def _proxy_websocket_request(
         )
         return
 
+    try:
+        _verify_secure_access(endpoint, dict(websocket.headers))
+    except HTTPException:
+        await _fail_client_websocket(
+            websocket,
+            status.WS_1008_POLICY_VIOLATION,
+            "Missing or invalid secure-access token",
+        )
+        return
+
+    _schedule_proxy_renew(websocket, sandbox_id)
     query_string = websocket.url.query or ""
     target_url = _build_proxy_target_url(
         endpoint,
@@ -338,6 +519,7 @@ async def _proxy_websocket_request(
         extra_excluded=WEBSOCKET_HANDSHAKE_HEADERS,
         connection_header=websocket.headers.get("connection"),
     )
+    _set_forwarded_headers(headers, websocket)
     subprotocols = list(websocket.scope.get("subprotocols", []))
     raw_origin = websocket.headers.get("origin")
     origin: Origin | None = Origin(raw_origin) if raw_origin else None
@@ -390,10 +572,6 @@ async def _proxy_websocket_request(
         await _fail_client_websocket(websocket, status.WS_1011_INTERNAL_ERROR, "")
 
 
-@router.api_route(
-    "/sandboxes/{sandbox_id}/proxy/{port}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-)
 async def proxy_sandbox_endpoint_root(
     request: Request,
     sandbox_id: str,
@@ -403,10 +581,6 @@ async def proxy_sandbox_endpoint_root(
     return await _proxy_http_request(request, sandbox_id, port, "")
 
 
-@router.api_route(
-    "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-)
 async def proxy_sandbox_endpoint_request(
     request: Request,
     sandbox_id: str,
@@ -415,6 +589,39 @@ async def proxy_sandbox_endpoint_request(
 ):
     """Proxy HTTP requests to sandbox-backed services."""
     return await _proxy_http_request(request, sandbox_id, port, full_path)
+
+
+_PROXY_HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH")
+
+# Keep the multi-method route first for runtime dispatch so 405 responses retain
+# the complete Allow header. The method-specific routes provide unique OpenAPI IDs.
+router.add_api_route(
+    "/sandboxes/{sandbox_id}/proxy/{port}",
+    proxy_sandbox_endpoint_root,
+    methods=list(_PROXY_HTTP_METHODS),
+    include_in_schema=False,
+)
+
+for _method in _PROXY_HTTP_METHODS:
+    router.add_api_route(
+        "/sandboxes/{sandbox_id}/proxy/{port}",
+        proxy_sandbox_endpoint_root,
+        methods=[_method],
+    )
+
+router.add_api_route(
+    "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
+    proxy_sandbox_endpoint_request,
+    methods=list(_PROXY_HTTP_METHODS),
+    include_in_schema=False,
+)
+
+for _method in _PROXY_HTTP_METHODS:
+    router.add_api_route(
+        "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
+        proxy_sandbox_endpoint_request,
+        methods=[_method],
+    )
 
 
 @router.websocket("/sandboxes/{sandbox_id}/proxy/{port}")

@@ -52,7 +52,6 @@ func (c *CodeInterpretingController) RunCommand() {
 	}
 
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
-	defer cancel()
 	execStart := time.Now()
 	var recordOnce sync.Once
 	recordExecution := func(result string) {
@@ -67,18 +66,37 @@ func (c *CodeInterpretingController) RunCommand() {
 	}
 
 	runCodeRequest := c.buildExecuteCommandRequest(request)
-	eventsHandler := c.setServerEventsHandler(ctx)
+	eventsHandler, stopSSE := c.setServerEventsHandler(ctx)
+
+	// completeCh is closed when OnExecuteComplete fires, meaning the final SSE
+	// event has been written and flushed. We only wait for this callback as a
+	// safety check and then return immediately to avoid fixed tail latency.
+	completeCh := make(chan struct{})
+	var completeOnce sync.Once
+	signalComplete := func() {
+		completeOnce.Do(func() {
+			close(completeCh)
+		})
+	}
 	origComplete := eventsHandler.OnExecuteComplete
 	eventsHandler.OnExecuteComplete = func(executionTime time.Duration) {
 		origComplete(executionTime)
 		recordExecution("success")
+		signalComplete()
 	}
 	origError := eventsHandler.OnExecuteError
 	eventsHandler.OnExecuteError = func(err *execute.ErrorOutput) {
 		origError(err)
 		recordExecution("failure")
+		signalComplete()
 	}
 	runCodeRequest.Hooks = eventsHandler
+
+	// Cancel the context first (signals the ping goroutine to stop), then
+	// wait for it to fully exit before the handler returns. This prevents
+	// the ping goroutine from writing to the response after Go's net/http
+	// closes the response writer.
+	defer func() { cancel(); stopSSE() }()
 
 	// SSE headers are committed lazily on the first event write
 	// (see writeSingleEvent), so a synchronous error from Execute below can
@@ -94,6 +112,12 @@ func (c *CodeInterpretingController) RunCommand() {
 		return
 	}
 
+	waitForExecutionComplete(ctx, completeCh)
+
+	// Keep the SSE connection alive briefly so clients can read all
+	// buffered events and downstream components (e.g. egress sidecar)
+	// have time to synchronise state changes that were triggered
+	// during command execution.
 	time.Sleep(flag.ApiGracefulShutdownTimeout)
 }
 

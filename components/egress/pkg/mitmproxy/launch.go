@@ -15,7 +15,9 @@
 package mitmproxy
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -40,12 +42,11 @@ const listenHostLoopback = "127.0.0.1"
 // (COPY components/egress/mitmscripts /var/egress/mitmscripts). Always loaded.
 const systemScriptPath = "/var/egress/mitmscripts/system.py"
 
-// Config: mitmdump --mode transparent. Static options (mode, connection_strategy,
-// listen_host, stream_large_bodies, ignore_hosts,
-// ssl_verify_upstream_trusted_confdir) live in
-// /var/lib/mitmproxy/.mitmproxy/config.yaml and are auto-loaded by mitmdump.
-// This struct carries only per-launch dynamic values that override those
-// defaults via `--set`.
+// Config carries only per-launch dynamic values, applied via `--set`. Static
+// options (mode, listen_host, connection_strategy, stream_large_bodies,
+// ignore_hosts, ssl_verify_upstream_trusted_confdir) are auto-loaded by
+// mitmdump from /var/lib/mitmproxy/.mitmproxy/config.yaml (shipped from
+// components/egress/mitmproxy/config.yaml).
 type Config struct {
 	ListenPort int
 	UserName   string
@@ -102,8 +103,9 @@ func Launch(cfg Config) (*Running, error) {
 	args := buildMitmdumpArgs(cfg)
 
 	cmd := exec.Command("mitmdump", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	mitmOut, mitmIn := io.Pipe()
+	cmd.Stdout = mitmIn
+	cmd.Stderr = mitmIn
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: uid, Gid: gid},
 	}
@@ -112,12 +114,18 @@ func Launch(cfg Config) (*Running, error) {
 	cmd.Env = buildMitmdumpEnv(os.Environ(), home)
 
 	if err := cmd.Start(); err != nil {
+		_ = mitmIn.Close()
 		return nil, fmt.Errorf("mitmproxy: start mitmdump: %w", err)
 	}
+	safego.Go(func() { forwardMitmdumpOutput(mitmOut) })
 	done := make(chan error, 1)
 	onExit := cfg.OnExit
 	safego.Go(func() {
 		err := cmd.Wait()
+		// cmd.Wait waits for the internal copy from the child to complete, so
+		// closing the write end here EOFs the reader only after the remaining
+		// mitmdump output has been drained.
+		_ = mitmIn.Close()
 		done <- err
 		if onExit != nil {
 			onExit(err)
@@ -131,6 +139,7 @@ func Launch(cfg Config) (*Running, error) {
 func buildMitmdumpArgs(cfg Config) []string {
 	args := []string{
 		"--listen-port", strconv.Itoa(cfg.ListenPort),
+		"--set", "flow_detail=0",
 	}
 
 	if trustDir := strings.TrimSpace(os.Getenv(constants.EnvMitmproxyUpstreamTrustDir)); trustDir != "" {
@@ -155,4 +164,41 @@ func buildMitmdumpEnv(base []string, home string) []string {
 	env = append(env, base...)
 	env = append(env, "HOME="+home)
 	return env
+}
+
+// forwardMitmdumpOutput relays credential proxy log lines from mitmdump
+// stdout/stderr into the egress zap logger at warn level, so they land in the
+// same sink as egress logs (OPENSANDBOX_LOG_OUTPUT) and stand out from
+// mitmproxy's own high-volume flow logs, which are dropped.
+func forwardMitmdumpOutput(r io.ReadCloser) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), " \t\r")
+		msg, ok := credentialProxyMessage(line)
+		if !ok {
+			continue
+		}
+		log.Warnf("[mitmproxy] %s", msg)
+	}
+	// On ErrTooLong (a newline-free line over the buffer limit) Scan stops
+	// early; closing the read end makes the exec copy goroutine fail with
+	// ErrClosedPipe so cmd.Wait returns instead of hanging forever.
+	_ = r.Close()
+}
+
+// credentialProxyMessage returns the message of a credential proxy log line,
+// stripping the leading [HH:MM:SS.mmm] timestamp that mitmproxy 11.x terminal
+// logger prepends to ctx.log.* records. It reports false for any other line,
+// so mitmproxy's own high-volume flow logs stay filtered out.
+func credentialProxyMessage(line string) (string, bool) {
+	if strings.HasPrefix(line, "[") {
+		if end := strings.Index(line, "] "); end != -1 {
+			line = line[end+2:]
+		}
+	}
+	if !strings.HasPrefix(line, "credential proxy:") {
+		return "", false
+	}
+	return line, true
 }

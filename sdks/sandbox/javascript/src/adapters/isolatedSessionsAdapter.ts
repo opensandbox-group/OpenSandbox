@@ -15,18 +15,32 @@
 import { createExecdClient } from "../openapi/execdClient.js";
 import { IsolatedFilesystemAdapter } from "./isolatedFilesystemAdapter.js";
 import { parseJsonEventStream } from "./sse.js";
+import type { components as ExecdComponents } from "../api/execd.js";
 import type { CommandExecution, ServerStreamEvent } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
 import type { SandboxFiles } from "../services/filesystem.js";
-import type { IsolationService, IsolationSession } from "../services/isolatedSessions.js";
+import type {
+  IsolationService,
+  IsolationSession,
+  RunOnceOpts,
+} from "../services/isolatedSessions.js";
 import type {
   CreateIsolatedSessionRequest,
+  IsolatedBackgroundRun,
   IsolatedCapabilities,
+  IsolatedRunLogs,
   IsolatedRunOpts,
+  IsolatedRunStatus,
   IsolatedSessionInfo,
   IsolatedSessionState,
+  IsolatedSessionSummary,
+  ListIsolatedSessionsResponse,
 } from "../models/isolated.js";
+
+type SessionStateWire = ExecdComponents["schemas"]["SessionState"];
+
+const TAIL_CURSOR_HEADER = "EXECD-ISOLATED-TAIL-CURSOR";
 
 function joinUrl(baseUrl: string, pathname: string): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -38,6 +52,10 @@ function assertNonBlank(value: string, field: string): void {
   if (!value.trim()) {
     throw new Error(`${field} cannot be empty`);
   }
+}
+
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
 }
 
 function inferExitCode(execution: CommandExecution): number | null {
@@ -89,6 +107,15 @@ class IsolationSessionHandle implements IsolationSession {
   run(code: string, opts?: IsolatedRunOpts, handlers?: ExecutionHandlers, signal?: AbortSignal): Promise<CommandExecution> {
     return this.adapter._run(this._info.session_id, code, opts, handlers, signal);
   }
+  runBackground(code: string, opts?: IsolatedRunOpts): Promise<IsolatedBackgroundRun> {
+    return this.adapter._runBackground(this._info.session_id, code, opts);
+  }
+  getRunStatus(runId: string): Promise<IsolatedRunStatus> {
+    return this.adapter._getRunStatus(this._info.session_id, runId);
+  }
+  getRunLogs(runId: string, cursor?: number): Promise<IsolatedRunLogs> {
+    return this.adapter._getRunLogs(this._info.session_id, runId, cursor);
+  }
   get(): Promise<IsolatedSessionState> {
     return this.adapter._get(this._info.session_id);
   }
@@ -138,6 +165,35 @@ export class IsolatedSessionsAdapter implements IsolationService {
       "/v1/isolated/session",
       request,
     );
+    return new IsolationSessionHandle(info, this);
+  }
+
+  async attach(sessionId: string): Promise<IsolationSessionHandle> {
+    assertNonBlank(sessionId, "sessionId");
+    const state = await this.jsonRequest<SessionStateWire>(
+      "GET",
+      `/v1/isolated/session/${encodeURIComponent(sessionId)}`,
+    );
+    // Build an IsolatedSessionInfo from the SessionState response.
+    // Creation-parameter echo fields are optional; older execd builds omit
+    // them. Unknown/absent fields become `undefined` so the handle is still
+    // usable via sessionId for run/get/delete/files.
+    const info: IsolatedSessionInfo = {
+      session_id: sessionId,
+      created_at: state.created_at ?? "",
+    };
+    if (state.profile !== undefined) info.profile = state.profile;
+    if (state.workspace !== undefined) info.workspace = state.workspace;
+    if (state.extra_writable !== undefined) info.extra_writable = state.extra_writable;
+    if (state.binds !== undefined) info.binds = state.binds;
+    if (state.share_net !== undefined) info.share_net = state.share_net;
+    if (state.env_passthrough !== undefined) info.env_passthrough = state.env_passthrough;
+    if (state.uid !== undefined) info.uid = state.uid;
+    if (state.gid !== undefined) info.gid = state.gid;
+    if (state.uid_mode !== undefined) info.uid_mode = state.uid_mode;
+    if (state.idle_timeout_seconds !== undefined) {
+      info.idle_timeout_seconds = state.idle_timeout_seconds;
+    }
     return new IsolationSessionHandle(info, this);
   }
 
@@ -202,10 +258,133 @@ export class IsolatedSessionsAdapter implements IsolationService {
     );
   }
 
+  async _runBackground(
+    sessionId: string,
+    code: string,
+    opts?: IsolatedRunOpts,
+  ): Promise<IsolatedBackgroundRun> {
+    assertNonBlank(sessionId, "sessionId");
+    assertNonBlank(code, "code");
+
+    const body: Record<string, unknown> = { code, background: true };
+    if (opts?.envs) body.envs = opts.envs;
+    // timeout_seconds is foreground-only and deliberately not sent.
+
+    const pathname = `/v1/isolated/session/${encodeURIComponent(sessionId)}/run`;
+    const res = await this.fetch(joinUrl(this.opts.baseUrl, pathname), {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        ...(this.opts.headers ?? {}),
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.status !== 202) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`POST ${pathname} failed: ${res.status} ${text}`);
+    }
+    const raw = await res.text();
+    return JSON.parse(raw) as IsolatedBackgroundRun;
+  }
+
+  async _getRunStatus(
+    sessionId: string,
+    runId: string,
+  ): Promise<IsolatedRunStatus> {
+    assertNonBlank(sessionId, "sessionId");
+    assertNonBlank(runId, "runId");
+    return this.jsonRequest<IsolatedRunStatus>(
+      "GET",
+      `/v1/isolated/session/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}`,
+    );
+  }
+
+  async _getRunLogs(
+    sessionId: string,
+    runId: string,
+    cursor = 0,
+  ): Promise<IsolatedRunLogs> {
+    assertNonBlank(sessionId, "sessionId");
+    assertNonBlank(runId, "runId");
+    if (cursor < 0) {
+      throw new Error("cursor cannot be negative");
+    }
+
+    const pathname = `/v1/isolated/session/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/logs`;
+    const url = new URL(joinUrl(this.opts.baseUrl, pathname));
+    if (cursor > 0) {
+      url.searchParams.set("cursor", String(cursor));
+    }
+    const res = await this.fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        accept: "text/plain",
+        ...(this.opts.headers ?? {}),
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`GET ${pathname} failed: ${res.status} ${text}`);
+    }
+
+    const text = await res.text();
+    const headerValue = res.headers.get(TAIL_CURSOR_HEADER);
+    const parsedHeader = headerValue != null ? Number(headerValue) : NaN;
+    const nextCursor =
+      Number.isInteger(parsedHeader) && parsedHeader >= 0
+        ? parsedHeader
+        : cursor + utf8ByteLength(text);
+    return { text, cursor: nextCursor };
+  }
+
   async capabilities(): Promise<IsolatedCapabilities> {
-    return this.jsonRequest<IsolatedCapabilities>(
+    const response = await this.jsonRequest<IsolatedCapabilities>(
       "GET",
       "/v1/isolated/capabilities",
     );
+    return {
+      ...response,
+      setpriv_available: response.setpriv_available ?? false,
+      userns_available: response.userns_available ?? false,
+    };
+  }
+
+  async list(): Promise<IsolatedSessionSummary[]> {
+    const resp = await this.jsonRequest<ListIsolatedSessionsResponse>(
+      "GET",
+      "/v1/isolated/sessions",
+    );
+    return resp.sessions ?? [];
+  }
+
+  async runOnce(
+    code: string,
+    workspace: string,
+    opts?: RunOnceOpts,
+  ): Promise<CommandExecution> {
+    const session = await this.create({
+      workspace: { path: workspace, mode: opts?.workspaceMode },
+      profile: opts?.profile,
+      share_net: opts?.shareNet,
+      binds: opts?.binds,
+    });
+    try {
+      return await session.run(code, opts?.runOpts, opts?.handlers, opts?.signal);
+    } finally {
+      try { await session.delete(); } catch { /* best-effort cleanup */ }
+    }
+  }
+
+  async withSession<T>(
+    request: CreateIsolatedSessionRequest,
+    fn: (session: IsolationSession) => Promise<T>,
+  ): Promise<T> {
+    const session = await this.create(request);
+    try {
+      return await fn(session);
+    } finally {
+      try { await session.delete(); } catch { /* best-effort cleanup */ }
+    }
   }
 }

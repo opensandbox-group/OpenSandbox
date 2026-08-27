@@ -43,6 +43,12 @@ DEFAULT_CONFIG_PATH = Path.home() / ".sandbox.toml"
 
 API_KEY_ENV_VAR = "OPENSANDBOX_SERVER_API_KEY"
 
+# OSEP-0011 secure-access keys may be injected via environment instead of the
+# [ingress.secure_access] TOML block, so key material can come from a Secret
+# rather than a plaintext config file.
+SECURE_ACCESS_KEYS_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_KEYS"
+SECURE_ACCESS_ACTIVE_KEY_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY"
+
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?:\.(?!-)[A-Za-z0-9-]{1,63})*$")
 _WILDCARD_DOMAIN_RE = re.compile(r"^\*\.(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$")
 _IPV4_WITH_PORT_RE = re.compile(r"^(?P<ip>(?:\d{1,3}\.){3}\d{1,3})(?::(?P<port>\d{1,5}))?$")
@@ -104,31 +110,31 @@ def _is_wildcard_domain(host: str) -> bool:
 
 
 class RenewIntentRedisConfig(BaseModel):
-    """🧪 [EXPERIMENTAL] Redis list consumer for renew-intent queue (ingress gateway path)."""
+    """Redis list consumer for renew-intent queue (ingress gateway path)."""
 
     enabled: bool = Field(
         default=False,
         description=(
-            "🧪 [EXPERIMENTAL] When true, server workers consume renew intents from Redis "
+            "When true, server workers consume renew intents from Redis "
             "(ingress gateway path)."
         ),
     )
     dsn: Optional[str] = Field(
         default=None,
         description=(
-            '🧪 [EXPERIMENTAL] Redis DSN (e.g. "redis://127.0.0.1:6379/0"). '
+            'Redis DSN (e.g. "redis://127.0.0.1:6379/0"). '
             "Required when redis.enabled is true."
         ),
     )
     queue_key: str = Field(
         default="opensandbox:renew:intent",
         min_length=1,
-        description="🧪 [EXPERIMENTAL] Redis List key for LPUSH/BRPOP renew-intent JSON payloads.",
+        description="Redis List key for LPUSH/BRPOP renew-intent JSON payloads.",
     )
     consumer_concurrency: int = Field(
         default=8,
         ge=1,
-        description="🧪 [EXPERIMENTAL] Number of concurrent BRPOP worker tasks.",
+        description="Number of concurrent BRPOP worker tasks.",
     )
 
     @model_validator(mode="after")
@@ -140,13 +146,40 @@ class RenewIntentRedisConfig(BaseModel):
         return self
 
 
-class RenewIntentConfig(BaseModel):
-    """🧪 [EXPERIMENTAL] Renew sandbox expiration when access is observed (proxy and/or Redis queue)."""
+class OtelConfig(BaseModel):
+    """Optional OpenTelemetry export for Server and ingested SDK metrics."""
 
     enabled: bool = Field(
         default=False,
         description=(
-            "🧪 [EXPERIMENTAL] Master switch for auto-renew on reverse-proxy access and/or Redis "
+            "Enable OTLP metrics export. When false, Server and SDK metrics are noops."
+        ),
+    )
+    endpoint: Optional[str] = Field(
+        default=None,
+        description=(
+            "OTLP HTTP metrics endpoint. When omitted, OpenTelemetry uses "
+            "OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_METRICS_ENDPOINT."
+        ),
+    )
+    service_name: str = Field(
+        default="opensandbox-server",
+        description="service.name resource attribute for exported metrics.",
+    )
+    export_interval_millis: int = Field(
+        default=60000,
+        ge=1000,
+        description="Periodic export interval in milliseconds.",
+    )
+
+
+class RenewIntentConfig(BaseModel):
+    """Renew sandbox expiration when access is observed (proxy and/or Redis queue)."""
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for auto-renew on reverse-proxy access and/or Redis "
             "ingress intents. When false, renew-intent logic is off."
         ),
     )
@@ -154,14 +187,14 @@ class RenewIntentConfig(BaseModel):
         default=60,
         ge=1,
         description=(
-            "🧪 [EXPERIMENTAL] Minimum seconds between successful renewals for the same sandbox "
+            "Minimum seconds between successful renewals for the same sandbox "
             "(cooldown)."
         ),
     )
     redis: RenewIntentRedisConfig = Field(
         default_factory=RenewIntentRedisConfig,
         description=(
-            "🧪 [EXPERIMENTAL] Redis queue consumer for ingress gateway renew-intent mode. "
+            "Redis queue consumer for ingress gateway renew-intent mode. "
             "In TOML, set keys under the same [renew_intent] table as redis.enabled, "
             "redis.dsn, redis.queue_key, redis.consumer_concurrency (dotted keys)."
         ),
@@ -324,7 +357,9 @@ class IngressConfig(BaseModel):
             "OSEP-0011 secure access signing configuration. "
             "When set, the server can issue signed route tokens and static "
             "SecureAccessTokens for sandbox endpoints. "
-            "Requires ingress.mode = 'gateway'."
+            "Requires ingress.mode = 'gateway'. "
+            "May also be injected via the OPENSANDBOX_SECURE_ACCESS_KEYS and "
+            "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY environment variables."
         ),
     )
 
@@ -470,6 +505,15 @@ class ServerConfig(BaseModel):
         # no concurrency cap. TOML has no null literal, so 0 is the only way
         # to disable the limit from the config file.
         return None if value == 0 else value
+    timeout_graceful_shutdown: Optional[int] = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Seconds uvicorn waits for in-flight requests to finish before "
+            "forcing shutdown. Ensures Ctrl+C terminates promptly even when "
+            "a long-running operation (e.g. image pull) is in progress."
+        ),
+    )
     backlog: int = Field(
         default=2048,
         ge=1,
@@ -582,10 +626,6 @@ class KubernetesRuntimeConfig(BaseModel):
         default=None,
         description="Namespace used for sandbox workloads.",
     )
-    service_account: Optional[str] = Field(
-        default=None,
-        description="Service account bound to sandbox workloads.",
-    )
     workload_provider: Optional[str] = Field(
         default=None,
         description="Workload provider type. If not specified, uses the first registered provider.",
@@ -598,6 +638,14 @@ class KubernetesRuntimeConfig(BaseModel):
         default=60,
         ge=1,
         description="Timeout in seconds to wait for a sandbox to become ready (IP assigned) after creation.",
+    )
+    pool_acquisition_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Maximum cumulative time in seconds to wait while Pool capacity "
+            "prevents sandbox allocation. The overall sandbox create timeout still applies."
+        ),
     )
     sandbox_create_poll_interval_seconds: float = Field(
         default=1.0,
@@ -711,6 +759,14 @@ class EgressConfig(BaseModel):
             "(e.g. IPv4-only CNI or experimenting with IPv6 egress despite gaps)."
         ),
     )
+    readiness_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Maximum time in seconds to wait for the egress sidecar health endpoint "
+            "to become ready in Docker runtime."
+        ),
+    )
 
 
 class RuntimeConfig(BaseModel):
@@ -724,6 +780,17 @@ class RuntimeConfig(BaseModel):
         ...,
         description="Container image that contains the execd binary for sandbox initialization.",
         min_length=1,
+    )
+    execd_run_as_init: bool = Field(
+        default=False,
+        description=(
+            "Run execd as the sandbox init (OSEP-0018): sets EXECD_INIT in the "
+            "sandbox environment so bootstrap.sh execs into execd (--init) and "
+            "execd becomes PID 1, reaping children and owning the container "
+            "lifecycle. Defaults to false (classic background-and-wait "
+            "topology); intended to be flipped on after a few releases once "
+            "the init mode is validated in production."
+        ),
     )
 
 
@@ -834,11 +901,61 @@ class DockerConfig(BaseModel):
             "Optional seccomp profile name or path applied to sandbox containers. Leave unset to use Docker's default profile."
         ),
     )
+    port_range_min: int = Field(
+        default=40000,
+        ge=1024,
+        le=65535,
+        description=(
+            "Lower bound of the host port range for bridge-mode sandbox port allocation. "
+            "Must be less than port_range_max. Narrow the range to match your firewall policy."
+        ),
+    )
+    port_range_max: int = Field(
+        default=60000,
+        ge=1024,
+        le=65535,
+        description=(
+            "Upper bound of the host port range for bridge-mode sandbox port allocation. "
+            "Range must span at least 100 ports for reliable allocation. "
+            "Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar)."
+        ),
+    )
     pids_limit: Optional[int] = Field(
         default=4096,
         ge=1,
         description="Maximum number of processes allowed per sandbox container. Set to null to disable the limit.",
     )
+    sandbox_env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Environment variables injected into every sandbox container. Keys from a sandbox "
+            "creation request override same-named keys. Docker-runtime counterpart of the "
+            "Kubernetes pod template: useful for fleet-wide settings such as trusting a private "
+            "CA (e.g. NODE_EXTRA_CA_CERTS) together with sandbox_binds."
+        ),
+    )
+    sandbox_binds: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Host bind mounts applied to every sandbox container, in Docker -v syntax "
+            "(host_path:container_path[:mode]). Prepended to the binds derived from a request's "
+            "volumes. Useful for mounting a private CA certificate into all sandboxes."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_port_range(self) -> "DockerConfig":
+        if self.port_range_min >= self.port_range_max:
+            raise ValueError(
+                f"docker.port_range_min ({self.port_range_min}) must be less than "
+                f"docker.port_range_max ({self.port_range_max})."
+            )
+        if self.port_range_max - self.port_range_min < 100:
+            raise ValueError(
+                f"Port range ({self.port_range_min}-{self.port_range_max}) is too narrow. "
+                f"Need at least 100 ports for reliable allocation."
+            )
+        return self
 
 
 class StoreConfig(BaseModel):
@@ -855,6 +972,43 @@ class StoreConfig(BaseModel):
     )
 
 
+class TenantsConfig(BaseModel):
+    """Multi-tenant provider configuration."""
+
+    provider: Literal["file", "http"] = Field(
+        default="file",
+        description="Tenant provider type: 'file' (tenants.toml) or 'http' (remote endpoint).",
+    )
+    endpoint: Optional[str] = Field(
+        default=None,
+        description="HTTP tenant provider endpoint URL. Required when provider='http'.",
+    )
+    max_stale_seconds: float = Field(
+        default=300.0,
+        ge=0,
+        description="Maximum seconds to serve stale cache when HTTP endpoint is unreachable.",
+    )
+    timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="HTTP request timeout in seconds.",
+    )
+    auth_header: Optional[str] = Field(
+        default=None,
+        description="Optional header name for provider-level authentication to HTTP endpoint.",
+    )
+    auth_token: Optional[str] = Field(
+        default=None,
+        description="Optional token value for provider-level authentication to HTTP endpoint.",
+    )
+
+    @model_validator(mode="after")
+    def require_endpoint_for_http(self) -> "TenantsConfig":
+        if self.provider == "http" and not self.endpoint:
+            raise ValueError("[tenants] endpoint must be set when provider='http'.")
+        return self
+
+
 class AppConfig(BaseModel):
     """Root application configuration model."""
 
@@ -863,9 +1017,17 @@ class AppConfig(BaseModel):
         default_factory=LogConfig,
         description="Logging configuration (level, file output, rotation).",
     )
+    tenants: Optional[TenantsConfig] = Field(
+        default=None,
+        description="Multi-tenant configuration. When present, enables multi-tenant mode.",
+    )
     renew_intent: RenewIntentConfig = Field(
         default_factory=RenewIntentConfig,
         description="Auto-renew sandbox expiration when reverse-proxy access is observed.",
+    )
+    otel: OtelConfig = Field(
+        default_factory=OtelConfig,
+        description="OpenTelemetry export for SDK metrics ingestion (Phase 1: create latency).",
     )
     runtime: RuntimeConfig = Field(..., description="Sandbox runtime configuration.")
     kubernetes: Optional[KubernetesRuntimeConfig] = None
@@ -943,6 +1105,44 @@ def _apply_env_overrides(config: AppConfig) -> None:
     """Apply environment variable overrides to parsed configuration."""
     if API_KEY_ENV_VAR in os.environ:
         config.server.api_key = os.environ[API_KEY_ENV_VAR]
+    _apply_secure_access_env_overrides(config)
+
+
+def _apply_secure_access_env_overrides(config: AppConfig) -> None:
+    """Build ingress.secure_access from OPENSANDBOX_SECURE_ACCESS_* env vars.
+
+    OPENSANDBOX_SECURE_ACCESS_KEYS is a comma-separated key ring in
+    "key_id=base64" form; OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY names the
+    signing key. Both must be set together, and env wins over any
+    [ingress.secure_access] block from the config file.
+    """
+    keys_env = os.environ.get(SECURE_ACCESS_KEYS_ENV_VAR)
+    active_key_env = os.environ.get(SECURE_ACCESS_ACTIVE_KEY_ENV_VAR)
+    if keys_env is None and active_key_env is None:
+        return
+    if not keys_env or not active_key_env:
+        raise ValueError(
+            f"{SECURE_ACCESS_KEYS_ENV_VAR} and {SECURE_ACCESS_ACTIVE_KEY_ENV_VAR} "
+            "must be set together."
+        )
+    if config.ingress is None or config.ingress.mode != INGRESS_MODE_GATEWAY:
+        raise ValueError(
+            f"{SECURE_ACCESS_KEYS_ENV_VAR} requires ingress.mode = "
+            f"'{INGRESS_MODE_GATEWAY}' in the config file."
+        )
+    keys: list[SecureAccessKey] = []
+    for pair in keys_env.split(","):
+        key_id, sep, b64 = pair.partition("=")
+        if not sep or not key_id:
+            raise ValueError(
+                f"{SECURE_ACCESS_KEYS_ENV_VAR} entries must be in "
+                f"key_id=base64 form, got {pair!r}"
+            )
+        keys.append(SecureAccessKey(key_id=key_id, key=b64))
+    config.ingress.secure_access = SecureAccessConfig(
+        active_key=active_key_env,
+        keys=keys,
+    )
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

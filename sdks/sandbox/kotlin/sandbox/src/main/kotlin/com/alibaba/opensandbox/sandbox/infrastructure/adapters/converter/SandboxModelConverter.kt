@@ -38,11 +38,13 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PaginationInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxAllocation
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxCreateResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageAuth
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
@@ -52,13 +54,16 @@ import java.time.Duration
 import java.time.OffsetDateTime
 import com.alibaba.opensandbox.sandbox.api.models.CredentialProxyConfig as ApiCredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.api.models.Host as ApiHost
+import com.alibaba.opensandbox.sandbox.api.models.LifecycleHook as ApiLifecycleHook
 import com.alibaba.opensandbox.sandbox.api.models.NetworkPolicy as ApiNetworkPolicy
 import com.alibaba.opensandbox.sandbox.api.models.NetworkRule as ApiNetworkRule
 import com.alibaba.opensandbox.sandbox.api.models.OSSFS as ApiOSSFS
 import com.alibaba.opensandbox.sandbox.api.models.PVC as ApiPVC
 import com.alibaba.opensandbox.sandbox.api.models.PaginationInfo as ApiPaginationInfo
+import com.alibaba.opensandbox.sandbox.api.models.PeriodicLifecycleHook as ApiPeriodicLifecycleHook
 import com.alibaba.opensandbox.sandbox.api.models.PlatformSpec as ApiPlatformSpec
 import com.alibaba.opensandbox.sandbox.api.models.Sandbox as ApiSandbox
+import com.alibaba.opensandbox.sandbox.api.models.SandboxLifecycle as ApiSandboxLifecycle
 import com.alibaba.opensandbox.sandbox.api.models.SandboxStatus as ApiSandboxStatus
 import com.alibaba.opensandbox.sandbox.api.models.Volume as ApiVolume
 import com.alibaba.opensandbox.sandbox.api.models.egress.NetworkPolicy as ApiEgressNetworkPolicy
@@ -263,6 +268,7 @@ internal object SandboxModelConverter {
         volumes: List<Volume>?,
         snapshotId: String?,
         resourceRequests: Map<String, String>? = null,
+        lifecycle: SandboxLifecycle? = null,
     ): CreateSandboxRequest {
         return CreateSandboxRequest(
             image = spec?.toApiImageSpec(),
@@ -271,6 +277,7 @@ internal object SandboxModelConverter {
             timeout = timeout?.seconds?.toInt(),
             env = env,
             metadata = metadata,
+            lifecycle = lifecycle?.takeUnless { it.isEmpty }?.toApiSandboxLifecycle(),
             resourceLimits = resource,
             resourceRequests = resourceRequests,
             platform = platform?.toApiPlatformSpec(),
@@ -279,6 +286,27 @@ internal object SandboxModelConverter {
             secureAccess = secureAccess,
             extensions = extensions,
             volumes = volumes?.map { it.toApiVolume() },
+        )
+    }
+
+    private fun SandboxLifecycle.toApiSandboxLifecycle(): ApiSandboxLifecycle {
+        return ApiSandboxLifecycle(
+            preStart =
+                preStart?.let {
+                    ApiLifecycleHook(
+                        command = it.command,
+                        timeoutSeconds = it.timeoutSeconds,
+                    )
+                },
+            periodic =
+                periodic?.map {
+                    ApiPeriodicLifecycleHook(
+                        name = it.name,
+                        schedule = it.schedule,
+                        command = it.command,
+                        timeoutSeconds = it.timeoutSeconds,
+                    )
+                },
         )
     }
 
@@ -322,7 +350,16 @@ internal object SandboxModelConverter {
             snapshotId = this.snapshotId,
             platform = this.platform?.toDomainPlatformSpec(),
             status = this.status.toSandboxStatus(),
+            allocation =
+                this.allocation?.let {
+                    SandboxAllocation(
+                        mode = it.mode.value,
+                        poolRef = it.poolRef,
+                        state = it.state.value,
+                    )
+                },
             metadata = metadata,
+            extensions = extensions,
         )
     }
 
@@ -372,6 +409,7 @@ internal object SandboxModelConverter {
         return SandboxCreateResponse(
             id = this.id,
             platform = this.platform?.toDomainPlatformSpec(),
+            extensions = this.extensions,
         )
     }
 

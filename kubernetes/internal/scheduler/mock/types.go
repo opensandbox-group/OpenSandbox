@@ -90,3 +90,17 @@ func (mr *MockTaskMockRecorder) IsResourceReleased() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsResourceReleased", reflect.TypeOf((*MockTask)(nil).IsResourceReleased))
 }
+
+// GetTerminatedMessage mocks base method.
+func (m *MockTask) GetTerminatedMessage() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetTerminatedMessage")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// GetTerminatedMessage indicates an expected call of GetTerminatedMessage.
+func (mr *MockTaskMockRecorder) GetTerminatedMessage() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetTerminatedMessage", reflect.TypeOf((*MockTask)(nil).GetTerminatedMessage))
+}

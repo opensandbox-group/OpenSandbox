@@ -1,0 +1,52 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: qemu-pool
+  namespace: qemu-vmstate-e2e
+spec:
+  template:
+    metadata:
+      annotations:
+        sandbox.opensandbox.io/checkpoint-provider: qemu
+        sandbox.opensandbox.io/qemu-container: rootfs
+        sandbox.opensandbox.io/qemu-qmp-socket: /run/qemu-e2e/qmp.sock
+        sandbox.opensandbox.io/qemu-launch-manifest: /run/qemu-e2e/launch.json
+    spec:
+      containers:
+      - name: rootfs
+        image: opensandbox/qemu-vmstate-e2e:dev
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: 500m
+            memory: 768Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        readinessProbe:
+          exec:
+            command:
+            - curl
+            - --fail
+            - --silent
+            - --show-error
+            - http://127.0.0.1:18080/healthz
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          timeoutSeconds: 3
+          failureThreshold: 60
+        volumeMounts:
+        - name: kvm
+          mountPath: /dev/kvm
+      volumes:
+      - name: kvm
+        hostPath:
+          path: /dev/kvm
+          type: CharDevice
+  capacitySpec:
+    bufferMax: 1
+    bufferMin: 1
+    poolMax: 2
+    poolMin: 1

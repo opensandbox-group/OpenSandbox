@@ -1,0 +1,17 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: {{.BatchSandboxName}}
+  namespace: {{.Namespace}}
+spec:
+  replicas: {{.Replicas}}
+  poolRef: {{.PoolName}}
+  taskTemplate:
+    spec:
+      process:
+        command: ["sleep", "3600"]
+        lifecycle:
+          postStop:
+            exec:
+              command: ["/bin/sh", "-c", "echo poststop-executed > /tmp/poststop-marker"]
+            execMode: Local

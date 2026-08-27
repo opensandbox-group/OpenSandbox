@@ -45,7 +45,6 @@ test("waitUntilReady timeout includes last health-check error and connection con
   expect(message).toContain("Last health check error");
   expect(message).toContain("domain=localhost:8080");
   expect(message).toContain("useServerProxy=false");
-  expect(message).toContain("useServerProxy=true");
 });
 
 test("waitUntilReady timeout includes false-continuously hint when ping returns false", async () => {

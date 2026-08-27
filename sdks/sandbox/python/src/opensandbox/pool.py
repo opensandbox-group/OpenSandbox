@@ -18,6 +18,11 @@
 from opensandbox._async_pool_store import InMemoryAsyncPoolStateStore
 from opensandbox._pool_store import InMemoryPoolStateStore
 from opensandbox.pool_async import AsyncSandboxPool, SandboxPoolAsync
+from opensandbox.pool_manager import (
+    SandboxPoolManager,
+    SandboxPoolManagerAsync,
+    SandboxPoolManagerSync,
+)
 from opensandbox.pool_types import (
     AcquirePolicy,
     AsyncPoolConfig,
@@ -26,6 +31,10 @@ from opensandbox.pool_types import (
     IdleEntry,
     PoolConfig,
     PoolCreationSpec,
+    PoolDestroyOptions,
+    PoolDestroyResult,
+    PoolDestroyState,
+    PoolDestroyStrategy,
     PooledSandboxCreateContext,
     PooledSandboxCreateReason,
     PooledSandboxCreator,
@@ -54,12 +63,19 @@ __all__ = [
     "PooledSandboxCreator",
     "PoolConfig",
     "PoolCreationSpec",
+    "PoolDestroyOptions",
+    "PoolDestroyResult",
+    "PoolDestroyState",
+    "PoolDestroyStrategy",
     "PoolLifecycleState",
     "PoolSnapshot",
     "PoolState",
     "PoolStateStore",
     "SandboxPoolAsync",
     "SandboxPool",
+    "SandboxPoolManager",
+    "SandboxPoolManagerAsync",
+    "SandboxPoolManagerSync",
     "SandboxPoolSync",
     "StoreCounters",
     "TakeIdleResult",

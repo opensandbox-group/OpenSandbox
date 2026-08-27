@@ -29,6 +29,7 @@ from ...types import UNSET, Response, Unset
 def _get_kwargs(
     *,
     sandbox_id: str | Unset = UNSET,
+    name: str | Unset = UNSET,
     state: list[str] | Unset = UNSET,
     page: int | Unset = 1,
     page_size: int | Unset = 20,
@@ -36,6 +37,8 @@ def _get_kwargs(
     params: dict[str, Any] = {}
 
     params["sandboxId"] = sandbox_id
+
+    params["name"] = name
 
     json_state: list[str] | Unset = UNSET
     if not isinstance(state, Unset):
@@ -102,6 +105,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     sandbox_id: str | Unset = UNSET,
+    name: str | Unset = UNSET,
     state: list[str] | Unset = UNSET,
     page: int | Unset = 1,
     page_size: int | Unset = 20,
@@ -113,6 +117,7 @@ def sync_detailed(
 
     Args:
         sandbox_id (str | Unset):
+        name (str | Unset):
         state (list[str] | Unset):
         page (int | Unset):  Default: 1.
         page_size (int | Unset):  Default: 20.
@@ -127,6 +132,7 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         sandbox_id=sandbox_id,
+        name=name,
         state=state,
         page=page,
         page_size=page_size,
@@ -143,6 +149,7 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     sandbox_id: str | Unset = UNSET,
+    name: str | Unset = UNSET,
     state: list[str] | Unset = UNSET,
     page: int | Unset = 1,
     page_size: int | Unset = 20,
@@ -154,6 +161,7 @@ def sync(
 
     Args:
         sandbox_id (str | Unset):
+        name (str | Unset):
         state (list[str] | Unset):
         page (int | Unset):  Default: 1.
         page_size (int | Unset):  Default: 20.
@@ -169,6 +177,7 @@ def sync(
     return sync_detailed(
         client=client,
         sandbox_id=sandbox_id,
+        name=name,
         state=state,
         page=page,
         page_size=page_size,
@@ -179,6 +188,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     sandbox_id: str | Unset = UNSET,
+    name: str | Unset = UNSET,
     state: list[str] | Unset = UNSET,
     page: int | Unset = 1,
     page_size: int | Unset = 20,
@@ -190,6 +200,7 @@ async def asyncio_detailed(
 
     Args:
         sandbox_id (str | Unset):
+        name (str | Unset):
         state (list[str] | Unset):
         page (int | Unset):  Default: 1.
         page_size (int | Unset):  Default: 20.
@@ -204,6 +215,7 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         sandbox_id=sandbox_id,
+        name=name,
         state=state,
         page=page,
         page_size=page_size,
@@ -218,6 +230,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     sandbox_id: str | Unset = UNSET,
+    name: str | Unset = UNSET,
     state: list[str] | Unset = UNSET,
     page: int | Unset = 1,
     page_size: int | Unset = 20,
@@ -229,6 +242,7 @@ async def asyncio(
 
     Args:
         sandbox_id (str | Unset):
+        name (str | Unset):
         state (list[str] | Unset):
         page (int | Unset):  Default: 1.
         page_size (int | Unset):  Default: 20.
@@ -245,6 +259,7 @@ async def asyncio(
         await asyncio_detailed(
             client=client,
             sandbox_id=sandbox_id,
+            name=name,
             state=state,
             page=page,
             page_size=page_size,

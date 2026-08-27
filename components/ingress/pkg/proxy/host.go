@@ -18,8 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
+	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
+	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 )
 
 type Mode string
@@ -30,6 +33,29 @@ const (
 )
 
 func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
+	start := time.Now()
+	host, status, err := p.doGetSandboxHostDefinition(r)
+	durationMs := float64(time.Since(start)) / float64(time.Millisecond)
+
+	result := "success"
+	if err != nil {
+		result = routingResultFromErr(err)
+	}
+	telemetry.RecordRouting(result, durationMs)
+	return host, status, err
+}
+
+func routingResultFromErr(err error) string {
+	if errors.Is(err, sandbox.ErrSandboxNotFound) {
+		return "not_found"
+	}
+	if errors.Is(err, sandbox.ErrSandboxNotReady) {
+		return "not_ready"
+	}
+	return "error"
+}
+
+func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
 	var pr parsedRoute
 	var err error
 

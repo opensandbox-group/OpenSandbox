@@ -231,7 +231,7 @@ code-interpreter/
 
 问题和疑问：
 
-- GitHub Issues: [OpenSandbox Issues](https://github.com/alibaba/OpenSandbox/issues)
+- GitHub Issues: [OpenSandbox Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
 
 ## 相关项目
 

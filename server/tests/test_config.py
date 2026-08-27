@@ -76,6 +76,7 @@ def test_load_config_from_file(tmp_path, monkeypatch):
     assert loaded.server.max_sandbox_timeout_seconds == 172800
     assert loaded.runtime.type == "kubernetes"
     assert loaded.runtime.execd_image == "opensandbox/execd:test"
+    assert loaded.runtime.execd_run_as_init is False
     assert loaded.ingress is not None
     assert loaded.ingress.mode == "gateway"
     assert loaded.ingress.gateway is not None
@@ -151,6 +152,33 @@ def test_load_config_without_env_uses_toml_api_key(tmp_path, monkeypatch):
     assert loaded.server.api_key == "toml-secret-key"
 
 
+def test_runtime_execd_run_as_init_parses_from_toml(tmp_path):
+    toml = """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+        execd_run_as_init = true
+        """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+
+    loaded = config_module.load_config(config_path)
+    assert loaded.runtime.execd_run_as_init is True
+
+
+def test_runtime_execd_run_as_init_defaults_false(tmp_path):
+    toml = """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+        """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+
+    loaded = config_module.load_config(config_path)
+    assert loaded.runtime.execd_run_as_init is False
+
+
 def test_docker_runtime_disallows_kubernetes_block():
     server_cfg = ServerConfig()
     runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")
@@ -162,6 +190,14 @@ def test_docker_runtime_disallows_kubernetes_block():
 def test_server_config_defaults_include_max_sandbox_timeout():
     server_cfg = ServerConfig()
     assert server_cfg.max_sandbox_timeout_seconds is None
+
+
+def test_kubernetes_pool_acquisition_timeout_defaults_and_validates():
+    kubernetes_cfg = config_module.KubernetesRuntimeConfig()
+    assert kubernetes_cfg.pool_acquisition_timeout_seconds == 30
+
+    with pytest.raises(ValueError):
+        config_module.KubernetesRuntimeConfig(pool_acquisition_timeout_seconds=0)
 
 
 def test_server_config_uvicorn_tuning_defaults():
@@ -891,8 +927,39 @@ def test_egress_config_mode_literal():
     base = EgressConfig(image="opensandbox/egress:v1")
     assert base.mode == EGRESS_MODE_DNS
     assert base.disable_ipv6 is True
+    assert base.readiness_timeout_seconds == 30.0
     cfg = EgressConfig(image="opensandbox/egress:v1", mode=EGRESS_MODE_DNS_NFT)
     assert cfg.mode == EGRESS_MODE_DNS_NFT
+
+
+def test_egress_config_readiness_timeout_must_be_positive():
+    cfg = EgressConfig(readiness_timeout_seconds=75.5)
+    assert cfg.readiness_timeout_seconds == 75.5
+
+    with pytest.raises(ValidationError):
+        EgressConfig(readiness_timeout_seconds=0)
+
+
+def test_load_config_with_egress_readiness_timeout(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    toml = textwrap.dedent(
+        """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+
+        [egress]
+        image = "opensandbox/egress:test"
+        readiness_timeout_seconds = 75.5
+        """
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+
+    loaded = config_module.load_config(config_path)
+
+    assert loaded.egress is not None
+    assert loaded.egress.readiness_timeout_seconds == 75.5
 
 
 def test_log_config_defaults():
@@ -1418,3 +1485,140 @@ class TestSecureAccessTomlLoading:
         with pytest.raises(ValidationError, match="not found in secure_access.keys"):
             config_module.load_config(config_path)
 
+
+class TestSecureAccessEnvOverride:
+    """OPENSANDBOX_SECURE_ACCESS_KEYS / OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY."""
+
+    _GATEWAY_TOML = textwrap.dedent(
+        """
+        [server]
+        host = "127.0.0.1"
+        port = 9000
+
+        [runtime]
+        type = "kubernetes"
+        execd_image = "opensandbox/execd:test"
+
+        [ingress]
+        mode = "gateway"
+
+        [ingress.gateway]
+        address = "gw.example.com"
+
+        [ingress.gateway.route]
+        mode = "header"
+        """
+    )
+
+    def _write_config(self, tmp_path, toml: str):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(toml)
+        return config_path
+
+    def test_env_secure_access_without_toml_block(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        _reset_config(monkeypatch)
+        b64_a = base64.b64encode(b"key-a").decode()
+        b64_b = base64.b64encode(b"key-b").decode()
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64_a},b={b64_b}")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "b")
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        loaded = config_module.load_config(config_path)
+        assert loaded.ingress is not None
+        assert loaded.ingress.secure_access is not None
+        assert loaded.ingress.secure_access.active_key == "b"
+        assert loaded.ingress.secure_access.get_active_secret_bytes() == b"key-b"
+
+    def test_env_secure_access_overrides_toml_block(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        _reset_config(monkeypatch)
+        b64_toml = base64.b64encode(b"toml-key").decode()
+        b64_env = base64.b64encode(b"env-key").decode()
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64_env}")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        toml = self._GATEWAY_TOML + textwrap.dedent(
+            f"""
+            [ingress.secure_access]
+            active_key = "a"
+
+            [[ingress.secure_access.keys]]
+            key_id = "a"
+            key = "{b64_toml}"
+            """
+        )
+        config_path = self._write_config(tmp_path, toml)
+
+        loaded = config_module.load_config(config_path)
+        assert loaded.ingress.secure_access.get_active_secret_bytes() == b"env-key"
+
+    def test_env_secure_access_requires_both_vars(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        b64 = base64.b64encode(b"key").decode()
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        _reset_config(monkeypatch)
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64}")
+        with pytest.raises(ValueError, match="must be set together"):
+            config_module.load_config(config_path)
+
+        _reset_config(monkeypatch)
+        monkeypatch.delenv("OPENSANDBOX_SECURE_ACCESS_KEYS")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        with pytest.raises(ValueError, match="must be set together"):
+            config_module.load_config(config_path)
+
+    def test_env_secure_access_requires_gateway_mode(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        _reset_config(monkeypatch)
+        b64 = base64.b64encode(b"key").decode()
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64}")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        toml = textwrap.dedent(
+            """
+            [server]
+            host = "127.0.0.1"
+
+            [runtime]
+            type = "docker"
+            execd_image = "opensandbox/execd:test"
+            """
+        )
+        config_path = self._write_config(tmp_path, toml)
+
+        with pytest.raises(ValueError, match="requires ingress.mode"):
+            config_module.load_config(config_path)
+
+    def test_env_secure_access_rejects_malformed_entry(self, tmp_path, monkeypatch) -> None:
+        _reset_config(monkeypatch)
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", "not-a-pair")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        with pytest.raises(ValueError, match="key_id=base64"):
+            config_module.load_config(config_path)
+
+    def test_env_secure_access_rejects_invalid_base64(self, tmp_path, monkeypatch) -> None:
+        _reset_config(monkeypatch)
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", "a=!!!invalid!!!")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        with pytest.raises(ValidationError, match="not valid base64"):
+            config_module.load_config(config_path)
+
+    def test_env_secure_access_active_key_must_exist(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        _reset_config(monkeypatch)
+        b64 = base64.b64encode(b"key").decode()
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64}")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "z")
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        with pytest.raises(ValidationError, match="not found in secure_access.keys"):
+            config_module.load_config(config_path)

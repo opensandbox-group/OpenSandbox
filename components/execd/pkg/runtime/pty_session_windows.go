@@ -45,6 +45,7 @@ type PTYSession interface {
 	WriteStdin(p []byte) (int, error)
 	AttachOutput() (io.Reader, io.Reader, func())
 	AttachOutputWithSnapshot(since int64) (io.Reader, io.Reader, func(), []byte, int64)
+	ReadOutput(since int64) ([]byte, int64, <-chan struct{})
 	SendSignal(name string)
 	ResizePTY(cols, rows uint16) error
 }
@@ -84,6 +85,7 @@ func (s *ptySession) IsRunning() bool                              { return fals
 func (s *ptySession) IsPTY() bool                                  { return false }
 func (s *ptySession) ExitCode() int                                { return -1 }
 func (s *ptySession) Done() <-chan struct{}                        { return nil }
+func (s *ptySession) OutputDone() <-chan struct{}                  { return nil }
 func (s *ptySession) ReplayBuffer() *replayBuffer                  { return nil }
 func (s *ptySession) StartPTY() error                              { return errPTYSessionNotSupported }
 func (s *ptySession) StartPipe() error                             { return errPTYSessionNotSupported }
@@ -91,6 +93,9 @@ func (s *ptySession) WriteStdin(_ []byte) (int, error)             { return 0, e
 func (s *ptySession) AttachOutput() (io.Reader, io.Reader, func()) { return nil, nil, func() {} }
 func (s *ptySession) AttachOutputWithSnapshot(_ int64) (io.Reader, io.Reader, func(), []byte, int64) {
 	return nil, nil, func() {}, nil, 0
+}
+func (s *ptySession) ReadOutput(_ int64) ([]byte, int64, <-chan struct{}) {
+	return nil, 0, nil
 }
 func (s *ptySession) SendSignal(_ string)         {}
 func (s *ptySession) ResizePTY(_, _ uint16) error { return nil }

@@ -57,3 +57,51 @@ func TestValidateWorkingDir_ExpandsHome(t *testing.T) {
 
 	require.NoError(t, ValidateWorkingDir("~/workspace"))
 }
+
+func TestValidateWorkingDirWithEnv(t *testing.T) {
+	const (
+		requestOnlyKey = "OPENSANDBOX_TEST_REQUEST_ONLY_CWD"
+		overrideKey    = "OPENSANDBOX_TEST_OVERRIDE_CWD"
+		missingKey     = "OPENSANDBOX_TEST_MISSING_CWD"
+	)
+
+	unsetEnvForTest(t, requestOnlyKey)
+	requestDir := t.TempDir()
+	require.NoError(t, ValidateWorkingDirWithEnv("$"+requestOnlyKey, map[string]string{
+		requestOnlyKey: requestDir,
+	}))
+
+	processFile := filepath.Join(t.TempDir(), "process-file")
+	require.NoError(t, os.WriteFile(processFile, []byte("x"), 0o600))
+	t.Setenv(overrideKey, processFile)
+	require.NoError(t, ValidateWorkingDirWithEnv("$"+overrideKey, map[string]string{
+		overrideKey: t.TempDir(),
+	}))
+
+	unsetEnvForTest(t, missingKey)
+	err := ValidateWorkingDirWithEnv("$"+missingKey, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "undefined environment variables")
+
+	nonexistent := filepath.Join(t.TempDir(), "missing")
+	err = ValidateWorkingDirWithEnv("$TARGET", map[string]string{"TARGET": nonexistent})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not exist")
+
+	err = ValidateWorkingDirWithEnv("$TARGET", map[string]string{"TARGET": processFile})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a directory")
+}
+
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	previous, existed := os.LookupEnv(key)
+	require.NoError(t, os.Unsetenv(key))
+	t.Cleanup(func() {
+		if existed {
+			require.NoError(t, os.Setenv(key, previous))
+			return
+		}
+		require.NoError(t, os.Unsetenv(key))
+	})
+}

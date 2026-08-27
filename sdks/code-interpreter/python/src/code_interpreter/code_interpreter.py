@@ -196,17 +196,20 @@ class CodeInterpreter:
         if sandbox is None:
             raise InvalidArgumentException("Sandbox instance must be provided")
 
-        logger.info("Creating code interpreter from sandbox: %s", sandbox.id)
+        logger.info(f"Creating code interpreter from sandbox: {sandbox.id}")
 
         factory = AdapterFactory(sandbox.connection_config)
 
         try:
             # Connect to the execd daemon endpoint for code execution services
             from opensandbox.constants import DEFAULT_EXECD_PORT
-            code_interpreter_endpoint = await sandbox.get_endpoint(DEFAULT_EXECD_PORT)
-            code_execution_service = factory.create_code_execution_service(code_interpreter_endpoint)
 
-            logger.info("Code interpreter %s created successfully", sandbox.id)
+            code_interpreter_endpoint = await sandbox.get_endpoint(DEFAULT_EXECD_PORT)
+            code_execution_service = factory.create_code_execution_service(
+                code_interpreter_endpoint
+            )
+
+            logger.info(f"Code interpreter {sandbox.id} created successfully")
 
             return cls(sandbox, code_execution_service)
         except Exception as e:

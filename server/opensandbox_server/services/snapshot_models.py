@@ -69,6 +69,7 @@ class SnapshotRecord:
 
     id: str
     source_sandbox_id: str
+    namespace: str | None = None
     name: str | None = None
     description: str | None = None
     restore_config: SnapshotRestoreConfig = field(default_factory=SnapshotRestoreConfig)

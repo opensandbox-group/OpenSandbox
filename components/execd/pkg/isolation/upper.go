@@ -26,10 +26,11 @@ import (
 
 // UpperManager manages upper directories for overlay workspaces.
 type UpperManager struct {
-	root     string
-	maxBytes int64
-	mu       sync.Mutex
-	entries  map[string]*UpperEntry
+	root      string
+	maxBytes  int64
+	removeAll func(string) error
+	mu        sync.Mutex
+	entries   map[string]*UpperEntry
 }
 
 // UpperEntry tracks one allocated upper directory.
@@ -48,9 +49,10 @@ func NewUpperManager(root string, maxBytes int64) (*UpperManager, error) {
 		return nil, fmt.Errorf("upper: create root %s: %w", root, err)
 	}
 	return &UpperManager{
-		root:     root,
-		maxBytes: maxBytes,
-		entries:  make(map[string]*UpperEntry),
+		root:      root,
+		maxBytes:  maxBytes,
+		removeAll: os.RemoveAll,
+		entries:   make(map[string]*UpperEntry),
 	}, nil
 }
 
@@ -105,34 +107,54 @@ func (m *UpperManager) Release(sessionID string) {
 // Remove immediately deletes an upper directory.
 func (m *UpperManager) Remove(sessionID string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	e, ok := m.entries[sessionID]
 	if !ok {
-		m.mu.Unlock()
 		return fmt.Errorf("upper: session %s not found", sessionID)
 	}
-	delete(m.entries, sessionID)
-	m.mu.Unlock()
 
+	// Mark the entry released before removal. A transient filesystem error must
+	// leave the directory tracked so CollectWithErrors can retry it later.
+	e.InUse = false
 	upperParent := filepath.Dir(e.UpperDir)
-	return os.RemoveAll(upperParent)
+	if err := m.removeAll(upperParent); err != nil {
+		return err
+	}
+	delete(m.entries, sessionID)
+	return nil
 }
 
 // Collect runs one garbage collection pass, removing all released entries.
 func (m *UpperManager) Collect() []string {
+	freed, _ := m.CollectWithErrors()
+	return freed
+}
+
+// CollectWithErrors runs one garbage collection pass and reports every
+// released entry that could not be removed. Failed entries remain tracked for
+// a later retry.
+func (m *UpperManager) CollectWithErrors() ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var freed []string
+	var cleanupErr error
 	for id, e := range m.entries {
 		if !e.InUse {
 			upperParent := filepath.Dir(e.UpperDir)
-			if err := os.RemoveAll(upperParent); err == nil {
-				freed = append(freed, id)
-				delete(m.entries, id)
+			if err := m.removeAll(upperParent); err != nil {
+				cleanupErr = errors.Join(
+					cleanupErr,
+					fmt.Errorf("upper: collect session %s: %w", id, err),
+				)
+				continue
 			}
+			freed = append(freed, id)
+			delete(m.entries, id)
 		}
 	}
-	return freed
+	return freed, cleanupErr
 }
 
 // Usage returns the current total size of all upper directories in bytes.

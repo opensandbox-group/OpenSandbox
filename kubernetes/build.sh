@@ -26,6 +26,7 @@ build_arg_if_set() {
 TAG=${TAG:-latest}
 COMPONENT=${COMPONENT:-controller}
 PUSH=${PUSH:-true}
+GHCR_REPO=${GHCR_REPO:-}
 BUILD_METADATA_FILE=${BUILD_METADATA_FILE:-build/${COMPONENT}-image-metadata.json}
 BUILD_ARGS=()
 for name in GOFLAGS LDFLAGS CGO_ENABLED CC CXX CFLAGS CXXFLAGS CGO_CFLAGS CGO_CXXFLAGS CGO_LDFLAGS; do
@@ -67,13 +68,17 @@ echo "========================================="
 PLATFORMS="linux/amd64,linux/arm64"
 
 if [ "$PUSH" == "true" ]; then
+    IMAGE_TAGS=(-t "${DOCKERHUB_REPO}/${IMAGE_NAME}:${TAG}" -t "${ACR_REPO}/${IMAGE_NAME}:${TAG}")
+    if [[ -n "${GHCR_REPO}" ]]; then
+        IMAGE_TAGS+=(-t "${GHCR_REPO}/${IMAGE_NAME}:${TAG}")
+    fi
+
     # Build and push to registry
     docker buildx build \
         --platform $PLATFORMS \
         $BUILD_ARG \
         "${BUILD_ARGS[@]}" \
-        -t "${DOCKERHUB_REPO}/${IMAGE_NAME}:${TAG}" \
-        -t "${ACR_REPO}/${IMAGE_NAME}:${TAG}" \
+        "${IMAGE_TAGS[@]}" \
         --metadata-file "${BUILD_METADATA_FILE}" \
         --push \
         -f "$DOCKERFILE" \
@@ -83,6 +88,9 @@ if [ "$PUSH" == "true" ]; then
     echo "Successfully built and pushed:"
     echo "  ${DOCKERHUB_REPO}/${IMAGE_NAME}:${TAG}"
     echo "  ${ACR_REPO}/${IMAGE_NAME}:${TAG}"
+    if [[ -n "${GHCR_REPO}" ]]; then
+        echo "  ${GHCR_REPO}/${IMAGE_NAME}:${TAG}"
+    fi
     echo "========================================="
 else
     # Build only (for local testing)

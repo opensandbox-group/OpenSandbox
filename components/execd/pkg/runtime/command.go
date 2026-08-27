@@ -37,6 +37,8 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
 
+const bashShell = "bash"
+
 var forwardSignals = []os.Signal{
 	syscall.SIGINT,
 	syscall.SIGTERM,
@@ -47,13 +49,57 @@ var forwardSignals = []os.Signal{
 	syscall.SIGWINCH,
 }
 
-// getShell returns the preferred shell, falling back to sh if bash is not available.
-// This is needed for Alpine-based Docker images that only have sh by default.
-func getShell() string {
-	if _, err := exec.LookPath("bash"); err == nil {
-		return "bash"
+// subscribeCommandSignals sets up the classic-mode subscription that
+// forwards application signals to a running /command process group, and
+// returns the signal channel plus a stop function. In init mode
+// (OSEP-0018) nothing is subscribed and the channel is nil: application
+// signals are owned by forwardInitSignals, which forwards them to the
+// entrypoint group (and SIGTERM triggers the shutdown sequence). An
+// additional subscription here would split each in-namespace signal
+// between two channels and leak HUP/USR*/WINCH into whatever /command
+// happens to be running.
+func subscribeCommandSignals() (chan os.Signal, func()) {
+	if initModeActive() {
+		return nil, func() {}
 	}
-	return "sh"
+	signals := make(chan os.Signal, len(forwardSignals)+1)
+	signal.Notify(signals, forwardSignals...)
+	return signals, func() {
+		signal.Stop(signals)
+		close(signals)
+	}
+}
+
+// getShell returns "bash" if available, otherwise "sh". The result is cached
+// for the process lifetime; tests that mutate PATH must call
+// resetShellCacheForTest.
+var (
+	shellCacheOnce sync.Once
+	shellCacheVal  string
+)
+
+func getShell() string {
+	shellCacheOnce.Do(func() {
+		if _, err := exec.LookPath(bashShell); err == nil {
+			shellCacheVal = bashShell
+		} else {
+			shellCacheVal = "sh"
+		}
+	})
+	return shellCacheVal
+}
+
+// shellCommand returns (shell, argv) for launching the preferred shell,
+// prepending --noprofile --norc when Bash is selected. Extra positional
+// arguments (script path, or "-c" + code) are appended after.
+func shellCommand(extra ...string) (string, []string) {
+	shell := getShell()
+	args := make([]string, 0, 2+len(extra))
+	if shell == bashShell {
+		args = append(args, "--noprofile", "--norc")
+	}
+	args = append(args, extra...)
+	return shell, args
 }
 
 func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
@@ -100,10 +146,8 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
 	session := c.newContextID()
 
-	signals := make(chan os.Signal, len(forwardSignals)+1)
-	defer close(signals)
-	signal.Notify(signals, forwardSignals...)
-	defer signal.Stop(signals)
+	signals, stopSignals := subscribeCommandSignals()
+	defer stopSignals()
 
 	stdout, stderr, err := c.stdLogDescriptor(session)
 	if err != nil {
@@ -116,6 +160,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 	startAt := time.Now()
 	log.Info("received command: %v", log.SanitizeCommand(request.Code))
+	// --noprofile/--norc are no-ops for `bash -c`, so shellCommand is not used here.
 	shell := getShell()
 	cmd := exec.CommandContext(ctx, shell, "-c", request.Code)
 	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
@@ -151,7 +196,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
 	})
 
-	err = cmd.Start()
+	mp, err := launchManaged(cmd)
 	if err != nil {
 		close(done)
 		wg.Wait()
@@ -219,7 +264,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		}
 	})
 
-	err = cmd.Wait()
+	err = mp.Wait()
 	close(done)
 	wg.Wait()
 	if err != nil {
@@ -227,9 +272,9 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		var eCode int
 		var traceback []string
 
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
-			exitCode := exitError.ExitCode()
+		var exitCodeErr exitCoder
+		if errors.As(err, &exitCodeErr) {
+			exitCode := exitCodeErr.ExitCode()
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
 			eCode = exitCode
@@ -269,13 +314,14 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	stdoutPath := c.combinedOutputFileName(session)
 	stderrPath := c.combinedOutputFileName(session)
 
-	signals := make(chan os.Signal, len(forwardSignals)+1)
-	defer close(signals)
-	signal.Notify(signals, forwardSignals...)
-	defer signal.Stop(signals)
+	// Classic-mode signal subscription (no-op in init mode; the channel is
+	// never consumed, keeping today's behavior of not dying on SIGHUP etc.).
+	_, stopSignals := subscribeCommandSignals()
+	defer stopSignals()
 
 	startAt := time.Now()
 	log.Info("received command: %v", log.SanitizeCommand(request.Code))
+	// --noprofile/--norc are no-ops for `bash -c`, so shellCommand is not used here.
 	shell := getShell()
 	cmd := exec.CommandContext(ctx, shell, "-c", request.Code)
 	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
@@ -307,7 +353,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		defer devNull.Close()
 	}
 
-	err = cmd.Start()
+	mp, err := launchManaged(cmd)
 	kernel := &commandKernel{
 		pid:          -1,
 		stdoutPath:   stdoutPath,
@@ -326,21 +372,24 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		return fmt.Errorf("failed to start commands: %w", err)
 	}
 
+	// Register the kernel synchronously so that GetCommandStatus callers
+	// can find the session immediately after Execute returns. Previously
+	// this happened inside the goroutine, creating a race where the HTTP
+	// handler could return before the kernel was stored.
+	kernel.pid = cmd.Process.Pid
+	c.storeCommandKernel(session, kernel)
+
 	safego.Go(func() {
 		defer pipe.Close()
 
-		kernel.running = true
-		kernel.pid = cmd.Process.Pid
-		c.storeCommandKernel(session, kernel)
-
-		err = cmd.Wait()
+		err = mp.Wait()
 		cancel()
 		if err != nil {
 			log.Error("CommandExecError: error running commands: %v", err)
 			exitCode := 1
-			var exitError *exec.ExitError
-			if errors.As(err, &exitError) {
-				exitCode = exitError.ExitCode()
+			var exitCodeErr exitCoder
+			if errors.As(err, &exitCodeErr) {
+				exitCode = exitCodeErr.ExitCode()
 			}
 			c.markCommandFinished(session, exitCode, err.Error())
 			return

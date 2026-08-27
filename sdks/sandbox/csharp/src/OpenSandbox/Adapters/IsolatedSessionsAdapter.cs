@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using OpenSandbox.Core;
@@ -50,6 +51,18 @@ internal sealed class IsolationSessionHandle : IIsolationSession
         CancellationToken cancellationToken = default)
         => _adapter.RunInternalAsync(SessionId, code, opts, handlers, cancellationToken);
 
+    public Task<IsolatedBackgroundRun> RunBackgroundAsync(
+        string code, IsolatedRunOpts? opts = null, CancellationToken cancellationToken = default)
+        => _adapter.RunBackgroundInternalAsync(SessionId, code, opts, cancellationToken);
+
+    public Task<IsolatedRunStatus> GetRunStatusAsync(
+        string runId, CancellationToken cancellationToken = default)
+        => _adapter.RunStatusInternalAsync(SessionId, runId, cancellationToken);
+
+    public Task<RunLogs> GetRunLogsAsync(
+        string runId, long cursor = 0, CancellationToken cancellationToken = default)
+        => _adapter.RunLogsInternalAsync(SessionId, runId, cursor, cancellationToken);
+
     public Task<IsolatedSessionState> GetAsync(CancellationToken cancellationToken = default)
         => _adapter.GetInternalAsync(SessionId, cancellationToken);
 
@@ -59,6 +72,8 @@ internal sealed class IsolationSessionHandle : IIsolationSession
 
 internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
 {
+    private const string TailCursorHeader = "EXECD-ISOLATED-TAIL-CURSOR";
+
     private readonly HttpClient _httpClient;
     private readonly HttpClient _sseHttpClient;
     internal readonly string _baseUrl;
@@ -102,15 +117,50 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         return new IsolationSessionHandle(info, this);
     }
 
-    internal async Task<IsolatedSessionState> GetInternalAsync(
+    public async Task<IIsolationSession> AttachAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId cannot be empty", nameof(sessionId));
+        }
+
+        var state = await GetStateAsync(sessionId, "attach isolated session", cancellationToken)
+            .ConfigureAwait(false);
+        // Build an IsolatedSessionInfo from the SessionState response. The
+        // creation-parameter echo fields are additive/optional; older execd
+        // builds omit them. Missing fields remain null on the info so the
+        // handle is still usable via sessionId for RunAsync/GetAsync/DeleteAsync.
+        var info = new IsolatedSessionInfo(
+            SessionId: sessionId,
+            CreatedAt: state.CreatedAt,
+            Profile: state.Profile,
+            Workspace: state.Workspace,
+            ExtraWritable: state.ExtraWritable,
+            Binds: state.Binds,
+            ShareNet: state.ShareNet,
+            EnvPassthrough: state.EnvPassthrough,
+            Uid: state.Uid,
+            Gid: state.Gid,
+            UidMode: state.UidMode,
+            IdleTimeoutSeconds: state.IdleTimeoutSeconds);
+        return new IsolationSessionHandle(info, this);
+    }
+
+    internal Task<IsolatedSessionState> GetInternalAsync(
         string sessionId, CancellationToken cancellationToken = default)
+        => GetStateAsync(sessionId, "get isolated session", cancellationToken);
+
+    private async Task<IsolatedSessionState> GetStateAsync(
+        string sessionId, string operation, CancellationToken cancellationToken)
     {
         var url = $"{_baseUrl}/v1/isolated/session/{Uri.EscapeDataString(sessionId)}";
         using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
         ApplyHeaders(httpRequest);
 
         using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
-        await EnsureSuccessAsync(response, "get isolated session");
+        await EnsureSuccessAsync(response, operation);
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         return JsonSerializer.Deserialize<IsolatedSessionState>(body, JsonOptions)!;
     }
@@ -146,6 +196,105 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         return execution;
     }
 
+    internal async Task<IsolatedBackgroundRun> RunBackgroundInternalAsync(
+        string sessionId, string code, IsolatedRunOpts? opts = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidArgumentException("sessionId cannot be empty");
+        }
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            throw new InvalidArgumentException("code cannot be empty");
+        }
+
+        var url = $"{_baseUrl}/v1/isolated/session/{Uri.EscapeDataString(sessionId)}/run";
+        var bodyObj = new Dictionary<string, object> { ["code"] = code, ["background"] = true };
+        if (opts?.Envs != null) bodyObj["envs"] = opts.Envs;
+        // timeout_seconds is foreground-only and deliberately not sent.
+
+        var json = JsonSerializer.Serialize(bodyObj, JsonOptions);
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url);
+        httpRequest.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        ApplyHeaders(httpRequest);
+
+        using var response = await _httpClient.SendAsync(
+            httpRequest, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode != HttpStatusCode.Accepted)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            throw new SandboxApiException(
+                $"run background in isolated session failed. Status: {(int)response.StatusCode}, Body: {errorBody}",
+                (int)response.StatusCode);
+        }
+        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        return JsonSerializer.Deserialize<IsolatedBackgroundRun>(body, JsonOptions)!;
+    }
+
+    internal async Task<IsolatedRunStatus> RunStatusInternalAsync(
+        string sessionId, string runId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidArgumentException("sessionId cannot be empty");
+        }
+        if (string.IsNullOrWhiteSpace(runId))
+        {
+            throw new InvalidArgumentException("runId cannot be empty");
+        }
+
+        var url = $"{_baseUrl}/v1/isolated/session/{Uri.EscapeDataString(sessionId)}" +
+                  $"/runs/{Uri.EscapeDataString(runId)}";
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
+        ApplyHeaders(httpRequest);
+
+        using var response = await _httpClient.SendAsync(
+            httpRequest, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, "get isolated run status").ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        return JsonSerializer.Deserialize<IsolatedRunStatus>(body, JsonOptions)!;
+    }
+
+    internal async Task<RunLogs> RunLogsInternalAsync(
+        string sessionId, string runId, long cursor = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidArgumentException("sessionId cannot be empty");
+        }
+        if (string.IsNullOrWhiteSpace(runId))
+        {
+            throw new InvalidArgumentException("runId cannot be empty");
+        }
+        if (cursor < 0)
+        {
+            throw new InvalidArgumentException("cursor cannot be negative");
+        }
+
+        var url = $"{_baseUrl}/v1/isolated/session/{Uri.EscapeDataString(sessionId)}" +
+                  $"/runs/{Uri.EscapeDataString(runId)}/logs";
+        if (cursor > 0) url += $"?cursor={cursor}";
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
+        ApplyHeaders(httpRequest);
+
+        using var response = await _httpClient.SendAsync(
+            httpRequest, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, "get isolated run logs").ConfigureAwait(false);
+        var bytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+        var text = Encoding.UTF8.GetString(bytes);
+
+        var cursorHeader = response.Headers.TryGetValues(TailCursorHeader, out var values)
+            ? values.FirstOrDefault()
+            : null;
+        var nextCursor = long.TryParse(cursorHeader, out var parsedCursor)
+            ? parsedCursor
+            : cursor + bytes.Length;
+
+        return new RunLogs(text, nextCursor);
+    }
+
     internal async Task DeleteInternalAsync(
         string sessionId, CancellationToken cancellationToken = default)
     {
@@ -168,6 +317,20 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         await EnsureSuccessAsync(response, "get isolated capabilities");
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         return JsonSerializer.Deserialize<IsolatedCapabilities>(body, JsonOptions)!;
+    }
+
+    public async Task<IReadOnlyList<IsolatedSessionSummary>> ListAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var url = $"{_baseUrl}/v1/isolated/sessions";
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
+        ApplyHeaders(httpRequest);
+
+        using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
+        await EnsureSuccessAsync(response, "list isolated sessions");
+        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        var result = JsonSerializer.Deserialize<ListIsolatedSessionsResponse>(body, JsonOptions)!;
+        return result.Sessions ?? new List<IsolatedSessionSummary>();
     }
 
     internal ISandboxFiles CreateFilesForSession(string sessionId)

@@ -212,15 +212,6 @@ var matchTests = []MatchTest{
 	{"node_modules/!(.cache)/**", "node_modules/others/others/file.txt", true, true, nil, false, false, false, !onWindows, 0, 0},
 }
 
-// numResultsFilesOnly memoizes results with WithFilesOnly.
-var numResultsFilesOnly []int
-
-// numResultsNoFollow memoizes results with WithNoFollow.
-var numResultsNoFollow []int
-
-// numResultsAllOpts memoizes counts with every option enabled.
-var numResultsAllOpts []int
-
 func TestValidatePattern(t *testing.T) {
 	for idx, tt := range matchTests {
 		testValidatePatternWith(t, idx, tt)

@@ -29,4 +29,4 @@ Port-forward to access locally:
 Then use the API at http://localhost:8080 (set api_key in config if required).
 {{- end }}
 
-Documentation: https://github.com/alibaba/OpenSandbox
+Documentation: https://github.com/opensandbox-group/OpenSandbox

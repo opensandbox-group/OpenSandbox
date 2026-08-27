@@ -36,13 +36,23 @@ func (c *captureSubscriber) HandleBlocked(_ context.Context, ev BlockedEvent) {
 }
 
 type blockingSubscriber struct {
-	block chan struct{}
+	entered chan struct{}
+	block   chan struct{}
+	recv    chan BlockedEvent
 }
 
 func (b *blockingSubscriber) HandleBlocked(_ context.Context, ev BlockedEvent) {
-	// Block until the channel is closed to simulate a slow consumer and trigger backpressure.
+	// Signal the test that the handler is busy, then block until the channel
+	// is closed to simulate a slow consumer and trigger backpressure.
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
 	<-b.block
-	_ = ev
+	select {
+	case b.recv <- ev:
+	default:
+	}
 }
 
 func TestBroadcasterFanout(t *testing.T) {
@@ -80,21 +90,40 @@ func TestBroadcasterDropsWhenSubscriberBackedUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Small queue; blocking subscriber will hold the first event.
+	// Small queue; blocking subscriber holds the first event it handles.
 	b := NewBroadcaster(ctx, BroadcasterConfig{QueueSize: 1})
+	entered := make(chan struct{})
 	block := make(chan struct{})
-	sub := &blockingSubscriber{block: block}
+	sub := &blockingSubscriber{entered: entered, block: block, recv: make(chan BlockedEvent, 8)}
 	b.AddSubscriber(sub)
 
 	ev1 := BlockedEvent{Hostname: "first.example", Timestamp: time.Now()}
 	ev2 := BlockedEvent{Hostname: "second.example", Timestamp: time.Now()}
+	ev3 := BlockedEvent{Hostname: "third.example", Timestamp: time.Now()}
 
+	// ev1 is handed directly to the subscriber, which then blocks in its handler.
 	b.Publish(ev1)
-	// This publish should drop because subscriber is blocked and queue size is 1.
+	<-entered
+	// Subscriber is provably busy: ev2 fills the one-slot queue, ev3 is dropped.
 	b.Publish(ev2)
+	b.Publish(ev3)
 
-	// Allow subscriber to drain and exit.
+	// Allow subscriber to drain whatever was queued.
 	close(block)
+
+	for _, want := range []BlockedEvent{ev1, ev2} {
+		select {
+		case got := <-sub.recv:
+			require.Equal(t, want.Hostname, got.Hostname, "expected %s to be delivered", want.Hostname)
+		case <-time.After(2 * time.Second):
+			require.FailNow(t, "subscriber did not receive %s", want.Hostname)
+		}
+	}
+	select {
+	case dropped := <-sub.recv:
+		require.FailNow(t, "third event should have been dropped, got %s", dropped.Hostname)
+	case <-time.After(200 * time.Millisecond):
+	}
 
 	b.Close()
 }

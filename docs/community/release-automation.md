@@ -25,20 +25,25 @@ Script path:
 - `python/code-interpreter`
 - `python/mcp/sandbox`
 - `java/sandbox`
-- `java/code-interpreter`
 - `csharp/sandbox`
 - `csharp/code-interpreter`
 - `sdks/sandbox/go`
 - `cli`
 - `server`
 - `docker/execd`
+- `docker/nodeagent`
 - `docker/code-interpreter`
 - `docker/ingress`
 - `docker/egress`
 - `k8s/controller`
 - `k8s/task-executor`
 - `helm/opensandbox`
+- `helm/opensandbox-node-agent`
 - `helm` (alias of `helm/opensandbox`)
+
+The `java/sandbox` target publishes the Kotlin/JVM SDK release train, including
+`sandbox`, `sandbox-api`, `sandbox-pool-redis`, `code-interpreter`, and
+`sandbox-bom`.
 
 ## Tag Rules
 
@@ -51,6 +56,27 @@ The script aligns with existing workflow triggers:
 - plain suffix tags:
   - `<target>/<version>` for docker/k8s/helm targets
   - examples: `docker/execd/v0.3.0`, `helm/opensandbox/0.1.0`
+
+Release tag namespaces are protected by repository rulesets. Only authorized
+release managers may create matching tags, and an existing release tag cannot
+be updated or deleted.
+
+## Release Approval and Source Verification
+
+Hosted publish workflows run a shared release preflight before publishing:
+
+- the release commit must be reachable from `origin/main`
+- non-dry-run releases require approval through the `release` environment
+- the person who triggered the release cannot approve their own deployment
+
+This implements two-person control: one person initiates the release and a
+different Project Maintainer approves it. GitHub environments require one of
+the configured reviewers; they do not natively support requiring two reviewer
+approvals in addition to the initiator.
+
+The hosted Generic Release workflow does not create or push release tags. An
+authorized release manager must create the tag from a commit on `main` before
+running a non-dry-run Generic Release.
 
 ## Release Notes Format
 
@@ -102,7 +128,9 @@ Examples:
 - `js/sandbox` -> `sdks/sandbox/javascript` + `specs/sandbox-lifecycle.yml`
 - `server` -> `server` + `specs/sandbox-lifecycle.yml`
 - `docker/egress` -> `components/egress`
+- `docker/nodeagent` -> `components/nodeagent` + `components/internal`
 - `helm/opensandbox` -> `kubernetes/charts/opensandbox`
+- `helm/opensandbox-node-agent` -> `kubernetes/charts/opensandbox-node-agent`
 
 Override behavior:
 
@@ -203,37 +231,14 @@ If `--dry-run` is enabled, the script never creates/pushes tags and never create
 
 ## GitHub Actions Entry
 
-You can trigger the same flow in GitHub Actions from:
+The GitHub Actions dispatch entry for this flow (`release-generic.yml`) was
+removed because it had no callers; the release process uses tag pushes that
+trigger the `publish-*` workflows directly. Run `scripts/release/create-release.sh`
+locally to create release tags and GitHub Releases:
 
-- `.github/workflows/release-generic.yml`
-
-Inputs exposed in the workflow dispatch form:
-
-- `target`
-- `version`
-- `from_tag` (optional)
-- `initial_release` (boolean)
-- `push_tag` (boolean)
-- `dry_run` (boolean, default `true`)
-
-Dry-run in GitHub Actions:
-
-- set `dry_run=true`
-- set `push_tag=false`
-- check logs for:
-  - computed tag (`New tag`)
-  - range (`Computed range`)
-  - preview body (`Generated release notes preview`)
-
-Recommended first run in UI:
-
-- set `dry_run=true`
-- keep `push_tag=false`
-- verify the generated release notes preview in logs
-- rerun with `dry_run=false` and `push_tag=true` when confirmed
-
-When `dry_run=false`, `.github/workflows/release-generic.yml` uploads an
-explicit `opensandbox-<tag>.tar.gz` source archive and `SHA256SUMS` file to the
-GitHub Release, then signs both files with GitHub/Sigstore provenance
-attestations. See [Release Verification](release-verification.md) for user
-verification commands and release signing coverage.
+When `dry_run=false`, `scripts/release/create-release.sh` creates the tag and
+the GitHub Release. Source archives (`opensandbox-<tag>.tar.gz` + `SHA256SUMS`)
+were previously uploaded by the removed `release-generic.yml` workflow; releases
+created after its removal no longer carry source archives. See
+[Release Verification](release-verification.md) for user verification commands
+and release signing coverage.

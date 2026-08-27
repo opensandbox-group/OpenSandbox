@@ -16,7 +16,12 @@
 
 @file:Suppress("UnstableApiUsage")
 
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import org.gradle.api.GradleException
+import org.gradle.api.publish.PublishingExtension
+import org.gradle.api.publish.maven.MavenPublication
+import org.gradle.api.publish.maven.tasks.GenerateMavenPom
+import org.gradle.api.publish.tasks.GenerateModuleMetadata
 import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 
 fun Project.resolveVersionFromTag(expectedTagPrefix: String): String? {
@@ -48,6 +53,7 @@ plugins {
     alias(libs.plugins.dokka) apply false
     alias(libs.plugins.spotless)
     alias(libs.plugins.mavenPublish) apply false
+    alias(libs.plugins.shadow) apply false
 }
 
 val manualProjectVersion = project.findProperty("project.version") as String
@@ -90,6 +96,9 @@ val kotlinJvmId = libs.plugins.kotlin.jvm.get().pluginId
 val kotlinSerializationId = libs.plugins.kotlin.serialization.get().pluginId
 val dokkaId = libs.plugins.dokka.get().pluginId
 val mavenPublishId = libs.plugins.mavenPublish.get().pluginId
+val shadowId = libs.plugins.shadow.get().pluginId
+
+val shadedSerializationProjects = setOf("sandbox-api", "sandbox", "code-interpreter")
 
 subprojects {
     apply(plugin = mavenPublishId)
@@ -104,6 +113,67 @@ subprojects {
             compilerOptions {
                 javaParameters.set(true)
                 freeCompilerArgs.add("-Xjvm-default=all")
+            }
+        }
+    }
+
+    if (name in shadedSerializationProjects) {
+        apply(plugin = shadowId)
+
+        tasks.named<ShadowJar>("shadowJar").configure {
+            archiveClassifier.set("shadowed")
+            relocate("kotlinx.serialization", "com.alibaba.opensandbox.shaded.kotlinx.serialization")
+        }
+        tasks.withType<GenerateModuleMetadata>().configureEach {
+            enabled = false
+        }
+        tasks.withType<GenerateMavenPom>().configureEach {
+            doLast {
+                val pomFile = destination
+                val filtered =
+                    pomFile
+                        .readText()
+                        .replace(
+                            Regex(
+                                "\\s*<dependency>\\s*<groupId>org\\.jetbrains\\.kotlinx</groupId>.*?</dependency>",
+                                RegexOption.DOT_MATCHES_ALL,
+                            ),
+                            "",
+                        )
+                pomFile.writeText(filtered)
+            }
+        }
+
+        afterEvaluate {
+            extensions.configure<PublishingExtension>("publishing") {
+                publications.withType<MavenPublication>().configureEach {
+                    artifacts.removeIf { artifact ->
+                        artifact.classifier == null && artifact.extension == "jar"
+                    }
+                    artifact(tasks.named("shadowJar")) {
+                        classifier = null
+                        extension = "jar"
+                    }
+                    pom.withXml {
+                        val dependenciesNode =
+                            asNode()
+                                .children()
+                                .filterIsInstance<groovy.util.Node>()
+                                .firstOrNull { it.name() == "dependencies" }
+                        dependenciesNode
+                            ?.children()
+                            ?.removeAll { child ->
+                                val dependencyNode = child as? groovy.util.Node ?: return@removeAll false
+                                val groupId =
+                                    dependencyNode
+                                        .children()
+                                        .filterIsInstance<groovy.util.Node>()
+                                        .firstOrNull { it.name() == "groupId" }
+                                        ?.text()
+                                groupId == "org.jetbrains.kotlinx"
+                            }
+                    }
+                }
             }
         }
     }
@@ -145,6 +215,27 @@ subprojects {
                 url.set("https://github.com/opensandbox-group/OpenSandbox")
                 connection.set("scm:git:https://github.com/opensandbox-group/OpenSandbox.git")
                 developerConnection.set("scm:git:ssh://git@github.com/opensandbox-group/OpenSandbox.git")
+            }
+            if (project.name in shadedSerializationProjects) {
+                withXml {
+                    val dependenciesNode =
+                        asNode()
+                            .children()
+                            .filterIsInstance<groovy.util.Node>()
+                            .firstOrNull { it.name() == "dependencies" }
+                    dependenciesNode
+                        ?.children()
+                        ?.removeIf { child ->
+                            val dependencyNode = child as? groovy.util.Node ?: return@removeIf false
+                            val groupId =
+                                dependencyNode
+                                    .children()
+                                    .filterIsInstance<groovy.util.Node>()
+                                    .firstOrNull { it.name() == "groupId" }
+                                    ?.text()
+                            groupId == "org.jetbrains.kotlinx"
+                        }
+                }
             }
         }
     }

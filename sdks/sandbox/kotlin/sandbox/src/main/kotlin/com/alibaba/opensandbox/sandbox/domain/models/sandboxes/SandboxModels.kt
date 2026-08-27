@@ -347,7 +347,7 @@ class NetworkPolicy private constructor(
         fun build(): NetworkPolicy {
             return NetworkPolicy(
                 defaultAction = defaultAction,
-                egress = if (egress.isEmpty()) null else egress.toList(),
+                egress = egress.toList(),
             )
         }
     }
@@ -714,6 +714,8 @@ class Volume private constructor(
  * @property image Image specification used to create this sandbox
  * @property platform Effective platform used for sandbox provisioning
  * @property metadata Custom metadata attached to the sandbox
+ * @property extensions Opaque extension data returned by the server
+ * @property allocation Current runtime-confirmed pool allocation, when available
  */
 class SandboxInfo(
     val id: String,
@@ -725,6 +727,46 @@ class SandboxInfo(
     val snapshotId: String? = null,
     val platform: PlatformSpec? = null,
     val metadata: Map<String, String>? = null,
+    val extensions: Map<String, String>? = null,
+    val allocation: SandboxAllocation? = null,
+) {
+    constructor(
+        id: String,
+        status: SandboxStatus,
+        entrypoint: List<String>,
+        expiresAt: OffsetDateTime?,
+        createdAt: OffsetDateTime,
+        image: SandboxImageSpec?,
+        snapshotId: String?,
+        platform: PlatformSpec?,
+        metadata: Map<String, String>?,
+        extensions: Map<String, String>?,
+    ) : this(
+        id = id,
+        status = status,
+        entrypoint = entrypoint,
+        expiresAt = expiresAt,
+        createdAt = createdAt,
+        image = image,
+        snapshotId = snapshotId,
+        platform = platform,
+        metadata = metadata,
+        extensions = extensions,
+        allocation = null,
+    )
+}
+
+/**
+ * Current runtime-confirmed pool allocation for a sandbox.
+ *
+ * @property mode Confirmed allocation mode. Currently always `pool`.
+ * @property poolRef Concrete pool reference currently allocated to the sandbox.
+ * @property state Current confirmed allocation state. Currently always `allocated`.
+ */
+class SandboxAllocation(
+    val mode: String,
+    val poolRef: String,
+    val state: String,
 )
 
 /**
@@ -747,10 +789,12 @@ class SandboxStatus(
  *
  * @property id Unique identifier of the newly created sandbox
  * @property platform Effective platform used for sandbox provisioning
+ * @property extensions Opaque extension data returned by the server
  */
 class SandboxCreateResponse(
     val id: String,
     val platform: PlatformSpec? = null,
+    val extensions: Map<String, String>? = null,
 )
 
 /**
@@ -794,6 +838,7 @@ class SnapshotInfo(
 
 class SnapshotFilter private constructor(
     val sandboxId: String?,
+    val name: String?,
     val states: List<String>?,
     val pageSize: Int?,
     val page: Int?,
@@ -805,12 +850,18 @@ class SnapshotFilter private constructor(
 
     class Builder {
         private var sandboxId: String? = null
+        private var name: String? = null
         private var states: List<String>? = null
         private var pageSize: Int? = null
         private var page: Int? = null
 
         fun sandboxId(sandboxId: String): Builder {
             this.sandboxId = sandboxId
+            return this
+        }
+
+        fun name(name: String): Builder {
+            this.name = name
             return this
         }
 
@@ -836,7 +887,7 @@ class SnapshotFilter private constructor(
             return this
         }
 
-        fun build(): SnapshotFilter = SnapshotFilter(sandboxId, states, pageSize, page)
+        fun build(): SnapshotFilter = SnapshotFilter(sandboxId, name, states, pageSize, page)
     }
 }
 

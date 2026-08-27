@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620" role="img" aria-labelledby="title desc">
+  <title id="title">Isolation Session Runtime Layout</title>
+  <desc id="desc">Inside a single sandbox, execd forks one bwrap child per isolation session. Each bwrap runs a long-lived bash isolated by Linux namespaces. Overlay upper directories live on the host, so the filesystem proxy operates outside the namespaces.</desc>
+  <defs>
+    <marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
+    </marker>
+    <marker id="a-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2410c"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 22px; font-weight: 700; fill: #1e40af; }
+      .panel-title { font-size: 16px; font-weight: 700; fill: #1e40af; }
+      .box-title { font-size: 15px; font-weight: 700; fill: #1e3a5f; }
+      .mono { font-size: 13px; font-weight: 600; fill: #374151; }
+      .detail { font-size: 12px; font-weight: 600; fill: #64748b; }
+      .line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+  </defs>
+
+  <rect width="1100" height="620" fill="#ffffff"/>
+  <text class="title" x="30" y="40">Isolation Session Runtime Layout</text>
+
+  <!-- Sandbox boundary -->
+  <rect x="30" y="70" width="1040" height="470" rx="10" ry="10" fill="#dbeafe" stroke="#1e40af" stroke-width="2.5"/>
+  <text class="panel-title" x="50" y="98">Sandbox  (one container, one kernel)</text>
+
+  <!-- execd -->
+  <rect x="60" y="120" width="980" height="80" rx="8" ry="8" fill="#a7f3d0" stroke="#047857" stroke-width="2"/>
+  <text class="box-title" x="80" y="145">execd  (parent process)</text>
+  <text class="mono" x="80" y="168">POST /session · POST /session/{id}/run · DELETE /session/{id} · /files (FS proxy)</text>
+  <text class="detail" x="80" y="187">forks one bwrap per session, streams stdout back to clients as SSE</text>
+
+  <!-- Session A -->
+  <rect x="60" y="240" width="300" height="270" rx="8" ry="8" fill="#ffffff" stroke="#1e3a5f" stroke-width="2"/>
+  <text class="box-title" x="80" y="268">bwrap · Session A</text>
+  <text class="detail" x="80" y="286">ns: PID · mount · IPC · UTS</text>
+
+  <rect x="80" y="304" width="260" height="70" rx="6" ry="6" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text class="box-title" x="95" y="326">bash (PID 1 in ns)</text>
+  <text class="mono" x="95" y="346">stdin  ← pipe ← execd</text>
+  <text class="mono" x="95" y="364">stdout → pipe → execd</text>
+
+  <rect x="80" y="388" width="260" height="105" rx="6" ry="6" fill="#ddd6fe" stroke="#6d28d9" stroke-width="1.5"/>
+  <text class="box-title" x="95" y="410" fill="#6d28d9">mounts inside ns</text>
+  <text class="mono" x="95" y="432">/workspace = overlay(</text>
+  <text class="mono" x="95" y="450">    lower = host workspace,</text>
+  <text class="mono" x="95" y="468">    upper = A/upper</text>
+  <text class="mono" x="95" y="486">)</text>
+
+  <!-- Session B -->
+  <rect x="390" y="240" width="300" height="270" rx="8" ry="8" fill="#ffffff" stroke="#1e3a5f" stroke-width="2"/>
+  <text class="box-title" x="410" y="268">bwrap · Session B</text>
+  <text class="detail" x="410" y="286">isolated from A</text>
+
+  <rect x="410" y="304" width="260" height="70" rx="6" ry="6" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text class="box-title" x="425" y="326">bash (PID 1 in ns)</text>
+  <text class="mono" x="425" y="346">state is per-session:</text>
+  <text class="mono" x="425" y="364">  export X=1 in A ≠ seen in B</text>
+
+  <rect x="410" y="388" width="260" height="105" rx="6" ry="6" fill="#ddd6fe" stroke="#6d28d9" stroke-width="1.5"/>
+  <text class="box-title" x="425" y="410" fill="#6d28d9">mounts inside ns</text>
+  <text class="mono" x="425" y="432">/workspace = overlay(</text>
+  <text class="mono" x="425" y="450">    lower = host workspace,</text>
+  <text class="mono" x="425" y="468">    upper = B/upper</text>
+  <text class="mono" x="425" y="486">)</text>
+
+  <!-- Host-side state -->
+  <rect x="720" y="240" width="320" height="270" rx="8" ry="8" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
+  <text class="box-title" x="740" y="268" fill="#b45309">Host-side  (outside ns)</text>
+  <text class="detail" x="740" y="286">same container FS as execd</text>
+
+  <rect x="740" y="304" width="280" height="90" rx="6" ry="6" fill="#ffffff" stroke="#b45309" stroke-width="1.5"/>
+  <text class="box-title" x="755" y="326" fill="#b45309">overlay upper dirs</text>
+  <text class="mono" x="755" y="348">/var/lib/execd/isolation/</text>
+  <text class="mono" x="755" y="366">  ├── A/upper/    ← A's writes</text>
+  <text class="mono" x="755" y="384">  └── B/upper/    ← B's writes</text>
+
+  <rect x="740" y="408" width="280" height="86" rx="6" ry="6" fill="#ffffff" stroke="#b45309" stroke-width="1.5"/>
+  <text class="box-title" x="755" y="430" fill="#b45309">FS proxy path</text>
+  <text class="mono" x="755" y="452">execd reads/writes merged view</text>
+  <text class="mono" x="755" y="470">from host — no ns entry needed</text>
+  <text class="mono" x="755" y="488">(works during long-running runs)</text>
+
+  <!-- Client -->
+  <rect x="380" y="555" width="340" height="50" rx="8" ry="8" fill="#ddd6fe" stroke="#6d28d9" stroke-width="2"/>
+  <text class="box-title" x="550" y="586" text-anchor="middle">SDK  /  curl  /  lifecycle server</text>
+
+  <!-- Arrows -->
+  <path class="line" d="M 550 555 V 205" stroke="#6d28d9" stroke-width="2.5" marker-end="url(#a-purple)"/>
+  <path class="line" d="M 210 205 V 240" stroke="#047857" stroke-width="2.5" marker-end="url(#a-green)"/>
+  <path class="line" d="M 540 205 V 240" stroke="#047857" stroke-width="2.5" marker-end="url(#a-green)"/>
+  <path class="line" d="M 880 205 V 240" stroke="#c2410c" stroke-width="2.5" stroke-dasharray="6 6" marker-end="url(#a-orange)"/>
+
+  <!-- Legend -->
+  <g transform="translate(50, 588)">
+    <line x1="0" y1="-4" x2="30" y2="-4" stroke="#6d28d9" stroke-width="2.5" marker-end="url(#a-purple)"/>
+    <text class="detail" x="38" y="0">HTTP</text>
+    <line x1="90" y1="-4" x2="120" y2="-4" stroke="#047857" stroke-width="2.5" marker-end="url(#a-green)"/>
+    <text class="detail" x="128" y="0">fork + pipes</text>
+    <line x1="220" y1="-4" x2="250" y2="-4" stroke="#c2410c" stroke-width="2.5" stroke-dasharray="6 6" marker-end="url(#a-orange)"/>
+    <text class="detail" x="258" y="0">FS proxy</text>
+  </g>
+</svg>

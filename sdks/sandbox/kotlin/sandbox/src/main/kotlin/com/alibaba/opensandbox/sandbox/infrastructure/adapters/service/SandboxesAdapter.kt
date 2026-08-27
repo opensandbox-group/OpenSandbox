@@ -20,9 +20,6 @@ import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.SandboxesApi
 import com.alibaba.opensandbox.sandbox.api.SnapshotsApi
 import com.alibaba.opensandbox.sandbox.api.infrastructure.Serializer
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
@@ -33,6 +30,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
@@ -47,7 +45,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Sandbox
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toSandboxInfo
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toSandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toSnapshotInfo
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -73,6 +71,16 @@ internal class SandboxesAdapter(
 
     private val api = SandboxesApi(provider.config.getBaseUrl(), provider.authenticatedClient)
     private val snapshotApi = SnapshotsApi(provider.config.getBaseUrl(), provider.authenticatedClient)
+
+    private val endpointCache: com.alibaba.opensandbox.sandbox.infrastructure.cache.EndpointCache? =
+        if (!provider.config.endpointCacheDisabled) {
+            com.alibaba.opensandbox.sandbox.infrastructure.cache.EndpointCache(
+                maxSize = provider.config.endpointCacheSize,
+                ttl = provider.config.endpointCacheTtl,
+            )
+        } else {
+            null
+        }
 
     override fun createSandbox(
         spec: SandboxImageSpec?,
@@ -121,6 +129,41 @@ internal class SandboxesAdapter(
         snapshotId: String?,
         credentialProxy: CredentialProxyConfig?,
         resourceRequests: Map<String, String>?,
+    ): SandboxCreateResponse =
+        createSandbox(
+            spec = spec,
+            entrypoint = entrypoint,
+            env = env,
+            metadata = metadata,
+            timeout = timeout,
+            resource = resource,
+            networkPolicy = networkPolicy,
+            extensions = extensions,
+            volumes = volumes,
+            platform = platform,
+            secureAccess = secureAccess,
+            snapshotId = snapshotId,
+            credentialProxy = credentialProxy,
+            resourceRequests = resourceRequests,
+            lifecycle = null,
+        )
+
+    override fun createSandbox(
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
+        env: Map<String, String>,
+        metadata: Map<String, String>,
+        timeout: Duration?,
+        resource: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        volumes: List<Volume>?,
+        platform: PlatformSpec?,
+        secureAccess: Boolean,
+        snapshotId: String?,
+        credentialProxy: CredentialProxyConfig?,
+        resourceRequests: Map<String, String>?,
+        lifecycle: SandboxLifecycle?,
     ): SandboxCreateResponse {
         logger.info("Creating sandbox with startup source: {}", spec?.image ?: snapshotId)
 
@@ -141,12 +184,12 @@ internal class SandboxesAdapter(
                     volumes = volumes,
                     snapshotId = snapshotId,
                     resourceRequests = resourceRequests,
+                    lifecycle = lifecycle,
                 )
             val apiResponse = api.sandboxesPost(createRequest)
             val response = apiResponse.toSandboxCreateResponse()
 
             logger.info("Successfully created sandbox: {}", response.id)
-
             response
         } catch (e: Exception) {
             throw e.toSandboxException()
@@ -213,12 +256,9 @@ internal class SandboxesAdapter(
             if (response.isSuccessful) {
                 return Serializer.kotlinxSerializationJson.decodeFromString<ApiSandbox>(responseBody)
             }
-            throw SandboxApiException(
-                message = "Failed to patch sandbox metadata. Status code: ${response.code}, Body: $responseBody",
-                statusCode = response.code,
-                error = parseSandboxError(responseBody) ?: SandboxError(UNEXPECTED_RESPONSE),
-                requestId = response.header("X-Request-ID"),
-            )
+            throw response.toSandboxApiException(responseBody) { statusCode, body ->
+                "Failed to patch sandbox metadata. Status code: $statusCode, Body: $body"
+            }
         }
     }
 
@@ -247,7 +287,7 @@ internal class SandboxesAdapter(
 
     override fun listSnapshots(filter: SnapshotFilter): PagedSnapshotInfos {
         return try {
-            snapshotApi.snapshotsGet(filter.sandboxId, filter.states, filter.page, filter.pageSize).toPagedSnapshotInfos()
+            snapshotApi.snapshotsGet(filter.sandboxId, filter.name, filter.states, filter.page, filter.pageSize).toPagedSnapshotInfos()
         } catch (e: Exception) {
             throw e.toSandboxException()
         }
@@ -273,6 +313,16 @@ internal class SandboxesAdapter(
         port: Int,
         useServerProxy: Boolean,
     ): SandboxEndpoint {
+        val cache = endpointCache ?: return fetchSandboxEndpoint(sandboxId, port, useServerProxy)
+        val key = com.alibaba.opensandbox.sandbox.infrastructure.cache.EndpointCacheKey(sandboxId, port, useServerProxy)
+        return cache.getOrFetch(key) { fetchSandboxEndpoint(sandboxId, port, useServerProxy) }
+    }
+
+    private fun fetchSandboxEndpoint(
+        sandboxId: String,
+        port: Int,
+        useServerProxy: Boolean,
+    ): SandboxEndpoint {
         logger.debug("Retrieving sandbox endpoint: {}, port {}", sandboxId, port)
         return try {
             api.sandboxesSandboxIdEndpointsPortGet(sandboxId, port, useServerProxy).toSandboxEndpoint()
@@ -280,6 +330,10 @@ internal class SandboxesAdapter(
             logger.error("Failed to retrieve sandbox endpoint for sandbox {}", sandboxId, e)
             throw e.toSandboxException()
         }
+    }
+
+    override fun invalidateEndpointCache(sandboxId: String) {
+        endpointCache?.invalidate(sandboxId)
     }
 
     override fun getSignedSandboxEndpoint(

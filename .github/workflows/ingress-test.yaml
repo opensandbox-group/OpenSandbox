@@ -3,16 +3,24 @@ name: Ingress Tests
 on:
   pull_request:
     branches: [ main ]
-    paths:
-      - 'components/ingress/**'
-      - 'components/internal/**'
+
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: ingress
+
   test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -48,3 +56,25 @@ jobs:
         working-directory: components/ingress
         run: |
           make test
+
+  required:
+    name: Ingress CI
+    if: always()
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$TEST_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" ]]
+          fi

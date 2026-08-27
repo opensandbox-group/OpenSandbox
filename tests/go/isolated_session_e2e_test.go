@@ -77,6 +77,103 @@ func TestIsolationSessionLifecycle(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestIsolationAttachRoundtrip covers the stateless-recovery flow: a
+// client that only kept the sessionId calls IsolationAttach and then
+// exercises run/get/delete through the newly-built handle. Also verifies
+// that the creation-parameter echoes are populated after attach.
+func TestIsolationAttachRoundtrip(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	created, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	})
+	require.NoError(t, err)
+	sessionID := created.SessionID()
+
+	// Write some state through the original handle so we can prove the
+	// attached handle really targets the same bwrap session.
+	_, err = created.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: "echo attached-state > /tmp/attach-marker.txt",
+	}, nil)
+	require.NoError(t, err)
+
+	// Simulate a stateless client that only kept the sessionID.
+	attached, err := sb.IsolationAttach(ctx, sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, sessionID, attached.SessionID())
+
+	// Creation-parameter echoes should be populated by GET.
+	info := attached.Info()
+	require.NotNil(t, info)
+	require.NotNil(t, info.Workspace)
+	assert.Equal(t, "/tmp", info.Workspace.Path)
+	assert.Equal(t, "rw", info.Workspace.Mode)
+
+	// Handle works end-to-end via sessionID alone.
+	state, err := attached.Get(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "active", state.Status)
+
+	exec, err := attached.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: "cat /tmp/attach-marker.txt",
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), "attached-state")
+
+	require.NoError(t, attached.Delete(ctx))
+}
+
+// TestIsolationAttachNotFound verifies attach with an unknown sessionID
+// surfaces the same error shape used by IsolatedGet on 404.
+func TestIsolationAttachNotFound(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	_, err := sb.IsolationAttach(ctx, "00000000-0000-0000-0000-000000000000")
+	require.Error(t, err)
+}
+
+func TestIsolationListSessions(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	// Create two sessions and confirm both appear in the list.
+	sessionA, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	})
+	require.NoError(t, err)
+	defer sessionA.Delete(ctx)
+
+	sessionB, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	})
+	require.NoError(t, err)
+	defer sessionB.Delete(ctx)
+
+	sessions, err := sb.IsolationListSessions(ctx)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(sessions), 2)
+
+	ids := make(map[string]opensandbox.IsolatedSessionSummary, len(sessions))
+	for _, s := range sessions {
+		ids[s.SessionID] = s
+	}
+
+	sumA, okA := ids[sessionA.SessionID()]
+	require.True(t, okA, "sessionA should appear in list")
+	assert.Equal(t, "active", sumA.Status)
+	assert.False(t, sumA.CreatedAt.IsZero(), "created_at should be populated")
+
+	_, okB := ids[sessionB.SessionID()]
+	require.True(t, okB, "sessionB should appear in list")
+
+	// After deleting a session it should no longer be listed.
+	require.NoError(t, sessionB.Delete(ctx))
+	sessions, err = sb.IsolationListSessions(ctx)
+	require.NoError(t, err)
+	for _, s := range sessions {
+		assert.NotEqual(t, sessionB.SessionID(), s.SessionID, "deleted session should not be listed")
+	}
+}
+
 func TestIsolationRunEcho(t *testing.T) {
 	ctx, sb := createIsolatedTestSandbox(t)
 
@@ -973,4 +1070,273 @@ func TestIsolationOverlayFilesAPIListDirectory(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "expected child file in overlay directory listing")
+}
+
+// ---------------------------------------------------------------------------
+// RunOnce / WithSession convenience API tests
+// ---------------------------------------------------------------------------
+
+func TestIsolationRunOnce(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	exec, err := sb.IsolationRunOnce(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	}, opensandbox.IsolatedRunRequest{Code: "echo run-once-e2e"}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), "run-once-e2e")
+}
+
+func TestIsolationRunOnceWithEnvs(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	exec, err := sb.IsolationRunOnce(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	}, opensandbox.IsolatedRunRequest{
+		Code: "echo $E2E_VAR",
+		Envs: map[string]string{"E2E_VAR": "run-once-val"},
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), "run-once-val")
+}
+
+// ---------------------------------------------------------------------------
+// Bind mount tests (explicit source->dest binds)
+// ---------------------------------------------------------------------------
+
+// TestIsolationBindReadWriteHostVisible verifies a legal read-write bind:
+// data written inside the bwrap namespace at the bind destination is readable
+// on the host at the bind source.
+func TestIsolationBindReadWriteHostVisible(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	ts := time.Now().UnixMilli()
+	// Source must fall within the execd writable allowlist (e.g. /data).
+	srcDir := fmt.Sprintf("/data/bind_rw_%d", ts)
+	dest := "/mnt/bind_rw"
+	fileName := "from_sandbox.txt"
+	content := "bind-rw-visible-on-host"
+
+	// Host-side: create the bind source directory and the destination mount
+	// point (bwrap binds onto an existing dir; it cannot create one under the
+	// read-only root).
+	_, err := sb.RunCommand(ctx, fmt.Sprintf("mkdir -p %s %s", srcDir, dest), nil)
+	require.NoError(t, err)
+
+	session, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+		Binds: []opensandbox.BindMount{
+			{Source: srcDir, Dest: dest},
+		},
+	})
+	require.NoError(t, err)
+	defer session.Delete(ctx)
+
+	// Read back inside the namespace after writing (write + read in sandbox).
+	exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: fmt.Sprintf("echo -n %s > %s/%s && cat %s/%s", content, dest, fileName, dest, fileName),
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), content, "sandbox should read back what it wrote to the bind")
+
+	// Host-side: the write must be visible at the bind source.
+	hostExec, err := sb.RunCommand(ctx, fmt.Sprintf("cat %s/%s", srcDir, fileName), nil)
+	require.NoError(t, err)
+	assert.Contains(t, hostExec.Text(), content, "bind write should be visible on host")
+}
+
+// TestIsolationBindIllegalRejected verifies that a bind whose source is outside
+// the writable allowlist is rejected at session creation.
+func TestIsolationBindIllegalRejected(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	_, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+		Binds: []opensandbox.BindMount{
+			// /etc is not in the writable allowlist.
+			{Source: "/etc", Dest: "/mnt/etc"},
+		},
+	})
+	require.Error(t, err, "bind with source outside allowlist should be rejected")
+	assert.Contains(t, strings.ToLower(err.Error()), "allowlist",
+		"error should indicate the allowlist rejection, got: %v", err)
+}
+
+// TestIsolationBindReadOnlyReadable verifies a read-only bind: a host-created
+// file is readable inside the bwrap namespace via the read-only bind.
+func TestIsolationBindReadOnlyReadable(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	ts := time.Now().UnixMilli()
+	srcDir := fmt.Sprintf("/data/bind_ro_%d", ts)
+	dest := "/mnt/bind_ro"
+	fileName := "host_created.txt"
+	content := "bind-ro-host-content"
+
+	// Host-side: create the source dir (with a file to read), plus the
+	// destination mount point that bwrap will bind onto.
+	_, err := sb.RunCommand(ctx,
+		fmt.Sprintf("mkdir -p %s %s && echo -n %s > %s/%s", srcDir, dest, content, srcDir, fileName), nil)
+	require.NoError(t, err)
+
+	session, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+		Binds: []opensandbox.BindMount{
+			{Source: srcDir, Dest: dest, ReadOnly: true},
+		},
+	})
+	require.NoError(t, err)
+	defer session.Delete(ctx)
+
+	// Read the host-created file inside the namespace via the read-only bind.
+	exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: fmt.Sprintf("cat %s/%s", dest, fileName),
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), content, "read-only bind should be readable inside the sandbox")
+
+	// Writing through the read-only bind must fail.
+	writeExec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
+		Code: fmt.Sprintf("echo x > %s/newfile.txt 2>&1; echo exit=$?", dest),
+	}, nil)
+	require.NoError(t, err)
+	text := writeExec.Text()
+	assert.True(t,
+		strings.Contains(text, "Read-only") ||
+			strings.Contains(text, "read-only") ||
+			strings.Contains(text, "Permission denied") ||
+			strings.Contains(text, "exit=1"),
+		"expected write to fail through read-only bind, got: %s", text)
+}
+
+func TestIsolationWithSessionE2E(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	var output string
+	err := sb.IsolationWithSession(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	}, func(session *opensandbox.IsolationSession) error {
+		_, err := session.Run(ctx, opensandbox.IsolatedRunRequest{Code: "export WS_VAR=with-session-val"}, nil)
+		if err != nil {
+			return err
+		}
+		exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{Code: "echo $WS_VAR"}, nil)
+		if err != nil {
+			return err
+		}
+		output = exec.Text()
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Contains(t, output, "with-session-val")
+}
+
+// ---------------------------------------------------------------------------
+// Background run tests
+// ---------------------------------------------------------------------------
+
+// waitForBackgroundRun polls a background run's status until it is no longer
+// running or the timeout elapses.
+func waitForBackgroundRun(t *testing.T, ctx context.Context, session *opensandbox.IsolationSession, runID string) *opensandbox.IsolatedRunStatus {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := session.GetRunStatus(ctx, runID)
+		require.NoError(t, err)
+		if !status.Running {
+			return status
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("background run %s did not finish within 30s", runID)
+	return nil
+}
+
+func createIsolationSessionForTest(t *testing.T, ctx context.Context, sb *opensandbox.Sandbox) *opensandbox.IsolationSession {
+	t.Helper()
+	session, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { session.Delete(ctx) })
+	return session
+}
+
+// TestIsolationBackgroundRunCompletes covers the full background lifecycle:
+// start a detached echo run, poll status until it finishes with exit code 0,
+// read the logs from the start, and verify an incremental read from the
+// returned cursor returns the remainder.
+func TestIsolationBackgroundRunCompletes(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+	session := createIsolationSessionForTest(t, ctx, sb)
+
+	run, err := session.RunBackground(ctx, "echo hello-background")
+	require.NoError(t, err)
+	assert.NotEmpty(t, run.RunID)
+	assert.Equal(t, session.SessionID(), run.SessionID)
+	assert.False(t, run.StartedAt.IsZero(), "started_at should be populated")
+
+	status := waitForBackgroundRun(t, ctx, session, run.RunID)
+	assert.False(t, status.Running)
+	assert.NotNil(t, status.ExitCode)
+	assert.Equal(t, 0, *status.ExitCode)
+	assert.NotNil(t, status.FinishedAt)
+
+	logs, nextCursor, err := session.GetRunLogs(ctx, run.RunID, 0)
+	require.NoError(t, err)
+	assert.Contains(t, logs, "hello-background")
+	assert.Greater(t, nextCursor, int64(0))
+
+	// Incremental read from the returned cursor returns the remainder.
+	tail, tailCursor, err := session.GetRunLogs(ctx, run.RunID, nextCursor)
+	require.NoError(t, err)
+	assert.Equal(t, "", tail)
+	assert.Equal(t, nextCursor, tailCursor)
+}
+
+// TestIsolationBackgroundRunExitCode verifies exit code propagation for a
+// failing background run.
+func TestIsolationBackgroundRunExitCode(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+	session := createIsolationSessionForTest(t, ctx, sb)
+
+	run, err := session.RunBackground(ctx, "exit 7")
+	require.NoError(t, err)
+
+	status := waitForBackgroundRun(t, ctx, session, run.RunID)
+	assert.False(t, status.Running)
+	assert.NotNil(t, status.ExitCode)
+	assert.Equal(t, 7, *status.ExitCode)
+	assert.Equal(t, "", status.Error)
+}
+
+// TestIsolationBackgroundRunDoesNotPolluteForeground verifies that background
+// output is captured to the run log and does not leak into a following
+// foreground run's output.
+func TestIsolationBackgroundRunDoesNotPolluteForeground(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+	session := createIsolationSessionForTest(t, ctx, sb)
+
+	run, err := session.RunBackground(ctx, "echo bg-output-line")
+	require.NoError(t, err)
+	waitForBackgroundRun(t, ctx, session, run.RunID)
+
+	exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{Code: "echo fg-output-line"}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), "fg-output-line")
+	assert.NotContains(t, exec.Text(), "bg-output-line")
+
+	// The background output must live in the run log instead.
+	logs, _, err := session.GetRunLogs(ctx, run.RunID, 0)
+	require.NoError(t, err)
+	assert.Contains(t, logs, "bg-output-line")
+}
+
+// TestIsolationBackgroundRunStatusNotFound verifies that an unknown run ID
+// surfaces an error from the status endpoint.
+func TestIsolationBackgroundRunStatusNotFound(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+	session := createIsolationSessionForTest(t, ctx, sb)
+
+	_, err := session.GetRunStatus(ctx, "no-such-run")
+	require.Error(t, err)
 }

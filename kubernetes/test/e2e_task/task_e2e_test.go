@@ -308,4 +308,264 @@ var _ = Describe("Task Executor E2E", Ordered, func() {
 			}, 5*time.Second, 500*time.Millisecond).Should(BeNil())
 		})
 	})
+
+	// ===== Lifecycle Hook E2E Tests =====
+
+	Context("When creating a task with a successful preStart hook", func() {
+		taskName := "e2e-prestart-ok"
+
+		It("should execute preStart before main process and succeed", func() {
+			By("Creating task with preStart that writes a marker file to shared volume")
+			task := &api.Task{
+				Name: taskName,
+				Process: &api.Process{
+					// Main process reads the marker created by preStart via shared volume
+					Command: []string{"cat", "/tmp/tasks/prestart-marker"},
+					Lifecycle: &api.ProcessLifecycle{
+						PreStart: &api.LifecycleHandler{
+							Exec: &api.ExecAction{
+								Command: []string{"/bin/sh", "-c", "echo prestart-ok > /tmp/tasks/prestart-marker"},
+							},
+							ExecMode: api.ExecModeLocal,
+						},
+					},
+				},
+			}
+			_, err := client.Set(context.Background(), task)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for task to succeed")
+			Eventually(func(g Gomega) {
+				got, err := client.Get(context.Background())
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(got).NotTo(BeNil())
+				g.Expect(got.ProcessStatus).NotTo(BeNil())
+				g.Expect(got.ProcessStatus.Terminated).NotTo(BeNil(), "Task status: %v", got.ProcessStatus)
+				g.Expect(got.ProcessStatus.Terminated.ExitCode).To(BeZero(),
+					"Main process should succeed because preStart created the marker file")
+			}, 15*time.Second, 1*time.Second).Should(Succeed())
+		})
+
+		It("should be deletable", func() {
+			_, err := client.Set(context.Background(), nil)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() *api.Task {
+				got, _ := client.Get(context.Background())
+				return got
+			}, 5*time.Second, 500*time.Millisecond).Should(BeNil())
+		})
+	})
+
+	Context("When creating a task with a failing preStart hook", func() {
+		taskName := "e2e-prestart-fail"
+
+		It("should fail with PreStartHookFailed reason and include stderr", func() {
+			By("Creating task with preStart that exits with error")
+			task := &api.Task{
+				Name: taskName,
+				Process: &api.Process{
+					Command: []string{"echo", "should-not-run"},
+					Lifecycle: &api.ProcessLifecycle{
+						PreStart: &api.LifecycleHandler{
+							Exec: &api.ExecAction{
+								Command: []string{"/bin/sh", "-c", "echo 'mount failed: device busy' >&2; exit 1"},
+							},
+							ExecMode: api.ExecModeLocal,
+						},
+					},
+				},
+			}
+			_, err := client.Set(context.Background(), task)
+			// Set may return error since the task fails immediately, or it may
+			// accept the task and report failure via status — both are valid.
+			if err != nil {
+				Expect(err.Error()).To(ContainSubstring("preStart hook failed"))
+			}
+
+			By("Waiting for task to report failure with error details")
+			Eventually(func(g Gomega) {
+				got, err := client.Get(context.Background())
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(got).NotTo(BeNil())
+				g.Expect(got.ProcessStatus).NotTo(BeNil())
+				g.Expect(got.ProcessStatus.Terminated).NotTo(BeNil(), "Task status: %v", got.ProcessStatus)
+				g.Expect(got.ProcessStatus.Terminated.ExitCode).NotTo(BeZero(),
+					"Task should have failed")
+				g.Expect(got.ProcessStatus.Terminated.Reason).To(Equal("PreStartHookFailed"),
+					"Reason should indicate preStart failure")
+				g.Expect(got.ProcessStatus.Terminated.Message).To(ContainSubstring("mount failed: device busy"),
+					"Message should contain stderr from the hook")
+			}, 10*time.Second, 1*time.Second).Should(Succeed())
+		})
+
+		It("should be deletable", func() {
+			_, err := client.Set(context.Background(), nil)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() *api.Task {
+				got, _ := client.Get(context.Background())
+				return got
+			}, 5*time.Second, 500*time.Millisecond).Should(BeNil())
+		})
+	})
+
+	Context("When creating a task with a preStart hook that times out", func() {
+		taskName := "e2e-prestart-timeout"
+
+		It("should fail with timeout error", func() {
+			By("Creating task with preStart that hangs and a 2s timeout")
+			timeoutSec := int64(2)
+			task := &api.Task{
+				Name: taskName,
+				Process: &api.Process{
+					Command: []string{"echo", "should-not-run"},
+					Lifecycle: &api.ProcessLifecycle{
+						PreStart: &api.LifecycleHandler{
+							Exec: &api.ExecAction{
+								Command: []string{"/bin/sh", "-c", "sleep 60"},
+							},
+							ExecMode:       api.ExecModeLocal,
+							TimeoutSeconds: &timeoutSec,
+						},
+					},
+				},
+			}
+
+			start := time.Now()
+			_, err := client.Set(context.Background(), task)
+			// Same as above: error may come inline or via status
+			_ = err
+
+			By("Waiting for task to report timeout failure")
+			Eventually(func(g Gomega) {
+				got, err := client.Get(context.Background())
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(got).NotTo(BeNil())
+				g.Expect(got.ProcessStatus).NotTo(BeNil())
+				g.Expect(got.ProcessStatus.Terminated).NotTo(BeNil(), "Task status: %v", got.ProcessStatus)
+				g.Expect(got.ProcessStatus.Terminated.Reason).To(Equal("PreStartHookFailed"))
+				g.Expect(got.ProcessStatus.Terminated.Message).To(ContainSubstring("timed out"))
+			}, 15*time.Second, 1*time.Second).Should(Succeed())
+
+			elapsed := time.Since(start)
+			Expect(elapsed).To(BeNumerically("<", 10*time.Second),
+				"Should not wait much longer than the 2s hook timeout")
+		})
+
+		It("should be deletable", func() {
+			_, err := client.Set(context.Background(), nil)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() *api.Task {
+				got, _ := client.Get(context.Background())
+				return got
+			}, 5*time.Second, 500*time.Millisecond).Should(BeNil())
+		})
+	})
+
+	Context("When creating a task with a postStop hook", func() {
+		taskName := "e2e-poststop-ok"
+
+		It("should execute postStop when task is deleted", func() {
+			By("Creating a long-running task with postStop that writes a marker file")
+			task := &api.Task{
+				Name: taskName,
+				Process: &api.Process{
+					Command: []string{"sleep", "60"},
+					Lifecycle: &api.ProcessLifecycle{
+						PostStop: &api.LifecycleHandler{
+							Exec: &api.ExecAction{
+								Command: []string{"/bin/sh", "-c", "echo poststop-ok > /tmp/tasks/poststop-marker"},
+							},
+							ExecMode: api.ExecModeLocal,
+						},
+					},
+				},
+			}
+			_, err := client.Set(context.Background(), task)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for task to be running")
+			Eventually(func(g Gomega) {
+				got, err := client.Get(context.Background())
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(got).NotTo(BeNil())
+				g.Expect(got.ProcessStatus).NotTo(BeNil())
+				g.Expect(got.ProcessStatus.Running).NotTo(BeNil(), "Task status: %v", got.ProcessStatus)
+			}, 10*time.Second, 1*time.Second).Should(Succeed())
+
+			By("Deleting the task to trigger postStop")
+			_, err = client.Set(context.Background(), nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for task to be fully deleted")
+			Eventually(func() *api.Task {
+				got, _ := client.Get(context.Background())
+				return got
+			}, 10*time.Second, 500*time.Millisecond).Should(BeNil())
+
+			By("Verifying postStop hook executed by checking marker file in executor container")
+			out, err := exec.Command("docker", "exec", ExecutorContainer, "cat", "/tmp/tasks/poststop-marker").CombinedOutput()
+			Expect(err).NotTo(HaveOccurred(), "postStop marker file should exist: %s", string(out))
+			Expect(string(out)).To(ContainSubstring("poststop-ok"))
+		})
+	})
+
+	Context("When creating a task with both preStart and postStop hooks", func() {
+		taskName := "e2e-lifecycle-both"
+
+		It("should run preStart → main → postStop in order", func() {
+			By("Creating a long-running task where each stage appends to a log file")
+			task := &api.Task{
+				Name: taskName,
+				Process: &api.Process{
+					Command: []string{"/bin/sh", "-c", "echo step2-main >> /tmp/tasks/lifecycle-order.log; sleep 60"},
+					Lifecycle: &api.ProcessLifecycle{
+						PreStart: &api.LifecycleHandler{
+							Exec: &api.ExecAction{
+								Command: []string{"/bin/sh", "-c", "echo step1-prestart > /tmp/tasks/lifecycle-order.log"},
+							},
+							ExecMode: api.ExecModeLocal,
+						},
+						PostStop: &api.LifecycleHandler{
+							Exec: &api.ExecAction{
+								Command: []string{"/bin/sh", "-c", "echo step3-poststop >> /tmp/tasks/lifecycle-order.log"},
+							},
+							ExecMode: api.ExecModeLocal,
+						},
+					},
+				},
+			}
+			_, err := client.Set(context.Background(), task)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for task to be running (preStart completed)")
+			Eventually(func(g Gomega) {
+				got, err := client.Get(context.Background())
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(got).NotTo(BeNil())
+				g.Expect(got.ProcessStatus).NotTo(BeNil())
+				g.Expect(got.ProcessStatus.Running).NotTo(BeNil(), "Task status: %v", got.ProcessStatus)
+			}, 10*time.Second, 1*time.Second).Should(Succeed())
+
+			By("Verifying preStart and main have executed")
+			out, err := exec.Command("docker", "exec", ExecutorContainer, "cat", "/tmp/tasks/lifecycle-order.log").CombinedOutput()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(ContainSubstring("step1-prestart"))
+			Expect(string(out)).To(ContainSubstring("step2-main"))
+
+			By("Deleting the task to trigger postStop")
+			_, err = client.Set(context.Background(), nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for task to be fully deleted")
+			Eventually(func() *api.Task {
+				got, _ := client.Get(context.Background())
+				return got
+			}, 10*time.Second, 500*time.Millisecond).Should(BeNil())
+
+			By("Verifying postStop hook executed")
+			out, err = exec.Command("docker", "exec", ExecutorContainer, "cat", "/tmp/tasks/lifecycle-order.log").CombinedOutput()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(ContainSubstring("step3-poststop"))
+		})
+	})
 })

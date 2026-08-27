@@ -2,7 +2,7 @@
 # Rules are evaluated top-to-bottom; the last matching pattern wins.
 
 # Default owners (fallback for files not matched by specific rules)
-* @jwx0925 @hittyt @hellomypastor @Pangjiping @ninan-nn
+* @jwx0925 @hittyt @Pangjiping @ninan-nn
 
 # Control plane (server)
 /server/ @Pangjiping @hittyt @jwx0925 @Generalwin @ninan-nn
@@ -11,13 +11,13 @@
 /components/execd/ @Pangjiping @hittyt @ninan-nn
 /components/ingress/ @Pangjiping @hittyt @Generalwin @Spground
 /components/egress/ @Pangjiping @hittyt @jwx0925
-/sandboxes/ @Pangjiping @ninan-nn @jwx0925 @hittyt @hellomypastor
+/sandboxes/ @Pangjiping @ninan-nn @jwx0925 @hittyt
 
 # Kubernetes controller
 /kubernetes/ @Spground @Generalwin @fengcone @kevinlynx @ninan-nn @hittyt @Pangjiping
 
 # SDKs
-/sdks/ @ninan-nn @jwx0925 @hittyt @hellomypastor @Pangjiping
+/sdks/ @ninan-nn @jwx0925 @hittyt @Pangjiping
 
 # Specs and docs
 /specs/ @jwx0925 @hittyt @ninan-nn

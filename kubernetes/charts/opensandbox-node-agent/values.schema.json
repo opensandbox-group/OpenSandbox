@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["enabled", "image", "config", "sink", "hostPaths"],
+  "properties": {
+    "enabled": { "type": "boolean" },
+    "image": {
+      "type": "object",
+      "required": ["repository", "pullPolicy", "tag"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "tag": { "type": "string" }
+      }
+    },
+    "hostPaths": {
+      "type": "object",
+      "required": ["logs", "state", "fileData"],
+      "properties": {
+        "logs": { "$ref": "#/definitions/absolutePath" },
+        "state": { "$ref": "#/definitions/absolutePath" },
+        "fileData": { "$ref": "#/definitions/absolutePath" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["clusterID", "stateDir", "stateMaxBytes", "memoryBudgetBytes", "perSandboxQueueBytes", "perSandboxRateLimit", "maxLineBytes", "partialTimeout", "dropPolicy", "sinkTimeout", "retryMaxInterval", "endedStateRetention", "serverAddr"],
+      "properties": {
+        "clusterID": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+        "stateDir": { "$ref": "#/definitions/absolutePath" },
+        "stateMaxBytes": { "type": "integer", "minimum": 1 },
+        "memoryBudgetBytes": { "type": "integer", "minimum": 1 },
+        "perSandboxQueueBytes": { "type": "integer", "minimum": 1 },
+        "perSandboxRateLimit": { "type": "number", "minimum": 0 },
+        "maxLineBytes": { "type": "integer", "minimum": 1, "maximum": 1073741824 },
+        "partialTimeout": { "$ref": "#/definitions/positiveDuration" },
+        "dropPolicy": { "type": "string", "enum": ["block", "drop"] },
+        "sinkTimeout": { "$ref": "#/definitions/positiveDuration" },
+        "retryMaxInterval": { "$ref": "#/definitions/positiveDuration" },
+        "endedStateRetention": { "$ref": "#/definitions/positiveDuration" },
+        "serverAddr": { "type": "string", "pattern": "^:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$" },
+        "pprofAddr": { "type": "string", "pattern": "^$|^([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|\\[::1\\]):([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$" }
+      }
+    },
+    "sink": {
+      "type": "object",
+      "required": ["type", "file", "oss"],
+      "properties": {
+        "type": { "type": "string", "enum": ["file", "oss"] },
+        "file": {
+          "type": "object",
+          "required": ["path", "maxBytes", "maxFiles", "maxTotalBytes", "retention"],
+          "properties": {
+            "path": { "$ref": "#/definitions/optionalAbsolutePath" },
+            "maxBytes": { "type": "integer", "minimum": 1 },
+            "maxFiles": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+            "maxTotalBytes": { "type": "integer", "minimum": 1 },
+            "retention": { "$ref": "#/definitions/nonNegativeDuration" }
+          }
+        },
+        "oss": {
+          "type": "object",
+          "properties": {
+            "endpoint": { "type": "string" },
+            "bucket": { "type": "string" },
+            "keyPrefix": { "type": "string", "pattern": "^$|^[^\\s\"'\\\\*]+$" },
+            "existingSecret": { "type": "string" },
+            "accessKeyIDKey": { "type": "string", "minLength": 1 },
+            "accessKeySecretKey": { "type": "string", "minLength": 1 },
+            "sessionTokenKey": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["sink"], "properties": { "sink": { "required": ["type"], "properties": { "type": { "const": "oss" } } } } },
+      "then": {
+        "properties": {
+          "sink": {
+            "properties": {
+              "oss": {
+                "required": ["endpoint", "bucket", "keyPrefix", "existingSecret", "accessKeyIDKey", "accessKeySecretKey", "sessionTokenKey"],
+                "properties": {
+                  "endpoint": { "type": "string", "pattern": "^[Hh][Tt][Tt][Pp][Ss]://[^/?#@\\s\"'\\\\]+/?$" },
+                  "bucket": { "type": "string", "minLength": 1 },
+                  "keyPrefix": { "type": "string", "pattern": "^/*[^/\\s\"'\\\\*]+(?:/[^/\\s\"'\\\\*]+)*/*$", "not": { "pattern": "(^|/)\\.{1,2}(/|$)" } },
+                  "existingSecret": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "absolutePath": {
+      "type": "string",
+      "pattern": "^/[^\\s\"'\\\\*]+$",
+      "not": { "anyOf": [{ "pattern": "^/(\\.?/)*\\.?$" }, { "pattern": "(^|/)\\.\\.(/|$)" }] }
+    },
+    "optionalAbsolutePath": {
+      "type": "string",
+      "pattern": "^$|^/[^\\s\"'\\\\*]+$",
+      "not": { "anyOf": [{ "pattern": "^/(\\.?/)*\\.?$" }, { "pattern": "(^|/)\\.\\.(/|$)" }] }
+    },
+    "positiveDuration": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|μs|ms|s|m|h))+$", "not": { "pattern": "^(0+(\\.0+)?(ns|us|µs|μs|ms|s|m|h))+$" } },
+    "nonNegativeDuration": { "type": "string", "pattern": "^(0|([0-9]+(\\.[0-9]+)?(ns|us|µs|μs|ms|s|m|h))+)$" }
+  }
+}

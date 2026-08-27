@@ -1,35 +1,129 @@
-name: PR Label Check
+name: PR Auto Label
 
 on:
   pull_request_target:
-    types: [opened, reopened, labeled, unlabeled, synchronize]
+    types: [opened, reopened, synchronize]
     branches: [main]
 
 permissions:
+  contents: read
   pull-requests: write
 
 jobs:
-  check-labels:
+  auto-label:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v7
         with:
           script: |
             const pr = context.payload.pull_request;
-            const labels = pr.labels;
             const prNumber = pr.number;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const marker = "<!-- LABEL_CHECK_BOT -->";
 
-            function suggestLabels(files) {
+            // Ignore glob-like patterns for size accounting only. Matches the
+            // full path; "**" matches any path segments, "*" matches within a
+            // single segment.
+            const SIZE_IGNORE = [
+              // Lock files and other generated dependency manifests.
+              "**/go.sum",
+              "**/uv.lock",
+              "**/pnpm-lock.yaml",
+              "**/package-lock.json",
+              "**/yarn.lock",
+              "**/Cargo.lock",
+              "kubernetes/charts/opensandbox/Chart.lock",
+              "sdks/sandbox/kotlin/sandbox-api/src/main/kotlin/com/alibaba/opensandbox/sandbox/api/openapitools.json",
+
+              // Unit / integration / e2e test sources and fixtures. Kept out
+              // of the size label because they don't reflect production code
+              // complexity that reviewers need to reason about.
+              // Go
+              "**/*_test.go",
+              "**/testdata/**",
+              // Python (pytest layout: tests/ package or test_*.py)
+              "**/tests/**",
+              "**/test_*.py",
+              "**/conftest.py",
+              // JS / TS
+              "**/*.test.js",
+              "**/*.test.jsx",
+              "**/*.test.mjs",
+              "**/*.test.ts",
+              "**/*.test.tsx",
+              "**/*.spec.js",
+              "**/*.spec.jsx",
+              "**/*.spec.mjs",
+              "**/*.spec.ts",
+              "**/*.spec.tsx",
+              // Kotlin / Java (Gradle/Maven convention)
+              "**/src/test/kotlin/**",
+              "**/src/test/java/**",
+              "**/src/test/resources/**",
+              // C# (xUnit projects live under tests/ dirs; also match *.Tests.cs
+              // and Test.csproj)
+              "**/*.Tests.cs",
+              "**/*Tests.csproj",
+              // Top-level cross-language e2e suite
+              "tests/**",
+              // Kubernetes controller e2e suite (kubebuilder layout puts the
+              // whole suite under test/, including helper packages).
+              "kubernetes/test/**",
+            ];
+
+            function globToRegex(glob) {
+              let re = "^";
+              for (let i = 0; i < glob.length; i++) {
+                const c = glob[i];
+                if (c === "*" && glob[i + 1] === "*") {
+                  re += ".*";
+                  i++;
+                  if (glob[i + 1] === "/") i++;
+                } else if (c === "*") {
+                  re += "[^/]*";
+                } else if (c === "?") {
+                  re += "[^/]";
+                } else if (".+^$(){}|[]\\".includes(c)) {
+                  re += "\\" + c;
+                } else {
+                  re += c;
+                }
+              }
+              return new RegExp(re + "$");
+            }
+            const IGNORE_REGEXES = SIZE_IGNORE.map(globToRegex);
+
+            function isIgnoredForSize(filename) {
+              return IGNORE_REGEXES.some((r) => r.test(filename));
+            }
+
+            // Kubernetes/Prow size thresholds (additions + deletions).
+            // See https://github.com/kubernetes-sigs/prow/blob/main/pkg/plugins/size/size.go
+            function sizeLabel(changed) {
+              if (changed < 10) return "size/XS";
+              if (changed < 30) return "size/S";
+              if (changed < 100) return "size/M";
+              if (changed < 500) return "size/L";
+              if (changed < 1000) return "size/XL";
+              return "size/XXL";
+            }
+
+            function inferLabels(files) {
               const dirs = new Set();
               for (const f of files) {
                 const p = f.filename.split("/");
-                dirs.add(p[0]);
-                if (p.length >= 2) dirs.add(p[0] + "/" + p[1]);
+                for (let i = 1; i <= p.length; i++) {
+                  dirs.add(p.slice(0, i).join("/"));
+                }
               }
               const s = [];
+
+              let changed = 0;
+              for (const f of files) {
+                if (isIgnoredForSize(f.filename)) continue;
+                changed += (f.additions || 0) + (f.deletions || 0);
+              }
+              s.push(sizeLabel(changed));
 
               if (dirs.has("docs") || dirs.has("oseps") || dirs.has("specs") ||
                   dirs.has("examples")) {
@@ -44,82 +138,83 @@ jobs:
                 s.push("component/egress", "component/ingress");
               }
 
-              // k8s / server
               if (dirs.has("kubernetes")) s.push("component/k8s");
               if (dirs.has("server")) s.push("component/server");
 
-              // SDK
+              // SDK — layout: sdks/{sandbox,code-interpreter,mcp}/{go,python,...};
+              // Kotlin code-interpreter lives under sdks/sandbox/kotlin/code-interpreter.
               if (dirs.has("sdks")) {
-                s.push("sdks");
-                if (dirs.has("sdks/go")) s.push("sdk/go");
-                if (dirs.has("sdks/java")) s.push("sdk/java");
-                if (dirs.has("sdks/python")) s.push("sdk/python");
-                if (dirs.has("sdks/js")) s.push("sdk/js");
-                if (dirs.has("sdks/csharp")) s.push("sdk/c#");
+                const langMap = {
+                  go: "sdk/go",
+                  kotlin: "sdk/java",
+                  python: "sdk/python",
+                  javascript: "sdk/js",
+                  csharp: "sdk/c#",
+                };
+                for (const [dir, label] of Object.entries(langMap)) {
+                  for (const d of dirs) {
+                    if (d.startsWith("sdks/") && d.endsWith("/" + dir)) {
+                      s.push(label);
+                      break;
+                    }
+                  }
+                }
               }
 
               return [...new Set(s)].sort();
             }
 
-            if (labels.length === 0) {
-              const { data: files } = await github.rest.pulls.listFiles({
-                owner, repo, pull_number: prNumber,
-              });
-              const suggested = suggestLabels(files);
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: prNumber,
+            });
+            const inferred = inferLabels(files);
 
-              const { data: allLabels } = await github.rest.issues.listLabelsForRepo({
-                owner, repo,
-              });
+            if (inferred.length === 0) {
+              core.info("No labels inferred from changed files, skipping.");
+              return;
+            }
 
-              let tip = "";
-              const suggestedSet = new Set(suggested);
-              const allow = ["bug", "documentation", "feature", "dependencies", "packages"];
-              const otherLabels = allLabels.filter(l =>
-                !suggestedSet.has(l.name) && allow.includes(l.name)
-              );
-              if (suggested.length > 0) {
-                tip = `\n\n📋 **Recommended labels** (based on changed files):\n`;
-                for (const name of suggested) {
-                  tip += `- \`${name}\` ⬅️\n`;
-                }
-                if (otherLabels.length > 0) {
-                  tip += `\nOther available labels:\n`;
-                  for (const lab of otherLabels) {
-                    const desc = lab.description ? ` - ${lab.description}` : "";
-                    tip += `- \`${lab.name}\`${desc}\n`;
-                  }
-                }
-              }
+            const existing = new Set(pr.labels.map(l => l.name));
+            const inferredSet = new Set(inferred);
 
-              const touchedDirs = [...new Set(files.map(f => f.filename.split("/")[0]))].join("、");
-              const hint = `\n\n💡 Tip: Use \`feature\` for new functionality or improvements, \`bug\` for fixes.`;
-              const { data: comments } = await github.rest.issues.listComments({
-                owner, repo, issue_number: prNumber,
-              });
-              const existing = comments.filter(
-                c => c.user?.type === "Bot" && c.body?.includes(marker)
-              );
-              if (existing.length === 0) {
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number: prNumber,
-                  body: `${marker}
-            ⚠️  This PR has no labels. Please add one based on the changes.
+            // Size labels are mutually exclusive: drop any stale size/* labels
+            // that don't match the newly-inferred one.
+            const staleSizeLabels = [...existing].filter(
+              (l) => l.startsWith("size/") && !inferredSet.has(l),
+            );
 
-            Changed directories: ${touchedDirs}.${tip}${hint}
+            const toAdd = inferred.filter(l => !existing.has(l));
 
-            cc @${pr.user.login}`,
+            if (toAdd.length === 0 && staleSizeLabels.length === 0) {
+              core.info("All inferred labels already present.");
+              return;
+            }
+
+            const repoLabels = await github.paginate(
+              github.rest.issues.listLabelsForRepo,
+              { owner, repo },
+            );
+            const repoLabelNames = new Set(repoLabels.map(l => l.name));
+            const valid = toAdd.filter(l => repoLabelNames.has(l));
+
+            for (const stale of staleSizeLabels) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner, repo, issue_number: prNumber, name: stale,
                 });
-              }
-            } else {
-              const { data: comments } = await github.rest.issues.listComments({
-                owner, repo, issue_number: prNumber,
-              });
-              const botComments = comments.filter(
-                c => c.user?.type === "Bot" && c.body?.includes(marker)
-              );
-              for (const c of botComments) {
-                await github.rest.issues.deleteComment({
-                  owner, repo, comment_id: c.id,
-                });
+                core.info(`Removed stale label: ${stale}`);
+              } catch (e) {
+                core.warning(`Failed to remove ${stale}: ${e.message}`);
               }
             }
+
+            if (valid.length === 0) {
+              core.info("No new labels to add.");
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: prNumber,
+              labels: valid,
+            });
+            core.info(`Added labels: ${valid.join(", ")}`);

@@ -27,7 +27,8 @@ import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
-val jsonParser =
+@JvmSynthetic
+internal val jsonParser =
     Json {
         ignoreUnknownKeys = true
         isLenient = true

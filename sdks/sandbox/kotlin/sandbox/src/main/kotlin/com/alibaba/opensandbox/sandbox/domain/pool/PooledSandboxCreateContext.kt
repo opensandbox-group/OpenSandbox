@@ -32,6 +32,8 @@ import java.time.Duration
  * @property skipHealthCheck Whether readiness checks should be skipped for this creation.
  * @property healthCheck Optional custom health check for the created sandbox.
  * @property connectionConfig Connection config for lifecycle API calls.
+ * @property createConnectionConfig Connection config for a single-attempt warmup create.
+ * Custom creators should use this for the create request and keep [connectionConfig] on the returned sandbox.
  */
 class PooledSandboxCreateContext internal constructor(
     val poolName: String,
@@ -43,6 +45,7 @@ class PooledSandboxCreateContext internal constructor(
     val skipHealthCheck: Boolean,
     val healthCheck: ((Sandbox) -> Boolean)?,
     val connectionConfig: ConnectionConfig,
+    val createConnectionConfig: ConnectionConfig = connectionConfig,
 ) {
     enum class Reason {
         WARMUP,

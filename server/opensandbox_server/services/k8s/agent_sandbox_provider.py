@@ -89,12 +89,12 @@ class AgentSandboxProvider(WorkloadProvider):
         agent_config = app_config.agent_sandbox if app_config else None
 
         self.shutdown_policy = agent_config.shutdown_policy if agent_config else "Delete"
-        self.service_account = k8s_config.service_account if k8s_config else None
         self.template_manager = AgentSandboxTemplateManager(
             agent_config.template_file if agent_config else None
         )
         self.ingress_config = app_config.ingress if app_config else None
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
+        self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
@@ -165,13 +165,12 @@ class AgentSandboxProvider(WorkloadProvider):
             resource_requests=resource_requests,
             egress_env=egress_env,
             extensions=extensions,
+            sandbox_id=sandbox_id,
         )
 
         if volumes:
             apply_volumes_to_pod_spec(pod_spec, volumes)
 
-        if self.service_account:
-            pod_spec["serviceAccountName"] = self.service_account
         self._apply_platform_node_selector(pod_spec, platform)
 
         resource_name = self._resource_name(sandbox_id)
@@ -261,6 +260,7 @@ class AgentSandboxProvider(WorkloadProvider):
         resource_requests: Optional[Dict[str, str]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
         extensions: Optional[Dict[str, str]] = None,
+        sandbox_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build pod spec dict for the Sandbox CRD."""
         disable_ipv6_for_egress = (
@@ -274,6 +274,9 @@ class AgentSandboxProvider(WorkloadProvider):
             disable_ipv6_for_egress=disable_ipv6_for_egress,
         )
         main_env = dict(env)
+        main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self.execd_run_as_init:
+            main_env["EXECD_INIT"] = "1"
         if credential_proxy_enabled:
             main_env[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] = "true"
 
@@ -300,6 +303,7 @@ class AgentSandboxProvider(WorkloadProvider):
                 "emptyDir": {},
             })
         pod_spec: Dict[str, Any] = {
+            "automountServiceAccountToken": False,
             "initContainers": [_container_to_dict(init_container)],
             "containers": containers,
             "volumes": volumes,
@@ -316,6 +320,7 @@ class AgentSandboxProvider(WorkloadProvider):
             egress_mode=egress_mode,
             credential_proxy_enabled=credential_proxy_enabled,
             extra_env=egress_env,
+            sandbox_id=sandbox_id,
         )
 
         return pod_spec
@@ -441,6 +446,12 @@ class AgentSandboxProvider(WorkloadProvider):
             state = "Running"
         elif reason == "SandboxExpired":
             state = "Terminated"
+        elif reason == "PodSucceeded":
+            state = "Terminated"
+            message = message or "Sandbox pod completed successfully."
+        elif reason == "PodFailed":
+            state = "Failed"
+            message = message or "Sandbox pod failed."
         elif cond_status == "False" and self.is_platform_unschedulable(
             reason,
             message,
@@ -526,6 +537,24 @@ class AgentSandboxProvider(WorkloadProvider):
         if pods:
             return ("Pending", "POD_PENDING", "Pod is pending")
 
+        return None
+
+    def get_internal_endpoint(
+        self, workload: Dict[str, Any], port: int, sandbox_id: str
+    ) -> Optional[Endpoint]:
+        """Resolve the internal endpoint from the Sandbox CR status."""
+        workload_status = workload.get("status")
+        if not isinstance(workload_status, dict):
+            return None
+
+        pod_ips = workload_status.get("podIPs")
+        if not isinstance(pod_ips, list) or not pod_ips:
+            return None
+
+        for pod_ip in pod_ips:
+            if isinstance(pod_ip, str) and pod_ip:
+                host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                return Endpoint(endpoint=f"{host}:{port}")
         return None
 
     def get_endpoint_info(self, workload: Dict[str, Any], port: int, sandbox_id: str) -> Optional[Endpoint]:

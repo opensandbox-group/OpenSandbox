@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from docker.errors import APIError, DockerException, ImageNotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound as DockerNotFound
 from fastapi import HTTPException, status
 from requests.exceptions import ConnectTimeout, ReadTimeout
 
@@ -56,13 +56,15 @@ class DockerSnapshotRuntime:
         self,
         snapshot_id: str,
         sandbox_id: str,
+        *,
+        namespace: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         return self._create_snapshot(snapshot_id, sandbox_id)
 
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
         return None
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None) -> None:
+    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
         image_ref = image or build_snapshot_image_ref(snapshot_id)
         try:
             self._docker_client.images.remove(image=image_ref)
@@ -89,7 +91,7 @@ class DockerSnapshotRuntime:
                 f"Failed to delete snapshot image {image_ref}: {exc}"
             ) from exc
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
         image_ref = image or build_snapshot_image_ref(snapshot_id)
         try:
             self._docker_client.images.get(image_ref)
@@ -179,6 +181,13 @@ class DockerSnapshotRuntime:
                 all=True,
                 filters={"label": label_selector},
             )
+        except DockerNotFound as exc:
+            # Container disappeared between the list summary and the
+            # follow-up inspect (docker-py issues one inspect per matched
+            # container). Treat this as sandbox not found.
+            raise RuntimeError(
+                f"{SandboxErrorCodes.SANDBOX_NOT_FOUND}: Sandbox {sandbox_id} not found."
+            ) from exc
         except DockerException as exc:
             raise RuntimeError(
                 f"{SandboxErrorCodes.CONTAINER_QUERY_FAILED}: "

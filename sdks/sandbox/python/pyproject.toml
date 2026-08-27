@@ -46,11 +46,13 @@ dependencies = [
     "python-dateutil>=2.8.2,<3.0",
     "attrs>=21.3.0",
     "httpx>=0.27.0,<1.0",
+    "httpx-sse>=0.4.3,<0.5",
 ]
 
 [project.optional-dependencies]
 pool-redis = [
     "redis>=5.0,<6.0",
+    "pyjwt>=2.13.0",
 ]
 
 [project.urls]
@@ -67,7 +69,7 @@ source = "vcs"
 root = "../../.."
 tag_regex = "^python/sandbox/v(?P<version>\\d+\\.\\d+\\.\\d+(?:[\\.\\w\\+\\-]*)?)$"
 git_describe_command = 'git describe --dirty --tags --long --match "python/sandbox/v*"'
-fallback_version = "0.1.13"
+fallback_version = "0.1.16"
 
 [tool.hatch.build]
 include = [
@@ -135,6 +137,11 @@ python_files = [
     "*_test.py",
 ]
 asyncio_mode = "auto"
+
+[tool.uv]
+constraint-dependencies = [
+    "pyjwt>=2.13.0",
+]
 
 [tool.coverage.run]
 source = ["src"]

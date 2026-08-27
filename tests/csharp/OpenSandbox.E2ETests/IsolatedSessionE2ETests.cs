@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using OpenSandbox;
 using OpenSandbox.Core;
 using OpenSandbox.Models;
+using OpenSandbox.Services;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -34,6 +36,22 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
 
     private static string StdoutText(Execution exec)
         => string.Join("", exec.Logs.Stdout.Select(m => m.Text));
+
+    private static async Task<IsolatedRunStatus> PollRunFinishedAsync(
+        IIsolationSession session, string runId, int timeoutSeconds = 60)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(timeoutSeconds);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var status = await session.GetRunStatusAsync(runId);
+            if (!status.Running)
+            {
+                return status;
+            }
+            await Task.Delay(200);
+        }
+        throw new TimeoutException($"background run {runId} did not finish within {timeoutSeconds}s");
+    }
 
     public async Task InitializeAsync()
     {
@@ -127,6 +145,89 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
                 "echo $MY_VAR",
                 new IsolatedRunOpts(new Dictionary<string, string> { ["MY_VAR"] = "test-value-42" }));
             Assert.Contains("test-value-42", StdoutText(exec));
+        }
+        finally
+        {
+            await session.DeleteAsync();
+        }
+    }
+
+    // ── Background runs ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task TestBackgroundRunEcho()
+    {
+        var session = await _sandbox!.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")));
+        try
+        {
+            var run = await session.RunBackgroundAsync("echo bg-echo-output");
+            Assert.NotEmpty(run.RunId);
+            Assert.Equal(session.SessionId, run.SessionId);
+
+            var status = await PollRunFinishedAsync(session, run.RunId);
+            Assert.False(status.Running);
+            Assert.Equal(0, status.ExitCode);
+            Assert.Null(status.Error);
+
+            var logs = await session.GetRunLogsAsync(run.RunId);
+            Assert.Contains("bg-echo-output", logs.Text);
+
+            // Incremental read: the next cursor fetch returns only the remainder
+            // (empty here) and the cursor stays at the tail.
+            var remainder = await session.GetRunLogsAsync(run.RunId, logs.Cursor);
+            Assert.DoesNotContain("bg-echo-output", remainder.Text);
+            Assert.Equal(logs.Cursor, remainder.Cursor);
+        }
+        finally
+        {
+            await session.DeleteAsync();
+        }
+    }
+
+    [Fact]
+    public async Task TestBackgroundRunExitCodePropagation()
+    {
+        var session = await _sandbox!.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")));
+        try
+        {
+            var run = await session.RunBackgroundAsync("echo bg-before; exit 7; echo bg-after");
+            Assert.NotEmpty(run.RunId);
+
+            var status = await PollRunFinishedAsync(session, run.RunId);
+            Assert.False(status.Running);
+            Assert.Equal(7, status.ExitCode);
+
+            var logs = await session.GetRunLogsAsync(run.RunId);
+            Assert.Contains("bg-before", logs.Text);
+            Assert.DoesNotContain("bg-after", logs.Text);
+        }
+        finally
+        {
+            await session.DeleteAsync();
+        }
+    }
+
+    [Fact]
+    public async Task TestBackgroundRunWithEnvs()
+    {
+        var session = await _sandbox!.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")));
+        try
+        {
+            var run = await session.RunBackgroundAsync(
+                "echo bg-env-$BG_VAR",
+                new IsolatedRunOpts(
+                    new Dictionary<string, string> { ["BG_VAR"] = "cs-bg-42" }));
+            Assert.NotEmpty(run.RunId);
+
+            var status = await PollRunFinishedAsync(session, run.RunId);
+            Assert.False(status.Running);
+            Assert.Equal(0, status.ExitCode);
+
+            var logs = await session.GetRunLogsAsync(run.RunId);
+            Assert.Contains("bg-env-cs-bg-42", logs.Text);
         }
         finally
         {
@@ -786,6 +887,139 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
         {
             await session.DeleteAsync();
             await _sandbox.Commands.RunAsync($"rm -rf {prefix}");
+        }
+    }
+
+    // ── RunOnceAsync / WithSessionAsync convenience API tests ────────
+
+    [Fact]
+    public async Task TestRunOnce()
+    {
+        var exec = await _sandbox!.Isolation.RunOnceAsync(
+            "echo runonce-e2e", "/tmp", workspaceMode: "rw");
+        Assert.Contains("runonce-e2e", StdoutText(exec));
+    }
+
+    [Fact]
+    public async Task TestRunOnceWithEnvs()
+    {
+        var exec = await _sandbox!.Isolation.RunOnceAsync(
+            "echo $E2E_RUN_ONCE",
+            "/tmp",
+            workspaceMode: "rw",
+            opts: new IsolatedRunOpts(
+                new Dictionary<string, string> { ["E2E_RUN_ONCE"] = "cs-value" }));
+        Assert.Contains("cs-value", StdoutText(exec));
+    }
+
+    [Fact]
+    public async Task TestWithSession()
+    {
+        var output = await _sandbox!.Isolation.WithSessionAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")),
+            async session =>
+            {
+                await session.RunAsync("export WS_VAR=with-session-cs");
+                var exec = await session.RunAsync("echo $WS_VAR");
+                return StdoutText(exec);
+            });
+        Assert.Contains("with-session-cs", output);
+    }
+
+    [Fact]
+    public async Task TestWithSessionMultiRun()
+    {
+        var output = await _sandbox!.Isolation.WithSessionAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")),
+            async session =>
+            {
+                await session.RunAsync("echo step1 > /tmp/ws_test_cs.txt");
+                var exec = await session.RunAsync("cat /tmp/ws_test_cs.txt");
+                return StdoutText(exec);
+            });
+        Assert.Contains("step1", output);
+    }
+
+    // ── Bind mount tests (explicit source->dest binds) ─────────────────
+
+    [Fact]
+    public async Task TestBindReadWriteHostVisible()
+    {
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // Source must be within the execd writable allowlist (e.g. /data).
+        var srcDir = $"/data/bind_rw_{ts}";
+        var dest = "/mnt/bind_rw";
+        var fileName = "from_sandbox.txt";
+        var content = "bind-rw-visible-on-host";
+
+        // Create the source dir and the destination mount point (bwrap binds
+        // onto an existing dir; it cannot create one under the read-only root).
+        await _sandbox!.Commands.RunAsync($"mkdir -p {srcDir} {dest}");
+
+        var session = await _sandbox.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(
+                new IsolatedWorkspaceSpec("/tmp", "rw"),
+                Binds: new List<BindMount> { new BindMount(srcDir, dest) }));
+        try
+        {
+            var exec = await session.RunAsync(
+                $"echo -n {content} > {dest}/{fileName} && cat {dest}/{fileName}");
+            Assert.Contains(content, StdoutText(exec));
+
+            var hostCheck = await _sandbox.Commands.RunAsync($"cat {srcDir}/{fileName}");
+            Assert.Contains(content, StdoutText(hostCheck));
+        }
+        finally
+        {
+            await session.DeleteAsync();
+            await _sandbox.Commands.RunAsync($"rm -rf {srcDir}");
+        }
+    }
+
+    [Fact]
+    public async Task TestBindIllegalRejected()
+    {
+        await Assert.ThrowsAsync<SandboxApiException>(
+            () => _sandbox!.Isolation.CreateAsync(
+                new CreateIsolatedSessionRequest(
+                    new IsolatedWorkspaceSpec("/tmp", "rw"),
+                    // /etc is not in the writable allowlist.
+                    Binds: new List<BindMount> { new BindMount("/etc", "/mnt/etc") })));
+    }
+
+    [Fact]
+    public async Task TestBindReadOnlyReadable()
+    {
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var srcDir = $"/data/bind_ro_{ts}";
+        var dest = "/mnt/bind_ro";
+        var fileName = "host_created.txt";
+        var content = "bind-ro-host-content";
+
+        await _sandbox!.Commands.RunAsync(
+            $"mkdir -p {srcDir} {dest} && echo -n {content} > {srcDir}/{fileName}");
+
+        var session = await _sandbox.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(
+                new IsolatedWorkspaceSpec("/tmp", "rw"),
+                Binds: new List<BindMount> { new BindMount(srcDir, dest, true) }));
+        try
+        {
+            var exec = await session.RunAsync($"cat {dest}/{fileName}");
+            Assert.Contains(content, StdoutText(exec));
+
+            var write = await session.RunAsync(
+                $"echo x > {dest}/newfile.txt 2>&1; echo EXIT=$?");
+            var text = StdoutText(write);
+            Assert.True(
+                text.Contains("EXIT=1") || text.Contains("Read-only")
+                    || text.Contains("read-only") || text.Contains("Permission denied"),
+                $"expected write to fail through read-only bind, got: {text}");
+        }
+        finally
+        {
+            await session.DeleteAsync();
+            await _sandbox.Commands.RunAsync($"rm -rf {srcDir}");
         }
     }
 }

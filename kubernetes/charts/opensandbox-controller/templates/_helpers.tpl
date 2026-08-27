@@ -88,6 +88,14 @@ special tags like 'latest', 'dev', 'main', etc. as-is.
 {{- end }}
 
 {{/*
+Create the image-committer Pod template ConfigMap name.
+*/}}
+{{- define "opensandbox.imageCommitterPodTemplateName" -}}
+{{- $base := include "opensandbox.fullname" . | trunc 34 | trimSuffix "-" -}}
+{{- printf "%s-image-committer-pod-template" $base }}
+{{- end }}
+
+{{/*
 Create the name for the leader election role
 */}}
 {{- define "opensandbox.leaderElectionRoleName" -}}
@@ -99,6 +107,20 @@ Create the name for the manager role
 */}}
 {{- define "opensandbox.managerRoleName" -}}
 {{- print "opensandbox-manager-role" }}
+{{- end }}
+
+{{/*
+Create the name for the metrics auth role
+*/}}
+{{- define "opensandbox.metricsAuthRoleName" -}}
+{{- print "opensandbox-metrics-auth-role" }}
+{{- end }}
+
+{{/*
+Create the name for the metrics reader role (bind to your scraper's ServiceAccount)
+*/}}
+{{- define "opensandbox.metricsReaderRoleName" -}}
+{{- print "opensandbox-metrics-reader" }}
 {{- end }}
 
 {{/*

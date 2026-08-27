@@ -28,6 +28,39 @@ public interface IIsolationSession
         ExecutionHandlers? handlers = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Starts <paramref name="code"/> detached inside the session and returns a run handle.
+    /// The run's combined stdout/stderr and exit code are captured by execd; poll them
+    /// with <see cref="GetRunStatusAsync"/> and <see cref="GetRunLogsAsync"/>. The run is
+    /// not time-limited and idle GC is suspended while it is active. Background runs
+    /// require a writable log location, so sessions with a read-only (ro) workspace
+    /// reject them.
+    /// </summary>
+    Task<IsolatedBackgroundRun> RunBackgroundAsync(
+        string code,
+        IsolatedRunOpts? opts = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the lifecycle state of a background run started with
+    /// <see cref="RunBackgroundAsync"/>.
+    /// </summary>
+    Task<IsolatedRunStatus> GetRunStatusAsync(
+        string runId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the background run's combined output from <paramref name="cursor"/>
+    /// plus the next byte cursor. Each call returns at most 16 MiB; pass the returned
+    /// <see cref="RunLogs.Cursor"/> to fetch the remainder. Per-run log retention is
+    /// capped at 16 MiB (output beyond it is discarded when the run finishes), so drain
+    /// incrementally while the run is active if more than one page is needed.
+    /// </summary>
+    Task<RunLogs> GetRunLogsAsync(
+        string runId,
+        long cursor = 0,
+        CancellationToken cancellationToken = default);
+
     Task<IsolatedSessionState> GetAsync(
         CancellationToken cancellationToken = default);
 
@@ -41,6 +74,22 @@ public interface IIsolatedSessions
         CreateIsolatedSessionRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Rebuild a session handle for an existing isolated session from just its
+    /// session ID. Useful for stateless callers that need to reattach to a
+    /// session after a restart (e.g. serverless workers). Issues a GET on
+    /// /v1/isolated/session/{id} and populates <see cref="IsolatedSessionInfo"/>
+    /// with any creation-parameter fields echoed by execd. Older execd builds
+    /// may omit those fields; the returned handle still works for run/get/delete.
+    /// A missing session surfaces as a <see cref="Core.SandboxApiException"/> with status 404.
+    /// </summary>
+    Task<IIsolationSession> AttachAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default);
+
     Task<IsolatedCapabilities> CapabilitiesAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<IsolatedSessionSummary>> ListAsync(
         CancellationToken cancellationToken = default);
 }

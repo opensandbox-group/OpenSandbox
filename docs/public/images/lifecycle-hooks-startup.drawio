@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="claude-code" agent="claude-code-drawio-skill" version="24.7.17" type="device">
+  <diagram name="Lifecycle hook timing" id="lifecycle-hook-timing">
+    <mxGraphModel dx="1200" dy="640" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="640" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="Lifecycle hook timing" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=24;fontStyle=1;fontColor=#0F172A" vertex="1" parent="1">
+          <mxGeometry x="60" y="32" width="500" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="preStart is a startup gate; periodic hooks begin only after startup succeeds." style="text;html=1;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=13;fontColor=#64748B" vertex="1" parent="1">
+          <mxGeometry x="60" y="68" width="760" height="24" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="startup-dot" value="" style="ellipse;html=1;aspect=fixed;fillColor=#2563EB;strokeColor=none" vertex="1" parent="1">
+          <mxGeometry x="60" y="113" width="10" height="10" as="geometry"/>
+        </mxCell>
+        <mxCell id="startup-label" value="Sandbox startup" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=14;fontStyle=1;fontColor=#334155" vertex="1" parent="1">
+          <mxGeometry x="82" y="105" width="240" height="26" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="container-starts" value="Container starts" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontColor=#0F172A" vertex="1" parent="1">
+          <mxGeometry x="60" y="150" width="150" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="execd-ready" value="execd ready" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#64748B;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontColor=#0F172A" vertex="1" parent="1">
+          <mxGeometry x="270" y="150" width="150" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="prestart" value="&lt;b&gt;preStart&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#92400E&quot; size=&quot;2&quot;&gt;startup gate&lt;/font&gt;" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#FFF7ED;strokeColor=#F59E0B;strokeWidth=1.5;fontFamily=Helvetica;fontSize=15;fontColor=#78350F" vertex="1" parent="1">
+          <mxGeometry x="480" y="150" width="150" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="entrypoint-starts" value="User entrypoint starts" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#64748B;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontColor=#0F172A" vertex="1" parent="1">
+          <mxGeometry x="690" y="150" width="180" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="workload-running" value="User workload running" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#F0FDF4;strokeColor=#22C55E;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontStyle=1;fontColor=#166534" vertex="1" parent="1">
+          <mxGeometry x="930" y="150" width="210" height="72" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="startup-failed" value="&lt;b&gt;Failure or timeout&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#991B1B&quot; size=&quot;2&quot;&gt;entrypoint is not started&lt;/font&gt;" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#FEF2F2;strokeColor=#EF4444;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontColor=#991B1B" vertex="1" parent="1">
+          <mxGeometry x="455" y="280" width="200" height="72" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="divider" value="" style="rounded=0;html=1;fillColor=#E2E8F0;strokeColor=none" vertex="1" parent="1">
+          <mxGeometry x="60" y="390" width="1080" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="running-dot" value="" style="ellipse;html=1;aspect=fixed;fillColor=#16A34A;strokeColor=none" vertex="1" parent="1">
+          <mxGeometry x="60" y="427" width="10" height="10" as="geometry"/>
+        </mxCell>
+        <mxCell id="running-label" value="While the sandbox is running" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=14;fontStyle=1;fontColor=#334155" vertex="1" parent="1">
+          <mxGeometry x="82" y="419" width="320" height="26" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="scheduler" value="Periodic scheduler" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#64748B;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontColor=#0F172A" vertex="1" parent="1">
+          <mxGeometry x="60" y="475" width="190" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="periodic-1" value="periodic" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#F0FDF4;strokeColor=#16A34A;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontStyle=1;fontColor=#166534" vertex="1" parent="1">
+          <mxGeometry x="330" y="475" width="140" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="periodic-2" value="periodic" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#F0FDF4;strokeColor=#16A34A;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontStyle=1;fontColor=#166534" vertex="1" parent="1">
+          <mxGeometry x="550" y="475" width="140" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="periodic-3" value="periodic" style="rounded=1;arcSize=12;html=1;whiteSpace=wrap;fillColor=#F0FDF4;strokeColor=#16A34A;strokeWidth=1.5;fontFamily=Helvetica;fontSize=14;fontStyle=1;fontColor=#166534" vertex="1" parent="1">
+          <mxGeometry x="770" y="475" width="140" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="continuation" value="…" style="ellipse;html=1;aspect=fixed;fillColor=#F8FAFC;strokeColor=#94A3B8;strokeWidth=1.5;fontFamily=Helvetica;fontSize=22;fontColor=#475569" vertex="1" parent="1">
+          <mxGeometry x="990" y="475" width="64" height="64" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="mode-note" value="Bootstrap mode and execd-as-init mode expose the same hook timing." style="text;html=1;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=12;fontColor=#64748B" vertex="1" parent="1">
+          <mxGeometry x="60" y="580" width="1080" height="24" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e-container-execd" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#64748B;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="container-starts" target="execd-ready">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="240" y="186"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-execd-prestart" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#64748B;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="execd-ready" target="prestart">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="450" y="186"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-prestart-entrypoint" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#64748B;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="prestart" target="entrypoint-starts">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="660" y="186"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-entrypoint-workload" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#64748B;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="entrypoint-starts" target="workload-running">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="900" y="186"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-prestart-failure" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#DC2626;strokeWidth=2;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0" edge="1" parent="1" source="prestart" target="startup-failed">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="555" y="250"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-scheduler-periodic-1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#16A34A;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="scheduler" target="periodic-1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="290" y="507"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-periodic-1-2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#16A34A;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="periodic-1" target="periodic-2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="507"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-periodic-2-3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#16A34A;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="periodic-2" target="periodic-3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="730" y="507"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-periodic-3-continuation" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#16A34A;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="periodic-3" target="continuation">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="950" y="507"/></Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

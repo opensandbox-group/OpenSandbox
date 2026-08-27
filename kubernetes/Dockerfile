@@ -13,10 +13,11 @@
 # limitations under the License.
 
 # Build the manager binary
-FROM golang:1.24 AS builder
+FROM golang:1.25.12-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG GOFLAGS=
+ARG GOPROXY=https://proxy.golang.org,direct
 ARG LDFLAGS=
 ARG CGO_ENABLED=0
 ARG CC=
@@ -28,12 +29,11 @@ ARG CGO_CXXFLAGS=
 ARG CGO_LDFLAGS=
 
 WORKDIR /workspace
+RUN apk add --no-cache git
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
-# cache deps before building and copying source so that we don't need to re-download as much
-# and so that source changes don't invalidate our downloaded layer
-RUN GOPROXY=https://goproxy.cn,direct go mod download
+RUN GOPROXY="${GOPROXY}" go mod download
 
 # Copy the go source
 COPY cmd/ cmd/
@@ -62,7 +62,7 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
 
 # Use golang image as base to ensure nsenter (util-linux) is available
 # distroless does not contain shell or nsenter
-FROM golang:1.24
+FROM golang:1.25.12-alpine
 ARG USERID=65532
 WORKDIR /workspace
 COPY --from=builder /workspace/server .

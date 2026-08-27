@@ -47,7 +47,6 @@ func TestCreateCredentialVaultPayloadAndHeaders(t *testing.T) {
 					"name": "api-binding",
 					"match": map[string]any{
 						"schemes": []any{"https"},
-						"ports":   []any{float64(443)},
 						"hosts":   []any{"api.example.com"},
 						"methods": []any{"GET"},
 						"paths":   []any{"/v1/*"},
@@ -56,6 +55,13 @@ func TestCreateCredentialVaultPayloadAndHeaders(t *testing.T) {
 						"type":       "apiKey",
 						"name":       "X-Api-Key",
 						"credential": "api-token",
+						"substitutions": []any{
+							map[string]any{
+								"credential":  "api-token",
+								"placeholder": "__api_token__",
+								"in":          []any{"query", "body"},
+							},
+						},
 					},
 				},
 			},
@@ -402,7 +408,6 @@ func sampleCredentialVaultCreateRequest() CredentialVaultCreateRequest {
 				Name: "api-binding",
 				Match: CredentialMatch{
 					Schemes: []CredentialScheme{CredentialSchemeHTTPS},
-					Ports:   []int{443},
 					Hosts:   []string{"api.example.com"},
 					Methods: []string{"GET"},
 					Paths:   []string{"/v1/*"},
@@ -411,6 +416,13 @@ func sampleCredentialVaultCreateRequest() CredentialVaultCreateRequest {
 					Type:       CredentialAuthAPIKey,
 					Name:       "X-Api-Key",
 					Credential: "api-token",
+					Substitutions: []CredentialSubstitution{
+						{
+							Credential:  "api-token",
+							Placeholder: "__api_token__",
+							In:          []CredentialSubstitutionSurface{CredentialSubstitutionQuery, CredentialSubstitutionBody},
+						},
+					},
 				},
 			},
 		},

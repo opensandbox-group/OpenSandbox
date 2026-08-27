@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import pytest
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
@@ -28,7 +29,13 @@ from opensandbox_server.services.constants import (
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SandboxErrorCodes,
 )
-from opensandbox_server.api.schema import ImageAuth, ListSandboxesRequest, NetworkPolicy, PlatformSpec
+from opensandbox_server.api.schema import (
+    CredentialProxyConfig,
+    ImageAuth,
+    ListSandboxesRequest,
+    NetworkPolicy,
+    PlatformSpec,
+)
 from opensandbox_server.config import (
     EGRESS_MODE_DNS,
     EGRESS_MODE_DNS_NFT,
@@ -82,7 +89,23 @@ class TestKubernetesSandboxServiceInit:
             assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_INITIALIZATION_ERROR
 
 class TestKubernetesSandboxServiceCreate:
-    
+
+    def test_credential_proxy_requires_dns_nft_mode(
+        self, k8s_service, create_sandbox_request
+    ):
+        create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
+        create_sandbox_request.credential_proxy = CredentialProxyConfig(enabled=True)
+        k8s_service.app_config.egress = EgressConfig(
+            image="opensandbox/egress:v1.1.7", mode=EGRESS_MODE_DNS
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            k8s_service._ensure_network_policy_support(create_sandbox_request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "dns+nft" in exc_info.value.detail["message"]
+
     @pytest.mark.asyncio
     async def test_create_sandbox_with_valid_request_succeeds(
         self, k8s_service, create_sandbox_request, mock_workload
@@ -108,6 +131,80 @@ class TestKubernetesSandboxServiceCreate:
         assert response.id is not None
         assert response.status.state == "Running"
         k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_response_restores_extensions_from_workload(
+        self, k8s_service, create_sandbox_request, mock_workload
+    ):
+        create_sandbox_request.extensions = {
+            "opensandbox.extensions.custom-label": "中文数据",
+        }
+        mock_workload["metadata"]["annotations"] = {
+            "opensandbox.io/extensions.custom-label": "中文数据",
+        }
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        response = await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert response.extensions == {
+            "opensandbox.extensions.custom-label": "中文数据",
+        }
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_response_ignores_non_dict_workload_annotations(
+        self, k8s_service, create_sandbox_request
+    ):
+        workload = SimpleNamespace(
+            metadata=SimpleNamespace(annotations=["not", "a", "mapping"]),
+            spec=SimpleNamespace(),
+        )
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        response = await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert response.extensions is None
+
+    def test_list_sandboxes_restores_extensions_from_workloads(self, k8s_service, mock_workload):
+        mock_workload["metadata"]["annotations"] = {
+            "opensandbox.io/extensions.custom-label": "中文数据",
+        }
+        k8s_service.workload_provider.list_workloads.return_value = [mock_workload]
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        from opensandbox_server.api.schema import PaginationRequest
+        request = ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=20))
+        response = k8s_service.list_sandboxes(request)
+
+        assert response.items[0].extensions == {
+            "opensandbox.extensions.custom-label": "中文数据",
+        }
 
     @pytest.mark.asyncio
     async def test_create_sandbox_normalizes_allocated_status_to_running(
@@ -150,6 +247,7 @@ class TestKubernetesSandboxServiceCreate:
 
         # Override config values
         k8s_service.app_config.kubernetes.sandbox_create_timeout_seconds = 120
+        k8s_service.app_config.kubernetes.pool_acquisition_timeout_seconds = 15
         k8s_service.app_config.kubernetes.sandbox_create_poll_interval_seconds = 0.5
 
         with patch.object(k8s_service, "_wait_for_sandbox_ready", wraps=k8s_service._wait_for_sandbox_ready) as mock_wait:
@@ -158,7 +256,37 @@ class TestKubernetesSandboxServiceCreate:
         mock_wait.assert_called_once()
         _, kwargs = mock_wait.call_args
         assert kwargs["timeout_seconds"] == 120
+        assert kwargs["pool_acquisition_timeout_seconds"] == 15
         assert kwargs["poll_interval_seconds"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_cleans_up_workload_after_pool_capacity_timeout(
+        self, k8s_service, create_sandbox_request
+    ):
+        create_sandbox_request.extensions = {"poolRef": "*"}
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        capacity_error = HTTPException(
+            status_code=429,
+            detail={
+                "code": SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED,
+                "message": "Pool capacity remained unavailable",
+            },
+            headers={"Retry-After": "5"},
+        )
+
+        with patch.object(
+            k8s_service,
+            "_wait_for_sandbox_ready",
+            side_effect=capacity_error,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert exc_info.value is capacity_error
+        k8s_service.workload_provider.delete_workload.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_rejects_image_auth_when_provider_not_supported(
@@ -226,7 +354,7 @@ class TestKubernetesSandboxServiceCreate:
         self, k8s_service, create_sandbox_request
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
-        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.1.3")
+        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.1.7")
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-id", "uid": "uid-1"
         }
@@ -300,7 +428,7 @@ class TestKubernetesSandboxServiceCreate:
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
         k8s_service.app_config.egress = EgressConfig(
-            image="opensandbox/egress:v1.1.3",
+            image="opensandbox/egress:v1.1.7",
             mode=EGRESS_MODE_DNS_NFT,
         )
         k8s_service.workload_provider.create_workload.return_value = {
@@ -447,13 +575,11 @@ class TestKubernetesSandboxServiceCreate:
     def test_get_endpoint_resolve_internal_uses_pod_ip_even_in_gateway_mode(
         self, k8s_service
     ):
-        k8s_service.workload_provider.get_workload.return_value = {
-            "metadata": {
-                "annotations": {
-                    "sandbox.opensandbox.io/endpoints": '["10.0.0.1"]',
-                }
-            }
-        }
+        workload = {"metadata": {"annotations": {}}}
+        k8s_service.workload_provider.get_workload.return_value = workload
+        k8s_service.workload_provider.get_internal_endpoint.return_value = Endpoint(
+            endpoint="10.0.0.1:44772"
+        )
         k8s_service.workload_provider.get_endpoint_info.return_value = Endpoint(
             endpoint="gateway.example.com",
             headers={"OpenSandbox-Ingress-To": "sbx-123-44772"},
@@ -463,7 +589,10 @@ class TestKubernetesSandboxServiceCreate:
 
         assert endpoint.endpoint == "10.0.0.1:44772"
         assert endpoint.headers is None
-
+        k8s_service.workload_provider.get_internal_endpoint.assert_called_once_with(
+            workload, 44772, "sbx-123"
+        )
+        k8s_service.workload_provider.get_endpoint_info.assert_not_called()
 
     def test_get_endpoint_keeps_instance_egress_auth_header_private_for_workload_ports(
         self, k8s_service
@@ -571,6 +700,112 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_rejects_network_policy_with_400(
+        self, k8s_service
+    ):
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+            networkPolicy=NetworkPolicy(default_action="deny", egress=[]),
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(pool_request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "networkPolicy cannot be used together with extensions.poolRef" in (
+            exc_info.value.detail["message"]
+        )
+        k8s_service.k8s_client.get_custom_object.assert_not_called()
+        k8s_service.workload_provider.create_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_rejects_credential_proxy_with_400(
+        self, k8s_service
+    ):
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+            credentialProxy=CredentialProxyConfig(enabled=True),
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(pool_request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "credentialProxy.enabled cannot be used together with extensions.poolRef" in (
+            exc_info.value.detail["message"]
+        )
+        k8s_service.k8s_client.get_custom_object.assert_not_called()
+        k8s_service.workload_provider.create_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_missing_pool_fails_fast(
+        self, k8s_service
+    ):
+        """Pool mode validates poolRef before creating the BatchSandbox."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "does-not-exist-pool"},
+        )
+        k8s_service.k8s_client.get_custom_object.return_value = None
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(pool_request)
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == {
+            "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
+            "message": "Pool 'does-not-exist-pool' not found.",
+        }
+        k8s_service.k8s_client.get_custom_object.assert_called_once_with(
+            group="sandbox.opensandbox.io",
+            version="v1alpha1",
+            namespace=k8s_service.namespace,
+            plural="pools",
+            name="does-not-exist-pool",
+        )
+        k8s_service.workload_provider.create_workload.assert_not_called()
+        k8s_service.workload_provider.delete_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_auto_assign_skips_pool_lookup(
+        self, k8s_service, mock_workload
+    ):
+        """Pool auto-assignment uses '*' and must be handled by the controller."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "*"},
+        )
+
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-pool-auto",
+            "uid": "pool-auto-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.5:8080"
+        k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        response = await k8s_service.create_sandbox(pool_request)
+
+        assert response.id is not None
+        k8s_service.k8s_client.get_custom_object.assert_not_called()
+        k8s_service.workload_provider.create_workload.assert_called_once()
+        assert k8s_service.workload_provider.create_workload.call_args.kwargs["extensions"] == {"poolRef": "*"}
+
+    @pytest.mark.asyncio
     async def test_create_sandbox_pool_mode_skips_image_and_entrypoint_validation(
         self, k8s_service, mock_workload
     ):
@@ -633,6 +868,11 @@ class TestKubernetesSandboxServiceCreate:
 
 class TestWaitForSandboxReady:
     """_wait_for_sandbox_ready method tests"""
+
+    def test_pool_capacity_retry_after_matches_acquisition_window(self, k8s_service):
+        error = k8s_service._pool_capacity_exhausted_error(30)
+
+        assert error.headers == {"Retry-After": "30"}
     
     @pytest.mark.asyncio
     async def test_wait_for_running_pod_succeeds(self, k8s_service, mock_workload):
@@ -694,6 +934,141 @@ class TestWaitForSandboxReady:
         
         assert exc_info.value.status_code == 504  # Gateway Timeout
         assert "timeout" in exc_info.value.detail["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_wait_returns_retryable_error_when_pool_capacity_stays_exhausted(
+        self, k8s_service, mock_workload
+    ):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Pending",
+            "reason": "POOL_CAPACITY_EXHAUSTED",
+            "message": "Pool capacity is exhausted",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=1,
+                poll_interval_seconds=0.01,
+                pool_acquisition_timeout_seconds=0.02,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert (
+            exc_info.value.detail["code"]
+            == SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED
+        )
+        assert exc_info.value.headers == {"Retry-After": "1"}
+
+    @pytest.mark.asyncio
+    async def test_wait_succeeds_when_pool_capacity_is_released(
+        self, k8s_service, mock_workload
+    ):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.side_effect = [
+            {
+                "state": "Pending",
+                "reason": "POOL_CAPACITY_EXHAUSTED",
+                "message": "Pool capacity is exhausted",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+            {
+                "state": "Running",
+                "reason": "RUNNING",
+                "message": "Sandbox is running",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+        ]
+
+        result = await k8s_service._wait_for_sandbox_ready(
+            "test-sandbox-id",
+            timeout_seconds=1,
+            poll_interval_seconds=0.01,
+            pool_acquisition_timeout_seconds=0.2,
+        )
+
+        assert result == mock_workload
+
+    @pytest.mark.asyncio
+    async def test_overall_timeout_preserves_pool_capacity_error_classification(
+        self, k8s_service, mock_workload
+    ):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Pending",
+            "reason": "POOL_CAPACITY_EXHAUSTED",
+            "message": "Pool capacity is exhausted",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=0.02,
+                poll_interval_seconds=0.01,
+                pool_acquisition_timeout_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert (
+            exc_info.value.detail["code"]
+            == SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED
+        )
+
+    @pytest.mark.asyncio
+    async def test_wait_accumulates_pool_capacity_across_transient_recovery(
+        self, k8s_service, mock_workload
+    ):
+        clock = SimpleNamespace(now=0.0)
+
+        async def advance_clock(seconds: float) -> None:
+            clock.now += seconds
+
+        capacity_status = {
+            "state": "Pending",
+            "reason": "POOL_CAPACITY_EXHAUSTED",
+            "message": "Pool capacity is exhausted",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        generic_pending_status = {
+            "state": "Pending",
+            "reason": "BATCHSANDBOX_PENDING",
+            "message": "Sandbox is pending",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.side_effect = [
+            capacity_status,
+            generic_pending_status,
+            capacity_status,
+            generic_pending_status,
+        ]
+
+        with (
+            patch(
+                "opensandbox_server.services.k8s.kubernetes_service.time.time",
+                side_effect=lambda: clock.now,
+            ),
+            patch(
+                "opensandbox_server.services.k8s.kubernetes_service.asyncio.sleep",
+                new=advance_clock,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=4,
+                poll_interval_seconds=1,
+                pool_acquisition_timeout_seconds=2,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert (
+            exc_info.value.detail["code"]
+            == SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED
+        )
 
     @pytest.mark.asyncio
     async def test_wait_returns_400_when_scheduler_marks_platform_unschedulable(self, k8s_service, mock_workload):
@@ -1166,6 +1541,26 @@ class TestEnsurePvcVolumes:
         assert exc_info.value.status_code == 500
         k8s_service.k8s_client.create_pvc.assert_not_called()
 
+    def test_pvc_create_server_error_returns_internal_error(self, k8s_service):
+        """Unexpected PVC create errors must stay structured HTTP failures."""
+        from kubernetes.client import ApiException
+
+        k8s_service.k8s_client.get_pvc.return_value = None
+        k8s_service.k8s_client.create_pvc.side_effect = ApiException(
+            status=500, reason="Internal Server Error"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            k8s_service._ensure_pvc_volumes(
+                [self._make_volume("data-claim")], sandbox_id="sandbox-xyz"
+            )
+
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.detail == {
+            "code": SandboxErrorCodes.INTERNAL_ERROR,
+            "message": "Failed to auto-create PVC 'data-claim': Internal Server Error",
+        }
+
     def test_create_race_409_fails_closed_when_winner_pvc_already_gone(
         self, k8s_service
     ):
@@ -1337,6 +1732,68 @@ class TestCreateSandboxPvcFailureCleanup:
                 ),
             ],
         )
+
+    @pytest.mark.asyncio
+    async def test_shared_pvc_mixed_read_only_mounts_are_allowed(
+        self, k8s_service, mock_workload
+    ):
+        from opensandbox_server.api.schema import (
+            CreateSandboxRequest,
+            ImageSpec,
+            PVC,
+            ResourceLimits,
+            Volume,
+        )
+
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash", "-c", "sleep 3600"],
+            timeout=3600,
+            resourceLimits=ResourceLimits(root={"cpu": "1", "memory": "1Gi"}),
+            volumes=[
+                Volume(
+                    name="shared-skills",
+                    mountPath="/data/skills",
+                    subPath="common/skills",
+                    readOnly=True,
+                    pvc=PVC(
+                        claimName="auto-data",
+                        createIfNotExists=True,
+                        deleteOnSandboxTermination=True,
+                    ),
+                ),
+                Volume(
+                    name="shared-user",
+                    mountPath="/data/user",
+                    subPath="user1",
+                    readOnly=False,
+                    pvc=PVC(
+                        claimName="auto-data",
+                        createIfNotExists=True,
+                        deleteOnSandboxTermination=True,
+                    ),
+                ),
+            ],
+        )
+        k8s_service.k8s_client.get_pvc.return_value = None
+        k8s_service.k8s_client.create_pvc.return_value = None
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-id",
+            "uid": "abc",
+        }
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with patch.object(k8s_service, "_wait_for_sandbox_ready", return_value=mock_workload):
+            response = await k8s_service.create_sandbox(request)
+
+        assert response.id is not None
+        k8s_service.k8s_client.create_pvc.assert_called_once()
+        k8s_service.workload_provider.create_workload.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_pool_ref_with_volumes_rejected_before_pvc_creation(

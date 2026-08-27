@@ -71,6 +71,11 @@ public class SandboxCreateOptions
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
 
     /// <summary>
+    /// Gets or sets optional lifecycle hooks applied during sandbox creation.
+    /// </summary>
+    public SandboxLifecycle? Lifecycle { get; set; }
+
+    /// <summary>
     /// Gets or sets the network policy for the sandbox.
     /// </summary>
     public NetworkPolicy? NetworkPolicy { get; set; }

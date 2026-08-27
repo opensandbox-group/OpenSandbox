@@ -255,19 +255,23 @@ class SandboxTest {
 
     @Test
     fun `pause should delegate to sandboxService`() {
+        every { sandboxService.invalidateEndpointCache(sandboxId) } just Runs
         every { sandboxService.pauseSandbox(sandboxId) } just Runs
 
         sandbox.pause()
 
+        verify { sandboxService.invalidateEndpointCache(sandboxId) }
         verify { sandboxService.pauseSandbox(sandboxId) }
     }
 
     @Test
     fun `kill should delegate to sandboxService`() {
+        every { sandboxService.invalidateEndpointCache(sandboxId) } just Runs
         every { sandboxService.killSandbox(sandboxId) } just Runs
 
         sandbox.kill()
 
+        verify { sandboxService.invalidateEndpointCache(sandboxId) }
         verify { sandboxService.killSandbox(sandboxId) }
     }
 
@@ -306,6 +310,43 @@ class SandboxTest {
     }
 
     @Test
+    fun `checkReady should propagate wrapped interruption and restore interrupt status`() {
+        val interrupted = InterruptedException("acquire cancelled")
+        val wrapped = RuntimeException("health check interrupted", interrupted)
+        val sandboxWithInterruptingHealthCheck =
+            Sandbox(
+                id = sandboxId,
+                sandboxService = sandboxService,
+                fileSystemService = fileSystemService,
+                commandService = commandService,
+                healthService = healthService,
+                metricsService = metricsService,
+                egressService = egressService,
+                credentialVaultService = credentialVaultService,
+                isolatedService = mockk(),
+                customHealthCheck = { throw wrapped },
+                httpClientProvider = httpClientProvider,
+                diagnosticsService = diagnosticsService,
+            )
+
+        Thread.interrupted()
+        try {
+            val actual =
+                assertThrows(RuntimeException::class.java) {
+                    sandboxWithInterruptingHealthCheck.checkReady(
+                        Duration.ofSeconds(1),
+                        Duration.ofMillis(10),
+                    )
+                }
+
+            assertSame(wrapped, actual)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+    }
+
+    @Test
     fun `checkReady should throw exception when timeout`() {
         every { healthService.ping(sandboxId) } returns false
 
@@ -315,7 +356,7 @@ class SandboxTest {
     }
 
     @Test
-    fun `checkReady timeout should include connection context and bridge hint`() {
+    fun `checkReady timeout should include diagnostics without network configuration hints`() {
         every { healthService.ping(sandboxId) } throws RuntimeException("connect ECONNREFUSED")
 
         val ex =
@@ -324,27 +365,10 @@ class SandboxTest {
             }
 
         assertTrue(ex.message!!.contains("Connection context: domain=localhost:8080, useServerProxy=false"))
-        assertTrue(ex.message!!.contains("useServerProxy=true"))
-        assertTrue(ex.message!!.contains("[docker].host_ip"))
-        assertTrue(ex.message!!.contains("Last error: connect ECONNREFUSED"))
-    }
-
-    @Test
-    fun `checkReady timeout should omit host_ip hint when server proxy is enabled`() {
-        val proxyEnabledConfig =
-            ConnectionConfig.builder()
-                .domain("localhost:8080")
-                .useServerProxy(true)
-                .build()
-        every { httpClientProvider.config } returns proxyEnabledConfig
-        every { healthService.ping(sandboxId) } returns false
-
-        val ex =
-            assertThrows(SandboxReadyTimeoutException::class.java) {
-                sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
-            }
-
-        assertTrue(ex.message!!.contains("useServerProxy=true"))
+        assertFalse(ex.message!!.contains("consider enabling useServerProxy=true", ignoreCase = true))
+        assertFalse(ex.message!!.contains("Docker bridge", ignoreCase = true))
+        assertFalse(ex.message!!.contains("remote-network", ignoreCase = true))
         assertFalse(ex.message!!.contains("[docker].host_ip"))
+        assertTrue(ex.message!!.contains("Last error: connect ECONNREFUSED"))
     }
 }

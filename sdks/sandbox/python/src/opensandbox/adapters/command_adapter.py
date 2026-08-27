@@ -39,9 +39,10 @@ from opensandbox.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcher,
 )
 from opensandbox.adapters.converter.response_handler import (
-    extract_request_id,
+    build_api_exception_from_httpx,
     handle_api_error,
 )
+from opensandbox.adapters.sse import aiter_sse_events
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.execd import (
@@ -53,6 +54,7 @@ from opensandbox.models.execd import (
 )
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.command import Commands
+from opensandbox.transport import unwrap_retry_transport
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +67,7 @@ def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
         if timeout_ms < 0:
             raise InvalidArgumentException("timeout must be positive")
         return timeout_ms
-    raise InvalidArgumentException(
-        "timeout must be a datetime.timedelta or None"
-    )
+    raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
 
 
 def _infer_foreground_exit_code(execution: Execution) -> int | None:
@@ -102,22 +102,15 @@ def _build_run_in_session_request_body(
     )
 
 
-def _decode_sse_event_line(line: str) -> EventNode | None:
-    if not line.strip():
-        return None
-
-    if line.startswith((":", "event:", "id:", "retry:")):
-        return None
-
-    data = line[5:].strip() if line.startswith("data:") else line
-    if not data:
+def _decode_sse_event_data(data: str) -> EventNode | None:
+    if not data.strip():
         return None
 
     try:
         event_dict = json.loads(data)
         return EventNode(**event_dict)
     except Exception as e:
-        logger.error("Failed to parse SSE line: %s", line, exc_info=e)
+        logger.error(f"Failed to parse SSE event data: {data}", exc_info=e)
         return None
 
 
@@ -186,6 +179,9 @@ class CommandsAdapter(Commands):
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
+        # SSE bootstraps bypass the retry wrapper: request bodies are
+        # not replayable and a non-idempotent status opt-in would cause
+        # duplicate execution on a resent SSE POST.
         self._sse_client = httpx.AsyncClient(
             headers=sse_headers,
             timeout=httpx.Timeout(
@@ -194,7 +190,7 @@ class CommandsAdapter(Commands):
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=self.connection_config.transport,
+            transport=unwrap_retry_transport(self.connection_config.transport),
         )
 
     async def _get_client(self):
@@ -218,6 +214,7 @@ class CommandsAdapter(Commands):
         handlers: ExecutionHandlers | None,
         infer_exit_code: bool,
         failure_message: str,
+        is_background: bool = False,
     ) -> Execution:
         execution = Execution(
             id=None,
@@ -230,25 +227,23 @@ class CommandsAdapter(Commands):
         async with client.stream("POST", url, json=json_body) as response:
             if response.status_code != 200:
                 await response.aread()
-                error_body = response.text
                 logger.error(
-                    "%s. Status: %s, Body: %s",
-                    failure_message,
-                    response.status_code,
-                    error_body,
+                    f"{failure_message}. Status: {response.status_code}, Body: {response.text}"
                 )
-                raise SandboxApiException(
-                    message=f"{failure_message}. Status code: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
-                )
+                raise build_api_exception_from_httpx(response, failure_message)
 
             dispatcher = ExecutionEventDispatcher(execution, handlers)
-            async for line in response.aiter_lines():
-                event_node = _decode_sse_event_line(line)
+            async for event in aiter_sse_events(response):
+                event_node = _decode_sse_event_data(event.data)
                 if event_node is None:
                     continue
                 await dispatcher.dispatch(event_node)
+                if is_background and event_node.type == "execution_complete":
+                    # Background commands are done once execution_complete
+                    # arrives; do not wait for the chunked terminator, which
+                    # execd sends only after a graceful-shutdown sleep and can
+                    # be lost if the connection is closed early (#1528).
+                    break
 
         if infer_exit_code:
             execution.exit_code = _infer_foreground_exit_code(execution)
@@ -280,14 +275,11 @@ class CommandsAdapter(Commands):
                 handlers=handlers,
                 infer_exit_code=not opts.background,
                 failure_message="Failed to run command",
+                is_background=opts.background,
             )
 
         except Exception as e:
-            logger.error(
-                "Failed to run command (length: %s)",
-                len(command),
-                exc_info=e,
-            )
+            logger.error(f"Failed to run command (length: {len(command)})", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def interrupt(self, execution_id: str) -> None:
@@ -321,7 +313,9 @@ class CommandsAdapter(Commands):
             )
 
             handle_api_error(response_obj, "Get command status")
-            parsed = require_parsed(response_obj, CommandStatusResponse, "Get command status")
+            parsed = require_parsed(
+                response_obj, CommandStatusResponse, "Get command status"
+            )
             return to_command_status(parsed)
         except Exception as e:
             logger.error("Failed to get command status", exc_info=e)
@@ -371,9 +365,7 @@ class CommandsAdapter(Commands):
         from opensandbox.api.execd.types import UNSET
 
         body = (
-            CreateSessionRequest(cwd=working_directory)
-            if working_directory
-            else UNSET
+            CreateSessionRequest(cwd=working_directory) if working_directory else UNSET
         )
         try:
             client = await self._get_client()
@@ -434,9 +426,7 @@ class CommandsAdapter(Commands):
 
         try:
             client = await self._get_client()
-            parsed = await delete_session_asyncio(
-                client=client, session_id=session_id
-            )
+            parsed = await delete_session_asyncio(client=client, session_id=session_id)
             if parsed is not None:
                 handle_api_error(parsed, "delete_session")
         except Exception as e:

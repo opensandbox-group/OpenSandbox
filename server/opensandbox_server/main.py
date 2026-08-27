@@ -29,22 +29,74 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp
 
 from opensandbox_server.config import load_config
 from opensandbox_server.integrations.renew_intent import start_renew_intent_consumer
 from opensandbox_server.logging_config import configure_logging
 from opensandbox_server.startup_guard import api_key_confirm
+from opensandbox_server.tenants import (
+    validate_tenant_config,
+    validate_tenant_namespaces_on_startup,
+    TenantProvider,
+)
+
+# The deployed package version, resolved at runtime from installed metadata.
+# Exposed via GET /version (not /openapi.json). Mirrors
+# cli/src/opensandbox_cli/__init__.py; falls back when the package metadata is
+# unavailable (e.g. running from a source checkout without install).
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("opensandbox-server")
+except Exception:
+    __version__ = "0.0.0-dev"
+
+# info.version in /openapi.json and /docs is the API *contract* version, not the
+# package/release version. Keep it in sync with specs/sandbox-lifecycle.yml
+# (info.version); specs/* are the public contract source of truth (AGENTS.md).
+API_CONTRACT_VERSION = "0.1.0"
 
 # Load configuration before initializing routers/middleware
 app_config = load_config()
 _log_config = configure_logging(app_config.log)
+validate_tenant_config(app_config)
+
+
+def _build_tenant_provider(config) -> TenantProvider | None:
+    if config.tenants is None:
+        return None
+    if config.tenants.provider == "http":
+        from opensandbox_server.tenants.http_provider import (
+            HTTPTenantProvider,
+            HTTPTenantProviderConfig,
+        )
+
+        http_cfg = HTTPTenantProviderConfig(
+            endpoint=config.tenants.endpoint,
+            max_stale_seconds=config.tenants.max_stale_seconds,
+            timeout_seconds=config.tenants.timeout_seconds,
+            auth_header=config.tenants.auth_header,
+            auth_token=config.tenants.auth_token,
+        )
+        return HTTPTenantProvider(http_cfg)
+    from opensandbox_server.tenants.file_provider import FileTenantProvider
+
+    return FileTenantProvider()
+
+
+tenant_provider: TenantProvider | None = _build_tenant_provider(app_config)
 
 from opensandbox_server.api.devops import router as devops_router  # noqa: E402
+from opensandbox_server.api.metrics import router as metrics_router  # noqa: E402
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
 from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
+from opensandbox_server.integrations.otel import setup_otel_metrics, shutdown_otel_metrics  # noqa: E402
 from opensandbox_server.integrations.renew_intent.proxy_renew import ProxyRenewCoordinator  # noqa: E402
 from opensandbox_server.middleware.auth import AuthMiddleware  # noqa: E402
+from opensandbox_server.middleware.date_header import DateHeaderMiddleware  # noqa: E402
+from opensandbox_server.middleware.http_metrics import HttpMetricsMiddleware  # noqa: E402
 from opensandbox_server.middleware.request_id import RequestIdMiddleware  # noqa: E402
 from opensandbox_server.services.extension_service import require_extension_service  # noqa: E402
 from opensandbox_server.services.runtime_resolver import (  # noqa: E402
@@ -53,13 +105,40 @@ from opensandbox_server.services.runtime_resolver import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
+class _DateHeaderFastAPI(FastAPI):
+    """Keep Date handling outside Starlette's server error middleware."""
+
+    def build_middleware_stack(self) -> ASGIApp:
+        return DateHeaderMiddleware(super().build_middleware_stack())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        api_key_confirm(configured_api_key=app_config.server.api_key)
-    except Exception as exc:
-        logger.error("API key startup confirmation failed: %s", exc)
-        os._exit(1)
+    if tenant_provider is None:
+        try:
+            api_key_confirm(configured_api_key=app_config.server.api_key)
+        except Exception as exc:
+            logger.error("API key startup confirmation failed: %s", exc)
+            os._exit(1)
+
+    if tenant_provider is not None:
+        tenant_provider.start()
+        sandbox_service.set_tenant_provider(tenant_provider)
+
+        # OSEP-0014: startup MUST validate all tenant namespaces exist and
+        # are accessible before serving traffic (fail-fast). Multi-tenancy is
+        # Kubernetes-only, which validate_tenant_config() already enforces.
+        # Providers that cannot enumerate tenants (HTTP) skip with a warning
+        # instead of silently validating an empty set.
+        try:
+            from opensandbox_server.services.k8s.client import K8sClient
+
+            core_v1_api = K8sClient(app_config.kubernetes).get_core_v1_api()
+            validate_tenant_namespaces_on_startup(tenant_provider, core_v1_api)
+        except Exception as exc:
+            logger.error("Tenant namespace validation failed: %s", exc)
+            os._exit(1)
 
     from anyio.to_thread import current_default_thread_limiter
 
@@ -108,19 +187,24 @@ async def lifespan(app: FastAPI):
         app.state.renew_intent_consumer,
     )
 
+    setup_otel_metrics(app_config.otel)
+
     yield
 
     consumer = getattr(app.state, "renew_intent_consumer", None)
     if consumer is not None:
         await consumer.stop()
+    shutdown_otel_metrics()
     snapshot_service.close()
+    if tenant_provider is not None:
+        tenant_provider.close()
     await app.state.http_client.aclose()
 
 
 # Initialize FastAPI application
-app = FastAPI(
+app = _DateHeaderFastAPI(
     title="OpenSandbox Lifecycle API",
-    version="0.1.0",
+    version=API_CONTRACT_VERSION,
     description="The Sandbox Lifecycle API coordinates how untrusted workloads are created, "
                 "executed, paused, resumed, and finally disposed.",
     docs_url="/docs",
@@ -130,10 +214,12 @@ app = FastAPI(
 
 # Attach global config for runtime access
 app.state.config = app_config
+app.state.tenant_provider = tenant_provider
 
-# Middleware run in reverse order of addition: last added = first to run (outermost).
+# User middleware run in reverse order of addition: last added = first to run.
+# DateHeaderMiddleware wraps the complete stack, including ServerErrorMiddleware.
 # Add auth and CORS first so they run after RequestIdMiddleware.
-app.add_middleware(AuthMiddleware, config=app_config)
+app.add_middleware(AuthMiddleware, config=app_config, tenant_provider=tenant_provider)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -141,12 +227,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# RequestIdMiddleware last = outermost: runs first, so every response (including
-# 401 from AuthMiddleware) gets X-Request-ID and logs have request_id in context.
+# RequestIdMiddleware wraps auth and CORS so every response (including 401 from
+# AuthMiddleware) gets X-Request-ID and logs have request_id in context.
 app.add_middleware(RequestIdMiddleware)
+# HttpMetricsMiddleware is the outermost user middleware so auth failures and
+# other early responses are included. Unmatched routes use the bounded "unknown" label.
+app.add_middleware(HttpMetricsMiddleware)
 
 # Include API routes at root and versioned prefix.
-# IMPORTANT: devops_router and pool_router MUST be registered before proxy_router
+# IMPORTANT: non-proxy routers MUST be registered before proxy_router
 # because proxy_router contains catch-all routes that would swallow diagnostics paths.
 app.include_router(router)
 app.include_router(devops_router)
@@ -155,6 +244,7 @@ app.include_router(proxy_router)
 app.include_router(router, prefix="/v1")
 app.include_router(devops_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
+app.include_router(metrics_router, prefix="/v1")
 app.include_router(proxy_router, prefix="/v1")
 
 DEFAULT_ERROR_CODE = "GENERAL::UNKNOWN_ERROR"
@@ -197,6 +287,17 @@ async def health_check():
     return {"status": "healthy"}
 
 
+@app.get("/version")
+async def version_info():
+    """
+    Return the deployed server package version (resolved from installed metadata).
+
+    Returns:
+        dict: Package version
+    """
+    return {"version": __version__}
+
+
 if __name__ == "__main__":
     import uvicorn
 
@@ -210,4 +311,6 @@ if __name__ == "__main__":
         timeout_keep_alive=app_config.server.timeout_keep_alive,
         loop=app_config.server.loop,
         http=app_config.server.http,
+        date_header=False,
+        timeout_graceful_shutdown=app_config.server.timeout_graceful_shutdown,
     )

@@ -140,13 +140,13 @@ class RenewIntentConsumer:
                 queue_key=consumer._queue_key,
             )
             logger.info(
-                f"🧪 [EXPERIMENTAL] renew_intent is enabled: Redis BRPOP feeders + "
+                f"renew_intent is enabled: Redis BRPOP feeders + "
                 f"unified processors started ({line})",
                 extra=ex,
             )
         else:
             logger.info(
-                "🧪 [EXPERIMENTAL] renew_intent is enabled: unified in-process renew pipeline "
+                "renew_intent is enabled: unified in-process renew pipeline "
                 "(proxy path only; no Redis BRPOP)"
             )
         return consumer

@@ -100,9 +100,10 @@ class SandboxManager:
         """
         self._sandbox_service = sandbox_service
         self._connection_config = connection_config
-        self._diagnostics_service = diagnostics_service or AdapterFactory(
-            connection_config
-        ).create_diagnostics_service()
+        self._diagnostics_service = (
+            diagnostics_service
+            or AdapterFactory(connection_config).create_diagnostics_service()
+        )
 
     @property
     def connection_config(self) -> ConnectionConfig:
@@ -196,7 +197,7 @@ class SandboxManager:
 
         String values add or replace keys; None deletes keys.
         """
-        logger.info("Patching metadata for sandbox: %s", sandbox_id)
+        logger.info(f"Patching metadata for sandbox: {sandbox_id}")
         return await self._sandbox_service.patch_sandbox_metadata(sandbox_id, patch)
 
     async def kill_sandbox(self, sandbox_id: str) -> None:
@@ -213,7 +214,9 @@ class SandboxManager:
         await self._sandbox_service.kill_sandbox(sandbox_id)
         logger.info(f"Successfully terminated sandbox: {sandbox_id}")
 
-    async def renew_sandbox(self, sandbox_id: str, timeout: timedelta) -> SandboxRenewResponse:
+    async def renew_sandbox(
+        self, sandbox_id: str, timeout: timedelta
+    ) -> SandboxRenewResponse:
         """
         Renew expiration time for a single sandbox.
 
@@ -293,8 +296,7 @@ class SandboxManager:
             await self._connection_config.close_transport_if_owned()
         except Exception as e:
             logger.warning(
-                f"Error closing resources for sandbox manager: {e}",
-                exc_info=True
+                f"Error closing resources for sandbox manager: {e}", exc_info=True
             )
 
     async def __aenter__(self) -> "SandboxManager":

@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 class HealthAdapterSync(HealthSync):
-    def __init__(self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint) -> None:
+    def __init__(
+        self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint
+    ) -> None:
         self.connection_config = connection_config
         self.execd_endpoint = execd_endpoint
         from opensandbox.api.execd import Client
@@ -60,5 +62,5 @@ class HealthAdapterSync(HealthSync):
             handle_api_error(response_obj, "Ping")
             return True
         except Exception as e:
-            logger.debug("Health check failed for sandbox %s: %s", sandbox_id, e)
+            logger.debug(f"Health check failed for sandbox {sandbox_id}: {e}")
             return False

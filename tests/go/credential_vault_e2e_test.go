@@ -17,7 +17,9 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,13 +35,16 @@ var credentialVaultSecrets = map[string]string{
 	"api-key-token":          "vault-api-key-token",
 	"client-id":              "vault-client-id",
 	"client-secret":          "vault-client-secret",
+	"query-secret":           "vault-query-secret",
+	"path-secret":            "vault-path-secret",
+	"body-secret":            "vault-body-secret",
 	"runtime-token":          "vault-runtime-token",
 	"runtime-token-replaced": "vault-runtime-token-replaced",
 }
 
 func TestCredentialVaultInjectsAllAuthTypes(t *testing.T) {
 	targetIP := credentialVaultTargetIP(t)
-	ctx, sb := createCredentialVaultSandbox(t)
+	ctx, sb := createCredentialVaultSandbox(t, targetIP)
 
 	state, err := sb.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
 		Credentials: credentialVaultCredentials(
@@ -103,9 +108,80 @@ func TestCredentialVaultInjectsAllAuthTypes(t *testing.T) {
 	}
 }
 
+func TestCredentialVaultSubstitutesPlaceholdersInQueryPathAndBody(t *testing.T) {
+	targetIP := credentialVaultTargetIP(t)
+	ctx, sb := createCredentialVaultSandbox(t, targetIP)
+
+	state, err := sb.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
+		Credentials: credentialVaultCredentials("query-secret", "path-secret", "body-secret"),
+		Bindings: []opensandbox.CredentialBinding{
+			credentialVaultBinding("query-substitution", "/query-substitution", opensandbox.CredentialAuth{
+				Type: opensandbox.CredentialAuthPassthrough,
+				Substitutions: []opensandbox.CredentialSubstitution{
+					{
+						Credential:  "query-secret",
+						Placeholder: "__query_secret__",
+						In:          []opensandbox.CredentialSubstitutionSurface{opensandbox.CredentialSubstitutionQuery},
+					},
+				},
+			}),
+			credentialVaultBinding("path-substitution", "/tenant/*", opensandbox.CredentialAuth{
+				Type: opensandbox.CredentialAuthPassthrough,
+				Substitutions: []opensandbox.CredentialSubstitution{
+					{
+						Credential:  "path-secret",
+						Placeholder: "__path_secret__",
+						In:          []opensandbox.CredentialSubstitutionSurface{opensandbox.CredentialSubstitutionPath},
+					},
+				},
+			}),
+			credentialVaultBindingWithMethods("body-substitution", "/body-substitution", opensandbox.CredentialAuth{
+				Type: opensandbox.CredentialAuthPassthrough,
+				Substitutions: []opensandbox.CredentialSubstitution{
+					{
+						Credential:  "body-secret",
+						Placeholder: "__body_secret__",
+						In:          []opensandbox.CredentialSubstitutionSurface{opensandbox.CredentialSubstitutionBody},
+					},
+				},
+			}, []string{"POST"}),
+		},
+	})
+	require.NoError(t, err)
+
+	statePayload, err := json.Marshal(state)
+	require.NoError(t, err)
+	for _, secret := range credentialVaultSecrets {
+		require.NotContains(t, string(statePayload), secret)
+	}
+	for _, placeholder := range []string{"__query_secret__", "__path_secret__", "__body_secret__"} {
+		require.NotContains(t, string(statePayload), placeholder)
+	}
+
+	response := credentialVaultCurlJSON(t, ctx, sb, targetIP, "/query-substitution?api_key=__query_secret__", true)
+	require.Equal(t, true, response["ok"])
+	require.Equal(t, "query-substitution", response["case"])
+	require.Empty(t, stringSliceFromJSON(t, response["missingOrInvalid"]))
+
+	response = credentialVaultCurlJSON(t, ctx, sb, targetIP, "/tenant/__path_secret__/resource?tenant=__path_secret__", true)
+	require.Equal(t, true, response["ok"])
+	require.Equal(t, "path-substitution", response["case"])
+	require.Equal(t, true, response["queryStillPlaceholder"])
+
+	response = credentialVaultCurlJSONWithOptions(t, ctx, sb, targetIP, "/body-substitution", credentialVaultCurlOptions{
+		failOnHTTPError: true,
+		method:          "POST",
+		headers:         []string{"content-type: application/json"},
+		data:            `{"client_secret":"__body_secret__"}`,
+	})
+	require.Equal(t, true, response["ok"])
+	require.Equal(t, "body-substitution", response["case"])
+	require.Empty(t, stringSliceFromJSON(t, response["missingOrInvalid"]))
+}
+
 func TestCredentialVaultRuntimeMutationAddsReplacesAndDeletesBinding(t *testing.T) {
 	targetIP := credentialVaultTargetIP(t)
-	ctx, sb := createCredentialVaultSandbox(t)
+	ctx, sb := createCredentialVaultSandbox(t, targetIP)
 
 	state, err := sb.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{})
 	require.NoError(t, err)
@@ -204,6 +280,35 @@ func TestCredentialVaultRuntimeMutationAddsReplacesAndDeletesBinding(t *testing.
 	require.Empty(t, state.Credentials)
 }
 
+func TestCredentialVaultLargeBodiesAcrossStreamingThreshold(t *testing.T) {
+	targetIP := credentialVaultTargetIP(t)
+	ctx, sb := createCredentialVaultSandbox(t, targetIP)
+
+	_, err := sb.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
+		Credentials: credentialVaultCredentials("api-key-token"),
+		Bindings: []opensandbox.CredentialBinding{
+			credentialVaultBindingWithMethods("large-body", "/large-body", opensandbox.CredentialAuth{
+				Type:       opensandbox.CredentialAuthAPIKey,
+				Name:       "X-Api-Key",
+				Credential: "api-key-token",
+			}, []string{"POST"}),
+		},
+	})
+	require.NoError(t, err)
+
+	// Regression for the stream_large_bodies=1m header-injection bug: bodies
+	// above 1 MiB are streamed upstream by mitmproxy and used to reach the
+	// upstream without the injected API key (403). Injection now happens in
+	// the requestheaders hook, so all four sizes must succeed.
+	for _, size := range []int{1024*1024 - 1, 1024 * 1024, 1024*1024 + 1, 2 * 1024 * 1024} {
+		response := credentialVaultCurlJSONWithLargeBody(t, ctx, sb, targetIP, "/large-body", size)
+		require.Equal(t, true, response["ok"])
+		require.Equal(t, "large-body", response["case"])
+		require.Empty(t, stringSliceFromJSON(t, response["missingOrInvalid"]))
+		require.Equal(t, float64(size), response["bodyReceivedLength"])
+	}
+}
+
 func credentialVaultTargetHost() string {
 	if host := os.Getenv("OPENSANDBOX_CREDENTIAL_VAULT_E2E_TARGET_HOST"); host != "" {
 		return host
@@ -220,7 +325,7 @@ func credentialVaultTargetIP(t *testing.T) string {
 	return targetIP
 }
 
-func createCredentialVaultSandbox(t *testing.T) (context.Context, *opensandbox.Sandbox) {
+func createCredentialVaultSandbox(t *testing.T, targetIP string) (context.Context, *opensandbox.Sandbox) {
 	t.Helper()
 
 	image := os.Getenv("OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE")
@@ -237,8 +342,11 @@ func createCredentialVaultSandbox(t *testing.T) (context.Context, *opensandbox.S
 		ResourceLimits: credentialVaultSandboxResource(),
 		ReadyTimeout:   90 * time.Second,
 		NetworkPolicy: &opensandbox.NetworkPolicy{
-			DefaultAction: "allow",
-			Egress:        []opensandbox.NetworkRule{{Action: "allow", Target: credentialVaultTargetHost()}},
+			DefaultAction: "deny",
+			Egress: []opensandbox.NetworkRule{
+				{Action: "allow", Target: credentialVaultTargetHost()},
+				{Action: "allow", Target: targetIP},
+			},
 		},
 		CredentialProxy: &opensandbox.CredentialProxyConfig{Enabled: true},
 		Metadata: map[string]string{
@@ -281,17 +389,27 @@ func credentialVaultCredential(name, valueName string) opensandbox.Credential {
 }
 
 func credentialVaultBinding(name, path string, auth opensandbox.CredentialAuth) opensandbox.CredentialBinding {
+	return credentialVaultBindingWithMethods(name, path, auth, []string{"GET"})
+}
+
+func credentialVaultBindingWithMethods(name, path string, auth opensandbox.CredentialAuth, methods []string) opensandbox.CredentialBinding {
 	return opensandbox.CredentialBinding{
 		Name: name,
 		Match: opensandbox.CredentialMatch{
 			Schemes: []opensandbox.CredentialScheme{opensandbox.CredentialSchemeHTTP},
-			Ports:   []int{80},
 			Hosts:   []string{credentialVaultTargetHost()},
-			Methods: []string{"GET"},
+			Methods: methods,
 			Paths:   []string{path},
 		},
 		Auth: auth,
 	}
+}
+
+type credentialVaultCurlOptions struct {
+	failOnHTTPError bool
+	method          string
+	headers         []string
+	data            string
 }
 
 func credentialVaultCurlJSON(
@@ -303,14 +421,40 @@ func credentialVaultCurlJSON(
 	failOnHTTPError bool,
 ) map[string]any {
 	t.Helper()
-	failFlag := ""
-	if failOnHTTPError {
-		failFlag = "--fail "
+	return credentialVaultCurlJSONWithOptions(t, ctx, sb, targetIP, path, credentialVaultCurlOptions{
+		failOnHTTPError: failOnHTTPError,
+	})
+}
+
+func credentialVaultCurlJSONWithOptions(
+	t *testing.T,
+	ctx context.Context,
+	sb *opensandbox.Sandbox,
+	targetIP string,
+	path string,
+	options credentialVaultCurlOptions,
+) map[string]any {
+	t.Helper()
+	args := []string{"curl"}
+	if options.failOnHTTPError {
+		args = append(args, "--fail")
 	}
-	command := "curl " + failFlag +
-		"--silent --show-error --connect-timeout 5 --max-time 20 " +
-		"--resolve " + credentialVaultTargetHost() + ":80:" + targetIP + " " +
-		"http://" + credentialVaultTargetHost() + path
+	args = append(args, "--silent", "--show-error", "--connect-timeout", "5", "--max-time", "20")
+	if options.method != "" {
+		args = append(args, "--request", options.method)
+	}
+	for _, header := range options.headers {
+		args = append(args, "--header", shellQuote(header))
+	}
+	if options.data != "" {
+		args = append(args, "--data", shellQuote(options.data))
+	}
+	args = append(
+		args,
+		"--resolve", credentialVaultTargetHost()+":80:"+targetIP,
+		"http://"+credentialVaultTargetHost()+path,
+	)
+	command := strings.Join(args, " ")
 	for _, secret := range credentialVaultSecrets {
 		require.NotContains(t, command, secret)
 	}
@@ -327,6 +471,48 @@ func credentialVaultCurlJSON(
 	var response map[string]any
 	require.NoError(t, json.Unmarshal([]byte(stdout), &response))
 	return response
+}
+
+func credentialVaultCurlJSONWithLargeBody(
+	t *testing.T,
+	ctx context.Context,
+	sb *opensandbox.Sandbox,
+	targetIP string,
+	path string,
+	size int,
+) map[string]any {
+	t.Helper()
+	payloadPath := fmt.Sprintf("/tmp/credential-vault-large-%d.bin", size)
+	create, err := sb.RunCommand(ctx, fmt.Sprintf("head -c %d /dev/zero | tr '\\000' 'x' > %s", size, payloadPath), nil)
+	require.NoError(t, err)
+	require.Nil(t, create.Error)
+
+	command := fmt.Sprintf(
+		"curl --fail --silent --show-error --connect-timeout 5 --max-time 60 "+
+			"--request POST --header 'content-type: text/plain' --data-binary @%s "+
+			"--resolve %s:80:%s http://%s%s",
+		payloadPath, credentialVaultTargetHost(), targetIP, credentialVaultTargetHost(), path,
+	)
+	for _, secret := range credentialVaultSecrets {
+		require.NotContains(t, command, secret)
+	}
+
+	exec, err := sb.RunCommand(ctx, command, nil)
+	require.NoError(t, err)
+	require.Nil(t, exec.Error)
+	require.NotNil(t, exec.ExitCode)
+	require.Equal(t, 0, *exec.ExitCode)
+
+	stdout := exec.Text()
+	require.NotEmpty(t, stdout)
+
+	var response map[string]any
+	require.NoError(t, json.Unmarshal([]byte(stdout), &response))
+	return response
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func stringSliceFromJSON(t *testing.T, value any) []string {

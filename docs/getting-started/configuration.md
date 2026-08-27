@@ -74,7 +74,6 @@ Once the server is running, interactive API docs are available at:
 |----------|-------------|
 | `SANDBOX_CONFIG_PATH` | Override the config file path |
 | `DOCKER_HOST` | Custom Docker daemon address |
-| `PENDING_FAILURE_TTL` | TTL for sandboxes stuck in Pending state |
 | `OPENSANDBOX_INSECURE_SERVER` | Set to `YES` to run without API key in non-interactive mode |
 
 ## Related

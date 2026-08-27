@@ -22,13 +22,32 @@ by querying K8s Pod state and events. Mixed into KubernetesSandboxService.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from fastapi import HTTPException, status
+from kubernetes.client.exceptions import ApiException
 
 from opensandbox_server.services.constants import (
     SANDBOX_ID_LABEL,
     SandboxErrorCodes,
 )
+from opensandbox_server.services.diagnostics import (
+    DiagnosticResult,
+    limit_diagnostic_lines,
+    unsupported_scope_error,
+)
+
+_SUPPORTED_LOG_SCOPES = ("container", "all")
+_SUPPORTED_EVENT_SCOPES = ("runtime", "all")
+_STABLE_LOG_LINE_LIMIT = 100
+_STABLE_EVENT_LINE_LIMIT = 50
+
+#: Default container to pull logs from when the caller does not specify one.
+#: OSB-managed sandbox pods canonically run the user workload in a container
+#: named "sandbox" alongside sidecars (e.g. "egress") and init containers
+#: (e.g. "execd-installer"). Without this default, Kubernetes returns HTTP 400
+#: on any pod with more than one container.
+DEFAULT_LOG_CONTAINER = "sandbox"
 
 
 def _parse_since(since: str) -> int:
@@ -44,12 +63,78 @@ def _parse_since(since: str) -> int:
 class K8sDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Kubernetes backend."""
 
+    def get_sandbox_log_diagnostics(
+        self,
+        sandbox_id: str,
+        scope: str,
+    ) -> DiagnosticResult:
+        """Collect stable log diagnostics using Kubernetes capabilities."""
+        normalized_scope = scope.strip().lower()
+        if normalized_scope not in _SUPPORTED_LOG_SCOPES:
+            raise unsupported_scope_error("logs", scope, _SUPPORTED_LOG_SCOPES)
+
+        content = self.get_sandbox_logs(
+            sandbox_id,
+            tail=_STABLE_LOG_LINE_LIMIT + 1,
+            since=None,
+            container=None,
+        )
+        content, truncated = limit_diagnostic_lines(
+            content,
+            _STABLE_LOG_LINE_LIMIT,
+            keep_tail=True,
+        )
+        warnings: tuple[str, ...] = ()
+        if normalized_scope == "all":
+            warnings = (
+                "The current backend only contributes sandbox container logs to the all scope.",
+            )
+        return DiagnosticResult(
+            sandbox_id=sandbox_id,
+            kind="logs",
+            scope=normalized_scope,
+            content=content,
+            truncated=truncated,
+            warnings=warnings,
+        )
+
+    def get_sandbox_event_diagnostics(
+        self,
+        sandbox_id: str,
+        scope: str,
+    ) -> DiagnosticResult:
+        """Collect stable event diagnostics using Kubernetes capabilities."""
+        normalized_scope = scope.strip().lower()
+        if normalized_scope not in _SUPPORTED_EVENT_SCOPES:
+            raise unsupported_scope_error("events", scope, _SUPPORTED_EVENT_SCOPES)
+
+        content = self.get_sandbox_events(
+            sandbox_id,
+            limit=_STABLE_EVENT_LINE_LIMIT + 1,
+        )
+        content, truncated = limit_diagnostic_lines(
+            content,
+            _STABLE_EVENT_LINE_LIMIT,
+            keep_tail=False,
+        )
+        warnings: tuple[str, ...] = ()
+        if normalized_scope == "all":
+            warnings = ("The current backend only contributes runtime events to the all scope.",)
+        return DiagnosticResult(
+            sandbox_id=sandbox_id,
+            kind="events",
+            scope=normalized_scope,
+            content=content,
+            truncated=truncated,
+            warnings=warnings,
+        )
+
     def _find_pod_for_sandbox(self, sandbox_id: str):
         """Find the Pod associated with a sandbox ID via label selector."""
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
             pods = self.k8s_client.list_pods(
-                namespace=self.namespace,
+                namespace=self._resolve_namespace(),
                 label_selector=label_selector,
             )
         except Exception as exc:
@@ -71,22 +156,74 @@ class K8sDiagnosticsMixin:
             )
         return pods[0]
 
-    def get_sandbox_logs(self, sandbox_id: str, tail: int = 100, since: str | None = None) -> str:
+    def get_sandbox_logs(
+        self,
+        sandbox_id: str,
+        tail: int = 100,
+        since: str | None = None,
+        container: str | None = None,
+    ) -> str:
         pod = self._find_pod_for_sandbox(sandbox_id)
         pod_name = pod.metadata.name
         core_v1 = self.k8s_client.get_core_v1_api()
 
+        target_container = self._resolve_log_container(pod, container)
+
         kwargs: dict = {
             "name": pod_name,
-            "namespace": self.namespace,
+            "namespace": pod.metadata.namespace,
+            "container": target_container,
             "tail_lines": tail,
             "timestamps": True,
         }
         if since:
             kwargs["since_seconds"] = _parse_since(since)
 
-        log_text = core_v1.read_namespaced_pod_log(**kwargs)
+        try:
+            log_text = core_v1.read_namespaced_pod_log(**kwargs)
+        except ApiException as exc:
+            raise _map_pod_log_error(pod_name, target_container, exc) from exc
+
         return log_text or "(no logs)"
+
+    @staticmethod
+    def _resolve_log_container(pod, requested: str | None) -> str:
+        """Pick the container to read logs from.
+
+        Order of preference:
+        1. The caller-supplied name, if it matches a container or init container
+           on the pod.
+        2. ``DEFAULT_LOG_CONTAINER`` ("sandbox") when present.
+        3. The first regular container declared in the pod spec.
+        """
+        spec = getattr(pod, "spec", None)
+        regular = list(getattr(spec, "containers", None) or []) if spec else []
+        init = list(getattr(spec, "init_containers", None) or []) if spec else []
+        all_names = [c.name for c in regular] + [c.name for c in init]
+
+        if requested:
+            if requested in all_names:
+                return requested
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
+                    "message": (
+                        f"Container '{requested}' not found on pod "
+                        f"'{pod.metadata.name}'. Available: {all_names or '(none)'}"
+                    ),
+                },
+            )
+
+        if DEFAULT_LOG_CONTAINER in all_names:
+            return DEFAULT_LOG_CONTAINER
+        if regular:
+            return regular[0].name
+        if init:
+            return init[0].name
+        # Fall back to the canonical name so the upstream Kubernetes error is
+        # explicit instead of silently None-ing the container kwarg.
+        return DEFAULT_LOG_CONTAINER
 
     def get_sandbox_inspect(self, sandbox_id: str) -> str:
         pod = self._find_pod_for_sandbox(sandbox_id)
@@ -180,19 +317,139 @@ class K8sDiagnosticsMixin:
         pod_name = pod.metadata.name
         core_v1 = self.k8s_client.get_core_v1_api()
 
-        events_resp = core_v1.list_namespaced_event(
-            namespace=self.namespace,
-            field_selector=f"involvedObject.name={pod_name}",
-            limit=limit,
-        )
+        events: list[Any] = []
+        continuation: str | None = None
+        try:
+            while len(events) < limit:
+                if continuation is None:
+                    events_resp = core_v1.list_namespaced_event(
+                        namespace=pod.metadata.namespace,
+                        field_selector=f"involvedObject.name={pod_name}",
+                        limit=limit,
+                    )
+                else:
+                    events_resp = core_v1.list_namespaced_event(
+                        namespace=pod.metadata.namespace,
+                        field_selector=f"involvedObject.name={pod_name}",
+                        limit=limit,
+                        _continue=continuation,
+                    )
 
-        if not events_resp.items:
+                events.extend(events_resp.items or [])
+                metadata = getattr(events_resp, "metadata", None)
+                next_continuation = getattr(metadata, "_continue", None)
+                if not next_continuation or next_continuation == continuation:
+                    break
+                continuation = next_continuation
+        except ApiException as exc:
+            raise _map_pod_event_error(pod_name, exc) from exc
+
+        if not events:
             return "(no events)"
 
         lines: list[str] = []
-        for ev in events_resp.items:
+        for ev in events[:limit]:
             ts = ev.last_timestamp or ev.event_time or ev.first_timestamp or "N/A"
             lines.append(
                 f"[{ts}] {ev.type:8s} {ev.reason or 'N/A':20s} {ev.message or ''}"
             )
         return "\n".join(lines)
+
+
+def _map_pod_log_error(pod_name: str, container: str, exc: ApiException) -> HTTPException:
+    """Translate a Kubernetes pod-log ApiException into a sensible HTTPException.
+
+    Bare ``ApiException`` instances are not JSON-serialisable, so when they
+    escape the request handler FastAPI/uvicorn surfaces them as opaque 500
+    responses. Wrap them with structured detail and a status code that
+    reflects whether the problem is the request, the credentials, or the
+    cluster itself.
+    """
+    raw_status = getattr(exc, "status", None) or 0
+    body = getattr(exc, "body", None) or str(exc)
+
+    if raw_status == 400:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.K8S_API_ERROR,
+                "message": (
+                    f"Kubernetes rejected log request for pod '{pod_name}' "
+                    f"container '{container}': {body}"
+                ),
+            },
+        )
+    if raw_status in (401, 403):
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": SandboxErrorCodes.K8S_API_ERROR,
+                "message": (
+                    f"Kubernetes denied log access for pod '{pod_name}' "
+                    f"container '{container}': {body}"
+                ),
+            },
+        )
+    if raw_status == 404:
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
+                "message": (
+                    f"Pod '{pod_name}' or container '{container}' not found: {body}"
+                ),
+            },
+        )
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": SandboxErrorCodes.K8S_API_ERROR,
+            "message": (
+                f"Kubernetes returned {raw_status} when reading logs for pod "
+                f"'{pod_name}' container '{container}': {body}"
+            ),
+        },
+    )
+
+
+def _map_pod_event_error(pod_name: str, exc: ApiException) -> HTTPException:
+    """Translate a Kubernetes event ApiException into a contract error."""
+    raw_status = getattr(exc, "status", None) or 0
+    body = getattr(exc, "body", None) or str(exc)
+
+    if raw_status == 400:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.K8S_API_ERROR,
+                "message": (
+                    f"Kubernetes rejected event request for pod '{pod_name}': {body}"
+                ),
+            },
+        )
+    if raw_status in (401, 403):
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": SandboxErrorCodes.K8S_API_ERROR,
+                "message": f"Kubernetes denied event access for pod '{pod_name}': {body}",
+            },
+        )
+    if raw_status == 404:
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
+                "message": f"Pod '{pod_name}' not found when reading events: {body}",
+            },
+        )
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": SandboxErrorCodes.K8S_API_ERROR,
+            "message": (
+                f"Kubernetes returned {raw_status} when reading events for pod "
+                f"'{pod_name}': {body}"
+            ),
+        },
+    )

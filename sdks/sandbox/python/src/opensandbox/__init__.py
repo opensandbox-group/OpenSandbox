@@ -27,18 +27,17 @@ from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxImageSpec
 
 async def main():
-    # Create a sandbox instance.
-    #
-    # Note on lifecycle:
-    # - Exiting the context manager will call `sandbox.close()` (local HTTP resources only).
-    # - You must still call `sandbox.kill()` to terminate the remote sandbox instance.
-    async with await Sandbox.create("python:3.11") as sandbox:
+    sandbox = await Sandbox.create("python:3.11")
+    try:
         # Write a file
         await sandbox.files.write_file("hello.py", "print('Hello World')")
 
         # Execute a command
         result = await sandbox.commands.run("python hello.py")
         print(result.logs.stdout[0].text)  # Hello World
+    finally:
+        # Terminate the remote sandbox and close local HTTP resources.
+        await sandbox.destroy()
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -85,8 +84,7 @@ async def main():
         print(f"Memory usage: {metrics.memory_used_in_mib}MB")
 
     finally:
-        await sandbox.kill()
-        await sandbox.close()
+        await sandbox.destroy()
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -107,11 +105,18 @@ from opensandbox.pool import (
     InMemoryAsyncPoolStateStore,
     InMemoryPoolStateStore,
     PoolCreationSpec,
+    PoolDestroyOptions,
+    PoolDestroyResult,
+    PoolDestroyState,
+    PoolDestroyStrategy,
     PooledSandboxCreateContext,
     PooledSandboxCreateReason,
     PooledSandboxCreator,
     SandboxPool,
     SandboxPoolAsync,
+    SandboxPoolManager,
+    SandboxPoolManagerAsync,
+    SandboxPoolManagerSync,
 )
 from opensandbox.sandbox import Sandbox
 from opensandbox.sync import SandboxManagerSync, SandboxPoolSync, SandboxSync
@@ -137,6 +142,13 @@ __all__ = [
     "PooledSandboxCreateReason",
     "PooledSandboxCreator",
     "PoolCreationSpec",
+    "PoolDestroyOptions",
+    "PoolDestroyResult",
+    "PoolDestroyState",
+    "PoolDestroyStrategy",
     "InMemoryAsyncPoolStateStore",
     "InMemoryPoolStateStore",
+    "SandboxPoolManager",
+    "SandboxPoolManagerAsync",
+    "SandboxPoolManagerSync",
 ]

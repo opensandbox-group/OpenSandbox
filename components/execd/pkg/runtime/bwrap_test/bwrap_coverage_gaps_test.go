@@ -17,8 +17,13 @@
 package bwrap_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -300,8 +305,8 @@ func TestLargeFileWrite(t *testing.T) {
 	assert.True(t, found, "large file write should succeed, got: %v", lines)
 }
 
-// TestSessionLeakAfterRun verifies that each Run creates a subprocess but
-// does not leak zombie processes in the host.
+// TestSessionSubprocessCleanup verifies that Delete reaps an actual descendant
+// process tree, including workloads that ignore SIGTERM.
 func TestSessionSubprocessCleanup(t *testing.T) {
 	r := newRunner(t)
 
@@ -310,16 +315,87 @@ func TestSessionSubprocessCleanup(t *testing.T) {
 	}
 	id, err := r.CreateIsolatedSession(opts)
 	require.NoError(t, err)
-	defer r.DeleteIsolatedSession(id)
+	deleted := false
+	t.Cleanup(func() {
+		if !deleted {
+			_ = r.DeleteIsolatedSession(id)
+		}
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Each run forks a subprocess. Run several short-lived commands.
-	for i := 0; i < 5; i++ {
-		require.NoError(t, r.RunInIsolatedSession(ctx, id, "sleep 0.1 && true", nil, nil))
+	marker := fmt.Sprintf("opensandbox-cleanup-%d", time.Now().UnixNano())
+	script := fmt.Sprintf(
+		`bash -c "trap '' TERM; bash -c \"trap '' TERM; exec -a %s-grandchild sleep 300\" & exec -a %s-child sleep 300" & echo STARTED`,
+		marker,
+		marker,
+	)
+	require.NoError(t, r.RunInIsolatedSession(ctx, id, script, nil, nil))
+
+	var descendants []hostProcessIdentity
+	require.Eventually(t, func() bool {
+		descendants = hostProcessesWithCmdlineMarker(marker)
+		return len(descendants) >= 2
+	}, 5*time.Second, 20*time.Millisecond, "descendant process tree did not start")
+
+	require.NoError(t, r.DeleteIsolatedSession(id))
+	deleted = true
+	require.Eventually(t, func() bool {
+		for _, descendant := range descendants {
+			startTime, err := hostProcessStartTime(descendant.pid)
+			if err == nil && startTime == descendant.startTime {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 20*time.Millisecond, "Delete left descendant processes: %v", descendants)
+}
+
+type hostProcessIdentity struct {
+	pid       int
+	startTime string
+}
+
+func hostProcessesWithCmdlineMarker(marker string) []hostProcessIdentity {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
 	}
-	require.NoError(t, r.RunInIsolatedSession(ctx, id, "echo processes: $(ps aux | wc -l)", nil, nil))
+	var processes []hostProcessIdentity
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err == nil && bytes.Contains(cmdline, []byte(marker)) {
+			startTime, err := hostProcessStartTime(pid)
+			if err == nil {
+				processes = append(processes, hostProcessIdentity{
+					pid:       pid,
+					startTime: startTime,
+				})
+			}
+		}
+	}
+	return processes
+}
+
+func hostProcessStartTime(pid int) (string, error) {
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return "", err
+	}
+	closeParen := bytes.LastIndexByte(stat, ')')
+	if closeParen < 0 {
+		return "", errors.New("malformed process stat")
+	}
+	fields := strings.Fields(string(stat[closeParen+1:]))
+	if len(fields) <= 19 {
+		return "", errors.New("process stat omitted starttime")
+	}
+	return fields[19], nil
 }
 
 // TestBorderlineBufferSize exercises the scanner buffer with output

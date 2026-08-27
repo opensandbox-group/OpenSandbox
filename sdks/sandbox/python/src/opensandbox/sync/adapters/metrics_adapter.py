@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 
 
 class MetricsAdapterSync(MetricsSync):
-    def __init__(self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint) -> None:
+    def __init__(
+        self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint
+    ) -> None:
         self.connection_config = connection_config
         self.execd_endpoint = execd_endpoint
         from opensandbox.api.execd import Client
@@ -71,5 +73,5 @@ class MetricsAdapterSync(MetricsSync):
             parsed = require_parsed(response_obj, Metrics, "Get metrics")
             return MetricsModelConverter.to_sandbox_metrics(parsed)
         except Exception as e:
-            logger.error("Failed to get metrics for sandbox %s", sandbox_id, exc_info=e)
+            logger.error(f"Failed to get metrics for sandbox {sandbox_id}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e

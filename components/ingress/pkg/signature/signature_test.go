@@ -90,6 +90,33 @@ func TestVerifySignature_OKAnd401(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestVerifySignature_SingleByteDiffRejected guards the constant-time
+// signature comparison in VerifySignature: a signature that differs from
+// the expected value in a single hex character must still be rejected.
+// This locks in the behavior that the check is not merely length-based
+// and catches a regression where an equal-length forgery could slip
+// through a misused crypto/subtle call.
+func TestVerifySignature_SingleByteDiffRejected(t *testing.T) {
+	secret := []byte("test-secret-bytes")
+	sb := "my-sandbox"
+	port := 9000
+	exp := testExpiresB36(t)
+	hex8 := ExpectedHex8(Inner(secret, CanonicalBytes(sb, port, exp)))
+	v := &Verifier{Keys: map[string][]byte{"z": secret}}
+
+	// Replace the last hex char of the expected signature with a
+	// deterministically different lowercase hex digit. Same length,
+	// same key id, only one nibble different.
+	other := byte('0')
+	if hex8[7] == '0' {
+		other = '1'
+	}
+	tampered := hex8[:7] + string(other) + "z"
+	err := v.VerifySignature(tampered, sb, port, exp)
+	assert.Error(t, err)
+	assert.True(t, errors.Is(err, ErrUnauthorized))
+}
+
 func TestVerifySignature_ExpiryComparisonAvoidsUint64Overflow(t *testing.T) {
 	secret := []byte("test-secret-bytes")
 	sb := "my-sandbox"

@@ -31,6 +31,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMatch;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMetadata;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialMutationSet;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialSubstitution;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultCreateRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultPatchRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialVaultState;
@@ -62,6 +63,9 @@ class CredentialVaultE2ETest extends BaseE2ETest {
                     "api-key-token", "vault-api-key-token",
                     "client-id", "vault-client-id",
                     "client-secret", "vault-client-secret",
+                    "query-secret", "vault-query-secret",
+                    "path-secret", "vault-path-secret",
+                    "body-secret", "vault-body-secret",
                     "runtime-token", "vault-runtime-token",
                     "runtime-token-replaced", "vault-runtime-token-replaced");
 
@@ -69,7 +73,7 @@ class CredentialVaultE2ETest extends BaseE2ETest {
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
     void credentialVaultInjectsAllAuthTypes() {
         String targetIp = credentialVaultTargetIp();
-        Sandbox sandbox = createCredentialVaultSandbox();
+        Sandbox sandbox = createCredentialVaultSandbox(targetIp);
 
         try {
             CredentialVaultState state =
@@ -143,9 +147,92 @@ class CredentialVaultE2ETest extends BaseE2ETest {
 
     @Test
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void credentialVaultSubstitutesPlaceholdersInQueryPathAndBody() {
+        String targetIp = credentialVaultTargetIp();
+        Sandbox sandbox = createCredentialVaultSandbox(targetIp);
+
+        try {
+            sandbox.credentialVault()
+                    .create(
+                            CredentialVaultCreateRequest.builder()
+                                    .credentials(
+                                            credentials(
+                                                    "query-secret", "path-secret", "body-secret"))
+                                    .bindings(
+                                            List.of(
+                                                    binding(
+                                                            "query-substitution",
+                                                            "/query-substitution",
+                                                            CredentialAuth.passthrough(
+                                                                    List.of(
+                                                                            substitution(
+                                                                                    "query-secret",
+                                                                                    "__query_secret__",
+                                                                                    CredentialSubstitution
+                                                                                            .Surface
+                                                                                            .QUERY)))),
+                                                    binding(
+                                                            "path-substitution",
+                                                            "/tenant/*",
+                                                            CredentialAuth.passthrough(
+                                                                    List.of(
+                                                                            substitution(
+                                                                                    "path-secret",
+                                                                                    "__path_secret__",
+                                                                                    CredentialSubstitution
+                                                                                            .Surface
+                                                                                            .PATH)))),
+                                                    binding(
+                                                            "body-substitution",
+                                                            "/body-substitution",
+                                                            CredentialAuth.passthrough(
+                                                                    List.of(
+                                                                            substitution(
+                                                                                    "body-secret",
+                                                                                    "__body_secret__",
+                                                                                    CredentialSubstitution
+                                                                                            .Surface
+                                                                                            .BODY))),
+                                                            List.of("POST"))))
+                                    .build());
+
+            String response =
+                    curlJson(
+                            sandbox,
+                            targetIp,
+                            "/query-substitution?api_key=__query_secret__",
+                            true);
+            assertJsonCase(response, "query-substitution", true, "[]");
+
+            response =
+                    curlJson(
+                            sandbox,
+                            targetIp,
+                            "/tenant/__path_secret__/resource?tenant=__path_secret__",
+                            true);
+            assertJsonCase(response, "path-substitution", true, "[]");
+            assertTrue(response.contains("\"queryStillPlaceholder\":true"), response);
+
+            response =
+                    curlJson(
+                            sandbox,
+                            targetIp,
+                            "/body-substitution",
+                            true,
+                            "POST",
+                            List.of("content-type: application/json"),
+                            "{\"client_secret\":\"__body_secret__\"}");
+            assertJsonCase(response, "body-substitution", true, "[]");
+        } finally {
+            killSandbox(sandbox);
+        }
+    }
+
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
     void credentialVaultRuntimeMutationAddsReplacesAndDeletesBinding() {
         String targetIp = credentialVaultTargetIp();
-        Sandbox sandbox = createCredentialVaultSandbox();
+        Sandbox sandbox = createCredentialVaultSandbox(targetIp);
 
         try {
             CredentialVaultState state =
@@ -271,10 +358,9 @@ class CredentialVaultE2ETest extends BaseE2ETest {
         }
     }
 
-    private static Sandbox createCredentialVaultSandbox() {
+    private static Sandbox createCredentialVaultSandbox(String targetIp) {
         String image =
-                envOrDefault(
-                        "OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE", getSandboxImage());
+                envOrDefault("OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE", getSandboxImage());
         Map<String, String> resource = new HashMap<>();
         resource.put("cpu", envOrDefault("OPENSANDBOX_E2E_SANDBOX_CPU", "1"));
         resource.put("memory", envOrDefault("OPENSANDBOX_E2E_SANDBOX_MEMORY", "2Gi"));
@@ -287,11 +373,16 @@ class CredentialVaultE2ETest extends BaseE2ETest {
                 .readyTimeout(Duration.ofSeconds(90))
                 .networkPolicy(
                         NetworkPolicy.builder()
-                                .defaultAction(NetworkPolicy.DefaultAction.ALLOW)
+                                .defaultAction(NetworkPolicy.DefaultAction.DENY)
                                 .addEgress(
                                         NetworkRule.builder()
                                                 .action(NetworkRule.Action.ALLOW)
                                                 .target(credentialVaultTargetHost())
+                                                .build())
+                                .addEgress(
+                                        NetworkRule.builder()
+                                                .action(NetworkRule.Action.ALLOW)
+                                                .target(targetIp)
                                                 .build())
                                 .build())
                 .credentialProxy(CredentialProxyConfig.enabled())
@@ -317,27 +408,60 @@ class CredentialVaultE2ETest extends BaseE2ETest {
     }
 
     private static CredentialBinding binding(String name, String path, CredentialAuth auth) {
+        return binding(name, path, auth, List.of("GET"));
+    }
+
+    private static CredentialBinding binding(
+            String name, String path, CredentialAuth auth, List<String> methods) {
         return CredentialBinding.builder()
                 .name(name)
                 .match(
                         CredentialMatch.builder()
                                 .schemes(CredentialMatch.Scheme.HTTP)
-                                .ports(80)
                                 .hosts(credentialVaultTargetHost())
-                                .methods("GET")
+                                .methods(methods)
                                 .paths(path)
                                 .build())
                 .auth(auth)
                 .build();
     }
 
+    private static CredentialSubstitution substitution(
+            String credential, String placeholder, CredentialSubstitution.Surface surface) {
+        return CredentialSubstitution.builder()
+                .credential(credential)
+                .placeholder(placeholder)
+                .surfaces(surface)
+                .build();
+    }
+
     private static String curlJson(
             Sandbox sandbox, String targetIp, String path, boolean failOnHttpError) {
+        return curlJson(sandbox, targetIp, path, failOnHttpError, null, List.of(), null);
+    }
+
+    private static String curlJson(
+            Sandbox sandbox,
+            String targetIp,
+            String path,
+            boolean failOnHttpError,
+            String method,
+            List<String> headers,
+            String data) {
         String failFlag = failOnHttpError ? "--fail " : "";
+        String methodFlag = method == null ? "" : "--request " + method + " ";
+        String headerFlags =
+                headers.stream()
+                        .map(header -> "--header " + shellQuote(header) + " ")
+                        .collect(Collectors.joining());
+        String dataFlag = data == null ? "" : "--data " + shellQuote(data) + " ";
         String command =
                 "curl "
                         + failFlag
                         + "--silent --show-error --connect-timeout 5 --max-time 20 "
+                        + methodFlag
+                        + headerFlags
+                        + dataFlag
                         + "--resolve "
                         + credentialVaultTargetHost()
                         + ":80:"
@@ -361,6 +485,10 @@ class CredentialVaultE2ETest extends BaseE2ETest {
         return stdout;
     }
 
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
+    }
+
     private static void assertJsonCase(
             String payload, String expectedCase, boolean expectedOk, String expectedMissing) {
         assertTrue(payload.contains("\"ok\":" + expectedOk), payload);
@@ -373,7 +501,9 @@ class CredentialVaultE2ETest extends BaseE2ETest {
     }
 
     private static List<String> bindingNames(List<CredentialBindingMetadata> bindings) {
-        return bindings.stream().map(CredentialBindingMetadata::getName).collect(Collectors.toList());
+        return bindings.stream()
+                .map(CredentialBindingMetadata::getName)
+                .collect(Collectors.toList());
     }
 
     private static String credentialVaultTargetHost() {

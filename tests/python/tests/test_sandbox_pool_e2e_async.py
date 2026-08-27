@@ -29,6 +29,7 @@ from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import (
     PoolAcquireFailedException,
+    PoolDestroyedException,
     PoolEmptyException,
     PoolNotRunningException,
 )
@@ -38,9 +39,12 @@ from opensandbox.pool import (
     AsyncPoolStateStore,
     InMemoryAsyncPoolStateStore,
     PoolCreationSpec,
+    PoolDestroyOptions,
+    PoolDestroyState,
     PoolSnapshot,
     PoolState,
     SandboxPoolAsync,
+    SandboxPoolManagerAsync,
 )
 from opensandbox.pool_redis import AsyncRedisPoolStateStore
 
@@ -117,6 +121,30 @@ class TestSandboxPoolSingleNodeE2EAsync:
 
         await self.pool.shutdown(graceful=True)
         with pytest.raises(PoolNotRunningException):
+            await self.pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+
+    @pytest.mark.timeout(240)
+    async def test_async_destroy_drains_idle_writes_tombstone_and_blocks_acquire(self) -> None:
+        await _eventually(
+            "async pool has warm idle before destroy",
+            lambda: _snapshot_matches(self.pool, lambda snap: snap.idle_count >= 1),
+        )
+
+        manager = SandboxPoolManagerAsync(
+            state_store=self.store,
+            connection_config=create_connection_config(),
+            owner_id=f"destroyer-{self.tag}",
+        )
+        result = await manager.destroy(
+            self.pool_name,
+            PoolDestroyOptions(drain_timeout=timedelta(seconds=30)),
+        )
+
+        assert result.state == PoolDestroyState.DESTROYED
+        assert result.drained_idle_count >= 1
+        assert result.persistent_state_cleared
+        assert await self.store.get_destroy_state(self.pool_name) == PoolDestroyState.DESTROYED
+        with pytest.raises(PoolDestroyedException):
             await self.pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
 
     @pytest.mark.timeout(300)
@@ -199,6 +227,188 @@ class TestSandboxPoolSingleNodeE2EAsync:
             result = await sandbox.commands.run(f"cat {marker_path}")
             assert result.error is None
             assert result.logs.stdout[0].text == "async-prepared"
+
+    @pytest.mark.timeout(240)
+    async def test_async_retry_next_idle_skips_stale_and_returns_healthy_warm(self) -> None:
+        """RETRY_NEXT_IDLE should skip stale idle candidates and return a real warm sandbox.
+
+        Real-world scenario: the pool's idle queue holds a stale entry ahead of a healthy
+        warm sandbox — for example, a leftover after a control-plane blip that killed the
+        remote sandbox but left its id in the shared idle queue, or a slow-cold-starting
+        custom template that fails its first ready-check. The caller wants a warm sandbox
+        and is willing to skip a bounded number of bad candidates before giving up.
+
+        Setup: create an isolated pool with max_idle=2 and pre-inject one stale id into
+        the store before start(). FIFO ordering guarantees the stale id sits ahead of the
+        real idle that reconcile creates to reach the target. RETRY_NEXT_IDLE must pop
+        the stale, fail its ready-check, and then return the healthy warm sandbox.
+        """
+        await _cleanup_pool(self.pool)
+
+        mixed_tag = _tag("py-async-retry-next-idle-mixed")
+        mixed_store = InMemoryAsyncPoolStateStore()
+        mixed_pool_name = f"retry-mixed-{self.pool_name}"
+        # Pre-inject the stale id before start() so warmup lands behind it in the FIFO
+        # queue. With max_idle=2 the reconciler warms one real sandbox and then holds
+        # steady at idle_count=2 = [stale, real], neither shrinking nor rewarming.
+        stale_id = f"stale-{uuid.uuid4().hex}"
+        await mixed_store.put_idle(mixed_pool_name, stale_id)
+
+        mixed_pool = _create_pool(
+            pool_name=mixed_pool_name,
+            owner_id=f"retry-mixed-owner-{self.tag}",
+            state_store=mixed_store,
+            tag=mixed_tag,
+            max_idle=2,
+            max_acquire_retries=3,
+            acquire_ready_timeout=timedelta(seconds=5),
+        )
+        try:
+            await mixed_pool.start()
+            await _eventually(
+                "async mixed pool warms a real idle behind the pre-injected stale entry",
+                lambda: _snapshot_matches(
+                    mixed_pool, lambda snap: snap.idle_count == 2
+                ),
+            )
+
+            # Assert the stale id is at the HEAD of the FIFO idle queue. If a future
+            # store implementation ever reordered on put_idle, or if the reconciler
+            # somehow reaped the stale before warmup landed, we want to catch it here
+            # instead of silently taking the "healthy first" happy path and calling it
+            # RETRY coverage.
+            entries_before = await mixed_store.snapshot_idle_entries(mixed_pool_name)
+            assert len(entries_before) == 2
+            assert entries_before[0].sandbox_id == stale_id, (
+                f"expected stale id at idle head, got queue={[e.sandbox_id for e in entries_before]}"
+            )
+
+            sandbox = await mixed_pool.acquire(
+                timedelta(minutes=5), AcquirePolicy.RETRY_NEXT_IDLE
+            )
+            self.borrowed.append(sandbox)
+            assert await sandbox.is_healthy()
+            assert sandbox.id != stale_id
+
+            result = await sandbox.commands.run("echo py-async-retry-next-idle-ok")
+            assert result.error is None
+            assert result.logs.stdout[0].text == "py-async-retry-next-idle-ok"
+
+            # The stale id must not silently reappear in the idle queue.
+            remaining = await mixed_store.snapshot_idle_entries(mixed_pool_name)
+            assert all(entry.sandbox_id != stale_id for entry in remaining)
+        finally:
+            await _cleanup_pool(mixed_pool)
+            await _cleanup_tagged_sandboxes(self.manager, mixed_tag)
+
+    @pytest.mark.timeout(240)
+    async def test_async_retry_next_idle_then_create_falls_through_when_all_stale(
+        self,
+    ) -> None:
+        """RETRY_NEXT_IDLE_THEN_CREATE should fall through to direct-create after the retry
+        loop exhausts a queue of purely stale idle entries.
+
+        Real-world scenario: after a network flap every warm sandbox is unreachable; the
+        caller cannot afford to wait for reconcile to drain them and still needs a working
+        sandbox. RETRY_NEXT_IDLE_THEN_CREATE burns through the bounded budget on stales,
+        then falls through to direct-create.
+        """
+        await _cleanup_pool(self.pool)
+
+        all_stale_tag = _tag("py-async-retry-then-create-all-stale")
+        all_stale_store = InMemoryAsyncPoolStateStore()
+        all_stale_pool_name = f"retry-then-create-{self.pool_name}"
+        # Long reconcile_interval so the reconciler cannot race the acquire loop and
+        # shrink stale entries out from under the RETRY_NEXT_IDLE_THEN_CREATE path.
+        # We need the loop to actually exhaust max_acquire_retries on stale connect
+        # failures (loop_exhausted=True) before falling through, not to short-circuit
+        # via "idle buffer drained mid-loop".
+        all_stale_pool = _create_pool(
+            pool_name=all_stale_pool_name,
+            owner_id=f"retry-then-create-owner-{self.tag}",
+            state_store=all_stale_store,
+            tag=all_stale_tag,
+            max_idle=0,
+            max_acquire_retries=3,
+            acquire_ready_timeout=timedelta(seconds=3),
+            reconcile_interval=timedelta(minutes=5),
+        )
+        try:
+            await all_stale_pool.start()
+
+            stale_ids = [f"stale-{uuid.uuid4().hex}" for _ in range(3)]
+            for sid in stale_ids:
+                await all_stale_store.put_idle(all_stale_pool_name, sid)
+
+            sandbox = await all_stale_pool.acquire(
+                timedelta(minutes=5), AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE
+            )
+            self.borrowed.append(sandbox)
+            assert await sandbox.is_healthy()
+            assert sandbox.id not in stale_ids
+
+            result = await sandbox.commands.run("echo py-async-retry-then-create-ok")
+            assert result.error is None
+            assert result.logs.stdout[0].text == "py-async-retry-then-create-ok"
+
+            # Under the long reconcile_interval configured on this pool, only the acquire
+            # retry loop can pop entries from the idle queue. If the retry loop truly
+            # exhausted all 3 stale candidates before falling through to direct-create,
+            # all 3 stale ids must have been removed. If it short-circuited earlier
+            # (e.g. after a single attempt due to some race), some stale ids would
+            # remain in the queue and this assertion catches the regression.
+            remaining = await all_stale_store.snapshot_idle_entries(all_stale_pool_name)
+            remaining_ids = {entry.sandbox_id for entry in remaining}
+            assert not (set(stale_ids) & remaining_ids), (
+                f"retry loop did not fully exhaust stale queue; remaining={remaining_ids}"
+            )
+        finally:
+            await _cleanup_pool(all_stale_pool)
+            await _cleanup_tagged_sandboxes(self.manager, all_stale_tag)
+
+    @pytest.mark.timeout(240)
+    async def test_async_retry_next_idle_all_stale_raises_after_bounded_retries(
+        self,
+    ) -> None:
+        """RETRY_NEXT_IDLE (no fallthrough) should raise PoolAcquireFailedException after
+        max_acquire_retries stale candidates fail. Confirms the bound is respected and no
+        direct-create leaks."""
+        await _cleanup_pool(self.pool)
+
+        raise_tag = _tag("py-async-retry-next-idle-raise")
+        raise_store = InMemoryAsyncPoolStateStore()
+        raise_pool_name = f"retry-raise-{self.pool_name}"
+        raise_pool = _create_pool(
+            pool_name=raise_pool_name,
+            owner_id=f"retry-raise-owner-{self.tag}",
+            state_store=raise_store,
+            tag=raise_tag,
+            max_idle=0,
+            max_acquire_retries=2,
+            acquire_ready_timeout=timedelta(seconds=3),
+            # Long reconcile_interval: prevent the reconciler from shrinking stale ids
+            # before the acquire loop can pop them. We need to prove the bound stops the
+            # loop after exactly 2 stale attempts, not that the queue happened to drain.
+            reconcile_interval=timedelta(minutes=5),
+        )
+        try:
+            await raise_pool.start()
+
+            stale_ids = [f"stale-{uuid.uuid4().hex}" for _ in range(3)]
+            for sid in stale_ids:
+                await raise_store.put_idle(raise_pool_name, sid)
+
+            with pytest.raises(PoolAcquireFailedException):
+                await raise_pool.acquire(
+                    timedelta(minutes=1), AcquirePolicy.RETRY_NEXT_IDLE
+                )
+
+            # No sandbox with the raise_tag should have been created (RETRY_NEXT_IDLE never
+            # falls through to direct-create).
+            assert await _count_tagged_sandboxes(self.manager, raise_tag) == 0
+        finally:
+            await _cleanup_pool(raise_pool)
+            await _cleanup_tagged_sandboxes(self.manager, raise_tag)
 
     @pytest.mark.timeout(300)
     async def test_async_concurrent_shutdown_and_acquire_does_not_deadlock(self) -> None:
@@ -649,6 +859,67 @@ class TestSandboxPoolRedisDistributedE2EAsync:
             timeout=timedelta(seconds=60),
         )
 
+    @pytest.mark.timeout(420)
+    async def test_async_redis_destroy_tombstone_blocks_all_nodes_and_direct_create(self) -> None:
+        pool_name = f"async-redis-destroy-{self.tag}"
+        store_a = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 1)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 1)
+        self.pools.extend([pool_a, pool_b])
+
+        await pool_a.start()
+        await pool_b.start()
+        await _eventually(
+            "async Redis destroy pool warms",
+            lambda: _snapshot_matches(pool_a, lambda snap: snap.idle_count >= 1),
+        )
+
+        pool_manager = SandboxPoolManagerAsync(
+            state_store=store_b,
+            connection_config=create_connection_config(),
+            owner_id=f"destroyer-{self.tag}",
+        )
+        result = await pool_manager.destroy(
+            pool_name,
+            PoolDestroyOptions(drain_timeout=timedelta(seconds=60)),
+        )
+
+        assert result.state == PoolDestroyState.DESTROYED
+        assert await store_a.get_destroy_state(pool_name) == PoolDestroyState.DESTROYED
+        with pytest.raises(PoolDestroyedException):
+            await pool_a.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+        with pytest.raises(PoolDestroyedException):
+            await pool_b.resize(1)
+
+    @pytest.mark.timeout(60)
+    async def test_async_redis_begin_destroy_fence_blocks_start_and_direct_create(self) -> None:
+        pool_name = f"async-redis-destroying-fence-{self.tag}"
+        store = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        await store.begin_destroy(pool_name, f"destroyer-{self.tag}")
+        assert await store.get_destroy_state(pool_name) == PoolDestroyState.DESTROYING
+
+        pool = _create_pool(pool_name, f"owner-{self.tag}", store, self.tag, 0)
+        self.pools.append(pool)
+
+        with pytest.raises(PoolDestroyedException):
+            await pool.start()
+
+        running_pool_name = f"async-redis-destroying-running-{self.tag}"
+        running_store = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        running_pool = _create_pool(
+            running_pool_name,
+            f"owner-running-{self.tag}",
+            running_store,
+            self.tag,
+            0,
+        )
+        self.pools.append(running_pool)
+        await running_pool.start()
+        await running_store.begin_destroy(running_pool_name, f"destroyer-{self.tag}")
+        with pytest.raises(PoolDestroyedException):
+            await running_pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+
 
 def _create_pool(
     pool_name: str,
@@ -662,6 +933,8 @@ def _create_pool(
     warmup_ready_timeout: timedelta = timedelta(seconds=30),
     acquire_ready_timeout: timedelta = timedelta(seconds=30),
     warmup_concurrency: int = 1,
+    max_acquire_retries: int = 3,
+    reconcile_interval: timedelta = RECONCILE_INTERVAL,
 ) -> SandboxPoolAsync:
     return SandboxPoolAsync(
         pool_name=pool_name,
@@ -681,13 +954,14 @@ def _create_pool(
             },
             resource=get_e2e_sandbox_resource(),
         ),
-        reconcile_interval=RECONCILE_INTERVAL,
+        reconcile_interval=reconcile_interval,
         primary_lock_ttl=PRIMARY_LOCK_TTL,
         drain_timeout=DRAIN_TIMEOUT,
         warmup_sandbox_preparer=warmup_sandbox_preparer,
         degraded_threshold=degraded_threshold,
         warmup_ready_timeout=warmup_ready_timeout,
         acquire_ready_timeout=acquire_ready_timeout,
+        max_acquire_retries=max_acquire_retries,
     )
 
 

@@ -1,0 +1,18 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: {{.BatchSandboxName}}
+  namespace: {{.Namespace}}
+spec:
+  replicas: {{.Replicas}}
+  poolRef: {{.PoolName}}
+  taskTemplate:
+    spec:
+      process:
+        command: ["echo"]
+        args: ["should not run"]
+        lifecycle:
+          preStart:
+            exec:
+              command: ["/bin/sh", "-c", "echo 'mount failed: device busy' >&2; exit 1"]
+            execMode: Local

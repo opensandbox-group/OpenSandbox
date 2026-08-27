@@ -25,3 +25,6 @@
 OWNERS
 # Make files
 Makefile
+
+# helm-docs template (build-time only)
+README.md.gotmpl

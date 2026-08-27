@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="500" viewBox="0 0 920 500" role="img" aria-labelledby="title desc">
+  <title id="title">OpenSandbox Node Agent data and acknowledgement flow</title>
+  <desc id="desc">Sandbox sb-abc runs print hello on node-1. Kubernetes metadata flows to the Sandbox Store. CRI log data flows through the container-logs source, pipeline, Sink SPI, and OSS or durable-file storage. After the Sink reports durable success, Pipeline creates AckResult and commits it through Source.Acknowledge to the Source checkpoint.</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#374151"/>
+    </marker>
+    <marker id="arrow-muted" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/>
+    </marker>
+    <style>
+      .box { fill: #fff; stroke: #64748b; stroke-width: 1.2; rx: 5; }
+      .title { fill: #111827; font-family: Inter, Arial, sans-serif; font-size: 13px; font-weight: 600; text-anchor: middle; }
+      .subtitle { fill: #6b7280; font-family: Inter, Arial, sans-serif; font-size: 10px; text-anchor: middle; }
+      .label { fill: #4b5563; font-family: Inter, Arial, sans-serif; font-size: 10px; }
+      .data { fill: none; stroke: #2563eb; stroke-width: 2.2; marker-end: url(#arrow-blue); }
+      .metadata { fill: none; stroke: #64748b; stroke-width: 1.4; stroke-dasharray: 5 4; marker-end: url(#arrow-muted); }
+      .ack { fill: none; stroke: #374151; stroke-width: 1.5; marker-end: url(#arrow-gray); }
+    </style>
+  </defs>
+
+  <rect x="140" y="30" width="620" height="440" rx="8" fill="#fcfcfd" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="160" y="59" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="600">Node Agent on node-1 (DaemonSet)</text>
+
+  <path class="metadata" d="M115 120 H370"/>
+  <path class="metadata" d="M445 150 V215"/>
+  <path class="data" d="M115 250 H170"/>
+  <path class="data" d="M310 250 H375"/>
+  <path class="data" d="M515 250 H580"/>
+  <path class="data" d="M720 250 H780"/>
+  <path class="ack" d="M445 285 V319 H650 V330"/>
+  <path class="ack" d="M585 362 H520"/>
+  <path class="ack" d="M370 362 H305"/>
+
+  <text class="label" x="180" y="106">Pod metadata</text>
+  <text class="label" x="455" y="181">sandbox_id</text>
+  <text x="170" y="199" fill="#2563eb" font-family="Inter, Arial, sans-serif" font-size="10">sb-abc: print("hello")</text>
+  <text class="label" x="160" y="319">Commit path</text>
+  <text class="label" x="475" y="309">durable Consume succeeded → Pipeline creates AckResult</text>
+
+  <g>
+    <rect class="box" x="10" y="90" width="105" height="60"/>
+    <text class="title" x="62.5" y="116">Kubernetes API</text>
+    <text class="subtitle" x="62.5" y="134">list / watch</text>
+  </g>
+  <g>
+    <rect class="box" x="370" y="90" width="150" height="60"/>
+    <text class="title" x="445" y="116">Sandbox Store</text>
+    <text class="subtitle" x="445" y="134">Pod UID index</text>
+  </g>
+  <g>
+    <rect class="box" x="10" y="215" width="105" height="70"/>
+    <text class="title" x="62.5" y="246">CRI log files</text>
+    <text class="subtitle" x="62.5" y="264">/var/log/pods</text>
+  </g>
+  <g>
+    <rect class="box" x="170" y="215" width="140" height="70"/>
+    <text class="title" x="240" y="246">container-logs</text>
+    <text class="subtitle" x="240" y="264">tail · parse · cursor</text>
+  </g>
+  <g>
+    <rect class="box" x="375" y="215" width="140" height="70"/>
+    <text class="title" x="445" y="246">Pipeline</text>
+    <text class="subtitle" x="445" y="264">enrich · admit · batch</text>
+  </g>
+  <g>
+    <rect class="box" x="580" y="215" width="140" height="70"/>
+    <text class="title" x="650" y="246">Sink SPI</text>
+    <text class="subtitle" x="650" y="264">consume · finalize</text>
+  </g>
+  <g>
+    <rect class="box" x="780" y="215" width="130" height="70"/>
+    <text x="845" y="246" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="middle">OSS / durable file</text>
+    <text class="subtitle" x="845" y="264">objects + marker</text>
+  </g>
+  <g>
+    <rect class="box" x="585" y="330" width="130" height="64"/>
+    <text class="title" x="650" y="358">AckResult</text>
+    <text class="subtitle" x="650" y="376">created by Pipeline</text>
+  </g>
+  <g>
+    <rect class="box" x="370" y="330" width="150" height="64"/>
+    <text x="445" y="358" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="middle">Source.Acknowledge</text>
+    <text class="subtitle" x="445" y="376">validate · commit</text>
+  </g>
+  <g>
+    <rect class="box" x="170" y="330" width="135" height="64"/>
+    <text class="title" x="237.5" y="358">Source checkpoint</text>
+    <text class="subtitle" x="237.5" y="376">committed cursor · gaps</text>
+  </g>
+  <g>
+    <rect class="box" x="160" y="420" width="560" height="32"/>
+    <text class="subtitle" x="440" y="440">Core runtime: config · plugin lifecycle · health · metrics</text>
+  </g>
+</svg>

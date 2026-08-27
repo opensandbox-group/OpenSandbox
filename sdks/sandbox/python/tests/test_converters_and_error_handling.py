@@ -45,14 +45,18 @@ from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxApiException,
     SandboxInternalException,
+    SandboxRateLimitException,
 )
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import (
     CredentialProxyConfig,
+    LifecycleHook,
     NetworkPolicy,
     NetworkRule,
+    PeriodicLifecycleHook,
     PlatformSpec,
     SandboxImageSpec,
+    SandboxLifecycle,
 )
 
 
@@ -104,6 +108,253 @@ def test_handle_api_error_noop_on_success() -> None:
     handle_api_error(Resp(), "Op")
 
 
+def test_handle_api_error_raises_rate_limit_on_429() -> None:
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    class Resp:
+        status_code = 429
+        parsed = None
+        headers = {"X-Request-ID": "req-abc", "Retry-After": "12"}
+
+    with pytest.raises(SandboxRateLimitException) as ei:
+        handle_api_error(Resp(), "Op")
+    assert ei.value.status_code == 429
+    assert ei.value.retry_after == timedelta(seconds=12)
+    assert ei.value.request_id == "req-abc"
+    # 429 is a transient class; is_retryable is machine-checkable.
+    assert ei.value.is_retryable is True
+    # Backward-compatible: still catchable as SandboxApiException.
+    assert isinstance(ei.value, SandboxApiException)
+
+
+def test_handle_api_error_sets_is_retryable_by_status() -> None:
+    from opensandbox.exceptions import SandboxApiException
+
+    # 502/503 are transient -> is_retryable True; 500/4xx -> False.
+    for code, expected in [(502, True), (503, True), (500, False), (404, False)]:
+
+        class Resp:
+            status_code = code
+            parsed = None
+            headers: dict[str, str] = {}
+
+        with pytest.raises(SandboxApiException) as ei:
+            handle_api_error(Resp(), "Op")
+        assert ei.value.is_retryable is expected, f"status {code}"
+
+
+def test_to_sandbox_exception_connection_is_retryable() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import (
+        ExceptionConverter,
+    )
+    from opensandbox.exceptions import SandboxConnectionException
+
+    mapped = ExceptionConverter.to_sandbox_exception(
+        httpx.ConnectError("dns down")
+    )
+    assert isinstance(mapped, SandboxConnectionException)
+    assert mapped.is_retryable is True
+
+
+def test_handle_api_error_rate_limit_without_retry_after_header() -> None:
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    class Resp:
+        status_code = 429
+        parsed = None
+        headers: dict[str, str] = {}
+
+    with pytest.raises(SandboxRateLimitException) as ei:
+        handle_api_error(Resp(), "Op")
+    assert ei.value.retry_after is None
+
+
+def test_handle_api_error_attaches_raw_response_body() -> None:
+    body = b'{"whatever": "server text"}'
+
+    class Resp:
+        status_code = 500
+        parsed = None
+        headers: dict[str, str] = {}
+        content = body
+
+    with pytest.raises(SandboxApiException) as ei:
+        handle_api_error(Resp(), "Op")
+    # Raw body preserved untruncated on the exception.
+    assert ei.value.response_body == body
+    # And spliced into str() so logs surface the server's own message.
+    assert "server text" in str(ei.value)
+
+
+def test_handle_api_error_rate_limit_preserves_raw_body_when_unparsed() -> None:
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    body = b"quota exhausted for tenant foo"
+
+    class Resp:
+        status_code = 429
+        parsed = None
+        headers: dict[str, str] = {"Retry-After": "5"}
+        content = body
+
+    with pytest.raises(SandboxRateLimitException) as ei:
+        handle_api_error(Resp(), "Acquire")
+    assert ei.value.response_body == body
+    assert ei.value.retry_after == timedelta(seconds=5)
+    assert "quota exhausted for tenant foo" in str(ei.value)
+
+
+def test_handle_api_error_truncates_long_raw_body_in_message() -> None:
+    body = b"x" * 2000
+
+    class Resp:
+        status_code = 502
+        parsed = None
+        headers: dict[str, str] = {}
+        content = body
+
+    with pytest.raises(SandboxApiException) as ei:
+        handle_api_error(Resp(), "Op")
+    # Full body still available on the exception field.
+    assert ei.value.response_body == body
+    # str() is truncated with an ellipsis marker.
+    assert "…" in str(ei.value)
+    assert len(str(ei.value)) < 1500
+
+
+def test_handle_api_error_prefers_parsed_message_over_raw_body() -> None:
+    class Parsed:
+        code = "BAD_REQUEST"
+        message = "structured message"
+
+    class Resp:
+        status_code = 400
+        parsed = Parsed()
+        headers: dict[str, str] = {}
+        content = b"{unparsed raw body}"
+
+    with pytest.raises(SandboxApiException) as ei:
+        handle_api_error(Resp(), "Op")
+    # Structured message wins; raw body is not spliced.
+    assert "structured message" in str(ei.value)
+    assert "unparsed raw body" not in str(ei.value)
+    # But the raw body is still attached for callers that want it.
+    assert ei.value.response_body == b"{unparsed raw body}"
+
+
+def test_build_api_exception_from_httpx_maps_429_to_rate_limit() -> None:
+    from opensandbox.adapters.converter.response_handler import (
+        build_api_exception_from_httpx,
+    )
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    class Resp:
+        status_code = 429
+        headers = {"Retry-After": "3", "X-Request-ID": "req-xyz"}
+        content = b'{"code":"QUOTA","message":"too many"}'
+
+    exc = build_api_exception_from_httpx(Resp(), "Isolated create")
+    assert isinstance(exc, SandboxRateLimitException)
+    assert exc.status_code == 429
+    assert exc.retry_after == timedelta(seconds=3)
+    assert exc.request_id == "req-xyz"
+    assert exc.response_body == b'{"code":"QUOTA","message":"too many"}'
+    assert "too many" in str(exc)
+
+
+def test_build_api_exception_from_httpx_500_is_api_exception() -> None:
+    from opensandbox.adapters.converter.response_handler import (
+        build_api_exception_from_httpx,
+    )
+    from opensandbox.exceptions import (
+        SandboxApiException,
+        SandboxRateLimitException,
+    )
+
+    class Resp:
+        status_code = 500
+        headers: dict[str, str] = {}
+        content = b"internal explosion"
+
+    exc = build_api_exception_from_httpx(Resp(), "Isolated attach")
+    assert isinstance(exc, SandboxApiException)
+    assert not isinstance(exc, SandboxRateLimitException)
+    assert exc.response_body == b"internal explosion"
+    assert "internal explosion" in str(exc)
+
+
+def test_exception_converter_maps_read_timeout_to_timeout_exception() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.exceptions import SandboxTimeoutException
+
+    exc = ExceptionConverter.to_sandbox_exception(httpx.ReadTimeout("slow"))
+    assert isinstance(exc, SandboxTimeoutException)
+    assert "slow" in str(exc)
+
+
+def test_exception_converter_maps_connect_error_to_connection_exception() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.exceptions import SandboxConnectionException
+
+    exc = ExceptionConverter.to_sandbox_exception(httpx.ConnectError("boom"))
+    assert isinstance(exc, SandboxConnectionException)
+    assert "boom" in str(exc)
+
+
+def test_exception_converter_maps_connect_timeout_to_connection_exception() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.exceptions import (
+        SandboxConnectionException,
+        SandboxTimeoutException,
+    )
+
+    exc = ExceptionConverter.to_sandbox_exception(httpx.ConnectTimeout("dial"))
+    # ConnectTimeout is dispatched to Connection, not Timeout, because
+    # it happens before any bytes are on the wire.
+    assert isinstance(exc, SandboxConnectionException)
+    assert not isinstance(exc, SandboxTimeoutException)
+
+
+def test_exception_converter_maps_unexpected_status_429_to_rate_limit() -> None:
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.api.execd.errors import UnexpectedStatus
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    exc = ExceptionConverter.to_sandbox_exception(
+        UnexpectedStatus(status_code=429, content=b'{"code":"QUOTA"}')
+    )
+    assert isinstance(exc, SandboxRateLimitException)
+    assert exc.status_code == 429
+    assert exc.response_body == b'{"code":"QUOTA"}'
+
+
+def test_exception_converter_maps_httpx_status_error_429_to_rate_limit() -> None:
+    import httpx
+
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+    from opensandbox.exceptions import SandboxRateLimitException
+
+    response = httpx.Response(
+        status_code=429,
+        headers={"Retry-After": "7", "X-Request-ID": "req-1"},
+        content=b'{"code":"QUOTA"}',
+        request=httpx.Request("GET", "http://x"),
+    )
+    err = httpx.HTTPStatusError("429", request=response.request, response=response)
+    exc = ExceptionConverter.to_sandbox_exception(err)
+    assert isinstance(exc, SandboxRateLimitException)
+    assert exc.retry_after == timedelta(seconds=7)
+    assert exc.request_id == "req-1"
+
+
 def test_require_parsed_includes_request_id_on_invalid_payload() -> None:
     class Resp:
         status_code = 200
@@ -134,6 +385,65 @@ def test_exception_converter_maps_generated_unexpected_status_to_api_exception()
     assert converted.status_code == 400
     assert converted.error is not None
     assert converted.error.code == "X"
+
+
+def test_exception_converter_splices_unstructured_body_into_message() -> None:
+    body = b'{"error": "invalid parameter"}'  # JSON without code/message envelope
+    err = UnexpectedStatus(400, body)
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxApiException)
+    assert converted.status_code == 400
+    # The raw body is spliced into str()/message so logs show the server reason.
+    assert '{"error": "invalid parameter"}' in str(converted)
+    # Full body still available on the exception field.
+    assert converted.response_body == body
+
+
+def test_exception_converter_splices_plain_text_body_into_message() -> None:
+    body = b"cursor must be positive"
+    err = UnexpectedStatus(400, body)
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxApiException)
+    assert "cursor must be positive" in str(converted)
+    assert converted.response_body == body
+
+
+def test_exception_converter_maps_unstructured_429_body_into_message() -> None:
+    body = b"quota exhausted for tenant foo"
+    err = UnexpectedStatus(429, body)
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxRateLimitException)
+    assert "quota exhausted for tenant foo" in str(converted)
+    assert converted.response_body == body
+
+
+def test_exception_converter_truncates_long_unstructured_body_in_message() -> None:
+    body = b"x" * 2000
+    err = UnexpectedStatus(502, body)
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxApiException)
+    assert converted.response_body == body
+    assert "…" in str(converted)
+    assert len(str(converted)) < 1500
+
+
+def test_exception_converter_preserves_structured_code_without_message() -> None:
+    err = UnexpectedStatus(429, b'{"code":"QUOTA"}')
+
+    converted = ExceptionConverter.to_sandbox_exception(err)
+
+    assert isinstance(converted, SandboxRateLimitException)
+    # Structured code is preserved even when the body has no message field.
+    assert converted.error is not None
+    assert converted.error.code == "QUOTA"
 
 
 def test_exception_converter_maps_httpx_status_error_to_api_exception() -> None:
@@ -252,6 +562,19 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
         extensions={},
         volumes=None,
         credential_proxy=CredentialProxyConfig(enabled=True),
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(
+                command=["/opt/hooks/restore.sh"],
+                timeoutSeconds=30,
+            ),
+            periodic=[
+                PeriodicLifecycleHook(
+                    name="checkpoint",
+                    schedule="@hourly",
+                    command=["/opt/hooks/checkpoint.sh"],
+                )
+            ],
+        ),
     )
     d = req.to_dict()
     assert d["image"]["uri"] == "python:3.11"
@@ -262,9 +585,59 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
     assert d["networkPolicy"]["defaultAction"] == "deny"
     assert d["networkPolicy"]["egress"] == [{"action": "allow", "target": "pypi.org"}]
     assert d["credentialProxy"] == {"enabled": True}
+    assert d["lifecycle"] == {
+        "preStart": {
+            "command": ["/opt/hooks/restore.sh"],
+            "timeoutSeconds": 30,
+        },
+        "periodic": [
+            {
+                "name": "checkpoint",
+                "schedule": "@hourly",
+                "command": ["/opt/hooks/checkpoint.sh"],
+            }
+        ],
+    }
 
     renew = SandboxModelConverter.to_api_renew_request(datetime(2025, 1, 1))
     assert renew.expires_at.tzinfo is timezone.utc
+
+
+def test_sandbox_model_converter_omits_empty_lifecycle() -> None:
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["python"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=None,
+        lifecycle=SandboxLifecycle(),
+    )
+
+    assert "lifecycle" not in req.to_dict()
+
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["python"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=None,
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(command=["true"]),
+            periodic=[],
+        ),
+    )
+
+    assert req.to_dict()["lifecycle"] == {"preStart": {"command": ["true"]}}
 
 
 def test_platform_spec_accepts_windows() -> None:
@@ -316,6 +689,9 @@ def test_sandbox_model_converter_maps_platform_from_create_response() -> None:
     from opensandbox.api.lifecycle.models.create_sandbox_response import (
         CreateSandboxResponse,
     )
+    from opensandbox.api.lifecycle.models.create_sandbox_response_extensions import (
+        CreateSandboxResponseExtensions,
+    )
     from opensandbox.api.lifecycle.models.platform_spec import (
         PlatformSpec as ApiPlatformSpec,
     )
@@ -325,6 +701,9 @@ def test_sandbox_model_converter_maps_platform_from_create_response() -> None:
         id="sbx-1",
         status=SandboxStatus(state="Running"),
         platform=ApiPlatformSpec(os="linux", arch="arm64"),
+        extensions=CreateSandboxResponseExtensions.from_dict(
+            {"opensandbox.extensions.custom-label": "中文数据"}
+        ),
         created_at=datetime(2025, 1, 1),
         entrypoint=["/bin/sh"],
     )
@@ -332,6 +711,97 @@ def test_sandbox_model_converter_maps_platform_from_create_response() -> None:
     converted = SandboxModelConverter.to_sandbox_create_response(api_response)
     assert converted.platform is not None
     assert converted.platform.arch == "arm64"
+    assert converted.extensions == {"opensandbox.extensions.custom-label": "中文数据"}
+
+
+def test_sandbox_model_converter_preserves_missing_metadata_default() -> None:
+    from opensandbox.api.lifecycle.models.sandbox import Sandbox
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    api_sandbox = Sandbox(
+        id="sbx-1",
+        status=SandboxStatus(state="Running"),
+        created_at=datetime(2025, 1, 1),
+        entrypoint=["/bin/sh"],
+    )
+
+    converted = SandboxModelConverter.to_sandbox_info(api_sandbox)
+    assert converted.metadata == {}
+    assert converted.extensions is None
+    assert converted.allocation is None
+
+
+def test_sandbox_model_converter_maps_allocation() -> None:
+    from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+    from opensandbox.api.lifecycle.models.allocation_summary_mode import (
+        AllocationSummaryMode,
+    )
+    from opensandbox.api.lifecycle.models.allocation_summary_state import (
+        AllocationSummaryState,
+    )
+    from opensandbox.api.lifecycle.models.sandbox import Sandbox
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    api_sandbox = Sandbox(
+        id="sbx-1",
+        status=SandboxStatus(state="Running"),
+        created_at=datetime(2025, 1, 1),
+        entrypoint=["/bin/sh"],
+        allocation=AllocationSummary(
+            mode=AllocationSummaryMode.POOL,
+            pool_ref="default/python",
+            state=AllocationSummaryState.ALLOCATED,
+        ),
+    )
+
+    converted = SandboxModelConverter.to_sandbox_info(api_sandbox)
+    assert converted.allocation is not None
+    assert converted.allocation.mode == "pool"
+    assert converted.allocation.pool_ref == "default/python"
+    assert converted.allocation.state == "allocated"
+
+
+def test_sandbox_model_converter_maps_allocation_for_list_results() -> None:
+    from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+    from opensandbox.api.lifecycle.models.allocation_summary_mode import (
+        AllocationSummaryMode,
+    )
+    from opensandbox.api.lifecycle.models.allocation_summary_state import (
+        AllocationSummaryState,
+    )
+    from opensandbox.api.lifecycle.models.list_sandboxes_response import (
+        ListSandboxesResponse,
+    )
+    from opensandbox.api.lifecycle.models.pagination_info import PaginationInfo
+    from opensandbox.api.lifecycle.models.sandbox import Sandbox
+    from opensandbox.api.lifecycle.models.sandbox_status import SandboxStatus
+
+    api_response = ListSandboxesResponse(
+        items=[
+            Sandbox(
+                id="sbx-1",
+                status=SandboxStatus(state="Running"),
+                created_at=datetime(2025, 1, 1),
+                entrypoint=["/bin/sh"],
+                allocation=AllocationSummary(
+                    mode=AllocationSummaryMode.POOL,
+                    pool_ref="default/python",
+                    state=AllocationSummaryState.ALLOCATED,
+                ),
+            )
+        ],
+        pagination=PaginationInfo(
+            page=1,
+            page_size=10,
+            total_items=1,
+            total_pages=1,
+            has_next_page=False,
+        ),
+    )
+
+    converted = SandboxModelConverter.to_paged_sandbox_infos(api_response)
+    assert converted.sandbox_infos[0].allocation is not None
+    assert converted.sandbox_infos[0].allocation.pool_ref == "default/python"
 
 
 def test_sandbox_model_converter_supports_windows_platform_request() -> None:

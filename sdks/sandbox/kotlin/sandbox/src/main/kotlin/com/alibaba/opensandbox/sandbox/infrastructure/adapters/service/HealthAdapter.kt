@@ -33,7 +33,13 @@ internal class HealthAdapter(
     private val api =
         HealthApi(
             "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}",
-            httpClientProvider.httpClient.newBuilder()
+            (
+                if (httpClientProvider.config.singleAttemptHealthChecks) {
+                    httpClientProvider.singleAttemptClient
+                } else {
+                    httpClientProvider.httpClient
+                }
+            ).newBuilder()
                 .addInterceptor { chain ->
                     val requestBuilder = chain.request().newBuilder()
                     execdEndpoint.headers.forEach { (key, value) ->

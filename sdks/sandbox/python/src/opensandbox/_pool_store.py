@@ -22,7 +22,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 
-from opensandbox.pool_types import IdleEntry, StoreCounters, TakeIdleResult
+from opensandbox.exceptions import PoolDestroyedException
+from opensandbox.pool_types import (
+    IdleEntry,
+    PoolDestroyState,
+    StoreCounters,
+    TakeIdleResult,
+)
 
 
 class InMemoryPoolStateStore:
@@ -31,6 +37,7 @@ class InMemoryPoolStateStore:
     def __init__(self) -> None:
         self._default_idle_ttl = timedelta(hours=24)
         self._idle_ttl_by_pool: dict[str, timedelta] = {}
+        self._destroy_state_by_pool: dict[str, _DestroyStateEntry] = {}
         self._pools: dict[str, _PoolIdleState] = {}
         self._lock = RLock()
 
@@ -88,6 +95,7 @@ class InMemoryPoolStateStore:
         if not sandbox_id or not sandbox_id.strip():
             raise ValueError("sandbox_id must not be blank")
         with self._lock:
+            self._reject_if_destroyed_locked(pool_name)
             state = self._pools.setdefault(pool_name, _PoolIdleState())
             expires_at = _now() + self._resolve_idle_ttl(pool_name)
             if sandbox_id not in state.entries:
@@ -103,11 +111,17 @@ class InMemoryPoolStateStore:
     def try_acquire_primary_lock(
         self, pool_name: str, owner_id: str, ttl: timedelta
     ) -> bool:
+        with self._lock:
+            if self.get_destroy_state(pool_name) is not PoolDestroyState.ACTIVE:
+                return False
         return True
 
     def renew_primary_lock(
         self, pool_name: str, owner_id: str, ttl: timedelta
     ) -> bool:
+        with self._lock:
+            if self.get_destroy_state(pool_name) is not PoolDestroyState.ACTIVE:
+                return False
         return True
 
     def release_primary_lock(self, pool_name: str, owner_id: str) -> None:
@@ -168,13 +182,60 @@ class InMemoryPoolStateStore:
         return None
 
     def set_max_idle(self, pool_name: str, max_idle: int) -> None:
+        with self._lock:
+            self._reject_if_destroyed_locked(pool_name)
         return None
 
     def set_idle_entry_ttl(self, pool_name: str, idle_ttl: timedelta) -> None:
         if idle_ttl.total_seconds() <= 0:
             raise ValueError("idle_ttl must be positive")
         with self._lock:
+            self._reject_if_destroyed_locked(pool_name)
             self._idle_ttl_by_pool[pool_name] = idle_ttl
+
+    def get_destroy_state(self, pool_name: str) -> PoolDestroyState:
+        with self._lock:
+            entry = self._destroy_state_by_pool.get(pool_name)
+            if entry is None:
+                return PoolDestroyState.ACTIVE
+            if entry.expires_at is not None and entry.expires_at <= _now():
+                self._destroy_state_by_pool.pop(pool_name, None)
+                return PoolDestroyState.ACTIVE
+            return entry.state
+
+    def begin_destroy(self, pool_name: str, owner_id: str) -> None:
+        if not owner_id or not owner_id.strip():
+            raise ValueError("owner_id must not be blank")
+        with self._lock:
+            existing = self.get_destroy_state(pool_name)
+            if existing is PoolDestroyState.DESTROYED:
+                raise PoolDestroyedException(
+                    f"Pool namespace is already DESTROYED: pool_name={pool_name}"
+                )
+            self._destroy_state_by_pool[pool_name] = _DestroyStateEntry(
+                state=PoolDestroyState.DESTROYING,
+                expires_at=None,
+                owner_id=owner_id,
+            )
+
+    def clear_pool_state(self, pool_name: str) -> None:
+        with self._lock:
+            self._pools.pop(pool_name, None)
+            self._idle_ttl_by_pool.pop(pool_name, None)
+
+    def mark_destroyed(
+        self, pool_name: str, owner_id: str, tombstone_ttl: timedelta | None
+    ) -> None:
+        if not owner_id or not owner_id.strip():
+            raise ValueError("owner_id must not be blank")
+        if tombstone_ttl is not None and tombstone_ttl.total_seconds() <= 0:
+            raise ValueError("tombstone_ttl must be positive")
+        with self._lock:
+            self._destroy_state_by_pool[pool_name] = _DestroyStateEntry(
+                state=PoolDestroyState.DESTROYED,
+                expires_at=None if tombstone_ttl is None else _now() + tombstone_ttl,
+                owner_id=owner_id,
+            )
 
     def _resolve_idle_ttl(self, pool_name: str) -> timedelta:
         return self._idle_ttl_by_pool.get(pool_name, self._default_idle_ttl)
@@ -195,11 +256,25 @@ class InMemoryPoolStateStore:
                 sandbox_id for sandbox_id in state.queue if sandbox_id in state.entries
             )
 
+    def _reject_if_destroyed_locked(self, pool_name: str) -> None:
+        state = self.get_destroy_state(pool_name)
+        if state is not PoolDestroyState.ACTIVE:
+            raise PoolDestroyedException(
+                f"Pool namespace is {state.value}: pool_name={pool_name}"
+            )
+
 
 @dataclass
 class _PoolIdleState:
     entries: dict[str, IdleEntry] = field(default_factory=dict)
     queue: deque[str] = field(default_factory=deque)
+
+
+@dataclass(frozen=True)
+class _DestroyStateEntry:
+    state: PoolDestroyState
+    expires_at: datetime | None
+    owner_id: str
 
 
 def _now() -> datetime:

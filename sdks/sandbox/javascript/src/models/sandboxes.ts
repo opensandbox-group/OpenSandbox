@@ -115,7 +115,7 @@ export interface CredentialMatch extends Record<string, unknown> {
    */
   schemes?: CredentialMatchScheme[];
   /**
-   * Destination ports to match. Defaults to 443 in the sidecar.
+   * @deprecated Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected by the server.
    */
   ports?: number[];
   /**
@@ -132,6 +132,23 @@ export interface CredentialMatch extends Record<string, unknown> {
   paths?: string[];
 }
 
+export type CredentialSubstitutionSurface = "path" | "query" | "header" | "body";
+
+export interface CredentialSubstitution extends Record<string, unknown> {
+  /**
+   * Name of the sandbox-local credential used as the replacement value.
+   */
+  credential: string;
+  /**
+   * Literal placeholder to replace.
+   */
+  placeholder: string;
+  /**
+   * Request surfaces where the placeholder may be replaced.
+   */
+  in: CredentialSubstitutionSurface[];
+}
+
 export interface CustomHeaderEntry extends Record<string, unknown> {
   /**
    * Header name to inject.
@@ -143,27 +160,34 @@ export interface CustomHeaderEntry extends Record<string, unknown> {
   credential: string;
 }
 
+interface CredentialAuthSubstitutions {
+  substitutions?: CredentialSubstitution[];
+}
+
 export type CredentialAuth =
-  | {
+  | ({
       type: "bearer";
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "basic";
       /**
        * Credential containing pre-encoded base64(username:password).
        */
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "apiKey";
       name: string;
       credential: string;
-    }
-  | {
+    } & CredentialAuthSubstitutions)
+  | ({
       type: "customHeaders";
       headers: CustomHeaderEntry[];
-    };
+    } & CredentialAuthSubstitutions)
+  | ({
+      type: "passthrough";
+    } & CredentialAuthSubstitutions);
 
 export interface CredentialBinding extends Record<string, unknown> {
   /**
@@ -402,6 +426,24 @@ export interface SandboxStatus extends Record<string, unknown> {
   message?: string;
 }
 
+/**
+ * Current runtime-confirmed Pool allocation for a sandbox.
+ */
+export interface AllocationSummary extends Record<string, unknown> {
+  /**
+   * Confirmed allocation mode.
+   */
+  mode: "pool";
+  /**
+   * Concrete Pool reference currently allocated to the sandbox.
+   */
+  poolRef: string;
+  /**
+   * Current confirmed allocation state.
+   */
+  state: "allocated";
+}
+
 export interface SandboxInfo extends Record<string, unknown> {
   id: SandboxId;
   image?: ImageSpec;
@@ -409,7 +451,12 @@ export interface SandboxInfo extends Record<string, unknown> {
   platform?: PlatformSpec;
   entrypoint: string[];
   metadata?: Record<string, string>;
+  extensions?: Record<string, string>;
   status: SandboxStatus;
+  /**
+   * Current runtime-confirmed Pool allocation, when available.
+   */
+  allocation?: AllocationSummary;
   /**
    * Sandbox creation time.
    */
@@ -418,6 +465,38 @@ export interface SandboxInfo extends Record<string, unknown> {
    * Sandbox expiration time (server-side TTL).
    */
   expiresAt: Date | null;
+}
+
+export interface LifecycleHook extends Record<string, unknown> {
+  /** Command and arguments executed without implicit shell expansion. */
+  command: string[];
+  /** Maximum execution time in seconds, up to 3 hours (10800 seconds). Defaults to 60. */
+  timeoutSeconds?: number;
+}
+
+export interface PeriodicLifecycleHook extends Record<string, unknown> {
+  /** Name unique among periodic hooks in this sandbox. */
+  name: string;
+  /** Five-field cron expression or descriptor such as `@hourly` or `@every 30s`. */
+  schedule: string;
+  /** Command and arguments executed without implicit shell expansion. */
+  command: string[];
+  /** Maximum execution time in seconds, up to 300. Defaults to 60. */
+  timeoutSeconds?: number;
+}
+
+/** Extensible container for sandbox lifecycle hooks. */
+export interface SandboxLifecycle extends Record<string, unknown> {
+  /**
+   * Runs after execd is ready and before the user entrypoint on every container
+   * start. A failed or timed-out hook prevents the user entrypoint from starting.
+   */
+  preStart?: LifecycleHook;
+  /**
+   * Scheduled hooks run while the sandbox is running. Runs of the same named hook
+   * never overlap; a scheduled run is skipped while its previous run is active.
+   */
+  periodic?: PeriodicLifecycleHook[];
 }
 
 export interface CreateSandboxRequest extends Record<string, unknown> {
@@ -437,6 +516,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
   resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
+  lifecycle?: SandboxLifecycle;
   /**
    * Optional outbound network policy for the sandbox.
    */
@@ -457,6 +537,7 @@ export interface CreateSandboxResponse extends Record<string, unknown> {
   status: SandboxStatus;
   platform?: PlatformSpec;
   metadata?: Record<string, string>;
+  extensions?: Record<string, string>;
   /**
    * Sandbox expiration time after creation.
    */
@@ -546,6 +627,7 @@ export interface ListSandboxesParams {
 
 export interface ListSnapshotsParams {
   sandboxId?: SandboxId;
+  name?: string;
   states?: string[];
   page?: number;
   pageSize?: number;

@@ -42,7 +42,11 @@ export class DefaultAdapterFactory implements AdapterFactory {
       headers: opts.connectionConfig.headers,
       fetch: opts.connectionConfig.fetch,
     });
-    const sandboxes = new SandboxesAdapter(lifecycleClient);
+    const sandboxes = new SandboxesAdapter(lifecycleClient, {
+      ttlMs: opts.connectionConfig.endpointCacheTtlMs,
+      maxSize: opts.connectionConfig.endpointCacheSize,
+      disabled: opts.connectionConfig.endpointCacheDisabled,
+    });
     return { sandboxes };
   }
 

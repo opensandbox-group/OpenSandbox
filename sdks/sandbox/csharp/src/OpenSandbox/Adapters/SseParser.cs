@@ -75,7 +75,8 @@ internal static class SseParser
                 }
             }
 
-            var message = errorMessage ?? fallbackErrorMessage ?? $"Stream request failed (status={(int)response.StatusCode})";
+            var message = errorMessage ?? $"{fallbackErrorMessage ?? $"Stream request failed (status={(int)response.StatusCode})"}" +
+                (string.IsNullOrEmpty(text) ? string.Empty : $": {text}");
             var sandboxErrorCode = errorCode ?? SandboxErrorCodes.UnexpectedResponse;
 
             throw new SandboxApiException(

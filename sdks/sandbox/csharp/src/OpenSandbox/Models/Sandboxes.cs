@@ -191,9 +191,10 @@ public class CredentialMatch
     public IReadOnlyList<string>? Schemes { get; set; }
 
     /// <summary>
-    /// Gets or sets the request ports to match.
+    /// Deprecated: ignored, port is derived from scheme.
     /// </summary>
     [JsonPropertyName("ports")]
+    [Obsolete("Ports is ignored; port is derived from Schemes (https→443, http→80).")]
     public IReadOnlyList<int>? Ports { get; set; }
 
     /// <summary>
@@ -234,12 +235,36 @@ public class CustomHeaderEntry
 }
 
 /// <summary>
+/// Scoped placeholder substitution entry.
+/// </summary>
+public class CredentialSubstitution
+{
+    /// <summary>
+    /// Gets or sets the credential name used as the replacement value.
+    /// </summary>
+    [JsonPropertyName("credential")]
+    public required string Credential { get; set; }
+
+    /// <summary>
+    /// Gets or sets the literal placeholder to replace.
+    /// </summary>
+    [JsonPropertyName("placeholder")]
+    public required string Placeholder { get; set; }
+
+    /// <summary>
+    /// Gets or sets the request surfaces where replacement may occur.
+    /// </summary>
+    [JsonPropertyName("in")]
+    public required IReadOnlyList<string> In { get; set; }
+}
+
+/// <summary>
 /// Typed Credential Vault auth rule.
 /// </summary>
 public class CredentialAuth
 {
     /// <summary>
-    /// Gets or sets the auth rule type: bearer, basic, apiKey, or customHeaders.
+    /// Gets or sets the auth rule type: bearer, basic, apiKey, customHeaders, or passthrough.
     /// </summary>
     [JsonPropertyName("type")]
     public required string Type { get; set; }
@@ -261,6 +286,12 @@ public class CredentialAuth
     /// </summary>
     [JsonPropertyName("headers")]
     public IReadOnlyList<CustomHeaderEntry>? Headers { get; set; }
+
+    /// <summary>
+    /// Gets or sets scoped placeholder substitutions for matching requests.
+    /// </summary>
+    [JsonPropertyName("substitutions")]
+    public IReadOnlyList<CredentialSubstitution>? Substitutions { get; set; }
 }
 
 /// <summary>
@@ -682,6 +713,30 @@ public class SandboxStatus
 }
 
 /// <summary>
+/// Runtime-confirmed Pool allocation for a sandbox.
+/// </summary>
+public class AllocationSummary
+{
+    /// <summary>
+    /// Gets or sets the confirmed allocation mode. Currently, this is "pool".
+    /// </summary>
+    [JsonPropertyName("mode")]
+    public required string Mode { get; set; }
+
+    /// <summary>
+    /// Gets or sets the concrete Pool reference allocated to the sandbox.
+    /// </summary>
+    [JsonPropertyName("poolRef")]
+    public required string PoolRef { get; set; }
+
+    /// <summary>
+    /// Gets or sets the confirmed allocation state. Currently, this is "allocated".
+    /// </summary>
+    [JsonPropertyName("state")]
+    public required string State { get; set; }
+}
+
+/// <summary>
 /// Information about a sandbox.
 /// </summary>
 public class SandboxInfo
@@ -717,6 +772,12 @@ public class SandboxInfo
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
 
     /// <summary>
+    /// Gets or sets opaque extension data returned by the server.
+    /// </summary>
+    [JsonPropertyName("extensions")]
+    public IReadOnlyDictionary<string, string>? Extensions { get; set; }
+
+    /// <summary>
     /// Gets or sets the sandbox status.
     /// </summary>
     [JsonPropertyName("status")]
@@ -727,6 +788,12 @@ public class SandboxInfo
     /// </summary>
     [JsonPropertyName("platform")]
     public PlatformSpec? Platform { get; set; }
+
+    /// <summary>
+    /// Gets or sets the current runtime-confirmed Pool allocation, when available.
+    /// </summary>
+    [JsonPropertyName("allocation")]
+    public AllocationSummary? Allocation { get; set; }
 
     /// <summary>
     /// Gets or sets the sandbox creation time.
@@ -816,6 +883,12 @@ public class CreateSandboxRequest
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
 
     /// <summary>
+    /// Gets or sets optional lifecycle hooks applied during sandbox creation.
+    /// </summary>
+    [JsonPropertyName("lifecycle")]
+    public SandboxLifecycle? Lifecycle { get; set; }
+
+    /// <summary>
     /// Gets or sets the network policy.
     /// </summary>
     [JsonPropertyName("networkPolicy")]
@@ -847,6 +920,72 @@ public class CreateSandboxRequest
 }
 
 /// <summary>
+/// Command executed before the sandbox entrypoint starts.
+/// </summary>
+public class LifecycleHook
+{
+    /// <summary>
+    /// Gets or sets the command and arguments to execute.
+    /// </summary>
+    [JsonPropertyName("command")]
+    public required IReadOnlyList<string> Command { get; set; }
+
+    /// <summary>
+    /// Gets or sets the execution timeout in seconds. The maximum is 3 hours (10800 seconds).
+    /// </summary>
+    [JsonPropertyName("timeoutSeconds")]
+    public int? TimeoutSeconds { get; set; }
+}
+
+/// <summary>
+/// Named command scheduled while the sandbox is running.
+/// </summary>
+public class PeriodicLifecycleHook
+{
+    /// <summary>
+    /// Gets or sets the name unique among periodic hooks in this sandbox.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the cron expression or descriptor.
+    /// </summary>
+    [JsonPropertyName("schedule")]
+    public required string Schedule { get; set; }
+
+    /// <summary>
+    /// Gets or sets the command and arguments to execute.
+    /// </summary>
+    [JsonPropertyName("command")]
+    public required IReadOnlyList<string> Command { get; set; }
+
+    /// <summary>
+    /// Gets or sets the execution timeout in seconds. The maximum is 300 seconds.
+    /// </summary>
+    [JsonPropertyName("timeoutSeconds")]
+    public int? TimeoutSeconds { get; set; }
+}
+
+/// <summary>
+/// Optional lifecycle hooks applied during sandbox creation.
+/// </summary>
+public class SandboxLifecycle
+{
+    /// <summary>
+    /// Gets or sets the hook executed before the sandbox entrypoint starts.
+    /// </summary>
+    [JsonPropertyName("preStart")]
+    public LifecycleHook? PreStart { get; set; }
+
+    /// <summary>
+    /// Gets or sets hooks scheduled while the sandbox is running.
+    /// </summary>
+    [JsonPropertyName("periodic")]
+    public IReadOnlyList<PeriodicLifecycleHook>? Periodic { get; set; }
+}
+
+/// <summary>
 /// Response from creating a sandbox.
 /// </summary>
 public class CreateSandboxResponse
@@ -874,6 +1013,12 @@ public class CreateSandboxResponse
     /// </summary>
     [JsonPropertyName("metadata")]
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
+
+    /// <summary>
+    /// Gets or sets opaque extension data returned by the server.
+    /// </summary>
+    [JsonPropertyName("extensions")]
+    public IReadOnlyDictionary<string, string>? Extensions { get; set; }
 
     /// <summary>
     /// Gets or sets the sandbox expiration time.
@@ -1040,6 +1185,7 @@ public class ListSnapshotsResponse
 public class ListSnapshotsParams
 {
     public string? SandboxId { get; set; }
+    public string? Name { get; set; }
     public IReadOnlyList<string>? States { get; set; }
     public int? Page { get; set; }
     public int? PageSize { get; set; }

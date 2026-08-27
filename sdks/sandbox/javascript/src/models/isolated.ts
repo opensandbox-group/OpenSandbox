@@ -22,20 +22,39 @@ export interface EnvPassthroughSpec {
   keys?: string[];
 }
 
+export interface BindMount {
+  source: string;
+  dest?: string;
+  readonly?: boolean;
+}
+
 export interface CreateIsolatedSessionRequest {
   workspace: IsolatedWorkspaceSpec;
   profile?: "strict" | "balanced";
   extra_writable?: string[];
+  binds?: BindMount[];
   share_net?: boolean;
   env_passthrough?: EnvPassthroughSpec;
   uid?: number;
   gid?: number;
+  uid_mode?: "setpriv" | "userns";
   idle_timeout_seconds?: number;
 }
 
 export interface IsolatedSessionInfo {
   session_id: string;
   created_at: string;
+  // Creation-parameter fields echoed by execd (may be absent on older builds).
+  profile?: "strict" | "balanced";
+  workspace?: IsolatedWorkspaceSpec;
+  extra_writable?: string[];
+  binds?: BindMount[];
+  share_net?: boolean;
+  env_passthrough?: EnvPassthroughSpec;
+  uid?: number;
+  gid?: number;
+  uid_mode?: "setpriv" | "userns";
+  idle_timeout_seconds?: number;
 }
 
 export interface IsolatedSessionState {
@@ -43,6 +62,20 @@ export interface IsolatedSessionState {
   created_at?: string;
   last_run_at?: string;
   idle_remaining_seconds?: number | null;
+  // Creation-parameter fields echoed by execd (may be absent on older builds).
+  // Mirrors IsolatedSessionInfo so callers of session.get() can recover the
+  // parameters the session was created with — useful for stateless clients
+  // (e.g. serverless workers) that only persist a session ID.
+  profile?: "strict" | "balanced";
+  workspace?: IsolatedWorkspaceSpec;
+  extra_writable?: string[];
+  binds?: BindMount[];
+  share_net?: boolean;
+  env_passthrough?: EnvPassthroughSpec;
+  uid?: number;
+  gid?: number;
+  uid_mode?: "setpriv" | "userns";
+  idle_timeout_seconds?: number;
 }
 
 export interface IsolatedRunOpts {
@@ -50,11 +83,70 @@ export interface IsolatedRunOpts {
   timeout_seconds?: number;
 }
 
+/**
+ * Handle returned when a run is started with `background: true`.
+ */
+export interface IsolatedBackgroundRun {
+  session_id: string;
+  run_id: string;
+  started_at?: string;
+}
+
+/**
+ * Lifecycle state of an isolated background run.
+ */
+export interface IsolatedRunStatus {
+  session_id: string;
+  run_id: string;
+  running: boolean;
+  exit_code?: number | null;
+  error?: string;
+  started_at?: string;
+  finished_at?: string | null;
+}
+
+/**
+ * Incremental log read of an isolated background run.
+ */
+export interface IsolatedRunLogs {
+  text: string;
+  cursor: number;
+}
+
+export interface HardeningLayerState {
+  state: "active" | "disabled" | "degraded" | "unsupported" | string;
+  message?: string;
+}
+
+export interface HardeningStatus {
+  init_mode: "pid1" | "subreaper" | "none" | string;
+  signal_shield: boolean;
+  cap_drop?: HardeningLayerState;
+  seccomp?: HardeningLayerState;
+  landlock?: HardeningLayerState;
+  ebpf?: HardeningLayerState;
+}
+
 export interface IsolatedCapabilities {
   available: boolean;
   isolator?: string;
   version?: string;
   message?: string;
+  setpriv_available?: boolean;
+  userns_available?: boolean;
   commit_supported: boolean;
   diff_supported: boolean;
+  hardening?: HardeningStatus;
+}
+
+export interface IsolatedSessionSummary {
+  session_id: string;
+  status: string;
+  created_at?: string;
+  last_run_at?: string;
+  idle_remaining_seconds?: number;
+}
+
+export interface ListIsolatedSessionsResponse {
+  sessions?: IsolatedSessionSummary[];
 }

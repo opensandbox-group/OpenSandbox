@@ -64,11 +64,49 @@ spec:
         {{- include "opensandbox-server.ingressGatewaySelectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: ingress-gateway
         app.kubernetes.io/part-of: opensandbox
+        {{- with .Values.server.gateway.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.server.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "opensandbox-server.ingressGatewayFullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.gateway.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.gateway.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.server.gateway.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: main
           image: {{ include "opensandbox-server.ingressGatewayImage" . }}
+          {{- with .Values.server.gateway.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           imagePullPolicy: IfNotPresent
           args:
             - "--namespace={{ .Values.server.gateway.dataplaneNamespace }}"
@@ -78,11 +116,28 @@ spec:
             - "--log-level={{ .Values.server.gateway.logLevel }}"
 {{- if .Values.server.gateway.secureAccess.keys }}
             - "--secure-access-keys={{- range $i, $k := .Values.server.gateway.secureAccess.keys }}{{ if $i }},{{ end }}{{ $k.key_id }}={{ $k.key }}{{- end }}"
+{{- else if .Values.server.gateway.secureAccess.existingSecret }}
+            # Kubelet expands $(...) from the env below, so the key ring
+            # reaches the arg only at container start, never via the pod spec.
+            - "--secure-access-keys=$(OPENSANDBOX_SECURE_ACCESS_KEYS)"
 {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.server.gateway.port }}
               protocol: TCP
+          {{- if or .Values.server.gateway.env .Values.server.gateway.secureAccess.existingSecret }}
+          env:
+            {{- if .Values.server.gateway.secureAccess.existingSecret }}
+            - name: OPENSANDBOX_SECURE_ACCESS_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.gateway.secureAccess.existingSecret | quote }}
+                  key: keys
+            {{- end }}
+            {{- with .Values.server.gateway.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /status.ok

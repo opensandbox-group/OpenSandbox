@@ -37,6 +37,17 @@ controller:
   # -- Log level for zap logger (debug, info, error)
   logLevel: info
 
+  # -- controller-runtime metrics endpoint (Prometheus). Disabled by default to
+  # preserve the current behavior (the binary defaults to `--metrics-bind-address=0`).
+  metrics:
+    # -- Expose the controller-runtime /metrics endpoint (sets `--metrics-bind-address`)
+    enabled: false
+    # -- Port for the metrics endpoint
+    port: 8080
+    # -- Serve metrics over HTTPS with authn/authz (`--metrics-secure`). Set to false
+    # to serve plain HTTP for scraping without TLS/RBAC (e.g. PodMonitoring).
+    secure: false
+
   # -- Kubernetes client rate limiter configuration
   kubeClient:
     # -- QPS for Kubernetes client rate limiter.
@@ -46,11 +57,13 @@ controller:
 
   # -- Pause/Resume snapshot configuration
   snapshot:
-    # -- Image used for commit operations (must contain nerdctl tool)
-    # DockerHub: opensandbox/image-committer:v0.1.0
-    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.0"
-    # -- Containerd socket path of host
-    containerdSocketPath: "/var/run/containerd/containerd.sock"
+    # -- Image used for commit operations.
+    # DockerHub: opensandbox/image-committer:v0.1.1
+    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:v0.1.1"
+    # -- PodTemplateSpec overlay for image-committer commit Job Pods.
+    imageCommitterPodTemplate: {}
+    # -- Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag.
+    containerdSocketPath: ""
     # -- Timeout duration for commit jobs
     commitJobTimeout: "10m"
     # -- OCI registry prefix used for snapshot images.
@@ -59,6 +72,9 @@ controller:
     registryInsecure: false
     # -- Secret name used by commit Jobs to push snapshot images.
     snapshotPushSecret: ""
+    # -- Secret name for pulling the image-committer image in commit Jobs.
+    # Required when imageCommitterImage is stored in a private registry.
+    imageCommitterPullSecret: ""
     # -- Secret name injected into resumed sandboxes for pulling snapshot images.
     resumePullSecret: ""
 
@@ -150,14 +166,6 @@ crds:
   # -- Additional annotations to add to CRDs (will be merged with resource-policy if keep is true)
   annotations: {}
 
-# Network Policy configuration
-networkPolicy:
-  # -- Enable network policy
-  enabled: false
-  # -- Ingress rules for network policy
-  ingress: []
-  # -- Egress rules for network policy
-  egress: []
 
 # -- Additional environment variables for the controller
 extraEnv: []

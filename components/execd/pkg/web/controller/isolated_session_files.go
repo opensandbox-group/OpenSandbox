@@ -32,33 +32,37 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-func (c *IsolatedSessionController) getMergedView() (vfs.FS, error) {
-	if isolatedRunner == nil || !isolatedRunner.Available() {
+func (c *IsolatedSessionController) getMergedView() (vfs.FS, func(), error) {
+	if isolatedRunner == nil {
 		c.RespondError(http.StatusServiceUnavailable, model.ErrorCodeServiceUnavailable, "isolation unavailable")
-		return nil, fmt.Errorf("isolation unavailable")
+		return nil, nil, fmt.Errorf("isolation unavailable")
 	}
 	sessionID := c.ctx.Param("sessionId")
-	mv, err := isolatedRunner.GetMergedView(sessionID)
+	mv, release, err := isolatedRunner.GetMergedViewWithLease(sessionID)
 	if err != nil {
 		if errors.Is(err, runtime.ErrContextNotFound) {
 			c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
-			return nil, err
+			return nil, nil, err
 		}
 		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
-		return nil, err
+		return nil, nil, err
 	}
 	if mv == nil {
+		if release != nil {
+			release()
+		}
 		c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
-		return nil, fmt.Errorf("no merged view")
+		return nil, nil, fmt.Errorf("no merged view")
 	}
-	return mv, nil
+	return mv, release, nil
 }
 
 func (c *IsolatedSessionController) GetFilesInfo() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	paths := c.ctx.QueryArray("path")
 	if len(paths) == 0 {
@@ -84,10 +88,11 @@ func (c *IsolatedSessionController) GetFilesInfo() {
 }
 
 func (c *IsolatedSessionController) SearchFiles() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	path := c.ctx.Query("path")
 	if path == "" {
@@ -118,10 +123,11 @@ func (c *IsolatedSessionController) SearchFiles() {
 }
 
 func (c *IsolatedSessionController) DownloadFile() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	filePath := c.ctx.Query("path")
 	if filePath == "" {
@@ -239,10 +245,11 @@ func (c *IsolatedSessionController) serveIsolatedLineRange(file *os.File, rawOff
 }
 
 func (c *IsolatedSessionController) UploadFile() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	metadataParts, fileParts, uerr := parseUploadForm(c.ctx)
 	if uerr != nil {
@@ -291,10 +298,11 @@ func (c *IsolatedSessionController) UploadFile() {
 }
 
 func (c *IsolatedSessionController) RemoveFiles() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	paths := c.ctx.QueryArray("path")
 	for _, p := range paths {
@@ -307,10 +315,11 @@ func (c *IsolatedSessionController) RemoveFiles() {
 }
 
 func (c *IsolatedSessionController) RenameFiles() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	var request []model.RenameFileItem
 	if err := c.bindJSON(&request); err != nil {
@@ -333,10 +342,11 @@ func (c *IsolatedSessionController) RenameFiles() {
 }
 
 func (c *IsolatedSessionController) ChmodFiles() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	var request map[string]model.Permission
 	if err := c.bindJSON(&request); err != nil {
@@ -363,10 +373,11 @@ func (c *IsolatedSessionController) ChmodFiles() {
 }
 
 func (c *IsolatedSessionController) ReplaceContent() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	verbose := c.ctx.Query("verbose") == "true"
 
@@ -425,10 +436,11 @@ func (c *IsolatedSessionController) ReplaceContent() {
 }
 
 func (c *IsolatedSessionController) MakeDirs() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	var request map[string]model.Permission
 	if err := c.bindJSON(&request); err != nil {
@@ -458,10 +470,11 @@ func (c *IsolatedSessionController) MakeDirs() {
 }
 
 func (c *IsolatedSessionController) RemoveDirs() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	paths := c.ctx.QueryArray("path")
 	for _, p := range paths {
@@ -474,10 +487,11 @@ func (c *IsolatedSessionController) RemoveDirs() {
 }
 
 func (c *IsolatedSessionController) ListDirectory() {
-	mv, _ := c.getMergedView()
+	mv, release, _ := c.getMergedView()
 	if mv == nil {
 		return
 	}
+	defer release()
 
 	path := c.ctx.Query("path")
 	if path == "" {

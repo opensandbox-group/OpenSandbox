@@ -17,10 +17,6 @@ name: SDK Tests
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "cli/**"
-      - "sdks/**"
-      - "specs/**"
   push:
     branches: [main]
     paths:
@@ -30,14 +26,22 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: sdk
+
   cli-quality:
-    name: CLI Quality
+    name: CLI Quality And Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -67,28 +71,6 @@ jobs:
         working-directory: cli
         run: |
           uv run pyright
-
-  cli-tests:
-    name: CLI Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Install dependencies
-        working-directory: cli
-        run: |
-          uv sync
 
       - name: Run tests
         working-directory: cli
@@ -105,53 +87,9 @@ jobs:
             cli/reports/**
 
   python-sdk-quality:
-    name: Python SDK Quality (${{ matrix.package_name }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package_name: sandbox
-            package_dir: sdks/sandbox/python
-          - package_name: code-interpreter
-            package_dir: sdks/code-interpreter/python
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Install dependencies
-        working-directory: ${{ matrix.package_dir }}
-        run: |
-          uv sync
-
-      - name: Generate API
-        if: matrix.package_name == 'sandbox'
-        working-directory: sdks/sandbox/python
-        run: |
-          uv run python scripts/generate_api.py
-
-      - name: Run ruff
-        working-directory: ${{ matrix.package_dir }}
-        run: |
-          uv run ruff check
-
-      - name: Run pyright
-        working-directory: ${{ matrix.package_dir }}
-        run: |
-          uv run pyright
-
-  python-sdk-tests:
-    name: Python SDK Tests (${{ matrix.package_name }})
+    name: Python SDK Quality And Tests (${{ matrix.package_name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -188,6 +126,16 @@ jobs:
         run: |
           uv run python scripts/generate_api.py
 
+      - name: Run ruff
+        working-directory: ${{ matrix.package_dir }}
+        run: |
+          uv run ruff check
+
+      - name: Run pyright
+        working-directory: ${{ matrix.package_dir }}
+        run: |
+          uv run pyright
+
       - name: Run tests
         working-directory: ${{ matrix.package_dir }}
         run: |
@@ -208,6 +156,8 @@ jobs:
 
   javascript-sdk-quality:
     name: JavaScript SDK Quality And Tests (${{ matrix.package_name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -269,20 +219,10 @@ jobs:
             ${{ matrix.package_dir }}/reports/**
 
   kotlin-sdk-quality:
-    name: Kotlin SDK Quality And Tests (${{ matrix.package_name }})
+    name: Kotlin SDK Quality And Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package_name: sandbox
-            package_dir: sdks/sandbox/kotlin
-            test_task: :sandbox:test
-            gradle_args: ""
-          - package_name: code-interpreter
-            package_dir: sdks/code-interpreter/kotlin
-            test_task: :code-interpreter:test
-            gradle_args: "-PuseMavenLocal"
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -296,28 +236,24 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      - name: Publish sandbox SDK to Maven local
-        if: matrix.package_name == 'code-interpreter'
+      - name: Run quality checks and tests
         working-directory: sdks/sandbox/kotlin
         run: |
-          ./gradlew publishToMavenLocal
-
-      - name: Run quality checks and tests
-        working-directory: ${{ matrix.package_dir }}
-        run: |
-          ./gradlew spotlessCheck ${{ matrix.test_task }} ${{ matrix.gradle_args }}
+          ./gradlew spotlessCheck :sandbox:test :code-interpreter:test
 
       - name: Upload Kotlin reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kotlin-${{ matrix.package_name }}-reports
+          name: kotlin-reports
           path: |
-            ${{ matrix.package_dir }}/**/build/test-results/test/**
-            ${{ matrix.package_dir }}/**/build/reports/tests/test/**
+            sdks/sandbox/kotlin/**/build/test-results/test/**
+            sdks/sandbox/kotlin/**/build/reports/tests/test/**
 
   csharp-sdk-quality:
     name: C# SDK Quality And Tests (${{ matrix.package_name }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -365,6 +301,8 @@ jobs:
 
   go-sdk-quality:
     name: Go SDK Quality And Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -403,3 +341,37 @@ jobs:
           name: go-sdk-reports
           path: |
             sdks/sandbox/go/reports/**
+
+  required:
+    name: SDK CI
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs:
+      - changes
+      - cli-quality
+      - python-sdk-quality
+      - javascript-sdk-quality
+      - kotlin-sdk-quality
+      - csharp-sdk-quality
+      - go-sdk-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CLI_QUALITY_RESULT: ${{ needs.cli-quality.result }}
+          PYTHON_QUALITY_RESULT: ${{ needs.python-sdk-quality.result }}
+          JAVASCRIPT_RESULT: ${{ needs.javascript-sdk-quality.result }}
+          KOTLIN_RESULT: ${{ needs.kotlin-sdk-quality.result }}
+          CSHARP_RESULT: ${{ needs.csharp-sdk-quality.result }}
+          GO_RESULT: ${{ needs.go-sdk-quality.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection failed: $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$RELEVANT" == "true" ]]; then
+            [[ "$CLI_QUALITY_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
+          else
+            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
+          fi

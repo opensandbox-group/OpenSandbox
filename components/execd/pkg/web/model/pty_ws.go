@@ -28,6 +28,7 @@ type ServerFrame struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id,omitempty"`
 	Mode      string `json:"mode,omitempty"`
+	Role      string `json:"role,omitempty"`
 	Data      string `json:"data,omitempty"`
 	Offset    int64  `json:"offset,omitempty"`
 	ExitCode  *int   `json:"exit_code,omitempty"`
@@ -52,6 +53,8 @@ const (
 	WSErrCodeInvalidFrame     = "INVALID_FRAME"
 	WSErrCodeAlreadyConnected = "ALREADY_CONNECTED"
 	WSErrCodeTakenOver        = "TAKEN_OVER"
+	WSErrCodeReadOnly         = "READ_ONLY"
+	WSErrCodeViewerNotRunning = "VIEWER_REQUIRES_RUNNING_SESSION"
 	WSErrCodeRuntimeError     = "RUNTIME_ERROR"
 )
 

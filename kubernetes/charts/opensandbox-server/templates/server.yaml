@@ -21,8 +21,11 @@ metadata:
     {{- include "opensandbox-server.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/status", "events", "services", "configmaps"]
+    resources: ["pods", "pods/status", "pods/log", "events", "services", "configmaps"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete", "get"]
@@ -86,15 +89,45 @@ spec:
       labels:
         {{- include "opensandbox-server.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/part-of: opensandbox
+        {{- with .Values.server.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # The server parses config.toml once at startup, so an in-place update
+        # of the ConfigMap leaves the running pod on the previous configuration.
+        # Hashing the rendered TOML rolls the Deployment whenever it changes.
+        checksum/config: {{ printf "%s%s" .Values.configToml (include "opensandbox-server.ingressConfigToml" .) | sha256sum }}
+        {{- with .Values.server.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "opensandbox-server.serviceAccountName" . }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.server.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: main
           image: {{ include "opensandbox-server.serverImage" . }}
+          {{- with .Values.server.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           imagePullPolicy: {{ include "opensandbox-server.imagePullPolicy" . }}
           args:
             - "--config"
@@ -106,6 +139,21 @@ spec:
           env:
             - name: SANDBOX_CONFIG_PATH
               value: "/etc/opensandbox/config.toml"
+            {{- if and .Values.server.gateway.enabled .Values.server.gateway.secureAccess.existingSecret }}
+            # The server builds [ingress.secure_access] from these at startup
+            # (OPENSANDBOX_SECURE_ACCESS_* env override), keeping key material
+            # out of the config ConfigMap.
+            - name: OPENSANDBOX_SECURE_ACCESS_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.gateway.secureAccess.existingSecret | quote }}
+                  key: keys
+            - name: OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.gateway.secureAccess.existingSecret | quote }}
+                  key: active-key
+            {{- end }}
             {{- with .Values.server.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -157,11 +205,14 @@ metadata:
   labels:
     {{- include "opensandbox-server.labels" . | nindent 4 }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.server.service.type }}
   ports:
     - port: 80
       targetPort: http
       protocol: TCP
       name: http
+      {{- if and .Values.server.service.nodePort (ne .Values.server.service.type "ClusterIP") }}
+      nodePort: {{ .Values.server.service.nodePort }}
+      {{- end }}
   selector:
     {{- include "opensandbox-server.selectorLabels" . | nindent 4 }}

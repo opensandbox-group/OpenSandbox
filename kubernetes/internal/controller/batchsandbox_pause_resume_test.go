@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -111,6 +112,10 @@ func (f fakeSchedulerTask) IsResourceReleased() bool {
 	return f.released
 }
 
+func (f fakeSchedulerTask) GetTerminatedMessage() string {
+	return ""
+}
+
 type recordingTaskScheduler struct {
 	updatePodsCalls int
 	scheduleCalls   int
@@ -185,9 +190,10 @@ func TestDispatchPauseResume_Case2_PauseFalse(t *testing.T) {
 		},
 		Spec: sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: "test-bs"},
 		Status: sandboxv1alpha1.SandboxSnapshotStatus{
-			Phase: sandboxv1alpha1.SandboxSnapshotPhaseSucceed,
+			Phase:  sandboxv1alpha1.SandboxSnapshotPhaseSucceed,
+			Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
 			Containers: []sandboxv1alpha1.ContainerSnapshot{
-				{ContainerName: "main", ImageURI: "registry/test-bs-main:snap-gen1"},
+				{ContainerName: "main", ImageURI: "registry/test-bs-main:snap-gen1", ImageDigest: "sha256:" + strings.Repeat("a", 64)},
 			},
 		},
 	}
@@ -792,9 +798,10 @@ func TestContinueResume_NormalFlow(t *testing.T) {
 		},
 		Spec: sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: "test-bs"},
 		Status: sandboxv1alpha1.SandboxSnapshotStatus{
-			Phase: sandboxv1alpha1.SandboxSnapshotPhaseSucceed,
+			Phase:  sandboxv1alpha1.SandboxSnapshotPhaseSucceed,
+			Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
 			Containers: []sandboxv1alpha1.ContainerSnapshot{
-				{ContainerName: "main", ImageURI: "registry/test-bs-main:snap-gen1"},
+				{ContainerName: "main", ImageURI: "registry/test-bs-main:snap-gen1", ImageDigest: "sha256:" + strings.Repeat("a", 64)},
 			},
 		},
 	}
@@ -829,7 +836,7 @@ func TestContinueResume_NormalFlow(t *testing.T) {
 	// Verify images replaced
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
-	assert.Equal(t, "registry/test-bs-main:snap-gen1", updated.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, "registry/test-bs-main@sha256:"+strings.Repeat("a", 64), updated.Spec.Template.Spec.Containers[0].Image)
 	// Verify replicas are preserved.
 	assert.Equal(t, int32(1), *updated.Spec.Replicas)
 	// Verify controller does not clear spec.pause
@@ -1871,6 +1878,92 @@ func TestBuildRuntimeView_AggregatesResumeFailures(t *testing.T) {
 	assert.Equal(t, "2/3 observed pods failed; primary reason=ImagePullBackOff; sample pod=imgpull-0", podFailed.Message)
 }
 
+func TestBuildRuntimeView_MarksResumeFailedWhenStaleCacheMissesResumingPhase(t *testing.T) {
+	// Under informer lag the cached phase may still be the pre-pause steady phase
+	// while a resume request is already in flight; pod failures must still surface
+	// ResumeFailed instead of only PodFailed.
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-bs",
+			Namespace:  "default",
+			Generation: 4,
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause: ptr.To(false),
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                   sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			PauseObservedGeneration: 3,
+		},
+	}
+
+	pods := []*corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Name: "imgpull-0", Namespace: "default"},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "ErrImagePull",
+						Message: "image not found",
+					},
+				},
+			}},
+		},
+	}}
+
+	view := buildRuntimeView(bs, pods)
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+
+	var resumeFailed *sandboxv1alpha1.BatchSandboxCondition
+	for i := range view.status.Conditions {
+		if view.status.Conditions[i].Type == sandboxv1alpha1.BatchSandboxConditionResumeFailed {
+			resumeFailed = &view.status.Conditions[i]
+			break
+		}
+	}
+	require.NotNil(t, resumeFailed, "resume in flight must mark ResumeFailed even when the cached phase lags")
+	assert.Equal(t, sandboxv1alpha1.ConditionTrue, resumeFailed.Status)
+	assert.Equal(t, "ErrImagePull", resumeFailed.Reason)
+}
+
+func TestBuildRuntimeView_SteadyFailureWithoutResumeInFlightKeepsResumeFailedAbsent(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-bs",
+			Namespace:  "default",
+			Generation: 3,
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause: ptr.To(false),
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                   sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			PauseObservedGeneration: 3,
+		},
+	}
+
+	pods := []*corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Name: "crash-0", Namespace: "default"},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "CrashLoopBackOff",
+						Message: "crash",
+					},
+				},
+			}},
+		},
+	}}
+
+	view := buildRuntimeView(bs, pods)
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+	for i := range view.status.Conditions {
+		assert.NotEqual(t, sandboxv1alpha1.BatchSandboxConditionResumeFailed, view.status.Conditions[i].Type,
+			"steady-state pod failures must not set ResumeFailed")
+	}
+}
+
 func TestBuildRuntimeView_PreservesConditionTransitionTimeWhenUnchanged(t *testing.T) {
 	transitionTime := metav1.NewTime(time.Now().Add(-5 * time.Minute))
 	bs := &sandboxv1alpha1.BatchSandbox{
@@ -2720,6 +2813,69 @@ func TestAckPauseWithPhase_DoesNotMutateSpecPause(t *testing.T) {
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePausing, updated.Status.Phase)
 	require.NotNil(t, updated.Spec.Pause)
 	assert.True(t, *updated.Spec.Pause)
+}
+
+func TestInjectQEMURestorePreservesUserInitContainersAndIsIdempotent(t *testing.T) {
+	template := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			"sandbox.opensandbox.io/qemu-container": "main",
+		}},
+		Spec: corev1.PodSpec{
+			// A pod-level runAsNonRoot would be inherited by the injected init
+			// container unless it overrides the value explicitly.
+			SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)},
+			InitContainers:  []corev1.Container{{Name: "download-ubuntu", Image: "ubuntu-seed:test"}},
+			Containers:      []corev1.Container{{Name: "main", Image: "qemu:test"}},
+		},
+	}
+	snapshotObject := &sandboxv1alpha1.SandboxSnapshot{Status: sandboxv1alpha1.SandboxSnapshotStatus{
+		Format: sandboxv1alpha1.SandboxSnapshotFormatQEMUV1,
+		VirtualMachine: &sandboxv1alpha1.VirtualMachineSnapshot{
+			ImageURI:       "registry.example/sandbox-vmstate:snapshot",
+			ImageDigest:    "sha256:" + strings.Repeat("1", 64),
+			PayloadDigest:  "sha256:" + strings.Repeat("2", 64),
+			SizeBytes:      1024,
+			Compression:    "zstd",
+			ManifestDigest: "sha256:" + strings.Repeat("3", 64),
+			Compatibility: sandboxv1alpha1.QEMUCompatibility{
+				Architecture:      "amd64",
+				QEMUVersion:       "9.1.0",
+				MachineType:       "pc-q35-9.1",
+				CPUModel:          "host",
+				VCPUs:             2,
+				MemoryBytes:       1 << 30,
+				QEMUConfigDigest:  "sha256:config",
+				RequiredNodeClass: "shenlong-v1",
+			},
+		},
+	}}
+
+	require.NoError(t, injectQEMURestore(template, snapshotObject))
+	require.NoError(t, injectQEMURestore(template, snapshotObject))
+	require.Len(t, template.Spec.InitContainers, 2)
+	assert.Equal(t, "download-ubuntu", template.Spec.InitContainers[0].Name)
+	restore := template.Spec.InitContainers[1]
+	assert.Equal(t, vmStateRestoreInitName, restore.Name)
+	assert.Equal(t, "registry.example/sandbox-vmstate@sha256:"+strings.Repeat("1", 64), restore.Image)
+	assert.Contains(t, restore.Args, "sha256:"+strings.Repeat("3", 64))
+	require.NotNil(t, restore.SecurityContext)
+	require.NotNil(t, restore.SecurityContext.RunAsUser)
+	assert.Equal(t, int64(0), *restore.SecurityContext.RunAsUser)
+	require.NotNil(t, restore.SecurityContext.RunAsNonRoot, "RunAsNonRoot must be set explicitly so a pod-level runAsNonRoot=true does not conflict with UID 0")
+	assert.False(t, *restore.SecurityContext.RunAsNonRoot)
+	assert.Equal(t, "shenlong-v1", template.Spec.NodeSelector["sandbox.opensandbox.io/qemu-node-class"])
+	require.Len(t, template.Spec.Volumes, 1)
+	require.Len(t, template.Spec.Containers[0].VolumeMounts, 1)
+	assert.Equal(t, vmStateRestoreMountPath, template.Spec.Containers[0].VolumeMounts[0].MountPath)
+	assert.Contains(t, template.Spec.Containers[0].Env, corev1.EnvVar{Name: "OPENSANDBOX_RESTORE_MODE", Value: "qemu-v1"})
+	assert.Contains(t, template.Spec.Containers[0].Env, corev1.EnvVar{Name: "OPENSANDBOX_VMSTATE_DIR", Value: vmStateRestoreMountPath})
+
+	expectedStorage := vmStateRestoreStorageSize(1024)
+	require.NotNil(t, template.Spec.Volumes[0].EmptyDir)
+	require.NotNil(t, template.Spec.Volumes[0].EmptyDir.SizeLimit, "restore emptyDir must reserve a size limit based on the recorded VM state size")
+	assert.Equal(t, expectedStorage.Value(), template.Spec.Volumes[0].EmptyDir.SizeLimit.Value())
+	assert.Equal(t, expectedStorage, restore.Resources.Requests[corev1.ResourceEphemeralStorage])
+	assert.Equal(t, expectedStorage, restore.Resources.Limits[corev1.ResourceEphemeralStorage])
 }
 
 // Ensure ctrl.Result type is used

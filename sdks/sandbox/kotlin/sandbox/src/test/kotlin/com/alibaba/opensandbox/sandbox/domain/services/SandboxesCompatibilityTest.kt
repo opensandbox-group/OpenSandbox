@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox.domain.services
 
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.LifecycleHook
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
@@ -27,6 +28,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
@@ -81,6 +83,55 @@ class SandboxesCompatibilityTest {
             }
 
         assertTrue(error.message!!.contains("Credential Vault proxy is not supported"))
+    }
+
+    @Test
+    fun `default lifecycle overload rejects unsupported non-null config`() {
+        val sandboxes = LegacySandboxes()
+
+        val error =
+            assertThrows(UnsupportedOperationException::class.java) {
+                sandboxes.createSandbox(
+                    spec = null,
+                    entrypoint = null,
+                    env = emptyMap(),
+                    metadata = emptyMap(),
+                    timeout = null,
+                    resource = emptyMap(),
+                    networkPolicy = null,
+                    extensions = emptyMap(),
+                    volumes = null,
+                    credentialProxy = null,
+                    lifecycle =
+                        SandboxLifecycle.builder()
+                            .preStart(LifecycleHook.builder().command("true").build())
+                            .build(),
+                )
+            }
+
+        assertTrue(error.message!!.contains("lifecycle hooks are not supported"))
+    }
+
+    @Test
+    fun `empty lifecycle delegates to previous createSandbox signature`() {
+        val sandboxes = LegacySandboxes()
+
+        val response =
+            sandboxes.createSandbox(
+                spec = null,
+                entrypoint = null,
+                env = emptyMap(),
+                metadata = emptyMap(),
+                timeout = null,
+                resource = emptyMap(),
+                networkPolicy = null,
+                extensions = emptyMap(),
+                volumes = null,
+                credentialProxy = null,
+                lifecycle = SandboxLifecycle.builder().build(),
+            )
+
+        assertEquals("legacy-sandbox", response.id)
     }
 
     @Test

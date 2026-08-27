@@ -70,6 +70,33 @@ try {
 }
 ```
 
+## Lifecycle Hooks
+
+Set `lifecycle` in `Sandbox.create`. `preStart` completes before the entrypoint starts, while `periodic` hooks run on their schedules after startup.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu:24.04",
+  lifecycle: {
+    preStart: {
+      command: ["sh", "-c", "echo ready > /tmp/prestart.done"],
+      timeoutSeconds: 120,
+    },
+    periodic: [
+      {
+        name: "checkpoint",
+        schedule: "@every 5m",
+        command: ["sh", "-c", "date -u >> /tmp/checkpoints.log"],
+        timeoutSeconds: 120,
+      },
+    ],
+  },
+});
+```
+
+The Server validates `timeoutSeconds`; `preStart` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+
 ## Usage Examples
 
 ### 1. Lifecycle Management
@@ -231,6 +258,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
 | `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
+| `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
 ```ts
 import { ConnectionConfig } from "@alibaba-group/opensandbox";
@@ -330,7 +358,6 @@ await sandbox.credentialVault.create({
       name: "api-token",
       match: {
         schemes: ["https"],
-        ports: [443],
         hosts: ["api.example.com"],
         paths: ["/v1/*"],
       },
@@ -340,8 +367,8 @@ await sandbox.credentialVault.create({
 });
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, binding
+guidance, and Git/curl examples.
 
 ### 5. Resource Cleanup
 

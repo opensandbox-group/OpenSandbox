@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ..models.bearer_credential_auth import BearerCredentialAuth
     from ..models.credential_match import CredentialMatch
     from ..models.custom_headers_credential_auth import CustomHeadersCredentialAuth
+    from ..models.passthrough_credential_auth import PassthroughCredentialAuth
 
 
 T = TypeVar("T", bound="CredentialBinding")
@@ -38,17 +39,25 @@ class CredentialBinding:
     Attributes:
         name (str):
         match (CredentialMatch):
-        auth (ApiKeyCredentialAuth | BasicCredentialAuth | BearerCredentialAuth | CustomHeadersCredentialAuth):
+        auth (ApiKeyCredentialAuth | BasicCredentialAuth | BearerCredentialAuth | CustomHeadersCredentialAuth |
+            PassthroughCredentialAuth):
     """
 
     name: str
     match: CredentialMatch
-    auth: ApiKeyCredentialAuth | BasicCredentialAuth | BearerCredentialAuth | CustomHeadersCredentialAuth
+    auth: (
+        ApiKeyCredentialAuth
+        | BasicCredentialAuth
+        | BearerCredentialAuth
+        | CustomHeadersCredentialAuth
+        | PassthroughCredentialAuth
+    )
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.api_key_credential_auth import ApiKeyCredentialAuth
         from ..models.basic_credential_auth import BasicCredentialAuth
         from ..models.bearer_credential_auth import BearerCredentialAuth
+        from ..models.custom_headers_credential_auth import CustomHeadersCredentialAuth
 
         name = self.name
 
@@ -60,6 +69,8 @@ class CredentialBinding:
         elif isinstance(self.auth, BasicCredentialAuth):
             auth = self.auth.to_dict()
         elif isinstance(self.auth, ApiKeyCredentialAuth):
+            auth = self.auth.to_dict()
+        elif isinstance(self.auth, CustomHeadersCredentialAuth):
             auth = self.auth.to_dict()
         else:
             auth = self.auth.to_dict()
@@ -83,6 +94,7 @@ class CredentialBinding:
         from ..models.bearer_credential_auth import BearerCredentialAuth
         from ..models.credential_match import CredentialMatch
         from ..models.custom_headers_credential_auth import CustomHeadersCredentialAuth
+        from ..models.passthrough_credential_auth import PassthroughCredentialAuth
 
         d = dict(src_dict)
         name = d.pop("name")
@@ -91,7 +103,13 @@ class CredentialBinding:
 
         def _parse_auth(
             data: object,
-        ) -> ApiKeyCredentialAuth | BasicCredentialAuth | BearerCredentialAuth | CustomHeadersCredentialAuth:
+        ) -> (
+            ApiKeyCredentialAuth
+            | BasicCredentialAuth
+            | BearerCredentialAuth
+            | CustomHeadersCredentialAuth
+            | PassthroughCredentialAuth
+        ):
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
@@ -116,11 +134,19 @@ class CredentialBinding:
                 return componentsschemas_credential_auth_type_2
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                componentsschemas_credential_auth_type_3 = CustomHeadersCredentialAuth.from_dict(data)
+
+                return componentsschemas_credential_auth_type_3
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             if not isinstance(data, dict):
                 raise TypeError()
-            componentsschemas_credential_auth_type_3 = CustomHeadersCredentialAuth.from_dict(data)
+            componentsschemas_credential_auth_type_4 = PassthroughCredentialAuth.from_dict(data)
 
-            return componentsschemas_credential_auth_type_3
+            return componentsschemas_credential_auth_type_4
 
         auth = _parse_auth(d.pop("auth"))
 

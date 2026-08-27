@@ -31,9 +31,10 @@ Example files in this repository:
 10. [`[storage]`](#storage)
 11. [`[store]`](#store)
 12. [`[secure_runtime]`](#secure_runtime)
-13. [`[renew_intent]`](#renew_intent--experimental)
-14. [Environment variables (outside TOML)](#environment-variables-outside-toml)
-15. [Cross-field validation rules](#cross-field-validation-rules)
+13. [`[renew_intent]`](#renew_intent)
+14. [`[otel]`](#otel)
+15. [Environment variables (outside TOML)](#environment-variables-outside-toml)
+16. [Cross-field validation rules](#cross-field-validation-rules)
 
 ---
 
@@ -52,7 +53,8 @@ Example files in this repository:
 | `[storage]` | No | Host bind mounts / OSSFS mount root |
 | `[store]` | No | Server-managed persistent metadata backend |
 | `[secure_runtime]` | No | gVisor / Kata / Firecracker |
-| `[renew_intent]` | No | Experimental auto-renew on access |
+| `[renew_intent]` | No | Auto-renew on access |
+| `[otel]` | No | OTLP export for Server HTTP and ingested SDK metrics |
 
 ---
 
@@ -66,6 +68,7 @@ Example files in this repository:
 | `eip` | string \| omitted | `null` | Public IP or hostname used as the **host part** when the server returns sandbox endpoint URLs (notably Docker runtime). |
 | `max_sandbox_timeout_seconds` | integer \| omitted | `null` | Upper bound on sandbox TTL in seconds for **create** requests that specify `timeout`. Must be ≥ **60** if set. Omit to disable the server-side cap. |
 | `timeout_keep_alive` | integer | `30` | Idle keep-alive timeout (seconds) passed to uvicorn. |
+| `timeout_graceful_shutdown` | integer | `5` | Seconds uvicorn waits for in-flight requests to finish before forcing shutdown. Ensures Ctrl+C terminates promptly even when a long-running operation (e.g. image pull) is in progress. |
 | `limit_concurrency` | integer | `1024` | Maximum concurrent connections before returning 503. Provides backpressure protection under burst load. Set to `0` to disable the cap (TOML cannot express `null`). |
 | `backlog` | integer | `2048` | Socket listen backlog passed to uvicorn. |
 | `thread_pool_size` | integer | `200` | Maximum size of the anyio default threadpool used by FastAPI to run sync route handlers. The anyio default of 40 throttles bursts of blocking sandbox list/get/delete operations under high concurrency. |
@@ -93,6 +96,7 @@ Example files in this repository:
 |-----|------|---------|-------------|
 | `type` | string | — | **`docker`** or **`kubernetes`**. Selects which runtime implementation loads. |
 | `execd_image` | string | — | OCI image containing the **execd** binary used to bootstrap command/file access inside the sandbox. |
+| `execd_run_as_init` | boolean | `false` | Run **execd as the sandbox init** (OSEP-0018): sets `EXECD_INIT` in the sandbox environment so `bootstrap.sh` `exec`s into `execd --init` and execd becomes PID 1 — reaping children, owning the container lifecycle, and exposing the hardening floor. Defaults to `false` (classic background-and-wait topology); intended to be flipped on after validation in production. |
 
 ---
 
@@ -108,6 +112,10 @@ Example files in this repository:
 | `no_new_privileges` | boolean | `true` | Sets `no-new-privileges` to block privilege escalation. |
 | `seccomp_profile` | string \| omitted | `null` | Seccomp profile name or **absolute path**; empty uses Docker default seccomp. |
 | `pids_limit` | integer \| null | `4096` | Max PIDs per sandbox container; set to **`null`** to disable the limit. |
+| `sandbox_env` | table | `{}` | Environment variables injected into **every** sandbox container; keys from a creation request override same-named keys. Docker-runtime counterpart of the Kubernetes pod template (e.g. `NODE_EXTRA_CA_CERTS` to trust a private CA, together with `sandbox_binds`). |
+| `sandbox_binds` | string[] | `[]` | Host bind mounts applied to **every** sandbox container, Docker `-v` syntax (`host:container[:mode]`); prepended to binds derived from a request's `volumes`. |
+| `port_range_min` | integer | `40000` | Lower bound of the host port range used by bridge-mode sandbox port allocation. Must be less than `port_range_max`. Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar). Narrow this range to match your firewall policy — e.g., 100 concurrent sandboxes ≈ 300 ports. |
+| `port_range_max` | integer | `60000` | Upper bound of the host port range. Range must span ≥ 100 ports for reliable allocation. |
 
 ---
 
@@ -119,11 +127,11 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 |-----|------|---------|-------------|
 | `kubeconfig_path` | string \| omitted | `null` | Path to kubeconfig (expandable, e.g. `~/.kube/config`). In-cluster configs often leave this unset and rely on in-cluster credentials. |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
-| `service_account` | string \| omitted | `null` | ServiceAccount name bound to workload pods. |
 | `workload_provider` | string \| omitted | `null` | One of: **`batchsandbox`**, **`agent-sandbox`**. If omitted, the **first registered** provider is used (currently **`batchsandbox`**). |
 | `batchsandbox_template_file` | string \| omitted | `null` | Path to **BatchSandbox** CR YAML template when `workload_provider = "batchsandbox"`. |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | Image pull policy for the BatchSandbox main container. Values: **`Always`**, **`IfNotPresent`**, **`Never`**. |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max time to wait for a new sandbox to become ready (e.g. IP assigned), in seconds. |
+| `pool_acquisition_timeout_seconds` | integer | `30` | Max cumulative time to wait while Pool capacity prevents allocation. This does not extend `sandbox_create_timeout_seconds`. |
 | `sandbox_create_poll_interval_seconds` | float | `1.0` | Poll interval while waiting for readiness. |
 | `snapshot_create_timeout_seconds` | integer | `900` | Max time to wait for a Kubernetes public snapshot to become ready, in seconds. Set this greater than the controller snapshot `commitJobTimeout` / `--commit-job-timeout`. |
 | `informer_enabled` | boolean | `true` | **[Beta]** Use informer/watch cache for reads to reduce API load. |
@@ -200,6 +208,7 @@ Configures the **egress sidecar** image and enforcement mode. The server only at
 | `image` | string \| omitted | `null` | OCI image for the egress sidecar. **Required in config** when clients send **`networkPolicy`** (create request). |
 | `mode` | string | `"dns"` | Passed to the sidecar as `OPENSANDBOX_EGRESS_MODE`. Values: **`dns`** — DNS-proxy-based enforcement (CIDR/static IP rules **not** enforced); **`dns+nft`** — adds nftables where available so **CIDR/IP** rules can be enforced. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (especially on Kubernetes). **Default on**; set `false` only when you want IPv6 left up in the netns. Details in [IPv6 and egress](#ipv6-and-egress) below. |
+| `readiness_timeout_seconds` | float | `30.0` | **Docker only.** Maximum time to wait for the egress sidecar health endpoint to become ready. Must be greater than `0`. |
 
 ### IPv6 and egress
 
@@ -209,6 +218,7 @@ OpenSandbox egress does **not** treat IPv6 as a first-class, fully covered path�
 
 - `egress.image` must be set when using `networkPolicy`.
 - Outbound policy requires **`docker.network_mode = "bridge"`**; `networkPolicy` is rejected for incompatible network modes.
+- Increase `egress.readiness_timeout_seconds` when the sidecar needs more than 30 seconds to become ready in the deployment environment.
 
 **Kubernetes notes:**
 
@@ -275,9 +285,9 @@ See [`docs/guides/secure-container.md`](../docs/guides/secure-container.md) for 
 
 ---
 
-## `[renew_intent]` — **experimental**
+## `[renew_intent]`
 
-**🧪 Experimental:** auto-renew sandbox expiration when access is observed (lifecycle proxy and/or Redis queue). Off by default. Full design: [OSEP-0009](../oseps/0009-auto-renew-sandbox-on-ingress-access.md).
+Auto-renew sandbox expiration when access is observed (lifecycle proxy and/or Redis queue). Off by default. Full design: [OSEP-0009](../oseps/0009-auto-renew-sandbox-on-ingress-access.md).
 
 Use **dotted keys** under the same table for Redis (valid in TOML):
 
@@ -294,6 +304,28 @@ Per-sandbox enablement uses create request extensions (see OSEP-0009 and `exampl
 
 ---
 
+## `[otel]`
+
+Optional OpenTelemetry metrics export for Server HTTP requests and SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the HTTP middleware and ingestion endpoint remain active but record as noops.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable OTLP metrics export. |
+| `endpoint` | string \| omitted | `null` | OTLP HTTP metrics endpoint. When omitted, uses `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`. |
+| `service_name` | string | `"opensandbox-server"` | `service.name` resource attribute. |
+| `export_interval_millis` | integer | `60000` | Periodic export interval (≥ 1000). |
+
+Exported metrics:
+
+| Metric | Type | Unit | Attributes | Description |
+|-----|------|------|------------|-------------|
+| `server.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | Server HTTP request latency. Histogram count provides request volume. |
+| `opensandbox.sandbox.create.duration` | Histogram | `ms` | `sdk.language`, `sdk.version`, `success` | SDK-reported creation latency from create start until ready or failure. |
+
+The HTTP metric uses the matched route template rather than the raw request path. Requests that do not reach a matched route, including early authentication failures and unmatched URLs, use `http_route=unknown`. Standard HTTP methods are recorded in uppercase, while extension methods use `http_method=OTHER` to keep attribute cardinality bounded. The metric never includes sandbox IDs, tenant IDs, API keys, request or response bodies, query strings, or other unbounded request data.
+
+---
+
 ## Environment variables (outside TOML)
 
 These are read by the server or runtime code in addition to the TOML file:
@@ -303,7 +335,8 @@ These are read by the server or runtime code in addition to the TOML file:
 | `SANDBOX_CONFIG_PATH` | `config.py`, CLI | Path to the TOML file. Overrides the default `~/.sandbox.toml` when set. |
 | `OPENSANDBOX_SERVER_API_KEY` | `config.py` | Overrides the API key from the TOML file. |
 | `DOCKER_HOST` | Docker service | Standard Docker daemon address (e.g. `unix:///var/run/docker.sock`). |
-| `PENDING_FAILURE_TTL` | Docker service | Seconds to retain **failed Pending** sandboxes before cleanup; default **`3600`**. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTEL exporter | Default OTLP endpoint when `[otel].endpoint` is omitted. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | OTEL exporter | Metrics-specific OTLP endpoint override. |
 
 ---
 

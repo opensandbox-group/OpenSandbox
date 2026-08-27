@@ -1,0 +1,173 @@
+{{- if .Values.enabled }}
+{{- $nodeSelector := mergeOverwrite (deepCopy (default dict .Values.nodeSelector)) (dict "kubernetes.io/os" "linux") }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "opensandbox-node-agent.fullname" . }}
+  namespace: {{ include "opensandbox-node-agent.namespace" . }}
+  labels:
+    {{- include "opensandbox-node-agent.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "opensandbox-node-agent.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        app.kubernetes.io/name: {{ include "opensandbox-node-agent.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: node-agent
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "opensandbox-node-agent.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nodeagent
+          image: {{ include "opensandbox-node-agent.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODEAGENT_CLUSTER_ID
+              value: {{ .Values.config.clusterID | quote }}
+            - name: NODEAGENT_SOURCES
+              value: container-logs
+            - name: NODEAGENT_SINKS
+              value: {{ .Values.sink.type | quote }}
+            - name: NODEAGENT_LOG_ROOT
+              value: {{ required "hostPaths.logs is required" .Values.hostPaths.logs | quote }}
+            - name: NODEAGENT_STATE_DIR
+              value: {{ .Values.config.stateDir | quote }}
+            - name: NODEAGENT_STATE_MAX_BYTES
+              value: {{ .Values.config.stateMaxBytes | int64 | quote }}
+            - name: NODEAGENT_MEMORY_BUDGET_BYTES
+              value: {{ .Values.config.memoryBudgetBytes | int64 | quote }}
+            - name: NODEAGENT_PER_SANDBOX_QUEUE_BYTES
+              value: {{ .Values.config.perSandboxQueueBytes | int64 | quote }}
+            - name: NODEAGENT_PER_SANDBOX_RATE_LIMIT
+              value: {{ .Values.config.perSandboxRateLimit | quote }}
+            - name: NODEAGENT_MAX_LINE_BYTES
+              value: {{ .Values.config.maxLineBytes | int64 | quote }}
+            - name: NODEAGENT_PARTIAL_TIMEOUT
+              value: {{ .Values.config.partialTimeout | quote }}
+            - name: NODEAGENT_DROP_POLICY
+              value: {{ .Values.config.dropPolicy | quote }}
+            - name: NODEAGENT_SINK_TIMEOUT
+              value: {{ .Values.config.sinkTimeout | quote }}
+            - name: NODEAGENT_RETRY_MAX_INTERVAL
+              value: {{ .Values.config.retryMaxInterval | quote }}
+            - name: NODEAGENT_ENDED_STATE_RETENTION
+              value: {{ .Values.config.endedStateRetention | quote }}
+            - name: NODEAGENT_SERVER_ADDR
+              value: {{ .Values.config.serverAddr | quote }}
+            {{- if .Values.config.pprofAddr }}
+            - name: NODEAGENT_PPROF_ADDR
+              value: {{ .Values.config.pprofAddr | quote }}
+            {{- end }}
+            {{- if eq .Values.sink.type "file" }}
+            - name: NODEAGENT_FILE_PATH
+              value: {{ .Values.sink.file.path | quote }}
+            - name: NODEAGENT_FILE_MAX_BYTES
+              value: {{ .Values.sink.file.maxBytes | int64 | quote }}
+            - name: NODEAGENT_FILE_MAX_FILES
+              value: {{ .Values.sink.file.maxFiles | int64 | quote }}
+            - name: NODEAGENT_FILE_MAX_TOTAL_BYTES
+              value: {{ .Values.sink.file.maxTotalBytes | int64 | quote }}
+            - name: NODEAGENT_FILE_RETENTION
+              value: {{ .Values.sink.file.retention | quote }}
+            {{- else if eq .Values.sink.type "oss" }}
+            - name: NODEAGENT_OSS_ENDPOINT
+              value: {{ .Values.sink.oss.endpoint | quote }}
+            - name: NODEAGENT_OSS_BUCKET
+              value: {{ .Values.sink.oss.bucket | quote }}
+            - name: NODEAGENT_OSS_KEY_PREFIX
+              value: {{ .Values.sink.oss.keyPrefix | quote }}
+            - name: OSS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "sink.oss.existingSecret is required for OSS" .Values.sink.oss.existingSecret | quote }}
+                  key: {{ .Values.sink.oss.accessKeyIDKey | quote }}
+            - name: OSS_ACCESS_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sink.oss.existingSecret | quote }}
+                  key: {{ .Values.sink.oss.accessKeySecretKey | quote }}
+            - name: OSS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sink.oss.existingSecret | quote }}
+                  key: {{ .Values.sink.oss.sessionTokenKey | quote }}
+                  optional: true
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: health
+              containerPort: {{ trimPrefix ":" .Values.config.serverAddr | int }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: pod-logs
+              mountPath: {{ required "hostPaths.logs is required" .Values.hostPaths.logs | quote }}
+              readOnly: true
+            - name: state
+              mountPath: {{ .Values.config.stateDir | quote }}
+            {{- if and (eq .Values.sink.type "file") .Values.sink.file.path }}
+            - name: file-data
+              mountPath: {{ .Values.sink.file.path | quote }}
+            {{- end }}
+      volumes:
+        - name: pod-logs
+          hostPath:
+            path: {{ required "hostPaths.logs is required" .Values.hostPaths.logs | quote }}
+            type: Directory
+        - name: state
+          hostPath:
+            path: {{ required "hostPaths.state is required" .Values.hostPaths.state | quote }}
+            type: DirectoryOrCreate
+        {{- if and (eq .Values.sink.type "file") .Values.sink.file.path }}
+        - name: file-data
+          hostPath:
+            path: {{ required "hostPaths.fileData is required when the file sink is enabled" .Values.hostPaths.fileData | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
+      nodeSelector:
+        {{- toYaml $nodeSelector | nindent 8 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+{{- end }}

@@ -35,6 +35,7 @@ from opensandbox.models.sandboxes import (
     SandboxFilter,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxLifecycle,
     SandboxRenewResponse,
     SnapshotFilter,
     SnapshotInfo,
@@ -66,6 +67,7 @@ class SandboxesSync(Protocol):
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        lifecycle: SandboxLifecycle | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a new sandbox with the specified configuration (blocking).
@@ -83,6 +85,7 @@ class SandboxesSync(Protocol):
                 Prefer namespaced keys (e.g. ``storage.id``).
             volumes: Optional list of volumes to mount in the sandbox.
             secure_access: Whether to enable secured access for sandbox endpoints.
+            lifecycle: Optional pre-start and periodic lifecycle hooks.
 
         Returns:
             Sandbox create response.
@@ -250,4 +253,8 @@ class SandboxesSync(Protocol):
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         """Delete a snapshot (blocking)."""
+        ...
+
+    def invalidate_endpoint_cache(self, sandbox_id: str) -> None:
+        """Remove all cached endpoints for a sandbox. No-op if caching is disabled."""
         ...
