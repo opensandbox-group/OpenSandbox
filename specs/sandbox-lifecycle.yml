@@ -1285,8 +1285,8 @@ components:
         timeoutSeconds:
           type: integer
           minimum: 1
-          maximum: 300
-          description: Maximum execution time in seconds, up to 300. The server defaults to 60 when omitted.
+          maximum: 10800
+          description: Maximum execution time in seconds, up to 3 hours (10800 seconds) for `preStart`. The server defaults to 60 when omitted.
       additionalProperties: false
     PeriodicLifecycleHook:
       type: object

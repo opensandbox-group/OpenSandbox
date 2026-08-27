@@ -1480,6 +1480,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         port: int,
         resolve_internal: bool = False,
         expires: Optional[int] = None,
+        use_proxy_host: bool = False,
     ) -> Endpoint:
         """
         Get sandbox access endpoint.
@@ -1491,6 +1492,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 internal workload endpoint for use by the server-side proxy.
             expires: Unix epoch seconds for a signed route token.
                 Requires ingress gateway mode with secure_access keys configured.
+            use_proxy_host: Accepted for interface consistency with the Docker
+                runtime. The Kubernetes runtime currently ignores it.
 
         Returns:
             Endpoint: Endpoint information

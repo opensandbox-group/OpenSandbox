@@ -205,11 +205,14 @@ metadata:
   labels:
     {{- include "opensandbox-server.labels" . | nindent 4 }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.server.service.type }}
   ports:
     - port: 80
       targetPort: http
       protocol: TCP
       name: http
+      {{- if and .Values.server.service.nodePort (ne .Values.server.service.type "ClusterIP") }}
+      nodePort: {{ .Values.server.service.nodePort }}
+      {{- end }}
   selector:
     {{- include "opensandbox-server.selectorLabels" . | nindent 4 }}

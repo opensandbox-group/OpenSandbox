@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,9 +34,9 @@ const (
 	ConfigEnv     = "OPENSANDBOX_LIFECYCLE"
 	ConfigPathEnv = "EXECD_LIFECYCLE_CONFIG"
 
-	defaultTimeout        = 60 * time.Second
-	maxHookTimeoutSeconds = 300
-	configVersion         = 1
+	defaultTimeout            = 60 * time.Second
+	maxTimeoutDurationSeconds = math.MaxInt64 / int64(time.Second)
+	configVersion             = 1
 )
 
 // Config is the creation-time sandbox lifecycle configuration consumed by
@@ -198,8 +199,8 @@ func validateHook(name string, hook Hook) error {
 	if hook.TimeoutSeconds < 0 {
 		return fmt.Errorf("%s timeoutSeconds must not be negative", name)
 	}
-	if hook.TimeoutSeconds > maxHookTimeoutSeconds {
-		return fmt.Errorf("%s timeoutSeconds must not exceed %d", name, maxHookTimeoutSeconds)
+	if int64(hook.TimeoutSeconds) > maxTimeoutDurationSeconds {
+		return fmt.Errorf("%s timeoutSeconds must not exceed %d", name, maxTimeoutDurationSeconds)
 	}
 	return nil
 }

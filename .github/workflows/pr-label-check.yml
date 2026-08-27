@@ -144,7 +144,6 @@ jobs:
               // SDK — layout: sdks/{sandbox,code-interpreter,mcp}/{go,python,...};
               // Kotlin code-interpreter lives under sdks/sandbox/kotlin/code-interpreter.
               if (dirs.has("sdks")) {
-                s.push("sdks");
                 const langMap = {
                   go: "sdk/go",
                   kotlin: "sdk/java",

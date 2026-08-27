@@ -27,12 +27,20 @@ max_sandbox_timeout_seconds = 86400
 # - Interactive TTY: type YES when prompted
 # - Non-interactive: set OPENSANDBOX_INSECURE_SERVER=YES
 
+[proxy]
+# When True (default), the sandbox reverse-proxy targets the sandbox's
+# internal Docker bridge container IP. Set to False to target the
+# server-local host-mapped port instead. Use False when the server process
+# cannot route to bridge container IPs, e.g. a launchd/systemd user session
+# on macOS where such traffic is blocked.
+resolve_internal = true
+
 [log]
 level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.22"
+execd_image = "opensandbox/execd:v1.1.0"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.

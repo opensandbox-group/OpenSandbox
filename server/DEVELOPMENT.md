@@ -23,7 +23,7 @@ level = "DEBUG"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.22"
+execd_image = "opensandbox/execd:v1.1.0"
 
 [docker]
 network_mode = "bridge"

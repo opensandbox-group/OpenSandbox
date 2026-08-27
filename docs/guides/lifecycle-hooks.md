@@ -61,7 +61,7 @@ Lifecycle hooks are part of the sandbox creation request:
 | Field | Required | Description |
 |---|---:|---|
 | `command` | Yes | Non-empty command and argument array |
-| `timeoutSeconds` | No | When omitted, defaults to 60 seconds; explicit values must be from 1 through 300 seconds |
+| `timeoutSeconds` | No | When omitted, defaults to 60 seconds; explicit values must be from 1 through 10800 seconds (3 hours) |
 
 `preStart` runs on each container start. Make the command idempotent so retrying or restarting a sandbox does not corrupt its state.
 

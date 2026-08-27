@@ -41,6 +41,12 @@ server:
       cpu: "1"
       memory: 4Gi
 
+  service:
+    # -- Service type for the server. Set to NodePort or LoadBalancer to reach the server from outside the cluster.
+    type: ClusterIP
+    # -- Node port to bind when type is not ClusterIP. Empty lets Kubernetes allocate one from the cluster node-port range.
+    nodePort: ""
+
   # -- Tolerations for the server pod.
   tolerations: []
   # -- Affinity for the server pod.
@@ -152,7 +158,7 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.22"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0"
 
   [kubernetes]
   kubeconfig_path = ""

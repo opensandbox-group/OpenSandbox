@@ -561,6 +561,22 @@ class ServerConfig(BaseModel):
     )
 
 
+class ProxyConfig(BaseModel):
+    """Configuration for the sandbox reverse-proxy routes."""
+
+    resolve_internal: bool = Field(
+        default=True,
+        description=(
+            "When True (default), the proxy targets the sandbox's internal "
+            "container IP. When False, the proxy targets the server-local "
+            "host-mapped port, which is required when the server process "
+            "cannot route to Docker bridge network container IPs (for example "
+            "a launchd or systemd user session on macOS). Backward compatible: "
+            "the default preserves the historical behavior."
+        ),
+    )
+
+
 class KubernetesRuntimeConfig(BaseModel):
     """Kubernetes-specific runtime configuration."""
 
@@ -1013,6 +1029,10 @@ class AppConfig(BaseModel):
     """Root application configuration model."""
 
     server: ServerConfig = Field(default_factory=ServerConfig)
+    proxy: ProxyConfig = Field(
+        default_factory=ProxyConfig,
+        description="Configuration for the sandbox reverse-proxy routes.",
+    )
     log: LogConfig = Field(
         default_factory=LogConfig,
         description="Logging configuration (level, file output, rotation).",

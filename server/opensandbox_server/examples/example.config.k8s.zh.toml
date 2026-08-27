@@ -27,12 +27,19 @@ max_sandbox_timeout_seconds = 86400
 # - 交互式 TTY：按提示输入 YES
 # - 非交互环境：设置 OPENSANDBOX_INSECURE_SERVER=YES
 
+[proxy]
+# 当为 True（默认）时，服务端反向代理以沙箱的内部容器 IP（Docker bridge）或
+# provider 的内部 workload 端点为目标；设为 False 时，代理改为以服务端本地的
+# host-mapped 端口为目标。当服务端进程无法路由到容器 bridge IP 时（例如 macOS
+# 上的 launchd/systemd 用户会话）应设为 False。
+resolve_internal = true
+
 [log]
 level = "INFO"
 
 [runtime]
 type = "kubernetes"
-execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.22"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0"
 
 [storage]
 # 允许进行 bind mount 的宿主机路径前缀白名单。

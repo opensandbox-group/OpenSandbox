@@ -484,6 +484,50 @@ spec:
         assert result["state"] == "Terminated"
         assert result["reason"] == "SandboxExpired"
 
+    def test_get_status_pod_succeeded_maps_to_terminated(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "False",
+                        "reason": "PodSucceeded",
+                        "message": "Pod completed successfully",
+                        "lastTransitionTime": "2025-12-31T10:00:00Z",
+                    }
+                ]
+            },
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Terminated"
+        assert result["reason"] == "PodSucceeded"
+
+    def test_get_status_pod_failed_maps_to_failed(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "False",
+                        "reason": "PodFailed",
+                        "message": "Pod failed",
+                        "lastTransitionTime": "2025-12-31T10:00:00Z",
+                    }
+                ]
+            },
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Failed"
+        assert result["reason"] == "PodFailed"
+
     def test_get_status_falls_back_to_pod_state(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.return_value = [

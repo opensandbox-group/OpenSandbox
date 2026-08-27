@@ -345,7 +345,8 @@ class SandboxService(ABC):
 
     @abstractmethod
     def get_endpoint(self, sandbox_id: str, port: int, resolve_internal: bool = False,
-                     expires: Optional[int] = None) -> Endpoint:
+                     expires: Optional[int] = None,
+                     use_proxy_host: bool = False) -> Endpoint:
         """
         Get sandbox access endpoint.
 
@@ -356,6 +357,10 @@ class SandboxService(ABC):
             expires: Unix epoch seconds for a signed route token. When provided, the
                 endpoint is wrapped in a cryptographically signed route per OSEP-0011.
                 Requires ingress gateway mode with secure_access keys configured.
+            use_proxy_host: Runtime-specific hint. Docker consumes it to build
+                host-mapped endpoints from the server-local proxy host when the
+                server-side proxy targets the host-mapped port. Other runtimes
+                currently ignore it.
 
         Returns:
             Endpoint: Public endpoint URL
