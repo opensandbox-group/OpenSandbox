@@ -184,7 +184,6 @@ func TestReaperReapsOrphan(t *testing.T) {
 func TestReaperSweepBackstop(t *testing.T) {
 	oldInterval := reaperSweepInterval
 	reaperSweepInterval = 50 * time.Millisecond
-	defer func() { reaperSweepInterval = oldInterval }()
 
 	r := newReaper()
 	r.start()
@@ -198,6 +197,7 @@ func TestReaperSweepBackstop(t *testing.T) {
 		initReaper.stop()
 		signal.Stop(subscribed)
 		initReaper = nil
+		reaperSweepInterval = oldInterval
 	})
 	go r.run()
 
