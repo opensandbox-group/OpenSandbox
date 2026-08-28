@@ -18,7 +18,8 @@ Two tables are maintained:
 
 - ``sandbox_access_log``: one row per received request (request detail).
 - ``sandbox_access_latest``: one row per sandbox id, holding the latest
-  request and the total request count (summary).
+  request and the total request count (summary). Rows whose sandbox
+  resource is gone are flagged ``deleted`` and hidden from the UI/API.
 """
 
 import logging
@@ -46,6 +47,8 @@ CREATE INDEX IF NOT EXISTS idx_sandbox_access_log_sandbox_time
 """
 
 # One row per sandbox id, tracking its latest request and total count.
+# ``deleted`` marks sandboxes whose BatchSandbox resource no longer exists
+# (synced from Kubernetes); deleted rows are hidden from the UI/API.
 _CREATE_SUMMARY_TABLE = """
 CREATE TABLE IF NOT EXISTS sandbox_access_latest (
     sandbox_id    TEXT        PRIMARY KEY,
@@ -54,8 +57,15 @@ CREATE TABLE IF NOT EXISTS sandbox_access_latest (
     target        TEXT        NOT NULL,
     request_time  TIMESTAMPTZ NOT NULL,
     request_count BIGINT      NOT NULL DEFAULT 1,
+    deleted       BOOLEAN     NOT NULL DEFAULT FALSE,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT date_trunc('second', now())
 );
+"""
+
+# Migration for tables created before the ``deleted`` column existed.
+_ALTER_SUMMARY_ADD_DELETED = """
+ALTER TABLE sandbox_access_latest
+    ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE
 """
 
 # Truncate timestamps to whole seconds on write.
@@ -86,7 +96,7 @@ WHERE EXCLUDED.request_time >= sandbox_access_latest.request_time
 _LIST_LATEST = """
 SELECT sandbox_id, uri, method, target, request_time, request_count
 FROM sandbox_access_latest
-{where}
+WHERE NOT deleted {extra}
 ORDER BY {order}
 LIMIT %(limit)s OFFSET %(offset)s
 """
@@ -94,7 +104,7 @@ LIMIT %(limit)s OFFSET %(offset)s
 _COUNT_LATEST = """
 SELECT count(*) AS total
 FROM sandbox_access_latest
-{where}
+WHERE NOT deleted {extra}
 """
 
 # Whitelisted sort orders for the summary table.
@@ -132,6 +142,7 @@ class AuditStore:
             with conn.cursor() as cur:
                 cur.execute(sql.SQL(_CREATE_DETAIL_TABLE))
                 cur.execute(sql.SQL(_CREATE_SUMMARY_TABLE))
+                cur.execute(sql.SQL(_ALTER_SUMMARY_ADD_DELETED))
         logger.info("audit schema initialized")
 
     def record(self, events: list[dict]) -> int:
@@ -157,12 +168,17 @@ class AuditStore:
         sort: str = "-request_time",
         limit: int = 50,
         offset: int = 0,
+        time_from: datetime | None = None,
+        time_to: datetime | None = None,
     ) -> dict:
         """List per-sandbox latest requests, sorted by ``sort``.
 
+        Rows marked deleted (sandbox resource gone) are excluded.
         ``search`` filters sandbox ids by substring (case-insensitive,
-        fuzzy). ``sort`` is a whitelisted key from ``_LATEST_ORDERS``
-        (``-`` prefix means descending); default is newest first.
+        fuzzy). ``time_from``/``time_to`` bound the latest request time
+        (inclusive; naive timestamps are assumed to be UTC). ``sort`` is a
+        whitelisted key from ``_LATEST_ORDERS`` (``-`` prefix means
+        descending); default is newest first.
         """
         try:
             order = _LATEST_ORDERS[sort]
@@ -170,20 +186,26 @@ class AuditStore:
             raise ValueError(f"invalid sort key: {sort}") from None
 
         params: dict = {"limit": limit, "offset": offset}
+        conditions = []
         if search:
             # Fuzzy match on sandbox_id; escape LIKE wildcards in the input
             # so user input is matched literally.
             params["pattern"] = f"%{_like_escape(search)}%"
-            where = "WHERE sandbox_id ILIKE %(pattern)s ESCAPE '\\'"
-        else:
-            where = ""
+            conditions.append("sandbox_id ILIKE %(pattern)s ESCAPE '\\'")
+        if time_from is not None:
+            params["time_from"] = _ensure_utc(time_from)
+            conditions.append("request_time >= %(time_from)s")
+        if time_to is not None:
+            params["time_to"] = _ensure_utc(time_to)
+            conditions.append("request_time <= %(time_to)s")
+        extra = f" AND {' AND '.join(conditions)}" if conditions else ""
 
         with self.pool.connection() as conn:
             conn.row_factory = dict_row
             with conn.cursor() as cur:
-                cur.execute(_LIST_LATEST.format(where=where, order=order), params)
+                cur.execute(_LIST_LATEST.format(extra=extra, order=order), params)
                 rows = cur.fetchall()
-                cur.execute(_COUNT_LATEST.format(where=where), params)
+                cur.execute(_COUNT_LATEST.format(extra=extra), params)
                 total = cur.fetchone()["total"]
         return {"total": total, "items": [_jsonify(row) for row in rows]}
 
@@ -208,6 +230,42 @@ class AuditStore:
                 cur.execute(_COUNT_DETAILS.format(where=where), params)
                 total = cur.fetchone()["total"]
         return {"total": total, "items": [_jsonify(row) for row in rows]}
+
+    def sync_deleted_flags(self, live_ids: list[str]) -> dict:
+        """Reconcile the ``deleted`` flag against live sandbox resources.
+
+        ``live_ids`` are the names of the BatchSandbox resources currently
+        existing in the cluster. Summary rows whose sandbox id is not among
+        them are marked deleted (hidden from the UI/API); rows previously
+        marked deleted whose id reappears are restored. ``updated_at`` is
+        left untouched - it reflects the last request, not the sync.
+
+        Returns ``{"deleted": <n>, "restored": <n>}`` counting rows whose
+        flag actually changed.
+        """
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                # An empty live list marks everything deleted; <> ALL ([])
+                # is TRUE for every row, so no special case is needed.
+                cur.execute(
+                    """
+                    UPDATE sandbox_access_latest
+                    SET deleted = TRUE
+                    WHERE NOT deleted AND sandbox_id <> ALL(%(ids)s)
+                    """,
+                    {"ids": live_ids},
+                )
+                deleted = cur.rowcount
+                cur.execute(
+                    """
+                    UPDATE sandbox_access_latest
+                    SET deleted = FALSE
+                    WHERE deleted AND sandbox_id = ANY(%(ids)s)
+                    """,
+                    {"ids": live_ids},
+                )
+                restored = cur.rowcount
+        return {"deleted": deleted, "restored": restored}
 
 
 def _normalize(event: dict) -> dict:
@@ -243,6 +301,11 @@ def _jsonify(row: dict) -> dict:
         else value
         for key, value in row.items()
     }
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    """Treat naive filter timestamps as UTC (matches ``_normalize``)."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def _like_escape(text: str) -> str:

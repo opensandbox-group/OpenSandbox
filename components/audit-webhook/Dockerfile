@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Stage 1: build the React frontend into /static (multi-page: index,
+# details, login - see frontend/vite.config.ts).
+FROM node:22-slim AS frontend-build
+WORKDIR /src
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -19,10 +28,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py store.py ./
-COPY static ./static
+COPY main.py store.py config.py k8s.py ./
+COPY --from=frontend-build /static ./static
 
-ENV AUDIT_HOST=0.0.0.0 AUDIT_PORT=8080
+# Configuration: mount audit.toml at /app/audit.toml (or set AUDIT_CONFIG_PATH).
+ENV AUDIT_CONFIG_PATH=/app/audit.toml
 EXPOSE 8080
 
 CMD ["python", "main.py"]

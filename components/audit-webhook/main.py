@@ -19,21 +19,20 @@ Receives audit events POSTed by the OpenSandbox ingress
 PostgreSQL: a detail row per request plus a per-sandbox summary row
 holding the latest request.
 
-Web UI (password protected when ``AUDIT_UI_PASSWORD`` is set):
+Web UI (password protected when ``server.ui_password`` is set):
 - ``GET /``          - per-sandbox latest requests (summary page)
 - ``GET /details``   - request details page, filterable by sandbox id
 - ``GET /login``     - login page
 
 Run:
-    AUDIT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/opensandbox_audit \
-    AUDIT_UI_PASSWORD=secret \
+    cp audit.toml.example audit.toml   # then edit settings
     python main.py
 """
 
+import asyncio
 import hashlib
 import hmac
 import logging
-import os
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -47,24 +46,39 @@ from fastapi.staticfiles import StaticFiles
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+import k8s
+from config import load_config
 from store import AuditStore
+
+# Settings come from audit.toml (see audit.toml.example); the config file
+# location can be overridden with the AUDIT_CONFIG_PATH env var.
+_config = load_config()
 
 logger = logging.getLogger("audit-webhook")
 logging.basicConfig(
-    level=os.getenv("AUDIT_LOG_LEVEL", "INFO").upper(),
+    level=_config["log_level"].upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-DATABASE_URL = os.getenv(
-    "AUDIT_DATABASE_URL", "postgresql://opensandbox_audit:Newland1122@172.32.150.72:35432/opensandbox_audit"
-)
-HOST = os.getenv("AUDIT_HOST", "0.0.0.0")
-PORT = int(os.getenv("AUDIT_PORT", "8080"))
+DATABASE_URL = _config["database_url"]
+DB_POOL_MIN = _config["db_pool_min"]
+DB_POOL_MAX = _config["db_pool_max"]
+HOST = _config["host"]
+PORT = _config["port"]
 
 # When non-empty, the web UI and query APIs require login with this password.
 # Event ingestion (POST /events) is never password protected - the ingress
 # must be able to deliver events without a session.
-UI_PASSWORD = os.getenv("AUDIT_UI_PASSWORD", "")
+UI_PASSWORD = _config["ui_password"]
+
+# Kubernetes liveness sync: kubeconfig file path (empty = default kubeconfig,
+# falling back to in-cluster credentials) and the namespace whose
+# batchsandboxes.sandbox.opensandbox.io resources mark live sandbox ids.
+# sync_interval (seconds) enables a periodic background sync; 0 means sync
+# only via POST /api/sync-deleted.
+KUBECONFIG_PATH = _config["kubeconfig"]
+K8S_NAMESPACE = _config["k8s_namespace"]
+K8S_SYNC_INTERVAL = _config["k8s_sync_interval"]
 
 _SESSION_COOKIE = "audit_session"
 _SESSION_TTL = 7 * 24 * 3600  # 7 days, in seconds
@@ -92,8 +106,8 @@ class LoginRequest(BaseModel):
 async def lifespan(_: FastAPI):
     pool = ConnectionPool(
         conninfo=DATABASE_URL,
-        min_size=int(os.getenv("AUDIT_DB_POOL_MIN", "1")),
-        max_size=int(os.getenv("AUDIT_DB_POOL_MAX", "10")),
+        min_size=DB_POOL_MIN,
+        max_size=DB_POOL_MAX,
         open=True,
     )
     store = AuditStore(pool)
@@ -105,12 +119,40 @@ async def lifespan(_: FastAPI):
         raise
 
     app.state.store = store
+    app.state.k8s_client = k8s.K8sClient(KUBECONFIG_PATH)
+
+    sync_task = None
+    if K8S_SYNC_INTERVAL > 0:
+        if K8S_NAMESPACE:
+            sync_task = asyncio.create_task(_periodic_sync(store))
+        else:
+            logger.warning(
+                "kubernetes.sync_interval is set but kubernetes.namespace is not; "
+                "periodic deleted-sync disabled"
+            )
+
     logger.info("audit webhook ready on %s:%s (ui auth %s)", HOST, PORT, "on" if UI_PASSWORD else "off")
     try:
         yield
     finally:
+        if sync_task is not None:
+            sync_task.cancel()
         pool.close()
         logger.info("audit webhook stopped")
+
+
+async def _periodic_sync(store: AuditStore) -> None:
+    """Mark deleted sandboxes on a fixed interval; failures only log."""
+    while True:
+        try:
+            names = app.state.k8s_client.list_batch_sandbox_names(K8S_NAMESPACE)
+            result = store.sync_deleted_flags(names)
+            logger.info(
+                "periodic sync: %d live sandboxes, %s", len(names), result
+            )
+        except Exception:
+            logger.exception("periodic deleted-sync failed")
+        await asyncio.sleep(K8S_SYNC_INTERVAL)
 
 
 app = FastAPI(
@@ -250,7 +292,7 @@ def healthz() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Query APIs (auth required when AUDIT_UI_PASSWORD is set)
+# Query APIs (auth required when server.ui_password is set)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sandboxes")
@@ -263,16 +305,27 @@ def list_sandboxes(
     ] = "-request_time",
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    time_from: Annotated[datetime | None, Query()] = None,
+    time_to: Annotated[datetime | None, Query()] = None,
 ) -> dict:
     """List per-sandbox latest requests.
 
     ``search`` fuzzy-matches sandbox ids (case-insensitive substring).
     ``sort`` is ``request_time`` or ``request_count``; prefix with ``-``
-    for descending (default: ``-request_time``, newest first).
+    for descending (default: newest first). ``time_from``/``time_to``
+    bound the latest request time (ISO 8601, inclusive; naive values are
+    assumed to be UTC).
     """
     _require_api_auth(request)
     return _safe_query(
-        lambda: store.list_latest(search=search, sort=sort, limit=limit, offset=offset)
+        lambda: store.list_latest(
+            search=search,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+            time_from=time_from,
+            time_to=time_to,
+        )
     )
 
 
@@ -291,6 +344,37 @@ def list_requests(
     )
 
 
+@app.post("/api/sync-deleted")
+def sync_deleted(request: Request, store: StoreDep) -> dict:
+    """Reconcile the summary table's ``deleted`` flags against the cluster.
+
+    Lists the ``batchsandboxes.sandbox.opensandbox.io`` resources in the
+    configured namespace (``kubernetes.namespace``) via the
+    kubeconfig (``kubernetes.kubeconfig``). Summary rows whose sandbox id is not among the
+    resource names are marked ``deleted`` and hidden from the UI/API;
+    previously deleted ids that reappear are restored.
+    """
+    _require_api_auth(request)
+    if not K8S_NAMESPACE:
+        raise HTTPException(
+            status_code=400,
+            detail="kubernetes.namespace is not configured",
+        )
+    k8s_client: k8s.K8sClient = getattr(
+        request.app.state, "k8s_client", None
+    ) or k8s.K8sClient(KUBECONFIG_PATH)
+    try:
+        names = k8s_client.list_batch_sandbox_names(K8S_NAMESPACE)
+        result = store.sync_deleted_flags(names)
+    except k8s.K8sError as exc:
+        logger.error("k8s deleted-sync failed: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    except Exception:
+        logger.exception("failed to sync deleted flags")
+        raise HTTPException(status_code=502, detail="failed to sync deleted flags") from None
+    return {"namespace": K8S_NAMESPACE, "live": len(names), **result}
+
+
 def _require_api_auth(request: Request) -> None:
     if UI_PASSWORD and not _valid_session(_session_token(request)):
         raise HTTPException(status_code=401, detail="login required")
@@ -305,7 +389,7 @@ def _safe_query(query) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Web pages (auth required when AUDIT_UI_PASSWORD is set)
+# Web pages (auth required when server.ui_password is set)
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)

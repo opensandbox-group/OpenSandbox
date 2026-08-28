@@ -14,11 +14,14 @@ Two tables are maintained (auto-created on startup):
 - `sandbox_access_latest` — **总表**: one row per sandbox id, holding the
   latest request and the total request count.
 
-A built-in web UI displays the records on two pages (password protected
-when `AUDIT_UI_PASSWORD` is set):
+A built-in web UI (React + Ant Design; source in `frontend/`, built
+output in `static/`) displays the records on two pages (password
+protected when `server.ui_password` is set):
 
-- `GET /` - **总表页**: per-sandbox latest requests; clicking a sandbox id
-  navigates to its detail page.
+- `GET /` - **总表页**: per-sandbox latest requests; fuzzy search on
+  sandbox id, a date-range filter on the latest request time, sortable
+  columns, and auto-refresh; clicking a sandbox id navigates to its
+  detail page.
 - `GET /details?sandbox_id=<id>` - **请求详情页**: request details with
   sandbox filter, pagination, and optional auto-refresh.
 - `GET /login` - password login page (session cookie, 7-day validity).
@@ -28,16 +31,20 @@ when `AUDIT_UI_PASSWORD` is set):
 ```bash
 pip install -r requirements.txt
 
-export AUDIT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/opensandbox_audit
-export AUDIT_UI_PASSWORD=secret   # optional; unset = no login required
+cp audit.toml.example audit.toml   # then edit settings
 python main.py
 ```
+
+Configuration is read from `audit.toml` (next to `main.py`); point
+`AUDIT_CONFIG_PATH` at another location to use a different file. A missing
+file means "use defaults"; a malformed file fails startup.
 
 Endpoints: `POST /events` (audit events; `POST /` is an alias, so a
 path-less webhook URL also works), `GET /` (summary page), `GET /details`
 (detail page), `GET /login` / `POST /login` / `POST /logout` (UI auth),
 `GET /api/sandboxes` and `GET /api/requests` (JSON queries),
-`GET /status.ok` (health).
+`POST /api/sync-deleted` (mark deleted sandboxes), `GET /status.ok`
+(health).
 
 Event ingestion (`POST /events`) is never password protected - the ingress
 must deliver events without a session.
@@ -53,14 +60,21 @@ go run main.go \
 
 ## Configuration
 
-| Env | Default | Description |
+All settings live in `audit.toml` (see `audit.toml.example`); the file
+location can be overridden with the `AUDIT_CONFIG_PATH` env var. Every key
+is optional - defaults are shown below.
+
+| Key | Default | Description |
 |---|---|---|
-| `AUDIT_DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/opensandbox_audit` | PostgreSQL connection string |
-| `AUDIT_UI_PASSWORD` | (empty) | When set, the web UI and query APIs require password login |
-| `AUDIT_HOST` | `0.0.0.0` | HTTP listen host |
-| `AUDIT_PORT` | `8080` | HTTP listen port |
-| `AUDIT_DB_POOL_MIN` / `AUDIT_DB_POOL_MAX` | `1` / `10` | Connection pool bounds |
-| `AUDIT_LOG_LEVEL` | `INFO` | Log level |
+| `server.host` | `0.0.0.0` | HTTP listen host |
+| `server.port` | `8080` | HTTP listen port |
+| `server.ui_password` | (empty) | When set, the web UI and query APIs require password login |
+| `database.url` | `postgresql://postgres:postgres@localhost:5432/opensandbox_audit` | PostgreSQL connection string |
+| `database.pool_min` / `database.pool_max` | `1` / `10` | Connection pool bounds |
+| `kubernetes.kubeconfig` | (empty) | Kubeconfig file path for the deleted-sync (empty = default kubeconfig, falling back to in-cluster credentials) |
+| `kubernetes.namespace` | (empty) | Namespace whose `batchsandboxes.sandbox.opensandbox.io` resources mark live sandbox ids (required by the sync) |
+| `kubernetes.sync_interval` | `0` | When > 0 (seconds), sync the `deleted` flags periodically in the background; `0` = manual sync via `POST /api/sync-deleted` only |
+| `log.level` | `INFO` | Log level |
 
 ## API
 
@@ -87,8 +101,10 @@ Responses:
 ### `GET /` (Summary Page)
 
 Web page listing the latest request per sandbox id with the total request
-count. Supports fuzzy search on sandbox id and sorting by request time /
-request count (click the column headers to toggle ascending/descending).
+count. Supports fuzzy search on sandbox id, sorting by request time /
+request count (click the column headers to toggle ascending/descending),
+and a date-range filter on the latest request time (two date pickers -
+start/end, both inclusive, interpreted in the browser's local timezone).
 Clicking a sandbox id navigates to
 `GET /details?sandbox_id=<id>` showing that sandbox's request history.
 
@@ -98,9 +114,9 @@ Every request, filterable by sandbox id (pre-filled from the URL query),
 paginated (50 per page), with an optional 10s auto-refresh and a back
 link to the summary page.
 
-### Login (`AUDIT_UI_PASSWORD`)
+### Login (`server.ui_password`)
 
-When `AUDIT_UI_PASSWORD` is set, both pages and the query APIs require
+When `server.ui_password` is set, both pages and the query APIs require
 login (`GET /login`). Login issues an HMAC-signed session cookie valid
 for 7 days; `POST /logout` revokes it. Changing the password invalidates
 all existing sessions. Event ingestion is unaffected.
@@ -114,6 +130,9 @@ Query params:
   `%`/`_` in the input are matched literally)
 - `sort` - `request_time` or `request_count`; prefix with `-` for
   descending (default: `-request_time`, newest first)
+- `time_from` / `time_to` - ISO 8601 bounds on the latest request time
+  (inclusive; naive values are assumed to be UTC); the summary page's
+  date pickers send local start-of-day / end-of-day here
 - `limit` (1-500, default 50), `offset` (default 0)
 
 ```json
@@ -134,6 +153,26 @@ Query params: `sandbox_id` (optional filter), `limit` (1-500, default 50),
   "target": "10.0.0.2:8080", "request_time": "2026-08-20T10:00:01+00:00",
   "received_at": "2026-08-20T01:38:55+00:00"}]}
 ```
+
+### `POST /api/sync-deleted`
+
+Reconcile the summary table's `deleted` flags against the cluster (auth
+required like the other query APIs). Lists the
+`batchsandboxes.sandbox.opensandbox.io` resource names in the namespace
+configured via `kubernetes.namespace`, accessing Kubernetes through the
+kubeconfig at `kubernetes.kubeconfig` (empty = default kubeconfig /
+in-cluster). The BatchSandbox resource name is the sandbox id: summary rows
+whose sandbox id is not among the resource names are marked `deleted`
+(hidden from the UI and `/api/sandboxes`); previously deleted ids that
+reappear are restored.
+
+Responses:
+- `200 {"namespace": "...", "live": <n>, "deleted": <n>, "restored": <n>}`
+- `400` - `kubernetes.namespace` is not configured
+- `502` - the Kubernetes API or the database write failed
+
+Set `kubernetes.sync_interval` (seconds) to run the same sync periodically
+in the background instead of calling the endpoint manually.
 
 ## Table Schemas
 
@@ -159,6 +198,7 @@ CREATE TABLE sandbox_access_latest (
     target        TEXT        NOT NULL,
     request_time  TIMESTAMPTZ NOT NULL,  -- 最新一次请求时间
     request_count BIGINT      NOT NULL DEFAULT 1,  -- 累计请求数
+    deleted       BOOLEAN     NOT NULL DEFAULT FALSE,  -- 沙箱资源已不存在（前端不展示）
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -175,13 +215,17 @@ Behavior notes:
 - All stored timestamps are truncated to whole seconds (no sub-second
   precision); the UI displays them as `YYYY-MM-DD HH:MM:SS` in the
   browser's local timezone.
+- Summary rows flagged `deleted = TRUE` (sandbox resource gone, see
+  `POST /api/sync-deleted`) are excluded from `/api/sandboxes` and the
+  summary page; existing tables are migrated with
+  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
 
 ## Docker
 
 ```bash
 docker build -t opensandbox/audit-webhook:local .
 docker run -p 8080:8080 \
-  -e AUDIT_DATABASE_URL=postgresql://postgres:postgres@host:5432/opensandbox_audit \
+  -v $(pwd)/audit.toml:/app/audit.toml:ro \
   opensandbox/audit-webhook:local
 ```
 
@@ -195,3 +239,25 @@ pytest test_main.py
 Key code:
 - `main.py`: FastAPI app, routes, lifespan/pool management.
 - `store.py`: schema DDL and transactional writes.
+- `k8s.py`: kubeconfig-based BatchSandbox listing for the deleted-sync.
+- `config.py`: TOML config loading (`audit.toml`, see `audit.toml.example`).
+- `frontend/`: React + Vite + Ant Design SPA sources (three page entries).
+
+## Frontend
+
+The UI is a React app in `frontend/` (Vite, TypeScript, Ant Design). It
+is a multi-page build: `index.html` (summary), `details.html`, and
+`login.html` map 1:1 to the FastAPI routes that serve them, so no
+client-side router is needed. `npm run build` writes the output into
+`../static` (which FastAPI serves at `/static`).
+
+```bash
+cd frontend
+npm install
+npm run dev     # dev server at :5173, proxying /api and /login to :8080
+npm run build   # regenerate ../static (commit the result with your change)
+```
+
+After changing anything under `frontend/`, re-run `npm run build` and
+commit the regenerated `static/` output - the Docker image builds it
+itself, but `pytest test_main.py` serves the committed `static/` files.

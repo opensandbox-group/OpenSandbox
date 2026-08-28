@@ -3,59 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>登录 - OpenSandbox 审计</title>
-<link rel="stylesheet" href="/static/common.css">
-<style>
-  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-  .login-card {
-    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-    padding: 32px; width: 340px; box-shadow: 0 4px 16px rgba(0,0,0,.06);
-  }
-  .login-card h1 { font-size: 18px; margin: 0 0 6px; }
-  .login-card p { font-size: 13px; color: var(--muted); margin: 0 0 20px; }
-  .login-card input { width: 100%; font-size: 14px; padding: 8px 10px; }
-  .login-card button { width: 100%; padding: 8px; font-size: 14px; margin-top: 14px; }
-  .login-card .error { display: none; margin-top: 10px; text-align: center; }
-</style>
+<title>密码登录 - OpenSandbox 审计</title>
+  <script type="module" crossorigin src="/static/assets/login-BpBxVd4P.js"></script>
+  <link rel="modulepreload" crossorigin href="/static/assets/app-DoQa0es_.js">
+  <link rel="stylesheet" crossorigin href="/static/assets/app-Cs4aAWvj.css">
 </head>
 <body>
-<div class="login-card">
-  <h1>OpenSandbox 沙箱访问审计</h1>
-  <p>请输入密码登录以查看审计记录</p>
-  <input type="password" id="password" placeholder="密码" autofocus>
-  <button class="primary" id="login-btn" onclick="login()">登录</button>
-  <div class="error" id="error-box">密码错误，请重试</div>
-</div>
-
-<script>
-async function login() {
-  const password = document.getElementById("password").value;
-  const btn = document.getElementById("login-btn");
-  const box = document.getElementById("error-box");
-  btn.disabled = true;
-  try {
-    const resp = await fetch("/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
-    });
-    if (resp.ok) {
-      window.location.href = "/";
-      return;
-    }
-    box.style.display = "block";
-    document.getElementById("password").select();
-  } catch (err) {
-    box.textContent = "登录失败：" + err.message;
-    box.style.display = "block";
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-document.getElementById("password").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") login();
-});
-</script>
+<div id="root"></div>
 </body>
 </html>
