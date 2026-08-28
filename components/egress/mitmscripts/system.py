@@ -99,6 +99,10 @@ class ActiveVault:
         self.redactions = redactions
 
 
+class ActiveVaultLookupError(RuntimeError):
+    """The credential proxy could not determine the active vault state."""
+
+
 _vault_cache: ActiveVault | None = None
 _vault_cache_loaded_at = 0.0
 
@@ -172,18 +176,11 @@ def _load_active_vault() -> ActiveVault | None:
             _vault_cache_loaded_at = now
             return None
         if response.status != 200:
-            ctx.log.warn(
-                f"credential proxy: active vault lookup failed with HTTP {response.status}"
-            )
-            _vault_cache = None
-            _vault_cache_loaded_at = now
-            return None
+            raise ActiveVaultLookupError(f"HTTP {response.status}")
         payload = json.loads(body.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001 - mitm addon must not crash traffic handling
+    except Exception as exc:  # noqa: BLE001 - all lookup failures must fail closed
         ctx.log.warn(f"credential proxy: active vault lookup failed: {exc}")
-        _vault_cache = None
-        _vault_cache_loaded_at = now
-        return None
+        raise ActiveVaultLookupError("active vault lookup failed") from exc
     finally:
         connection.close()
 
@@ -377,7 +374,7 @@ def _request_may_be_streamed(flow: http.HTTPFlow) -> bool:
     return "transfer-encoding" in flow.request.headers
 
 
-def _reject_request(flow: http.HTTPFlow, body: bytes) -> None:
+def _reject_request(flow: http.HTTPFlow, body: bytes, status: int = 403) -> None:
     """Terminate a request before it is forwarded upstream.
 
     mitmproxy 11.0.2 refuses to serve a locally-set response while a request
@@ -393,7 +390,7 @@ def _reject_request(flow: http.HTTPFlow, body: bytes) -> None:
         if flow.killable:
             flow.kill()
         return
-    flow.response = http.Response.make(403, body, {"content-type": "text/plain"})
+    flow.response = http.Response.make(status, body, {"content-type": "text/plain"})
 
 
 def _flow_rejected(flow: http.HTTPFlow) -> bool:
@@ -638,7 +635,12 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     made: with ``stream_large_bodies=1m`` the ``request`` hook fires only
     after a body above 1 MiB has been streamed upstream.
     """
-    vault = _load_active_vault()
+    try:
+        vault = _load_active_vault()
+    except ActiveVaultLookupError:
+        _reject_request(flow, b"credential proxy temporarily unavailable\n", status=503)
+        ctx.log.warn("credential proxy: rejected request because active vault lookup failed")
+        return
     if vault is None:
         return
 
