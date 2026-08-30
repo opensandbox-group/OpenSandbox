@@ -53,6 +53,21 @@ _KVM_RESOURCE_LIMIT_KEY = "kvm"
 _K8S_NVIDIA_GPU_RESOURCE = "nvidia.com/gpu"
 
 
+def _validate_kvm_resource_limits_for_k8s(
+    resource_limits: Dict[str, str],
+) -> None:
+    if _KVM_RESOURCE_LIMIT_KEY in resource_limits:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    "resourceLimits.kvm is not supported by the Kubernetes runtime."
+                ),
+            },
+        )
+
+
 def _translate_resource_limits_for_k8s(
     resource_limits: Dict[str, str],
 ) -> Dict[str, str]:
@@ -81,16 +96,7 @@ def _translate_resource_limits_for_k8s(
     if not resource_limits:
         return {}
 
-    if _KVM_RESOURCE_LIMIT_KEY in resource_limits:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": (
-                    "resourceLimits.kvm is not supported by the Kubernetes runtime."
-                ),
-            },
-        )
+    _validate_kvm_resource_limits_for_k8s(resource_limits)
 
     translated: Dict[str, str] = {
         key: value
