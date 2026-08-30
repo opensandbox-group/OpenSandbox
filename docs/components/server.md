@@ -207,6 +207,30 @@ Response:
 }
 ```
 
+### Linux KVM access with Docker
+
+Linux sandboxes on a local Docker runtime can explicitly request the host KVM
+device:
+
+```bash
+osb sandbox create --image python:3.12 --resource kvm=1 -o json
+```
+
+The server accepts only the exact value `kvm=1`. It validates `/dev/kvm` as a
+non-symlink character device with identity `10:232`, maps it into the main
+sandbox container as read/write, and adds its non-root host GID as a
+supplementary group. Requests fail before provisioning when the device is
+missing or unsafe, or when Docker uses a remote endpoint.
+
+These checks run in the lifecycle server process namespace. If the server is
+containerized, `/dev/kvm` must be exposed to the lifecycle server container
+itself; visibility only on the Docker host is not sufficient.
+
+This option does not enable privileged mode, add capabilities, expose
+`/dev/net/tun`, or attach KVM to an egress sidecar. It is not supported by the
+Kubernetes runtime; Kubernetes deployments need an explicit device plugin and
+scheduling policy.
+
 **Other lifecycle calls** (same `OPEN-SANDBOX-API-KEY` header): `GET /v1/sandboxes/{id}`, `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume`, `GET /v1/sandboxes/{id}/endpoints/{port}` (append `?use_server_proxy=true` when needed), `POST .../renew-expiration`, `DELETE /v1/sandboxes/{id}`. Full request/response shapes: **Swagger UI** above or OpenAPI under [specs/](/api/).
 
 For Kubernetes-backed sandboxes, pause/resume is implemented via `BatchSandbox.spec.pause` and internal `SandboxSnapshot` resources. The externally visible lifecycle transitions are `Running -> Pausing -> Paused -> Resuming -> Running`.
