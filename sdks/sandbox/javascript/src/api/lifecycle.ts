@@ -1195,6 +1195,11 @@ export interface components {
              *     Required when `extensions.poolRef` is not set.
              *     Optional when using pool mode (resource limits are defined by the Pool CRD template).
              *     SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
+             *
+             *     On a local Docker runtime, the exact value `kvm: "1"` opts a Linux
+             *     sandbox into `/dev/kvm` access. The server rejects remote Docker
+             *     endpoints and validates the host path as character device `10:232`.
+             *     Kubernetes does not support this portable resource key.
              */
             resourceLimits?: components["schemas"]["ResourceLimits"];
             /**

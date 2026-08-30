@@ -69,6 +69,10 @@ from opensandbox_server.services.docker.networking import (
     DockerNetworkingMixin,
 )
 from opensandbox_server.services.docker.container_ops import DockerContainerOpsMixin
+from opensandbox_server.services.docker.kvm import (
+    apply_kvm_host_config,
+    resolve_kvm_device_group,
+)
 from opensandbox_server.services.docker.metadata import DockerMetadataStore
 from opensandbox_server.services.docker.port_allocator import (
     allocate_port_bindings,
@@ -665,6 +669,16 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._ensure_network_policy_support(request)
         self._validate_network_exists()
 
+        resource_limits = (
+            request.resource_limits.root if request.resource_limits else None
+        ) or {}
+        kvm_device_group = None
+        if not is_windows_platform(request.platform):
+            kvm_device_group = resolve_kvm_device_group(
+                resource_limits,
+                self.docker_client.api.base_url,
+            )
+
         try:
             sandbox_env, egress_env = split_egress_env(request.env)
         except ValueError as e:
@@ -687,6 +701,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     sandbox_id, request, created_at, expires_at,
                     pvc_inspect_cache, auto_created_volumes,
                     sandbox_env=sandbox_env, egress_env=egress_env,
+                    kvm_device_group=kvm_device_group,
                 )
                 loop.call_soon_threadsafe(future.set_result, result)
             except BaseException as exc:
@@ -717,6 +732,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         auto_created_volumes: Optional[list[str]] = None,
         sandbox_env: Optional[Dict[str, Optional[str]]] = None,
         egress_env: Optional[Dict[str, Optional[str]]] = None,
+        kvm_device_group: Optional[int] = None,
     ) -> CreateSandboxResponse:
         if sandbox_env is None and egress_env is None:
             sandbox_env, egress_env = split_egress_env(request.env)
@@ -864,6 +880,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     labels[SANDBOX_HTTP_PORT_LABEL] = str(host_http_port)
                 else:
                     exposed_ports = None
+
+            if kvm_device_group is not None:
+                host_config_kwargs = apply_kvm_host_config(
+                    host_config_kwargs,
+                    kvm_device_group,
+                )
 
             # Inject volume bind mounts into Docker host config
             if runtime_volume_name:
