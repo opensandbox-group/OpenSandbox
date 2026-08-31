@@ -22,6 +22,61 @@ namespace OpenSandbox.Tests;
 public class ModelsTests
 {
     [Fact]
+    public void IsolatedCapabilities_ShouldDeserializeModeAvailability()
+    {
+        const string json = """
+        {
+          "available": true,
+          "setpriv_available": false,
+          "userns_available": true,
+          "commit_supported": false,
+          "diff_supported": false
+        }
+        """;
+
+        var capabilities = JsonSerializer.Deserialize<IsolatedCapabilities>(json);
+
+        capabilities.Should().NotBeNull();
+        capabilities!.SetprivAvailable.Should().BeFalse();
+        capabilities.UsernsAvailable.Should().BeTrue();
+    }
+
+    [Fact]
+    public void IsolatedCapabilities_ShouldPreserveExistingPositionalArguments()
+    {
+        var capabilities = new IsolatedCapabilities(true, null, null, null, true, true);
+
+        capabilities.CommitSupported.Should().BeTrue();
+        capabilities.DiffSupported.Should().BeTrue();
+        capabilities.SetprivAvailable.Should().BeFalse();
+        capabilities.UsernsAvailable.Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsolatedCapabilities_ShouldPreserveExistingSixValueDeconstruction()
+    {
+        var capabilities = new IsolatedCapabilities(
+            true,
+            "bwrap",
+            "0.11.0",
+            "available",
+            true,
+            false,
+            true,
+            true
+        );
+
+        var (available, isolator, version, message, commitSupported, diffSupported) = capabilities;
+
+        available.Should().BeTrue();
+        isolator.Should().Be("bwrap");
+        version.Should().Be("0.11.0");
+        message.Should().Be("available");
+        commitSupported.Should().BeTrue();
+        diffSupported.Should().BeFalse();
+    }
+
+    [Fact]
     public void Execution_ShouldInitializeWithEmptyCollections()
     {
         // Arrange & Act
@@ -151,6 +206,21 @@ public class ModelsTests
         info.Entrypoint.Should().HaveCount(3);
         info.Status.State.Should().Be("Running");
         info.Metadata.Should().ContainKey("key");
+    }
+
+    [Fact]
+    public void AllocationSummary_ShouldStorePoolAllocation()
+    {
+        var allocation = new AllocationSummary
+        {
+            Mode = "pool",
+            PoolRef = "default/python",
+            State = "allocated"
+        };
+
+        allocation.Mode.Should().Be("pool");
+        allocation.PoolRef.Should().Be("default/python");
+        allocation.State.Should().Be("allocated");
     }
 
     [Fact]

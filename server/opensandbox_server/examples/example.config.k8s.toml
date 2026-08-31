@@ -27,12 +27,20 @@ max_sandbox_timeout_seconds = 86400
 # - Interactive TTY: type YES when prompted
 # - Non-interactive: set OPENSANDBOX_INSECURE_SERVER=YES
 
+[proxy]
+# When True (default), the sandbox reverse-proxy targets the sandbox's internal
+# container IP (Docker bridge) or the provider's internal workload endpoint. Set
+# to False to target the server-local host-mapped port instead. Use False when
+# the server process cannot route to container bridge IPs, e.g. a
+# launchd/systemd user session on macOS where such traffic is blocked.
+resolve_internal = true
+
 [log]
 level = "INFO"
 
 [runtime]
 type = "kubernetes"
-execd_image = "opensandbox/execd:v1.0.21"
+execd_image = "opensandbox/execd:v1.1.0"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
@@ -42,6 +50,13 @@ allowed_host_paths = []
 
 # Default storage size for auto-created Kubernetes PVCs (when caller omits size).
 volume_default_size = "1Gi"
+
+[store]
+# SQLite is durable only when this path is backed by a PersistentVolume.
+type = "sqlite"
+path = "~/.opensandbox/opensandbox.db"
+# To use PostgreSQL, set type = "postgresql", configure [store.postgresql], and
+# inject OPENSANDBOX_STORE_POSTGRESQL_DSN. Use only one active server replica.
 
 [kubernetes]
 # Path to kubeconfig file. Leave as null to use in-cluster configuration
@@ -75,12 +90,15 @@ batchsandbox_template_file = "~/batchsandbox-template.yaml"
 mode = "direct"
 
 [egress]
-image = "opensandbox/egress:v1.1.4"
+image = "opensandbox/egress:v1.1.7"
 mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false
+# Optional Kubernetes resources for the generated egress sidecar. Tune for your workload.
+# requests = { cpu = "25m", memory = "64Mi" }
+# limits = { cpu = "250m", memory = "256Mi" }
 
-# 🧪 [EXPERIMENTAL] Renew-on-access. Off by default — see server/README.md.
+# Renew-on-access. Off by default — see server/README.md.
 [renew_intent]
 enabled = false
 min_interval_seconds = 60

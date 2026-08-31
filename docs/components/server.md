@@ -68,7 +68,54 @@ opensandbox-server init-config ~/.sandbox.toml --example docker
 2. Edit the file for your environment. Full reference: [configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md) (all keys, defaults, validation, env vars).
 
    Topics covered there include: Docker `network_mode` / `host_ip` (e.g. server in Docker Compose), `[egress]` when clients send `networkPolicy`, `[ingress]`, `[secure_runtime]`, Kubernetes `workload_provider` / `batchsandbox_template_file`, `[agent_sandbox]`, TTL caps, `[renew_intent]`.
-   The server-wide persistence backend is configured under `[store]`; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records.
+   The server-wide persistence backend is configured under `[store]`; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records. PostgreSQL can be selected for externally managed persistence; see the [store configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#store).
+
+### PostgreSQL persistence
+
+Set the backend in the TOML configuration and inject the connection string through the environment:
+
+```toml
+[store]
+type = "postgresql"
+
+[store.postgresql]
+min_pool_size = 1
+max_pool_size = 10
+```
+
+```bash
+export OPENSANDBOX_STORE_POSTGRESQL_DSN='postgresql://opensandbox:password@postgres:5432/opensandbox?sslmode=require'
+opensandbox-server
+```
+
+::: warning
+Snapshot recovery is not coordinated across server processes. Run only one active server process against a PostgreSQL database.
+:::
+
+For Kubernetes Secret and Helm values wiring, see [Kubernetes Deployment](/kubernetes/deployment#use-postgresql-for-server-persistence).
+
+### OpenTelemetry metrics
+
+The Server can export metrics through OTLP when `[otel].enabled = true`. It uses
+the configured OTLP HTTP endpoint and does not expose a Prometheus `/metrics`
+listener.
+
+| Metric | Type | Unit | Attributes |
+|---|---|---|---|
+| `server.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` |
+| `opensandbox.sandbox.create.duration` | Histogram | `ms` | `sdk.language`, `sdk.version`, `success` |
+
+HTTP metrics use matched route templates such as `/v1/sandboxes/{sandbox_id}`,
+not raw paths. Requests that do not reach a matched route, including early
+authentication failures, use `http_route=unknown`. Sandbox IDs, tenant IDs,
+API keys, bodies, and query strings are never metric attributes. Standard HTTP
+methods are recorded in uppercase, while extension methods use
+`http_method=OTHER` to keep attribute cardinality bounded.
+
+The HTTP histogram's sample count can be used for request rate, its status-code
+attribute for error rate, and its buckets for latency percentiles. See the
+[Server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel)
+for the complete `[otel]` settings.
 
 ### Run the server
 
@@ -218,6 +265,39 @@ For Kubernetes-backed sandboxes, pause/resume is implemented via `BatchSandbox.s
      | Terminated |   | Failed |
      +------------+   +--------+
 ```
+
+### Failure recovery and `resume`
+
+`resume` is a pause-state operation, not a general restart operation. The API
+accepts it only for a sandbox in `Paused` and returns `409 Conflict` for a
+container or workload that has already exited into `Terminated` or `Failed`.
+It does not restart an externally stopped Docker container.
+
+Runtime restart behavior is configured below the Lifecycle API:
+
+- **Docker**: OpenSandbox does not set a Docker restart policy on sandbox
+  containers. If the entrypoint exits or an operator stops the container, the
+  sandbox becomes `Terminated` for exit code 0 or `Failed` for a non-zero exit.
+- **Kubernetes BatchSandbox**: container restart behavior follows the effective
+  Pod template's `restartPolicy`. The example Linux template uses `Never`, but
+  operators can supply a different template when its lifecycle and state-loss
+  tradeoffs are acceptable. OpenSandbox reports the resulting workload state;
+  it does not turn `resume` into a restart of a failed Pod.
+
+To continue after a terminal failure, create a replacement sandbox and update
+the caller to use its new sandbox ID. Ordinary recreation starts from the
+configured image and persistent volume contents; it does not recover process
+memory or unpersisted container filesystem changes. For an intentional
+state-preserving suspension, call `pause` while the sandbox is healthy and then
+`resume`. Kubernetes pause/resume keeps the same sandbox ID and restores the
+captured root filesystem, but not running processes or memory; see
+[Pause and Resume](/guides/pause-resume).
+
+TTL is an absolute expiration time. Runtime or server restarts do not reset it:
+the Docker server restores timers for managed containers after a server
+restart, and Kubernetes keeps `spec.expireTime` on the workload. A newly
+created replacement receives its own ID and expiration time from its new create
+request.
 
 ## Experimental Features
 

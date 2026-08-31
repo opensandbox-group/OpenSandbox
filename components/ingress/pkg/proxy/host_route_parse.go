@@ -20,15 +20,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 )
 
 type parsedRoute struct {
+	routeKind       sandbox.RouteKind
+	namespace       string
 	sandboxID       string
 	port            int
 	expiresB36      string
 	signature       string
 	requestURI      string
+	requestRawPath  string
 	uriParsedAsOSEP bool
 }
 

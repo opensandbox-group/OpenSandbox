@@ -17,18 +17,14 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.pool
 
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolState
-import java.time.Duration
-import java.time.Instant
 
 /**
- * Mutable state for reconcile loop: failure count, pool state, and exponential backoff.
+ * Mutable observation state for the reconcile loop.
  *
  * Thread-safe for use from reconcile worker and from pool snapshot.
  */
 internal class ReconcileState(
     private val degradedThreshold: Int,
-    private val backoffBase: Duration = Duration.ofSeconds(30),
-    private val backoffMax: Duration = Duration.ofDays(1),
 ) {
     @Volatile
     var failureCount: Int = 0
@@ -42,22 +38,20 @@ internal class ReconcileState(
     var lastError: String? = null
         private set
 
-    @Volatile
-    private var backoffUntil: Instant? = null
-
-    private var backoffAttempts: Int = 0
-
     @Synchronized
     fun recordSuccess() {
         failureCount = 0
         if (state == PoolState.DEGRADED) state = PoolState.HEALTHY
-        backoffUntil = null
-        backoffAttempts = 0
         lastError = null
     }
 
     @Synchronized
     fun recordFailure(errorMessage: String?) {
+        recordFailures(1, errorMessage)
+    }
+
+    @Synchronized
+    fun recordAsyncFailure(errorMessage: String?) {
         recordFailures(1, errorMessage)
     }
 
@@ -71,21 +65,9 @@ internal class ReconcileState(
         lastError = errorMessage
         if (failureCount >= degradedThreshold) {
             state = PoolState.DEGRADED
-            backoffAttempts++
-            val exponent = (backoffAttempts - 1).coerceAtMost(30)
-            val delaySeconds = backoffBase.seconds * (1L shl exponent)
-            val delayMs =
-                minOf(
-                    Duration.ofSeconds(delaySeconds).toMillis(),
-                    backoffMax.toMillis(),
-                )
-            backoffUntil = Instant.now().plusMillis(delayMs)
         }
     }
 
-    /** True if reconciler should skip create attempts this tick (in backoff window). */
-    fun isBackoffActive(now: Instant = Instant.now()): Boolean {
-        val until = backoffUntil ?: return false
-        return state == PoolState.DEGRADED && now.isBefore(until)
-    }
+    /** Replenish backoff is intentionally disabled; fixed create admission provides pressure control. */
+    fun isBackoffActive(): Boolean = false
 }

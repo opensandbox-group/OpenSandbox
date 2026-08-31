@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -90,6 +91,20 @@ func (p *DefaultSandboxPool) Start(ctx context.Context) error {
 	p.lifecycleState = PoolLifecycleStarting
 	startMaxIdle := p.config.MaxIdle
 	p.mu.Unlock()
+
+	// Refuse to bind a retired namespace. Only a definite fence blocks startup;
+	// a store outage is left to the writes below to surface.
+	if err := p.ensureNamespaceActive(ctx); err != nil {
+		var destroyed *PoolDestroyedError
+		if errors.As(err, &destroyed) {
+			p.mu.Lock()
+			if p.lifecycleState == PoolLifecycleStarting {
+				p.lifecycleState = PoolLifecycleNotStarted
+			}
+			p.mu.Unlock()
+			return err
+		}
+	}
 
 	// Initialize state store with pool configuration.
 	if err := p.config.StateStore.SetMaxIdle(ctx, p.config.PoolName, startMaxIdle); err != nil {
@@ -187,6 +202,17 @@ func (p *DefaultSandboxPool) syncHealthState() {
 func (p *DefaultSandboxPool) runReconcileTick(ctx context.Context) {
 	p.reconMu.Lock()
 	defer p.reconMu.Unlock()
+
+	// A destroy fences the namespace for every peer. Stop rather than keep
+	// replenishing a pool that is being retired.
+	if err := p.ensureNamespaceActive(ctx); err != nil {
+		var destroyed *PoolDestroyedError
+		if errors.As(err, &destroyed) {
+			p.stopAfterNamespaceDestroyed(destroyed.State)
+			return
+		}
+	}
+
 	createFn := func(ctx context.Context, reason PooledSandboxCreateReason) (string, error) {
 		return p.createOneSandbox(ctx, reason)
 	}
@@ -215,106 +241,217 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 		policy = *opts.Policy
 	}
 
+	// A fenced namespace must not mint new sandboxes, so this has to run before the
+	// direct-create fallthrough below and not only on the store write paths.
+	if err := p.ensureNamespaceActiveForAcquire(ctx, policy); err != nil {
+		return nil, err
+	}
+
 	// Resolve minTTL.
 	minTTL := p.config.AcquireMinRemainingTTL
 	if opts.MinRemainingTTL > 0 {
 		minTTL = opts.MinRemainingTTL
 	}
 
-	// Try take from idle.
-	var takeResult *TakeIdleResult
-	var err error
-	if minTTL > 0 {
-		takeResult, err = p.config.StateStore.TryTakeIdleWithMinTTL(ctx, p.config.PoolName, minTTL)
-	} else {
-		sandboxID, takeErr := p.config.StateStore.TryTakeIdle(ctx, p.config.PoolName)
+	// Bounded retry across up to `maxAttempts` idle candidates. FailFast / DirectCreate remain
+	// single-shot (maxAttempts=1) to preserve their existing latency profile; the RetryNextIdle
+	// variants use the configured MaxAcquireRetries (default 3).
+	maxAttempts := effectiveMaxIdleAttempts(policy, p.config.MaxAcquireRetries)
+
+	// Accumulate discarded-alive across all iterations so we schedule a single deferred cleanup.
+	var pendingKill []string
+	var lastIdleAttemptErr error
+	var lastSandboxID string
+	attemptedAny := false
+	loopExhausted := true
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		takeResult, takeErr := p.tryTakeIdle(ctx, minTTL)
 		if takeErr != nil {
-			err = takeErr
-		} else {
-			takeResult = &TakeIdleResult{SandboxID: sandboxID}
-		}
-	}
-	if err != nil {
-		// Under FailFast, propagate the store error immediately.
-		if policy == AcquirePolicyFailFast {
-			return nil, &PoolStateStoreUnavailableError{Operation: "TryTakeIdle", Cause: err}
-		}
-		// Under DirectCreate, treat store unavailability as a cache miss and
-		// fall through to direct create so the pool remains at least as available
-		// as raw SDK usage during store outages (OSEP-0005 error-code matrix).
-		p.config.Logger.Warn("acquire: state store unavailable, falling through to direct create",
-			"pool_name", p.config.PoolName,
-			"error", err)
-	}
-
-	var idleAttemptErr error
-	if takeResult != nil && takeResult.SandboxID != "" {
-		// Try to connect to the idle sandbox (health check is integrated into ready-poll).
-		sb, connectErr := p.connectAndRenew(ctx, takeResult.SandboxID, opts)
-		if connectErr == nil {
-			// Connected and healthy — return it.
-			go p.killDiscardedAliveSandboxes(takeResult.DiscardedAliveSandboxIDs)
-			p.config.Logger.Debug("acquire: from idle",
+			// Under FailFast / RetryNextIdle (no fallback), propagate the store error immediately.
+			// Under DirectCreate / RetryNextIdleThenCreate, treat store outage as a cache miss and
+			// fall through to direct create so the pool remains at least as available as raw SDK
+			// usage during store outages (OSEP-0005 error-code matrix).
+			if !policyFallsThroughToDirectCreate(policy) {
+				go p.killDiscardedAliveSandboxes(pendingKill)
+				return nil, &PoolStateStoreUnavailableError{Operation: "TryTakeIdle", Cause: takeErr}
+			}
+			p.config.Logger.Warn("acquire: state store unavailable, falling through to direct create",
 				"pool_name", p.config.PoolName,
-				"sandbox_id", takeResult.SandboxID)
-			return sb, nil
+				"error", takeErr)
+			loopExhausted = false
+			break
+		}
+		if takeResult != nil && len(takeResult.DiscardedAliveSandboxIDs) > 0 {
+			pendingKill = append(pendingKill, takeResult.DiscardedAliveSandboxIDs...)
+		}
+		if takeResult == nil || takeResult.SandboxID == "" {
+			// Idle buffer drained mid-loop (or was empty from the start). Stop retrying — another
+			// take round-trip is pure overhead.
+			loopExhausted = false
+			break
 		}
 
-		// Connect or health check failed — clean up and fall through.
-		idleAttemptErr = connectErr
-		_ = p.config.StateStore.RemoveIdle(ctx, p.config.PoolName, takeResult.SandboxID)
-		go p.killSandboxBestEffort(takeResult.SandboxID)
-		if policy == AcquirePolicyFailFast {
-			go p.killDiscardedAliveSandboxes(takeResult.DiscardedAliveSandboxIDs)
-			return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: connectErr}
+		lastSandboxID = takeResult.SandboxID
+		attemptedAny = true
+
+		// Try to connect to the idle sandbox (health check is integrated into ready-poll).
+		sb, connectErr := p.connectIdle(ctx, takeResult.SandboxID, opts)
+		if connectErr != nil {
+			// Connect / readiness / health-check failed — the idle candidate itself is unusable.
+			// Remove it, best-effort kill, then either retry (RetryNextIdle*) or fall through
+			// (single-shot policies).
+			lastIdleAttemptErr = connectErr
+			_ = p.config.StateStore.RemoveIdle(ctx, p.config.PoolName, takeResult.SandboxID)
+			go p.killSandboxBestEffort(takeResult.SandboxID)
+			p.config.Logger.Warn("acquire: idle sandbox connect/health check failed",
+				"pool_name", p.config.PoolName,
+				"sandbox_id", takeResult.SandboxID,
+				"policy", policy,
+				"attempt", attempt,
+				"max_attempts", maxAttempts,
+				"error", connectErr)
+
+			// Respect the caller's cancellation between iterations so a long retry loop doesn't
+			// keep paying AcquireReadyTimeout after the context has been cancelled.
+			if err := ctx.Err(); err != nil {
+				go p.killDiscardedAliveSandboxes(pendingKill)
+				return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: err}
+			}
+			// Re-check pool lifecycle between iterations. Shutdown(ctx, true) uses its own ctx
+			// to drive draining and does NOT cancel the caller's acquire ctx, so without this
+			// check the loop could keep paying AcquireReadyTimeout per retry while shutdown
+			// waits on inFlight.
+			p.mu.Lock()
+			currentState := p.lifecycleState
+			p.mu.Unlock()
+			if currentState != PoolLifecycleRunning {
+				go p.killDiscardedAliveSandboxes(pendingKill)
+				return nil, &PoolNotRunningError{PoolName: p.config.PoolName, State: currentState}
+			}
+			// A destroy may have landed since the preflight check. Stop retrying rather
+			// than pop further idle IDs out from under the drain.
+			if err := p.ensureNamespaceActiveForAcquire(ctx, policy); err != nil {
+				go p.killDiscardedAliveSandboxes(pendingKill)
+				return nil, err
+			}
+			continue
 		}
-		p.config.Logger.Warn("acquire: idle sandbox connect/health check failed, falling through to direct create",
+		// Connect + readiness succeeded. From here on the sandbox is a healthy, borrowable idle:
+		// any failure below (renew rejection, e.g. lifecycle API temporarily failing renew) is
+		// NOT a candidate-specific problem, so we must not treat it as "stale idle" and burn
+		// another retry. But TryTakeIdle already popped this ID out of the store, so if we only
+		// Close() locally the remote sandbox stays alive on the server until its TTL expires and
+		// is no longer tracked anywhere. Kill the remote sandbox best-effort, close local
+		// resources, and surface the raw error.
+		if opts.SandboxTimeout > 0 {
+			if _, renewErr := sb.Renew(ctx, opts.SandboxTimeout); renewErr != nil {
+				p.config.Logger.Warn("acquire: renew failed after idle connect; killing remote "+
+					"sandbox and not retrying (renew errors are not candidate-specific)",
+					"pool_name", p.config.PoolName,
+					"sandbox_id", takeResult.SandboxID,
+					"policy", policy,
+					"error", renewErr)
+				go p.killSandboxBestEffort(takeResult.SandboxID)
+				_ = sb.Close()
+				go p.killDiscardedAliveSandboxes(pendingKill)
+				return nil, fmt.Errorf("opensandbox: pool acquire: renew after connect failed: %w", renewErr)
+			}
+		}
+		// TryTakeIdle is unfenced so the destroy manager can drain, so this ID is
+		// already out of the store and a destroy can no longer reach it. Re-check
+		// before handing it over, fail-closed: if the store cannot confirm the
+		// namespace is ACTIVE, kill the sandbox rather than leak it into a
+		// namespace that may be retired.
+		if err := p.ensureNamespaceActiveAfterCreate(ctx, sb, nil); err != nil {
+			go p.killDiscardedAliveSandboxes(pendingKill)
+			return nil, err
+		}
+		go p.killDiscardedAliveSandboxes(pendingKill)
+		p.config.Logger.Debug("acquire: from idle",
 			"pool_name", p.config.PoolName,
 			"sandbox_id", takeResult.SandboxID,
-			"error", connectErr)
+			"policy", policy,
+			"attempt", attempt,
+			"max_attempts", maxAttempts)
+		return sb, nil
 	}
 
-	// Schedule kill of discarded-alive (whether we got a sandbox ID or not).
-	if takeResult != nil {
-		go p.killDiscardedAliveSandboxes(takeResult.DiscardedAliveSandboxIDs)
-	}
+	// Reached end of loop without a successful acquire. Fire deferred cleanup asynchronously
+	// so neither the error return nor the direct-create fallthrough waits on kill RPCs.
+	go p.killDiscardedAliveSandboxes(pendingKill)
 
-	if policy == AcquirePolicyFailFast {
-		if idleAttemptErr != nil {
-			return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: idleAttemptErr}
+	if !policyFallsThroughToDirectCreate(policy) {
+		if attemptedAny {
+			return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: lastIdleAttemptErr}
 		}
 		return nil, &PoolEmptyError{PoolName: p.config.PoolName, Policy: policy}
 	}
 
-	// DIRECT_CREATE path.
-	return p.directCreate(ctx, opts)
+	// DIRECT_CREATE / RETRY_NEXT_IDLE_THEN_CREATE fallthrough.
+	p.config.Logger.Debug("acquire: falling through to direct create",
+		"pool_name", p.config.PoolName,
+		"policy", policy,
+		"attempted_any", attemptedAny,
+		"loop_exhausted", loopExhausted,
+		"last_sandbox_id", lastSandboxID)
+	return p.directCreate(ctx, opts, policy)
 }
 
-func (p *DefaultSandboxPool) connectAndRenew(ctx context.Context, sandboxID string, opts AcquireOptions) (*Sandbox, error) {
-	var sb *Sandbox
-	var err error
-	if opts.SkipHealthCheck {
-		sb, err = ConnectSandbox(ctx, p.config.ConnectionConfig, sandboxID)
-	} else {
-		sb, err = ConnectSandbox(ctx, p.config.ConnectionConfig, sandboxID, ReadyOptions{
-			Timeout:         p.config.AcquireReadyTimeout,
-			PollingInterval: p.config.AcquireHealthCheckPollingInterval,
-			HealthCheck:     p.adaptAcquireHealthCheck(),
-		})
+// tryTakeIdle wraps the store's take primitives, returning a nil result on a legitimate empty
+// (as opposed to an outage). This keeps the Acquire loop's control flow linear.
+func (p *DefaultSandboxPool) tryTakeIdle(ctx context.Context, minTTL time.Duration) (*TakeIdleResult, error) {
+	if minTTL > 0 {
+		return p.config.StateStore.TryTakeIdleWithMinTTL(ctx, p.config.PoolName, minTTL)
 	}
+	sandboxID, err := p.config.StateStore.TryTakeIdle(ctx, p.config.PoolName)
 	if err != nil {
 		return nil, err
 	}
-	if opts.SandboxTimeout > 0 {
-		if _, err := sb.Renew(ctx, opts.SandboxTimeout); err != nil {
-			_ = sb.Close()
-			return nil, fmt.Errorf("opensandbox: pool acquire: renew after connect failed: %w", err)
-		}
-	}
-	return sb, nil
+	return &TakeIdleResult{SandboxID: sandboxID}, nil
 }
 
-func (p *DefaultSandboxPool) directCreate(ctx context.Context, opts AcquireOptions) (*Sandbox, error) {
+// effectiveMaxIdleAttempts is the per-acquire cap on idle candidates. Single-shot policies always
+// try exactly one; retry policies use the configured budget clamped to >= 1.
+func effectiveMaxIdleAttempts(policy AcquirePolicy, maxAcquireRetries int) int {
+	switch policy {
+	case AcquirePolicyRetryNextIdle, AcquirePolicyRetryNextIdleThenCreate:
+		if maxAcquireRetries < 1 {
+			return 1
+		}
+		return maxAcquireRetries
+	default:
+		return 1
+	}
+}
+
+// policyFallsThroughToDirectCreate reports whether the given policy, after exhausting its idle
+// budget, should silently create a fresh sandbox instead of returning an error.
+func policyFallsThroughToDirectCreate(policy AcquirePolicy) bool {
+	switch policy {
+	case AcquirePolicyDirectCreate, AcquirePolicyRetryNextIdleThenCreate:
+		return true
+	default:
+		return false
+	}
+}
+
+// connectIdle connects to an existing idle sandbox and waits for readiness (health check is
+// integrated into the ready-poll). Deliberately does NOT call Renew: the caller must decide
+// whether a renew failure should tear down the sandbox and retry (never — renew errors are
+// not candidate-specific) or bubble up as a non-retryable acquire failure.
+func (p *DefaultSandboxPool) connectIdle(ctx context.Context, sandboxID string, opts AcquireOptions) (*Sandbox, error) {
+	if opts.SkipHealthCheck {
+		return ConnectSandbox(ctx, p.config.ConnectionConfig, sandboxID)
+	}
+	return ConnectSandbox(ctx, p.config.ConnectionConfig, sandboxID, ReadyOptions{
+		Timeout:         p.config.AcquireReadyTimeout,
+		PollingInterval: p.config.AcquireHealthCheckPollingInterval,
+		HealthCheck:     p.adaptAcquireHealthCheck(),
+	})
+}
+
+func (p *DefaultSandboxPool) directCreate(ctx context.Context, opts AcquireOptions, policy AcquirePolicy) (*Sandbox, error) {
 	var sb *Sandbox
 	var err error
 
@@ -338,7 +475,15 @@ func (p *DefaultSandboxPool) directCreate(ctx context.Context, opts AcquireOptio
 	if err != nil {
 		return nil, err
 	}
-	return p.postCreateChecks(ctx, sb, opts)
+	sb, err = p.postCreateChecks(ctx, sb, opts)
+	if err != nil {
+		return nil, err
+	}
+	// Re-check: a destroy may have landed while this sandbox was being created.
+	if err := p.ensureNamespaceActiveAfterCreate(ctx, sb, &policy); err != nil {
+		return nil, err
+	}
+	return sb, nil
 }
 
 // postCreateChecks applies renew to a freshly created sandbox.
@@ -466,7 +611,7 @@ func adaptHealthCheck(userCheck func(context.Context, *Sandbox) error) func(cont
 	}
 }
 
-// ReleaseAllIdle drains all idle sandboxes and kills them.
+// ReleaseAllIdle drains all idle sandboxes and schedules a best-effort kill for each one.
 func (p *DefaultSandboxPool) ReleaseAllIdle(ctx context.Context) (int, error) {
 	count := 0
 	for {
@@ -484,6 +629,63 @@ func (p *DefaultSandboxPool) ReleaseAllIdle(ctx context.Context) (int, error) {
 		count++
 	}
 	return count, nil
+}
+
+// ReleaseAllIdleParallel drains all idle sandboxes and kills them with bounded
+// concurrency. It blocks until every drained sandbox has received a best-effort
+// kill attempt. maxWorkers must be positive.
+//
+// ctx only bounds the drain phase. Once an ID has been drained, its kill attempt
+// uses an independent timeout and completes before this method returns, even if
+// ctx is cancelled.
+func (p *DefaultSandboxPool) ReleaseAllIdleParallel(ctx context.Context, maxWorkers int) (int, error) {
+	if maxWorkers <= 0 {
+		return 0, fmt.Errorf("opensandbox: pool release all idle parallel: maxWorkers must be positive, got %d", maxWorkers)
+	}
+	sandboxIDs := make([]string, 0)
+	var drainErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			drainErr = err
+			break
+		}
+		sandboxID, err := p.config.StateStore.TryTakeIdle(ctx, p.config.PoolName)
+		if err != nil {
+			drainErr = err
+			break
+		}
+		if sandboxID == "" {
+			break
+		}
+		sandboxIDs = append(sandboxIDs, sandboxID)
+	}
+
+	jobs := make(chan string)
+	var workers sync.WaitGroup
+	workerCount := len(sandboxIDs)
+	if workerCount > maxWorkers {
+		workerCount = maxWorkers
+	}
+	workers.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			defer workers.Done()
+			for sandboxID := range jobs {
+				if err := p.killSandbox(sandboxID); err != nil {
+					p.config.Logger.Warn("failed to kill sandbox (best-effort)",
+						"pool_name", p.config.PoolName,
+						"sandbox_id", sandboxID,
+						"error", err)
+				}
+			}
+		}()
+	}
+	for _, sandboxID := range sandboxIDs {
+		jobs <- sandboxID
+	}
+	close(jobs)
+	workers.Wait()
+	return len(sandboxIDs), drainErr
 }
 
 // Resize dynamically changes the idle target.
@@ -663,12 +865,121 @@ done:
 	return nil
 }
 
-const killSandboxTimeout = 30 * time.Second
+// ensureNamespaceActive returns *PoolDestroyedError when a destroy has fenced or
+// tombstoned this pool's namespace, and *PoolStateStoreUnavailableError when the
+// state store cannot answer.
+func (p *DefaultSandboxPool) ensureNamespaceActive(ctx context.Context) error {
+	state, err := p.config.StateStore.GetDestroyState(ctx, p.config.PoolName)
+	if err != nil {
+		var unavailable *PoolStateStoreUnavailableError
+		if errors.As(err, &unavailable) {
+			return err
+		}
+		return &PoolStateStoreUnavailableError{Operation: "GetDestroyState", Cause: err}
+	}
+	if state != PoolDestroyStateActive {
+		return &PoolDestroyedError{PoolName: p.config.PoolName, State: state}
+	}
+	return nil
+}
+
+// ensureNamespaceActiveForAcquire is ensureNamespaceActive with the same
+// store-outage degradation the take path already applies: policies that fall
+// through to direct create treat an unreachable store as "state unknown" and
+// proceed, so a full store outage does not make them less available than
+// documented (OSEP-0005 error-code matrix). Fail-closed policies surface it.
+func (p *DefaultSandboxPool) ensureNamespaceActiveForAcquire(ctx context.Context, policy AcquirePolicy) error {
+	err := p.ensureNamespaceActive(ctx)
+	if err == nil {
+		return nil
+	}
+	var unavailable *PoolStateStoreUnavailableError
+	if errors.As(err, &unavailable) && policyFallsThroughToDirectCreate(policy) {
+		p.config.Logger.Warn("acquire: state store unavailable during namespace check, "+
+			"assuming ACTIVE and degrading to direct create",
+			"pool_name", p.config.PoolName,
+			"policy", policy,
+			"error", err)
+		return nil
+	}
+	return err
+}
+
+// ensureNamespaceActiveAfterCreate re-checks the fence once the acquire path holds
+// a live sandbox, so a destroy that landed mid-acquire does not leak one into a
+// retired namespace. On a fence the sandbox is killed and closed.
+//
+// policy is non-nil only for the direct-create path, where a store outage degrades
+// the same way the rest of that path does. The idle path passes nil and stays
+// fail-closed: that sandbox is already out of the store, so an unconfirmed
+// namespace has to be treated as retired.
+func (p *DefaultSandboxPool) ensureNamespaceActiveAfterCreate(ctx context.Context, sb *Sandbox, policy *AcquirePolicy) error {
+	err := p.ensureNamespaceActive(ctx)
+	if err == nil {
+		return nil
+	}
+	var unavailable *PoolStateStoreUnavailableError
+	if errors.As(err, &unavailable) && policy != nil && policyFallsThroughToDirectCreate(*policy) {
+		p.config.Logger.Warn("acquire: state store unavailable during post-create namespace check, "+
+			"keeping sandbox and degrading per policy",
+			"pool_name", p.config.PoolName,
+			"sandbox_id", sb.ID(),
+			"policy", *policy,
+			"error", err)
+		return nil
+	}
+	go p.killSandboxBestEffort(sb.ID())
+	_ = sb.Close()
+	return err
+}
+
+// stopAfterNamespaceDestroyed stops the pool once its namespace has been retired.
+// It runs on the reconcile goroutine, so unlike Shutdown it must not wait on p.wg.
+func (p *DefaultSandboxPool) stopAfterNamespaceDestroyed(state PoolDestroyState) {
+	p.mu.Lock()
+	if p.lifecycleState == PoolLifecycleStopped || p.lifecycleState == PoolLifecycleDraining {
+		p.mu.Unlock()
+		return
+	}
+	p.lifecycleState = PoolLifecycleStopped
+	if p.ticker != nil {
+		p.ticker.Stop()
+	}
+	if p.done != nil && !p.doneClosed {
+		close(p.done)
+		p.doneClosed = true
+	}
+	cancelFn := p.reconCancel
+	sdCh := p.shutdownDone
+	p.mu.Unlock()
+
+	if cancelFn != nil {
+		cancelFn()
+	}
+	if sdCh != nil {
+		select {
+		case <-sdCh:
+		default:
+			close(sdCh)
+		}
+	}
+	p.config.Logger.Info("pool stopped: namespace destroyed",
+		"pool_name", p.config.PoolName,
+		"destroy_state", state)
+}
+
+const (
+	killSandboxTimeout = 30 * time.Second
+)
 
 func (p *DefaultSandboxPool) killSandboxBestEffort(sandboxID string) {
+	_ = p.killSandbox(sandboxID)
+}
+
+func (p *DefaultSandboxPool) killSandbox(sandboxID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), killSandboxTimeout)
 	defer cancel()
-	_ = p.manager.KillSandbox(ctx, sandboxID)
+	return p.manager.KillSandbox(ctx, sandboxID)
 }
 
 func (p *DefaultSandboxPool) killDiscardedAliveSandboxes(ids []string) {

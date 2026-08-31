@@ -156,6 +156,15 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
 See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
 binding guidance, and Git/curl examples.
 
+### Release idle pool sandboxes
+
+`ReleaseAllIdle(ctx)` preserves the original fire-and-forget behavior: it drains
+idle IDs and returns after scheduling best-effort kills. Call
+`ReleaseAllIdleParallel(ctx, maxWorkers)` on `*DefaultSandboxPool` to bound kill
+concurrency and wait until every drained ID has received a kill attempt.
+`maxWorkers` must be positive. The parallel method is intentionally not part of
+the `SandboxPool` interface, so existing interface implementors remain compatible.
+
 ## API Reference
 
 ### LifecycleClient

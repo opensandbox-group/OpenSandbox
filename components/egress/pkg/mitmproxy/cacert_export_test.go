@@ -15,6 +15,7 @@
 package mitmproxy
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -32,4 +33,69 @@ func TestCandidateCACertPaths(t *testing.T) {
 		filepath.Join("/custom", ".mitmproxy", mitmCACertName),
 		filepath.Join(h, ".mitmproxy", mitmCACertName),
 	}, got)
+}
+
+func TestPurgeStaleExportedCAFrom_RemovesExistingFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, mitmCACertName)
+	require.NoError(t, os.WriteFile(path, []byte("stale-ca"), 0o644))
+
+	purgeStaleExportedCAFrom(root)
+
+	_, err := os.Stat(path)
+	require.True(t, os.IsNotExist(err), "expected file to be removed, got err=%v", err)
+}
+
+func TestPurgeStaleExportedCAFrom_NoFileIsNoOp(t *testing.T) {
+	root := t.TempDir()
+	// No file present; must not panic and must not create anything.
+	purgeStaleExportedCAFrom(root)
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestPurgeStaleExportedCAFrom_LeavesUnrelatedFiles(t *testing.T) {
+	root := t.TempDir()
+	stale := filepath.Join(root, mitmCACertName)
+	require.NoError(t, os.WriteFile(stale, []byte("stale-ca"), 0o644))
+
+	// A sibling file that must survive (e.g. the agent's merged bundle).
+	other := filepath.Join(root, "merged-ca-certificates.pem")
+	require.NoError(t, os.WriteFile(other, []byte("merged"), 0o644))
+
+	purgeStaleExportedCAFrom(root)
+
+	_, err := os.Stat(stale)
+	require.True(t, os.IsNotExist(err))
+	_, err = os.Stat(other)
+	require.NoError(t, err)
+}
+
+func TestSyncRootCAFleetExportsToSubdirWithoutSystemTrust(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "mitmhome")
+	confdir := filepath.Join(home, ".mitmproxy")
+	require.NoError(t, os.MkdirAll(confdir, 0o755))
+	cert := filepath.Join(confdir, mitmCACertName)
+	require.NoError(t, os.WriteFile(cert, []byte("fleet-ca"), 0o644))
+
+	// constants.OpenSandboxRootDir is a fixed /opt/opensandbox path; verify
+	// exportRootCA directly with a temp root instead of the env-dependent
+	// SyncRootCAFleet wrapper.
+	rootDir := filepath.Join(root, "opt", "opensandbox", FleetCAExportDir)
+	require.NoError(t, exportRootCA(confdir, home, rootDir, false))
+
+	dst := filepath.Join(rootDir, mitmCACertName)
+	content, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	require.Equal(t, "fleet-ca", string(content))
+
+	// no system-trust install was attempted: no ca-certificates dirs created
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NotEqual(t, "usr", e.Name(), "system trust install must be skipped for the fleet export")
+	}
 }

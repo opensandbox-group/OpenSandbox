@@ -16,14 +16,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
 
+from opensandbox.api.lifecycle.models.allocation_summary import AllocationSummary
+from opensandbox.api.lifecycle.models.create_sandbox_request import (
+    CreateSandboxRequest as ApiCreateSandboxRequest,
+)
 from opensandbox.api.lifecycle.models.create_sandbox_response import (
     CreateSandboxResponse as ApiCreateSandboxResponse,
 )
 from opensandbox.api.lifecycle.models.image_spec import ImageSpec as ApiImageSpec
+from opensandbox.api.lifecycle.models.lifecycle_hook import LifecycleHook
+from opensandbox.api.lifecycle.models.periodic_lifecycle_hook import (
+    PeriodicLifecycleHook,
+)
 from opensandbox.api.lifecycle.models.sandbox import Sandbox as ApiSandbox
+from opensandbox.api.lifecycle.models.sandbox_lifecycle import SandboxLifecycle
 from opensandbox.api.lifecycle.types import UNSET
 from opensandbox.models import CredentialSubstitution
 from opensandbox.models.execd import (
@@ -43,6 +53,7 @@ from opensandbox.models.sandboxes import (
     OSSFS,
     PVC,
     Host,
+    SandboxAllocation,
     SandboxFilter,
     SandboxImageAuth,
     SandboxImageSpec,
@@ -50,6 +61,47 @@ from opensandbox.models.sandboxes import (
     SandboxStatus,
     Volume,
 )
+from opensandbox.models.sandboxes import (
+    LifecycleHook as DomainLifecycleHook,
+)
+from opensandbox.models.sandboxes import (
+    PeriodicLifecycleHook as DomainPeriodicLifecycleHook,
+)
+
+
+@pytest.mark.parametrize(
+    "hook_type", [DomainLifecycleHook, DomainPeriodicLifecycleHook]
+)
+@pytest.mark.parametrize("timeout_seconds", [0, 301])
+def test_lifecycle_hooks_preserve_timeout_for_server_validation(
+    hook_type: type, timeout_seconds: int
+) -> None:
+    kwargs: dict[str, object] = {
+        "command": ["true"],
+        "timeoutSeconds": timeout_seconds,
+    }
+    if hook_type is DomainPeriodicLifecycleHook:
+        kwargs.update(name="sync", schedule="@hourly")
+
+    assert hook_type.model_validate(kwargs).timeout_seconds == timeout_seconds
+
+
+def test_lifecycle_hooks_reject_blank_commands_and_normalize_periodic_text() -> None:
+    with pytest.raises(ValueError, match="command must not be empty"):
+        DomainLifecycleHook(command=[" "])
+
+    periodic = DomainPeriodicLifecycleHook(
+        name=" sync ",
+        schedule=" @hourly ",
+        command=["true"],
+    )
+    assert periodic.name == "sync"
+    assert periodic.schedule == "@hourly"
+
+    with pytest.raises(ValueError, match="fields must not be blank"):
+        DomainPeriodicLifecycleHook(name=" ", schedule="@hourly", command=["true"])
+    with pytest.raises(ValueError, match="command must not be empty"):
+        DomainPeriodicLifecycleHook(name="sync", schedule="@hourly", command=[" "])
 
 
 def test_sandbox_image_spec_supports_positional_image() -> None:
@@ -92,6 +144,34 @@ def test_api_create_sandbox_response_tolerates_omitted_optional_fields() -> None
     assert response.status.last_transition_at is UNSET
 
 
+def test_api_create_sandbox_request_serializes_lifecycle_hooks() -> None:
+    request = ApiCreateSandboxRequest(
+        lifecycle=SandboxLifecycle(
+            pre_start=LifecycleHook(command=["/opt/hooks/restore.sh"]),
+            periodic=[
+                PeriodicLifecycleHook(
+                    name="checkpoint",
+                    schedule="*/5 * * * *",
+                    command=["/opt/hooks/checkpoint.sh"],
+                )
+            ],
+        )
+    )
+
+    assert request.to_dict()["lifecycle"] == {
+        "preStart": {
+            "command": ["/opt/hooks/restore.sh"],
+        },
+        "periodic": [
+            {
+                "name": "checkpoint",
+                "schedule": "*/5 * * * *",
+                "command": ["/opt/hooks/checkpoint.sh"],
+            }
+        ],
+    }
+
+
 def test_api_sandbox_tolerates_omitted_optional_fields() -> None:
     sandbox = ApiSandbox.from_dict(
         {
@@ -102,9 +182,29 @@ def test_api_sandbox_tolerates_omitted_optional_fields() -> None:
             "createdAt": "2025-01-01T00:00:00Z",
         }
     )
+    assert sandbox.allocation is UNSET
     assert sandbox.metadata is UNSET
     assert sandbox.expires_at is UNSET
     assert sandbox.status.last_transition_at is UNSET
+
+
+def test_api_sandbox_parses_optional_allocation() -> None:
+    sandbox = ApiSandbox.from_dict(
+        {
+            "id": "sandbox-1",
+            "status": {"state": "Running"},
+            "entrypoint": ["/bin/sh"],
+            "createdAt": "2025-01-01T00:00:00Z",
+            "allocation": {
+                "mode": "pool",
+                "poolRef": "default/python",
+                "state": "allocated",
+            },
+        }
+    )
+
+    allocation = cast(AllocationSummary, sandbox.allocation)
+    assert allocation.pool_ref == "default/python"
 
 
 def test_sandbox_image_auth_rejects_blank_username_and_password() -> None:
@@ -154,6 +254,23 @@ def test_sandbox_info_supports_manual_cleanup_expiration() -> None:
 
     dumped = info.model_dump(by_alias=True, mode="json")
     assert dumped["expires_at"] is None
+
+
+def test_sandbox_info_exposes_optional_allocation() -> None:
+    info = SandboxInfo(
+        id=str(__import__("uuid").uuid4()),
+        status=SandboxStatus(state="RUNNING"),
+        entrypoint=["/bin/sh"],
+        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        allocation=SandboxAllocation(
+            mode="pool",
+            pool_ref="default/python",
+            state="allocated",
+        ),
+    )
+
+    assert info.allocation is not None
+    assert info.allocation.pool_ref == "default/python"
 
 
 def test_filesystem_models_aliases_and_validation() -> None:
@@ -479,3 +596,21 @@ def test_isolated_binds_omitted_when_unset() -> None:
     body = req.model_dump(exclude_none=True)
     assert "binds" not in body
     assert "uid_mode" not in body
+
+
+def test_isolated_capabilities_parse_mode_availability() -> None:
+    """Per-mode isolation capability flags are exposed to SDK callers."""
+    from opensandbox.models import IsolatedCapabilities
+
+    capabilities = IsolatedCapabilities.model_validate(
+        {
+            "available": True,
+            "setpriv_available": False,
+            "userns_available": True,
+            "commit_supported": False,
+            "diff_supported": False,
+        }
+    )
+
+    assert capabilities.setpriv_available is False
+    assert capabilities.userns_available is True

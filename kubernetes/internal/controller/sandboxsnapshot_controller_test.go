@@ -16,7 +16,10 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -24,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+	snapshotcontract "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 )
 
 func newTestSnapshotReconciler(objs ...client.Object) *SandboxSnapshotReconciler {
@@ -251,6 +256,12 @@ func TestSandboxSnapshotHandleCommitting_CreatesUnpauseJobWhenCommitJobFailed(t 
 			Name:      "test-snapshot-commit",
 			Namespace: "default",
 		},
+		Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: CommitJobContainerName,
+				Env:  []corev1.EnvVar{{Name: "SOURCE_POD_UID", Value: "source-pod-uid"}},
+			}},
+		}}},
 		Status: batchv1.JobStatus{
 			Conditions: []batchv1.JobCondition{
 				{
@@ -275,6 +286,8 @@ func TestSandboxSnapshotHandleCommitting_CreatesUnpauseJobWhenCommitJobFailed(t 
 	cleanupContainer := cleanupJob.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, []string{"/usr/local/bin/image-committer"}, cleanupContainer.Command)
 	assert.Equal(t, []string{"unpause", "source-pod", "default", "main", "sidecar"}, cleanupContainer.Args)
+	assert.Contains(t, cleanupContainer.Env, corev1.EnvVar{Name: "SOURCE_POD_UID", Value: "source-pod-uid"})
+	assert.Empty(t, cleanupJob.Spec.Template.Spec.ServiceAccountName)
 	assert.Equal(t, "node-a", cleanupJob.Spec.Template.Spec.NodeName)
 }
 
@@ -328,6 +341,7 @@ func TestSandboxSnapshotHandlePending_UsesSourcePodContainersWhenTemplateMissing
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pool-pod",
 			Namespace: "default",
+			UID:       types.UID("pool-pod-uid"),
 		},
 		Spec: corev1.PodSpec{
 			NodeName: "node-a",
@@ -380,6 +394,8 @@ func TestSandboxSnapshotHandlePending_UsesSourcePodContainersWhenTemplateMissing
 
 	job := &batchv1.Job{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-snapshot-commit", Namespace: "default"}, job))
+	require.Len(t, job.Spec.Template.Spec.Containers, 1)
+	assert.Contains(t, job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: "SOURCE_POD_UID", Value: "pool-pod-uid"})
 }
 
 func TestSandboxSnapshotHandlePending_PublicSnapshotUsesSnapshotIDTag(t *testing.T) {
@@ -468,7 +484,7 @@ func TestBuildCommitJob_SetsBoundedBackoffLimit(t *testing.T) {
 	r := newTestSnapshotReconciler(snapshot)
 	r.SnapshotPushSecret = "registry-snapshot-push-secret"
 
-	job, err := r.buildCommitJob(snapshot)
+	job, err := r.buildCommitJob(snapshot, "")
 	require.NoError(t, err)
 	require.NotNil(t, job.Spec.BackoffLimit)
 	assert.Equal(t, DefaultCommitJobBackoffLimit, *job.Spec.BackoffLimit)
@@ -495,10 +511,38 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 
 	r := newTestSnapshotReconciler(snapshot)
 	r.SnapshotRegistryInsecure = true
+	r.ImageCommitterPodTemplate = &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      map[string]string{"identity.example/use": "true"},
+			Annotations: map[string]string{"example.com/template": "enabled"},
+		},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: "snapshot-committer",
+			NodeName:           "must-be-overridden",
+			RestartPolicy:      corev1.RestartPolicyAlways,
+			SecurityContext:    &corev1.PodSecurityContext{RunAsNonRoot: ptrToBool(true)},
+			Tolerations:        []corev1.Toleration{{Key: "snapshot", Operator: corev1.TolerationOpExists}},
+			Containers: []corev1.Container{
+				{
+					Name:    CommitJobContainerName,
+					Image:   "must-be-overridden",
+					Command: []string{"must-be-overridden"},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+					},
+					Env: []corev1.EnvVar{
+						{Name: "CUSTOM_ENV", Value: "custom"},
+						{Name: "SOURCE_POD_UID", Value: "must-be-overridden"},
+					},
+				},
+				{Name: "audit-sidecar", Image: "example.com/audit:latest"},
+			},
+		},
+	}
 
-	job, err := r.buildCommitJob(snapshot)
+	job, err := r.buildCommitJob(snapshot, "source-pod-uid")
 	require.NoError(t, err)
-	require.Len(t, job.Spec.Template.Spec.Containers, 1)
+	require.Len(t, job.Spec.Template.Spec.Containers, 2)
 
 	container := job.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, []string{"/usr/local/bin/image-committer"}, container.Command)
@@ -507,10 +551,141 @@ func TestBuildCommitJob_ExecutesImageCommitterDirectlyWithIsolatedArgs(t *testin
 		"default",
 		"main;echo nope:registry.example.com/test:tag",
 	}, container.Args)
+	assert.Contains(t, container.Env, corev1.EnvVar{Name: "CONTAINERD_SOCKET", Value: ContainerdSocketPath})
+	assert.Contains(t, container.Env, corev1.EnvVar{Name: "SOURCE_POD_UID", Value: "source-pod-uid"})
 	assert.Contains(t, container.Env, corev1.EnvVar{Name: "SNAPSHOT_REGISTRY_INSECURE", Value: "true"})
+	assert.Equal(t, "snapshot-committer", job.Spec.Template.Spec.ServiceAccountName)
+	assert.Equal(t, "node-1", job.Spec.Template.Spec.NodeName)
+	assert.Equal(t, corev1.RestartPolicyNever, job.Spec.Template.Spec.RestartPolicy)
+	assert.Equal(t, map[string]string{"identity.example/use": "true"}, job.Spec.Template.Labels)
+	assert.Equal(t, map[string]string{"example.com/template": "enabled"}, job.Spec.Template.Annotations)
+	assert.Contains(t, container.Env, corev1.EnvVar{Name: "CUSTOM_ENV", Value: "custom"})
+	assert.Equal(t, resource.MustParse("250m"), container.Resources.Requests[corev1.ResourceCPU])
+	assert.Equal(t, r.imageCommitterImage(), container.Image)
+	assert.Equal(t, []string{"/usr/local/bin/image-committer"}, container.Command)
+	assert.Contains(t, container.VolumeMounts, corev1.VolumeMount{Name: "containerd-fifo", MountPath: ContainerdFIFODir})
+	assert.Contains(t, job.Spec.Template.Spec.Tolerations, corev1.Toleration{Key: "snapshot", Operator: corev1.TolerationOpExists})
+	assert.Equal(t, "audit-sidecar", job.Spec.Template.Spec.Containers[1].Name)
+
+	var fifoVolume *corev1.Volume
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Name == "containerd-fifo" {
+			fifoVolume = &job.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	require.NotNil(t, fifoVolume)
+	require.NotNil(t, fifoVolume.HostPath)
+	assert.Equal(t, ContainerdFIFODir, fifoVolume.HostPath.Path)
+	require.NotNil(t, fifoVolume.HostPath.Type)
+	assert.Equal(t, corev1.HostPathDirectoryOrCreate, *fifoVolume.HostPath.Type)
+
+	require.NotNil(t, job.Spec.Template.Spec.SecurityContext)
+	require.NotNil(t, job.Spec.Template.Spec.SecurityContext.RunAsNonRoot)
+	assert.True(t, *job.Spec.Template.Spec.SecurityContext.RunAsNonRoot)
 	require.NotNil(t, container.SecurityContext)
+	require.NotNil(t, container.SecurityContext.RunAsUser)
+	assert.Zero(t, *container.SecurityContext.RunAsUser)
+	require.NotNil(t, container.SecurityContext.RunAsNonRoot)
+	assert.False(t, *container.SecurityContext.RunAsNonRoot)
 	require.NotNil(t, container.SecurityContext.AllowPrivilegeEscalation)
 	assert.False(t, *container.SecurityContext.AllowPrivilegeEscalation)
 	require.NotNil(t, container.SecurityContext.Capabilities)
 	assert.Equal(t, []corev1.Capability{"ALL"}, container.SecurityContext.Capabilities.Drop)
+	assert.Empty(t, container.SecurityContext.Capabilities.Add)
+}
+
+func TestBuildCommitJob_QEMUUsesStructuredRequestAndWorkVolume(t *testing.T) {
+	snapshotObject := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot", Namespace: "default"},
+		Spec:       sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: "test-sandbox"},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Format:         sandboxv1alpha1.SandboxSnapshotFormatQEMUV1,
+			SourcePodName:  "test-pod",
+			SourceNodeName: "node-1",
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "main", ImageURI: "registry.example/snapshots/test-main:snap-123"},
+			},
+		},
+	}
+	r := newTestSnapshotReconciler(snapshotObject)
+	r.SnapshotRegistry = "registry.example/snapshots"
+	contract := snapshotcontract.WorkloadContract{
+		Provider: snapshotcontract.ProviderQEMU,
+		QEMU: &snapshotcontract.QEMUContract{
+			ContainerName:      "main",
+			QMPSocketPath:      "/run/qemu/qmp.sock",
+			LaunchManifestPath: "/run/qemu/launch.json",
+			RequiredNodeClass:  "shenlong-v1",
+			VolumeMountPaths:   []string{"/dev/kvm", "/immutable-base"},
+		},
+	}
+
+	job, err := r.buildCommitJob(snapshotObject, "source-pod-uid", contract)
+	require.NoError(t, err)
+	assert.True(t, job.Spec.Template.Spec.HostPID)
+	container := job.Spec.Template.Spec.Containers[0]
+	require.NotNil(t, container.SecurityContext)
+	require.NotNil(t, container.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"SYS_PTRACE"}, container.SecurityContext.Capabilities.Add)
+	require.Equal(t, []string{"snapshot", "--request-base64"}, container.Args[:2])
+	requestData, err := base64.StdEncoding.DecodeString(container.Args[2])
+	require.NoError(t, err)
+	var request snapshotcontract.Request
+	require.NoError(t, json.Unmarshal(requestData, &request))
+	assert.Equal(t, snapshotcontract.ProviderQEMU, request.Provider)
+	assert.Equal(t, "source-pod-uid", request.PodUID)
+	assert.Equal(t, "registry.example/snapshots/test-sandbox-vmstate:snap-123", request.VMStateImageURI)
+	assert.False(t, request.LeaveSourceFrozen)
+	require.NotNil(t, request.QEMU)
+	assert.Equal(t, "/run/qemu/qmp.sock", request.QEMU.QMPSocketPath)
+	assert.Equal(t, "shenlong-v1", request.QEMU.RequiredNodeClass)
+	assert.Equal(t, []string{"/dev/kvm", "/immutable-base"}, request.QEMU.VolumeMountPaths)
+	containerdRuntimeDir := filepath.Dir(ContainerdSocketPath)
+	assert.Contains(t, container.VolumeMounts, corev1.VolumeMount{Name: "containerd-sock", MountPath: containerdRuntimeDir})
+	assert.Contains(t, container.VolumeMounts, corev1.VolumeMount{Name: "vmstate-work", MountPath: "/workspace/checkpoint"})
+	require.NotNil(t, job.Spec.Template.Spec.Volumes[0].HostPath)
+	assert.Equal(t, containerdRuntimeDir, job.Spec.Template.Spec.Volumes[0].HostPath.Path)
+	require.NotNil(t, container.Resources.Limits.StorageEphemeral())
+}
+
+func TestBuildCommitJob_InternalQEMUSnapshotLeavesSourceFrozen(t *testing.T) {
+	controller := true
+	snapshotObject := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind:       "BatchSandbox",
+				Controller: &controller,
+			}},
+		},
+		Spec: sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: "test-sandbox"},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Format:         sandboxv1alpha1.SandboxSnapshotFormatQEMUV1,
+			SourcePodName:  "test-pod",
+			SourceNodeName: "node-1",
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "main", ImageURI: "registry.example/snapshots/test-main:snap-123"},
+			},
+		},
+	}
+	r := newTestSnapshotReconciler(snapshotObject)
+	r.SnapshotRegistry = "registry.example/snapshots"
+	contract := snapshotcontract.WorkloadContract{
+		Provider: snapshotcontract.ProviderQEMU,
+		QEMU: &snapshotcontract.QEMUContract{
+			ContainerName:      "main",
+			QMPSocketPath:      "/run/qemu/qmp.sock",
+			LaunchManifestPath: "/run/qemu/launch.json",
+		},
+	}
+
+	job, err := r.buildCommitJob(snapshotObject, "source-pod-uid", contract)
+	require.NoError(t, err)
+	requestData, err := base64.StdEncoding.DecodeString(job.Spec.Template.Spec.Containers[0].Args[2])
+	require.NoError(t, err)
+	var request snapshotcontract.Request
+	require.NoError(t, json.Unmarshal(requestData, &request))
+	assert.True(t, request.LeaveSourceFrozen)
 }

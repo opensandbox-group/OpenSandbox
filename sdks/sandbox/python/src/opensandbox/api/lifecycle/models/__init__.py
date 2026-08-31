@@ -16,6 +16,9 @@
 
 """Contains all the data models used in inputs/outputs"""
 
+from .allocation_summary import AllocationSummary
+from .allocation_summary_mode import AllocationSummaryMode
+from .allocation_summary_state import AllocationSummaryState
 from .create_sandbox_request import CreateSandboxRequest
 from .create_sandbox_request_env import CreateSandboxRequestEnv
 from .create_sandbox_request_extensions import CreateSandboxRequestExtensions
@@ -31,8 +34,11 @@ from .error_response import ErrorResponse
 from .host import Host
 from .image_spec import ImageSpec
 from .image_spec_auth import ImageSpecAuth
+from .lifecycle_hook import LifecycleHook
 from .list_sandboxes_response import ListSandboxesResponse
 from .list_snapshots_response import ListSnapshotsResponse
+from .metrics_event import MetricsEvent
+from .metrics_event_event_type import MetricsEventEventType
 from .network_policy import NetworkPolicy
 from .network_policy_default_action import NetworkPolicyDefaultAction
 from .network_rule import NetworkRule
@@ -41,6 +47,7 @@ from .ossfs import OSSFS
 from .ossfs_version import OSSFSVersion
 from .pagination_info import PaginationInfo
 from .patch_sandbox_metadata_request import PatchSandboxMetadataRequest
+from .periodic_lifecycle_hook import PeriodicLifecycleHook
 from .platform_spec import PlatformSpec
 from .platform_spec_arch import PlatformSpecArch
 from .platform_spec_os import PlatformSpecOs
@@ -50,6 +57,7 @@ from .renew_sandbox_expiration_response import RenewSandboxExpirationResponse
 from .resource_limits import ResourceLimits
 from .sandbox import Sandbox
 from .sandbox_extensions import SandboxExtensions
+from .sandbox_lifecycle import SandboxLifecycle
 from .sandbox_metadata import SandboxMetadata
 from .sandbox_status import SandboxStatus
 from .snapshot import Snapshot
@@ -57,6 +65,9 @@ from .snapshot_status import SnapshotStatus
 from .volume import Volume
 
 __all__ = (
+    "AllocationSummary",
+    "AllocationSummaryMode",
+    "AllocationSummaryState",
     "CreateSandboxRequest",
     "CreateSandboxRequestEnv",
     "CreateSandboxRequestExtensions",
@@ -72,8 +83,11 @@ __all__ = (
     "Host",
     "ImageSpec",
     "ImageSpecAuth",
+    "LifecycleHook",
     "ListSandboxesResponse",
     "ListSnapshotsResponse",
+    "MetricsEvent",
+    "MetricsEventEventType",
     "NetworkPolicy",
     "NetworkPolicyDefaultAction",
     "NetworkRule",
@@ -82,6 +96,7 @@ __all__ = (
     "OSSFSVersion",
     "PaginationInfo",
     "PatchSandboxMetadataRequest",
+    "PeriodicLifecycleHook",
     "PlatformSpec",
     "PlatformSpecArch",
     "PlatformSpecOs",
@@ -91,6 +106,7 @@ __all__ = (
     "ResourceLimits",
     "Sandbox",
     "SandboxExtensions",
+    "SandboxLifecycle",
     "SandboxMetadata",
     "SandboxStatus",
     "Snapshot",

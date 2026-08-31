@@ -20,9 +20,11 @@ restore configuration, and lifecycle status. They are intentionally decoupled
 from both API schemas and runtime-specific objects.
 """
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 
 class SnapshotState(str, Enum):
@@ -47,6 +49,13 @@ class SnapshotRestoreConfig:
     """
 
     image: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, values: Mapping[str, Any]) -> "SnapshotRestoreConfig":
+        return cls(**{item.name: values[item.name] for item in fields(cls) if item.name in values})
 
 
 @dataclass(slots=True)

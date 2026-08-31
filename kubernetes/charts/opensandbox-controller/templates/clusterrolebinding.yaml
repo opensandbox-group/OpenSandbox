@@ -1,3 +1,4 @@
+{{- $metrics := .Values.controller.metrics | default dict -}}
 {{- if .Values.rbac.create -}}
 ---
 # Leader election role binding
@@ -35,5 +36,25 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "opensandbox.serviceAccountName" . }}
   namespace: {{ include "opensandbox.namespace" . }}
+
+{{- if and $metrics.enabled $metrics.secure }}
+---
+# Metrics auth ClusterRoleBinding
+apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "opensandbox.metricsAuthRoleName" . }}
+  labels:
+    {{- include "opensandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "opensandbox.metricsAuthRoleName" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "opensandbox.serviceAccountName" . }}
+  namespace: {{ include "opensandbox.namespace" . }}
+{{- end }}
 
 {{- end }}

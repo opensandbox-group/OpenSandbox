@@ -15,9 +15,11 @@
 """Snapshot persistence backends."""
 
 from opensandbox_server.repositories.snapshots.factory import create_snapshot_repository
+from opensandbox_server.repositories.snapshots.postgresql import PostgreSQLSnapshotRepository
 from opensandbox_server.repositories.snapshots.sqlite import SQLiteSnapshotRepository
 
 __all__ = [
     "SQLiteSnapshotRepository",
+    "PostgreSQLSnapshotRepository",
     "create_snapshot_repository",
 ]

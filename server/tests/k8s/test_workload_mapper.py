@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+from types import SimpleNamespace
+
+import pytest
+
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
     _extract_platform_from_workload,
@@ -50,6 +55,151 @@ class TestBuildSandboxFromWorkload:
         sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
 
         assert sandbox.extensions == {"opensandbox.extensions.custom-label": "中文数据"}
+
+    def test_returns_confirmed_pool_allocation_for_dict_workload(self):
+        sandbox = _build_sandbox_from_workload(_allocated_workload(), _WorkloadProvider())
+
+        assert sandbox.allocation is not None
+        assert sandbox.allocation.model_dump(by_alias=True) == {
+            "mode": "pool",
+            "poolRef": "pool-runc",
+            "state": "allocated",
+        }
+
+    def test_returns_confirmed_pool_allocation_for_object_workload(self):
+        workload = SimpleNamespace(
+            metadata=SimpleNamespace(
+                labels={"opensandbox.io/id": "sandbox-1"},
+                annotations={
+                    "sandbox.opensandbox.io/alloc-status": json.dumps(
+                        {"pods": ["pod-1"], "poolRef": "pool-runc", "generation": 4}
+                    )
+                },
+                finalizers=["pool.sandbox.opensandbox.io/pool-allocation"],
+                deletion_timestamp=None,
+                creation_timestamp="2026-06-22T00:00:00Z",
+            ),
+            spec=SimpleNamespace(pool_ref="pool-runc", containers=[]),
+            status=SimpleNamespace(allocated=1),
+        )
+
+        sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+
+        assert sandbox.allocation is not None
+        assert sandbox.allocation.pool_ref == "pool-runc"
+
+    @pytest.mark.parametrize(
+        ("name", "mutate"),
+        [
+            ("wrong annotation pool reference", lambda w: _set_annotation(w, {"pods": ["pod-1"], "poolRef": "other", "generation": 4})),
+            ("missing annotation pool reference", lambda w: _set_annotation(w, {"pods": ["pod-1"], "generation": 4})),
+            ("legacy pods-only annotation", lambda w: _set_annotation(w, {"pods": ["pod-1"]})),
+            ("deleting", lambda w: w["metadata"].update({"deletionTimestamp": "2026-06-23T00:00:00Z"})),
+            ("missing finalizer", lambda w: w["metadata"].update({"finalizers": []})),
+            ("missing allocation annotation", lambda w: w["metadata"].update({"annotations": {}})),
+            ("invalid annotation JSON", lambda w: w["metadata"]["annotations"].update({"sandbox.opensandbox.io/alloc-status": "{"})),
+            ("empty pods", lambda w: _set_annotation(w, {"pods": [], "poolRef": "pool-runc", "generation": 4})),
+            ("empty pod name", lambda w: _set_annotation(w, {"pods": [""], "poolRef": "pool-runc", "generation": 4})),
+            ("invalid pod name", lambda w: _set_annotation(w, {"pods": ["Pod-1"], "poolRef": "pool-runc", "generation": 4})),
+            ("duplicate pod names", lambda w: _set_annotation(w, {"pods": ["pod-1", "pod-1"], "poolRef": "pool-runc", "generation": 4})),
+            ("allocated count mismatch", lambda w: w["status"].update({"allocated": 2})),
+            ("wildcard pool reference", lambda w: w["spec"].update({"poolRef": "*"})),
+            ("non-pool workload", lambda w: w["spec"].pop("poolRef")),
+        ],
+    )
+    def test_omits_unconfirmed_pool_allocation(self, name, mutate):
+        workload = _allocated_workload()
+        mutate(workload)
+
+        sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+
+        assert sandbox.allocation is None, name
+
+    def test_renewal_generation_drift_remains_confirmed(self):
+        workload = _allocated_workload()
+        workload["metadata"]["generation"] = 12
+        _set_annotation(
+            workload,
+            {"pods": ["pod-1"], "poolRef": "pool-runc", "generation": 4},
+        )
+
+        sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+
+        assert sandbox.allocation is not None
+        assert sandbox.allocation.pool_ref == "pool-runc"
+
+    @pytest.mark.parametrize(
+        "annotation_key",
+        [
+            "sandbox.opensandbox.io/alloc-release",
+            "sandbox.opensandbox.io/alloc-released",
+        ],
+    )
+    def test_omits_allocation_when_release_state_intersects_allocation(
+        self, annotation_key
+    ):
+        workload = _allocated_workload()
+        workload["metadata"]["annotations"][annotation_key] = json.dumps(
+            {"pods": ["pod-1"]}
+        )
+
+        sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+
+        assert sandbox.allocation is None
+
+    @pytest.mark.parametrize(
+        "annotation_key",
+        [
+            "sandbox.opensandbox.io/alloc-release",
+            "sandbox.opensandbox.io/alloc-released",
+        ],
+    )
+    def test_omits_allocation_when_release_state_is_malformed(self, annotation_key):
+        workload = _allocated_workload()
+        workload["metadata"]["annotations"][annotation_key] = "{"
+
+        sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+
+        assert sandbox.allocation is None
+
+    @pytest.mark.parametrize(
+        "annotation_key",
+        [
+            "sandbox.opensandbox.io/alloc-release",
+            "sandbox.opensandbox.io/alloc-released",
+        ],
+    )
+    def test_returns_allocation_for_non_intersecting_release_state(self, annotation_key):
+        workload = _allocated_workload()
+        workload["metadata"]["annotations"][annotation_key] = json.dumps(
+            {"pods": ["pod-2"]}
+        )
+
+        sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+
+        assert sandbox.allocation is not None
+        assert sandbox.allocation.pool_ref == "pool-runc"
+
+
+def _allocated_workload(pool_ref="pool-runc"):
+    return {
+        "metadata": {
+            "labels": {"opensandbox.io/id": "sandbox-1"},
+            "annotations": {
+                "sandbox.opensandbox.io/alloc-status": json.dumps(
+                    {"pods": ["pod-1"], "poolRef": pool_ref, "generation": 4}
+                )
+            },
+            "finalizers": ["pool.sandbox.opensandbox.io/pool-allocation"],
+            "creationTimestamp": "2026-06-22T00:00:00Z",
+        },
+        "spec": {"poolRef": pool_ref, "template": None},
+        "status": {"allocated": 1},
+    }
+
+
+def _set_annotation(workload, allocation):
+    workload["metadata"]["annotations"]["sandbox.opensandbox.io/alloc-status"] = json.dumps(allocation)
 
 
 class TestExtractPlatformFromWorkload:

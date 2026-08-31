@@ -1,0 +1,13 @@
+{{- with .Values.controller.snapshot.imageCommitterPodTemplate }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opensandbox.imageCommitterPodTemplateName" $ }}
+  namespace: {{ include "opensandbox.namespace" $ }}
+  labels:
+    {{- include "opensandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: controller-manager
+data:
+  pod-template.yaml: |
+    {{- toYaml . | nindent 4 }}
+{{- end }}

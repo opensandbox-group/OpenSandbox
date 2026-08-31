@@ -136,6 +136,10 @@ Response (401):
 
 The HTTP provider caches results per key using the server-suggested `ttl`. On TTL expiry it re-fetches synchronously. If the endpoint is unreachable, stale entries are served up to `max_stale_seconds`, after which requests fail with 503.
 
+::: warning HTTP provider skips startup namespace validation
+The HTTP provider resolves tenants per API key and cannot enumerate all tenants at startup, so the OSEP-0014 fail-fast namespace check is skipped for it (a warning is logged instead). The file provider, which loads the full `tenants.toml` at startup, still fails fast when any tenant namespace is missing or inaccessible. With the HTTP provider, ensure namespaces exist and are accessible before issuing tenant API keys.
+:::
+
 ## Namespace Setup
 
 Before onboarding a tenant, the cluster admin must prepare the target namespace.
@@ -181,6 +185,21 @@ spec:
       memory: 512Mi
     type: Container
 ```
+
+The `Container` defaults apply to every container that omits the corresponding resource setting, including the OpenSandbox egress sidecar. Configure smaller, sidecar-specific values in the lifecycle server so egress containers do not inherit defaults intended for sandbox workloads.
+
+### 4. Egress sidecar resources (recommended)
+
+Add Kubernetes resource settings to the server's `[egress]` configuration:
+
+```toml
+[egress]
+image = "opensandbox/egress:v1.1.7"
+requests = { cpu = "25m", memory = "64Mi" }
+limits = { cpu = "250m", memory = "256Mi" }
+```
+
+Requests and limits can be configured independently. These values are a starting point for basic DNS/nft enforcement; benchmark your workload and allow more headroom when using Credential Vault or transparent mitmproxy. If your `LimitRange` defines minimum values, the egress settings must satisfy them.
 
 ### 5. Server RBAC
 

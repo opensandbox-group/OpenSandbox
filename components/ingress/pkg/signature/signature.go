@@ -16,6 +16,7 @@ package signature
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -226,7 +227,10 @@ func (v *Verifier) VerifySignature(signature, sandboxID string, port int, expire
 	canonical := CanonicalBytes(sandboxID, port, expiresB36)
 	inner := Inner(secret, canonical)
 	want := ExpectedHex8(inner)
-	if hex8 != want {
+	// Constant-time comparison to avoid timing side-channels leaking the
+	// expected signature byte-by-byte. Both hex8 and want are the fixed
+	// 8-hex-char output of ExpectedHex8, so length is already equal.
+	if subtle.ConstantTimeCompare([]byte(hex8), []byte(want)) != 1 {
 		return fmt.Errorf("%w: signature mismatch", ErrUnauthorized)
 	}
 	return nil

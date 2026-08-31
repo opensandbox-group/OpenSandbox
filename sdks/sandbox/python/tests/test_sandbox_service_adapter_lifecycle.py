@@ -22,6 +22,7 @@ import pytest
 
 from opensandbox.adapters.sandboxes_adapter import SandboxesAdapter
 from opensandbox.config import ConnectionConfig
+from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
@@ -30,6 +31,9 @@ from opensandbox.models.sandboxes import (
     SandboxFilter,
     SandboxImageSpec,
     SnapshotFilter,
+)
+from opensandbox.sync.adapters.sandboxes_adapter import (
+    SandboxesAdapterSync as SyncSandboxesAdapter,
 )
 
 
@@ -477,8 +481,8 @@ async def test_snapshot_lifecycle_calls_openapi(
         calls.append(("get", snapshot_id))
         return _Resp(status_code=200, parsed=_api_snapshot(snapshot_id))
 
-    async def _list_snapshots(*, client, sandbox_id, state, page, page_size):
-        calls.append(("list", (sandbox_id, state, page, page_size)))
+    async def _list_snapshots(*, client, sandbox_id, name, state, page, page_size):
+        calls.append(("list", (sandbox_id, name, state, page, page_size)))
         from opensandbox.api.lifecycle.models.list_snapshots_response import (
             ListSnapshotsResponse,
         )
@@ -525,7 +529,13 @@ async def test_snapshot_lifecycle_calls_openapi(
     )
     loaded = await adapter.get_snapshot("snap-1")
     listed = await adapter.list_snapshots(
-        SnapshotFilter(sandbox_id="sbx-1", states=["Ready"], page=1, page_size=10)
+        SnapshotFilter(
+            sandbox_id="sbx-1",
+            name="toolchain:python@rev-1",
+            states=["Ready"],
+            page=1,
+            page_size=10,
+        )
     )
     await adapter.delete_snapshot("snap-1")
 
@@ -535,9 +545,50 @@ async def test_snapshot_lifecycle_calls_openapi(
     assert calls == [
         ("create", ("sbx-1", "before-upgrade")),
         ("get", "snap-1"),
-        ("list", ("sbx-1", ["Ready"], 1, 10)),
+        ("list", ("sbx-1", "toolchain:python@rev-1", ["Ready"], 1, 10)),
         ("delete", "snap-1"),
     ]
+
+
+def test_sync_list_snapshots_forwards_name_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def _list_snapshots(*, client, sandbox_id, name, state, page, page_size):
+        calls.append((sandbox_id, name, state, page, page_size))
+        from opensandbox.api.lifecycle.models.list_snapshots_response import (
+            ListSnapshotsResponse,
+        )
+        from opensandbox.api.lifecycle.models.pagination_info import PaginationInfo
+
+        return _Resp(
+            status_code=200,
+            parsed=ListSnapshotsResponse(
+                items=[_api_snapshot("snap-1")],
+                pagination=PaginationInfo(
+                    page=1,
+                    page_size=20,
+                    total_items=1,
+                    total_pages=1,
+                    has_next_page=False,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.snapshots.get_snapshots.sync_detailed",
+        _list_snapshots,
+    )
+
+    adapter = SyncSandboxesAdapter(ConnectionConfigSync())
+    listed = adapter.list_snapshots(
+        SnapshotFilter(name="toolchain:python@rev-1")
+    )
+
+    assert listed.snapshot_infos[0].id == "snap-1"
+    assert len(calls) == 1
+    assert calls[0][1] == "toolchain:python@rev-1"
 
 
 async def test_get_sandbox_endpoint_logs_warning_and_not_error_on_failure(

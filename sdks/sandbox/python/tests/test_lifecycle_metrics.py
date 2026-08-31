@@ -136,6 +136,54 @@ def test_report_skipped_when_env_disables_metrics(monkeypatch):
     post.assert_not_called()
 
 
+def test_report_never_raises_when_construction_fails_sync():
+    # Regression test: previously, payload construction and event-loop /
+    # thread scheduling ran outside any try/except. If they raised, the
+    # telemetry exception would replace the original Sandbox.create failure
+    # when the reporter is called from the create catch path.
+    config = ConnectionConfig(
+        domain="127.0.0.1:9",
+        protocol="http",
+        request_timeout=timedelta(milliseconds=50),
+    )
+
+    with patch(
+        "opensandbox.internal.lifecycle_metrics._build_payload",
+        side_effect=RuntimeError("boom in construction"),
+    ):
+        # No running loop → sync/thread scheduling path. Must not raise.
+        report_sandbox_create_metric(
+            config,
+            sandbox_id="sbx",
+            image="python:3.12",
+            create_duration_ms=100,
+            success=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_report_never_raises_when_construction_fails_async():
+    # Same regression, running on an active event loop → task scheduling path.
+    config = ConnectionConfig(
+        domain="127.0.0.1:9",
+        protocol="http",
+        request_timeout=timedelta(milliseconds=50),
+    )
+
+    with patch(
+        "opensandbox.internal.lifecycle_metrics._build_payload",
+        side_effect=RuntimeError("boom in construction"),
+    ):
+        # Must not raise even though _build_payload throws before scheduling.
+        report_sandbox_create_metric(
+            config,
+            sandbox_id="sbx",
+            image="python:3.12",
+            create_duration_ms=100,
+            success=False,
+        )
+
+
 @pytest.mark.asyncio
 async def test_async_report_keeps_strong_task_ref():
     config = ConnectionConfig(

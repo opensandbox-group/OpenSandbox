@@ -15,13 +15,20 @@
 """Lightweight informer-style cache for namespaced custom resources."""
 
 import logging
+import math
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from kubernetes import watch
 from kubernetes.client import ApiException
 
 logger = logging.getLogger(__name__)
+
+# An idle watch sends nothing until the server closes the stream at
+# ``timeout_seconds``, so the client read timeout must sit above it.
+_WATCH_READ_TIMEOUT_BUFFER_SECONDS = 10
+_WATCH_CONNECT_TIMEOUT_SECONDS = 10
 
 
 class WorkloadInformer:
@@ -40,7 +47,7 @@ class WorkloadInformer:
             list_fn: Callable that lists the custom resource, with signature
                      ``list_fn(**kwargs) -> dict``.  Typically a bound method
                      like ``custom_api.list_namespaced_custom_object``.
-            resync_period_seconds: Full-resync interval when watch is disabled.
+            resync_period_seconds: Full-resync interval for the cache.
             watch_timeout_seconds: Per-stream watch timeout before restart.
             enable_watch: When False only the initial list is performed.
             thread_name: Name for the background thread, used in stack traces
@@ -56,13 +63,33 @@ class WorkloadInformer:
         self._lock = threading.RLock()
         self._resource_version: Optional[str] = None
         self._has_synced = False
+        self._last_contact_at: Optional[float] = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
     @property
     def has_synced(self) -> bool:
-        """Return True once an initial list has completed."""
-        return self._has_synced
+        """Return True while the cache is populated and still being maintained.
+
+        A watch can stop delivering without raising — a dead connection leaves the
+        reader parked forever — so a "listed once" latch would keep readers on a
+        frozen cache.  Going stale makes them fall back to a live request.
+
+        A stopped informer is likewise considered not synced, however recent its
+        last contact, since nothing will refresh the cache again.
+        """
+        if self._stop_event.is_set():
+            # Stopped: nothing will refresh the cache again, however recent it is.
+            return False
+        with self._lock:
+            if not self._has_synced or self._last_contact_at is None:
+                return False
+            return time.monotonic() - self._last_contact_at <= self._staleness_limit_seconds
+
+    @property
+    def _staleness_limit_seconds(self) -> float:
+        """One resync period, by which the cache should have been rebuilt, plus a watch cycle."""
+        return self.resync_period_seconds + self.watch_timeout_seconds
 
     def start(self) -> None:
         """Start the background watch thread if not already running."""
@@ -133,10 +160,12 @@ class WorkloadInformer:
 
     def _run(self) -> None:
         backoff = 1.0
+        last_full_resync_at: Optional[float] = None
         while not self._stop_event.is_set():
             try:
                 if not self._has_synced:
                     self._full_resync()
+                    last_full_resync_at = time.monotonic()
                     backoff = 1.0
 
                 if not self.enable_watch:
@@ -144,7 +173,22 @@ class WorkloadInformer:
                     self._has_synced = False  # trigger a fresh list on next loop
                     continue
 
-                self._run_watch_loop()
+                if last_full_resync_at is None:
+                    last_full_resync_at = time.monotonic()
+                remaining_resync_seconds = self.resync_period_seconds - (
+                    time.monotonic() - last_full_resync_at
+                )
+                if remaining_resync_seconds <= 0:
+                    self._has_synced = False
+                    continue
+
+                watch_timeout_seconds = min(
+                    self.watch_timeout_seconds,
+                    max(1, math.ceil(remaining_resync_seconds)),
+                )
+                self._run_watch_loop(watch_timeout_seconds)
+                if time.monotonic() - last_full_resync_at >= self.resync_period_seconds:
+                    self._has_synced = False
                 backoff = 1.0
             except ApiException as exc:
                 if exc.status == 410:
@@ -182,21 +226,31 @@ class WorkloadInformer:
             self._cache = new_cache
             self._advance_resource_version(resource_version)
             self._has_synced = True
+            self._last_contact_at = time.monotonic()
 
-    def _run_watch_loop(self) -> None:
+    def _run_watch_loop(self, timeout_seconds: int) -> None:
         """Stream watch events to keep the cache fresh."""
         w = watch.Watch()
         try:
             for event in w.stream(
                 self.list_fn,
                 resource_version=self._resource_version,
-                timeout_seconds=self.watch_timeout_seconds,
+                timeout_seconds=timeout_seconds,
+                # Without this a half-open connection parks the thread forever.
+                _request_timeout=(
+                    _WATCH_CONNECT_TIMEOUT_SECONDS,
+                    timeout_seconds + _WATCH_READ_TIMEOUT_BUFFER_SECONDS,
+                ),
             ):
                 if self._stop_event.is_set():
                     break
                 self._handle_event(event)
         finally:
             w.stop()
+
+        # The stream ran to completion, so the API server is still reachable.
+        with self._lock:
+            self._last_contact_at = time.monotonic()
 
     def _handle_event(self, event: Dict[str, Any]) -> None:
         obj = event.get("object")

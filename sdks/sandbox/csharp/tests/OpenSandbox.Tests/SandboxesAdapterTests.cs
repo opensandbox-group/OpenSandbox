@@ -79,10 +79,72 @@ public class SandboxesAdapterTests
         SandboxInfo sandbox = await adapter.GetSandboxAsync("sbx-1");
 
         sandbox.ExpiresAt.Should().BeNull();
+        sandbox.Allocation.Should().BeNull();
         sandbox.Platform.Should().NotBeNull();
         sandbox.Platform!.Arch.Should().Be("amd64");
         sandbox.Extensions.Should().ContainKey("opensandbox.extensions.custom-label")
             .WhoseValue.Should().Be("中文数据");
+    }
+
+    [Fact]
+    public async Task GetSandboxAsync_ShouldParseAllocation()
+    {
+        const string payload = """
+        {
+          "id": "sbx-pool",
+          "status": { "state": "Running" },
+          "entrypoint": ["/bin/sh"],
+          "createdAt": "2026-03-14T12:00:00Z",
+          "allocation": {
+            "mode": "pool",
+            "poolRef": "default/python",
+            "state": "allocated"
+          }
+        }
+        """;
+        var adapter = CreateAdapterWithJsonResponse(payload);
+
+        SandboxInfo sandbox = await adapter.GetSandboxAsync("sbx-pool");
+
+        sandbox.Allocation.Should().NotBeNull();
+        sandbox.Allocation!.Mode.Should().Be("pool");
+        sandbox.Allocation.PoolRef.Should().Be("default/python");
+        sandbox.Allocation.State.Should().Be("allocated");
+    }
+
+    [Fact]
+    public async Task ListSandboxesAsync_ShouldParseAllocation()
+    {
+        const string payload = """
+        {
+          "items": [
+            {
+              "id": "sbx-pool",
+              "status": { "state": "Running" },
+              "entrypoint": ["/bin/sh"],
+              "createdAt": "2026-03-14T12:00:00Z",
+              "allocation": {
+                "mode": "pool",
+                "poolRef": "default/python",
+                "state": "allocated"
+              }
+            },
+            {
+              "id": "sbx-legacy",
+              "status": { "state": "Running" },
+              "entrypoint": ["/bin/sh"],
+              "createdAt": "2026-03-14T12:00:00Z"
+            }
+          ]
+        }
+        """;
+        var adapter = CreateAdapterWithJsonResponse(payload);
+
+        ListSandboxesResponse response = await adapter.ListSandboxesAsync();
+
+        response.Items[0].Allocation.Should().NotBeNull();
+        response.Items[0].Allocation!.PoolRef.Should().Be("default/python");
+        response.Items[1].Allocation.Should().BeNull();
     }
 
     [Fact]
@@ -136,6 +198,48 @@ public class SandboxesAdapterTests
     }
 
     [Fact]
+    public async Task CreateSandboxAsync_ShouldSerializeLifecycleHooks()
+    {
+        var handler = new CaptureCreateRequestHandler();
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        _ = await adapter.CreateSandboxAsync(new CreateSandboxRequest
+        {
+            ResourceLimits = new Dictionary<string, string>(),
+            Lifecycle = new SandboxLifecycle
+            {
+                PreStart = new LifecycleHook
+                {
+                    Command = ["/opt/hooks/restore.sh"],
+                    TimeoutSeconds = 300
+                },
+                Periodic =
+                [
+                    new PeriodicLifecycleHook
+                    {
+                        Name = "checkpoint",
+                        Schedule = "@hourly",
+                        Command = ["/opt/hooks/checkpoint.sh"]
+                    }
+                ]
+            }
+        });
+
+        handler.RequestBody.Should().NotBeNullOrEmpty();
+        using var json = JsonDocument.Parse(handler.RequestBody!);
+        var lifecycle = json.RootElement.GetProperty("lifecycle");
+        var preStart = lifecycle.GetProperty("preStart");
+        preStart.GetProperty("command")[0].GetString().Should().Be("/opt/hooks/restore.sh");
+        preStart.GetProperty("timeoutSeconds").GetInt32().Should().Be(300);
+        var periodic = lifecycle.GetProperty("periodic")[0];
+        periodic.GetProperty("name").GetString().Should().Be("checkpoint");
+        periodic.GetProperty("schedule").GetString().Should().Be("@hourly");
+        periodic.GetProperty("command")[0].GetString().Should().Be("/opt/hooks/checkpoint.sh");
+    }
+
+    [Fact]
     public async Task PatchSandboxMetadataAsync_ShouldSendMetadataBodyAndPreserveNull()
     {
         var handler = new CapturePatchMetadataRequestHandler();
@@ -154,6 +258,23 @@ public class SandboxesAdapterTests
         json.RootElement.GetProperty("team").GetString().Should().Be("platform");
         json.RootElement.GetProperty("old").ValueKind.Should().Be(JsonValueKind.Null);
         result.Metadata.Should().ContainKey("team").WhoseValue.Should().Be("platform");
+    }
+
+    [Fact]
+    public async Task ListSnapshotsAsync_ShouldIncludeExactNameFilter()
+    {
+        var handler = new CaptureListSnapshotsHandler();
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        _ = await adapter.ListSnapshotsAsync(new ListSnapshotsParams
+        {
+            Name = "toolchain:csharp@rev-1"
+        });
+
+        handler.PathAndQuery.Should().Be(
+            "/v1/snapshots?name=toolchain%3Acsharp%40rev-1");
     }
 
     private static SandboxesAdapter CreateAdapterWithJsonResponse(string payload)
@@ -244,6 +365,35 @@ public class SandboxesAdapterTests
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
             return response;
+        }
+    }
+
+    private sealed class CaptureListSnapshotsHandler : HttpMessageHandler
+    {
+        public string? PathAndQuery { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            PathAndQuery = request.RequestUri?.PathAndQuery;
+            const string payload = """
+            {
+              "items": [],
+              "pagination": {
+                "page": 1,
+                "pageSize": 20,
+                "totalItems": 0,
+                "totalPages": 0,
+                "hasNextPage": false
+              }
+            }
+            """;
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+            return Task.FromResult(response);
         }
     }
 }

@@ -226,6 +226,7 @@ Rules:
 - `sandbox list --state` accepts known lifecycle states case-insensitively
 - use `renew` before long-running work instead of waiting for expiry
 - use `pause` only when the workload can tolerate suspension
+- treat the pause result as request acceptance and poll `sandbox get` until the state is `Paused` or `Failed`
 - use `kill` when cleanup is the real goal; do not leave orphaned sandboxes behind
 
 ## Runtime Notes
@@ -233,6 +234,7 @@ Rules:
 - `renew` resets the expiration to approximately `now + timeout`; treat it as a fresh TTL, not a simple additive extension to the old timestamp
 - `create --timeout none` means no automatic expiration; cleanup becomes an explicit `kill` responsibility
 - `create` without `--timeout` does not mean manual cleanup; it uses `defaults.timeout` first and otherwise leaves TTL selection to the SDK/server default
+- `pause` is asynchronous; `Pause request accepted` does not mean the sandbox is already paused
 - `pause` and `resume` may depend on the underlying runtime; if the runtime does not support them, avoid promising they will work
 - host-path volumes depend on server-side allowed host path configuration
 - if creation fails or the sandbox never becomes healthy, switch to `sandbox-troubleshooting` instead of adding more create flags blindly

@@ -116,7 +116,13 @@ def test_list_snapshots_parses_filters_and_pagination(
 
     response = client.get(
         "/v1/snapshots",
-        params={"sandboxId": "sbx-001", "state": ["Ready", "Failed"], "page": 2, "pageSize": 5},
+        params={
+            "sandboxId": "sbx-001",
+            "name": "toolchain:python@rev-1",
+            "state": ["Ready", "Failed"],
+            "page": 2,
+            "pageSize": 5,
+        },
         headers=auth_headers,
     )
 
@@ -124,6 +130,7 @@ def test_list_snapshots_parses_filters_and_pagination(
     payload = response.json()
     assert payload["items"][0]["id"] == "snap-001"
     assert captured_requests[0].filter.sandbox_id == "sbx-001"
+    assert captured_requests[0].filter.name == "toolchain:python@rev-1"
     assert captured_requests[0].filter.state == ["Ready", "Failed"]
     assert captured_requests[0].pagination.page == 2
     assert captured_requests[0].pagination.page_size == 5

@@ -17,6 +17,8 @@
 Sandbox-related exception definitions.
 """
 
+from datetime import timedelta
+
 
 class SandboxError:
     """
@@ -34,6 +36,9 @@ class SandboxError:
     POOL_NOT_RUNNING = "POOL_NOT_RUNNING"
     POOL_DESTROYED = "POOL_DESTROYED"
     POOL_DESTROY_INCOMPLETE = "POOL_DESTROY_INCOMPLETE"
+    TIMEOUT = "TIMEOUT"
+    CONNECTION = "CONNECTION"
+    RATE_LIMIT = "RATE_LIMIT"
 
     def __init__(self, code: str, message: str | None = None) -> None:
         self.code = code
@@ -47,8 +52,10 @@ class SandboxException(Exception):
     """
     Base exception class for all sandbox-related errors.
 
-    This is the root exception class that all other sandbox exceptions inherit from.
-    It provides a consistent error structure across the SDK.
+    Provides a consistent error structure across the SDK. ``is_retryable``
+    reflects whether the SDK actually decided to retry this failure:
+    budget exhaustion, deadline expiry, and caller cancellation all
+    force it to ``False`` even for transient causes.
     """
 
     def __init__(
@@ -57,11 +64,18 @@ class SandboxException(Exception):
         cause: Exception | None = None,
         error: SandboxError | None = None,
         request_id: str | None = None,
+        is_retryable: bool = False,
     ) -> None:
         super().__init__(message)
         self.__cause__ = cause
         self.error = error or SandboxError(SandboxError.INTERNAL_UNKNOWN_ERROR)
         self.request_id = request_id
+        self._is_retryable = is_retryable
+
+    @property
+    def is_retryable(self) -> bool:
+        """True iff the SDK considered this failure retryable at emission time."""
+        return self._is_retryable
 
     def __str__(self) -> str:
         parts = [super().__str__()]
@@ -76,6 +90,10 @@ class SandboxApiException(SandboxException):
     """
     Thrown when the Sandbox API returns an error response (e.g., HTTP 4xx or 5xx)
     or meets unexpected error when calling API.
+
+    ``response_body`` carries the raw response bytes from the server so
+    callers can inspect payloads the SDK could not parse into a
+    structured ``SandboxError``.
     """
 
     def __init__(
@@ -85,14 +103,49 @@ class SandboxApiException(SandboxException):
         status_code: int | None = None,
         error: SandboxError | None = None,
         request_id: str | None = None,
+        response_body: bytes | None = None,
+        is_retryable: bool = False,
     ) -> None:
         super().__init__(
             message,
             cause,
             error or SandboxError(SandboxError.UNEXPECTED_RESPONSE),
             request_id=request_id,
+            is_retryable=is_retryable,
         )
         self.status_code = status_code
+        self.response_body = response_body
+
+
+class SandboxRateLimitException(SandboxApiException):
+    """
+    Thrown when the API returns HTTP 429.
+
+    ``retry_after`` carries the server-supplied header value as a
+    ``timedelta`` when present, so fast-fail callers can still act on it.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        cause: Exception | None = None,
+        status_code: int | None = 429,
+        error: SandboxError | None = None,
+        request_id: str | None = None,
+        retry_after: timedelta | None = None,
+        response_body: bytes | None = None,
+        is_retryable: bool = False,
+    ) -> None:
+        super().__init__(
+            message,
+            cause,
+            status_code=status_code,
+            error=error or SandboxError(SandboxError.RATE_LIMIT, message),
+            request_id=request_id,
+            response_body=response_body,
+            is_retryable=is_retryable,
+        )
+        self.retry_after = retry_after
 
 
 class SandboxInternalException(SandboxException):
@@ -104,9 +157,53 @@ class SandboxInternalException(SandboxException):
         self,
         message: str | None = None,
         cause: Exception | None = None,
+        error: SandboxError | None = None,
+        is_retryable: bool = False,
     ) -> None:
         super().__init__(
-            message, cause, SandboxError(SandboxError.INTERNAL_UNKNOWN_ERROR)
+            message,
+            cause,
+            error or SandboxError(SandboxError.INTERNAL_UNKNOWN_ERROR),
+            is_retryable=is_retryable,
+        )
+
+
+class SandboxTimeoutException(SandboxInternalException):
+    """
+    Thrown when a per-attempt timeout or overall retry deadline fires.
+
+    Distinct from :class:`SandboxReadyTimeoutException`, which is the
+    health-poll timeout during sandbox startup.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        cause: Exception | None = None,
+        is_retryable: bool = False,
+    ) -> None:
+        super().__init__(
+            message,
+            cause,
+            error=SandboxError(SandboxError.TIMEOUT, message),
+            is_retryable=is_retryable,
+        )
+
+
+class SandboxConnectionException(SandboxInternalException):
+    """Transport-layer failure: DNS, TCP connect, TLS, or connection reset."""
+
+    def __init__(
+        self,
+        message: str | None = None,
+        cause: Exception | None = None,
+        is_retryable: bool = False,
+    ) -> None:
+        super().__init__(
+            message,
+            cause,
+            error=SandboxError(SandboxError.CONNECTION, message),
+            is_retryable=is_retryable,
         )
 
 

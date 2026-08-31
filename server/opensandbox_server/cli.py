@@ -36,6 +36,7 @@ from opensandbox_server.config import (
     RenewIntentConfig,
     RuntimeConfig,
     ServerConfig,
+    StoreConfig,
     StorageConfig,
     load_config,
 )
@@ -259,6 +260,7 @@ def render_full_config(destination: str | Path | None = None, *, force: bool = F
         ),
         _render_section("ingress", IngressConfig),
         _render_section("storage", StorageConfig),
+        _render_section("store", StoreConfig),
     ]
 
     content = "\n\n".join(sections) + "\n"
@@ -305,6 +307,7 @@ def main() -> None:
         backlog=server_cfg.backlog,
         loop=server_cfg.loop,
         http=server_cfg.http,
+        date_header=False,
         timeout_graceful_shutdown=server_cfg.timeout_graceful_shutdown,
     )
 

@@ -45,6 +45,7 @@ import type {
   RenewSandboxExpirationResponse,
   SandboxId,
   SandboxInfo,
+  SandboxLifecycle,
   SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
@@ -60,7 +61,13 @@ const unavailableIsolation: IsolationService = {
     throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
   },
   capabilities(): Promise<IsolatedCapabilities> {
-    return Promise.resolve({ available: false, commit_supported: false, diff_supported: false });
+    return Promise.resolve({
+      available: false,
+      setpriv_available: false,
+      userns_available: false,
+      commit_supported: false,
+      diff_supported: false,
+    });
   },
   list(): Promise<IsolatedSessionSummary[]> {
     throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
@@ -165,6 +172,10 @@ export interface SandboxCreateOptions {
    * Opaque extension parameters passed through to the server as-is.
    */
   extensions?: Record<string, string>;
+  /**
+   * Optional declarative lifecycle hooks executed inside the sandbox.
+   */
+  lifecycle?: SandboxLifecycle;
   /**
    * Optional runtime platform constraint used for provisioning.
    */
@@ -406,6 +417,7 @@ export class Sandbox {
       credentialProxy: opts.credentialProxy,
       volumes: opts.volumes,
       extensions: opts.extensions ?? {},
+      lifecycle: opts.lifecycle,
       platform: opts.platform,
     };
     if (timeoutSeconds !== null) {
@@ -732,12 +744,7 @@ export class Sandbox {
 
     const buildTimeoutMessage = () => {
       const context = `domain=${this.connectionConfig.domain}, useServerProxy=${this.connectionConfig.useServerProxy}`;
-      let suggestion =
-        "If this sandbox runs in Docker bridge or remote-network mode, consider enabling useServerProxy=true.";
-      if (!this.connectionConfig.useServerProxy) {
-        suggestion += " You can also configure server-side [docker].host_ip for direct endpoint access.";
-      }
-      return `Sandbox health check timed out after ${opts.readyTimeoutSeconds}s (${attempt} attempts). ${errorDetail} Connection context: ${context}. ${suggestion}`;
+      return `Sandbox health check timed out after ${opts.readyTimeoutSeconds}s (${attempt} attempts). ${errorDetail} Connection context: ${context}.`;
     };
 
     // Wait until execd becomes reachable and passes health check.

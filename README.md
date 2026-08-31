@@ -32,6 +32,20 @@ OpenSandbox is a **general-purpose sandbox platform** for AI applications, offer
 - 🔑 **Credential Vault**: Secure credential injection for sandbox outbound requests without exposing real secrets to workloads. See [Credential Vault](docs/guides/credential-vault.md).
 - 🏰 **Strong Isolation**: Supports secure container runtimes like gVisor, Kata Containers, and Firecracker microVM for enhanced isolation between sandbox workloads and the host. See [Secure Container Runtime Guide](docs/guides/secure-container.md) for details.
 
+## Official Container Images
+
+OpenSandbox release images are published under the same component name in
+three official registries:
+
+- Docker Hub: `docker.io/opensandbox/<component>`
+- GitHub Container Registry: `ghcr.io/opensandbox-group/opensandbox/<component>`
+- Alibaba Cloud Container Registry: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/<component>`
+
+Tagged release images are signed keylessly with Cosign and include provenance
+attestations. Pin production images by digest and follow the
+[release verification guide](docs/community/release-verification.md) to verify
+the image against the OpenSandbox GitHub Actions identity before deployment.
+
 ## SDKs
 
 Python:
@@ -224,7 +238,7 @@ OpenSandbox provides examples covering SDK usage, agent integrations, browser au
 
 #### 🤖 Coding Agent Integrations
 
-- **Coding CLIs** — [Claude Code](docs/examples/claude-code.md), [Gemini CLI](docs/examples/gemini-cli.md), [OpenAI Codex CLI](docs/examples/codex-cli.md), [Qwen Code](docs/examples/qwen-code.md), [Kimi CLI](docs/examples/kimi-cli.md): run each vendor CLI inside OpenSandbox.
+- **Coding CLIs** — [Claude Code](docs/examples/claude-code.md), [Gemini CLI](docs/examples/gemini-cli.md), [OpenAI Codex CLI](docs/examples/codex-cli.md), [OpenCode](docs/examples/opencode.md), [Qwen Code](docs/examples/qwen-code.md), [Kimi CLI](docs/examples/kimi-cli.md): run each CLI inside OpenSandbox.
 - **[langgraph](docs/examples/langgraph.md)** - LangGraph state-machine workflow that creates/runs a sandbox job with fallback retry.
 - **[google-adk](docs/examples/google-adk.md)** - Google ADK agent using OpenSandbox tools to write/read files and run commands.
 - **[openclaw](docs/examples/openclaw.md)** - Launch an OpenClaw Gateway inside a sandbox.
@@ -238,7 +252,6 @@ OpenSandbox provides examples covering SDK usage, agent integrations, browser au
 
 #### 🧠 Training and Evaluation
 
-- **[rl-training](docs/examples/rl-training.md)** - DQN CartPole training in a sandbox with checkpoints and summary output.
 - **[harbor-evaluation](docs/examples/harbor-evaluation.md)** - Run a [Harbor](https://github.com/harbor-framework/harbor) agent evaluation on OpenSandbox, one sandbox per trial.
 
 For more details, please refer to the [examples documentation](docs/examples/index.md).
@@ -297,4 +310,4 @@ and how roadmap items are managed.
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=opensandbox-group/OpenSandbox&type=date&legend=top-left)](https://www.star-history.com/#opensandbox-group/OpenSandbox&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=opensandbox-group/OpenSandbox&type=date&legend=top-left)](https://star-history.dera.page/#opensandbox-group/OpenSandbox&type=date&legend=top-left)

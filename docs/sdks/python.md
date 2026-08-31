@@ -181,6 +181,19 @@ finally:
     await pool.shutdown(graceful=True)
 ```
 
+::: tip AcquirePolicy
+`AcquirePolicy` controls what happens when the idle buffer is empty **or** the first idle candidate fails its readiness check:
+
+| Policy | Retry across idles | Fallback on exhaustion |
+|---|---|---|
+| `FAIL_FAST` | no | raise `PoolEmptyException` / `PoolAcquireFailedException` |
+| `DIRECT_CREATE` (default) | no | create a new sandbox via lifecycle API |
+| `RETRY_NEXT_IDLE` | up to `max_acquire_retries` idles | raise |
+| `RETRY_NEXT_IDLE_THEN_CREATE` | up to `max_acquire_retries` idles | create a new sandbox |
+
+Use the `RETRY_NEXT_IDLE*` variants when the pool may contain a mix of healthy and stale idle sandboxes (custom templates with long cold-start; network flap left a few unreachable idles). Each failed candidate still pays up to `acquire_ready_timeout`, so bound the retry with the `max_acquire_retries` constructor argument (default `3`). Both `SandboxPoolSync` and `SandboxPoolAsync` accept the same argument.
+:::
+
 For Python production services with multiple processes or pods, use Redis-backed
 pool state. Install the optional dependency:
 
@@ -234,11 +247,48 @@ For async pools, pass a `redis.asyncio` client to `AsyncRedisPoolStateStore`.
   idle buffer. `release_all_idle()` is only a best-effort cleanup pass in distributed
   mode because another primary may put new idle sandboxes concurrently unless the
   shared target has already been reduced.
+- `release_all_idle()` preserves serial cleanup. Use
+  `release_all_idle_parallel(max_workers=50)` for bounded parallel cleanup. The
+  worker count must be positive, and the call waits for every drained ID to receive
+  a best-effort kill attempt.
 - Configure `primary_lock_ttl` greater than `warmup_ready_timeout` plus expected
   warmup preparer time and buffer.
 - Redis outages are surfaced as pool state store errors. The pool fails closed; it
   does not bypass shared state.
 :::
+
+## Lifecycle Hooks
+
+Pass a `SandboxLifecycle` when creating a sandbox. `pre_start` completes before the entrypoint starts, while `periodic` hooks run on their schedules after startup.
+
+```python
+from opensandbox.models.sandboxes import (
+    LifecycleHook,
+    PeriodicLifecycleHook,
+    SandboxLifecycle,
+)
+
+sandbox = await Sandbox.create(
+    "ubuntu:24.04",
+    connection_config=config,
+    lifecycle=SandboxLifecycle(
+        pre_start=LifecycleHook(
+            command=["sh", "-c", "echo ready > /tmp/prestart.done"],
+            timeout_seconds=120,
+        ),
+        periodic=[
+            PeriodicLifecycleHook(
+                name="checkpoint",
+                schedule="@every 5m",
+                command=["sh", "-c", "date -u >> /tmp/checkpoints.log"],
+                timeout_seconds=120,
+            )
+        ],
+    ),
+)
+```
+
+The Server validates `timeout_seconds`; `pre_start` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
 
 ## Usage Examples
 
@@ -405,6 +455,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry)  | SDK-created per instance     | -                      |
+| `retry_policy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
 | `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
 
@@ -443,7 +494,67 @@ config = ConnectionConfig(
 # await config.transport.aclose()
 ```
 
-### 2. Sandbox Creation Configuration
+### 2. Automatic retries
+
+The SDK retries transient failures automatically. `ConnectionConfig` /
+`ConnectionConfigSync` install a retry wrapper around the default shared
+transport, controlled by `retry_policy` (`opensandbox.transport.RetryPolicy`).
+
+Default behavior:
+
+- **Enabled by default.** Idempotent methods (`GET/HEAD/PUT/DELETE/OPTIONS`)
+  are retried on `429`, `502`, `503`, and on pre-send transport failures
+  (DNS, TCP connect, TLS handshake, fresh-connection reset).
+- **`POST`/`PATCH` are never retried on a status code by default**, since the
+  request may already have been applied server-side. Pre-send transport
+  failures (before any byte is written) are still retried for these methods.
+- Up to `3` retries with decorrelated-jitter exponential backoff, honoring a
+  server `Retry-After` header (capped at 60s).
+- **SSE / streaming requests bypass retry** entirely (bodies are not
+  replayable).
+
+::: warning Behavior change
+Retries are on by default. This can increase the number of HTTP attempts and
+tail latency compared to earlier SDK versions. If you rely on fast-fail
+semantics, opt out explicitly with `RetryPolicy.disabled()`.
+:::
+
+```python
+from datetime import timedelta
+
+from opensandbox.transport import RetryPolicy
+
+# Fast-fail: never retry (also skips fresh-connection recovery).
+config = ConnectionConfig(
+    api_key="your-key",
+    domain="api.opensandbox.io",
+    retry_policy=RetryPolicy.disabled(),
+)
+
+# Custom policy: more retries, an overall wall-clock deadline, and an
+# opt-in to retry POST/PATCH on 503 (only safe if your endpoints are
+# idempotent).
+from http import HTTPStatus
+
+config = ConnectionConfig(
+    api_key="your-key",
+    domain="api.opensandbox.io",
+    retry_policy=RetryPolicy(
+        max_retries=5,
+        overall_deadline=timedelta(seconds=20),
+        retryable_status_codes_non_idempotent=frozenset(
+            {HTTPStatus.SERVICE_UNAVAILABLE}
+        ),
+    ),
+)
+```
+
+::: info
+If you pass a custom `transport`, the SDK does **not** wrap it; installing
+retry behavior is then your responsibility.
+:::
+
+### 3. Sandbox Creation Configuration
 
 The `Sandbox.create()` allows configuring the sandbox environment.
 
@@ -482,7 +593,7 @@ sandbox = await Sandbox.create(
 )
 ```
 
-### 3. Runtime Egress Policy Updates
+### 4. Runtime Egress Policy Updates
 
 Runtime egress policy reads and patches are sent directly to the sandbox egress sidecar.
 The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
@@ -504,7 +615,7 @@ await sandbox.patch_egress_rules(
 )
 ```
 
-### 4. Credential Vault
+### 5. Credential Vault
 
 Credential Vault injects outbound credentials from the egress sidecar while
 keeping real secrets out of sandbox environment variables, commands, files, and

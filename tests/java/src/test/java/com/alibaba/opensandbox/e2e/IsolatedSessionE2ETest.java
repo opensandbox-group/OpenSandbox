@@ -72,7 +72,9 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 caps.getVersion(),
                 caps.getMessage());
         if (!caps.getAvailable()) {
-            fail("Isolation NOT available: " + (caps.getMessage() != null ? caps.getMessage() : "unknown reason"));
+            fail(
+                    "Isolation NOT available: "
+                            + (caps.getMessage() != null ? caps.getMessage() : "unknown reason"));
         }
     }
 
@@ -96,9 +98,18 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     void testSessionLifecycle() {
         IsolationSession session =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         assertNotNull(session.getSessionId());
 
         var state = session.get();
@@ -112,11 +123,21 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     void testRunEcho() {
         IsolationSession session =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         try {
-            Execution exec = session.run(new IsolatedRunRequest("echo hello-isolation", null, null));
+            Execution exec =
+                    session.run(new IsolatedRunRequest("echo hello-isolation", null, null));
             assertTrue(stdoutText(exec).contains("hello-isolation"));
         } finally {
             session.delete();
@@ -128,9 +149,18 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     void testPidIsolation() {
         IsolationSession session =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         try {
             Execution exec = session.run(new IsolatedRunRequest("echo $$", null, null));
             int pid = Integer.parseInt(stdoutText(exec).trim());
@@ -145,15 +175,23 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     void testRunWithEnvs() {
         IsolationSession session =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         try {
             Execution exec =
-                    session.run(new IsolatedRunRequest(
-                            "echo $MY_VAR",
-                            Map.of("MY_VAR", "test-value-42"),
-                            null));
+                    session.run(
+                            new IsolatedRunRequest(
+                                    "echo $MY_VAR", Map.of("MY_VAR", "test-value-42"), null));
             assertTrue(stdoutText(exec).contains("test-value-42"));
         } finally {
             session.delete();
@@ -165,9 +203,18 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     void testSessionStatePersists() {
         IsolationSession session =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced", null, null, null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         try {
             session.run(new IsolatedRunRequest("export PERSIST_VAR=abc123", null, null));
             Execution exec = session.run(new IsolatedRunRequest("echo $PERSIST_VAR", null, null));
@@ -184,19 +231,42 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
 
         IsolationSession sessionA =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/workspace", "rw"),
-                                "strict", null, null, null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/workspace", "rw"),
+                                        "strict",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         IsolationSession sessionB =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/workspace", "rw"),
-                                "strict", null, null, null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/workspace", "rw"),
+                                        "strict",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         try {
-            sessionA.run(new IsolatedRunRequest(
-                    "echo secret > /tmp/isolated_test_file.txt", null, null));
-            Execution exec = sessionB.run(new IsolatedRunRequest(
-                    "cat /tmp/isolated_test_file.txt 2>&1 || echo NOT_FOUND", null, null));
+            sessionA.run(
+                    new IsolatedRunRequest(
+                            "echo secret > /tmp/isolated_test_file.txt", null, null));
+            Execution exec =
+                    sessionB.run(
+                            new IsolatedRunRequest(
+                                    "cat /tmp/isolated_test_file.txt 2>&1 || echo NOT_FOUND",
+                                    null,
+                                    null));
             String text = stdoutText(exec);
             assertTrue(
                     text.contains("NOT_FOUND") || text.contains("No such file"),
@@ -211,9 +281,18 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
 
     private IsolationSession createSession(String mode, String path) {
         return sandbox.isolation()
-                .create(new CreateIsolatedSessionRequest(
-                        new IsolatedWorkspaceSpec(path, mode),
-                        "balanced", null, null, null, null, null, null, null, null));
+                .create(
+                        new CreateIsolatedSessionRequest(
+                                new IsolatedWorkspaceSpec(path, mode),
+                                "balanced",
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null));
     }
 
     private IsolationSession createSession(String mode) {
@@ -226,8 +305,14 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("rw");
         try {
             String path = "/tmp/upload_rw_" + System.currentTimeMillis() + ".txt";
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(path).data("rw upload").mode(644).build()));
+            session.getFiles()
+                    .write(
+                            List.of(
+                                    WriteEntry.builder()
+                                            .path(path)
+                                            .data("rw upload")
+                                            .mode(644)
+                                            .build()));
             String content = session.getFiles().readFile(path);
             assertEquals("rw upload", content);
         } finally {
@@ -241,9 +326,9 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("rw");
         try {
             String path = "/tmp/bytes_rw_" + System.currentTimeMillis() + ".bin";
-            byte[] data = new byte[]{0x00, 0x01, 0x02, (byte) 0xff};
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(path).data(data).mode(644).build()));
+            byte[] data = new byte[] {0x00, 0x01, 0x02, (byte) 0xff};
+            session.getFiles()
+                    .write(List.of(WriteEntry.builder().path(path).data(data).mode(644).build()));
             byte[] read = session.getFiles().readByteArray(path);
             assertArrayEquals(data, read);
         } finally {
@@ -257,8 +342,8 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("rw");
         try {
             String path = "/tmp/info_rw_" + System.currentTimeMillis() + ".txt";
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(path).data("info").mode(644).build()));
+            session.getFiles()
+                    .write(List.of(WriteEntry.builder().path(path).data("info").mode(644).build()));
             Map<String, EntryInfo> infoMap = session.getFiles().readFileInfo(List.of(path));
             assertTrue(infoMap.containsKey(path));
             assertEquals(4, infoMap.get(path).getSize());
@@ -275,14 +360,30 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         try {
             String prefix = "/tmp/search_rw_" + System.currentTimeMillis();
             session.run(new IsolatedRunRequest("mkdir -p " + prefix, null, null));
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(prefix + "/a.txt").data("a").mode(644).build(),
-                    WriteEntry.builder().path(prefix + "/b.txt").data("b").mode(644).build(),
-                    WriteEntry.builder().path(prefix + "/c.log").data("c").mode(644).build()));
-            List<EntryInfo> results = session.getFiles().search(
-                    SearchEntry.builder().path(prefix).pattern("*.txt").build());
+            session.getFiles()
+                    .write(
+                            List.of(
+                                    WriteEntry.builder()
+                                            .path(prefix + "/a.txt")
+                                            .data("a")
+                                            .mode(644)
+                                            .build(),
+                                    WriteEntry.builder()
+                                            .path(prefix + "/b.txt")
+                                            .data("b")
+                                            .mode(644)
+                                            .build(),
+                                    WriteEntry.builder()
+                                            .path(prefix + "/c.log")
+                                            .data("c")
+                                            .mode(644)
+                                            .build()));
+            List<EntryInfo> results =
+                    session.getFiles()
+                            .search(SearchEntry.builder().path(prefix).pattern("*.txt").build());
             assertEquals(2, results.size());
-            List<String> paths = results.stream().map(EntryInfo::getPath).collect(Collectors.toList());
+            List<String> paths =
+                    results.stream().map(EntryInfo::getPath).collect(Collectors.toList());
             assertTrue(paths.stream().anyMatch(p -> p.contains("a.txt")));
             assertTrue(paths.stream().anyMatch(p -> p.contains("b.txt")));
         } finally {
@@ -296,8 +397,8 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("rw");
         try {
             String dir = "/tmp/mkdir_rw_" + System.currentTimeMillis();
-            session.getFiles().createDirectories(List.of(
-                    WriteEntry.builder().path(dir).mode(755).build()));
+            session.getFiles()
+                    .createDirectories(List.of(WriteEntry.builder().path(dir).mode(755).build()));
             Map<String, EntryInfo> infoMap = session.getFiles().readFileInfo(List.of(dir));
             assertTrue(infoMap.containsKey(dir));
         } finally {
@@ -311,11 +412,11 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("rw");
         try {
             String path = "/tmp/delete_rw_" + System.currentTimeMillis() + ".txt";
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(path).data("del").mode(644).build()));
+            session.getFiles()
+                    .write(List.of(WriteEntry.builder().path(path).data("del").mode(644).build()));
             session.getFiles().deleteFiles(List.of(path));
-            assertThrows(SandboxException.class,
-                    () -> session.getFiles().readFileInfo(List.of(path)));
+            assertThrows(
+                    SandboxException.class, () -> session.getFiles().readFileInfo(List.of(path)));
         } finally {
             session.delete();
         }
@@ -328,10 +429,9 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         try {
             String src = "/tmp/mv_rw_src_" + System.currentTimeMillis() + ".txt";
             String dst = "/tmp/mv_rw_dst_" + System.currentTimeMillis() + ".txt";
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(src).data("move").mode(644).build()));
-            session.getFiles().moveFiles(List.of(
-                    MoveEntry.builder().src(src).dest(dst).build()));
+            session.getFiles()
+                    .write(List.of(WriteEntry.builder().path(src).data("move").mode(644).build()));
+            session.getFiles().moveFiles(List.of(MoveEntry.builder().src(src).dest(dst).build()));
             assertEquals("move", session.getFiles().readFile(dst));
         } finally {
             session.delete();
@@ -344,10 +444,11 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("rw");
         try {
             String path = "/tmp/chmod_rw_" + System.currentTimeMillis() + ".txt";
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(path).data("ch").mode(644).build()));
-            session.getFiles().setPermissions(List.of(
-                    SetPermissionEntry.builder().path(path).mode(755).build()));
+            session.getFiles()
+                    .write(List.of(WriteEntry.builder().path(path).data("ch").mode(644).build()));
+            session.getFiles()
+                    .setPermissions(
+                            List.of(SetPermissionEntry.builder().path(path).mode(755).build()));
             Map<String, EntryInfo> infoMap = session.getFiles().readFileInfo(List.of(path));
             assertEquals(755, infoMap.get(path).getMode());
         } finally {
@@ -361,11 +462,22 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("rw");
         try {
             String path = "/tmp/replace_rw_" + System.currentTimeMillis() + ".txt";
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(path).data("hello old world").mode(644).build()));
-            session.getFiles().replaceContents(List.of(
-                    ContentReplaceEntry.builder()
-                            .path(path).oldContent("old").newContent("new").build()));
+            session.getFiles()
+                    .write(
+                            List.of(
+                                    WriteEntry.builder()
+                                            .path(path)
+                                            .data("hello old world")
+                                            .mode(644)
+                                            .build()));
+            session.getFiles()
+                    .replaceContents(
+                            List.of(
+                                    ContentReplaceEntry.builder()
+                                            .path(path)
+                                            .oldContent("old")
+                                            .newContent("new")
+                                            .build()));
             String content = session.getFiles().readFile(path);
             assertTrue(content.contains("new"));
             assertFalse(content.contains("old"));
@@ -381,11 +493,22 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         try {
             String prefix = "/tmp/listdir_rw_" + System.currentTimeMillis();
             session.run(new IsolatedRunRequest("mkdir -p " + prefix + "/sub", null, null));
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(prefix + "/f1.txt").data("f1").mode(644).build(),
-                    WriteEntry.builder().path(prefix + "/sub/f2.txt").data("f2").mode(644).build()));
+            session.getFiles()
+                    .write(
+                            List.of(
+                                    WriteEntry.builder()
+                                            .path(prefix + "/f1.txt")
+                                            .data("f1")
+                                            .mode(644)
+                                            .build(),
+                                    WriteEntry.builder()
+                                            .path(prefix + "/sub/f2.txt")
+                                            .data("f2")
+                                            .mode(644)
+                                            .build()));
             List<EntryInfo> entries = session.getFiles().listDirectory(prefix);
-            List<String> names = entries.stream().map(EntryInfo::getPath).collect(Collectors.toList());
+            List<String> names =
+                    entries.stream().map(EntryInfo::getPath).collect(Collectors.toList());
             assertTrue(names.stream().anyMatch(n -> n.contains("f1.txt")));
             assertTrue(names.stream().anyMatch(n -> n.contains("sub")));
         } finally {
@@ -402,8 +525,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         sandbox.commands().run("echo ro-data > /tmp/" + marker);
         IsolationSession session = createSession("ro");
         try {
-            Execution exec = session.run(
-                    new IsolatedRunRequest("cat /tmp/" + marker, null, null));
+            Execution exec = session.run(new IsolatedRunRequest("cat /tmp/" + marker, null, null));
             assertTrue(stdoutText(exec).contains("ro-data"));
         } finally {
             session.delete();
@@ -416,11 +538,17 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     void testRoCannotWrite() {
         IsolationSession session = createSession("ro");
         try {
-            Execution exec = session.run(new IsolatedRunRequest(
-                    "echo fail > /tmp/ro_write_test.txt 2>&1; echo EXIT=$?", null, null));
+            Execution exec =
+                    session.run(
+                            new IsolatedRunRequest(
+                                    "echo fail > /tmp/ro_write_test.txt 2>&1; echo EXIT=$?",
+                                    null,
+                                    null));
             String text = stdoutText(exec);
             assertTrue(
-                    text.contains("EXIT=1") || text.contains("Read-only") || text.contains("Permission denied"),
+                    text.contains("EXIT=1")
+                            || text.contains("Read-only")
+                            || text.contains("Permission denied"),
                     "expected write failure in RO mode, got: " + text);
         } finally {
             session.delete();
@@ -449,8 +577,9 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         sandbox.commands().run("mkdir -p " + prefix + " && echo x > " + prefix + "/file.txt");
         IsolationSession session = createSession("ro");
         try {
-            List<EntryInfo> results = session.getFiles().search(
-                    SearchEntry.builder().path(prefix).pattern("*.txt").build());
+            List<EntryInfo> results =
+                    session.getFiles()
+                            .search(SearchEntry.builder().path(prefix).pattern("*.txt").build());
             assertTrue(results.size() >= 1);
         } finally {
             session.delete();
@@ -489,10 +618,9 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         String marker = "overlay_invis_" + System.currentTimeMillis() + ".txt";
         IsolationSession session = createSession("overlay");
         try {
-            session.run(new IsolatedRunRequest(
-                    "echo overlay-data > /tmp/" + marker, null, null));
-            Execution hostCheck = sandbox.commands().run(
-                    "cat /tmp/" + marker + " 2>&1 || echo NOT_FOUND");
+            session.run(new IsolatedRunRequest("echo overlay-data > /tmp/" + marker, null, null));
+            Execution hostCheck =
+                    sandbox.commands().run("cat /tmp/" + marker + " 2>&1 || echo NOT_FOUND");
             String text = stdoutText(hostCheck);
             assertTrue(
                     text.contains("NOT_FOUND") || text.contains("No such file"),
@@ -510,8 +638,7 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         sandbox.commands().run("echo lower-data > /tmp/" + marker);
         IsolationSession session = createSession("overlay");
         try {
-            Execution exec = session.run(new IsolatedRunRequest(
-                    "cat /tmp/" + marker, null, null));
+            Execution exec = session.run(new IsolatedRunRequest("cat /tmp/" + marker, null, null));
             assertTrue(stdoutText(exec).contains("lower-data"));
         } finally {
             session.delete();
@@ -527,10 +654,9 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         sandbox.commands().run("echo original > /tmp/" + marker);
         IsolationSession session = createSession("overlay");
         try {
-            session.run(new IsolatedRunRequest(
-                    "echo modified > /tmp/" + marker, null, null));
-            Execution inSession = session.run(new IsolatedRunRequest(
-                    "cat /tmp/" + marker, null, null));
+            session.run(new IsolatedRunRequest("echo modified > /tmp/" + marker, null, null));
+            Execution inSession =
+                    session.run(new IsolatedRunRequest("cat /tmp/" + marker, null, null));
             assertTrue(stdoutText(inSession).contains("modified"));
             Execution hostCheck = sandbox.commands().run("cat /tmp/" + marker);
             assertTrue(stdoutText(hostCheck).contains("original"));
@@ -547,13 +673,18 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("overlay");
         try {
             String path = "/tmp/ov_upload_" + System.currentTimeMillis() + ".txt";
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(path).data("overlay file").mode(644).build()));
+            session.getFiles()
+                    .write(
+                            List.of(
+                                    WriteEntry.builder()
+                                            .path(path)
+                                            .data("overlay file")
+                                            .mode(644)
+                                            .build()));
             String content = session.getFiles().readFile(path);
             assertEquals("overlay file", content);
             // Host should NOT see it
-            Execution hostCheck = sandbox.commands().run(
-                    "cat " + path + " 2>&1 || echo NOT_FOUND");
+            Execution hostCheck = sandbox.commands().run("cat " + path + " 2>&1 || echo NOT_FOUND");
             String hostText = stdoutText(hostCheck);
             assertTrue(
                     hostText.contains("NOT_FOUND") || hostText.contains("No such file"),
@@ -571,11 +702,19 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         sandbox.commands().run("mkdir -p " + prefix + " && echo lower > " + prefix + "/lower.txt");
         IsolationSession session = createSession("overlay");
         try {
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(prefix + "/upper.txt").data("upper").mode(644).build()));
-            List<EntryInfo> results = session.getFiles().search(
-                    SearchEntry.builder().path(prefix).pattern("*.txt").build());
-            List<String> paths = results.stream().map(EntryInfo::getPath).collect(Collectors.toList());
+            session.getFiles()
+                    .write(
+                            List.of(
+                                    WriteEntry.builder()
+                                            .path(prefix + "/upper.txt")
+                                            .data("upper")
+                                            .mode(644)
+                                            .build()));
+            List<EntryInfo> results =
+                    session.getFiles()
+                            .search(SearchEntry.builder().path(prefix).pattern("*.txt").build());
+            List<String> paths =
+                    results.stream().map(EntryInfo::getPath).collect(Collectors.toList());
             assertTrue(paths.stream().anyMatch(p -> p.contains("lower.txt")));
             assertTrue(paths.stream().anyMatch(p -> p.contains("upper.txt")));
         } finally {
@@ -593,7 +732,8 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         IsolationSession session = createSession("overlay");
         try {
             session.getFiles().deleteFiles(List.of(prefix + "/target.txt"));
-            assertThrows(SandboxException.class,
+            assertThrows(
+                    SandboxException.class,
                     () -> session.getFiles().readFileInfo(List.of(prefix + "/target.txt")));
             // Host file should be untouched
             Execution hostCheck = sandbox.commands().run("cat " + prefix + "/target.txt");
@@ -612,10 +752,15 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         try {
             String src = "/tmp/ov_mv_src_" + System.currentTimeMillis() + ".txt";
             String dst = "/tmp/ov_mv_dst_" + System.currentTimeMillis() + ".txt";
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(src).data("moveme").mode(644).build()));
-            session.getFiles().moveFiles(List.of(
-                    MoveEntry.builder().src(src).dest(dst).build()));
+            session.getFiles()
+                    .write(
+                            List.of(
+                                    WriteEntry.builder()
+                                            .path(src)
+                                            .data("moveme")
+                                            .mode(644)
+                                            .build()));
+            session.getFiles().moveFiles(List.of(MoveEntry.builder().src(src).dest(dst).build()));
             assertEquals("moveme", session.getFiles().readFile(dst));
         } finally {
             session.delete();
@@ -630,8 +775,13 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         sandbox.commands().run("echo ch > /tmp/" + marker + " && chmod 644 /tmp/" + marker);
         IsolationSession session = createSession("overlay");
         try {
-            session.getFiles().setPermissions(List.of(
-                    SetPermissionEntry.builder().path("/tmp/" + marker).mode(755).build()));
+            session.getFiles()
+                    .setPermissions(
+                            List.of(
+                                    SetPermissionEntry.builder()
+                                            .path("/tmp/" + marker)
+                                            .mode(755)
+                                            .build()));
             Map<String, EntryInfo> infoMap =
                     session.getFiles().readFileInfo(List.of("/tmp/" + marker));
             assertEquals(755, infoMap.get("/tmp/" + marker).getMode());
@@ -652,12 +802,14 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         sandbox.commands().run("printf 'hello old world' > /tmp/" + marker);
         IsolationSession session = createSession("overlay");
         try {
-            session.getFiles().replaceContents(List.of(
-                    ContentReplaceEntry.builder()
-                            .path("/tmp/" + marker)
-                            .oldContent("old")
-                            .newContent("new")
-                            .build()));
+            session.getFiles()
+                    .replaceContents(
+                            List.of(
+                                    ContentReplaceEntry.builder()
+                                            .path("/tmp/" + marker)
+                                            .oldContent("old")
+                                            .newContent("new")
+                                            .build()));
             String content = session.getFiles().readFile("/tmp/" + marker);
             assertTrue(content.contains("new"));
             assertFalse(content.contains("old"));
@@ -678,10 +830,17 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         sandbox.commands().run("mkdir -p " + prefix + " && echo l > " + prefix + "/lower.txt");
         IsolationSession session = createSession("overlay");
         try {
-            session.getFiles().write(List.of(
-                    WriteEntry.builder().path(prefix + "/upper.txt").data("u").mode(644).build()));
+            session.getFiles()
+                    .write(
+                            List.of(
+                                    WriteEntry.builder()
+                                            .path(prefix + "/upper.txt")
+                                            .data("u")
+                                            .mode(644)
+                                            .build()));
             List<EntryInfo> entries = session.getFiles().listDirectory(prefix);
-            List<String> names = entries.stream().map(EntryInfo::getPath).collect(Collectors.toList());
+            List<String> names =
+                    entries.stream().map(EntryInfo::getPath).collect(Collectors.toList());
             assertTrue(names.stream().anyMatch(n -> n.contains("lower.txt")));
             assertTrue(names.stream().anyMatch(n -> n.contains("upper.txt")));
         } finally {
@@ -695,54 +854,88 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     @Test
     @Order(33)
     void testRunOnce() {
-        Execution exec = sandbox.isolation()
-                .runOnce("echo runonce-e2e", "/tmp", "rw", null, null, null, null, null);
+        Execution exec =
+                sandbox.isolation()
+                        .runOnce("echo runonce-e2e", "/tmp", "rw", null, null, null, null, null);
         assertTrue(stdoutText(exec).contains("runonce-e2e"));
     }
 
     @Test
     @Order(34)
     void testRunOnceWithEnvs() {
-        Execution exec = sandbox.isolation()
-                .runOnce(
-                        "echo $E2E_RUN_ONCE",
-                        "/tmp",
-                        "rw",
-                        Map.of("E2E_RUN_ONCE", "kt-value"),
-                        null,
-                        null,
-                        null,
-                        null);
+        Execution exec =
+                sandbox.isolation()
+                        .runOnce(
+                                "echo $E2E_RUN_ONCE",
+                                "/tmp",
+                                "rw",
+                                Map.of("E2E_RUN_ONCE", "kt-value"),
+                                null,
+                                null,
+                                null,
+                                null);
         assertTrue(stdoutText(exec).contains("kt-value"));
     }
 
     @Test
     @Order(35)
     void testWithSession() {
-        String output = sandbox.isolation().withSession(
-                new CreateIsolatedSessionRequest(
-                        new IsolatedWorkspaceSpec("/tmp", "rw"),
-                        "balanced", null, null, null, null, null, null, null, null),
-                session -> {
-                    session.run(new IsolatedRunRequest("export WS_VAR=with-session-kt", null, null));
-                    Execution exec = session.run(new IsolatedRunRequest("echo $WS_VAR", null, null));
-                    return stdoutText(exec);
-                });
+        String output =
+                sandbox.isolation()
+                        .withSession(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null),
+                                session -> {
+                                    session.run(
+                                            new IsolatedRunRequest(
+                                                    "export WS_VAR=with-session-kt", null, null));
+                                    Execution exec =
+                                            session.run(
+                                                    new IsolatedRunRequest(
+                                                            "echo $WS_VAR", null, null));
+                                    return stdoutText(exec);
+                                });
         assertTrue(output.contains("with-session-kt"));
     }
 
     @Test
     @Order(36)
     void testWithSessionMultiRun() {
-        String output = sandbox.isolation().withSession(
-                new CreateIsolatedSessionRequest(
-                        new IsolatedWorkspaceSpec("/tmp", "rw"),
-                        "balanced", null, null, null, null, null, null, null, null),
-                session -> {
-                    session.run(new IsolatedRunRequest("echo step1 > /tmp/ws_test_kt.txt", null, null));
-                    Execution exec = session.run(new IsolatedRunRequest("cat /tmp/ws_test_kt.txt", null, null));
-                    return stdoutText(exec);
-                });
+        String output =
+                sandbox.isolation()
+                        .withSession(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null),
+                                session -> {
+                                    session.run(
+                                            new IsolatedRunRequest(
+                                                    "echo step1 > /tmp/ws_test_kt.txt",
+                                                    null,
+                                                    null));
+                                    Execution exec =
+                                            session.run(
+                                                    new IsolatedRunRequest(
+                                                            "cat /tmp/ws_test_kt.txt", null, null));
+                                    return stdoutText(exec);
+                                });
         assertTrue(output.contains("step1"));
     }
 
@@ -764,17 +957,34 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
 
         IsolationSession session =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced",
-                                null,
-                                List.of(new BindMount(srcDir, dest, null)),
-                                null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        List.of(new BindMount(srcDir, dest, null)),
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         try {
-            Execution exec = session.run(new IsolatedRunRequest(
-                    "echo -n " + content + " > " + dest + "/" + fileName
-                            + " && cat " + dest + "/" + fileName,
-                    null, null));
+            Execution exec =
+                    session.run(
+                            new IsolatedRunRequest(
+                                    "echo -n "
+                                            + content
+                                            + " > "
+                                            + dest
+                                            + "/"
+                                            + fileName
+                                            + " && cat "
+                                            + dest
+                                            + "/"
+                                            + fileName,
+                                    null,
+                                    null));
             assertTrue(stdoutText(exec).contains(content));
 
             Execution hostCheck = sandbox.commands().run("cat " + srcDir + "/" + fileName);
@@ -790,14 +1000,21 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     void testBindIllegalRejected() {
         assertThrows(
                 SandboxException.class,
-                () -> sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced",
-                                null,
-                                // /etc is not in the writable allowlist.
-                                List.of(new BindMount("/etc", "/mnt/etc", null)),
-                                null, null, null, null, null, null)));
+                () ->
+                        sandbox.isolation()
+                                .create(
+                                        new CreateIsolatedSessionRequest(
+                                                new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                                "balanced",
+                                                null,
+                                                // /etc is not in the writable allowlist.
+                                                List.of(new BindMount("/etc", "/mnt/etc", null)),
+                                                null,
+                                                null,
+                                                null,
+                                                null,
+                                                null,
+                                                null)));
     }
 
     @Test
@@ -809,27 +1026,50 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         String fileName = "host_created.txt";
         String content = "bind-ro-host-content";
 
-        sandbox.commands().run(
-                "mkdir -p " + srcDir + " " + dest + " && echo -n " + content + " > " + srcDir + "/" + fileName);
+        sandbox.commands()
+                .run(
+                        "mkdir -p "
+                                + srcDir
+                                + " "
+                                + dest
+                                + " && echo -n "
+                                + content
+                                + " > "
+                                + srcDir
+                                + "/"
+                                + fileName);
 
         IsolationSession session =
                 sandbox.isolation()
-                        .create(new CreateIsolatedSessionRequest(
-                                new IsolatedWorkspaceSpec("/tmp", "rw"),
-                                "balanced",
-                                null,
-                                List.of(new BindMount(srcDir, dest, true)),
-                                null, null, null, null, null, null));
+                        .create(
+                                new CreateIsolatedSessionRequest(
+                                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                                        "balanced",
+                                        null,
+                                        List.of(new BindMount(srcDir, dest, true)),
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null));
         try {
-            Execution exec = session.run(new IsolatedRunRequest("cat " + dest + "/" + fileName, null, null));
+            Execution exec =
+                    session.run(new IsolatedRunRequest("cat " + dest + "/" + fileName, null, null));
             assertTrue(stdoutText(exec).contains(content));
 
-            Execution write = session.run(new IsolatedRunRequest(
-                    "echo x > " + dest + "/newfile.txt 2>&1; echo EXIT=$?", null, null));
+            Execution write =
+                    session.run(
+                            new IsolatedRunRequest(
+                                    "echo x > " + dest + "/newfile.txt 2>&1; echo EXIT=$?",
+                                    null,
+                                    null));
             String text = stdoutText(write);
             assertTrue(
-                    text.contains("EXIT=1") || text.contains("Read-only")
-                            || text.contains("read-only") || text.contains("Permission denied"),
+                    text.contains("EXIT=1")
+                            || text.contains("Read-only")
+                            || text.contains("read-only")
+                            || text.contains("Permission denied"),
                     "expected write to fail through read-only bind, got: " + text);
         } finally {
             session.delete();

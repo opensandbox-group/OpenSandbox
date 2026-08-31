@@ -22,6 +22,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -55,6 +56,25 @@ jobs:
         run: |
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
+      - name: Run execd-ebpf variant tests
+        working-directory: components/execd
+        run: |
+          # Regenerate the per-arch bytecode first: the generated files are
+          # build artifacts (not committed), so local tests need them too.
+          # clang ships in the GitHub-hosted ubuntu image; apt is only a
+          # fallback for hosts without a toolchain.
+          command -v clang >/dev/null || sudo apt-get update -qq && sudo apt-get install -y -qq clang >/dev/null
+          make generate-ebpf ARCH=$(go env GOARCH)
+          CGO_ENABLED=1 go test -tags ebpf -count=1 ./pkg/ebpf/
+
+      - name: Upload per-arch vmlinux.h (for bytecode regeneration)
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vmlinux-${{ runner.arch }}
+          path: /tmp/ebpf-dump/vmlinux.h
+          if-no-files-found: ignore
+
       - name: Calculate coverage and generate summary
         working-directory: components/execd
         id: coverage
@@ -79,7 +99,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, self-hosted]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -123,12 +143,39 @@ jobs:
           chmod +x tests/sigterm_forward.sh
           ./tests/sigterm_forward.sh
 
+      - name: Lifecycle bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: bash tests/lifecycle.sh
+
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           chmod +x components/execd/tests/smoke_bwrap.sh
           bash components/execd/tests/smoke_bwrap.sh
+
+      - name: Init-mode container regression
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          chmod +x components/execd/tests/init_container.sh
+          bash components/execd/tests/init_container.sh
+
+      - name: Execd eBPF bare-container smoke
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          # Runs the execd-ebpf variant in a bare container against THIS
+          # runner's kernel and asserts exec/connect/privilege events land in
+          # the JSONL audit file. GitHub-hosted ubuntu validates the stock CI
+          # kernel; the self-hosted leg is the 5.10 empirical validation
+          # (inline-filename exec-hook fallback). Host prerequisites (BTF,
+          # cgroup v2, tracefs) are prechecked by the script.
+          bash scripts/execd-ebpf-smoke.sh --build
 
       - name: Show logs
         if: always()
@@ -161,9 +208,79 @@ jobs:
           sudo cp builddir/bwrap /usr/local/bin/bwrap
           bwrap --version
 
+      - name: Build and install native session workload gate
+        working-directory: components/execd
+        run: |
+          install_root="${RUNNER_TEMP}/execd-session-gate-root"
+          make build-session-gate
+          mkdir -p \
+            "${install_root}/usr/local/libexec" \
+            "${install_root}/opt/opensandbox"
+          chmod 0777 \
+            "${install_root}/usr/local/libexec" \
+            "${install_root}/opt/opensandbox"
+          make install-session-gate DESTDIR="${install_root}"
+          test -x bin/opensandbox-session-gate
+          test -x "${install_root}/usr/local/libexec/opensandbox-session-gate"
+          test -x "${install_root}/opt/opensandbox/opensandbox-session-gate"
+          test "$(stat -c '%a' "${install_root}/usr/local/libexec")" = "755"
+          test "$(stat -c '%a' "${install_root}/opt/opensandbox")" = "755"
+          cmp \
+            bin/opensandbox-session-gate \
+            "${install_root}/usr/local/libexec/opensandbox-session-gate"
+          cmp \
+            bin/opensandbox-session-gate \
+            "${install_root}/opt/opensandbox/opensandbox-session-gate"
+          test "$(stat -c '%a' "${install_root}/usr/local/libexec/opensandbox-session-gate")" = "555"
+          test "$(stat -c '%a' "${install_root}/opt/opensandbox/opensandbox-session-gate")" = "555"
+          file bin/opensandbox-session-gate | grep -q 'statically linked'
+
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0777 /opt/opensandbox
+          sudo make install-session-gate
+          test -x /usr/local/bin/bwrap
+          test -x /usr/local/libexec/opensandbox-session-gate
+          test -x /opt/opensandbox/opensandbox-session-gate
+          test "$(stat -c '%U:%G' /usr/local/libexec)" = "root:root"
+          test "$(stat -c '%U:%G' /opt/opensandbox)" = "root:root"
+          test "$(stat -c '%U:%G' /usr/local/libexec/opensandbox-session-gate)" = "root:root"
+          test "$(stat -c '%U:%G' /opt/opensandbox/opensandbox-session-gate)" = "root:root"
+          test "$(stat -c '%a' /usr/local/libexec)" = "755"
+          test "$(stat -c '%a' /opt/opensandbox)" = "755"
+          test "$(stat -c '%a' /usr/local/libexec/opensandbox-session-gate)" = "555"
+          test "$(stat -c '%a' /opt/opensandbox/opensandbox-session-gate)" = "555"
+
+      - name: Run workload lifecycle integration test
+        working-directory: components/execd
+        run: |
+          # Execd must authenticate a non-root workload without CAP_SYS_PTRACE.
+          sudo -E setpriv --bounding-set=-sys_ptrace env "PATH=$PATH" go test \
+            -v -count=1 -timeout=2m \
+            -run '^TestBwrapLifecycleEndToEnd$' \
+            ./pkg/isolation
+
+      - name: Run namespace pin lifecycle integration test
+        working-directory: components/execd
+        run: |
+          # Pinning must not depend on CAP_SYS_PTRACE in either uid mode.
+          sudo -E setpriv --bounding-set=-sys_ptrace env "PATH=$PATH" go test \
+            -tags="linux,bwrap" -v -count=1 -timeout=2m \
+            -run '^TestPrivateSessionPinsNamespacesBeforeMarkReady$' \
+            ./pkg/runtime
+
       - name: Run bwrap integration tests
         working-directory: components/execd
         run: sudo -E env "PATH=$PATH" go test -tags="linux,bwrap" -v -count=1 -timeout=5m ./pkg/runtime/bwrap_test/
+
+      - name: Run isolated session init-mode reaper integration test
+        working-directory: components/execd
+        run: |
+          # bwrap lifecycle under init-mode reaper dispatch: the pre-reap
+          # barrier must serialize process-group teardown with the reaper's
+          # observe/consume while execd owns wait4.
+          sudo -E env "PATH=$PATH" go test \
+            -tags="linux,bwrap" -v -count=1 -timeout=3m \
+            -run '^TestIsolatedSessionWithInitReaper$' \
+            ./pkg/runtime
 
   required:
     name: Execd CI

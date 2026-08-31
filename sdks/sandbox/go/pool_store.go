@@ -71,4 +71,23 @@ type PoolStateStore interface {
 
 	// SetIdleEntryTTL persists the idle entry TTL for the pool.
 	SetIdleEntryTTL(ctx context.Context, poolName string, ttl time.Duration) error
+
+	// GetDestroyState returns the destroy state of the pool namespace.
+	// An expired tombstone reads back as ACTIVE.
+	GetDestroyState(ctx context.Context, poolName string) (PoolDestroyState, error)
+
+	// BeginDestroy writes the DESTROYING fence, making the namespace
+	// unwritable for every peer sharing this store. Returns *PoolDestroyedError
+	// if the namespace is already tombstoned. Re-entrant while DESTROYING.
+	BeginDestroy(ctx context.Context, poolName string, ownerID string) error
+
+	// ClearPoolState wipes the pool's coordination state: idle entries, the
+	// primary lock, maxIdle, and the idle entry TTL. The destroy state itself
+	// is left in place.
+	ClearPoolState(ctx context.Context, poolName string) error
+
+	// MarkDestroyed replaces the fence with a DESTROYED tombstone so later
+	// callers cannot silently rebind the namespace. A zero tombstoneTTL writes
+	// a tombstone that never expires; it must not be negative.
+	MarkDestroyed(ctx context.Context, poolName string, ownerID string, tombstoneTTL time.Duration) error
 }

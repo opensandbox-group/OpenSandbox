@@ -27,12 +27,18 @@ max_sandbox_timeout_seconds = 86400
 # - 交互式 TTY：按提示输入 YES
 # - 非交互环境：设置 OPENSANDBOX_INSECURE_SERVER=YES
 
+[proxy]
+# 当为 True（默认）时，服务端反向代理以沙箱的内部容器 IP（Docker bridge）为目标；
+# 设为 False 时，代理改为以服务端本地的 host-mapped 端口为目标。当服务端进程无法
+# 路由到容器 bridge IP 时（例如 macOS 上的 launchd/systemd 用户会话）应设为 False。
+resolve_internal = true
+
 [log]
 level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0"
 
 [storage]
 allowed_host_paths = []
@@ -43,6 +49,14 @@ volume_default_size = "1Gi"
 [store]
 type = "sqlite"
 path = "~/.opensandbox/opensandbox.db"
+# 如需使用外部 PostgreSQL 存储，请设置 type = "postgresql" 并配置：
+# [store.postgresql]
+# min_pool_size = 1
+# max_pool_size = 10
+# connect_timeout_seconds = 5
+# pool_timeout_seconds = 5
+# 生产环境通过 OPENSANDBOX_STORE_POSTGRESQL_DSN 注入连接串。
+# 每个 PostgreSQL 数据库只能由一个活跃 Server 进程使用。
 
 [docker]
 # Supported values for network_mode: "host", "bridge"
@@ -59,6 +73,11 @@ no_new_privileges = true
 apparmor_profile = ""
 # Limit process count to reduce host impact from fork bombs; set to null to disable
 pids_limit = 4096
+# 可选:注入到每个沙箱容器的环境变量(创建请求中的同名键优先)。
+# 与 sandbox_binds 搭配可让所有沙箱信任私有 CA:
+# sandbox_env = { NODE_EXTRA_CA_CERTS = "/etc/ssl/private-ca/root-ca.crt" }
+# 可选:应用到每个沙箱容器的宿主机 bind 挂载(docker -v 语法)
+# sandbox_binds = ["/opt/certs/root-ca.crt:/etc/ssl/private-ca/root-ca.crt:ro"]
 # Seccomp profile: empty string uses Docker default; set to an absolute path for a custom profile
 seccomp_profile = ""
 
@@ -66,10 +85,11 @@ seccomp_profile = ""
 mode = "direct"
 
 [egress]
-image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.4"
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.7"
 mode = "dns"
+readiness_timeout_seconds = 30.0
 
-# 🧪 [EXPERIMENTAL] 按访问续期。默认关闭 — 见 server/README_zh.md。
+# 按访问续期。默认关闭 — 见 server/README_zh.md。
 [renew_intent]
 enabled = false
 min_interval_seconds = 60

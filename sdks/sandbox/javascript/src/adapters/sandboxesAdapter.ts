@@ -23,6 +23,7 @@ import type {
   CreateSnapshotRequest,
   CreateSandboxRequest,
   CreateSandboxResponse,
+  AllocationSummary,
   Endpoint,
   ListSnapshotsParams,
   ListSnapshotsResponse,
@@ -64,6 +65,10 @@ type ApiListSnapshotsOk =
   LifecyclePaths["/snapshots"]["get"]["responses"][200]["content"]["application/json"];
 type ApiEndpointOk =
   LifecyclePaths["/sandboxes/{sandboxId}/endpoints/{port}"]["get"]["responses"][200]["content"]["application/json"];
+
+type ApiSandboxWithAllocation = ApiGetSandboxOk & {
+  allocation?: AllocationSummary;
+};
 
 function encodeMetadataFilter(metadata: Record<string, string>): string {
   // The Lifecycle API expects a single `metadata` query parameter whose value is `k=v&k2=v2`.
@@ -122,8 +127,10 @@ export class SandboxesAdapter implements Sandboxes {
   }
 
   private mapSandboxInfo(raw: ApiGetSandboxOk): SandboxInfo {
+    const { allocation, ...sandbox } = raw as ApiSandboxWithAllocation;
     return {
-      ...(raw ?? {}),
+      ...sandbox,
+      ...(allocation == null ? {} : { allocation }),
       createdAt: this.parseIsoDate("createdAt", raw?.createdAt),
       expiresAt: this.parseOptionalIsoDate("expiresAt", raw?.expiresAt),
     } as SandboxInfo;
@@ -131,7 +138,26 @@ export class SandboxesAdapter implements Sandboxes {
 
   async createSandbox(req: CreateSandboxRequest): Promise<CreateSandboxResponse> {
     // Make the OpenAPI contract explicit so backend schema changes surface quickly.
-    const body: ApiCreateSandboxRequest = req as unknown as ApiCreateSandboxRequest;
+    const normalizedRequest = { ...req };
+    const lifecycle = normalizedRequest.lifecycle;
+    if (lifecycle) {
+      const normalizedLifecycle = { ...lifecycle };
+      if (Array.isArray(normalizedLifecycle.periodic) && normalizedLifecycle.periodic.length === 0) {
+        delete normalizedLifecycle.periodic;
+      }
+      for (const [key, value] of Object.entries(normalizedLifecycle)) {
+        if (value === null || value === undefined) delete normalizedLifecycle[key];
+      }
+      const hasConfiguredHook = Object.keys(normalizedLifecycle).length > 0;
+      if (hasConfiguredHook) {
+        normalizedRequest.lifecycle = normalizedLifecycle;
+      } else {
+        delete normalizedRequest.lifecycle;
+      }
+    } else {
+      delete normalizedRequest.lifecycle;
+    }
+    const body: ApiCreateSandboxRequest = normalizedRequest as unknown as ApiCreateSandboxRequest;
     const { data, error, response } = await this.client.POST("/sandboxes", {
       body,
     });
@@ -274,6 +300,7 @@ export class SandboxesAdapter implements Sandboxes {
   async listSnapshots(params: ListSnapshotsParams = {}): Promise<ListSnapshotsResponse> {
     const query: Record<string, string | number | (string | number)[] | undefined> = {};
     if (params.sandboxId) query.sandboxId = params.sandboxId;
+    if (params.name != null) query.name = params.name;
     if (params.states?.length) query.state = params.states;
     if (params.page != null) query.page = params.page;
     if (params.pageSize != null) query.pageSize = params.pageSize;

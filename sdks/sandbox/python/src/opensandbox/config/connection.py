@@ -29,6 +29,8 @@ from pydantic import (  # type: ignore[reportMissingImports]
     field_validator,
 )
 
+from opensandbox.transport import RetryAsyncTransport, RetryPolicy
+
 
 class ConnectionConfig(BaseModel):
     """
@@ -65,7 +67,7 @@ class ConnectionConfig(BaseModel):
         default=False, description="Enable debug logging for HTTP requests"
     )
     user_agent: str = Field(
-        default="OpenSandbox-Python-SDK/0.1.14", description="User agent string"
+        default="OpenSandbox-Python-SDK/0.1.16", description="User agent string"
     )
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"
@@ -74,8 +76,17 @@ class ConnectionConfig(BaseModel):
         default=None,
         description=(
             "Shared httpx transport instance used by all HTTP clients within a "
-            "Sandbox/Manager instance. Pass a custom transport (e.g. AsyncHTTPTransport "
-            "with custom settings) to control connection pooling, proxies, retries, etc."
+            "Sandbox/Manager instance. When unset the SDK builds an "
+            "AsyncHTTPTransport wrapped by RetryAsyncTransport honoring "
+            "`retry_policy`. Pass a custom transport to override the whole "
+            "stack (retry wrapping is then the caller's job)."
+        ),
+    )
+    retry_policy: RetryPolicy = Field(
+        default_factory=RetryPolicy,
+        description=(
+            "Retry policy applied to non-streaming requests going through "
+            "the shared transport. Pass RetryPolicy.disabled() for fast-fail."
         ),
     )
     use_server_proxy: bool = Field(
@@ -114,24 +125,40 @@ class ConnectionConfig(BaseModel):
     def model_post_init(self, __context: object) -> None:
         # If the user explicitly provided `transport`, the SDK must not close it.
         self._owns_transport = "transport" not in self.model_fields_set
+        # Best-effort: attach the SDK host's own IP so the server can see the
+        # client's self-reported address. Never overrides a user-supplied value
+        # and is skipped silently when the IP cannot be determined.
+        from opensandbox.config import client_ip
+
+        client_ip.apply_client_ip(self.headers)
 
     def with_transport_if_missing(self) -> "ConnectionConfig":
         """
         Ensure a transport exists for this SDK resource.
 
-        If `transport` is missing, return a copy with a default transport and
-        mark it as SDK-owned. If present, return self unchanged.
+        When `transport` is missing, return a copy whose `transport` is
+        a retry-wrapped AsyncHTTPTransport (unless the policy has no
+        wrapper-only knobs, in which case the raw transport is used).
+        When `transport` is present, return self unchanged; the caller
+        owns retry wrapping.
         """
         if self.transport is not None:
             return self
-        transport = httpx.AsyncHTTPTransport(
+        inner = httpx.AsyncHTTPTransport(
             limits=httpx.Limits(
                 max_connections=100,
                 max_keepalive_connections=20,
                 keepalive_expiry=30.0,
             ),
         )
-        config = self.model_copy(update={"transport": transport})
+        wrapped: httpx.AsyncBaseTransport
+        if self.retry_policy.wraps_transport():
+            wrapped = RetryAsyncTransport(
+                inner, self.retry_policy, owns_inner=True
+            )
+        else:
+            wrapped = inner
+        config = self.model_copy(update={"transport": wrapped})
         config._owns_transport = True
         return config
 
@@ -142,7 +169,7 @@ class ConnectionConfig(BaseModel):
         try:
             await self.transport.aclose()
         except Exception:
-            # Avoid raising during cleanup paths
+            # Avoid raising during cleanup paths.
             pass
 
     @field_validator("protocol")

@@ -21,15 +21,20 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	slogger "github.com/alibaba/opensandbox/internal/logger"
+
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
+	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
-	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
+
+const httpScheme = "http"
 
 type Proxy struct {
 	sandboxProvider      sandbox.Provider
@@ -37,21 +42,23 @@ type Proxy struct {
 	renewIntentPublisher renewintent.Publisher
 
 	secure *signature.Verifier
+	scope  *routescope.Verifier
 }
 
-func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, renewIntentPublisher renewintent.Publisher, secure *signature.Verifier) *Proxy {
+func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, renewIntentPublisher renewintent.Publisher, secure *signature.Verifier, scope *routescope.Verifier) *Proxy {
 	return &Proxy{
 		sandboxProvider:      sandboxProvider,
 		mode:                 mode,
 		renewIntentPublisher: renewIntentPublisher,
 		secure:               secure,
+		scope:                scope,
 	}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-	proxyType := "http"
+	proxyType := httpScheme
 	if p.isWebSocketRequest(r) {
 		proxyType = "websocket"
 	}
@@ -92,66 +99,132 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	host, status, err := p.getSandboxHostDefinition(r)
 	if err != nil {
+		var detailed interface{ InternalCause() error }
+		if errors.As(err, &detailed) {
+			Logger.With(slogger.Field{Key: "error", Value: detailed.InternalCause()}).Errorf("ingress: provider resolution failed")
+		}
 		if status == 0 {
 			status = http.StatusBadRequest
+		}
+		if status == http.StatusServiceUnavailable {
+			sw.Header().Set("Retry-After", "1")
 		}
 		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
 		return
 	}
 
-	targetHost, err, code := p.resolveRealHost(host)
+	targetURL, code, err := p.resolveRealHost(host, r.URL)
 	if err != nil {
 		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
 		return
 	}
 
 	if p.renewIntentPublisher != nil {
-		p.renewIntentPublisher.PublishIntent(host.ingressKey, host.port, host.requestURI)
+		p.renewIntentPublisher.PublishIntent(host.namespace, host.ingressKey, host.port, host.requestURI)
 	}
 
-	// modify if requestURI is not empty
-	if host.requestURI != "" {
-		r.URL.Path = host.requestURI
-	}
-
-	r.Host = targetHost
-	r.URL.Host = targetHost
+	r.URL.Scheme = targetURL.Scheme
+	r.URL.Host = targetURL.Host
+	r.URL.Path = targetURL.Path
+	r.URL.RawPath = targetURL.RawPath
+	r.URL.RawQuery = targetURL.RawQuery
+	r.Host = targetURL.Host
 	r.Header.Del(SandboxIngress)
+	r.Header.Del(DeprecatedSandboxIngress)
 	r.Header.Del(signature.OpenSandboxSecureAccessCanonical)
+	r.Header.Del(sandbox.FastSandboxCredential)
+	// Host is carried by r.Host, not r.Header. The Phase 1a Fleets provider
+	// accepts only the Fastlet route credential in UpstreamHeaders.
+	for name, values := range host.info.UpstreamHeaders {
+		r.Header.Del(name)
+		for _, value := range values {
+			r.Header.Add(name, value)
+		}
+	}
 
 	Logger.With(
-		slogger.Field{Key: "target", Value: targetHost},
+		slogger.Field{Key: "target", Value: targetURL.String()},
 		slogger.Field{Key: "client", Value: p.getClientIP(r)},
 		slogger.Field{Key: "uri", Value: r.RequestURI},
 		slogger.Field{Key: "method", Value: r.Method},
 	).Infof("ingress requested")
-	p.serve(sw, r)
+	p.serve(sw, r, sandbox.EndpointTarget{RouteKind: host.routeKind, Namespace: host.namespace, SandboxID: host.ingressKey, Port: host.port})
 }
 
-func (p *Proxy) serve(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget) {
 	if p.isWebSocketRequest(r) {
 		if r.URL == nil {
 			http.Error(w, "invalid request URL", http.StatusBadRequest)
 			return
 		}
 
-		if r.URL.Scheme == "" {
+		switch r.URL.Scheme {
+		case httpScheme:
+			r.URL.Scheme = "ws"
+		case "https":
+			r.URL.Scheme = "wss"
+		case "":
 			if r.TLS != nil {
 				r.URL.Scheme = "wss"
 			} else {
 				r.URL.Scheme = "ws"
 			}
 		}
-		NewWebSocketProxy(r.URL).ServeHTTP(w, r)
+		websocketProxy := NewWebSocketProxy(r.URL, p.upstreamResponseObserver(target)) //nolint:bodyclose // Failed handshake bodies are closed by copyResponse.
+		websocketProxy.errorObserver = p.upstreamErrorObserver(target)
+		websocketProxy.ServeHTTP(w, r)
 	} else {
 		if r.URL.Scheme == "" {
 			if r.TLS != nil {
 				r.URL.Scheme = "https"
 			} else {
-				r.URL.Scheme = "http"
+				r.URL.Scheme = httpScheme
 			}
 		}
-		NewHTTPProxy().ServeHTTP(w, r)
+		httpProxy := NewHTTPProxy(p.upstreamResponseObserver(target)) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		httpProxy.errorObserver = p.upstreamErrorObserver(target)
+		httpProxy.ServeHTTP(w, r)
+	}
+}
+
+func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget) func(*http.Response) {
+	if target.RouteKind != sandbox.RouteKindFleets {
+		return nil
+	}
+	invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
+	if !ok {
+		return nil
+	}
+	return func(response *http.Response) {
+		if response.StatusCode < http.StatusBadRequest || !sandbox.IsStaleFastPathResponse(response.Header) {
+			return
+		}
+		invalidator.Invalidate(target)
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
+		response.Body = http.NoBody
+		response.ContentLength = 0
+		for name := range response.Header {
+			delete(response.Header, name)
+		}
+		response.Trailer = nil
+		response.StatusCode = http.StatusServiceUnavailable
+		response.Status = fmt.Sprintf("%d %s", http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
+		response.Header.Set("Retry-After", "1")
+	}
+}
+
+func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget) func(error) {
+	if target.RouteKind != sandbox.RouteKindFleets {
+		return nil
+	}
+	invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
+	if !ok {
+		return nil
+	}
+	return func(error) {
+		invalidator.Invalidate(target)
 	}
 }
 
@@ -168,28 +241,60 @@ func (p *Proxy) isWebSocketRequest(r *http.Request) bool {
 	return true
 }
 
-func (p *Proxy) resolveRealHost(host *sandboxHost) (string, error, int) {
-	endpoint := host.endpoint
-	if endpoint == "" {
-		// Fallback lookup (should rarely happen because host parsing now fills endpoint).
-		info, err := p.sandboxProvider.GetEndpoint(host.ingressKey)
-		if err != nil {
-			// Map sandbox errors to HTTP status codes
-			switch {
-			case errors.Is(err, sandbox.ErrSandboxNotFound):
-				return "", err, http.StatusNotFound
-			case errors.Is(err, sandbox.ErrSandboxNotReady):
-				return "", err, http.StatusServiceUnavailable
-			default:
-				return "", err, http.StatusBadGateway
-			}
-		}
-		endpoint = info.Endpoint
+func (p *Proxy) resolveRealHost(host *sandboxHost, requestURL *url.URL) (*url.URL, int, error) {
+	if host.info == nil {
+		return nil, http.StatusBadGateway, errors.New("provider returned no endpoint information")
 	}
+	if host.info.UpstreamURL == "" {
+		if host.endpoint == "" {
+			return nil, http.StatusBadGateway, errors.New("provider returned an empty endpoint")
+		}
+		path := requestURL.Path
+		rawPath := requestURL.EscapedPath()
+		if host.requestURI != "" {
+			path = host.requestURI
+			rawPath = host.requestRawPath
+		}
+		return &url.URL{Host: fmt.Sprintf("%s:%d", host.endpoint, host.port), Path: path, RawPath: nonCanonicalRawPath(path, rawPath), RawQuery: requestURL.RawQuery}, 0, nil
+	}
+	upstream, err := url.Parse(host.info.UpstreamURL)
+	if err != nil {
+		return nil, http.StatusBadGateway, err
+	}
+	upstreamPath := upstream.Path
+	upstreamRawPath := upstream.EscapedPath()
+	requestPath := requestURL.Path
+	requestRawPath := requestURL.EscapedPath()
+	if host.requestURI != "" {
+		requestPath = host.requestURI
+		requestRawPath = host.requestRawPath
+	}
+	upstream.Path = joinURLPath(upstreamPath, requestPath)
+	joinedRawPath := joinURLPath(upstreamRawPath, requestRawPath)
+	upstream.RawPath = nonCanonicalRawPath(upstream.Path, joinedRawPath)
+	if upstream.RawQuery == "" {
+		upstream.RawQuery = requestURL.RawQuery
+	} else if requestURL.RawQuery != "" {
+		upstream.RawQuery += "&" + requestURL.RawQuery
+	}
+	return upstream, 0, nil
+}
 
-	// Construct target host with port
-	targetHost := fmt.Sprintf("%s:%d", endpoint, host.port)
-	return targetHost, nil, 0
+func nonCanonicalRawPath(path, escapedPath string) string {
+	if escapedPath == "" || escapedPath == (&url.URL{Path: path}).EscapedPath() {
+		return ""
+	}
+	return escapedPath
+}
+
+func joinURLPath(base, suffix string) string {
+	if base == "" {
+		base = "/"
+	}
+	if suffix == "" || suffix == "/" {
+		return strings.TrimRight(base, "/") + "/"
+	}
+	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
 }
 
 type statusCapturingResponseWriter struct {
@@ -222,7 +327,7 @@ func (w *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, e
 		}
 		return conn, buf, err
 	}
-	return nil, nil, fmt.Errorf("upstream ResponseWriter does not implement http.Hijacker")
+	return nil, nil, errors.New("upstream ResponseWriter does not implement http.Hijacker")
 }
 
 func (w *statusCapturingResponseWriter) Flush() {

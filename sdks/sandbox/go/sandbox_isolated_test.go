@@ -25,6 +25,26 @@ import (
 	"testing"
 )
 
+func TestIsolatedCapabilities_ModeAvailabilityWireFormat(t *testing.T) {
+	var caps IsolatedCapabilities
+	err := json.Unmarshal([]byte(`{
+		"available": true,
+		"setpriv_available": false,
+		"userns_available": true,
+		"commit_supported": false,
+		"diff_supported": false
+	}`), &caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caps.SetprivAvailable {
+		t.Error("SetprivAvailable = true, want false")
+	}
+	if !caps.UsernsAvailable {
+		t.Error("UsernsAvailable = false, want true")
+	}
+}
+
 // TestCreateIsolatedSessionRequest_BindsWireFormat verifies that binds and
 // uid_mode serialize to the expected execd wire format.
 func TestCreateIsolatedSessionRequest_BindsWireFormat(t *testing.T) {

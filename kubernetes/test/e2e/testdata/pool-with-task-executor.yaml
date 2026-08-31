@@ -14,3 +14,7 @@ spec:
     bufferMin: 0
     poolMax: 10
     poolMin: 2
+{{ if .RecycleType }}
+  recycleStrategy:
+    type: {{.RecycleType}}
+{{ end }}

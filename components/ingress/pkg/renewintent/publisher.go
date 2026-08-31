@@ -15,5 +15,5 @@
 package renewintent
 
 type Publisher interface {
-	PublishIntent(sandboxID string, port int, requestURI string)
+	PublishIntent(namespace, sandboxID string, port int, requestURI string)
 }

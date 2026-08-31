@@ -177,6 +177,12 @@ internal sealed class SandboxesAdapter : ISandboxes
             queryParts.Add($"sandboxId={Uri.EscapeDataString(sandboxId)}");
         }
 
+        var name = @params?.Name;
+        if (name != null)
+        {
+            queryParts.Add($"name={Uri.EscapeDataString(name)}");
+        }
+
         if (@params?.States != null && @params.States.Count > 0)
         {
             queryParts.AddRange(@params.States.Select(state => $"state={Uri.EscapeDataString(state)}"));
@@ -332,6 +338,14 @@ internal sealed class SandboxesAdapter : ISandboxes
                 : null,
             Platform = element.TryGetProperty("platform", out var platform) && platform.ValueKind == JsonValueKind.Object
                 ? JsonSerializer.Deserialize<PlatformSpec>(platform.GetRawText(), JsonOptions)
+                : null,
+            Allocation = element.TryGetProperty("allocation", out var allocation) && allocation.ValueKind == JsonValueKind.Object
+                ? new AllocationSummary
+                {
+                    Mode = allocation.GetProperty("mode").GetString() ?? throw new SandboxApiException("Missing allocation.mode in response"),
+                    PoolRef = allocation.GetProperty("poolRef").GetString() ?? throw new SandboxApiException("Missing allocation.poolRef in response"),
+                    State = allocation.GetProperty("state").GetString() ?? throw new SandboxApiException("Missing allocation.state in response")
+                }
                 : null,
             Entrypoint = element.GetProperty("entrypoint").EnumerateArray().Select(e => e.GetString() ?? string.Empty).ToList(),
             Metadata = ParseStringMap(element, "metadata"),

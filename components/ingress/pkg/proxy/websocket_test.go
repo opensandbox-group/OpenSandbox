@@ -48,7 +48,7 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 
 	ctx := context.Background()
 	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
-	proxy := NewProxy(ctx, provider, ModeHeader, nil, nil)
+	proxy := NewProxy(ctx, provider, ModeHeader, nil, nil, nil)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)
@@ -140,7 +140,7 @@ func webSocketProxyWithURIMode(t *testing.T) {
 
 	ctx := context.Background()
 	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
-	proxy := NewProxy(ctx, provider, ModeURI, nil, nil)
+	proxy := NewProxy(ctx, provider, ModeURI, nil, nil, nil)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)

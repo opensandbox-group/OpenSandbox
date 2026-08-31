@@ -1,0 +1,28 @@
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Hardened isolation configuration for the execd-as-init e2e (OSEP-0018,
+# R-i). Baked into the e2e image variant (Dockerfile.hardened-e2e) and
+# injected into sandboxes via [docker] sandbox_env
+# (EXECD_ISOLATION_CONFIG=/etc/opensandbox/isolation.toml) so the whole
+# server -> sandbox -> execd path runs with the floor on.
+#
+# This is the "common cases" config from the OSEP: one line each for the
+# floor and for filesystem confinement. Everything else stays built-in.
+
+[hardening]
+enabled = true
+
+[landlock]
+enabled = true

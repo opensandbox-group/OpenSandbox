@@ -20,6 +20,7 @@ import hmac
 import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import Optional
+from urllib.parse import urlsplit
 
 import anyio
 import httpx
@@ -27,11 +28,14 @@ import websockets
 from fastapi import APIRouter, Request, WebSocket, status
 from fastapi.exceptions import HTTPException
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection
+from websockets.frames import EXTERNAL_CLOSE_CODES
 from websockets.typing import Origin
 
 from opensandbox_server.api import lifecycle
+from opensandbox_server.config import get_config
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_SECURE_ACCESS_HEADER
@@ -50,6 +54,12 @@ HOP_BY_HOP_HEADERS = {
     "trailer",
     "transfer-encoding",
     "upgrade",
+}
+
+# Uvicorn adds this to client-facing responses. Forwarding the backend value as
+# well would produce a duplicate field on the wire.
+SERVER_GENERATED_RESPONSE_HEADERS = {
+    "server",
 }
 
 # Headers that shouldn't be forwarded to untrusted/internal backends
@@ -163,6 +173,30 @@ def _set_forwarded_headers(
         headers["X-Forwarded-For"] = request.client.host
 
 
+def _rewrite_proxy_location(
+    location: str,
+    request: Request,
+    sandbox_id: str,
+    port: int,
+) -> str:
+    """Keep root-relative redirects inside the current sandbox proxy route."""
+    if not location.startswith("/") or location.startswith("//"):
+        return location
+
+    proxy_suffix = f"/sandboxes/{sandbox_id}/proxy/{port}"
+    eip = (lifecycle.get_config().server.eip or "").strip().rstrip("/")
+    if eip:
+        external_url = eip if "://" in eip else f"//{eip}"
+        external_prefix = urlsplit(external_url).path.rstrip("/")
+        return f"{external_prefix}{proxy_suffix}{location}"
+
+    proxy_start = request.url.path.find(proxy_suffix)
+    if proxy_start < 0:
+        return location
+    proxy_path = request.url.path[: proxy_start + len(proxy_suffix)]
+    return f"{proxy_path}{location}"
+
+
 def _schedule_proxy_renew(request: Request | WebSocket, sandbox_id: str) -> None:
     proxy_renew = getattr(request.app.state, "proxy_renew_coordinator", None)
     if proxy_renew is not None:
@@ -207,19 +241,43 @@ async def _authenticate_websocket_tenant(websocket: WebSocket) -> bool:
     return True
 
 
-async def _stream_backend_response(resp: httpx.Response) -> AsyncIterator[bytes]:
-    """
-    Yield backend body chunks without httpx content decoding and always close the response.
-
-    httpx requires ``await resp.aclose()`` for ``stream=True`` responses so connections
-    return to the pool; Starlette's StreamingResponse does not do this automatically.
-    Use ``aiter_raw`` so forwarded ``content-encoding`` headers still match the body bytes.
-    """
-    try:
-        async for chunk in resp.aiter_raw():
-            yield chunk
-    finally:
+async def _close_backend_response(resp: httpx.Response) -> None:
+    """Return a streamed backend response to httpx's pool, even during cancellation."""
+    with anyio.CancelScope(shield=True):
         await resp.aclose()
+
+
+async def _stream_backend_response(resp: httpx.Response) -> AsyncIterator[bytes]:
+    """Yield raw backend chunks so content-encoding still matches the body bytes."""
+    async for chunk in resp.aiter_raw():
+        yield chunk
+
+
+class _ProxyStreamingResponse(StreamingResponse):
+    """Streaming response that owns and always releases its httpx response."""
+
+    def __init__(
+        self,
+        resp: httpx.Response,
+        *,
+        status_code: int,
+        headers: Mapping[str, str],
+    ) -> None:
+        self._backend_response = resp
+        super().__init__(
+            content=_stream_backend_response(resp),
+            status_code=status_code,
+            headers=headers,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # The body iterator may never start if the downstream disconnects
+            # while Starlette sends response headers. Keep ownership here so
+            # that connection is still returned to the shared httpx pool.
+            await _close_backend_response(self._backend_response)
 
 
 def _verify_secure_access(endpoint: Endpoint, caller_headers: Mapping[str, str]) -> None:
@@ -260,7 +318,13 @@ async def _proxy_http_request(
     port: int,
     full_path: str,
 ) -> StreamingResponse:
-    endpoint = lifecycle.sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
+    resolve_internal = get_config().proxy.resolve_internal
+    endpoint = lifecycle.sandbox_service.get_endpoint(
+        sandbox_id,
+        port,
+        resolve_internal=resolve_internal,
+        use_proxy_host=not resolve_internal,
+    )
     _verify_secure_access(endpoint, request.headers)
     _schedule_proxy_renew(request, sandbox_id)
     query_string = request.url.query
@@ -295,25 +359,36 @@ async def _proxy_http_request(
 
         resp = await client.send(req, stream=True)
 
-        hop_by_hop = set(HOP_BY_HOP_HEADERS)
-        connection_header = resp.headers.get("connection")
-        if connection_header:
-            hop_by_hop.update(
-                header.strip().lower()
-                for header in connection_header.split(",")
-                if header.strip()
-            )
-        response_headers = {
-            key: value
-            for key, value in resp.headers.items()
-            if key.lower() not in hop_by_hop
-        }
+        try:
+            hop_by_hop = set(HOP_BY_HOP_HEADERS)
+            connection_header = resp.headers.get("connection")
+            if connection_header:
+                hop_by_hop.update(
+                    header.strip().lower()
+                    for header in connection_header.split(",")
+                    if header.strip()
+                )
+            response_header_exclusions = hop_by_hop | SERVER_GENERATED_RESPONSE_HEADERS
+            response_headers = {
+                key: (
+                    _rewrite_proxy_location(value, request, sandbox_id, port)
+                    if key.lower() == "location"
+                    else value
+                )
+                for key, value in resp.headers.items()
+                if key.lower() not in response_header_exclusions
+            }
 
-        return StreamingResponse(
-            content=_stream_backend_response(resp),
-            status_code=resp.status_code,
-            headers=response_headers,
-        )
+            return _ProxyStreamingResponse(
+                resp,
+                status_code=resp.status_code,
+                headers=response_headers,
+            )
+        except BaseException:
+            # Until ownership passes to _ProxyStreamingResponse, any failure
+            # after client.send() must release the acquired pool connection.
+            await _close_backend_response(resp)
+            raise
     except httpx.ConnectError as e:
         raise HTTPException(
             status_code=502,
@@ -342,6 +417,15 @@ async def _fail_client_websocket(websocket: WebSocket, code: int, reason: str = 
         await websocket.close(code=code, reason=reason[:123])
     except RuntimeError:
         pass
+
+
+def _client_websocket_close_code(code: int | None) -> int:
+    """Map non-transmittable close codes to a legal client close code."""
+    if code is None:
+        return status.WS_1000_NORMAL_CLOSURE
+    if code in EXTERNAL_CLOSE_CODES or 3000 <= code < 5000:
+        return code
+    return status.WS_1011_INTERNAL_ERROR
 
 
 async def _relay_client_messages(
@@ -384,7 +468,7 @@ async def _relay_backend_messages(
     except websockets.ConnectionClosed as exc:
         try:
             await websocket.close(
-                code=exc.code or status.WS_1000_NORMAL_CLOSURE,
+                code=_client_websocket_close_code(exc.code),
                 reason=exc.reason or "",
             )
         except RuntimeError:
@@ -403,7 +487,13 @@ async def _proxy_websocket_request(
         return
 
     try:
-        endpoint = lifecycle.sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
+        resolve_internal = get_config().proxy.resolve_internal
+        endpoint = lifecycle.sandbox_service.get_endpoint(
+            sandbox_id,
+            port,
+            resolve_internal=resolve_internal,
+            use_proxy_host=not resolve_internal,
+        )
     except HTTPException as exc:
         logger.warning(
             "Rejecting websocket proxy request for sandbox=%s port=%s: %s",
@@ -495,10 +585,6 @@ async def _proxy_websocket_request(
         await _fail_client_websocket(websocket, status.WS_1011_INTERNAL_ERROR, "")
 
 
-@router.api_route(
-    "/sandboxes/{sandbox_id}/proxy/{port}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-)
 async def proxy_sandbox_endpoint_root(
     request: Request,
     sandbox_id: str,
@@ -508,10 +594,6 @@ async def proxy_sandbox_endpoint_root(
     return await _proxy_http_request(request, sandbox_id, port, "")
 
 
-@router.api_route(
-    "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-)
 async def proxy_sandbox_endpoint_request(
     request: Request,
     sandbox_id: str,
@@ -520,6 +602,39 @@ async def proxy_sandbox_endpoint_request(
 ):
     """Proxy HTTP requests to sandbox-backed services."""
     return await _proxy_http_request(request, sandbox_id, port, full_path)
+
+
+_PROXY_HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH")
+
+# Keep the multi-method route first for runtime dispatch so 405 responses retain
+# the complete Allow header. The method-specific routes provide unique OpenAPI IDs.
+router.add_api_route(
+    "/sandboxes/{sandbox_id}/proxy/{port}",
+    proxy_sandbox_endpoint_root,
+    methods=list(_PROXY_HTTP_METHODS),
+    include_in_schema=False,
+)
+
+for _method in _PROXY_HTTP_METHODS:
+    router.add_api_route(
+        "/sandboxes/{sandbox_id}/proxy/{port}",
+        proxy_sandbox_endpoint_root,
+        methods=[_method],
+    )
+
+router.add_api_route(
+    "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
+    proxy_sandbox_endpoint_request,
+    methods=list(_PROXY_HTTP_METHODS),
+    include_in_schema=False,
+)
+
+for _method in _PROXY_HTTP_METHODS:
+    router.add_api_route(
+        "/sandboxes/{sandbox_id}/proxy/{port}/{full_path:path}",
+        proxy_sandbox_endpoint_request,
+        methods=[_method],
+    )
 
 
 @router.websocket("/sandboxes/{sandbox_id}/proxy/{port}")

@@ -21,8 +21,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.alibaba.opensandbox.sandbox.Sandbox;
 import com.alibaba.opensandbox.sandbox.SandboxManager;
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig;
-import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolEmptyException;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolAcquireFailedException;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyedException;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolEmptyException;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest;
@@ -52,6 +53,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
@@ -109,7 +111,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                         .stateStore(stateStore)
                         .connectionConfig(sharedConnectionConfig)
                         .creationSpec(creationSpec)
-                        .reconcileInterval(Duration.ofSeconds(2))
                         .drainTimeout(Duration.ofMillis(200))
                         .build();
         pool.start();
@@ -556,7 +557,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                         .stateStore(stateStore)
                         .connectionConfig(sharedConnectionConfig)
                         .creationSpec(creationSpec)
-                        .reconcileInterval(Duration.ofMinutes(5))
                         .drainTimeout(Duration.ofMillis(200))
                         .build();
         pool.start();
@@ -575,7 +575,8 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
         PoolDestroyResult result = poolManager.destroy(poolName, new PoolDestroyOptions());
 
         assertEquals(PoolDestroyState.DESTROYED, result.getState());
-        assertTrue(result.getPersistentStateCleared(), "destroy should clear persistent pool state");
+        assertTrue(
+                result.getPersistentStateCleared(), "destroy should clear persistent pool state");
         assertTrue(result.getDrainedIdleCount() >= 1, "destroy should drain warmed idle ids");
         assertEquals(result.getDrainedIdleCount(), result.getKilledIdleCount());
         assertEquals(PoolDestroyState.DESTROYED, stateStore.getDestroyState(poolName));
@@ -595,7 +596,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                         .stateStore(stateStore)
                         .connectionConfig(sharedConnectionConfig)
                         .creationSpec(creationSpec)
-                        .reconcileInterval(Duration.ofMinutes(5))
                         .drainTimeout(Duration.ofMillis(200))
                         .build();
         assertThrows(PoolDestroyedException.class, replacement::start);
@@ -641,7 +641,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                                             "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
                                                             "1s"))
                                             .build())
-                            .reconcileInterval(Duration.ofSeconds(2))
                             .drainTimeout(Duration.ofMillis(200))
                             .build();
 
@@ -687,7 +686,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                                             "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
                                                             "1s"))
                                             .build())
-                            .reconcileInterval(Duration.ofSeconds(2))
                             .drainTimeout(Duration.ofMillis(200))
                             .build();
 
@@ -815,7 +813,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                                             "1s"))
                                             .build())
                             .degradedThreshold(1)
-                            .reconcileInterval(Duration.ofSeconds(1))
                             .drainTimeout(Duration.ofMillis(100))
                             .build();
             badPool.start();
@@ -886,7 +883,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                                             "1s"))
                                             .build())
                             .degradedThreshold(1)
-                            .reconcileInterval(Duration.ofSeconds(1))
                             .drainTimeout(Duration.ofMillis(100))
                             .build();
             badPool.start();
@@ -954,7 +950,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                                             "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
                                                             "1s"))
                                             .build())
-                            .reconcileInterval(Duration.ofSeconds(2))
                             .drainTimeout(Duration.ofMillis(100))
                             .build();
             goodPool.start();
@@ -1039,7 +1034,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                                     .writeFile(
                                                             markerPath,
                                                             "prepared-by-warmup-" + preparedTag))
-                            .reconcileInterval(Duration.ofSeconds(2))
                             .drainTimeout(Duration.ofMillis(200))
                             .build();
             preparedPool.start();
@@ -1116,7 +1110,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                                                             "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
                                                             "1s"))
                                             .build())
-                            .reconcileInterval(Duration.ofSeconds(2))
                             .drainTimeout(Duration.ofMillis(200))
                             .build();
             concurrentPool.start();
@@ -1147,6 +1140,125 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
 
     @Test
     @Order(18)
+    @DisplayName("slow warmup does not block other admitted warmups")
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void testSlowWarmupDoesNotBlockOtherAdmittedWarmups() throws Exception {
+        pool.resize(0);
+        pool.releaseAllIdle();
+        pool.shutdown(false);
+
+        String rollingTag =
+                "e2e-pool-rolling-warmup-" + UUID.randomUUID().toString().substring(0, 8);
+        CountDownLatch slowWarmupEntered = new CountDownLatch(1);
+        CountDownLatch releaseSlowWarmup = new CountDownLatch(1);
+        CountDownLatch laterWarmupsEntered = new CountDownLatch(3);
+        AtomicInteger warmupSequence = new AtomicInteger();
+        AtomicInteger activePreparers = new AtomicInteger();
+        AtomicInteger maxActivePreparers = new AtomicInteger();
+        SandboxPool rollingPool = null;
+        try {
+            rollingPool =
+                    SandboxPool.builder()
+                            .poolName("pool-rolling-warmup-" + rollingTag)
+                            .ownerId("owner-rolling-warmup-" + rollingTag)
+                            .maxIdle(4)
+                            .warmupConcurrency(2)
+                            .stateStore(new InMemoryPoolStateStore())
+                            .connectionConfig(sharedConnectionConfig)
+                            .creationSpec(
+                                    PoolCreationSpec.builder()
+                                            .image(getSandboxImage())
+                                            .entrypoint(List.of("tail -f /dev/null"))
+                                            .metadata(
+                                                    Map.of(
+                                                            "tag",
+                                                            rollingTag,
+                                                            "suite",
+                                                            "sandbox-pool-e2e"))
+                                            .env(
+                                                    Map.of(
+                                                            "E2E_TEST",
+                                                            "true",
+                                                            "EXECD_API_GRACE_SHUTDOWN",
+                                                            "3s",
+                                                            "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
+                                                            "1s"))
+                                            .build())
+                            .warmupSandboxPreparer(
+                                    sandbox -> {
+                                        int active = activePreparers.incrementAndGet();
+                                        maxActivePreparers.accumulateAndGet(active, Math::max);
+                                        int sequence = warmupSequence.incrementAndGet();
+                                        try {
+                                            if (sequence == 1) {
+                                                slowWarmupEntered.countDown();
+                                                awaitLatch(releaseSlowWarmup);
+                                            } else {
+                                                laterWarmupsEntered.countDown();
+                                            }
+                                        } finally {
+                                            activePreparers.decrementAndGet();
+                                        }
+                                    })
+                            // All four logical warmups are admitted together. The worker bound must
+                            // still allow the three fast warmups to progress around one slow task.
+                            .drainTimeout(Duration.ofSeconds(10))
+                            .build();
+            rollingPool.start();
+
+            assertTrue(
+                    slowWarmupEntered.await(2, TimeUnit.MINUTES),
+                    "one warmup should enter the deliberately slow preparer");
+            assertTrue(
+                    laterWarmupsEntered.await(2, TimeUnit.MINUTES),
+                    "three later admitted warmups should progress while the first stays blocked");
+
+            SandboxPool finalRollingPool = rollingPool;
+            eventually(
+                    "three fast warmups become idle before the slow tail completes",
+                    Duration.ofMinutes(2),
+                    Duration.ofMillis(500),
+                    () -> finalRollingPool.snapshot().getIdleCount() == 3);
+            assertEquals(
+                    1L,
+                    releaseSlowWarmup.getCount(),
+                    "the first warmup must still be blocked when later warmups become idle");
+            assertTrue(
+                    maxActivePreparers.get() <= 2,
+                    "warmup execution must respect warmupConcurrency");
+            assertTrue(
+                    countTaggedSandboxes(rollingTag) <= 4,
+                    "warmup admission must not create beyond maxIdle");
+
+            releaseSlowWarmup.countDown();
+            eventually(
+                    "pool converges after the slow tail completes",
+                    Duration.ofMinutes(1),
+                    Duration.ofMillis(500),
+                    () -> finalRollingPool.snapshot().getIdleCount() == 4);
+            assertEquals(4, warmupSequence.get(), "exactly maxIdle warmups should be admitted");
+            assertTrue(
+                    countTaggedSandboxes(rollingTag) <= 4,
+                    "remote sandbox count must remain bounded by maxIdle");
+        } finally {
+            releaseSlowWarmup.countDown();
+            if (rollingPool != null) {
+                try {
+                    rollingPool.resize(0);
+                    rollingPool.releaseAllIdle();
+                } catch (Exception ignored) {
+                }
+                try {
+                    rollingPool.shutdown(false);
+                } catch (Exception ignored) {
+                }
+            }
+            cleanupTaggedSandboxes(rollingTag);
+        }
+    }
+
+    @Test
+    @Order(19)
     @DisplayName("snapshot exposes lifecycle maxIdle and idle entry details")
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
     void testSnapshotExposesLifecycleAndIdleEntries() throws InterruptedException {
@@ -1189,6 +1301,279 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
         pool.shutdown(false);
         assertEquals(PoolLifecycleState.STOPPED, pool.snapshot().getLifecycleState());
         assertEquals(PoolState.STOPPED, pool.snapshot().getState());
+    }
+
+    @Test
+    @Order(20)
+    @DisplayName("RETRY_NEXT_IDLE skips stale idle candidate and returns healthy warm sandbox")
+    @Timeout(value = 4, unit = TimeUnit.MINUTES)
+    void testRetryNextIdleSkipsStaleAndReturnsHealthyWarm() throws Exception {
+        // Real-world scenario: the pool's idle queue holds a stale entry ahead of a healthy
+        // warm sandbox — for example a leftover after a control-plane blip that killed the
+        // remote sandbox but left its id in the shared idle queue, or a slow-cold-starting
+        // custom template that fails its first ready-check. The caller wants a warm sandbox
+        // and is willing to skip a bounded number of bad candidates before giving up.
+        //
+        // Setup: an isolated pool with maxIdle=2 and one stale id pre-injected into the
+        // store before start(). FIFO ordering guarantees the stale id sits ahead of the
+        // real idle that reconcile creates. Once IdleCount==2==[stale, real] the reconciler
+        // holds steady (neither shrinking nor rewarming).
+        pool.shutdown(false);
+
+        String mixedTag =
+                "e2e-pool-retry-next-idle-" + UUID.randomUUID().toString().substring(0, 8);
+        String mixedPoolName = "pool-" + mixedTag;
+        InMemoryPoolStateStore mixedStore = new InMemoryPoolStateStore();
+        String staleId = "stale-" + UUID.randomUUID();
+        mixedStore.putIdle(mixedPoolName, staleId);
+
+        PoolCreationSpec mixedSpec =
+                PoolCreationSpec.builder()
+                        .image(getSandboxImage())
+                        .entrypoint(List.of("tail -f /dev/null"))
+                        .metadata(Map.of("tag", mixedTag, "suite", "sandbox-pool-e2e"))
+                        .env(
+                                Map.of(
+                                        "E2E_TEST",
+                                        "true",
+                                        "EXECD_API_GRACE_SHUTDOWN",
+                                        "3s",
+                                        "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
+                                        "1s"))
+                        .build();
+        SandboxPool mixedPool =
+                SandboxPool.builder()
+                        .poolName(mixedPoolName)
+                        .ownerId("owner-" + mixedTag)
+                        .maxIdle(2)
+                        .warmupConcurrency(1)
+                        .maxAcquireRetries(3)
+                        .acquireReadyTimeout(Duration.ofSeconds(5))
+                        .stateStore(mixedStore)
+                        .connectionConfig(sharedConnectionConfig)
+                        .creationSpec(mixedSpec)
+                        .drainTimeout(Duration.ofMillis(200))
+                        .build();
+        try {
+            mixedPool.start();
+            eventually(
+                    "mixed pool warms one real idle behind pre-injected stale entry",
+                    Duration.ofMinutes(2),
+                    Duration.ofSeconds(2),
+                    () -> mixedPool.snapshot().getIdleCount() == 2);
+
+            // Assert the stale id is at the HEAD of the FIFO idle queue. If a future
+            // store implementation ever reordered on putIdle, or if the reconciler
+            // somehow reaped the stale before warmup landed, catch it here instead of
+            // silently taking the "healthy first" happy path and mis-calling it RETRY
+            // coverage.
+            List<IdleEntry> entriesBefore = mixedStore.snapshotIdleEntries(mixedPoolName);
+            assertEquals(2, entriesBefore.size());
+            assertEquals(
+                    staleId,
+                    entriesBefore.get(0).getSandboxId(),
+                    "expected stale id at idle head, got: " + entriesBefore);
+
+            Sandbox sandbox =
+                    mixedPool.acquire(Duration.ofMinutes(5), AcquirePolicy.RETRY_NEXT_IDLE);
+            borrowed.add(sandbox);
+            assertNotEquals(staleId, sandbox.getId(), "acquired sandbox must not be the stale id");
+            assertTrue(sandbox.isHealthy(), "acquired sandbox should be healthy");
+
+            Execution result =
+                    sandbox.commands()
+                            .run(
+                                    RunCommandRequest.builder()
+                                            .command("echo kotlin-retry-next-idle-ok")
+                                            .build());
+            assertNull(result.getError());
+            assertEquals(
+                    "kotlin-retry-next-idle-ok", result.getLogs().getStdout().get(0).getText());
+
+            // Stale id must not silently reappear in the idle queue.
+            List<IdleEntry> remaining = mixedStore.snapshotIdleEntries(mixedPoolName);
+            assertTrue(
+                    remaining.stream().noneMatch(entry -> staleId.equals(entry.getSandboxId())),
+                    "stale id should have been removed by retry loop");
+        } finally {
+            try {
+                mixedPool.releaseAllIdle();
+            } catch (Exception ignored) {
+            }
+            try {
+                mixedPool.shutdown(false);
+            } catch (Exception ignored) {
+            }
+            cleanupTaggedSandboxes(mixedTag);
+        }
+    }
+
+    @Test
+    @Order(21)
+    @DisplayName(
+            "RETRY_NEXT_IDLE_THEN_CREATE falls through to direct-create when all idle are stale")
+    @Timeout(value = 4, unit = TimeUnit.MINUTES)
+    void testRetryNextIdleThenCreateFallsThroughWhenAllStale() throws Exception {
+        // Real-world scenario: after a network flap every warm sandbox is unreachable; the
+        // caller cannot afford to wait for reconcile to drain them and still needs a working
+        // sandbox. RETRY_NEXT_IDLE_THEN_CREATE burns through the bounded budget on stales
+        // then falls through to direct-create.
+        pool.shutdown(false);
+
+        String allStaleTag =
+                "e2e-pool-retry-then-create-" + UUID.randomUUID().toString().substring(0, 8);
+        String allStalePoolName = "pool-" + allStaleTag;
+        InMemoryPoolStateStore allStaleStore = new InMemoryPoolStateStore();
+
+        PoolCreationSpec allStaleSpec =
+                PoolCreationSpec.builder()
+                        .image(getSandboxImage())
+                        .entrypoint(List.of("tail -f /dev/null"))
+                        .metadata(Map.of("tag", allStaleTag, "suite", "sandbox-pool-e2e"))
+                        .env(
+                                Map.of(
+                                        "E2E_TEST",
+                                        "true",
+                                        "EXECD_API_GRACE_SHUTDOWN",
+                                        "3s",
+                                        "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
+                                        "1s"))
+                        .build();
+        // maxIdle=0 delays the fixed first reconcile tick by one second. Inject entries before
+        // start so acquire owns the stale-candidate behavior under test.
+        SandboxPool allStalePool =
+                SandboxPool.builder()
+                        .poolName(allStalePoolName)
+                        .ownerId("owner-" + allStaleTag)
+                        .maxIdle(0)
+                        .warmupConcurrency(1)
+                        .maxAcquireRetries(3)
+                        .acquireReadyTimeout(Duration.ofSeconds(3))
+                        .stateStore(allStaleStore)
+                        .connectionConfig(sharedConnectionConfig)
+                        .creationSpec(allStaleSpec)
+                        .drainTimeout(Duration.ofMillis(200))
+                        .build();
+        try {
+            List<String> staleIds =
+                    List.of(
+                            "stale-a-" + UUID.randomUUID(),
+                            "stale-b-" + UUID.randomUUID(),
+                            "stale-c-" + UUID.randomUUID());
+            for (String id : staleIds) {
+                allStaleStore.putIdle(allStalePoolName, id);
+            }
+            allStalePool.start();
+
+            Sandbox sandbox =
+                    allStalePool.acquire(
+                            Duration.ofMinutes(5), AcquirePolicy.RETRY_NEXT_IDLE_THEN_CREATE);
+            borrowed.add(sandbox);
+            for (String id : staleIds) {
+                assertNotEquals(id, sandbox.getId(), "acquired sandbox must not be any stale id");
+            }
+            assertTrue(sandbox.isHealthy());
+            Execution result =
+                    sandbox.commands()
+                            .run(
+                                    RunCommandRequest.builder()
+                                            .command("echo kotlin-retry-then-create-ok")
+                                            .build());
+            assertNull(result.getError());
+            assertEquals(
+                    "kotlin-retry-then-create-ok", result.getLogs().getStdout().get(0).getText());
+
+            // Acquire starts before the first fixed reconcile tick. If its retry loop truly
+            // exhausted all 3 stale candidates before falling through to direct-create, all
+            // 3 stale ids must have been removed. If it short-circuited earlier (for example,
+            // after one attempt), this assertion catches the regression.
+            List<IdleEntry> remaining = allStaleStore.snapshotIdleEntries(allStalePoolName);
+            Set<String> remainingIds =
+                    remaining.stream().map(IdleEntry::getSandboxId).collect(Collectors.toSet());
+            for (String id : staleIds) {
+                assertFalse(
+                        remainingIds.contains(id),
+                        "retry loop did not fully exhaust stale queue; " + id + " remained");
+            }
+        } finally {
+            try {
+                allStalePool.releaseAllIdle();
+            } catch (Exception ignored) {
+            }
+            try {
+                allStalePool.shutdown(false);
+            } catch (Exception ignored) {
+            }
+            cleanupTaggedSandboxes(allStaleTag);
+        }
+    }
+
+    @Test
+    @Order(22)
+    @DisplayName(
+            "RETRY_NEXT_IDLE raises PoolAcquireFailedException after bounded retries on all-stale queue")
+    @Timeout(value = 3, unit = TimeUnit.MINUTES)
+    void testRetryNextIdleAllStaleRaisesAfterBoundedRetries() throws Exception {
+        pool.shutdown(false);
+
+        String raiseTag = "e2e-pool-retry-raise-" + UUID.randomUUID().toString().substring(0, 8);
+        String raisePoolName = "pool-" + raiseTag;
+        InMemoryPoolStateStore raiseStore = new InMemoryPoolStateStore();
+
+        PoolCreationSpec raiseSpec =
+                PoolCreationSpec.builder()
+                        .image(getSandboxImage())
+                        .entrypoint(List.of("tail -f /dev/null"))
+                        .metadata(Map.of("tag", raiseTag, "suite", "sandbox-pool-e2e"))
+                        .env(
+                                Map.of(
+                                        "E2E_TEST",
+                                        "true",
+                                        "EXECD_API_GRACE_SHUTDOWN",
+                                        "3s",
+                                        "EXECD_JUPYTER_IDLE_POLL_INTERVAL",
+                                        "1s"))
+                        .build();
+        SandboxPool raisePool =
+                SandboxPool.builder()
+                        .poolName(raisePoolName)
+                        .ownerId("owner-" + raiseTag)
+                        .maxIdle(0)
+                        .warmupConcurrency(1)
+                        .maxAcquireRetries(2)
+                        .acquireReadyTimeout(Duration.ofSeconds(3))
+                        .stateStore(raiseStore)
+                        .connectionConfig(sharedConnectionConfig)
+                        .creationSpec(raiseSpec)
+                        .drainTimeout(Duration.ofMillis(200))
+                        .build();
+        try {
+            // Inject more stales than the retry budget so we also assert the loop stops at
+            // the bound instead of draining the whole queue.
+            for (int i = 0; i < 3; i++) {
+                raiseStore.putIdle(raisePoolName, "stale-" + i + "-" + UUID.randomUUID());
+            }
+            raisePool.start();
+
+            assertThrows(
+                    PoolAcquireFailedException.class,
+                    () -> raisePool.acquire(Duration.ofMinutes(1), AcquirePolicy.RETRY_NEXT_IDLE));
+
+            // RETRY_NEXT_IDLE must not fall through to direct-create, so no tagged sandbox
+            // should have been created.
+            int taggedCount = countTaggedSandboxes(raiseTag);
+            assertEquals(0, taggedCount, "RETRY_NEXT_IDLE must not fall through to direct-create");
+        } finally {
+            try {
+                raisePool.releaseAllIdle();
+            } catch (Exception ignored) {
+            }
+            try {
+                raisePool.shutdown(false);
+            } catch (Exception ignored) {
+            }
+            cleanupTaggedSandboxes(raiseTag);
+        }
     }
 
     private void cleanupTaggedSandboxes() {
@@ -1261,6 +1646,15 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                             + lastError.getMessage());
         } else {
             fail("Timed out waiting for " + description);
+        }
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("warmup interrupted unexpectedly", exception);
         }
     }
 

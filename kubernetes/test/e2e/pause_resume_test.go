@@ -156,6 +156,12 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 		utils.Run(cmd)
 	})
 
+	JustAfterEach(func() {
+		if report := CurrentSpecReport(); report.Failed() {
+			dumpPauseResumeDiagnostics(report.FullText())
+		}
+	})
+
 	Context("Pause and Resume", func() {
 		It("should complete the full pause-resume flow via spec.pause trigger", func() {
 			const sandboxName = "test-pause-resume"
@@ -930,9 +936,19 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			}, 3*time.Minute).Should(Succeed())
 
 			By("tampering SandboxSnapshot with invalid image URI")
+			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
+				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.containers[0].imageDigest}")
+			digestOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			imageDigest := strings.TrimSpace(digestOutput)
+			Expect(imageDigest).NotTo(BeEmpty())
+			statusPatch := fmt.Sprintf(
+				`{"status":{"containers":[{"containerName":"sandbox-container","imageUri":"invalid.registry/unreachable/image:nonexistent","imageDigest":%q}]}}`,
+				imageDigest,
+			)
 			cmd = exec.Command("kubectl", "patch", "sandboxsnapshot", sandboxName+"-pause",
 				"-n", pauseResumeNamespace, "--type=merge", "--subresource=status",
-				"-p", `{"status":{"containers":[{"containerName":"sandbox-container","imageUri":"invalid.registry/unreachable/image:nonexistent"}]}}`)
+				"-p", statusPatch)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -970,16 +986,18 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("verifying ResumeFailed condition is set")
-			cmd = exec.Command("kubectl", "get", "batchsandbox", sandboxName,
-				"-n", pauseResumeNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='ResumeFailed')].status}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("True"))
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", sandboxName,
+					"-n", pauseResumeNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='ResumeFailed')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, time.Minute, 2*time.Second).Should(Succeed())
 
 			By("verifying the reserved internal SandboxSnapshot is retained after failed resume")
 			cmd = exec.Command("kubectl", "get", "sandboxsnapshot", sandboxName+"-pause",
 				"-n", pauseResumeNamespace, "-o", "name")
-			output, err = utils.Run(cmd)
+			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Internal pause snapshot should remain after failed resume")
 			Expect(strings.TrimSpace(output)).To(Equal("sandboxsnapshot.sandbox.opensandbox.io/" + sandboxName + "-pause"))
 
@@ -1068,4 +1086,25 @@ func createDockerRegistrySecrets(namespace string) error {
 	}
 
 	return nil
+}
+
+// dumpPauseResumeDiagnostics captures cluster state to GinkgoWriter to help
+// diagnose flaky pause/resume failures before suite teardown deletes the cluster.
+func dumpPauseResumeDiagnostics(spec string) {
+	fmt.Fprintf(GinkgoWriter, "\n=== DIAGNOSTICS for failed spec: %s ===\n", spec)
+	dump := func(title string, args ...string) {
+		cmd := exec.Command("kubectl", args...)
+		output, err := utils.Run(cmd)
+		if err != nil {
+			output = fmt.Sprintf("(dump failed: %v)", err)
+		}
+		fmt.Fprintf(GinkgoWriter, "\n--- DIAG %s ---\n%s\n", title, output)
+	}
+	dump("batchsandboxes", "get", "batchsandboxes", "-n", pauseResumeNamespace, "-o", "yaml")
+	dump("sandboxsnapshots", "get", "sandboxsnapshots", "-n", pauseResumeNamespace, "-o", "yaml")
+	dump("jobs", "get", "jobs", "-n", pauseResumeNamespace, "-o", "yaml")
+	dump("pods", "get", "pods", "-n", pauseResumeNamespace, "-o", "wide")
+	dump("events", "get", "events", "-n", pauseResumeNamespace, "--sort-by=.lastTimestamp")
+	dump("controller-logs", "logs", "-n", namespace, "-l", "control-plane=controller-manager",
+		"--all-containers=true", "--tail=800")
 }

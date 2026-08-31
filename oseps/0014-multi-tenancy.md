@@ -3,8 +3,8 @@ title: Multi-Tenancy Support for Kubernetes Runtime
 authors:
   - "@Pangjiping"
 creation-date: 2026-04-29
-last-updated: 2026-05-07
-status: draft
+last-updated: 2026-07-27
+status: implemented
 ---
 
 # OSEP-0014: Multi-Tenancy Support for Kubernetes Runtime

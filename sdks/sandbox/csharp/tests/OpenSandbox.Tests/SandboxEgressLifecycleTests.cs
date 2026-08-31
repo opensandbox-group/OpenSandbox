@@ -145,6 +145,58 @@ public class SandboxEgressLifecycleTests
     }
 
     [Fact]
+    public async Task CreateAsync_ShouldForwardLifecycleHooks()
+    {
+        var sandboxes = new StubSandboxes();
+        var adapterFactory = new StubAdapterFactory(sandboxes, new StubEgress());
+        var lifecycle = new SandboxLifecycle
+        {
+            PreStart = new LifecycleHook
+            {
+                Command = ["/opt/hooks/restore.sh"],
+                TimeoutSeconds = 300
+            },
+            Periodic =
+            [
+                new PeriodicLifecycleHook
+                {
+                    Name = "checkpoint",
+                    Schedule = "@hourly",
+                    Command = ["/opt/hooks/checkpoint.sh"]
+                }
+            ]
+        };
+
+        await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+        {
+            Image = "python:3.12",
+            ConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+            {
+                Domain = "127.0.0.1:8080",
+                Protocol = ConnectionProtocol.Http
+            }),
+            AdapterFactory = adapterFactory,
+            SkipHealthCheck = true,
+            Diagnostics = new SdkDiagnosticsOptions
+            {
+                LoggerFactory = NullLoggerFactory.Instance
+            },
+            Lifecycle = lifecycle
+        });
+
+        sandboxes.LastCreateRequest.Should().NotBeNull();
+        var forwarded = sandboxes.LastCreateRequest!.Lifecycle;
+        forwarded.Should().NotBeNull();
+        forwarded!.PreStart.Should().NotBeNull();
+        forwarded.PreStart!.Command.Should().Equal("/opt/hooks/restore.sh");
+        forwarded.PreStart.TimeoutSeconds.Should().Be(300);
+        forwarded.Periodic.Should().ContainSingle();
+        forwarded.Periodic![0].Name.Should().Be("checkpoint");
+        forwarded.Periodic[0].Schedule.Should().Be("@hourly");
+        forwarded.Periodic[0].Command.Should().Equal("/opt/hooks/checkpoint.sh");
+    }
+
+    [Fact]
     public async Task CreateAsync_ShouldSupportSnapshotRestore()
     {
         var sandboxes = new StubSandboxes();

@@ -65,6 +65,8 @@ func (s *stubNft) AddResolvedIPs(_ context.Context, _ []nftables.ResolvedIP) err
 	return nil
 }
 
+func (s *stubNft) StartConnectionRefresh(context.Context) {}
+
 func (s *stubNft) RemoveEnforcement(_ context.Context) error {
 	return nil
 }

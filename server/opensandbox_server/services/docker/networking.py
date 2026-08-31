@@ -38,6 +38,7 @@ from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
     EGRESS_RULES_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
@@ -178,7 +179,8 @@ class DockerNetworkingMixin:
         )
 
     def get_endpoint(self, sandbox_id: str, port: int, resolve_internal: bool = False,
-                     expires: Optional[int] = None) -> Endpoint:
+                     expires: Optional[int] = None,
+                     use_proxy_host: bool = False) -> Endpoint:
         """
         Get sandbox access endpoint.
 
@@ -187,6 +189,12 @@ class DockerNetworkingMixin:
             port: Port number where the service is listening inside the sandbox
             resolve_internal: If True, return the internal container IP (for proxy), ignoring router config.
             expires: Not supported by Docker runtime.
+            use_proxy_host: When True and resolve_internal is False, build the
+                host-mapped endpoint from the server-local proxy host
+                (``_resolve_proxy_host()``) instead of the public host. This is
+                used by the server-side proxy so that deployments that advertise
+                a public EIP (``server.eip``) still route proxied traffic to a
+                locally reachable host.
 
         Returns:
             Endpoint: Public endpoint URL
@@ -233,7 +241,14 @@ class DockerNetworkingMixin:
                 )
             return self._resolve_internal_endpoint(container, port)
 
-        public_host = self._resolve_public_host()
+        # The server-side proxy needs a locally reachable host: when the
+        # deployment advertises a public EIP (server.eip), _resolve_public_host()
+        # returns that EIP, which the proxy process itself may not be able to
+        # reach (no hairpin). Use the server-local proxy host for that case.
+        if use_proxy_host:
+            public_host = self._resolve_proxy_host()
+        else:
+            public_host = self._resolve_public_host()
 
         if self.network_mode == HOST_NETWORK_MODE:
             endpoint = Endpoint(endpoint=f"{public_host}:{port}")
@@ -411,6 +426,7 @@ class DockerNetworkingMixin:
             f"{EGRESS_RULES_ENV}={policy_payload}",
             f"{EGRESS_MODE_ENV}={egress_mode}",
             f"{OPENSANDBOX_EGRESS_TOKEN}={egress_token}",
+            f"{OPENSANDBOX_EGRESS_SANDBOX_ID}={sandbox_id}",
         ]
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
@@ -509,6 +525,7 @@ class DockerNetworkingMixin:
                     sandbox_id,
                     egress_api_host_port,
                     egress_token,
+                    timeout_seconds=self.app_config.egress.readiness_timeout_seconds,
                 )
             return sidecar_container
         except Exception as exc:
@@ -547,7 +564,7 @@ class DockerNetworkingMixin:
         sandbox_id: str,
         host_port: int,
         egress_token: str,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float,
     ) -> None:
         deadline = time.monotonic() + timeout_seconds
         url = f"http://{self._resolve_proxy_host()}:{host_port}/healthz"

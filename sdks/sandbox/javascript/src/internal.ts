@@ -43,3 +43,15 @@ export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
 export { IsolatedSessionsAdapter } from "./adapters/isolatedSessionsAdapter.js";
+
+// Client-IP detection helpers (advanced/testing).
+export {
+  detectOutboundIp,
+  selectClientIp,
+  getClientIp,
+  ensureClientIpReady,
+  withClientIp,
+  _setClientIpForTest,
+  _restartDetectionForTest,
+  _resetClientIpCacheForTest,
+} from "./config/clientIp.js";

@@ -46,6 +46,7 @@ from opensandbox.models.sandboxes import (
     SandboxFilter,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxLifecycle,
     SandboxRenewResponse,
     SnapshotFilter,
     SnapshotInfo,
@@ -118,6 +119,7 @@ class SandboxesAdapterSync(SandboxesSync):
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        lifecycle: SandboxLifecycle | None = None,
     ) -> SandboxCreateResponse:
         logger.info(
             f"Creating sandbox with startup source: {spec.image if spec is not None else snapshot_id}"
@@ -143,6 +145,7 @@ class SandboxesAdapterSync(SandboxesSync):
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
+                lifecycle=lifecycle,
             )
             response_obj = post_sandboxes.sync_detailed(
                 client=self._get_client(), body=create_request
@@ -446,6 +449,7 @@ class SandboxesAdapterSync(SandboxesSync):
                 sandbox_id=filter.sandbox_id
                 if filter.sandbox_id is not None
                 else API_UNSET,
+                name=filter.name if filter.name is not None else API_UNSET,
                 state=filter.states if filter.states else API_UNSET,
                 page=filter.page if filter.page is not None else API_UNSET,
                 page_size=filter.page_size

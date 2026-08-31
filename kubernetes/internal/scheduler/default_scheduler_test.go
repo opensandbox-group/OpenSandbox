@@ -15,6 +15,7 @@
 package scheduler
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -40,6 +41,78 @@ func (m mockLogger) WithValues(keysAndValues ...interface{}) logr.LogSink      {
 func (m mockLogger) WithName(name string) logr.LogSink                         { return m }
 
 var testLogger = logr.New(mockLogger{})
+
+type deadlineRecordingTaskClient struct {
+	hasDeadline bool
+	deadline    time.Time
+}
+
+func (c *deadlineRecordingTaskClient) Set(ctx context.Context, task *api.Task) (*api.Task, error) {
+	c.deadline, c.hasDeadline = ctx.Deadline()
+	return task, nil
+}
+
+func (c *deadlineRecordingTaskClient) Get(context.Context) (*api.Task, error) {
+	return nil, nil
+}
+
+func TestSetTaskUsesPreStartHookTimeoutForDeadline(t *testing.T) {
+	timeoutSeconds := int64(30)
+	client := &deadlineRecordingTaskClient{}
+
+	_, err := setTask(client, &api.Task{
+		Name: "slow-prestart",
+		Process: &api.Process{
+			Command: []string{"echo", "main"},
+			Lifecycle: &api.ProcessLifecycle{
+				PreStart: &api.LifecycleHandler{
+					Exec: &api.ExecAction{
+						Command: []string{"sleep", "20"},
+					},
+					TimeoutSeconds: &timeoutSeconds,
+				},
+			},
+		},
+	}, testLogger)
+
+	if err != nil {
+		t.Fatalf("setTask returned error: %v", err)
+	}
+	if !client.hasDeadline {
+		t.Fatal("setTask should pass a deadline-bound context")
+	}
+	if remaining := time.Until(client.deadline); remaining < 25*time.Second {
+		t.Fatalf("setTask deadline = %v from now, want at least the preStart hook timeout", remaining)
+	}
+}
+
+func TestSetTaskUsesFallbackDeadlineWhenPreStartHookHasNoTimeout(t *testing.T) {
+	client := &deadlineRecordingTaskClient{}
+
+	_, err := setTask(client, &api.Task{
+		Name: "unbounded-prestart",
+		Process: &api.Process{
+			Command: []string{"echo", "main"},
+			Lifecycle: &api.ProcessLifecycle{
+				PreStart: &api.LifecycleHandler{
+					Exec: &api.ExecAction{
+						Command: []string{"sleep", "20"},
+					},
+				},
+			},
+		},
+	}, testLogger)
+
+	if err != nil {
+		t.Fatalf("setTask returned error: %v", err)
+	}
+	if !client.hasDeadline {
+		t.Fatalf("setTask should apply a fallback deadline to an unbounded preStart hook")
+	}
+	if remaining := time.Until(client.deadline); remaining < 30*time.Minute-defaultTimeout {
+		t.Fatalf("setTask deadline = %v from now, want the fallback preStart timeout", remaining)
+	}
+}
 
 func Test_scheduleSingleTaskNode(t *testing.T) {
 	ctl := gomock.NewController(t)

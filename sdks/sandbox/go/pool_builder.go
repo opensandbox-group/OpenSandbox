@@ -43,6 +43,7 @@ func NewSandboxPoolBuilder() *SandboxPoolBuilder {
 			WarmupHealthCheckPollingInterval:  200 * time.Millisecond,
 			EmptyBehavior:                     AcquirePolicyDirectCreate,
 			DrainTimeout:                      30 * time.Second,
+			MaxAcquireRetries:                 3,
 		},
 	}
 }
@@ -190,6 +191,14 @@ func (b *SandboxPoolBuilder) DrainTimeout(d time.Duration) *SandboxPoolBuilder {
 	return b
 }
 
+// MaxAcquireRetries sets the upper bound on how many idle candidates a single Acquire will
+// attempt when the effective policy is AcquirePolicyRetryNextIdle or
+// AcquirePolicyRetryNextIdleThenCreate. Must be >= 1 (1 disables retry). Default: 3.
+func (b *SandboxPoolBuilder) MaxAcquireRetries(n int) *SandboxPoolBuilder {
+	b.config.MaxAcquireRetries = n
+	return b
+}
+
 // PoolLogger sets a custom structured logger for pool operations.
 // Defaults to a no-op logger if not set.
 func (b *SandboxPoolBuilder) PoolLogger(l PoolLogger) *SandboxPoolBuilder {
@@ -251,6 +260,9 @@ func (b *SandboxPoolBuilder) Build() (*DefaultSandboxPool, error) {
 	}
 	if b.config.WarmupConcurrency < 0 {
 		return nil, fmt.Errorf("opensandbox: pool builder: WarmupConcurrency must be non-negative, got %d", b.config.WarmupConcurrency)
+	}
+	if b.config.MaxAcquireRetries < 1 {
+		return nil, fmt.Errorf("opensandbox: pool builder: MaxAcquireRetries must be >= 1, got %d", b.config.MaxAcquireRetries)
 	}
 
 	// Work on a local copy so Build() doesn't mutate the builder.

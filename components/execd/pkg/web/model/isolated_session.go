@@ -121,12 +121,31 @@ type IsolatedRunRequest struct {
 	Code           string            `json:"code" validate:"required"`
 	Envs           map[string]string `json:"envs,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty" validate:"omitempty,gte=0"`
+	Background     bool              `json:"background,omitempty"`
 }
 
 // Validate checks IsolatedRunRequest fields.
 func (r *IsolatedRunRequest) Validate() error {
 	v := validator.New()
 	return v.Struct(r)
+}
+
+// IsolatedBackgroundRunResponse is the handle returned for background: true runs.
+type IsolatedBackgroundRunResponse struct {
+	SessionID string    `json:"session_id"`
+	RunID     string    `json:"run_id"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// IsolatedRunStatus describes the lifecycle state of an isolated background run.
+type IsolatedRunStatus struct {
+	SessionID  string     `json:"session_id"`
+	RunID      string     `json:"run_id"`
+	Running    bool       `json:"running"`
+	ExitCode   *int       `json:"exit_code,omitempty"`
+	Error      string     `json:"error,omitempty"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
 // Session State
@@ -176,10 +195,13 @@ type ListIsolatedSessionsResponse struct {
 
 // CapabilitiesResponse is returned by GET /v1/isolated/capabilities.
 type CapabilitiesResponse struct {
-	Available       bool   `json:"available"`
-	Isolator        string `json:"isolator,omitempty"`
-	Version         string `json:"version,omitempty"`
-	Message         string `json:"message,omitempty"`
-	CommitSupported bool   `json:"commit_supported"`
-	DiffSupported   bool   `json:"diff_supported"`
+	Available        bool             `json:"available"`
+	Isolator         string           `json:"isolator,omitempty"`
+	Version          string           `json:"version,omitempty"`
+	Message          string           `json:"message,omitempty"`
+	SetprivAvailable bool             `json:"setpriv_available"`
+	UsernsAvailable  bool             `json:"userns_available"`
+	CommitSupported  bool             `json:"commit_supported"`
+	DiffSupported    bool             `json:"diff_supported"`
+	Hardening        *HardeningStatus `json:"hardening,omitempty"`
 }

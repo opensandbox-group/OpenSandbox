@@ -323,6 +323,12 @@ def test_snapshot_service_lists_and_deletes_records(tmp_path) -> None:
     assert page.pagination.total_items == 1
     assert [item.id for item in page.items] == [first.id]
 
+    named_page = service.list_snapshots(
+        ListSnapshotsRequest(filter=SnapshotFilter(name="second"))
+    )
+    assert named_page.pagination.total_items == 1
+    assert [item.id for item in named_page.items] == [second.id]
+
     second_record = repo.get(second.id)
     assert second_record is not None
     second_record.status = SnapshotStatusRecord(state=SnapshotState.FAILED)

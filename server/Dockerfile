@@ -14,6 +14,12 @@
 
 FROM python:3.10-slim AS builder
 
+# Optional: inject the release version when .git is unavailable so hatch-vcs
+# resolves the real version instead of falling back to 0.1.0.dev0. Passed by
+# build.sh as --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=<version> (no leading v).
+ARG SETUPTOOLS_SCM_PRETEND_VERSION
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=$SETUPTOOLS_SCM_PRETEND_VERSION
+
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

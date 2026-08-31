@@ -29,7 +29,7 @@ import time
 from typing import Optional
 from uuid import uuid4
 
-from docker.errors import DockerException
+from docker.errors import DockerException, NotFound as DockerNotFound
 from fastapi import HTTPException, status
 
 from opensandbox_server.api.schema import PlatformSpec
@@ -42,6 +42,10 @@ OPENSANDBOX_DIR = "/opt/opensandbox"
 # even when the server runs on Windows.
 EXECED_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "execd")
 BOOTSTRAP_PATH = posixpath.join(OPENSANDBOX_DIR, "bootstrap.sh")
+SESSION_GATE_SOURCE_PATH = "/usr/local/libexec/opensandbox-session-gate"
+SESSION_GATE_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-session-gate")
+LAUNCHER_SOURCE_PATH = "/usr/local/libexec/opensandbox-launcher"
+LAUNCHER_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-launcher")
 DEFAULT_EXECD_ENVS_PATH = posixpath.join(OPENSANDBOX_DIR, ".env")
 
 
@@ -125,6 +129,42 @@ class DockerRuntimeMixin:
                             self._bwrap_archive_cache[cache_key] = b"".join(bwrap_stream)
                     except DockerException:
                         logger.warning("bwrap not found in execd image — isolation will be unavailable, upgrade execd image to v1.1.0+")
+                # Cache the native workload gate independently so older execd
+                # images remain usable for legacy, non-lifecycle isolation.
+                if cache_key not in self._session_gate_archive_cache:
+                    try:
+                        with self._docker_operation(
+                            "execd cache read session gate", "execd-cache"
+                        ):
+                            gate_stream, _ = container.get_archive(
+                                SESSION_GATE_SOURCE_PATH
+                            )
+                            self._session_gate_archive_cache[cache_key] = b"".join(
+                                gate_stream
+                            )
+                    except DockerNotFound:
+                        logger.warning(
+                            "session workload gate not found in execd image — "
+                            "gated isolated-session lifecycle will be unavailable"
+                        )
+                # Cache the hardening launcher (best-effort; older images do
+                # not contain it, which degrades [hardening] to unavailable).
+                if cache_key not in self._launcher_archive_cache:
+                    try:
+                        with self._docker_operation(
+                            "execd cache read launcher", "execd-cache"
+                        ):
+                            launcher_stream, _ = container.get_archive(
+                                LAUNCHER_SOURCE_PATH
+                            )
+                            self._launcher_archive_cache[cache_key] = b"".join(
+                                launcher_stream
+                            )
+                    except DockerNotFound:
+                        logger.warning(
+                            "hardening launcher not found in execd image — "
+                            "[hardening] will degrade to unavailable"
+                        )
             except DockerException as exc:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -262,6 +302,79 @@ class DockerRuntimeMixin:
                 exc,
             )
 
+    def _copy_session_gate_to_container(
+        self,
+        container,
+        sandbox_id: str,
+        platform: Optional[PlatformSpec] = None,
+    ) -> None:
+        """Copy the native workload gate into its managed runtime path.
+
+        Older execd images do not contain this helper, so distribution remains
+        best-effort for backward compatibility. WrapWithLifecycle still opens
+        the managed path fail-closed before starting a workload.
+        """
+        cache_key = self._normalize_platform_key(platform)
+        archive = self._session_gate_archive_cache.get(cache_key)
+        if archive is None:
+            logger.warning(
+                "session workload gate archive not cached for %s — "
+                "gated isolated-session lifecycle will be unavailable",
+                cache_key,
+            )
+            return
+
+        try:
+            with self._docker_operation("copy session gate to sandbox", sandbox_id):
+                container.put_archive(path=OPENSANDBOX_DIR, data=archive)
+        except DockerException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.EXECD_DISTRIBUTION_FAILED,
+                    "message": (
+                        "Failed to copy session workload gate into sandbox "
+                        f"at {SESSION_GATE_INSTALL_PATH}: {str(exc)}"
+                    ),
+                },
+            ) from exc
+
+    def _copy_launcher_to_container(
+        self,
+        container,
+        sandbox_id: str,
+        platform: Optional[PlatformSpec] = None,
+    ) -> None:
+        """Copy the hardening launcher into its managed runtime path.
+
+        Best-effort for backward compatibility with older execd images; when
+        it is missing, [hardening] degrades to unavailable at runtime.
+        """
+        cache_key = self._normalize_platform_key(platform)
+        archive = self._launcher_archive_cache.get(cache_key)
+        if archive is None:
+            logger.warning(
+                "hardening launcher archive not cached for %s — "
+                "[hardening] will be unavailable",
+                cache_key,
+            )
+            return
+
+        try:
+            with self._docker_operation("copy launcher to sandbox", sandbox_id):
+                container.put_archive(path=OPENSANDBOX_DIR, data=archive)
+        except DockerException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.EXECD_DISTRIBUTION_FAILED,
+                    "message": (
+                        "Failed to copy hardening launcher into sandbox "
+                        f"at {LAUNCHER_INSTALL_PATH}: {str(exc)}"
+                    ),
+                },
+            ) from exc
+
     def _prepare_sandbox_runtime(
         self,
         container,
@@ -272,3 +385,5 @@ class DockerRuntimeMixin:
         self._copy_execd_to_container(container, sandbox_id, platform)
         self._install_bootstrap_script(container, sandbox_id, platform)
         self._copy_bwrap_to_container(container, sandbox_id, platform)
+        self._copy_session_gate_to_container(container, sandbox_id, platform)
+        self._copy_launcher_to_container(container, sandbox_id, platform)

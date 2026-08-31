@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package fastpath.v2;
+
+option go_package = "github.com/alibaba/opensandbox/ingress/pkg/fastpath/v2;fastpathv2";
+
+// This is the fixed T5 subset of opensandbox-group/fast-sandbox FastPath v2
+// at revision e22078237542eea4c0ce17aed938cf96bd352520. Field numbers and the
+// fully-qualified RPC name must remain wire-compatible with that source.
+service FastPathService {
+  rpc ResolveEndpoint(ResolveEndpointRequest) returns (ResolveEndpointResponse);
+}
+
+message NamespacedName {
+  string namespace = 1;
+  string name = 2;
+}
+
+message SandboxReference {
+  oneof reference {
+    string sandbox_uid = 1;
+    NamespacedName namespaced_name = 2;
+  }
+}
+
+message EndpointTarget {
+  oneof target {
+    string component_name = 1;
+    uint32 port = 2;
+  }
+}
+
+enum EndpointAccessMode {
+  CENTRAL_PROXY = 0;
+  DIRECT_FASTLET_PROXY = 1;
+}
+
+message ResolveEndpointRequest {
+  SandboxReference sandbox = 1;
+  EndpointTarget target = 2;
+  EndpointAccessMode access_mode = 3;
+  bool wait_until_ready = 4;
+  int32 wait_timeout_millis = 5;
+}
+
+message ResolveEndpointResponse {
+  string sandbox_uid = 1;
+  EndpointTarget target = 2;
+  string component_name = 3;
+  string protocol = 4;
+  uint32 resolved_port = 5;
+  string proxy_endpoint = 6;
+  map<string, string> required_headers = 7;
+  int64 route_generation = 8;
+  int64 expires_at_unix_seconds = 9;
+}

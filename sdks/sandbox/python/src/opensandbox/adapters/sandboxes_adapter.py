@@ -50,6 +50,7 @@ from opensandbox.models.sandboxes import (
     SandboxFilter,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxLifecycle,
     SandboxRenewResponse,
     SnapshotFilter,
     SnapshotInfo,
@@ -141,6 +142,7 @@ class SandboxesAdapter(Sandboxes):
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        lifecycle: SandboxLifecycle | None = None,
     ) -> SandboxCreateResponse:
         """Create a new sandbox instance with the specified configuration."""
         logger.info(
@@ -165,6 +167,7 @@ class SandboxesAdapter(Sandboxes):
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
+                lifecycle=lifecycle,
             )
 
             client = await self._get_client()
@@ -341,6 +344,7 @@ class SandboxesAdapter(Sandboxes):
                 sandbox_id=filter.sandbox_id
                 if filter.sandbox_id is not None
                 else API_UNSET,
+                name=filter.name if filter.name is not None else API_UNSET,
                 state=filter.states if filter.states else API_UNSET,
                 page=filter.page if filter.page is not None else API_UNSET,
                 page_size=filter.page_size

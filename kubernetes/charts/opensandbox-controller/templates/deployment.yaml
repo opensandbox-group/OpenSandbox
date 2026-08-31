@@ -1,3 +1,4 @@
+{{- $metrics := .Values.controller.metrics | default dict -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,6 +16,9 @@ spec:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: manager
+        {{- if .Values.controller.snapshot.imageCommitterPodTemplate }}
+        checksum/image-committer-pod-template: {{ include (print $.Template.BasePath "/image-committer-pod-template.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.controller.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -52,6 +56,10 @@ spec:
         {{- end }}
         - --health-probe-bind-address=:8081
         - --zap-log-level={{ .Values.controller.logLevel }}
+        {{- if $metrics.enabled }}
+        - --metrics-bind-address=:{{ $metrics.port | default 8080 }}
+        - --metrics-secure={{ $metrics.secure | default false }}
+        {{- end }}
         {{- if and .Values.controller.kubeClient (gt (int .Values.controller.kubeClient.qps) 0) }}
         - --kube-client-qps={{ .Values.controller.kubeClient.qps }}
         {{- end }}
@@ -60,6 +68,9 @@ spec:
         {{- end }}
         {{- if .Values.controller.snapshot.imageCommitterImage }}
         - --image-committer-image={{ .Values.controller.snapshot.imageCommitterImage }}
+        {{- end }}
+        {{- if .Values.controller.snapshot.imageCommitterPodTemplate }}
+        - --image-committer-pod-template-file=/etc/opensandbox/image-committer/pod-template.yaml
         {{- end }}
         {{- if .Values.controller.snapshot.containerdSocketPath }}
         - --containerd-socket-path={{ .Values.controller.snapshot.containerdSocketPath }}
@@ -86,6 +97,11 @@ spec:
         - name: health
           containerPort: 8081
           protocol: TCP
+        {{- if $metrics.enabled }}
+        - name: metrics
+          containerPort: {{ $metrics.port | default 8080 }}
+          protocol: TCP
+        {{- end }}
         {{- with .Values.controller.containerSecurityContext }}
         securityContext:
           {{- toYaml . | nindent 10 }}
@@ -118,16 +134,30 @@ spec:
         env:
         {{- toYaml .Values.extraEnv | nindent 8 }}
         {{- end }}
-        {{- with .Values.extraVolumeMounts }}
+        {{- if or .Values.controller.snapshot.imageCommitterPodTemplate .Values.extraVolumeMounts }}
         volumeMounts:
+        {{- if .Values.controller.snapshot.imageCommitterPodTemplate }}
+        - name: image-committer-pod-template
+          mountPath: /etc/opensandbox/image-committer
+          readOnly: true
+        {{- end }}
+        {{- with .Values.extraVolumeMounts }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- end }}
       {{- with .Values.extraContainers }}
       {{- toYaml . | nindent 6 }}
       {{- end }}
-      {{- with .Values.extraVolumes }}
+      {{- if or .Values.controller.snapshot.imageCommitterPodTemplate .Values.extraVolumes }}
       volumes:
+      {{- if .Values.controller.snapshot.imageCommitterPodTemplate }}
+      - name: image-committer-pod-template
+        configMap:
+          name: {{ include "opensandbox.imageCommitterPodTemplateName" . }}
+      {{- end }}
+      {{- with .Values.extraVolumes }}
       {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:

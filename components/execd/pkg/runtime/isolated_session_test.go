@@ -18,10 +18,12 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,15 +40,58 @@ func (s *stubIsolator) Name() string                                    { return
 func (s *stubIsolator) Available() bool                                 { return s.available }
 func (s *stubIsolator) Capabilities() isolation.Capabilities            { return s.caps }
 func (s *stubIsolator) Wrap(_ *exec.Cmd, _ isolation.WrapOptions) error { return nil }
+func (s *stubIsolator) WrapWithLifecycle(
+	cmd *exec.Cmd,
+	opts isolation.WrapOptions,
+) (isolation.WorkloadLifecycle, error) {
+	if err := s.Wrap(cmd, opts); err != nil {
+		return nil, err
+	}
+	return newStubWorkloadLifecycle(), nil
+}
+
+type stubWorkloadLifecycle struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newStubWorkloadLifecycle() *stubWorkloadLifecycle {
+	return &stubWorkloadLifecycle{done: make(chan struct{})}
+}
+
+func (*stubWorkloadLifecycle) WaitForIdentity(context.Context) (isolation.WorkloadIdentity, error) {
+	return isolation.WorkloadIdentity{
+		PID:                   2,
+		SandboxPID:            1,
+		NetNamespaceID:        1,
+		ProcessStartTimeTicks: 1,
+	}, nil
+}
+func (*stubWorkloadLifecycle) MarkReady() error { return nil }
+func (s *stubWorkloadLifecycle) Abort() {
+	s.once.Do(func() {
+		close(s.done)
+	})
+}
+func (s *stubWorkloadLifecycle) DrainDone() <-chan struct{} { return s.done }
+func (*stubWorkloadLifecycle) DrainError() error            { return nil }
+func (*stubWorkloadLifecycle) ExitCode() (int, bool)        { return 0, true }
+func (s *stubWorkloadLifecycle) Close() error {
+	s.Abort()
+	return nil
+}
 
 func newStubIsolator() *stubIsolator {
 	return &stubIsolator{
 		available: true,
 		caps: isolation.Capabilities{
-			Available:       true,
-			Isolator:        "stub",
-			CommitSupported: false,
-			DiffSupported:   false,
+			Available:              true,
+			Isolator:               "stub",
+			SetprivAvailable:       true,
+			SetprivSwitchAvailable: true,
+			UsernsAvailable:        true,
+			CommitSupported:        false,
+			DiffSupported:          false,
 		},
 	}
 }
@@ -72,6 +117,127 @@ func TestNewIsolatedRunner(t *testing.T) {
 	}
 	if !runner.Available() {
 		t.Error("runner should be available with stub isolator")
+	}
+}
+
+func TestCreateIsolatedSession_RejectsOnlyUnavailableUidMode(t *testing.T) {
+	customUID := uint32(424242)
+	tests := []struct {
+		name              string
+		mode              string
+		setprivAvailable  bool
+		identityAvailable bool
+		usernsAvailable   bool
+		uid               *uint32
+		wantUnavailable   bool
+	}{
+		{name: "setpriv supported", mode: "setpriv", setprivAvailable: true},
+		{name: "setpriv custom identity supported", mode: "setpriv", setprivAvailable: true, identityAvailable: true, uid: &customUID},
+		{name: "setpriv custom identity unsupported", mode: "setpriv", setprivAvailable: true, uid: &customUID, wantUnavailable: true},
+		{name: "setpriv unsupported", mode: "setpriv", usernsAvailable: true, wantUnavailable: true},
+		{name: "default setpriv unsupported", mode: "", usernsAvailable: true, wantUnavailable: true},
+		{name: "userns supported", mode: "userns", usernsAvailable: true},
+		{name: "userns unsupported", mode: "userns", setprivAvailable: true, wantUnavailable: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := newTestRunner(t)
+			stub := runner.isolator.(*stubIsolator)
+			stub.caps.SetprivAvailable = tt.setprivAvailable
+			stub.caps.SetprivSwitchAvailable = tt.identityAvailable
+			stub.caps.UsernsAvailable = tt.usernsAvailable
+
+			opts := &IsolatedSessionOptions{
+				WorkspacePath: filepath.Join(t.TempDir(), "workspace"),
+				WorkspaceMode: "rw",
+				UidMode:       tt.mode,
+				Uid:           tt.uid,
+			}
+			id, err := runner.CreateIsolatedSession(opts)
+			if tt.wantUnavailable {
+				if !errors.Is(err, ErrUidModeUnavailable) {
+					t.Fatalf("error = %v, want ErrUidModeUnavailable", err)
+				}
+				if id != "" {
+					t.Errorf("session id = %q, want empty", id)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("CreateIsolatedSession: %v", err)
+			}
+			defer runner.DeleteIsolatedSession(id)
+		})
+	}
+}
+
+func TestValidateUidModeAvailable_RejectsUnknownMode(t *testing.T) {
+	runner := newTestRunner(t)
+	err := runner.validateUidModeAvailable(&IsolatedSessionOptions{UidMode: "bogus"})
+	if !errors.Is(err, ErrUidModeUnavailable) {
+		t.Fatalf("error = %v, want ErrUidModeUnavailable", err)
+	}
+}
+
+func TestValidateUidModeAvailable_EmptyModeUsesSetpriv(t *testing.T) {
+	runner := newTestRunner(t)
+	stub := runner.isolator.(*stubIsolator)
+	stub.caps.SetprivAvailable = false
+	stub.caps.UsernsAvailable = true
+
+	err := runner.validateUidModeAvailable(&IsolatedSessionOptions{})
+	if !errors.Is(err, ErrUidModeUnavailable) {
+		t.Fatalf("error = %v, want ErrUidModeUnavailable", err)
+	}
+}
+
+func TestSetprivIdentitySwitchRequired(t *testing.T) {
+	currentUID, currentGID := uint32(1000), uint32(1001)
+	otherUID, otherGID := uint32(2000), uint32(2001)
+	tests := []struct {
+		name string
+		opts *IsolatedSessionOptions
+		want bool
+	}{
+		{name: "omitted identity", opts: &IsolatedSessionOptions{}},
+		{name: "same identity", opts: &IsolatedSessionOptions{Uid: &currentUID, Gid: &currentGID}},
+		{name: "different uid", opts: &IsolatedSessionOptions{Uid: &otherUID}, want: true},
+		{name: "different gid", opts: &IsolatedSessionOptions{Gid: &otherGID}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := setprivIdentitySwitchRequired(tt.opts, currentUID, currentGID); got != tt.want {
+				t.Errorf("setprivIdentitySwitchRequired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsolatedSession_FallsBackToSh(t *testing.T) {
+	useShOnlyPath(t)
+
+	runner := newTestRunner(t)
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "workspace"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatalf("CreateIsolatedSession: %v", err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	var lines []string
+	err = runner.RunInIsolatedSession(context.Background(), id, "printf 'fallback_isolated\\n'", nil, func(line string) {
+		lines = append(lines, line)
+	})
+	if err != nil {
+		t.Fatalf("RunInIsolatedSession: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "fallback_isolated" {
+		t.Fatalf("output = %v, want [fallback_isolated]", lines)
 	}
 }
 
@@ -547,7 +713,7 @@ func TestRunInIsolatedSession_EnvPersistence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Run 1: set env var in bash session.
+	// Run 1: set env var in the shell session.
 	err = runner.RunInIsolatedSession(ctx, id, "export MY_VAR=hello_from_session", nil, nil)
 	if err != nil {
 		t.Fatalf("run 1: %v", err)

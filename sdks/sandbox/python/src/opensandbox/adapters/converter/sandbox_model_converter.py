@@ -60,6 +60,7 @@ from opensandbox.models.sandboxes import (
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxLifecycle,
     SandboxRenewResponse,
     SandboxStatus,
     SnapshotInfo,
@@ -182,6 +183,7 @@ class SandboxModelConverter:
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
+        lifecycle: SandboxLifecycle | None = None,
     ) -> CreateSandboxRequest:
         """Convert domain parameters to API CreateSandboxRequest."""
         from opensandbox.api.lifecycle.models.create_sandbox_request import (
@@ -215,6 +217,9 @@ class SandboxModelConverter:
             PlatformSpec as ApiPlatformSpec,
         )
         from opensandbox.api.lifecycle.models.resource_limits import ResourceLimits
+        from opensandbox.api.lifecycle.models.sandbox_lifecycle import (
+            SandboxLifecycle as ApiSandboxLifecycle,
+        )
         from opensandbox.api.lifecycle.types import UNSET
 
         # Convert env dict to API model
@@ -284,6 +289,21 @@ class SandboxModelConverter:
                 }
             )
 
+        api_lifecycle = UNSET
+        if lifecycle is not None:
+            if not isinstance(lifecycle, SandboxLifecycle):
+                raise TypeError(
+                    "lifecycle must be a SandboxLifecycle or None, "
+                    f"got {type(lifecycle).__name__}"
+                )
+            if lifecycle.pre_start is not None or lifecycle.periodic:
+                lifecycle_payload = lifecycle.model_dump(
+                    by_alias=True, exclude_none=True
+                )
+                if not lifecycle_payload.get("periodic"):
+                    lifecycle_payload.pop("periodic", None)
+                api_lifecycle = ApiSandboxLifecycle.from_dict(lifecycle_payload)
+
         # Convert volumes to API model
         api_volumes = UNSET
         if volumes is not None and len(volumes) > 0:
@@ -306,6 +326,7 @@ class SandboxModelConverter:
             entrypoint=entrypoint if entrypoint is not None else UNSET,
             env=api_env,
             metadata=api_metadata,
+            lifecycle=api_lifecycle,
             resource_limits=api_resource_limits,
             resource_requests=api_resource_requests,
             platform=api_platform,
@@ -456,6 +477,7 @@ class SandboxModelConverter:
         """Convert API Sandbox to domain SandboxInfo."""
         from opensandbox.api.lifecycle.types import Unset
         from opensandbox.models.sandboxes import (
+            SandboxAllocation,
             SandboxImageAuth,
             SandboxImageSpec,
             SandboxInfo,
@@ -500,6 +522,21 @@ class SandboxModelConverter:
                 }
             )
 
+        allocation: SandboxAllocation | None = None
+        api_allocation = getattr(api_sandbox, "allocation", None)
+        if not isinstance(api_allocation, Unset) and api_allocation is not None:
+            allocation = SandboxAllocation(
+                mode=cast(
+                    Literal["pool"],
+                    str(getattr(api_allocation.mode, "value", api_allocation.mode)),
+                ),
+                pool_ref=api_allocation.pool_ref,
+                state=cast(
+                    Literal["allocated"],
+                    str(getattr(api_allocation.state, "value", api_allocation.state)),
+                ),
+            )
+
         return SandboxInfo(
             id=api_sandbox.id,
             status=SandboxModelConverter._convert_sandbox_status(api_sandbox.status),
@@ -510,6 +547,7 @@ class SandboxModelConverter:
                 else getattr(api_sandbox, "snapshot_id", None)
             ),
             platform=platform,
+            allocation=allocation,
             created_at=api_sandbox.created_at,
             expires_at=expires_at,
             entrypoint=api_sandbox.entrypoint,

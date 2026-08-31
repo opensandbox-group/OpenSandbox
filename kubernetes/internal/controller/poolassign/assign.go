@@ -32,6 +32,14 @@ type PredicateWithReason interface {
 	Reason(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) string
 }
 
+// PredicateWithFailureCode exposes a stable identifier for a rejected predicate.
+type PredicateWithFailureCode interface {
+	Predicate
+	FailureCode() string
+}
+
+const FailureCodeCapacityExhausted = "PoolCapacityExhausted"
+
 type Scorer interface {
 	Score(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) float64
 }
@@ -42,8 +50,9 @@ type Assigner interface {
 
 // PoolRejection records why a specific pool was rejected during assignment.
 type PoolRejection struct {
-	PoolName string
-	Reasons  []string
+	PoolName     string
+	Reasons      []string
+	FailureCodes []string
 }
 
 // NoEligiblePoolError is returned when no pool passes all predicates.
@@ -60,4 +69,17 @@ func (e *NoEligiblePoolError) Error() string {
 		fmt.Fprintf(&sb, "\n  %s: %s", r.PoolName, strings.Join(r.Reasons, "; "))
 	}
 	return sb.String()
+}
+
+// CapacityExhausted reports whether at least one Pool matched every predicate
+// except capacity. Pools that also fail image, resource, label, or node
+// predicates do not make the assignment a capacity failure.
+func (e *NoEligiblePoolError) CapacityExhausted() bool {
+	for _, rejection := range e.Rejections {
+		if len(rejection.FailureCodes) == 1 &&
+			rejection.FailureCodes[0] == FailureCodeCapacityExhausted {
+			return true
+		}
+	}
+	return false
 }

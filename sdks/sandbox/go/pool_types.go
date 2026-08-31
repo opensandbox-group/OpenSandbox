@@ -66,12 +66,23 @@ func (s PoolHealthState) String() string {
 	}
 }
 
-// AcquirePolicy determines behavior when the pool is empty.
+// AcquirePolicy determines behavior on idle-empty / stale-idle during Acquire.
+//
+//   - AcquirePolicyDirectCreate / AcquirePolicyFailFast: try at most one idle candidate; on
+//     failure DirectCreate falls through to lifecycle-create, FailFast returns an error.
+//   - AcquirePolicyRetryNextIdle / AcquirePolicyRetryNextIdleThenCreate: try up to
+//     PoolConfig.MaxAcquireRetries idle candidates, skipping stale/unhealthy ones. On
+//     exhaustion, ThenCreate falls through to lifecycle-create; the retry-only variant returns
+//     PoolAcquireFailedError.
 type AcquirePolicy int
 
+// The iota order MUST stay append-only; existing zero-value defaults rely on
+// AcquirePolicyDirectCreate == 0.
 const (
 	AcquirePolicyDirectCreate AcquirePolicy = iota
 	AcquirePolicyFailFast
+	AcquirePolicyRetryNextIdle
+	AcquirePolicyRetryNextIdleThenCreate
 )
 
 func (p AcquirePolicy) String() string {
@@ -80,6 +91,10 @@ func (p AcquirePolicy) String() string {
 		return "DIRECT_CREATE"
 	case AcquirePolicyFailFast:
 		return "FAIL_FAST"
+	case AcquirePolicyRetryNextIdle:
+		return "RETRY_NEXT_IDLE"
+	case AcquirePolicyRetryNextIdleThenCreate:
+		return "RETRY_NEXT_IDLE_THEN_CREATE"
 	default:
 		return "UNKNOWN"
 	}
@@ -222,6 +237,15 @@ type PoolConfig struct {
 	IdleTimeout            time.Duration
 	DrainTimeout           time.Duration
 	Logger                 PoolLogger
+
+	// MaxAcquireRetries caps how many idle candidates a single Acquire may attempt when the
+	// effective policy is AcquirePolicyRetryNextIdle or AcquirePolicyRetryNextIdleThenCreate.
+	// Counts total attempts, not additional retries: 1 disables retry (same behavior as
+	// FailFast / DirectCreate), 3 (default) tries up to three idles before giving up or
+	// falling through. Ignored under FailFast / DirectCreate, which always try at most one
+	// idle. Must be >= 1. Increasing this trades acquire latency (each failed candidate pays
+	// up to AcquireReadyTimeout) for a higher chance of returning a warm sandbox.
+	MaxAcquireRetries int
 }
 
 // AcquireOptions configures a single Acquire call.
@@ -234,3 +258,89 @@ type AcquireOptions struct {
 
 // DefaultIdleTimeout is the default TTL for idle pool entries (24 hours, per OSEP-0005).
 const DefaultIdleTimeout = 24 * time.Hour
+
+// PoolDestroyState represents the destroy lifecycle of a pool namespace as seen
+// by every process sharing the same state store.
+//
+//   - ACTIVE: the namespace is usable.
+//   - DESTROYING: a destroy fence is in place. Peer pools must stop replenishing
+//     and must not fall back to direct create.
+//   - DESTROYED: a tombstone is in place. Callers must not rebind the namespace
+//     until the tombstone expires.
+type PoolDestroyState int
+
+const (
+	PoolDestroyStateActive PoolDestroyState = iota
+	PoolDestroyStateDestroying
+	PoolDestroyStateDestroyed
+)
+
+func (s PoolDestroyState) String() string {
+	switch s {
+	case PoolDestroyStateActive:
+		return "ACTIVE"
+	case PoolDestroyStateDestroying:
+		return "DESTROYING"
+	case PoolDestroyStateDestroyed:
+		return "DESTROYED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// PoolDestroyStrategy selects how a namespace is retired. Only FORCE is
+// implemented; the iota order MUST stay append-only.
+type PoolDestroyStrategy int
+
+const (
+	PoolDestroyForce PoolDestroyStrategy = iota
+)
+
+func (s PoolDestroyStrategy) String() string {
+	switch s {
+	case PoolDestroyForce:
+		return "FORCE"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// DefaultPoolDrainTimeout bounds the idle-drain phase of a pool destroy.
+const DefaultPoolDrainTimeout = 30 * time.Second
+
+// DefaultPoolTombstoneTTL is how long a DESTROYED tombstone survives before the
+// namespace may be rebound.
+const DefaultPoolTombstoneTTL = 7 * 24 * time.Hour
+
+// PoolDestroyOptions configures a single SandboxPoolManager.Destroy call.
+// The zero value is valid and selects FORCE with all defaults.
+type PoolDestroyOptions struct {
+	// Strategy selects the destroy algorithm. Only PoolDestroyForce is supported.
+	Strategy PoolDestroyStrategy
+
+	// DrainTimeout bounds the idle-drain loop. Nil selects DefaultPoolDrainTimeout;
+	// an explicit zero drains without a deadline. Must not be negative.
+	DrainTimeout *time.Duration
+
+	// TombstoneTTL is how long the DESTROYED tombstone survives. Nil selects
+	// DefaultPoolTombstoneTTL; an explicit zero writes a tombstone that never
+	// expires. Must not be negative.
+	TombstoneTTL *time.Duration
+}
+
+// PoolDestroyResult reports what a destroy actually did.
+type PoolDestroyResult struct {
+	PoolName string
+	State    PoolDestroyState
+
+	// DrainedIdleCount is how many idle entries were taken from the store.
+	DrainedIdleCount int
+
+	// KilledIdleCount is how many of those sandboxes were successfully killed.
+	// Killing is best-effort, so this may be lower than DrainedIdleCount.
+	KilledIdleCount int
+
+	// PersistentStateCleared reports whether this call cleared the coordination
+	// state. It is false when the namespace was already tombstoned.
+	PersistentStateCleared bool
+}

@@ -72,21 +72,58 @@ func (s *DefaultTaskSchedulingStrategy) getTaskSpec(idx int) (*api.Task, error) 
 		if err = json.Unmarshal(modified, newTaskTemplate); err != nil {
 			return nil, fmt.Errorf("batchsandbox: failed to unmarshal %s to TaskTemplateSpec, idx %d, err %w", modified, idx, err)
 		}
-		task.Process = &api.Process{
-			Command:        newTaskTemplate.Spec.Process.Command,
-			Args:           newTaskTemplate.Spec.Process.Args,
-			Env:            newTaskTemplate.Spec.Process.Env,
-			WorkingDir:     newTaskTemplate.Spec.Process.WorkingDir,
-			TimeoutSeconds: s.Spec.TaskTemplate.Spec.TimeoutSeconds,
-		}
+		task.Process = convertProcessSpec(newTaskTemplate.Spec.Process, s.Spec.TaskTemplate.Spec.TimeoutSeconds)
 	} else if s.Spec.TaskTemplate != nil && s.Spec.TaskTemplate.Spec.Process != nil {
-		task.Process = &api.Process{
-			Command:        s.Spec.TaskTemplate.Spec.Process.Command,
-			Args:           s.Spec.TaskTemplate.Spec.Process.Args,
-			Env:            s.Spec.TaskTemplate.Spec.Process.Env,
-			WorkingDir:     s.Spec.TaskTemplate.Spec.Process.WorkingDir,
-			TimeoutSeconds: s.Spec.TaskTemplate.Spec.TimeoutSeconds,
-		}
+		task.Process = convertProcessSpec(s.Spec.TaskTemplate.Spec.Process, s.Spec.TaskTemplate.Spec.TimeoutSeconds)
 	}
 	return task, nil
+}
+
+// convertProcessSpec converts sandboxv1alpha1.ProcessTask to api.Process.
+func convertProcessSpec(src *sandboxv1alpha1.ProcessTask, timeoutSeconds *int64) *api.Process {
+	if src == nil {
+		return nil
+	}
+	return &api.Process{
+		Command:        src.Command,
+		Args:           src.Args,
+		Env:            src.Env,
+		WorkingDir:     src.WorkingDir,
+		TimeoutSeconds: timeoutSeconds,
+		ExecMode:       api.ExecMode(src.ExecMode),
+		Lifecycle:      convertLifecycle(src.Lifecycle),
+	}
+}
+
+// convertLifecycle converts sandboxv1alpha1.ProcessLifecycle to api.ProcessLifecycle.
+func convertLifecycle(src *sandboxv1alpha1.ProcessLifecycle) *api.ProcessLifecycle {
+	if src == nil {
+		return nil
+	}
+	return &api.ProcessLifecycle{
+		PreStart: convertLifecycleHandler(src.PreStart),
+		PostStop: convertLifecycleHandler(src.PostStop),
+	}
+}
+
+// convertLifecycleHandler converts sandboxv1alpha1.LifecycleHandler to api.LifecycleHandler.
+func convertLifecycleHandler(src *sandboxv1alpha1.LifecycleHandler) *api.LifecycleHandler {
+	if src == nil {
+		return nil
+	}
+	return &api.LifecycleHandler{
+		Exec:           convertExecAction(src.Exec),
+		ExecMode:       api.ExecMode(src.ExecMode),
+		TimeoutSeconds: src.TimeoutSeconds,
+	}
+}
+
+// convertExecAction converts sandboxv1alpha1.ExecAction to api.ExecAction.
+func convertExecAction(src *sandboxv1alpha1.ExecAction) *api.ExecAction {
+	if src == nil {
+		return nil
+	}
+	return &api.ExecAction{
+		Command: src.Command,
+	}
 }

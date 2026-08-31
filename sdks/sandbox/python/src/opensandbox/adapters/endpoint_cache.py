@@ -125,7 +125,8 @@ class EndpointCache:
             raise
         finally:
             with self._lock:
-                self._inflight.pop(key, None)
+                if self._inflight.get(key) is inf:
+                    self._inflight.pop(key)
             inf.event.set()
 
 
@@ -214,4 +215,5 @@ class AsyncEndpointCache:
                 future.exception()
             raise
         finally:
-            self._inflight.pop(key, None)
+            if self._inflight.get(key) is future:
+                self._inflight.pop(key)

@@ -50,6 +50,7 @@ type policyUpdater interface {
 type nftApplier interface {
 	ApplyStatic(context.Context, *policy.NetworkPolicy) error
 	AddResolvedIPs(context.Context, []nftables.ResolvedIP) error
+	StartConnectionRefresh(context.Context)
 	RemoveEnforcement(context.Context) error
 }
 
@@ -712,6 +713,8 @@ func (s *policyServer) reloadAlwaysRules() (bool, error) {
 	if !changed {
 		return false, nil
 	}
+	allow = withTelemetryAllow(allow)
+	s.setAlwaysRules(deny, allow)
 	s.proxy.UpdateAlwaysRules(deny, allow)
 	return true, nil
 }

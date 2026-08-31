@@ -17,9 +17,12 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.api.execd.CommandApi
+import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
@@ -279,11 +282,12 @@ class CommandsAdapterTest {
 
     @Test
     fun `run should expose request id on api exception`() {
+        val responseBody = """{"code":"INTERNAL_ERROR","message":"boom"}"""
         mockWebServer.enqueue(
             MockResponse()
                 .setResponseCode(500)
                 .addHeader("X-Request-ID", "req-kotlin-123")
-                .setBody("""{"code":"INTERNAL_ERROR","message":"boom"}"""),
+                .setBody(responseBody),
         )
 
         val request = RunCommandRequest.builder().command("echo Hello").build()
@@ -291,6 +295,68 @@ class CommandsAdapterTest {
 
         assertEquals(500, ex.statusCode)
         assertEquals("req-kotlin-123", ex.requestId)
+        assertEquals(responseBody, ex.responseBody)
+    }
+
+    @Test
+    fun `run should map unstructured rate limit response metadata`() {
+        val responseBody = "slow down"
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(429)
+                .addHeader("X-Request-ID", "req-rate-limit")
+                .addHeader("Retry-After", "2")
+                .setBody(responseBody),
+        )
+
+        val request = RunCommandRequest.builder().command("echo Hello").build()
+        val ex = assertThrows(SandboxRateLimitException::class.java) { commandsAdapter.run(request) }
+
+        assertEquals(429, ex.statusCode)
+        assertEquals("RATE_LIMIT", ex.error.code)
+        assertEquals("req-rate-limit", ex.requestId)
+        assertEquals(Duration.ofSeconds(2), ex.retryAfter)
+        assertEquals(responseBody, ex.responseBody)
+        assertTrue(ex.isRetryable)
+    }
+
+    @Test
+    fun `getBackgroundCommandLogs should include response body in client error`() {
+        val responseBody = """{"code":"INVALID_ARGUMENT","message":"cursor must be positive"}"""
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(400)
+                .setBody(responseBody),
+        )
+
+        val ex =
+            assertThrows(SandboxApiException::class.java) {
+                commandsAdapter.getBackgroundCommandLogs("exec-1")
+            }
+
+        assertEquals(400, ex.statusCode)
+        assertTrue(ex.message!!.contains(responseBody))
+        assertEquals(responseBody, ex.responseBody)
+    }
+
+    @Test
+    fun `generated client error message should include response body`() {
+        val responseBody = """{"code":"QUOTA_EXCEEDED","message":"sandbox quota exceeded"}"""
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(400)
+                .setBody(responseBody),
+        )
+
+        val api =
+            CommandApi(
+                "http://${mockWebServer.hostName}:${mockWebServer.port}",
+                httpClientProvider.httpClient,
+            )
+
+        val ex = assertThrows(ClientException::class.java) { api.getCommandStatus("exec-1") }
+
+        assertTrue(ex.message!!.contains(responseBody))
     }
 
     @Test

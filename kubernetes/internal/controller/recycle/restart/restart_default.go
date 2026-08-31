@@ -39,6 +39,12 @@ import (
 // container. Containers using the Restart recycle strategy must have a PID 1 process that
 // handles SIGTERM and exits gracefully (e.g., a real application server, not bare
 // "sleep"). When PID 1 exits, the kubelet restarts the container per its restartPolicy.
+//
+// Init-mode execd (OSEP-0018) keeps this contract: it installs a SIGTERM handler that
+// forwards the signal to the workload and exits with the workload's status, so the
+// in-namespace `kill 1` performed by this recycle path still restarts the container.
+// When a trusted out-of-band stop channel replaces signal-driven stop (OSEP-0018 §3),
+// this command must be reconciled with that channel instead.
 var DefaultRestartCommand = []string{"kill", "1"}
 
 const (

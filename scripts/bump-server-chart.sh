@@ -52,3 +52,21 @@ perl -i -0pe 's{
 }{$1'"$NEW_VERSION"'$2}x' "$FILE"
 
 echo "Updated $FILE: server.image.tag -> $NEW_VERSION"
+
+# Also keep Chart.yaml appVersion in sync with the server release, so installs
+# from the repo report the right version (the APP VERSION column in `helm list`).
+# Until now appVersion was only patched at chart-package time by
+# publish-helm-chart.yml, leaving the committed Chart.yaml stale at 0.1.0.
+# chart `version` is intentionally left to the helm release process.
+CHART_FILE="kubernetes/charts/opensandbox-server/Chart.yaml"
+if [ ! -f "$CHART_FILE" ]; then
+  echo "Error: missing $CHART_FILE" >&2
+  exit 1
+fi
+if ! grep -qE '^appVersion:' "$CHART_FILE"; then
+  echo "Error: appVersion line not found in $CHART_FILE" >&2
+  exit 1
+fi
+APP_VERSION="${NEW_VERSION#v}"   # appVersion has no leading "v"
+perl -i -pe 's/^appVersion:.*/appVersion: "'"$APP_VERSION"'"/' "$CHART_FILE"
+echo "Updated $CHART_FILE: appVersion -> $APP_VERSION"

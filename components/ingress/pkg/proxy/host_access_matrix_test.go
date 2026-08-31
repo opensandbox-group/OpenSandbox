@@ -47,6 +47,10 @@ func (p staticEndpointProvider) GetEndpoint(id string) (*sandbox.EndpointInfo, e
 	return &sandbox.EndpointInfo{Endpoint: "127.0.0.1"}, nil
 }
 
+func (p staticEndpointProvider) ResolveEndpoint(_ context.Context, target sandbox.EndpointTarget) (*sandbox.EndpointInfo, error) {
+	return p.GetEndpoint(target.SandboxID)
+}
+
 func (staticEndpointProvider) Start(context.Context) error { return nil }
 
 func newTestProvider() staticEndpointProvider {

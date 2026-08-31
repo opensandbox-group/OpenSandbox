@@ -232,7 +232,11 @@ SandboxPool pool = SandboxPool.builder()
     .poolName("demo-pool")
     .ownerId("worker-1")
     .maxIdle(3)
+    .warmupCreateQps(10)
     .warmupReadyTimeout(Duration.ofSeconds(45))
+    .warmupHealthCheckInitialDelay(Duration.ofSeconds(2))
+    .warmupPostPrepareHealthCheck(sandbox -> sandbox.ping())
+    .warmupPostPrepareHealthCheckTimeout(Duration.ofSeconds(30))
     .stateStore(new InMemoryPoolStateStore()) // single-node store
     .connectionConfig(config)
     .creationSpec(
@@ -280,11 +284,39 @@ Pool lifecycle semantics:
   on borrowed sandboxes or sandboxes created by `AcquirePolicy.DIRECT_CREATE`.
 - `ownerId` is the lock owner identity (node/process id), not the pool identifier.
   If omitted, SDK auto-generates a UUID-based default.
-- Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool.
+- Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool. An optional `warmupPostPrepareHealthCheck(...)` can validate the prepared sandbox before it becomes idle; retries never rerun the preparer.
+- `warmupCreateQps` caps new warmup creates admitted by each pool during its fixed
+  one-second reconcile tick. `warmupConcurrency` independently bounds active
+  post-create warmup work such as health checks and preparation. Their defaults
+  are `10` and `128`, respectively.
+- Readiness checks start after `warmupHealthCheckInitialDelay` (zero by default).
+  Readiness and post-prepare retries share `warmupHealthCheckPollingInterval`,
+  whose Pool default is `500ms`. Their timeout settings are soft deadlines: a
+  delayed task still receives one final check at or after its deadline.
+- Pool warmup create uses one transport attempt. Direct create, standalone create,
+  acquire, connect, renew, and cleanup retain the configured retry behavior.
+- Reconcile runs once per second. Warmup completion does not trigger an extra tick.
+- With `ConnectionConfig.enableTracing()`, each admitted warmup emits one
+  `pool.warmup` trace. Each health stage is summarized by one span with its
+  attempt count and scheduler delay. Terminal structured logs classify
+  `stage`, `result`, and `reason`; the current primary also emits an active-pool
+  summary every 30 seconds from the existing reconcile thread. Production
+  deployments should configure OpenTelemetry sampling explicitly; tracing is
+  opt-in but the SDK does not override the application's sampler.
+- Graceful shutdown stops admitting new warmups, keeps the primary heartbeat and
+  delayed-stage dispatcher alive while already-admitted warmups finish, and preserves
+  the existing behavior of allowing those warmups to enter idle before shutdown completes.
+- When `ConnectionConfig` carries no custom OkHttp `ConnectionPool`, the pool
+  creates one for direct create and idle connect, sized by `warmupConcurrency`
+  with a 5-minute keep-alive, and evicts it on `shutdown()`. Default staged
+  warmup sandboxes retain their own endpoint pools to avoid accumulating
+  mutually incompatible routes in one large pool. An explicitly user-provided
+  connection pool is honored by every path and is never evicted by the pool.
 
 
-> For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. Configure `primaryLockTtl` greater than `warmupReadyTimeout` plus expected warmup preparer time and buffer, otherwise leadership may expire while a node is creating idle sandboxes.
+> For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. The pool renews an owned primary lock independently from warmup execution at an internal interval no greater than `primaryLockTtl / 3`, so one slow warmup does not block leader heartbeats.
 > In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass.
+> `releaseAllIdle()` preserves the original serial cleanup behavior. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive; the overload returns only after every ID drained from the store has received a best-effort kill attempt.
 > `SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
 
 ## Configuration

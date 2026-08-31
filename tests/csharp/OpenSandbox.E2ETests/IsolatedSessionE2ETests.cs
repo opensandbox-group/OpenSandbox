@@ -15,6 +15,7 @@
 using OpenSandbox;
 using OpenSandbox.Core;
 using OpenSandbox.Models;
+using OpenSandbox.Services;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -35,6 +36,22 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
 
     private static string StdoutText(Execution exec)
         => string.Join("", exec.Logs.Stdout.Select(m => m.Text));
+
+    private static async Task<IsolatedRunStatus> PollRunFinishedAsync(
+        IIsolationSession session, string runId, int timeoutSeconds = 60)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(timeoutSeconds);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var status = await session.GetRunStatusAsync(runId);
+            if (!status.Running)
+            {
+                return status;
+            }
+            await Task.Delay(200);
+        }
+        throw new TimeoutException($"background run {runId} did not finish within {timeoutSeconds}s");
+    }
 
     public async Task InitializeAsync()
     {
@@ -128,6 +145,89 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
                 "echo $MY_VAR",
                 new IsolatedRunOpts(new Dictionary<string, string> { ["MY_VAR"] = "test-value-42" }));
             Assert.Contains("test-value-42", StdoutText(exec));
+        }
+        finally
+        {
+            await session.DeleteAsync();
+        }
+    }
+
+    // ── Background runs ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task TestBackgroundRunEcho()
+    {
+        var session = await _sandbox!.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")));
+        try
+        {
+            var run = await session.RunBackgroundAsync("echo bg-echo-output");
+            Assert.NotEmpty(run.RunId);
+            Assert.Equal(session.SessionId, run.SessionId);
+
+            var status = await PollRunFinishedAsync(session, run.RunId);
+            Assert.False(status.Running);
+            Assert.Equal(0, status.ExitCode);
+            Assert.Null(status.Error);
+
+            var logs = await session.GetRunLogsAsync(run.RunId);
+            Assert.Contains("bg-echo-output", logs.Text);
+
+            // Incremental read: the next cursor fetch returns only the remainder
+            // (empty here) and the cursor stays at the tail.
+            var remainder = await session.GetRunLogsAsync(run.RunId, logs.Cursor);
+            Assert.DoesNotContain("bg-echo-output", remainder.Text);
+            Assert.Equal(logs.Cursor, remainder.Cursor);
+        }
+        finally
+        {
+            await session.DeleteAsync();
+        }
+    }
+
+    [Fact]
+    public async Task TestBackgroundRunExitCodePropagation()
+    {
+        var session = await _sandbox!.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")));
+        try
+        {
+            var run = await session.RunBackgroundAsync("echo bg-before; exit 7; echo bg-after");
+            Assert.NotEmpty(run.RunId);
+
+            var status = await PollRunFinishedAsync(session, run.RunId);
+            Assert.False(status.Running);
+            Assert.Equal(7, status.ExitCode);
+
+            var logs = await session.GetRunLogsAsync(run.RunId);
+            Assert.Contains("bg-before", logs.Text);
+            Assert.DoesNotContain("bg-after", logs.Text);
+        }
+        finally
+        {
+            await session.DeleteAsync();
+        }
+    }
+
+    [Fact]
+    public async Task TestBackgroundRunWithEnvs()
+    {
+        var session = await _sandbox!.Isolation.CreateAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")));
+        try
+        {
+            var run = await session.RunBackgroundAsync(
+                "echo bg-env-$BG_VAR",
+                new IsolatedRunOpts(
+                    new Dictionary<string, string> { ["BG_VAR"] = "cs-bg-42" }));
+            Assert.NotEmpty(run.RunId);
+
+            var status = await PollRunFinishedAsync(session, run.RunId);
+            Assert.False(status.Running);
+            Assert.Equal(0, status.ExitCode);
+
+            var logs = await session.GetRunLogsAsync(run.RunId);
+            Assert.Contains("bg-env-cs-bg-42", logs.Text);
         }
         finally
         {

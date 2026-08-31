@@ -15,10 +15,12 @@
 using OpenSandbox.Config;
 using OpenSandbox.Core;
 using OpenSandbox.Factory;
+using OpenSandbox.Internal;
 using OpenSandbox.Models;
 using OpenSandbox.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Diagnostics;
 using System.Text.RegularExpressions;
 
 namespace OpenSandbox;
@@ -150,12 +152,14 @@ public sealed class Sandbox : IAsyncDisposable
             throw new InvalidArgumentException("Entrypoint must be omitted when SnapshotId is provided.");
         }
         ValidateHostPaths(options.Volumes);
+        var startupSource = options.Image ?? options.SnapshotId;
+        var createStopwatch = Stopwatch.StartNew();
         var httpClientProvider = new HttpClientProvider(connectionConfig, loggerFactory);
 
         ISandboxes sandboxes;
         logger.LogInformation(
             "Creating sandbox (startupSource={StartupSource}, useServerProxy={UseServerProxy})",
-            options.Image ?? options.SnapshotId,
+            startupSource,
             connectionConfig.UseServerProxy);
         try
         {
@@ -171,6 +175,13 @@ public sealed class Sandbox : IAsyncDisposable
         catch
         {
             logger.LogError("Failed to initialize lifecycle adapters while creating sandbox");
+            LifecycleMetricsReporter.ReportSandboxCreate(
+                connectionConfig,
+                sandboxId: null,
+                image: startupSource,
+                createDurationMs: createStopwatch.ElapsedMilliseconds,
+                success: false,
+                loggerFactory);
             httpClientProvider.Dispose();
             throw;
         }
@@ -194,6 +205,7 @@ public sealed class Sandbox : IAsyncDisposable
             Env = options.Env,
             SecureAccess = options.SecureAccess,
             Metadata = options.Metadata,
+            Lifecycle = options.Lifecycle,
             Platform = options.Platform,
             NetworkPolicy = options.NetworkPolicy != null
                 ? new NetworkPolicy
@@ -275,6 +287,14 @@ public sealed class Sandbox : IAsyncDisposable
                 }, cancellationToken).ConfigureAwait(false);
             }
 
+            LifecycleMetricsReporter.ReportSandboxCreate(
+                connectionConfig,
+                sandboxId: sandboxId,
+                image: startupSource,
+                createDurationMs: createStopwatch.ElapsedMilliseconds,
+                success: true,
+                loggerFactory);
+
             return sandbox;
         }
         catch (Exception ex)
@@ -290,6 +310,14 @@ public sealed class Sandbox : IAsyncDisposable
                     // Ignore cleanup failure; surface original error
                 }
             }
+
+            LifecycleMetricsReporter.ReportSandboxCreate(
+                connectionConfig,
+                sandboxId: sandboxId,
+                image: startupSource,
+                createDurationMs: createStopwatch.ElapsedMilliseconds,
+                success: false,
+                loggerFactory);
 
             httpClientProvider.Dispose();
             logger.LogError(ex, "Sandbox create flow failed");
@@ -788,13 +816,8 @@ public sealed class Sandbox : IAsyncDisposable
             if (DateTime.UtcNow > deadline)
             {
                 var context = $"domain={ConnectionConfig.Domain}, useServerProxy={ConnectionConfig.UseServerProxy}";
-                var suggestion = "If this sandbox runs in Docker bridge or remote-network mode, consider enabling useServerProxy=true.";
-                if (!ConnectionConfig.UseServerProxy)
-                {
-                    suggestion += " You can also configure server-side [docker].host_ip for direct endpoint access.";
-                }
                 throw new SandboxReadyTimeoutException(
-                    $"Sandbox health check timed out after {options.ReadyTimeoutSeconds}s ({attempt} attempts). {errorDetail} Connection context: {context}. {suggestion}");
+                    $"Sandbox health check timed out after {options.ReadyTimeoutSeconds}s ({attempt} attempts). {errorDetail} Connection context: {context}.");
             }
             attempt++;
 

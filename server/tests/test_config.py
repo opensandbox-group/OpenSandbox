@@ -15,9 +15,10 @@
 import textwrap
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from opensandbox_server import config as config_module
+from opensandbox_server.cli import render_full_config
 from opensandbox_server.config import (
     AppConfig,
     LogConfig,
@@ -25,6 +26,7 @@ from opensandbox_server.config import (
     EGRESS_MODE_DNS,
     EGRESS_MODE_DNS_NFT,
     EgressConfig,
+    ExecdInitResources,
     GatewayConfig,
     GatewayRouteModeConfig,
     IngressConfig,
@@ -32,6 +34,8 @@ from opensandbox_server.config import (
     SecureAccessConfig,
     SecureAccessKey,
     ServerConfig,
+    POSTGRESQL_DSN_ENV_VAR,
+    PostgreSQLStoreConfig,
     StoreConfig,
     StorageConfig,
 )
@@ -76,6 +80,7 @@ def test_load_config_from_file(tmp_path, monkeypatch):
     assert loaded.server.max_sandbox_timeout_seconds == 172800
     assert loaded.runtime.type == "kubernetes"
     assert loaded.runtime.execd_image == "opensandbox/execd:test"
+    assert loaded.runtime.execd_run_as_init is False
     assert loaded.ingress is not None
     assert loaded.ingress.mode == "gateway"
     assert loaded.ingress.gateway is not None
@@ -151,6 +156,33 @@ def test_load_config_without_env_uses_toml_api_key(tmp_path, monkeypatch):
     assert loaded.server.api_key == "toml-secret-key"
 
 
+def test_runtime_execd_run_as_init_parses_from_toml(tmp_path):
+    toml = """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+        execd_run_as_init = true
+        """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+
+    loaded = config_module.load_config(config_path)
+    assert loaded.runtime.execd_run_as_init is True
+
+
+def test_runtime_execd_run_as_init_defaults_false(tmp_path):
+    toml = """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+        """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+
+    loaded = config_module.load_config(config_path)
+    assert loaded.runtime.execd_run_as_init is False
+
+
 def test_docker_runtime_disallows_kubernetes_block():
     server_cfg = ServerConfig()
     runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")
@@ -162,6 +194,14 @@ def test_docker_runtime_disallows_kubernetes_block():
 def test_server_config_defaults_include_max_sandbox_timeout():
     server_cfg = ServerConfig()
     assert server_cfg.max_sandbox_timeout_seconds is None
+
+
+def test_kubernetes_pool_acquisition_timeout_defaults_and_validates():
+    kubernetes_cfg = config_module.KubernetesRuntimeConfig()
+    assert kubernetes_cfg.pool_acquisition_timeout_seconds == 30
+
+    with pytest.raises(ValueError):
+        config_module.KubernetesRuntimeConfig(pool_acquisition_timeout_seconds=0)
 
 
 def test_server_config_uvicorn_tuning_defaults():
@@ -229,6 +269,20 @@ def test_store_defaults_to_sqlite():
     cfg = StoreConfig()
     assert cfg.type == "sqlite"
     assert cfg.path.endswith("opensandbox.db")
+
+
+def test_postgresql_store_requires_dsn():
+    with pytest.raises(ValidationError, match="must be set"):
+        StoreConfig(type="postgresql")
+
+
+def test_postgresql_store_validates_pool_size():
+    with pytest.raises(ValidationError, match="min_pool_size"):
+        PostgreSQLStoreConfig(
+            dsn=SecretStr("postgresql://localhost/opensandbox"),
+            min_pool_size=3,
+            max_pool_size=2,
+        )
 
 
 def test_renew_intent_defaults():
@@ -306,6 +360,105 @@ def test_load_config_store_block(tmp_path, monkeypatch):
     loaded = config_module.load_config(config_path)
     assert loaded.store.type == "sqlite"
     assert loaded.store.path == str(db_path)
+
+
+def test_load_config_postgresql_dsn_from_environment(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    monkeypatch.setenv(
+        POSTGRESQL_DSN_ENV_VAR,
+        "postgresql://opensandbox:secret@postgres.example/opensandbox",
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            [store]
+            type = "postgresql"
+
+            [store.postgresql]
+            min_pool_size = 2
+            max_pool_size = 4
+
+            [runtime]
+            type = "docker"
+            execd_image = "opensandbox/execd:test"
+            """
+        )
+    )
+
+    loaded = config_module.load_config(config_path)
+
+    assert loaded.store.type == "postgresql"
+    assert loaded.store.postgresql.dsn is not None
+    assert (
+        loaded.store.postgresql.dsn.get_secret_value()
+        == "postgresql://opensandbox:secret@postgres.example/opensandbox"
+    )
+    assert loaded.store.postgresql.min_pool_size == 2
+    assert loaded.store.postgresql.max_pool_size == 4
+
+
+def test_postgresql_dsn_environment_overrides_toml(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    monkeypatch.setenv(POSTGRESQL_DSN_ENV_VAR, "postgresql://environment/opensandbox")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            [store]
+            type = "postgresql"
+
+            [store.postgresql]
+            dsn = "postgresql://toml/opensandbox"
+
+            [runtime]
+            type = "docker"
+            execd_image = "opensandbox/execd:test"
+            """
+        )
+    )
+
+    loaded = config_module.load_config(config_path)
+
+    assert loaded.store.postgresql.dsn is not None
+    assert loaded.store.postgresql.dsn.get_secret_value() == "postgresql://environment/opensandbox"
+
+
+def test_postgresql_dsn_is_redacted_from_validation_errors(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    secret_dsn = "postgresql://opensandbox:sensitive-password@postgres/opensandbox"
+    monkeypatch.setenv(POSTGRESQL_DSN_ENV_VAR, secret_dsn)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            [store]
+            type = "postgresql"
+
+            [store.postgresql]
+            min_pool_size = 3
+            max_pool_size = 2
+
+            [runtime]
+            type = "docker"
+            execd_image = "opensandbox/execd:test"
+            """
+        )
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        config_module.load_config(config_path)
+
+    assert secret_dsn not in str(exc_info.value)
+
+
+def test_full_config_includes_store_sections(tmp_path) -> None:
+    config_path = render_full_config(tmp_path / "generated.toml")
+
+    content = config_path.read_text()
+    assert "[store]" in content
+    assert "[store.postgresql]" in content
+    assert "min_pool_size" in content
 
 
 def test_load_config_renew_intent_legacy_redis_subtable(tmp_path, monkeypatch):
@@ -891,8 +1044,181 @@ def test_egress_config_mode_literal():
     base = EgressConfig(image="opensandbox/egress:v1")
     assert base.mode == EGRESS_MODE_DNS
     assert base.disable_ipv6 is True
+    assert base.readiness_timeout_seconds == 30.0
+    assert base.requests is None
+    assert base.limits is None
     cfg = EgressConfig(image="opensandbox/egress:v1", mode=EGRESS_MODE_DNS_NFT)
     assert cfg.mode == EGRESS_MODE_DNS_NFT
+
+
+@pytest.mark.parametrize(
+    ("resource_name", "quantity"),
+    [
+        ("cpu", "1"),
+        ("memory", "1Gi"),
+        ("ephemeral-storage", "1Gi"),
+        ("hugepages-2Mi", "2Mi"),
+        ("nvidia.com/gpu", "1"),
+    ],
+)
+def test_egress_config_accepts_kubernetes_container_resource_names(
+    resource_name, quantity
+):
+    config = EgressConfig(
+        requests={resource_name: quantity},
+        limits={resource_name: quantity},
+    )
+
+    assert config.requests == {resource_name: quantity}
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    [
+        "",
+        "gpu",
+        "bad resource name",
+        "hugepages-invalid",
+        "/gpu",
+        "example.com/",
+        "Example.com/gpu",
+        "example..com/gpu",
+        "requests.example.com/gpu",
+        f"{'a' * 64}.com/gpu",
+        f"example.com/{'a' * 64}",
+    ],
+)
+def test_egress_config_rejects_invalid_kubernetes_container_resource_names(
+    resource_name,
+):
+    with pytest.raises(
+        ValidationError,
+        match=r"invalid Kubernetes container resource name",
+    ):
+        EgressConfig(requests={resource_name: "1"})
+
+
+@pytest.mark.parametrize(
+    ("requests", "limits"),
+    [
+        ({"cpu": "500m"}, {"cpu": "250m"}),
+        ({"memory": "1Gi"}, {"memory": "512Mi"}),
+    ],
+)
+def test_egress_config_rejects_requests_greater_than_limits(requests, limits):
+    with pytest.raises(
+        ValidationError,
+        match=r"resource request .* must not exceed limit",
+    ):
+        EgressConfig(requests=requests, limits=limits)
+
+
+def test_execd_init_resources_preserve_existing_unvalidated_quantity_semantics():
+    resources = ExecdInitResources(requests={"cpu": "not-a-quantity"})
+
+    assert resources.requests == {"cpu": "not-a-quantity"}
+
+
+@pytest.mark.parametrize(
+    "quantity",
+    ["not-a-quantity", "-1", "NaN", "1K"],
+)
+@pytest.mark.parametrize("resource_kind", ["requests", "limits"])
+def test_egress_config_rejects_invalid_kubernetes_resource_quantities(
+    resource_kind, quantity
+):
+    with pytest.raises(
+        ValidationError,
+        match=r"invalid Kubernetes resource quantity for 'cpu'",
+    ):
+        EgressConfig.model_validate({resource_kind: {"cpu": quantity}})
+
+
+def test_egress_config_readiness_timeout_must_be_positive():
+    cfg = EgressConfig(readiness_timeout_seconds=75.5)
+    assert cfg.readiness_timeout_seconds == 75.5
+
+    with pytest.raises(ValidationError):
+        EgressConfig(readiness_timeout_seconds=0)
+
+
+def test_load_config_with_egress_readiness_timeout(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    toml = textwrap.dedent(
+        """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+
+        [egress]
+        image = "opensandbox/egress:test"
+        readiness_timeout_seconds = 75.5
+        """
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+
+    loaded = config_module.load_config(config_path)
+
+    assert loaded.egress is not None
+    assert loaded.egress.readiness_timeout_seconds == 75.5
+
+
+def test_load_config_with_egress_resources(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            [runtime]
+            type = "kubernetes"
+            execd_image = "opensandbox/execd:test"
+
+            [egress]
+            image = "opensandbox/egress:test"
+            requests = { cpu = "25m", memory = "64Mi" }
+            limits = { cpu = "250m", memory = "256Mi" }
+            """
+        )
+    )
+
+    loaded = config_module.load_config(config_path)
+
+    assert loaded.egress is not None
+    assert loaded.egress.requests == {"cpu": "25m", "memory": "64Mi"}
+    assert loaded.egress.limits == {"cpu": "250m", "memory": "256Mi"}
+
+
+@pytest.mark.parametrize(
+    ("resource_config", "error"),
+    [
+        ('requests = { gpu = "1" }', "invalid Kubernetes container resource name"),
+        (
+            'requests = { cpu = "500m" }\nlimits = { cpu = "250m" }',
+            "must not exceed limit",
+        ),
+    ],
+)
+def test_load_config_rejects_invalid_egress_resources_at_startup(
+    tmp_path, monkeypatch, resource_config, error
+):
+    _reset_config(monkeypatch)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            f"""
+            [runtime]
+            type = "kubernetes"
+            execd_image = "opensandbox/execd:test"
+
+            [egress]
+            {resource_config}
+            """
+        )
+    )
+
+    with pytest.raises(ValidationError, match=error):
+        config_module.load_config(config_path)
 
 
 def test_log_config_defaults():
@@ -1418,3 +1744,140 @@ class TestSecureAccessTomlLoading:
         with pytest.raises(ValidationError, match="not found in secure_access.keys"):
             config_module.load_config(config_path)
 
+
+class TestSecureAccessEnvOverride:
+    """OPENSANDBOX_SECURE_ACCESS_KEYS / OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY."""
+
+    _GATEWAY_TOML = textwrap.dedent(
+        """
+        [server]
+        host = "127.0.0.1"
+        port = 9000
+
+        [runtime]
+        type = "kubernetes"
+        execd_image = "opensandbox/execd:test"
+
+        [ingress]
+        mode = "gateway"
+
+        [ingress.gateway]
+        address = "gw.example.com"
+
+        [ingress.gateway.route]
+        mode = "header"
+        """
+    )
+
+    def _write_config(self, tmp_path, toml: str):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(toml)
+        return config_path
+
+    def test_env_secure_access_without_toml_block(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        _reset_config(monkeypatch)
+        b64_a = base64.b64encode(b"key-a").decode()
+        b64_b = base64.b64encode(b"key-b").decode()
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64_a},b={b64_b}")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "b")
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        loaded = config_module.load_config(config_path)
+        assert loaded.ingress is not None
+        assert loaded.ingress.secure_access is not None
+        assert loaded.ingress.secure_access.active_key == "b"
+        assert loaded.ingress.secure_access.get_active_secret_bytes() == b"key-b"
+
+    def test_env_secure_access_overrides_toml_block(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        _reset_config(monkeypatch)
+        b64_toml = base64.b64encode(b"toml-key").decode()
+        b64_env = base64.b64encode(b"env-key").decode()
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64_env}")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        toml = self._GATEWAY_TOML + textwrap.dedent(
+            f"""
+            [ingress.secure_access]
+            active_key = "a"
+
+            [[ingress.secure_access.keys]]
+            key_id = "a"
+            key = "{b64_toml}"
+            """
+        )
+        config_path = self._write_config(tmp_path, toml)
+
+        loaded = config_module.load_config(config_path)
+        assert loaded.ingress.secure_access.get_active_secret_bytes() == b"env-key"
+
+    def test_env_secure_access_requires_both_vars(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        b64 = base64.b64encode(b"key").decode()
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        _reset_config(monkeypatch)
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64}")
+        with pytest.raises(ValueError, match="must be set together"):
+            config_module.load_config(config_path)
+
+        _reset_config(monkeypatch)
+        monkeypatch.delenv("OPENSANDBOX_SECURE_ACCESS_KEYS")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        with pytest.raises(ValueError, match="must be set together"):
+            config_module.load_config(config_path)
+
+    def test_env_secure_access_requires_gateway_mode(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        _reset_config(monkeypatch)
+        b64 = base64.b64encode(b"key").decode()
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64}")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        toml = textwrap.dedent(
+            """
+            [server]
+            host = "127.0.0.1"
+
+            [runtime]
+            type = "docker"
+            execd_image = "opensandbox/execd:test"
+            """
+        )
+        config_path = self._write_config(tmp_path, toml)
+
+        with pytest.raises(ValueError, match="requires ingress.mode"):
+            config_module.load_config(config_path)
+
+    def test_env_secure_access_rejects_malformed_entry(self, tmp_path, monkeypatch) -> None:
+        _reset_config(monkeypatch)
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", "not-a-pair")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        with pytest.raises(ValueError, match="key_id=base64"):
+            config_module.load_config(config_path)
+
+    def test_env_secure_access_rejects_invalid_base64(self, tmp_path, monkeypatch) -> None:
+        _reset_config(monkeypatch)
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", "a=!!!invalid!!!")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        with pytest.raises(ValidationError, match="not valid base64"):
+            config_module.load_config(config_path)
+
+    def test_env_secure_access_active_key_must_exist(self, tmp_path, monkeypatch) -> None:
+        import base64
+
+        _reset_config(monkeypatch)
+        b64 = base64.b64encode(b"key").decode()
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", f"a={b64}")
+        monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "z")
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+
+        with pytest.raises(ValidationError, match="not found in secure_access.keys"):
+            config_module.load_config(config_path)

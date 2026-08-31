@@ -27,7 +27,7 @@ Proposals (OSEPs).
 |------|--------|----------|-------|
 | Local lightweight sandbox | Planned | TBD | Lightweight sandbox runtime for AI tools running directly on PCs. |
 | Persistent volumes | Implementing | [OSEP-0003](oseps/0003-volume-and-volumebinding-support.md) | Close remaining runtime/backend gaps from OSEP-0003 before treating volume support as mature. |
-| Secure container runtime | Maturing | [OSEP-0004](oseps/0004-secure-container-runtime.md), [secure container guide](docs/guides/secure-container.md) | Continue hardening isolation guidance and deployment practices. |
+| Secure container runtime | Implemented / maturing | [OSEP-0004](oseps/0004-secure-container-runtime.md), [secure container guide](docs/guides/secure-container.md) | Continue hardening isolation guidance and deployment practices. |
 | Pause and resume via rootfs snapshot | Implementing | [OSEP-0008](oseps/0008-pause-resume-rootfs-snapshot.md) | Improve lifecycle support for stateful sandbox workflows. |
 | Secure endpoint access | Implemented / maturing | [OSEP-0011](oseps/0011-secure-access-endpoint.md) | Keep endpoint security behavior aligned across server, SDKs, and docs. |
 
@@ -36,7 +36,7 @@ Proposals (OSEPs).
 | Area | Status | Tracking | Notes |
 |------|--------|----------|-------|
 | SDK parity | Ongoing | [sdks/](sdks/), [specs/](specs/README.md) | Keep Python, Go, Kotlin, JavaScript/TypeScript, and C# SDKs aligned with public specs. |
-| Client-side sandbox pool | Implementing / maturing | [OSEP-0005](oseps/0005-client-side-sandbox-pool.md) | Expand behavior consistency, tests, and documentation where practical. |
+| Client-side sandbox pool | Implemented / maturing | [OSEP-0005](oseps/0005-client-side-sandbox-pool.md) | Expand behavior consistency, tests, and documentation where practical. |
 | CLI usability | Planned | [cli/](cli/README.md) | Improve common sandbox lifecycle workflows and developer ergonomics. |
 | Developer console | Implementable | [OSEP-0006](oseps/0006-developer-console.md) | Provide a clearer operational surface for sandbox users and maintainers. |
 

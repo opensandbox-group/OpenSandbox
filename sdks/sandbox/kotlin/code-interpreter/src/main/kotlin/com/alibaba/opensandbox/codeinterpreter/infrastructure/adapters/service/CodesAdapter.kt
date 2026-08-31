@@ -25,15 +25,14 @@ import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.execd.CodeInterpretingApi
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -48,6 +47,14 @@ class CodesAdapter(
     companion object {
         private const val RUN_CODE_PATH = "/code"
     }
+
+    private val jsonParser =
+        Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+            encodeDefaults = true
+            coerceInputValues = true
+        }
 
     private val logger = LoggerFactory.getLogger(CodesAdapter::class.java)
     private val baseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
@@ -132,15 +139,9 @@ class CodesAdapter(
 
             httpClientProvider.sseClient.newCall(httpRequest).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to run code. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, responseBody ->
+                        "Failed to run code. Status code: $statusCode, Body: $responseBody"
+                    }
                 }
 
                 response.body?.byteStream()?.bufferedReader(Charsets.UTF_8)?.use { reader ->

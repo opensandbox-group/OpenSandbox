@@ -160,4 +160,8 @@ func (p *BatchSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, err
 	}, nil
 }
 
+func (p *BatchSandboxProvider) ResolveEndpoint(_ context.Context, target EndpointTarget) (*EndpointInfo, error) {
+	return p.GetEndpoint(target.SandboxID)
+}
+
 var _ Provider = (*BatchSandboxProvider)(nil)

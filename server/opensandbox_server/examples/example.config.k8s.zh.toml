@@ -27,12 +27,19 @@ max_sandbox_timeout_seconds = 86400
 # - 交互式 TTY：按提示输入 YES
 # - 非交互环境：设置 OPENSANDBOX_INSECURE_SERVER=YES
 
+[proxy]
+# 当为 True（默认）时，服务端反向代理以沙箱的内部容器 IP（Docker bridge）或
+# provider 的内部 workload 端点为目标；设为 False 时，代理改为以服务端本地的
+# host-mapped 端口为目标。当服务端进程无法路由到容器 bridge IP 时（例如 macOS
+# 上的 launchd/systemd 用户会话）应设为 False。
+resolve_internal = true
+
 [log]
 level = "INFO"
 
 [runtime]
 type = "kubernetes"
-execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.21"
+execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0"
 
 [storage]
 # 允许进行 bind mount 的宿主机路径前缀白名单。
@@ -42,6 +49,13 @@ allowed_host_paths = []
 
 # 自动创建 Kubernetes PVC 时的默认存储大小（当调用方未指定时使用）。
 volume_default_size = "1Gi"
+
+[store]
+# 仅当该路径挂载了 PersistentVolume 时，SQLite 数据才会持久保留。
+type = "sqlite"
+path = "~/.opensandbox/opensandbox.db"
+# 如需使用 PostgreSQL，请设置 type = "postgresql"，在 [store.postgresql]
+# 配置连接池，并通过 OPENSANDBOX_STORE_POSTGRESQL_DSN 注入连接串。只能运行一个活跃 Server 副本。
 
 [kubernetes]
 # Path to kubeconfig file. Leave as null to use in-cluster configuration
@@ -76,12 +90,15 @@ batchsandbox_template_file = "~/batchsandbox-template.yaml"
 mode = "direct"
 
 [egress]
-image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.4"
+image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.7"
 mode = "dns"
 # Default is true (recommended for dual-stack CNI). Set false only if you need IPv6 in the netns (see server/configuration.md).
 # disable_ipv6 = false
+# 可选：为生成的 egress sidecar 配置独立的 Kubernetes 资源，请根据实际负载调整。
+# requests = { cpu = "25m", memory = "64Mi" }
+# limits = { cpu = "250m", memory = "256Mi" }
 
-# 🧪 [EXPERIMENTAL] 按访问续期。默认关闭 — 见 server/README_zh.md。
+# 按访问续期。默认关闭 — 见 server/README_zh.md。
 [renew_intent]
 enabled = false
 min_interval_seconds = 60

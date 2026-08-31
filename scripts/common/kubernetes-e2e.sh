@@ -78,7 +78,10 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
   hostPath:
-    path: /tmp/${PV_NAME}
+    # NOT under /tmp: the kind node mounts /tmp as a noexec tmpfs, so a
+    # hostPath PV there is not executable (writes/reads work, exec fails with
+    # EACCES regardless of Landlock). /var lives on the node's rootfs.
+    path: /var/opensandbox-e2e/${PV_NAME}
     type: DirectoryOrCreate
 ---
 apiVersion: v1
@@ -188,6 +191,7 @@ configToml: |
   [runtime]
   type = "kubernetes"
   execd_image = "${EXECD_IMG}"
+  execd_run_as_init = ${E2E_EXECD_RUN_AS_INIT:-false}
 
   [egress]
   image = "${EGRESS_IMG}"
@@ -293,5 +297,9 @@ k8s_e2e_generate_sdk_and_run_kubernetes_mini() {
   make generate-api
   cd "${REPO_ROOT}/tests/python"
   uv sync --all-extras --refresh
-  make test-kubernetes-mini
+  if [ "${E2E_TEST_SUITE:-mini}" = "pool" ]; then
+    uv run pytest tests/test_sandbox_pool_e2e_sync.py tests/test_server_pool_e2e_sync.py
+  else
+    make test-kubernetes-mini
+  fi
 }

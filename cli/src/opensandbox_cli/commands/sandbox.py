@@ -371,7 +371,7 @@ def sandbox_pause(obj: ClientContext, sandbox_id: str, output_format: str | None
     mgr = obj.get_manager()
     with obj.output.spinner("Pausing sandbox..."):
         mgr.pause_sandbox(sandbox_id)
-    obj.output.success(f"Sandbox paused: {sandbox_id}")
+    obj.output.success(f"Pause request accepted: {sandbox_id}")
 
 
 # ---- resume ---------------------------------------------------------------

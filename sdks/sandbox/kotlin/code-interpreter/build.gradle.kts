@@ -23,10 +23,15 @@ dependencies {
 
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
-    implementation(libs.bundles.serialization)
+    compileOnly(libs.bundles.serialization)
 
     testImplementation(libs.bundles.testing)
+    testImplementation(libs.bundles.serialization)
     testRuntimeOnly(libs.junit.platform.launcher)
+}
+
+tasks.named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
+    configurations = emptyList()
 }
 
 // Configure test tasks to use JDK 17

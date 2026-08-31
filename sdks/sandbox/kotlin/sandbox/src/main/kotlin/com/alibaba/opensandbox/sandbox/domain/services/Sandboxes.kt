@@ -26,6 +26,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
@@ -111,6 +112,55 @@ interface Sandboxes {
         }
         throw UnsupportedOperationException(
             "Credential Vault proxy is not supported by this Sandboxes implementation",
+        )
+    }
+
+    /**
+     * Creates a sandbox with optional Credential Vault proxy and lifecycle hooks.
+     *
+     * Existing implementations remain compatible when [lifecycle] is null or empty.
+     *
+     * @param lifecycle Optional hooks. A value without pre-start or periodic hooks is ignored.
+     * @throws UnsupportedOperationException if non-empty hooks are requested from an
+     * implementation that does not override this method.
+     */
+    fun createSandbox(
+        spec: SandboxImageSpec?,
+        entrypoint: List<String>?,
+        env: Map<String, String>,
+        metadata: Map<String, String>,
+        timeout: Duration?,
+        resource: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        volumes: List<Volume>?,
+        platform: PlatformSpec? = null,
+        secureAccess: Boolean = false,
+        snapshotId: String? = null,
+        credentialProxy: CredentialProxyConfig?,
+        resourceRequests: Map<String, String>? = null,
+        lifecycle: SandboxLifecycle?,
+    ): SandboxCreateResponse {
+        if (lifecycle == null || lifecycle.isEmpty) {
+            return createSandbox(
+                spec = spec,
+                entrypoint = entrypoint,
+                env = env,
+                metadata = metadata,
+                timeout = timeout,
+                resource = resource,
+                networkPolicy = networkPolicy,
+                extensions = extensions,
+                volumes = volumes,
+                platform = platform,
+                secureAccess = secureAccess,
+                snapshotId = snapshotId,
+                credentialProxy = credentialProxy,
+                resourceRequests = resourceRequests,
+            )
+        }
+        throw UnsupportedOperationException(
+            "Sandbox lifecycle hooks are not supported by this Sandboxes implementation",
         )
     }
 

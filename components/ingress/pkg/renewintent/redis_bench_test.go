@@ -63,7 +63,7 @@ func BenchmarkRedisPublisher_PublishIntent(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		p.PublishIntent(sandboxID, port, requestURI)
+		p.PublishIntent("bench", sandboxID, port, requestURI)
 	}
 }
 
@@ -93,7 +93,7 @@ func BenchmarkRedisPublisher_PublishIntent_Throttled(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		p.PublishIntent(sandboxID, port, requestURI)
+		p.PublishIntent("bench", sandboxID, port, requestURI)
 	}
 }
 
@@ -123,6 +123,6 @@ func BenchmarkRedisPublisher_PublishIntent_ManySandboxes(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		sandboxID := fmt.Sprintf("sandbox-%d", i%1000)
-		p.PublishIntent(sandboxID, port, requestURI)
+		p.PublishIntent("bench", sandboxID, port, requestURI)
 	}
 }

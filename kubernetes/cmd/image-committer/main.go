@@ -15,6 +15,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -25,253 +27,95 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	snapshotcontract "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/imagecommitter"
+	imagecommittercli "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/imagecommitter/cli"
 )
 
+var terminationMessagePath = "/dev/termination-log"
+
+const registryConfigPath = "/var/run/opensandbox/registry/config.json"
+
+// commandCombinedOutput is a var so tests can replace it.
 var commandCombinedOutput = func(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).CombinedOutput()
 }
 
-var terminationMessagePath = "/dev/termination-log"
+func main() {
+	args := os.Args[1:]
 
-// containerdSocket returns the containerd socket address from env or default
-func containerdSocket() string {
-	if v := os.Getenv("CONTAINERD_SOCKET"); v != "" {
-		return v
+	// QEMU-specific subcommands use the nerdctl-based path, which requires
+	// HostPID access and runs qemu-checkpoint-helper inside the container.
+	if len(args) > 0 && (args[0] == "snapshot" || args[0] == "recover-qemu") {
+		recovery := &snapshotRecovery{}
+
+		// Recover the source workload if the snapshot process is interrupted.
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			sig := <-c
+			fmt.Fprintf(os.Stderr, "Received signal %v, recovering snapshot source...\n", sig)
+			recoverSnapshotSource(recovery)
+			os.Exit(1)
+		}()
+
+		// Recover the source workload if snapshot orchestration panics.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "Panic occurred: %v\n", r)
+				recoverSnapshotSource(recovery)
+				panic(r)
+			}
+		}()
+
+		if args[0] == "recover-qemu" {
+			runRecoverQEMU(args[1:])
+			return
+		}
+		if err := runSnapshotRequest(args[1:], recovery); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: snapshot failed: %v\n", err)
+			recoverSnapshotSource(recovery)
+			os.Exit(1)
+		}
+		return
 	}
-	return "/run/containerd/containerd.sock"
-}
 
-// containerdNamespace returns the containerd namespace from env or default
-func containerdNamespace() string {
-	if v := os.Getenv("CONTAINERD_NAMESPACE"); v != "" {
-		return v
+	// Standard rootfs commit and unpause via the containerd API path.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	provider := imagecommitter.DockerConfigCredentialProvider{Path: registryConfigPath, ErrorOutput: os.Stderr}
+	if err := imagecommittercli.Run(ctx, args, imagecommittercli.Config{
+		CredentialProvider:       provider,
+		SourceCredentialProvider: provider,
+		TerminationMessagePath:   terminationMessagePath,
+		Output:                   os.Stdout,
+		ErrorOutput:              os.Stderr,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
 	}
-	return "k8s.io"
 }
 
-// nerdctlBaseArgs returns the base arguments for nerdctl commands
-func nerdctlBaseArgs() []string {
-	return []string{"--address", containerdSocket(), "--namespace", containerdNamespace()}
-}
-
+// ContainerSpec maps a source container to its target image.
+// Used by the legacy rootfs snapshot path and its tests.
 type ContainerSpec struct {
 	Name string
 	URI  string
 }
 
-type snapshotResult struct {
-	Containers []snapshotContainerResult `json:"containers"`
-}
-
-type snapshotContainerResult struct {
-	Name   string `json:"name"`
-	Image  string `json:"image"`
-	Digest string `json:"digest"`
-}
-
-// Global tracking of paused containers for cleanup
-var pausedContainerIds []string
-
-func main() {
-	args := os.Args[1:]
-
-	// Set up signal handler to ensure all paused containers are resumed on exit
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-c
-		fmt.Fprintf(os.Stderr, "Received signal %v, cleaning up paused containers...\n", sig)
-		resumeAllPausedContainers()
-		os.Exit(1)
-	}()
-
-	// Defer cleanup in case of panic or early termination
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "Panic occurred: %v\n", r)
-			resumeAllPausedContainers()
-			panic(r)
-		}
-	}()
-
-	if len(args) > 0 && args[0] == "unpause" {
-		runUnpause(args[1:])
-		return
-	}
-
-	// Parse arguments using unified format:
-	// <pod_name> <namespace> <container1:uri1> [container2:uri2...]
-	var podName, namespace string
-	var containerSpecs []ContainerSpec
-
-	if len(args) < 3 {
-		fmt.Fprintln(os.Stderr, "ERROR: Missing required parameters")
-		fmt.Fprintln(os.Stderr, "Usage: commit-snapshot <pod_name> <namespace> <container1:uri1> [container2:uri2...]")
-		os.Exit(1)
-	}
-
-	podName = args[0]
-	namespace = args[1]
-
-	for i := 2; i < len(args); i++ {
-		spec, err := parseContainerSpec(args[i])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-			os.Exit(1)
-		}
-		containerSpecs = append(containerSpecs, spec)
-	}
-
-	// Validate required inputs
-	if len(podName) == 0 {
-		fmt.Fprintln(os.Stderr, "ERROR: Pod name is required")
-		os.Exit(1)
-	}
-
-	if len(namespace) == 0 {
-		fmt.Fprintln(os.Stderr, "ERROR: Namespace is required")
-		os.Exit(1)
-	}
-
-	if len(containerSpecs) == 0 {
-		fmt.Fprintln(os.Stderr, "ERROR: At least one container specification is required")
-		fmt.Fprintln(os.Stderr, "Usage: commit-snapshot <pod_name> <namespace> <container1:uri1> [container2:uri2...]")
-		os.Exit(1)
-	}
-
-	fmt.Println("=== Commit Snapshot Go Program ===")
-	fmt.Printf("Pod: %s\n", podName)
-	fmt.Printf("Namespace: %s\n", namespace)
-	for _, spec := range containerSpecs {
-		fmt.Printf("Container spec: %s -> %s\n", spec.Name, spec.URI)
-	}
-
-	// Step 1: Find container IDs via nerdctl (direct containerd API, no CRI dependency)
-	fmt.Println("\n=== Step 1: Find container IDs via nerdctl ===")
-	containerMap := make(map[string]string) // Maps container name to container ID
-	for _, spec := range containerSpecs {
-		containerID, err := getContainerIDByNerdctl(podName, namespace, spec.Name)
-		if err != nil {
-			resumeAllPausedContainers()
-			fmt.Fprintf(os.Stderr, "ERROR: Failed to find container '%s': %v\n", spec.Name, err)
-			os.Exit(1)
-		}
-
-		fmt.Printf("Container '%s' -> ID: %s\n", spec.Name, containerID)
-		containerMap[spec.Name] = containerID
-	}
-
-	// Step 2: Pause all containers
-	fmt.Println("\n=== Step 2: Pause all containers ===")
-	pauseErrors := 0
-	for _, spec := range containerSpecs {
-		containerID := containerMap[spec.Name]
-		if err := pauseContainer(containerID); err != nil {
-			// On pause failure, we still try to continue since commit might work anyway (as in shell script)
-			fmt.Fprintf(os.Stderr, "WARNING: Could not pause '%s'. Will attempt commit anyway (container may be stopped).\n", spec.Name)
-			pauseErrors++
-		} else {
-			// Track successfully paused containers for cleanup
-			pausedContainerIds = append(pausedContainerIds, containerID)
-		}
-	}
-
-	// Step 3: Commit all containers
-	fmt.Println("\n=== Step 3: Commit all containers ===")
-	committedImages := make(map[string]string) // Maps container name to committed image URI
-	commitErrors := 0
-	for _, spec := range containerSpecs {
-		containerID := containerMap[spec.Name]
-		if err := commitContainer(containerID, spec.URI); err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: Failed to commit container '%s': %v\n", spec.Name, err)
-			commitErrors++
-		} else {
-			committedImages[spec.Name] = spec.URI
-			fmt.Printf("Successfully committed: %s -> %s\n", containerID, spec.URI)
-		}
-	}
-
-	// Step 4: Resume all paused containers (regardless of commit success/failure)
-	fmt.Println("\n=== Step 4: Resume all paused containers ===")
-	resumeAllPausedContainers()
-
-	// If there were commit errors, exit with failure after cleanup
-	if commitErrors > 0 {
-		fmt.Fprintf(os.Stderr, "ERROR: %d container(s) failed to commit. All containers have been resumed.\n", commitErrors)
-		os.Exit(1)
-	}
-
-	// Step 5: Push all committed images
-	fmt.Println("\n=== Step 5: Push all images ===")
-	pushErrors := 0
-	for _, spec := range containerSpecs {
-		if _, ok := committedImages[spec.Name]; ok {
-			if err := pushImage(spec.URI); err != nil {
-				fmt.Fprintf(os.Stderr, "ERROR: Failed to push image for container '%s': %v\n", spec.Name, err)
-				pushErrors++
-			} else {
-				fmt.Printf("Successfully pushed: %s\n", spec.URI)
-			}
-		}
-	}
-
-	if pushErrors > 0 {
-		fmt.Fprintf(os.Stderr, "ERROR: %d image(s) failed to push.\n", pushErrors)
-		os.Exit(1)
-	}
-
-	// Step 6: Extract digests and output results
-	fmt.Println("\n=== Step 6: Extract digests ===")
-	digests := make(map[string]string) // Maps container name to digest
-	firstDigest := ""
-
-	for _, spec := range containerSpecs {
-		if _, ok := committedImages[spec.Name]; ok {
-			digest, err := getImageDigest(spec.URI)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ERROR: Failed to extract digest for %s: %v\n", spec.URI, err)
-				os.Exit(1)
-			}
-
-			digests[spec.Name] = digest
-			fmt.Printf("Container '%s' digest: %s\n", spec.Name, digest)
-
-			// Capture first digest for legacy output
-			if firstDigest == "" {
-				firstDigest = digest
-			}
-		}
-	}
-
-	// Final output - SNAPSHOT_DIGEST_ variables for each container
-	fmt.Println("\n=== Snapshot completed successfully ===")
-	for _, spec := range containerSpecs {
-		if digest, ok := digests[spec.Name]; ok {
-			upperName := strings.ToUpper(strings.ReplaceAll(spec.Name, "-", "_"))
-			fmt.Printf("SNAPSHOT_DIGEST_%s=%s\n", upperName, digest)
-			fmt.Printf("  Image: %s\n", spec.URI)
-			fmt.Printf("  Digest: %s\n", digest)
-		}
-	}
-
-	if err := writeSnapshotResult(containerSpecs, digests); err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: Failed to write snapshot result to termination message: %v\n", err)
-	}
-
-	// Legacy single-digest output for backward compatibility
-	fmt.Printf("SNAPSHOT_DIGEST=%s\n", firstDigest)
-}
-
+// writeSnapshotResult writes the legacy rootfs snapshot result to the
+// Kubernetes termination message path.
 func writeSnapshotResult(containerSpecs []ContainerSpec, digests map[string]string) error {
-	result := snapshotResult{
-		Containers: make([]snapshotContainerResult, 0, len(digests)),
+	result := snapshotcontract.Result{
+		Containers: make([]snapshotcontract.ContainerResult, 0, len(digests)),
 	}
 	for _, spec := range containerSpecs {
 		digest, ok := digests[spec.Name]
 		if !ok {
 			continue
 		}
-		result.Containers = append(result.Containers, snapshotContainerResult{
+		result.Containers = append(result.Containers, snapshotcontract.ContainerResult{
 			Name:   spec.Name,
 			Image:  spec.URI,
 			Digest: digest,
@@ -281,50 +125,28 @@ func writeSnapshotResult(containerSpecs []ContainerSpec, digests map[string]stri
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(terminationMessagePath, append(data, '\n'), 0644)
+	return os.WriteFile(terminationMessagePath, append(data, '\n'), 0o644)
 }
 
-func runUnpause(args []string) {
-	if len(args) < 3 {
-		fmt.Fprintln(os.Stderr, "ERROR: Missing required parameters")
-		fmt.Fprintln(os.Stderr, "Usage: image-committer unpause <pod_name> <namespace> <container_name> [container_name...]")
-		os.Exit(1)
+// containerdSocket returns the containerd socket address from env or default.
+func containerdSocket() string {
+	if v := strings.TrimSpace(os.Getenv("CONTAINERD_SOCKET")); v != "" {
+		return v
 	}
-
-	podName := args[0]
-	namespace := args[1]
-	containerNames := args[2:]
-	errors := 0
-
-	for _, containerName := range containerNames {
-		containerID, err := getContainerIDByNerdctl(podName, namespace, containerName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: Failed to find container '%s': %v\n", containerName, err)
-			errors++
-			continue
-		}
-		if err := resumeContainer(containerID); err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: Failed to unpause container '%s': %v\n", containerName, err)
-			errors++
-		}
-	}
-
-	if errors > 0 {
-		os.Exit(1)
-	}
+	return "/run/containerd/containerd.sock"
 }
 
-// parseContainerSpec parses a "container:uri" string into ContainerSpec
-func parseContainerSpec(specStr string) (ContainerSpec, error) {
-	parts := strings.SplitN(specStr, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return ContainerSpec{}, fmt.Errorf("invalid container spec '%s'. Expected format: container_name:uri", specStr)
+// containerdNamespace returns the containerd namespace from env or default.
+func containerdNamespace() string {
+	if v := strings.TrimSpace(os.Getenv("CONTAINERD_NAMESPACE")); v != "" {
+		return v
 	}
+	return "k8s.io"
+}
 
-	return ContainerSpec{
-		Name: parts[0],
-		URI:  parts[1],
-	}, nil
+// nerdctlBaseArgs returns the base arguments for nerdctl commands.
+func nerdctlBaseArgs() []string {
+	return []string{"--address", containerdSocket(), "--namespace", containerdNamespace()}
 }
 
 // getContainerIDByNerdctl finds a container ID using nerdctl ps with Kubernetes labels.
@@ -333,9 +155,10 @@ func parseContainerSpec(specStr string) (ContainerSpec, error) {
 // Kubernetes injects standard labels on all containers:
 //   - io.kubernetes.pod.name
 //   - io.kubernetes.pod.namespace
+//   - io.kubernetes.pod.uid
 //   - io.kubernetes.container.name
-func getContainerIDByNerdctl(podName, podNamespace, containerName string) (string, error) {
-	containerID, err := lookupContainerIDByNerdctl(podName, podNamespace, containerName, false)
+func getContainerIDByNerdctl(podName, podNamespace, podUID, containerName string) (string, error) {
+	containerID, err := lookupContainerIDByNerdctl(podName, podNamespace, podUID, containerName, false)
 	if err != nil {
 		return "", err
 	}
@@ -343,7 +166,7 @@ func getContainerIDByNerdctl(podName, podNamespace, containerName string) (strin
 		return containerID, nil
 	}
 
-	containerID, err = lookupContainerIDByNerdctl(podName, podNamespace, containerName, true)
+	containerID, err = lookupContainerIDByNerdctl(podName, podNamespace, podUID, containerName, true)
 	if err != nil {
 		return "", err
 	}
@@ -359,7 +182,7 @@ func getContainerIDByNerdctl(podName, podNamespace, containerName string) (strin
 	)
 }
 
-func lookupContainerIDByNerdctl(podName, podNamespace, containerName string, includeStopped bool) (string, error) {
+func lookupContainerIDByNerdctl(podName, podNamespace, podUID, containerName string, includeStopped bool) (string, error) {
 	args := append(nerdctlBaseArgs(), "ps")
 	if includeStopped {
 		args = append(args, "-a")
@@ -368,6 +191,11 @@ func lookupContainerIDByNerdctl(podName, podNamespace, containerName string, inc
 		"-q",
 		"--filter", fmt.Sprintf("label=io.kubernetes.pod.name=%s", podName),
 		"--filter", fmt.Sprintf("label=io.kubernetes.pod.namespace=%s", podNamespace),
+	)
+	if podUID != "" {
+		args = append(args, "--filter", fmt.Sprintf("label=io.kubernetes.pod.uid=%s", podUID))
+	}
+	args = append(args,
 		"--filter", fmt.Sprintf("label=io.kubernetes.container.name=%s", containerName),
 	)
 	output, err := commandCombinedOutput("nerdctl", args...)
@@ -397,7 +225,7 @@ func lookupContainerIDByNerdctl(podName, podNamespace, containerName string, inc
 	return strings.TrimSpace(lines[0]), nil
 }
 
-// pauseContainer uses nerdctl to pause a container
+// pauseContainer uses nerdctl to pause a container.
 func pauseContainer(containerID string) error {
 	fmt.Printf("Pausing container %s...\n", containerID)
 	args := append(nerdctlBaseArgs(), "pause", containerID)
@@ -410,7 +238,7 @@ func pauseContainer(containerID string) error {
 	return nil
 }
 
-// resumeContainer uses nerdctl to resume a container
+// resumeContainer uses nerdctl to resume a container.
 func resumeContainer(containerID string) error {
 	fmt.Printf("Resuming container %s...\n", containerID)
 	args := append(nerdctlBaseArgs(), "unpause", containerID)
@@ -423,28 +251,7 @@ func resumeContainer(containerID string) error {
 	return nil
 }
 
-// resumeAllPausedContainers resumes all paused containers that were tracked
-func resumeAllPausedContainers() {
-	if len(pausedContainerIds) == 0 {
-		return
-	}
-
-	fmt.Println("\n=== Cleanup: Resuming all paused containers ===")
-
-	// Process in reverse order to match pause order
-	for i := len(pausedContainerIds) - 1; i >= 0; i-- {
-		containerID := pausedContainerIds[i]
-		err := resumeContainer(containerID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "WARNING: Could not resume container %s: %v\n", containerID, err)
-		}
-	}
-
-	// Clear the paused containers list after cleanup
-	pausedContainerIds = []string{}
-}
-
-// commitContainer uses nerdctl to commit a container to an image
+// commitContainer uses nerdctl to commit a container to an image.
 func commitContainer(containerID, targetImage string) error {
 	fmt.Printf("Committing container %s to image %s...\n", containerID, targetImage)
 	args := append(nerdctlBaseArgs(), "commit", containerID, targetImage)
@@ -583,28 +390,56 @@ func shouldUseInsecureRegistry(registryHost string) bool {
 }
 
 func isPrivate172Registry(registryHost string) bool {
-	host := strings.Split(registryHost, ":")[0]
+	host := strings.SplitN(registryHost, ":", 2)[0]
 	parts := strings.Split(host, ".")
 	if len(parts) < 2 || parts[0] != "172" {
 		return false
 	}
 	secondOctet, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return false
-	}
-	return secondOctet >= 16 && secondOctet <= 31
+	return err == nil && secondOctet >= 16 && secondOctet <= 31
 }
 
-// getImageDigest uses nerdctl to get the digest of the image
+type nerdctlNativeImageInspect struct {
+	Target struct {
+		Digest string `json:"digest"`
+	} `json:"Target"`
+	Image struct {
+		Target struct {
+			Digest string `json:"digest"`
+		} `json:"Target"`
+	} `json:"Image"`
+	ManifestDesc struct {
+		Digest string `json:"digest"`
+	} `json:"ManifestDesc"`
+}
+
+// getImageDigest uses nerdctl's native descriptor rather than the Docker
+// config ID. Native inspect changed shape between nerdctl releases, so accept
+// both the direct Target and the older Image.Target/ManifestDesc layouts.
 func getImageDigest(imageRef string) (string, error) {
-	args := append(nerdctlBaseArgs(), "inspect", "--format", "{{.Id}}", imageRef)
+	args := append(nerdctlBaseArgs(), "image", "inspect", "--mode=native", imageRef)
 	output, err := commandCombinedOutput("nerdctl", args...)
 	if err != nil {
 		return "", fmt.Errorf("nerdctl inspect failed for image %s: %w, output: %s", imageRef, err, strings.TrimSpace(string(output)))
 	}
-	digest := strings.TrimSpace(string(output))
-	if digest == "" {
-		return "", fmt.Errorf("nerdctl inspect returned empty digest for image %s", imageRef)
+	jsonStart := bytes.IndexByte(output, '[')
+	if jsonStart < 0 {
+		return "", fmt.Errorf("nerdctl native inspect returned no JSON array for image %s: %s", imageRef, strings.TrimSpace(string(output)))
 	}
-	return digest, nil
+	var inspected []nerdctlNativeImageInspect
+	if err := json.Unmarshal(output[jsonStart:], &inspected); err != nil {
+		return "", fmt.Errorf("decode nerdctl native inspect for image %s: %w", imageRef, err)
+	}
+	for _, item := range inspected {
+		for _, digest := range []string{item.Target.Digest, item.Image.Target.Digest, item.ManifestDesc.Digest} {
+			if digest == "" {
+				continue
+			}
+			if _, err := snapshotcontract.ParseSHA256Digest(digest); err != nil {
+				return "", fmt.Errorf("nerdctl inspect returned invalid manifest digest for image %s: %w", imageRef, err)
+			}
+			return digest, nil
+		}
+	}
+	return "", fmt.Errorf("nerdctl native inspect returned no manifest digest for image %s", imageRef)
 }

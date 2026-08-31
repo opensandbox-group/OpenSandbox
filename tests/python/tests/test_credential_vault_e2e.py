@@ -61,6 +61,7 @@ SECRET_VALUES = {
     "body-secret": "vault-body-secret",
     "runtime-token": "vault-runtime-token",
     "runtime-token-replaced": "vault-runtime-token-replaced",
+    "npm-scoped-token": "vault-npm-scoped-token",
 }
 
 
@@ -130,6 +131,102 @@ def test_credential_vault_injects_all_auth_types(
             assert response["ok"] is True
             assert response["case"] == path.lstrip("/")
             assert response["missingOrInvalid"] == []
+    finally:
+        _close_sandbox(cfg, sandbox)
+
+
+def test_credential_vault_allows_npm_scoped_package_encoded_slash(
+    credential_vault_target_ip: str,
+) -> None:
+    """Regression for the egress ``%2f`` false-positive that broke npm.
+
+    npm scoped package registry requests are required to be sent as
+    ``/@scope%2fname`` on the wire. The credential proxy used to reject
+    those as ambiguous, so ``npm install @scope/pkg`` inside a sandbox
+    returned 403 whenever Credential Vault was active. This case configures
+    a binding that matches the npm registry path and asserts the request
+    reaches the upstream with the bearer credential injected.
+    """
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
+    try:
+        sandbox.credential_vault.create(
+            credentials=[
+                Credential(
+                    name="npm-scoped-token",
+                    source={"value": SECRET_VALUES["npm-scoped-token"]},
+                )
+            ],
+            bindings=[
+                _binding(
+                    "npm-scoped",
+                    "/npm-scoped/*",
+                    {"type": "bearer", "credential": "npm-scoped-token"},
+                ),
+            ],
+        )
+
+        response = _curl_json(
+            sandbox,
+            credential_vault_target_ip,
+            "/npm-scoped/@ali%2forion-claude-plugin",
+        )
+        assert response["ok"] is True
+        assert response["case"] == "npm-scoped"
+        assert response["authorization"] == (
+            f"Bearer {SECRET_VALUES['npm-scoped-token']}"
+        )
+    finally:
+        _close_sandbox(cfg, sandbox)
+
+
+def test_credential_vault_active_but_no_binding_lets_npm_scoped_path_through(
+    credential_vault_target_ip: str,
+) -> None:
+    """Regression for the same ``%2f`` false-positive on the more common
+    path: Credential Vault is *active* (so the ambiguous-path check runs)
+    but the sandbox has no binding for the public npm registry. The request
+    should pass through untouched — 200 from the upstream, no credential
+    injected.
+
+    Before the fix, the ambiguous-path check ran unconditionally as soon as
+    the vault was active and returned 403 for any ``%2f`` in the path, so
+    ``npm install`` for a scoped package failed even when the user had
+    only bound an internal registry credential.
+    """
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
+    try:
+        # Vault is active but its only binding matches a path that will not
+        # be hit by the npm scoped request. The server rejects bindings for
+        # hosts outside the sandbox's egress policy, so keep the same
+        # TARGET_HOST and rely on path mismatch alone: the npm request
+        # reaches _select_binding without a match and must be forwarded
+        # verbatim to the upstream.
+        sandbox.credential_vault.create(
+            credentials=[
+                Credential(
+                    name="unrelated-token",
+                    source={"value": SECRET_VALUES["bearer-token"]},
+                )
+            ],
+            bindings=[
+                _binding(
+                    "unrelated-path",
+                    "/never-hit-by-npm/*",
+                    {"type": "bearer", "credential": "unrelated-token"},
+                ),
+            ],
+        )
+
+        response = _curl_json(
+            sandbox,
+            credential_vault_target_ip,
+            "/npm-scoped/@ali%2forion-claude-plugin",
+        )
+        assert response["ok"] is True
+        assert response["case"] == "npm-scoped"
+        # No binding matched, so the credential proxy must not inject
+        # anything. curl also does not send Authorization by default.
+        assert response["authorization"] is None
     finally:
         _close_sandbox(cfg, sandbox)
 
@@ -344,6 +441,51 @@ def test_credential_vault_runtime_mutation_adds_replaces_and_deletes_binding(
         _close_sandbox(cfg, sandbox)
 
 
+def test_credential_vault_large_bodies_across_streaming_threshold(
+    credential_vault_target_ip: str,
+) -> None:
+    """Regression for the stream_large_bodies=1m header-injection bug.
+
+    mitmproxy streams request bodies above 1 MiB upstream and the credential
+    proxy used to inject auth headers in the request hook, which fires only
+    after a streamed body has been forwarded — so large requests reached the
+    upstream without credentials and returned 403. Injection now happens in
+    the requestheaders hook; 1 MiB - 1, exactly 1 MiB, 1 MiB + 1 and 2 MiB
+    must all reach the upstream with the API key injected.
+    """
+    cfg, sandbox = _create_credential_proxy_sandbox(credential_vault_target_ip)
+    try:
+        sandbox.credential_vault.create(
+            credentials=[
+                Credential(
+                    name="api-key-token",
+                    source={"value": SECRET_VALUES["api-key-token"]},
+                )
+            ],
+            bindings=[
+                _binding(
+                    "large-body",
+                    "/large-body",
+                    {
+                        "type": "apiKey",
+                        "name": "X-Api-Key",
+                        "credential": "api-key-token",
+                    },
+                    methods=["POST"],
+                ),
+            ],
+        )
+
+        for size in [1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 1, 2 * 1024 * 1024]:
+            response = _curl_json_file(sandbox, credential_vault_target_ip, "/large-body", size)
+            assert response["ok"] is True
+            assert response["case"] == "large-body"
+            assert response["missingOrInvalid"] == []
+            assert response["bodyReceivedLength"] == size
+    finally:
+        _close_sandbox(cfg, sandbox)
+
+
 def _create_credential_proxy_sandbox(target_ip: str) -> tuple[object, SandboxSync]:
     cfg = create_connection_config_sync()
     sandbox = SandboxSync.create(
@@ -431,3 +573,31 @@ def _curl_json(
 
 def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _curl_json_file(
+    sandbox: SandboxSync,
+    target_ip: str,
+    path: str,
+    size: int,
+) -> dict[str, object]:
+    payload_path = f"/tmp/credential-vault-large-{size}.bin"
+    create = sandbox.commands.run(
+        f"head -c {size} /dev/zero | tr '\\000' 'x' > {payload_path}"
+    )
+    assert create.error is None, create.error
+    command = (
+        "curl --fail --silent --show-error --connect-timeout 5 --max-time 60 "
+        f"--request POST --header 'content-type: text/plain' "
+        f"--data-binary @{payload_path} "
+        f"--resolve {TARGET_HOST}:80:{target_ip} "
+        f"http://{TARGET_HOST}{path}"
+    )
+    for secret in SECRET_VALUES.values():
+        assert secret not in command
+
+    result = sandbox.commands.run(command)
+    assert result.error is None, result.error
+    stdout = "".join(part.text for part in result.logs.stdout)
+    assert stdout
+    return json.loads(stdout)

@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from docker.errors import APIError, DockerException, ImageNotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound as DockerNotFound
 from fastapi import HTTPException, status
 from requests.exceptions import ConnectTimeout, ReadTimeout
 
@@ -181,6 +181,13 @@ class DockerSnapshotRuntime:
                 all=True,
                 filters={"label": label_selector},
             )
+        except DockerNotFound as exc:
+            # Container disappeared between the list summary and the
+            # follow-up inspect (docker-py issues one inspect per matched
+            # container). Treat this as sandbox not found.
+            raise RuntimeError(
+                f"{SandboxErrorCodes.SANDBOX_NOT_FOUND}: Sandbox {sandbox_id} not found."
+            ) from exc
         except DockerException as exc:
             raise RuntimeError(
                 f"{SandboxErrorCodes.CONTAINER_QUERY_FAILED}: "

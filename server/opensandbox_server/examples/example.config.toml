@@ -27,12 +27,20 @@ max_sandbox_timeout_seconds = 86400
 # - Interactive TTY: type YES when prompted
 # - Non-interactive: set OPENSANDBOX_INSECURE_SERVER=YES
 
+[proxy]
+# When True (default), the sandbox reverse-proxy targets the sandbox's
+# internal Docker bridge container IP. Set to False to target the
+# server-local host-mapped port instead. Use False when the server process
+# cannot route to bridge container IPs, e.g. a launchd/systemd user session
+# on macOS where such traffic is blocked.
+resolve_internal = true
+
 [log]
 level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.21"
+execd_image = "opensandbox/execd:v1.1.0"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
@@ -46,6 +54,14 @@ volume_default_size = "1Gi"
 [store]
 type = "sqlite"
 path = "~/.opensandbox/opensandbox.db"
+# For an external PostgreSQL store, set type = "postgresql" and configure:
+# [store.postgresql]
+# min_pool_size = 1
+# max_pool_size = 10
+# connect_timeout_seconds = 5
+# pool_timeout_seconds = 5
+# Inject the DSN with OPENSANDBOX_STORE_POSTGRESQL_DSN in production.
+# Use only one active server process per PostgreSQL database.
 
 [docker]
 network_mode = "bridge"
@@ -61,6 +77,12 @@ no_new_privileges = true
 apparmor_profile = ""
 # Limit process count to reduce host impact from fork bombs; set to null to disable
 pids_limit = 4096
+# Optional: environment variables injected into every sandbox container
+# (request env overrides same-named keys). Pair with sandbox_binds to make
+# every sandbox trust a private CA:
+# sandbox_env = { NODE_EXTRA_CA_CERTS = "/etc/ssl/private-ca/root-ca.crt" }
+# Optional: host bind mounts applied to every sandbox container (docker -v syntax)
+# sandbox_binds = ["/opt/certs/root-ca.crt:/etc/ssl/private-ca/root-ca.crt:ro"]
 # Seccomp profile: empty string uses Docker default; set to an absolute path for a custom profile
 seccomp_profile = ""
 
@@ -68,10 +90,11 @@ seccomp_profile = ""
 mode = "direct"
 
 [egress]
-image = "opensandbox/egress:v1.1.4"
+image = "opensandbox/egress:v1.1.7"
 mode = "dns"
+readiness_timeout_seconds = 30.0
 
-# 🧪 [EXPERIMENTAL] Renew-on-access. Off by default — see server/README.md.
+# Renew-on-access. Off by default — see server/README.md.
 [renew_intent]
 enabled = false
 min_interval_seconds = 60

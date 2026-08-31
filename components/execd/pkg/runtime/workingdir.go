@@ -24,10 +24,14 @@ import (
 )
 
 func ValidateWorkingDir(cwd string) error {
+	return ValidateWorkingDirWithEnv(cwd, nil)
+}
+
+func ValidateWorkingDirWithEnv(cwd string, envOverrides map[string]string) error {
 	if cwd == "" {
 		return nil
 	}
-	resolvedCwd, err := pathutil.ExpandPath(cwd)
+	resolvedCwd, err := pathutil.ExpandPathWithEnv(cwd, envOverrides)
 	if err != nil {
 		return fmt.Errorf("cannot resolve working directory %q: %w", cwd, err)
 	}

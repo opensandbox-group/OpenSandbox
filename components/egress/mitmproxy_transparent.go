@@ -30,10 +30,9 @@ import (
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
-// exitEvent carries an OnExit notification tagged with the generation of the
-// mitmdump process that produced it. Generation tagging lets the watcher tell
-// "the currently-running mitmdump just died" apart from "a half-launched
-// attempt we already killed during a retry storm just finished reaping".
+// exitEvent carries an OnExit notification tagged with the mitmdump generation
+// that produced it, so the watcher can tell the live process dying apart from
+// a killed half-launched attempt being reaped.
 type exitEvent struct {
 	gen uint64
 	err error
@@ -45,6 +44,7 @@ type mitmTransparent struct {
 	currentGen uint64 // generation of the mitmdump currently considered live
 	port       int
 	uid        uint32
+	dports     string           // iptables --dports list (e.g. "80,443" or "80,443,8080")
 	cfg        mitmproxy.Config // OnExit must NOT be set here; built per-Launch
 	nextGen    uint64           // atomic; monotonic gen counter handed to each Launch
 	restartCh  chan exitEvent
@@ -71,15 +71,10 @@ func (m *mitmTransparent) getCurrentGen() uint64 {
 }
 
 // launchTagged starts mitmdump with an OnExit closure that publishes the death
-// of this specific process (identified by gen) into restartCh.
-//
-// The send is blocking with shutdownCh as the only escape: dropping an exit
-// event while the watcher is still running can leave egress in a silent dead
-// state (the watcher would never see the death and never trigger a restart).
-// Stale events from killed half-launched attempts are still cheap to discard
-// downstream via the gen check in watchMitmproxy; we just must not lose them
-// in transit. Shutdown is the only legitimate reason to give up on a send,
-// and we log a warning when that happens so the drop is observable.
+// of this specific process (identified by gen) into restartCh. The send blocks
+// (shutdownCh is the only escape): losing an exit event would leave the watcher
+// blind to a dead mitmdump, while stale events from killed attempts are cheap
+// to discard via the gen check in watchMitmproxy.
 func launchTagged(cfg mitmproxy.Config, restartCh chan<- exitEvent, shutdownCh <-chan struct{}, gen uint64) (*mitmproxy.Running, error) {
 	cfg.OnExit = func(err error) {
 		select {
@@ -103,16 +98,18 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 		return nil, fmt.Errorf("lookup user %q: %w (ensure this user exists in the image)", mitmproxy.RunAsUser, err)
 	}
 
+	dports, err := constants.BuildMitmproxyPortList(os.Getenv(constants.EnvMitmproxyExtraPorts))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", constants.EnvMitmproxyExtraPorts, err)
+	}
+
 	cfg := mitmproxy.Config{
 		ListenPort:  mpPort,
 		UserName:    mitmproxy.RunAsUser,
 		ScriptPaths: parseScriptPaths(os.Getenv(constants.EnvMitmproxyScript)),
 	}
-	// Buffer absorbs OnExit events from a retry storm so OnExit goroutines
-	// don't all park waiting for the watcher to drain. Correctness does not
-	// depend on the size: launchTagged uses a blocking send with shutdownCh
-	// as the only escape, so events cannot be silently dropped while the
-	// watcher is alive.
+	// Buffer absorbs a retry storm; correctness does not depend on the size
+	// (launchTagged sends block, so events are never silently dropped).
 	restartCh := make(chan exitEvent, 64)
 	shutdownCh := make(chan struct{})
 	const initialGen uint64 = 1
@@ -125,10 +122,10 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 	if err := mitmproxy.WaitListenPort(waitAddr, 15*time.Second); err != nil {
 		return nil, fmt.Errorf("wait listen %s: %w", waitAddr, err)
 	}
-	if err := iptables.SetupTransparentHTTP(mpPort, mpUID); err != nil {
+	if err := iptables.SetupTransparentHTTP(mpPort, mpUID, dports); err != nil {
 		return nil, fmt.Errorf("iptables transparent: %w", err)
 	}
-	log.Infof("mitmproxy: transparent intercept active (OUTPUT tcp 80,443 -> %d; trust mitm CA in clients)", mpPort)
+	log.Infof("mitmproxy: transparent intercept active (OUTPUT tcp %s -> %d; trust mitm CA in clients)", dports, mpPort)
 
 	if err := mitmproxy.SyncRootCA("", mpHome); err != nil {
 		return nil, fmt.Errorf("mitm CA export: %w", err)
@@ -138,6 +135,7 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 		currentGen: initialGen,
 		port:       mpPort,
 		uid:        mpUID,
+		dports:     dports,
 		cfg:        cfg,
 		nextGen:    initialGen,
 		restartCh:  restartCh,
@@ -184,14 +182,13 @@ func (m *mitmTransparent) watchMitmproxy(ctx context.Context, gate *mitmproxy.He
 	})
 }
 
-// restartWithBackoff retries mitmdump launch indefinitely with exponential backoff
-// (1s, 2s, 4s, ..., capped at 30s) until it succeeds or ctx is cancelled.
-// Transient OOM / resource pressure must not leave egress in a permanent dead state.
+// restartWithBackoff retries mitmdump launch indefinitely with exponential
+// backoff (1s..30s) until it succeeds or ctx is cancelled, so transient OOM /
+// resource pressure cannot leave egress permanently dead.
 //
-// Each attempt is tagged with a fresh generation; setRunning publishes that
-// generation as the "live" one. Exit events for older (killed) generations are
-// filtered out by watchMitmproxy, so we do NOT drain restartCh here -- doing
-// so could swallow a real death of the freshly-restarted mitmdump.
+// Each attempt gets a fresh generation. Exit events for older (killed)
+// generations are filtered by watchMitmproxy, so restartCh must not be drained
+// here — doing so could swallow a real death of the freshly-restarted mitmdump.
 func (m *mitmTransparent) restartWithBackoff(ctx context.Context, gate *mitmproxy.HealthGate) {
 	const (
 		initialBackoff = time.Second

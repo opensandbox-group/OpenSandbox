@@ -30,8 +30,11 @@ from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.isolated import (
     BindMount,
     CreateIsolatedSessionRequest,
+    IsolatedBackgroundRun,
     IsolatedCapabilities,
+    IsolatedRunLogs,
     IsolatedRunOpts,
+    IsolatedRunStatus,
     IsolatedSessionInfo,
     IsolatedSessionState,
     IsolatedSessionSummary,
@@ -61,6 +64,34 @@ class IsolationSession(Protocol):
         opts: IsolatedRunOpts | None = None,
         handlers: ExecutionHandlers | None = None,
     ) -> Execution: ...
+
+    async def run_background(
+        self,
+        code: str,
+        *,
+        opts: IsolatedRunOpts | None = None,
+    ) -> IsolatedBackgroundRun:
+        """Start *code* detached inside the session and return a run handle.
+
+        The run's combined output and exit code are captured by execd; poll
+        them with :meth:`run_status` and :meth:`run_logs`. The run is not
+        time-limited and idle GC is suspended while it is active.
+        """
+        ...
+
+    async def run_status(self, run_id: str) -> IsolatedRunStatus:
+        """Return the lifecycle state of a background run."""
+        ...
+
+    async def run_logs(self, run_id: str, cursor: int = 0) -> IsolatedRunLogs:
+        """Return the background run's log from *cursor* plus the next cursor.
+
+        Each call returns at most 16 MiB; pass the returned ``cursor`` to
+        fetch the remainder. Per-run log retention is capped at 16 MiB
+        (output beyond it is discarded when the run finishes), so drain
+        incrementally while the run is active if more than one page is needed.
+        """
+        ...
 
     async def get(self) -> IsolatedSessionState: ...
 

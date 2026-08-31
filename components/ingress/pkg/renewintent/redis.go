@@ -41,6 +41,7 @@ type RedisPublisherConfig struct {
 }
 
 type intentReq struct {
+	namespace  string
 	sandboxID  string
 	port       int
 	requestURI string
@@ -56,12 +57,12 @@ type RedisPublisher struct {
 
 func NewRedisPublisher(ctx context.Context, client *redis.Client, cfg RedisPublisherConfig) *RedisPublisher {
 	p := &RedisPublisher{client: client, cfg: cfg, ch: make(chan intentReq, publishChanCap)}
-	for i := 0; i < publishWorkers; i++ {
+	for range publishWorkers {
 		go func() {
 			for {
 				select {
 				case req := <-p.ch:
-					p.doPublish(req.sandboxID, req.port, req.requestURI)
+					p.doPublish(req.namespace, req.sandboxID, req.port, req.requestURI)
 				case <-ctx.Done():
 					return
 				}
@@ -80,42 +81,46 @@ func NewRedisPublisher(ctx context.Context, client *redis.Client, cfg RedisPubli
 	return p
 }
 
-func (p *RedisPublisher) shouldSendIntent(sandboxID string) bool {
+func (p *RedisPublisher) shouldSendIntent(namespace, sandboxID string) bool {
 	if p.cfg.MinInterval <= 0 {
 		return true
 	}
 
 	now := time.Now()
-	prev, loaded := p.lastSent.LoadOrStore(sandboxID, now)
+	key := struct{ namespace, sandboxID string }{namespace: namespace, sandboxID: sandboxID}
+	prev, loaded := p.lastSent.LoadOrStore(key, now)
 	if !loaded {
 		return true
 	}
 	if now.Sub(prev.(time.Time)) < p.cfg.MinInterval {
 		return false
 	}
-	p.lastSent.Store(sandboxID, now)
+	p.lastSent.Store(key, now)
 	return true
 }
 
-func (p *RedisPublisher) PublishIntent(sandboxID string, port int, requestURI string) {
+func (p *RedisPublisher) PublishIntent(namespace, sandboxID string, port int, requestURI string) {
 	if p.stopped.Load() {
 		return
 	}
 	select {
-	case p.ch <- intentReq{sandboxID: sandboxID, port: port, requestURI: requestURI}:
+	case p.ch <- intentReq{namespace: namespace, sandboxID: sandboxID, port: port, requestURI: requestURI}:
 	default:
 	}
 }
 
-func (p *RedisPublisher) doPublish(sandboxID string, port int, requestURI string) {
-	if !p.shouldSendIntent(sandboxID) {
+func (p *RedisPublisher) doPublish(namespace, sandboxID string, port int, requestURI string) {
+	if !p.shouldSendIntent(namespace, sandboxID) {
 		return
 	}
 
-	intent := NewIntent(sandboxID, port, requestURI)
+	intent := NewIntent(namespace, sandboxID, port, requestURI)
 	payload, err := json.Marshal(intent)
 	if err != nil {
-		p.cfg.Logger.With(logger.Field{Key: "sandbox_id", Value: sandboxID}).Errorf("renewintent: marshal intent: %v", err)
+		p.cfg.Logger.With(
+			logger.Field{Key: "namespace", Value: namespace},
+			logger.Field{Key: "sandbox_id", Value: sandboxID},
+		).Errorf("renewintent: marshal intent: %v", err)
 		return
 	}
 
@@ -129,6 +134,7 @@ func (p *RedisPublisher) doPublish(sandboxID string, port int, requestURI string
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		p.cfg.Logger.With(
+			logger.Field{Key: "namespace", Value: namespace},
 			logger.Field{Key: "sandbox_id", Value: sandboxID},
 			logger.Field{Key: "queue_key", Value: p.cfg.QueueKey},
 			logger.Field{Key: "error", Value: err},
@@ -136,6 +142,7 @@ func (p *RedisPublisher) doPublish(sandboxID string, port int, requestURI string
 		return
 	}
 	p.cfg.Logger.With(
+		logger.Field{Key: "namespace", Value: namespace},
 		logger.Field{Key: "sandbox_id", Value: sandboxID},
 		logger.Field{Key: "queue_key", Value: p.cfg.QueueKey},
 	).Debugf("renewintent: published")

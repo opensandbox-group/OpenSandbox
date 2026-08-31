@@ -31,6 +31,7 @@ class SnapshotListQuery:
     page: int = 1
     page_size: int = 20
     source_sandbox_id: str | None = None
+    name: str | None = None
     states: list[str] = field(default_factory=list)
     namespace: str | None = None
 
@@ -82,6 +83,11 @@ class SnapshotRepository(Protocol):
     def delete(self, snapshot_id: str) -> None:
         """
         Delete a snapshot record by id.
+        """
+
+    def close(self) -> None:
+        """
+        Release resources owned by the repository.
         """
 
 

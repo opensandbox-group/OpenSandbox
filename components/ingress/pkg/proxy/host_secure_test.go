@@ -38,6 +38,10 @@ func (routeTestProvider) GetEndpoint(string) (*sandbox.EndpointInfo, error) {
 	}, nil
 }
 
+func (p routeTestProvider) ResolveEndpoint(_ context.Context, target sandbox.EndpointTarget) (*sandbox.EndpointInfo, error) {
+	return p.GetEndpoint(target.SandboxID)
+}
+
 func (routeTestProvider) Start(context.Context) error { return nil }
 
 func TestGetSandboxHostDefinition_HeaderSecureSig(t *testing.T) {

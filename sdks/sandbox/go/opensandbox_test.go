@@ -440,6 +440,9 @@ func TestSnapshotLifecycle(t *testing.T) {
 			if r.URL.Query().Get("sandboxId") != "sbx-1" {
 				assert.Fail(t, fmt.Sprintf("sandboxId = %q, want %q", r.URL.Query().Get("sandboxId"), "sbx-1"))
 			}
+			if r.URL.Query().Get("name") != "toolchain:go@rev-1" {
+				assert.Fail(t, fmt.Sprintf("name = %q, want %q", r.URL.Query().Get("name"), "toolchain:go@rev-1"))
+			}
 			jsonResponse(w, http.StatusOK, ListSnapshotsResponse{
 				Items: []SnapshotInfo{{
 					ID:        "snap-1",
@@ -466,6 +469,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 
 	listed, err := client.ListSnapshots(context.Background(), ListSnapshotsOptions{
 		SandboxID: "sbx-1",
+		Name:      "toolchain:go@rev-1",
 		States:    []SnapshotState{SnapshotStateReady},
 		Page:      1,
 		PageSize:  10,

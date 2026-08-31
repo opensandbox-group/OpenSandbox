@@ -126,10 +126,48 @@ jobs:
         run: |
           cat server/app.log
 
+  postgresql-integration:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: opensandbox
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d opensandbox"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OPENSANDBOX_TEST_POSTGRESQL_DSN: postgresql://postgres:postgres@127.0.0.1:5432/opensandbox
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Run PostgreSQL repository tests
+        working-directory: server
+        run: |
+          uv sync --all-groups
+          uv run pytest -v tests/test_snapshot_repository_postgresql.py
+
   required:
     name: Server CI
     if: always()
-    needs: [changes, test, docker-smoke]
+    needs: [changes, test, docker-smoke, postgresql-integration]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -138,13 +176,14 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           TEST_RESULT: ${{ needs.test.result }}
           DOCKER_SMOKE_RESULT: ${{ needs.docker-smoke.result }}
+          POSTGRESQL_RESULT: ${{ needs.postgresql-integration.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$TEST_RESULT" == "success" && "$DOCKER_SMOKE_RESULT" == "success" ]]
+            [[ "$TEST_RESULT" == "success" && "$DOCKER_SMOKE_RESULT" == "success" && "$POSTGRESQL_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$DOCKER_SMOKE_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$TEST_RESULT" == "skipped" && "$DOCKER_SMOKE_RESULT" == "skipped" && "$POSTGRESQL_RESULT" == "skipped" ]]
           fi

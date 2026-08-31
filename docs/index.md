@@ -48,10 +48,6 @@ OpenSandbox is listed in the [CNCF Landscape](https://landscape.cncf.io/?item=or
     <h3>AI Code Execution</h3>
     <p>Run model-generated code safely, stream outputs, and iterate quickly with reproducible environments.</p>
   </a>
-  <a class="scenario-card" href="/examples/rl-training">
-    <h3>RL Training</h3>
-    <p>Launch reinforcement learning tasks with managed sandbox lifecycle and resource controls.</p>
-  </a>
 </div>
 
 Explore all examples in [Examples](/examples/).
