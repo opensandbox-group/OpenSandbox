@@ -20,6 +20,9 @@ Two tables are maintained:
 - ``sandbox_access_latest``: one row per sandbox id, holding the latest
   request and the total request count (summary). Rows whose sandbox
   resource is gone are flagged ``deleted`` and hidden from the UI/API.
+  Sandboxes discovered in the cluster before any request arrived are
+  inserted with ``accessed = FALSE`` (request fields NULL) so the UI can
+  tell them apart from accessed ones.
 """
 
 import logging
@@ -49,23 +52,38 @@ CREATE INDEX IF NOT EXISTS idx_sandbox_access_log_sandbox_time
 # One row per sandbox id, tracking its latest request and total count.
 # ``deleted`` marks sandboxes whose BatchSandbox resource no longer exists
 # (synced from Kubernetes); deleted rows are hidden from the UI/API.
+# ``accessed`` is FALSE on rows inserted by the cluster discovery for
+# sandboxes that have not been accessed yet - their request fields are
+# NULL until the first audit event arrives. ``created_at`` holds the
+# sandbox's BatchSandbox creationTimestamp on discovery-inserted rows.
 _CREATE_SUMMARY_TABLE = """
 CREATE TABLE IF NOT EXISTS sandbox_access_latest (
     sandbox_id    TEXT        PRIMARY KEY,
-    uri           TEXT        NOT NULL,
-    method        TEXT        NOT NULL,
-    target        TEXT        NOT NULL,
-    request_time  TIMESTAMPTZ NOT NULL,
+    uri           TEXT,
+    method        TEXT,
+    target        TEXT,
+    request_time  TIMESTAMPTZ,
     request_count BIGINT      NOT NULL DEFAULT 1,
     deleted       BOOLEAN     NOT NULL DEFAULT FALSE,
+    accessed      BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT date_trunc('second', now())
 );
 """
 
-# Migration for tables created before the ``deleted`` column existed.
-_ALTER_SUMMARY_ADD_DELETED = """
+# Migrations for tables created before the ``deleted``/``accessed``/
+# ``created_at`` columns existed; the request columns must be nullable to
+# hold unaccessed rows.
+_ALTER_SUMMARY_MIGRATIONS = """
 ALTER TABLE sandbox_access_latest
-    ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE
+    ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS accessed BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+ALTER TABLE sandbox_access_latest
+    ALTER COLUMN uri DROP NOT NULL,
+    ALTER COLUMN method DROP NOT NULL,
+    ALTER COLUMN target DROP NOT NULL,
+    ALTER COLUMN request_time DROP NOT NULL
 """
 
 # Truncate timestamps to whole seconds on write.
@@ -77,24 +95,50 @@ VALUES (%(sandbox_id)s, %(uri)s, %(method)s, %(target)s, %(request_time)s, {now}
 """.format(now=_TRUNCATED_NOW)
 
 # Upsert the summary row. The WHERE clause guards against out-of-order
-# events: an older event never overwrites a newer summary.
+# events: an older event never overwrites a newer summary. A NULL
+# request_time (row created by the pod discovery, never accessed) loses
+# the comparison, so it is handled explicitly.
 _UPSERT_SUMMARY = """
 INSERT INTO sandbox_access_latest
-    (sandbox_id, uri, method, target, request_time, request_count, updated_at)
+    (sandbox_id, uri, method, target, request_time, request_count, accessed, updated_at)
 VALUES
-    (%(sandbox_id)s, %(uri)s, %(method)s, %(target)s, %(request_time)s, 1, {now})
+    (%(sandbox_id)s, %(uri)s, %(method)s, %(target)s, %(request_time)s, 1, TRUE, {now})
 ON CONFLICT (sandbox_id) DO UPDATE SET
     uri           = EXCLUDED.uri,
     method        = EXCLUDED.method,
     target        = EXCLUDED.target,
     request_time  = EXCLUDED.request_time,
     request_count = sandbox_access_latest.request_count + 1,
+    accessed      = TRUE,
     updated_at    = {now}
 WHERE EXCLUDED.request_time >= sandbox_access_latest.request_time
+   OR sandbox_access_latest.request_time IS NULL
 """.format(now=_TRUNCATED_NOW)
 
+# Placeholder rows for sandboxes discovered in the cluster before any
+# request arrived. Rows that already exist get their ``created_at``
+# backfilled when still NULL (e.g. the sandbox was accessed before the
+# first sync ran) - everything else is left untouched. One statement for
+# all ids (the DB may be a high-latency round trip away); RETURNING
+# splits inserted vs. backfilled rows (``xmax = 0`` marks fresh inserts).
+_INSERT_DISCOVERED = """
+INSERT INTO sandbox_access_latest
+    (sandbox_id, uri, method, target, request_time, request_count, accessed, created_at, updated_at)
+SELECT name, NULL, NULL, NULL, NULL, 0, FALSE, created_at, {now}
+FROM unnest(%(ids)s::text[], %(created)s::timestamptz[]) AS discovered(name, created_at)
+ON CONFLICT (sandbox_id) DO UPDATE SET
+    created_at = EXCLUDED.created_at
+WHERE sandbox_access_latest.created_at IS NULL
+  AND EXCLUDED.created_at IS NOT NULL
+RETURNING (xmax = 0) AS inserted
+""".format(now=_TRUNCATED_NOW)
+
+# The window count piggybacks the total on the listing query so a page
+# load costs one round trip instead of two; the plain COUNT remains as a
+# fallback for pages past the end (no rows returned -> no total known).
 _LIST_LATEST = """
-SELECT sandbox_id, uri, method, target, request_time, request_count
+SELECT sandbox_id, uri, method, target, request_time, request_count, accessed, created_at,
+       count(*) OVER () AS __total
 FROM sandbox_access_latest
 WHERE NOT deleted {extra}
 ORDER BY {order}
@@ -107,16 +151,20 @@ FROM sandbox_access_latest
 WHERE NOT deleted {extra}
 """
 
-# Whitelisted sort orders for the summary table.
+# Whitelisted sort orders for the summary table. Never-accessed rows have
+# a NULL request_time and always sort last within an accessed group.
 _LATEST_ORDERS = {
     "request_time": "request_time ASC",
-    "-request_time": "request_time DESC",
+    "-request_time": "request_time DESC NULLS LAST",
     "request_count": "request_count ASC",
     "-request_count": "request_count DESC",
+    "accessed": "accessed ASC, request_time DESC NULLS LAST",
+    "-accessed": "accessed DESC, request_time DESC NULLS LAST",
 }
 
 _LIST_DETAILS = """
-SELECT id, sandbox_id, uri, method, target, request_time, received_at
+SELECT id, sandbox_id, uri, method, target, request_time, received_at,
+       count(*) OVER () AS __total
 FROM sandbox_access_log
 WHERE {where}
 ORDER BY id DESC
@@ -142,7 +190,7 @@ class AuditStore:
             with conn.cursor() as cur:
                 cur.execute(sql.SQL(_CREATE_DETAIL_TABLE))
                 cur.execute(sql.SQL(_CREATE_SUMMARY_TABLE))
-                cur.execute(sql.SQL(_ALTER_SUMMARY_ADD_DELETED))
+                cur.execute(sql.SQL(_ALTER_SUMMARY_MIGRATIONS))
         logger.info("audit schema initialized")
 
     def record(self, events: list[dict]) -> int:
@@ -205,8 +253,14 @@ class AuditStore:
             with conn.cursor() as cur:
                 cur.execute(_LIST_LATEST.format(extra=extra, order=order), params)
                 rows = cur.fetchall()
-                cur.execute(_COUNT_LATEST.format(extra=extra), params)
-                total = cur.fetchone()["total"]
+                if rows:
+                    total = rows[0]["__total"]
+                    rows = [_drop_total(row) for row in rows]
+                else:
+                    # Past the last page: the window count returned nothing,
+                    # fall back to a separate COUNT for the true total.
+                    cur.execute(_COUNT_LATEST.format(extra=extra), params)
+                    total = cur.fetchone()["total"]
         return {"total": total, "items": [_jsonify(row) for row in rows]}
 
     def list_details(
@@ -227,9 +281,56 @@ class AuditStore:
             with conn.cursor() as cur:
                 cur.execute(_LIST_DETAILS.format(where=where), params)
                 rows = cur.fetchall()
-                cur.execute(_COUNT_DETAILS.format(where=where), params)
-                total = cur.fetchone()["total"]
+                if rows:
+                    total = rows[0]["__total"]
+                    rows = [_drop_total(row) for row in rows]
+                else:
+                    # Past the last page: the window count returned nothing,
+                    # fall back to a separate COUNT for the true total.
+                    cur.execute(_COUNT_DETAILS.format(where=where), params)
+                    total = cur.fetchone()["total"]
         return {"total": total, "items": [_jsonify(row) for row in rows]}
+
+    def upsert_discovered_sandboxes(self, sandboxes: list[dict]) -> dict:
+        """Insert placeholder rows for unaccessed sandboxes and backfill
+        creation timestamps.
+
+        ``sandboxes`` are the live BatchSandbox resources, each a dict
+        with ``name`` (the sandbox id) and ``created_at`` (the resource's
+        creationTimestamp, or None).
+
+        - Ids with no summary row get one marked ``accessed = FALSE``
+          with NULL request fields, a zero request count and
+          ``created_at`` set (existing rows are otherwise untouched).
+        - Existing rows whose ``created_at`` is still NULL (e.g. the
+          sandbox was accessed before the first sync ran) get it
+          backfilled from the resource's creationTimestamp.
+
+        Returns ``{"discovered": <n>, "backfilled": <n>}``.
+        """
+        # One statement for all ids - each round trip to a remote
+        # database can be slow.
+        deduped = {sandbox["name"]: sandbox.get("created_at") for sandbox in sandboxes}
+        if not deduped:
+            return {"discovered": 0, "backfilled": 0}
+        with self.pool.connection() as conn:
+            conn.row_factory = dict_row
+            with conn.cursor() as cur:
+                cur.execute(
+                    _INSERT_DISCOVERED,
+                    {
+                        "ids": list(deduped),
+                        "created": [
+                            _ensure_utc(created) if created is not None else None
+                            for created in deduped.values()
+                        ],
+                    },
+                )
+                flags = [row["inserted"] for row in cur.fetchall()]
+        return {
+            "discovered": sum(1 for flag in flags if flag),
+            "backfilled": sum(1 for flag in flags if not flag),
+        }
 
     def sync_deleted_flags(self, live_ids: list[str]) -> dict:
         """Reconcile the ``deleted`` flag against live sandbox resources.
@@ -301,6 +402,11 @@ def _jsonify(row: dict) -> dict:
         else value
         for key, value in row.items()
     }
+
+
+def _drop_total(row: dict) -> dict:
+    """Strip the piggybacked window ``__total`` from a listing row."""
+    return {key: value for key, value in row.items() if key != "__total"}
 
 
 def _ensure_utc(value: datetime) -> datetime:

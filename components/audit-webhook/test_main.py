@@ -18,6 +18,7 @@ Uses a fake store so no PostgreSQL instance is required.
 """
 
 import pytest
+from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 
 import main
@@ -29,6 +30,10 @@ class FakeStore:
         self.events = []
         self.fail = False
         self.deleted_ids = set()
+        self.unaccessed = {}  # sandbox_id -> created_at
+        # created_at per known row (event rows start as None); mimics the
+        # backfill in upsert_discovered_sandboxes.
+        self.created_at = {}
 
     def init_schema(self):
         pass
@@ -37,7 +42,33 @@ class FakeStore:
         if self.fail:
             raise RuntimeError("db down")
         self.events.extend(_normalize(event) for event in events)
+        # Mimic the upsert: a first request flips the row to accessed.
+        for event in events:
+            self.created_at.setdefault(event["sandbox_id"], None)
+            self.unaccessed.pop(event["sandbox_id"], None)
         return len(events)
+
+    def upsert_discovered_sandboxes(self, sandboxes):
+        if self.fail:
+            raise RuntimeError("db down")
+        discovered = [
+            sandbox
+            for sandbox in sandboxes
+            if sandbox["name"] not in self.created_at
+        ]
+        backfilled = [
+            sandbox
+            for sandbox in sandboxes
+            if sandbox["name"] in self.created_at
+            and self.created_at[sandbox["name"]] is None
+            and sandbox.get("created_at") is not None
+        ]
+        for sandbox in discovered:
+            self.created_at[sandbox["name"]] = sandbox.get("created_at")
+            self.unaccessed[sandbox["name"]] = sandbox.get("created_at")
+        for sandbox in backfilled:
+            self.created_at[sandbox["name"]] = sandbox["created_at"]
+        return {"discovered": len(discovered), "backfilled": len(backfilled)}
 
     def list_latest(
         self,
@@ -50,26 +81,44 @@ class FakeStore:
     ):
         if self.fail:
             raise RuntimeError("db down")
-        events = [
-            event for event in self.events
+        items = [
+            {
+                "sandbox_id": event["sandbox_id"],
+                "uri": event["uri"],
+                "method": event["method"],
+                "target": event["target"],
+                "request_time": event["request_time"],
+                "request_count": 1,
+                "accessed": True,
+                "created_at": self.created_at.get(event["sandbox_id"]),
+            }
+            for event in self.events
             if event["sandbox_id"] not in self.deleted_ids
             and (search is None or search.lower() in event["sandbox_id"].lower())
             and (time_from is None or time_from <= event["request_time"])
             and (time_to is None or event["request_time"] <= time_to)
         ]
-        return {
-            "total": len(events),
-            "items": [
+        # Discovered-but-never-accessed rows: NULL request fields, count 0.
+        # Time filters exclude them (NULL comparisons are not TRUE in SQL).
+        if time_from is None and time_to is None:
+            items.extend(
                 {
-                    "sandbox_id": event["sandbox_id"],
-                    "uri": event["uri"],
-                    "method": event["method"],
-                    "target": event["target"],
-                    "request_time": event["request_time"],
-                    "request_count": 1,
+                    "sandbox_id": sandbox_id,
+                    "uri": None,
+                    "method": None,
+                    "target": None,
+                    "request_time": None,
+                    "request_count": 0,
+                    "accessed": False,
+                    "created_at": created_at,
                 }
-                for event in events[offset : offset + limit]
-            ],
+                for sandbox_id, created_at in self.unaccessed.items()
+                if sandbox_id not in self.deleted_ids
+                and (search is None or search.lower() in sandbox_id.lower())
+            )
+        return {
+            "total": len(items),
+            "items": items[offset : offset + limit],
             "sort": sort,
             "search": search,
         }
@@ -328,6 +377,11 @@ def test_list_sandboxes_sort(client):
     assert response.status_code == 200
     assert response.json()["sort"] == "-request_count"
 
+    # Sort by accessed (ascending = never-accessed first) is allowed.
+    response = test_client.get("/api/sandboxes", params={"sort": "accessed"})
+    assert response.status_code == 200
+    assert response.json()["sort"] == "accessed"
+
     # Unknown sort keys are rejected.
     response = test_client.get("/api/sandboxes", params={"sort": "sandbox_id"})
     assert response.status_code == 422
@@ -431,13 +485,14 @@ def test_normalize_truncates_to_seconds():
 
 
 class FakeK8sClient:
-    def __init__(self, names):
+    def __init__(self, names, created_at=None):
         self.names = names
+        self.created_at = created_at
         self.calls = 0
 
-    def list_batch_sandbox_names(self, namespace):
+    def list_batch_sandboxes(self, namespace):
         self.calls += 1
-        return list(self.names)
+        return [{"name": name, "created_at": self.created_at} for name in self.names]
 
 
 def test_sync_deleted_marks_missing_sandboxes(monkeypatch, client):
@@ -503,7 +558,7 @@ def test_sync_deleted_k8s_failure_returns_502(monkeypatch, client):
     test_client, _ = client
 
     class BrokenK8sClient:
-        def list_batch_sandbox_names(self, namespace):
+        def list_batch_sandboxes(self, namespace):
             raise main.k8s.K8sError("api down")
 
     monkeypatch.setattr(main.k8s, "K8sClient", lambda _: BrokenK8sClient())
@@ -519,3 +574,106 @@ def test_sync_deleted_requires_auth(monkeypatch, client):
     test_client, _ = client
 
     assert test_client.post("/api/sync-deleted").status_code == 401
+
+
+def test_sync_discovers_unaccessed_sandboxes(monkeypatch, client):
+    """Cluster sandbox ids missing from the database are inserted as unaccessed rows."""
+    monkeypatch.setattr(main, "K8S_NAMESPACE", "opensandbox")
+    test_client, fake = client
+    fake.record([EVENT])
+    created = datetime(2026, 8, 30, 4, 5, 6, tzinfo=timezone.utc)
+    fake_k8s = FakeK8sClient(["test-sandbox", "fresh"], created_at=created)
+    monkeypatch.setattr(main.k8s, "K8sClient", lambda _: fake_k8s)
+    main.app.state.k8s_client = fake_k8s
+    try:
+        response = test_client.post("/api/sync-deleted")
+    finally:
+        main.app.state.k8s_client = None
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["discovered"] == 1
+    # "test-sandbox" already had a row without created_at -> backfilled.
+    assert data["backfilled"] == 1
+    assert data["deleted"] == 0
+
+    # The discovered sandbox shows up in the summary API as never accessed,
+    # carrying the BatchSandbox creationTimestamp.
+    listing = test_client.get("/api/sandboxes")
+    assert listing.status_code == 200
+    items = {item["sandbox_id"]: item for item in listing.json()["items"]}
+    assert set(items) == {"test-sandbox", "fresh"}
+    assert items["fresh"]["accessed"] is False
+    assert items["fresh"]["request_count"] == 0
+    assert items["fresh"]["uri"] is None
+    assert items["fresh"]["request_time"] is None
+    assert items["fresh"]["created_at"] == "2026-08-30T04:05:06Z"
+    assert items["test-sandbox"]["accessed"] is True
+    # Backfilled from the sync (discovery happened mid-test).
+    assert items["test-sandbox"]["created_at"] == "2026-08-30T04:05:06Z"
+
+    # A second sync discovers nothing new.
+    main.app.state.k8s_client = fake_k8s
+    try:
+        assert test_client.post("/api/sync-deleted").json()["discovered"] == 0
+    finally:
+        main.app.state.k8s_client = None
+
+
+def test_sync_backfills_creation_timestamp(monkeypatch, client):
+    """Existing rows missing created_at get it backfilled from the resource."""
+    monkeypatch.setattr(main, "K8S_NAMESPACE", "opensandbox")
+    test_client, fake = client
+    # The sandbox was accessed before the first sync ran, so its row
+    # exists but has no creation timestamp.
+    fake.record([EVENT])
+    created = datetime(2026, 8, 19, 8, 30, 0, tzinfo=timezone.utc)
+    fake_k8s = FakeK8sClient(["test-sandbox"], created_at=created)
+    monkeypatch.setattr(main.k8s, "K8sClient", lambda _: fake_k8s)
+    main.app.state.k8s_client = fake_k8s
+    try:
+        response = test_client.post("/api/sync-deleted")
+    finally:
+        main.app.state.k8s_client = None
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["discovered"] == 0
+    assert data["backfilled"] == 1
+
+    items = {
+        item["sandbox_id"]: item
+        for item in test_client.get("/api/sandboxes").json()["items"]
+    }
+    assert items["test-sandbox"]["created_at"] == "2026-08-19T08:30:00Z"
+    assert items["test-sandbox"]["accessed"] is True
+    assert items["test-sandbox"]["uri"] == EVENT["uri"]
+
+    # Re-syncing with the same timestamp backfills nothing more.
+    main.app.state.k8s_client = fake_k8s
+    try:
+        assert test_client.post("/api/sync-deleted").json()["backfilled"] == 0
+    finally:
+        main.app.state.k8s_client = None
+
+
+def test_discovered_sandbox_becomes_accessed_on_first_event(monkeypatch, client):
+    """The first audit event for a discovered sandbox flips it to accessed."""
+    monkeypatch.setattr(main, "K8S_NAMESPACE", "opensandbox")
+    test_client, fake = client
+    fake.upsert_discovered_sandboxes([{"name": "fresh", "created_at": None}])
+
+    items = {
+        item["sandbox_id"]: item
+        for item in test_client.get("/api/sandboxes").json()["items"]
+    }
+    assert items["fresh"]["accessed"] is False
+
+    test_client.post("/events", json={**EVENT, "sandbox_id": "fresh"})
+
+    items = {
+        item["sandbox_id"]: item
+        for item in test_client.get("/api/sandboxes").json()["items"]
+    }
+    assert items["fresh"]["accessed"] is True
+    assert items["fresh"]["uri"] == EVENT["uri"]

@@ -19,6 +19,11 @@ Receives audit events POSTed by the OpenSandbox ingress
 PostgreSQL: a detail row per request plus a per-sandbox summary row
 holding the latest request.
 
+A periodic Kubernetes sync (``kubernetes.sync_interval``) also discovers
+BatchSandbox resources whose sandbox id has no database row yet and
+inserts them as never-accessed rows, visible in the UI with an ``未访问``
+marker.
+
 Web UI (password protected when ``server.ui_password`` is set):
 - ``GET /``          - per-sandbox latest requests (summary page)
 - ``GET /details``   - request details page, filterable by sandbox id
@@ -73,9 +78,12 @@ UI_PASSWORD = _config["ui_password"]
 
 # Kubernetes liveness sync: kubeconfig file path (empty = default kubeconfig,
 # falling back to in-cluster credentials) and the namespace whose
-# batchsandboxes.sandbox.opensandbox.io resources mark live sandbox ids.
-# sync_interval (seconds) enables a periodic background sync; 0 means sync
-# only via POST /api/sync-deleted.
+# batchsandboxes.sandbox.opensandbox.io resources mark live sandbox ids
+# (the resource name is the sandbox id). sync_interval (seconds) enables a
+# periodic background sync; 0 means sync only via POST /api/sync-deleted.
+# Each sync discovers sandboxes that exist in the cluster but not in the
+# database (inserted as never-accessed rows) and reconciles the deleted
+# flags.
 KUBECONFIG_PATH = _config["kubeconfig"]
 K8S_NAMESPACE = _config["k8s_namespace"]
 K8S_SYNC_INTERVAL = _config["k8s_sync_interval"]
@@ -142,17 +150,38 @@ async def lifespan(_: FastAPI):
 
 
 async def _periodic_sync(store: AuditStore) -> None:
-    """Mark deleted sandboxes on a fixed interval; failures only log."""
+    """Sync sandboxes against the cluster on a fixed interval; failures only log.
+
+    The sync does blocking k8s/DB calls (each potentially a slow network
+    round trip) - run them in a worker thread so the event loop keeps
+    serving requests while a sync is in flight.
+    """
     while True:
         try:
-            names = app.state.k8s_client.list_batch_sandbox_names(K8S_NAMESPACE)
-            result = store.sync_deleted_flags(names)
-            logger.info(
-                "periodic sync: %d live sandboxes, %s", len(names), result
+            result = await asyncio.to_thread(
+                _sync_sandboxes, store, app.state.k8s_client
             )
+            logger.info("periodic sync: %s", result)
         except Exception:
-            logger.exception("periodic deleted-sync failed")
+            logger.exception("periodic sandbox sync failed")
         await asyncio.sleep(K8S_SYNC_INTERVAL)
+
+
+def _sync_sandboxes(store: AuditStore, k8s_client: k8s.K8sClient) -> dict:
+    """Discover unaccessed sandboxes and reconcile the ``deleted`` flags.
+
+    The BatchSandbox resource name is the sandbox id. Sandbox ids that
+    exist in the cluster but have no summary row are inserted as
+    never-accessed rows carrying the resource's creationTimestamp
+    (shown in the UI with an ``未访问`` marker); existing rows missing a
+    creation timestamp get it backfilled; rows whose sandbox id is gone
+    from the cluster are flagged deleted.
+    """
+    sandboxes = k8s_client.list_batch_sandboxes(K8S_NAMESPACE)
+    discovered = store.upsert_discovered_sandboxes(sandboxes)
+    names = [sandbox["name"] for sandbox in sandboxes]
+    result = store.sync_deleted_flags(names)
+    return {"live": len(sandboxes), **discovered, **result}
 
 
 app = FastAPI(
@@ -301,7 +330,7 @@ def list_sandboxes(
     store: StoreDep,
     search: Annotated[str | None, Query(min_length=1)] = None,
     sort: Annotated[
-        str, Query(pattern=r"^-?(request_time|request_count)$")
+        str, Query(pattern=r"^-?(request_time|request_count|accessed)$")
     ] = "-request_time",
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -311,10 +340,11 @@ def list_sandboxes(
     """List per-sandbox latest requests.
 
     ``search`` fuzzy-matches sandbox ids (case-insensitive substring).
-    ``sort`` is ``request_time`` or ``request_count``; prefix with ``-``
-    for descending (default: newest first). ``time_from``/``time_to``
-    bound the latest request time (ISO 8601, inclusive; naive values are
-    assumed to be UTC).
+    ``sort`` is ``request_time``, ``request_count`` or ``accessed``;
+    prefix with ``-`` for descending (default: newest first; sorting by
+    ``accessed`` ascending puts never-accessed sandboxes first).
+    ``time_from``/``time_to`` bound the latest request time (ISO 8601,
+    inclusive; naive values are assumed to be UTC).
     """
     _require_api_auth(request)
     return _safe_query(
@@ -346,13 +376,18 @@ def list_requests(
 
 @app.post("/api/sync-deleted")
 def sync_deleted(request: Request, store: StoreDep) -> dict:
-    """Reconcile the summary table's ``deleted`` flags against the cluster.
+    """Sync the summary table against the cluster.
 
-    Lists the ``batchsandboxes.sandbox.opensandbox.io`` resources in the
-    configured namespace (``kubernetes.namespace``) via the
-    kubeconfig (``kubernetes.kubeconfig``). Summary rows whose sandbox id is not among the
-    resource names are marked ``deleted`` and hidden from the UI/API;
-    previously deleted ids that reappear are restored.
+    Sandboxes whose BatchSandbox resource exists in the namespace
+    (``kubernetes.namespace``, via the kubeconfig at
+    ``kubernetes.kubeconfig``) but has no database row are inserted as
+    never-accessed rows (``accessed = FALSE``, ``created_at`` = the
+    resource's creationTimestamp, shown in the UI with an ``未访问``
+    marker); existing rows missing a creation timestamp get it
+    backfilled. Then the ``deleted`` flags are reconciled: summary rows
+    whose sandbox id is not among the live resource names (the resource
+    name is the sandbox id) are marked ``deleted`` and hidden from the
+    UI/API; previously deleted ids that reappear are restored.
     """
     _require_api_auth(request)
     if not K8S_NAMESPACE:
@@ -364,15 +399,14 @@ def sync_deleted(request: Request, store: StoreDep) -> dict:
         request.app.state, "k8s_client", None
     ) or k8s.K8sClient(KUBECONFIG_PATH)
     try:
-        names = k8s_client.list_batch_sandbox_names(K8S_NAMESPACE)
-        result = store.sync_deleted_flags(names)
+        result = _sync_sandboxes(store, k8s_client)
     except k8s.K8sError as exc:
-        logger.error("k8s deleted-sync failed: %s", exc)
+        logger.error("k8s sandbox sync failed: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from None
     except Exception:
-        logger.exception("failed to sync deleted flags")
-        raise HTTPException(status_code=502, detail="failed to sync deleted flags") from None
-    return {"namespace": K8S_NAMESPACE, "live": len(names), **result}
+        logger.exception("failed to sync sandboxes")
+        raise HTTPException(status_code=502, detail="failed to sync sandboxes") from None
+    return {"namespace": K8S_NAMESPACE, **result}
 
 
 def _require_api_auth(request: Request) -> None:

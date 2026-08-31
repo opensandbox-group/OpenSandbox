@@ -11,8 +11,10 @@ The ingress posts one JSON event per routed request when started with
 Two tables are maintained (auto-created on startup):
 
 - `sandbox_access_log` — **请求详情表**: one row per request.
-- `sandbox_access_latest` — **总表**: one row per sandbox id, holding the
-  latest request and the total request count.
+- `sandbox_access_latest` - **总表**: one row per sandbox id, holding the
+  latest request and the total request count. BatchSandbox resources
+  whose sandbox id has no row yet are inserted with `accessed = FALSE`
+  (request fields NULL) and shown in the UI as `未访问`.
 
 A built-in web UI (React + Ant Design; source in `frontend/`, built
 output in `static/`) displays the records on two pages (password
@@ -20,8 +22,10 @@ protected when `server.ui_password` is set):
 
 - `GET /` - **总表页**: per-sandbox latest requests; fuzzy search on
   sandbox id, a date-range filter on the latest request time, sortable
-  columns, and auto-refresh; clicking a sandbox id navigates to its
-  detail page.
+  columns (request time / request count / accessed status), and
+  auto-refresh; sandboxes that exist in the cluster but were never
+  accessed are listed with an `未访问` marker; clicking a sandbox id
+  navigates to its detail page.
 - `GET /details?sandbox_id=<id>` - **请求详情页**: request details with
   sandbox filter, pagination, and optional auto-refresh.
 - `GET /login` - password login page (session cookie, 7-day validity).
@@ -72,8 +76,8 @@ is optional - defaults are shown below.
 | `database.url` | `postgresql://postgres:postgres@localhost:5432/opensandbox_audit` | PostgreSQL connection string |
 | `database.pool_min` / `database.pool_max` | `1` / `10` | Connection pool bounds |
 | `kubernetes.kubeconfig` | (empty) | Kubeconfig file path for the deleted-sync (empty = default kubeconfig, falling back to in-cluster credentials) |
-| `kubernetes.namespace` | (empty) | Namespace whose `batchsandboxes.sandbox.opensandbox.io` resources mark live sandbox ids (required by the sync) |
-| `kubernetes.sync_interval` | `0` | When > 0 (seconds), sync the `deleted` flags periodically in the background; `0` = manual sync via `POST /api/sync-deleted` only |
+| `kubernetes.namespace` | (empty) | Namespace whose `batchsandboxes.sandbox.opensandbox.io` resources mark live sandbox ids (the resource name is the sandbox id; required by the sync) |
+| `kubernetes.sync_interval` | `0` | When > 0 (seconds), sync against the cluster periodically in the background (discover unaccessed sandboxes + reconcile the `deleted` flags); `0` = manual sync via `POST /api/sync-deleted` only |
 | `log.level` | `INFO` | Log level |
 
 ## API
@@ -128,8 +132,9 @@ List per-sandbox latest requests (summary table).
 Query params:
 - `search` - fuzzy-match sandbox ids (case-insensitive substring;
   `%`/`_` in the input are matched literally)
-- `sort` - `request_time` or `request_count`; prefix with `-` for
-  descending (default: `-request_time`, newest first)
+- `sort` - `request_time`, `request_count` or `accessed`; prefix with
+  `-` for descending (default: `-request_time`, newest first;
+  `accessed` ascending puts never-accessed sandboxes first)
 - `time_from` / `time_to` - ISO 8601 bounds on the latest request time
   (inclusive; naive values are assumed to be UTC); the summary page's
   date pickers send local start-of-day / end-of-day here
@@ -138,8 +143,13 @@ Query params:
 ```json
 {"total": 2, "items": [{"sandbox_id": "my-sandbox", "uri": "/ws", "method": "GET",
   "target": "10.0.0.1:8080", "request_time": "2026-08-20T10:00:00+00:00",
-  "request_count": 2}]}
+  "request_count": 2, "accessed": true}]}
 ```
+
+`accessed` is `false` (and the request fields `null`, `request_count` `0`)
+on rows inserted by the cluster discovery for sandboxes that have not
+been accessed yet; they sort last under the default
+`-request_time` order.
 
 ### `GET /api/requests`
 
@@ -156,18 +166,26 @@ Query params: `sandbox_id` (optional filter), `limit` (1-500, default 50),
 
 ### `POST /api/sync-deleted`
 
-Reconcile the summary table's `deleted` flags against the cluster (auth
-required like the other query APIs). Lists the
-`batchsandboxes.sandbox.opensandbox.io` resource names in the namespace
-configured via `kubernetes.namespace`, accessing Kubernetes through the
-kubeconfig at `kubernetes.kubeconfig` (empty = default kubeconfig /
-in-cluster). The BatchSandbox resource name is the sandbox id: summary rows
-whose sandbox id is not among the resource names are marked `deleted`
-(hidden from the UI and `/api/sandboxes`); previously deleted ids that
-reappear are restored.
+Sync the summary table against the cluster (auth required like the other
+query APIs), accessing Kubernetes through the kubeconfig at
+`kubernetes.kubeconfig` (empty = default kubeconfig / in-cluster):
+
+1. BatchSandbox resources in the namespace configured via
+   `kubernetes.namespace` (the resource name is the sandbox id) whose
+   id has no summary row yet are inserted as never-accessed rows
+   (`accessed = FALSE`, NULL request fields, `request_count` 0,
+   `created_at` = the resource's creationTimestamp) and shown in the
+   UI with an `未访问` marker. Existing rows whose `created_at` is
+   still NULL get it backfilled. The first audit event for such a
+   sandbox flips the row to `accessed = TRUE`.
+2. The `deleted` flags are reconciled against the
+   `batchsandboxes.sandbox.opensandbox.io` resource names (the resource
+   name is the sandbox id): summary rows whose sandbox id is not among
+   them are marked `deleted` (hidden from the UI and `/api/sandboxes`);
+   previously deleted ids that reappear are restored.
 
 Responses:
-- `200 {"namespace": "...", "live": <n>, "deleted": <n>, "restored": <n>}`
+- `200 {"namespace": "...", "live": <n>, "discovered": <n>, "backfilled": <n>, "deleted": <n>, "restored": <n>}`
 - `400` - `kubernetes.namespace` is not configured
 - `502` - the Kubernetes API or the database write failed
 
@@ -193,12 +211,13 @@ CREATE INDEX idx_sandbox_access_log_sandbox_time
 -- 总表：每个沙箱 id 一行，记录最新一次请求
 CREATE TABLE sandbox_access_latest (
     sandbox_id    TEXT        PRIMARY KEY,
-    uri           TEXT        NOT NULL,
-    method        TEXT        NOT NULL,
-    target        TEXT        NOT NULL,
-    request_time  TIMESTAMPTZ NOT NULL,  -- 最新一次请求时间
+    uri           TEXT,                 -- 最新一次请求（未访问沙箱为 NULL）
+    method        TEXT,
+    target        TEXT,
+    request_time  TIMESTAMPTZ,          -- 最新一次请求时间（未访问沙箱为 NULL）
     request_count BIGINT      NOT NULL DEFAULT 1,  -- 累计请求数
     deleted       BOOLEAN     NOT NULL DEFAULT FALSE,  -- 沙箱资源已不存在（前端不展示）
+    accessed      BOOLEAN     NOT NULL DEFAULT TRUE,   -- 集群中发现但从未访问
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -219,6 +238,12 @@ Behavior notes:
   `POST /api/sync-deleted`) are excluded from `/api/sandboxes` and the
   summary page; existing tables are migrated with
   `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+- Sandbox ids present on BatchSandbox resources but absent from the
+  database are inserted as never-accessed rows (`accessed = FALSE`,
+  NULL request fields, `created_at` = the resource's
+  creationTimestamp); existing rows missing `created_at` get it
+  backfilled; a first request flips them to `accessed = TRUE` even
+  when it is older than the (NULL) stored request time.
 
 ## Docker
 
@@ -233,13 +258,13 @@ docker run -p 8080:8080 \
 
 ```bash
 pip install -r requirements.txt pytest httpx
-pytest test_main.py
+pytest test_main.py test_k8s.py test_config.py
 ```
 
 Key code:
 - `main.py`: FastAPI app, routes, lifespan/pool management.
 - `store.py`: schema DDL and transactional writes.
-- `k8s.py`: kubeconfig-based BatchSandbox listing for the deleted-sync.
+- `k8s.py`: kubeconfig-based BatchSandbox listing for the cluster sync.
 - `config.py`: TOML config loading (`audit.toml`, see `audit.toml.example`).
 - `frontend/`: React + Vite + Ant Design SPA sources (three page entries).
 
