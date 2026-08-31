@@ -336,6 +336,11 @@ Optional **strong isolation** runtimes (gVisor, Kata, Firecracker).
 - If `type` is **`firecracker`**, **`k8s_runtime_class`** is **required** (`docker` runtime cannot use Firecracker).
 - If `type` is **`gvisor`** or **`kata`**, at least one of **`docker_runtime`** or **`k8s_runtime_class`** must be set.
 
+One Server process has one `[secure_runtime]` profile; API requests cannot select
+a different runtime class. To offer multiple profiles in one Kubernetes cluster,
+deploy separately addressed Server releases as described in
+[Multiple Runtime Profiles on Kubernetes](../docs/guides/secure-container.md#multiple-runtime-profiles-on-kubernetes).
+
 See [`docs/guides/secure-container.md`](../docs/guides/secure-container.md) for installation and node requirements.
 
 ---
