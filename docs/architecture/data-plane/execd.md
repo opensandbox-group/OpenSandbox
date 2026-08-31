@@ -154,3 +154,7 @@ Sandboxes can be pre-warmed in pools and reused across allocations. Execd makes 
 ## Observability
 
 Execd exposes local CPU and memory metrics as a snapshot and as a live stream, and exports OpenTelemetry metrics when the platform configures an endpoint — attributed to your sandbox ID and allocation. See [telemetry](/guides/telemetry#execd) for the metric list and how export is configured.
+
+### Request id propagation
+
+`/command` and PTY session creation accept an optional `X-Request-Id` header. When it is present and well-formed (at most 128 characters from `[A-Za-z0-9._-]`), execd exports it as the `SANDBOX_REQUEST_ID` environment variable for the launched command and every descendant process, so process-level audit (eBPF `process_exec` arguments, `ps`) can correlate executions back to the calling request. On POSIX shells, shell-mode commands additionally carry the id in the launched shell's argv; on Windows the id propagates via the environment only. Interactive PTY sessions (created without a `command`) do not propagate the id — the wrap only applies when an explicit command is given. Ids that are oversized or use other characters are dropped silently (no propagation, no error), and calls without the header are byte-for-byte unchanged.

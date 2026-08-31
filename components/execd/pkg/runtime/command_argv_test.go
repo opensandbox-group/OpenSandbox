@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,4 +139,34 @@ func TestNativeCommandResolution(t *testing.T) {
 	cmd, err = prepareCommand(context.Background(), req)
 	require.Error(t, err)
 	require.Nil(t, cmd)
+}
+
+// TestPrepareCommandInjectsRequestIDEnv verifies the direct env injection of
+// the ingress request id: it must be present for shell-mode and native argv
+// execution alike, so descendants inherit the correlation id on every
+// platform (including Windows, where no shell wrap is applied).
+func TestPrepareCommandInjectsRequestIDEnv(t *testing.T) {
+	req := &ExecuteCodeRequest{Code: "true", RequestID: "req-env-1"}
+	cmd, err := prepareCommand(context.Background(), req)
+	require.NoError(t, err)
+	require.Contains(t, cmd.Env, "SANDBOX_REQUEST_ID=req-env-1")
+
+	argvReq := &ExecuteCodeRequest{Argv: []string{"true"}, RequestID: "req-env-2"}
+	cmd, err = prepareCommand(context.Background(), argvReq)
+	require.NoError(t, err)
+	require.Contains(t, cmd.Env, "SANDBOX_REQUEST_ID=req-env-2")
+
+	// The no-ID case asserts prepareCommand itself injects nothing: unset the
+	// variable from the test process environment first, because an inherited
+	// SANDBOX_REQUEST_ID (e.g. running `go test` as a descendant of an
+	// instrumented execd) legitimately flows through os.Environ().
+	t.Setenv(RequestIDEnvVar, "")
+	noID := &ExecuteCodeRequest{Code: "true"}
+	cmd, err = prepareCommand(context.Background(), noID)
+	require.NoError(t, err)
+	for _, entry := range cmd.Env {
+		if value, ok := strings.CutPrefix(entry, RequestIDEnvVar+"="); ok {
+			require.Empty(t, value, "unexpected injected %s", entry)
+		}
+	}
 }

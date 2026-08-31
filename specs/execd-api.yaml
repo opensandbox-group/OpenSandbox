@@ -422,6 +422,23 @@ paths:
       operationId: runCommand
       tags:
         - Command
+      parameters:
+        - name: X-Request-Id
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+            pattern: "^[A-Za-z0-9._-]+$"
+          description: |
+            Optional end-to-end request id. When present, execd exports it as the
+            `SANDBOX_REQUEST_ID` environment variable for the command and its descendant
+            processes; on POSIX shells (shell-mode commands) it is also included in the
+            launched shell's argv so process-level audit can correlate executions to the
+            calling request, while on Windows it propagates via the environment only.
+            Ids longer than 128 characters or containing characters outside
+            `[A-Za-z0-9._-]` are dropped (no propagation, no error); absent headers leave
+            the command byte-for-byte unchanged.
       requestBody:
         required: true
         content:

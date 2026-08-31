@@ -2258,7 +2258,14 @@ export interface operations {
     runCommand: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Optional end-to-end request id (at most 128 characters from
+                 *     [A-Za-z0-9._-]). Exported as SANDBOX_REQUEST_ID for the command and its
+                 *     descendants; ids that are oversized or use other characters are dropped.
+                 */
+                "X-Request-Id"?: string;
+            };
             path?: never;
             cookie?: never;
         };
