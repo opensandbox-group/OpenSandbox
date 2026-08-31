@@ -155,6 +155,17 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 409: components["responses"]["Conflict"];
+                /** @description Pool capacity remained unavailable before the acquisition timeout */
+                429: {
+                    headers: {
+                        "X-Request-ID": components["headers"]["XRequestId"];
+                        "Retry-After": components["headers"]["RetryAfter"];
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
                 500: components["responses"]["InternalServerError"];
             };
         };
@@ -933,6 +944,12 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * @description Current runtime-confirmed pool allocation. Omitted unless an active pool
+             *     allocation is confirmed; this is not a request echo, allocation history,
+             *     readiness signal, or Kubernetes introspection result.
+             */
+            allocation?: components["schemas"]["AllocationSummary"];
+            /**
              * @description The command to execute as the sandbox's entry process.
              *     Always present in responses. For image-created sandboxes, this is copied
              *     from the creation request. For snapshot-created sandboxes, this is restored
@@ -949,6 +966,21 @@ export interface components {
              * @description Sandbox creation timestamp
              */
             createdAt: string;
+        };
+        /** @description Public summary of a confirmed active pool allocation. */
+        AllocationSummary: {
+            /**
+             * @description Allocation mode.
+             * @enum {string}
+             */
+            mode: "pool";
+            /** @description Concrete pool reference currently allocated. */
+            poolRef: string;
+            /**
+             * @description Current confirmed allocation state.
+             * @enum {string}
+             */
+            state: "allocated";
         };
         /**
          * @description High-level lifecycle state of the sandbox.
@@ -1045,6 +1077,53 @@ export interface components {
              * @enum {string}
              */
             arch: "amd64" | "arm64";
+        };
+        /**
+         * @description A lifecycle command executed directly as an argv array. No implicit shell
+         *     expansion is performed. Use an explicit shell command such as
+         *     `["sh", "-c", "..."]` when shell syntax is required.
+         */
+        LifecycleHook: {
+            /** @description Command and arguments to execute. */
+            command: string[];
+            /** @description Maximum execution time in seconds, up to 3 hours (10800 seconds) for `preStart`. The server defaults to 60 when omitted. */
+            timeoutSeconds?: number;
+        };
+        /** @description A named lifecycle command scheduled inside the sandbox by execd. */
+        PeriodicLifecycleHook: {
+            /** @description Name unique among periodic hooks in this sandbox. */
+            name: string;
+            /**
+             * @description Five-field cron expression or descriptor such as `@hourly` or
+             *     `@every 30s`. An `@every` interval must be a whole number of
+             *     seconds with a minimum of one second.
+             */
+            schedule: string;
+            /** @description Command and arguments to execute without implicit shell expansion. */
+            command: string[];
+            /** @description Maximum execution time in seconds, up to 300. The server defaults to 60 when omitted. */
+            timeoutSeconds?: number;
+        };
+        /**
+         * @description Extensible container for sandbox lifecycle hooks. All fields are optional.
+         *     Future lifecycle events are added as new optional fields without changing
+         *     the semantics of existing fields.
+         *
+         *     This release supports only `preStart` and `periodic`.
+         */
+        SandboxLifecycle: {
+            /**
+             * @description Runs in execd after its HTTP server is ready and before the user
+             *     entrypoint on every sandbox container start. A failed or timed-out
+             *     hook prevents the user entrypoint from starting.
+             */
+            preStart?: components["schemas"]["LifecycleHook"];
+            /**
+             * @description Scheduled hooks run by execd while the sandbox is running. Runs of
+             *     the same named hook never overlap; a scheduled run is skipped when
+             *     its previous run is still active.
+             */
+            periodic?: components["schemas"]["PeriodicLifecycleHook"][];
         };
         /**
          * @description JSON Merge Patch (RFC 7396) request body for updating sandbox metadata.
@@ -1151,6 +1230,17 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
+            /**
+             * @description Optional declarative sandbox lifecycle hooks. This release supports
+             *     `preStart` and `periodic`. The server transports this configuration to
+             *     execd; callers must not depend on the internal transport mechanism.
+             *     The configuration is not included in Sandbox responses.
+             *
+             *     Not supported together with `extensions.poolRef`, because pooled
+             *     sandboxes have already started execd before allocation. Runtimes that
+             *     do not implement lifecycle hook transport reject this field.
+             */
+            lifecycle?: components["schemas"]["SandboxLifecycle"];
             /**
              * @description The command to execute as the sandbox's entry process.
              *

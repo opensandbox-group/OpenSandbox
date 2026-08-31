@@ -107,6 +107,72 @@ class TestEndpointCacheSync:
         assert result.endpoint == "cached"
         assert fetch_count[0] == 0
 
+    def test_invalidate_does_not_remove_replacement_inflight(self):
+        c = EndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        release_second = threading.Event()
+        fetch_count = 0
+        fetch_count_lock = threading.Lock()
+        first_result = []
+        second_result = []
+
+        def fetch():
+            nonlocal fetch_count
+            with fetch_count_lock:
+                fetch_count += 1
+                call = fetch_count
+            if call == 1:
+                first_started.set()
+                assert release_first.wait(timeout=2)
+                return _ep("first")
+            if call == 2:
+                second_started.set()
+                assert release_second.wait(timeout=2)
+                return _ep("second")
+            raise AssertionError("unexpected duplicate fetch")
+
+        first_thread = threading.Thread(
+            target=lambda: first_result.append(c.get_or_fetch(key, fetch))
+        )
+        second_thread = None
+        try:
+            first_thread.start()
+            assert first_started.wait(timeout=2)
+            with c._lock:
+                first_inflight = c._inflight[key]
+
+            c.invalidate("sb-1")
+            second_thread = threading.Thread(
+                target=lambda: second_result.append(c.get_or_fetch(key, fetch))
+            )
+            second_thread.start()
+            assert second_started.wait(timeout=2)
+            with c._lock:
+                second_inflight = c._inflight[key]
+            assert second_inflight is not first_inflight
+
+            release_first.set()
+            first_thread.join(timeout=2)
+            assert not first_thread.is_alive()
+            with c._lock:
+                assert c._inflight.get(key) is second_inflight
+
+            release_second.set()
+            second_thread.join(timeout=2)
+            assert not second_thread.is_alive()
+            assert [result.endpoint for result in first_result] == ["first"]
+            assert [result.endpoint for result in second_result] == ["second"]
+            assert fetch_count == 2
+        finally:
+            release_first.set()
+            release_second.set()
+            first_thread.join(timeout=2)
+            if second_thread is not None:
+                second_thread.join(timeout=2)
+
 
 class TestAsyncEndpointCache:
     @pytest.mark.asyncio
@@ -185,3 +251,44 @@ class TestAsyncEndpointCache:
         # Cache should not be populated on error
         assert c.get(key) is None
         assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+    @pytest.mark.asyncio
+    async def test_invalidate_does_not_remove_replacement_inflight(self):
+        c = AsyncEndpointCache(maxsize=10, ttl=60.0)
+        key = ("sb-1", 8080, False)
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+        release_second = asyncio.Event()
+        fetch_count = 0
+
+        async def fetch():
+            nonlocal fetch_count
+            fetch_count += 1
+            if fetch_count == 1:
+                first_started.set()
+                await release_first.wait()
+                return _ep("first")
+            if fetch_count == 2:
+                second_started.set()
+                await release_second.wait()
+                return _ep("second")
+            raise AssertionError("unexpected duplicate fetch")
+
+        first_task = asyncio.create_task(c.get_or_fetch(key, fetch))
+        await asyncio.wait_for(first_started.wait(), timeout=2)
+        first_inflight = c._inflight[key]
+
+        c.invalidate("sb-1")
+        second_task = asyncio.create_task(c.get_or_fetch(key, fetch))
+        await asyncio.wait_for(second_started.wait(), timeout=2)
+        second_inflight = c._inflight[key]
+        assert second_inflight is not first_inflight
+
+        release_first.set()
+        assert await first_task == _ep("first")
+        assert c._inflight.get(key) is second_inflight
+
+        release_second.set()
+        assert await second_task == _ep("second")
+        assert fetch_count == 2

@@ -142,9 +142,9 @@ public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
     }
 
     @Test
-    @DisplayName("graceful shutdown drains admitted rolling warmups without refilling slots")
+    @DisplayName("graceful shutdown drains all admitted warmups without new admission")
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
-    void testGracefulShutdownDrainsAdmittedRollingWarmupsWithoutRefill() throws Exception {
+    void testGracefulShutdownDrainsAllAdmittedWarmupsWithoutNewAdmission() throws Exception {
         tag = uniqueTag("graceful-rolling");
         InMemoryPoolStateStore stateStore = new InMemoryPoolStateStore();
         CountDownLatch admittedWarmupsEntered = new CountDownLatch(2);
@@ -195,18 +195,18 @@ public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
             assertNull(shutdownFailure.get(), "graceful shutdown should not fail");
             assertEquals(PoolLifecycleState.STOPPED, pool.snapshot().getLifecycleState());
             assertEquals(
-                    2,
+                    3,
                     pool.snapshot().getIdleCount(),
-                    "both pre-admitted warmups should be persisted");
+                    "all pre-admitted warmups should be persisted");
             assertEquals(
-                    2,
+                    3,
                     preparerCalls.get(),
-                    "shutdown must close admissions instead of refilling the released slots");
+                    "shutdown should drain admitted work without admitting beyond maxIdle");
             eventually(
-                    "only the two pre-admitted sandboxes remain remotely",
+                    "only the three pre-admitted sandboxes remain remotely",
                     Duration.ofSeconds(30),
                     Duration.ofMillis(500),
-                    () -> countTaggedSandboxes() == 2);
+                    () -> countTaggedSandboxes() == 3);
 
             pool.releaseAllIdle();
             eventually(
@@ -423,7 +423,6 @@ public class SandboxPoolGracefulShutdownE2ETest extends BaseE2ETest {
                 .connectionConfig(sharedConnectionConfig)
                 .creationSpec(creationSpec)
                 .warmupSandboxPreparer(preparer)
-                .reconcileInterval(Duration.ofMinutes(5))
                 .drainTimeout(drainTimeout)
                 .build();
     }

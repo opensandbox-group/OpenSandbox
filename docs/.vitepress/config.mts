@@ -96,9 +96,11 @@ export default defineConfig({
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
+            { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
             { text: "Client Pool", link: "/guides/client-pool" },
             { text: "SDK Telemetry", link: "/guides/sdk-telemetry" },
+            { text: "SDK Tracing (Pool Warmup)", link: "/guides/sdk-tracing" },
           ],
         },
       ],
@@ -156,6 +158,10 @@ export default defineConfig({
           items: [
             { text: "Overview", link: "/kubernetes/" },
             { text: "Deployment", link: "/kubernetes/deployment" },
+            {
+              text: "QEMU VMState Snapshots",
+              link: "/kubernetes/qemu-vmstate-snapshots",
+            },
           ],
         },
       ],
@@ -186,6 +192,7 @@ export default defineConfig({
             { text: "Claude Code", link: "/examples/claude-code" },
             { text: "Gemini CLI", link: "/examples/gemini-cli" },
             { text: "Codex CLI", link: "/examples/codex-cli" },
+            { text: "OpenCode", link: "/examples/opencode" },
             { text: "Qwen Code", link: "/examples/qwen-code" },
             { text: "Kimi CLI", link: "/examples/kimi-cli" },
             { text: "LangGraph", link: "/examples/langgraph" },
@@ -274,6 +281,10 @@ export default defineConfig({
             {
               text: "Execd Path Migration",
               link: "/reference/execd-path-migration",
+            },
+            {
+              text: "Snapshot Store Migration",
+              link: "/reference/snapshot-store-migration",
             },
           ],
         },

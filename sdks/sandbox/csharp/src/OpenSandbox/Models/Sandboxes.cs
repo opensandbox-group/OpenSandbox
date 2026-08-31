@@ -713,6 +713,30 @@ public class SandboxStatus
 }
 
 /// <summary>
+/// Runtime-confirmed Pool allocation for a sandbox.
+/// </summary>
+public class AllocationSummary
+{
+    /// <summary>
+    /// Gets or sets the confirmed allocation mode. Currently, this is "pool".
+    /// </summary>
+    [JsonPropertyName("mode")]
+    public required string Mode { get; set; }
+
+    /// <summary>
+    /// Gets or sets the concrete Pool reference allocated to the sandbox.
+    /// </summary>
+    [JsonPropertyName("poolRef")]
+    public required string PoolRef { get; set; }
+
+    /// <summary>
+    /// Gets or sets the confirmed allocation state. Currently, this is "allocated".
+    /// </summary>
+    [JsonPropertyName("state")]
+    public required string State { get; set; }
+}
+
+/// <summary>
 /// Information about a sandbox.
 /// </summary>
 public class SandboxInfo
@@ -764,6 +788,12 @@ public class SandboxInfo
     /// </summary>
     [JsonPropertyName("platform")]
     public PlatformSpec? Platform { get; set; }
+
+    /// <summary>
+    /// Gets or sets the current runtime-confirmed Pool allocation, when available.
+    /// </summary>
+    [JsonPropertyName("allocation")]
+    public AllocationSummary? Allocation { get; set; }
 
     /// <summary>
     /// Gets or sets the sandbox creation time.
@@ -853,6 +883,12 @@ public class CreateSandboxRequest
     public IReadOnlyDictionary<string, string>? Metadata { get; set; }
 
     /// <summary>
+    /// Gets or sets optional lifecycle hooks applied during sandbox creation.
+    /// </summary>
+    [JsonPropertyName("lifecycle")]
+    public SandboxLifecycle? Lifecycle { get; set; }
+
+    /// <summary>
     /// Gets or sets the network policy.
     /// </summary>
     [JsonPropertyName("networkPolicy")]
@@ -881,6 +917,72 @@ public class CreateSandboxRequest
     /// </summary>
     [JsonPropertyName("extensions")]
     public IReadOnlyDictionary<string, object>? Extensions { get; set; }
+}
+
+/// <summary>
+/// Command executed before the sandbox entrypoint starts.
+/// </summary>
+public class LifecycleHook
+{
+    /// <summary>
+    /// Gets or sets the command and arguments to execute.
+    /// </summary>
+    [JsonPropertyName("command")]
+    public required IReadOnlyList<string> Command { get; set; }
+
+    /// <summary>
+    /// Gets or sets the execution timeout in seconds. The maximum is 3 hours (10800 seconds).
+    /// </summary>
+    [JsonPropertyName("timeoutSeconds")]
+    public int? TimeoutSeconds { get; set; }
+}
+
+/// <summary>
+/// Named command scheduled while the sandbox is running.
+/// </summary>
+public class PeriodicLifecycleHook
+{
+    /// <summary>
+    /// Gets or sets the name unique among periodic hooks in this sandbox.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
+
+    /// <summary>
+    /// Gets or sets the cron expression or descriptor.
+    /// </summary>
+    [JsonPropertyName("schedule")]
+    public required string Schedule { get; set; }
+
+    /// <summary>
+    /// Gets or sets the command and arguments to execute.
+    /// </summary>
+    [JsonPropertyName("command")]
+    public required IReadOnlyList<string> Command { get; set; }
+
+    /// <summary>
+    /// Gets or sets the execution timeout in seconds. The maximum is 300 seconds.
+    /// </summary>
+    [JsonPropertyName("timeoutSeconds")]
+    public int? TimeoutSeconds { get; set; }
+}
+
+/// <summary>
+/// Optional lifecycle hooks applied during sandbox creation.
+/// </summary>
+public class SandboxLifecycle
+{
+    /// <summary>
+    /// Gets or sets the hook executed before the sandbox entrypoint starts.
+    /// </summary>
+    [JsonPropertyName("preStart")]
+    public LifecycleHook? PreStart { get; set; }
+
+    /// <summary>
+    /// Gets or sets hooks scheduled while the sandbox is running.
+    /// </summary>
+    [JsonPropertyName("periodic")]
+    public IReadOnlyList<PeriodicLifecycleHook>? Periodic { get; set; }
 }
 
 /// <summary>

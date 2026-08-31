@@ -323,6 +323,45 @@ class IsolatedRunLogs(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class HardeningLayerState(BaseModel):
+    """Whether one hardening layer is actually enforced (OSEP-0018)."""
+
+    state: str | None = Field(
+        default=None,
+        description="active | disabled (not configured) | degraded | unsupported",
+    )
+    message: str | None = Field(
+        default=None,
+        description="Concrete reason whenever state is not active",
+    )
+
+
+class HardeningStatus(BaseModel):
+    """execd init-mode and workload-hardening state (OSEP-0018)."""
+
+    init_mode: str | None = Field(
+        default=None, description='"pid1" | "subreaper" | "none"'
+    )
+    signal_shield: bool = Field(
+        default=False,
+        description="Whether the kernel PID 1 signal shield is active",
+    )
+    cap_drop: HardeningLayerState | None = Field(
+        default=None, description="Capability/bounding-set reduction on user code"
+    )
+    seccomp: HardeningLayerState | None = Field(
+        default=None, description="Seccomp floor installed on user code"
+    )
+    landlock: HardeningLayerState | None = Field(
+        default=None, description="Landlock filesystem confinement"
+    )
+    ebpf: HardeningLayerState | None = Field(
+        default=None, description="eBPF exec/connect/privilege observation"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class IsolatedCapabilities(BaseModel):
     """Isolator capabilities reported by execd."""
 
@@ -354,6 +393,10 @@ class IsolatedCapabilities(BaseModel):
     )
     diff_supported: bool = Field(
         default=False, description="Whether diff is supported"
+    )
+    hardening: HardeningStatus | None = Field(
+        default=None,
+        description="execd init-mode and workload-hardening state (OSEP-0018)",
     )
 
     model_config = ConfigDict(populate_by_name=True)

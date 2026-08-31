@@ -33,6 +33,16 @@ const (
 	waitCACert     = 20 * time.Second
 )
 
+// FleetCAExportDir is the dedicated subdir (under constants.OpenSandboxRootDir)
+// where the fleet profile exports the mitm CA. The fastlet bind-mounts this
+// directory read-only into every sandbox at creation, so sandbox bootstrap can
+// seed the trust store with the CA (OSEP-0022 A1; see fast-sandbox issue #19).
+// The directory-level mount (not file-level) keeps the export visible across
+// egress's atomic rename-based CA rotation. Deliberately NOT the whole
+// OpenSandboxRootDir: a read-only mount of the parent would shadow the
+// fastlet-placed execd binary and is shared-writable across sandboxes.
+const FleetCAExportDir = "mitm-ca"
+
 // candidateCACertPaths: mitm may place mitmproxy-ca-cert.pem in confdir, .mitmproxy under confdir, or home.
 func candidateCACertPaths(confDirEnv, home string) []string {
 	confDirEnv = strings.TrimSpace(confDirEnv)
@@ -63,18 +73,18 @@ func waitMitmCACertPath(confDirEnv, home string) (string, error) {
 }
 
 // PurgeStaleExportedCA removes any mitmproxy-ca-cert.pem left on the shared
-// volume by a previous generation of this egress container. mitmproxy's CA
-// lives in the egress container's ephemeral confdir, so an egress container
-// restart rotates the CA while the previous public cert is still on the
-// (pod-scoped) shared volume; without this purge, an agent container starting
-// alongside us would pass its bootstrap readiness check on the stale file
-// and install a CA that no longer matches what mitmproxy will sign with.
-// See upstream issue #1370. Must be called as early as possible in main().
+// volume by a previous egress generation: a restart rotates the CA in the
+// ephemeral confdir, and the stale cert would let an agent pass its bootstrap
+// readiness check and install a CA mitmproxy no longer signs with (issue #1370).
+// The fleet export subdir is purged the same way, so a sandbox holding the
+// mount never reads a stale generation's CA (fast-sandbox issue #19).
+// Must be called as early as possible in main().
 func PurgeStaleExportedCA() {
 	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		return
 	}
 	purgeStaleExportedCAFrom(constants.OpenSandboxRootDir)
+	purgeStaleExportedCAFrom(filepath.Join(constants.OpenSandboxRootDir, FleetCAExportDir))
 }
 
 // purgeStaleExportedCAFrom is the testable core of PurgeStaleExportedCA.
@@ -97,19 +107,34 @@ func purgeStaleExportedCAFrom(rootDir string) {
 }
 
 func SyncRootCA(confDirEnv, home string) error {
+	return exportRootCA(confDirEnv, home, constants.OpenSandboxRootDir, true)
+}
+
+// SyncRootCAFleet exports the CA into the dedicated fleet subdir (the fastlet
+// mount point). The egress container's own system trust store is NOT touched:
+// upstream validation uses the public roots, and the CA is only meaningful to
+// the sandbox clients downstream.
+func SyncRootCAFleet(confDirEnv, home string) error {
+	return exportRootCA(confDirEnv, home, filepath.Join(constants.OpenSandboxRootDir, FleetCAExportDir), false)
+}
+
+func exportRootCA(confDirEnv, home, rootDir string, installSystemTrust bool) error {
 	src, err := waitMitmCACertPath(confDirEnv, home)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(constants.OpenSandboxRootDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", constants.OpenSandboxRootDir, err)
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", rootDir, err)
 	}
-	dst := filepath.Join(constants.OpenSandboxRootDir, mitmCACertName)
+	dst := filepath.Join(rootDir, mitmCACertName)
 	if err := copyFile(src, dst, 0o644); err != nil {
 		return fmt.Errorf("copy mitm CA to %s: %w", dst, err)
 	}
 	log.Infof("[mitmproxy] copied root CA to %s", dst)
 
+	if !installSystemTrust {
+		return nil
+	}
 	if err := installMitmCAInSystemTrust(dst); err != nil {
 		return fmt.Errorf("install mitm CA into system trust store: %w", err)
 	}

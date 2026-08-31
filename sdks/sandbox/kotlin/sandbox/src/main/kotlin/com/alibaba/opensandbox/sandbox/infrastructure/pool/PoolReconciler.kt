@@ -19,15 +19,14 @@ package com.alibaba.opensandbox.sandbox.infrastructure.pool
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolConfig
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolStateStore
 import org.slf4j.LoggerFactory
-import java.time.Instant
 
 /**
  * Runs one reconcile tick: leader-gated replenish/shrink and TTL reap.
  *
  * Only the current primary lock holder performs idle maintenance writes.
  * Leader does not voluntarily release the lock; it is only lost when renew fails or TTL expires.
- * Call from a periodic or completion-driven scheduler. Warmup submission is non-blocking; completed
- * warmups are committed independently by the owning pool.
+ * Call from the fixed periodic scheduler. Warmup submission is non-blocking; completed warmups are
+ * committed independently by the owning pool.
  */
 internal object PoolReconciler {
     private val logger = LoggerFactory.getLogger(PoolReconciler::class.java)
@@ -42,7 +41,7 @@ internal object PoolReconciler {
         config: PoolConfig,
         stateStore: PoolStateStore,
         onDiscardSandbox: (String) -> Unit = {},
-        reconcileState: ReconcileState,
+        onPrimaryAcquired: () -> Unit = {},
         warmingCount: Int,
         submitWarmups: (Int) -> Unit,
     ): Boolean {
@@ -54,11 +53,11 @@ internal object PoolReconciler {
             logger.trace("Reconcile skip (not primary): pool_name={}", poolName)
             return false
         }
+        onPrimaryAcquired()
         runPrimaryReplenishOnce(
             config = config,
             stateStore = stateStore,
             onDiscardSandbox = onDiscardSandbox,
-            reconcileState = reconcileState,
             warmingCount = warmingCount,
             submitWarmups = submitWarmups,
         )
@@ -70,16 +69,14 @@ internal object PoolReconciler {
         config: PoolConfig,
         stateStore: PoolStateStore,
         onDiscardSandbox: (String) -> Unit,
-        reconcileState: ReconcileState,
         warmingCount: Int,
         submitWarmups: (Int) -> Unit,
     ) {
         val poolName = config.poolName
         val ownerId = config.ownerId
         val ttl = config.primaryLockTtl
-        val now = Instant.now()
 
-        val discardedAlive = stateStore.reapExpiredIdle(poolName, now, config.acquireMinRemainingTtl)
+        val discardedAlive = stateStore.reapExpiredIdle(poolName, java.time.Instant.now(), config.acquireMinRemainingTtl)
         for (sandboxId in discardedAlive) {
             // Reaped near-expiry but server-side TTL has not yet elapsed; kill so the live sandbox
             // does not linger past its pool membership and consume quota.
@@ -98,31 +95,28 @@ internal object PoolReconciler {
                 idleCount = counters.idleCount,
                 warmingCount = warmingCount,
                 maxIdle = config.maxIdle,
-                warmupConcurrency = config.warmupConcurrency,
+                warmupCreateQps = config.warmupCreateQps,
             )
 
-        if (plan.toSubmit == 0 || reconcileState.isBackoffActive(now)) {
+        if (plan.toSubmit == 0) {
             stateStore.renewPrimaryLock(poolName, ownerId, ttl)
             logger.debug(
-                "Reconcile tick: pool_name={} idle={} warming={} deficit={} available_slots={} " +
-                    "to_submit=0 backoff={}",
+                "Reconcile tick: pool_name={} idle={} warming={} deficit={} to_submit=0",
                 poolName,
                 counters.idleCount,
                 warmingCount,
                 plan.deficit,
-                plan.availableSlots,
-                reconcileState.isBackoffActive(now),
             )
             return
         }
 
         logger.debug(
-            "Reconcile tick: pool_name={} idle={} warming={} deficit={} available_slots={} to_submit={}",
+            "Reconcile tick: pool_name={} idle={} warming={} deficit={} create_qps={} to_submit={}",
             poolName,
             counters.idleCount,
             warmingCount,
             plan.deficit,
-            plan.availableSlots,
+            config.warmupCreateQps,
             plan.toSubmit,
         )
 

@@ -20,7 +20,6 @@ import com.alibaba.opensandbox.sandbox.Sandbox
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import java.time.Duration
 import java.util.UUID
-import kotlin.math.ceil
 
 /**
  * Configuration for a client-side sandbox pool.
@@ -29,14 +28,14 @@ import kotlin.math.ceil
  * @property ownerId Unique process identity for primary lock ownership (node/process id, not pool id).
  * If not provided, a UUID-based default is generated.
  * @property maxIdle Standby idle target/cap (required).
- * @property warmupConcurrency Max concurrent creation workers during replenish (default: max(1, ceil(maxIdle * 0.2))).
+ * @property warmupCreateQps Maximum warmup create admissions per one-second reconcile tick (default: 10).
+ * @property warmupConcurrency Maximum concurrent post-create warmup workers (default: 128).
  * @property primaryLockTtl Lock TTL for distributed primary ownership (default: 60s).
  * @property stateStore Injected [PoolStateStore] implementation (required).
  * @property connectionConfig Connection config for lifecycle API (required).
  * @property creationSpec Template for creating sandboxes (replenish and direct-create) (required).
  * @property sandboxCreator Optional custom creator for pool-created sandboxes. When absent, the pool uses
  * [creationSpec] and the standard sandbox lifecycle API.
- * @property reconcileInterval Interval between reconcile ticks (default: 30s).
  * @property degradedThreshold Consecutive create failures required to transition to DEGRADED (default: 3).
  * @property acquireReadyTimeout Max time to wait for a sandbox returned by acquire to become ready (default: 30s).
  * @property acquireHealthCheckPollingInterval Poll interval while waiting for a sandbox returned by acquire to become
@@ -53,10 +52,13 @@ import kotlin.math.ceil
  * resolved value is always strictly less than [idleTimeout]. Pass an explicit value to the builder
  * to override.
  * @property warmupReadyTimeout Max time to wait for a pool-created sandbox to become ready (default: 30s).
+ * @property warmupHealthCheckInitialDelay Delay before the first warmup readiness check (default: zero).
  * @property warmupHealthCheckPollingInterval Poll interval while waiting for a pool-created sandbox to become ready
- * (default: 200ms).
+ * (default: 500ms).
  * @property warmupHealthCheck Optional custom health check for pool-created sandboxes.
  * @property warmupSandboxPreparer Optional callback invoked after a warmup sandbox is ready and before it is put idle.
+ * @property warmupPostPrepareHealthCheck Optional health check invoked after the warmup preparer succeeds.
+ * @property warmupPostPrepareHealthCheckTimeout Max time to wait for the post-prepare health check (default: 30s).
  * @property warmupSkipHealthCheck When true, skip readiness checks for pool-created sandboxes (default: false).
  * @property idleTimeout Timeout applied to pool-created sandboxes when they are initialized (default: 24h).
  * @property drainTimeout Max wait during graceful shutdown for in-flight ops (default: 30s).
@@ -73,13 +75,13 @@ class PoolConfig private constructor(
     val poolName: String,
     val ownerId: String,
     val maxIdle: Int,
+    val warmupCreateQps: Int,
     val warmupConcurrency: Int,
     val primaryLockTtl: java.time.Duration,
     val stateStore: PoolStateStore,
     val connectionConfig: ConnectionConfig,
     val creationSpec: PoolCreationSpec,
     val sandboxCreator: PooledSandboxCreator?,
-    val reconcileInterval: Duration,
     val degradedThreshold: Int,
     val acquireReadyTimeout: Duration,
     val acquireHealthCheckPollingInterval: Duration,
@@ -87,9 +89,12 @@ class PoolConfig private constructor(
     val acquireSkipHealthCheck: Boolean,
     val acquireMinRemainingTtl: Duration,
     val warmupReadyTimeout: Duration,
+    val warmupHealthCheckInitialDelay: Duration,
     val warmupHealthCheckPollingInterval: Duration,
     val warmupHealthCheck: ((Sandbox) -> Boolean)?,
     val warmupSandboxPreparer: SandboxPreparer?,
+    val warmupPostPrepareHealthCheck: ((Sandbox) -> Boolean)?,
+    val warmupPostPrepareHealthCheckTimeout: Duration,
     val warmupSkipHealthCheck: Boolean,
     val idleTimeout: Duration,
     val drainTimeout: Duration,
@@ -99,9 +104,9 @@ class PoolConfig private constructor(
         require(poolName.isNotBlank()) { "poolName must not be blank" }
         require(ownerId.isNotBlank()) { "ownerId must not be blank" }
         require(maxIdle >= 0) { "maxIdle must be >= 0" }
+        require(warmupCreateQps > 0) { "warmupCreateQps must be positive" }
         require(warmupConcurrency > 0) { "warmupConcurrency must be positive" }
         require(degradedThreshold > 0) { "degradedThreshold must be positive" }
-        require(!reconcileInterval.isNegative && !reconcileInterval.isZero) { "reconcileInterval must be positive" }
         require(!primaryLockTtl.isNegative && !primaryLockTtl.isZero) { "primaryLockTtl must be positive" }
         require(!acquireReadyTimeout.isNegative && !acquireReadyTimeout.isZero) {
             "acquireReadyTimeout must be positive"
@@ -115,8 +120,12 @@ class PoolConfig private constructor(
                 "idleTimeout ($idleTimeout); otherwise every warmed idle entry would be rejected"
         }
         require(!warmupReadyTimeout.isNegative && !warmupReadyTimeout.isZero) { "warmupReadyTimeout must be positive" }
+        require(!warmupHealthCheckInitialDelay.isNegative) { "warmupHealthCheckInitialDelay must be non-negative" }
         require(!warmupHealthCheckPollingInterval.isNegative && !warmupHealthCheckPollingInterval.isZero) {
             "warmupHealthCheckPollingInterval must be positive"
+        }
+        require(!warmupPostPrepareHealthCheckTimeout.isNegative && !warmupPostPrepareHealthCheckTimeout.isZero) {
+            "warmupPostPrepareHealthCheckTimeout must be positive"
         }
         require(!idleTimeout.isNegative && !idleTimeout.isZero) { "idleTimeout must be positive" }
         require(!drainTimeout.isNegative) { "drainTimeout must be non-negative" }
@@ -124,14 +133,17 @@ class PoolConfig private constructor(
     }
 
     companion object {
-        private val DEFAULT_RECONCILE_INTERVAL = Duration.ofSeconds(30)
         private val DEFAULT_PRIMARY_LOCK_TTL = Duration.ofSeconds(60)
         private const val DEFAULT_DEGRADED_THRESHOLD = 3
+        private const val DEFAULT_WARMUP_CREATE_QPS = 10
+        private const val DEFAULT_WARMUP_CONCURRENCY = 128
         private val DEFAULT_ACQUIRE_READY_TIMEOUT = Duration.ofSeconds(30)
         private val DEFAULT_ACQUIRE_HEALTH_CHECK_POLLING_INTERVAL = Duration.ofMillis(200)
         private val DEFAULT_ACQUIRE_MIN_REMAINING_TTL_CAP: Duration = Duration.ofSeconds(60)
         private val DEFAULT_WARMUP_READY_TIMEOUT = Duration.ofSeconds(30)
-        private val DEFAULT_WARMUP_HEALTH_CHECK_POLLING_INTERVAL = Duration.ofMillis(200)
+        private val DEFAULT_WARMUP_HEALTH_CHECK_INITIAL_DELAY = Duration.ZERO
+        private val DEFAULT_WARMUP_HEALTH_CHECK_POLLING_INTERVAL = Duration.ofMillis(500)
+        private val DEFAULT_WARMUP_POST_PREPARE_HEALTH_CHECK_TIMEOUT = Duration.ofSeconds(30)
         private val DEFAULT_IDLE_TIMEOUT = Duration.ofHours(24)
         private val DEFAULT_DRAIN_TIMEOUT = Duration.ofSeconds(30)
         private const val DEFAULT_MAX_ACQUIRE_RETRIES = 3
@@ -160,13 +172,13 @@ class PoolConfig private constructor(
             poolName = poolName,
             ownerId = ownerId,
             maxIdle = maxIdle,
+            warmupCreateQps = warmupCreateQps,
             warmupConcurrency = warmupConcurrency,
             primaryLockTtl = primaryLockTtl,
             stateStore = stateStore,
             connectionConfig = connectionConfig,
             creationSpec = creationSpec,
             sandboxCreator = sandboxCreator,
-            reconcileInterval = reconcileInterval,
             degradedThreshold = degradedThreshold,
             acquireReadyTimeout = acquireReadyTimeout,
             acquireHealthCheckPollingInterval = acquireHealthCheckPollingInterval,
@@ -174,9 +186,12 @@ class PoolConfig private constructor(
             acquireSkipHealthCheck = acquireSkipHealthCheck,
             acquireMinRemainingTtl = acquireMinRemainingTtl,
             warmupReadyTimeout = warmupReadyTimeout,
+            warmupHealthCheckInitialDelay = warmupHealthCheckInitialDelay,
             warmupHealthCheckPollingInterval = warmupHealthCheckPollingInterval,
             warmupHealthCheck = warmupHealthCheck,
             warmupSandboxPreparer = warmupSandboxPreparer,
+            warmupPostPrepareHealthCheck = warmupPostPrepareHealthCheck,
+            warmupPostPrepareHealthCheckTimeout = warmupPostPrepareHealthCheckTimeout,
             warmupSkipHealthCheck = warmupSkipHealthCheck,
             idleTimeout = idleTimeout,
             drainTimeout = drainTimeout,
@@ -188,13 +203,13 @@ class PoolConfig private constructor(
         private var poolName: String? = null
         private var ownerId: String? = null
         private var maxIdle: Int? = null
-        private var warmupConcurrency: Int? = null
+        private var warmupCreateQps: Int = DEFAULT_WARMUP_CREATE_QPS
+        private var warmupConcurrency: Int = DEFAULT_WARMUP_CONCURRENCY
         private var primaryLockTtl: Duration = DEFAULT_PRIMARY_LOCK_TTL
         private var stateStore: PoolStateStore? = null
         private var connectionConfig: ConnectionConfig? = null
         private var creationSpec: PoolCreationSpec? = null
         private var sandboxCreator: PooledSandboxCreator? = null
-        private var reconcileInterval: Duration = DEFAULT_RECONCILE_INTERVAL
         private var degradedThreshold: Int = DEFAULT_DEGRADED_THRESHOLD
         private var acquireReadyTimeout: Duration = DEFAULT_ACQUIRE_READY_TIMEOUT
         private var acquireHealthCheckPollingInterval: Duration = DEFAULT_ACQUIRE_HEALTH_CHECK_POLLING_INTERVAL
@@ -202,9 +217,13 @@ class PoolConfig private constructor(
         private var acquireSkipHealthCheck: Boolean = false
         private var acquireMinRemainingTtl: Duration? = null
         private var warmupReadyTimeout: Duration = DEFAULT_WARMUP_READY_TIMEOUT
+        private var warmupHealthCheckInitialDelay: Duration = DEFAULT_WARMUP_HEALTH_CHECK_INITIAL_DELAY
         private var warmupHealthCheckPollingInterval: Duration = DEFAULT_WARMUP_HEALTH_CHECK_POLLING_INTERVAL
         private var warmupHealthCheck: ((Sandbox) -> Boolean)? = null
         private var warmupSandboxPreparer: SandboxPreparer? = null
+        private var warmupPostPrepareHealthCheck: ((Sandbox) -> Boolean)? = null
+        private var warmupPostPrepareHealthCheckTimeout: Duration =
+            DEFAULT_WARMUP_POST_PREPARE_HEALTH_CHECK_TIMEOUT
         private var warmupSkipHealthCheck: Boolean = false
         private var idleTimeout: Duration = DEFAULT_IDLE_TIMEOUT
         private var drainTimeout: Duration = DEFAULT_DRAIN_TIMEOUT
@@ -222,6 +241,11 @@ class PoolConfig private constructor(
 
         fun maxIdle(maxIdle: Int): Builder {
             this.maxIdle = maxIdle
+            return this
+        }
+
+        fun warmupCreateQps(warmupCreateQps: Int): Builder {
+            this.warmupCreateQps = warmupCreateQps
             return this
         }
 
@@ -252,11 +276,6 @@ class PoolConfig private constructor(
 
         fun sandboxCreator(sandboxCreator: PooledSandboxCreator): Builder {
             this.sandboxCreator = sandboxCreator
-            return this
-        }
-
-        fun reconcileInterval(reconcileInterval: Duration): Builder {
-            this.reconcileInterval = reconcileInterval
             return this
         }
 
@@ -305,6 +324,11 @@ class PoolConfig private constructor(
             return this
         }
 
+        fun warmupHealthCheckInitialDelay(warmupHealthCheckInitialDelay: Duration): Builder {
+            this.warmupHealthCheckInitialDelay = warmupHealthCheckInitialDelay
+            return this
+        }
+
         fun warmupHealthCheckPollingInterval(warmupHealthCheckPollingInterval: Duration): Builder {
             this.warmupHealthCheckPollingInterval = warmupHealthCheckPollingInterval
             return this
@@ -317,6 +341,16 @@ class PoolConfig private constructor(
 
         fun warmupSandboxPreparer(warmupSandboxPreparer: SandboxPreparer): Builder {
             this.warmupSandboxPreparer = warmupSandboxPreparer
+            return this
+        }
+
+        fun warmupPostPrepareHealthCheck(warmupPostPrepareHealthCheck: (Sandbox) -> Boolean): Builder {
+            this.warmupPostPrepareHealthCheck = warmupPostPrepareHealthCheck
+            return this
+        }
+
+        fun warmupPostPrepareHealthCheckTimeout(warmupPostPrepareHealthCheckTimeout: Duration): Builder {
+            this.warmupPostPrepareHealthCheckTimeout = warmupPostPrepareHealthCheckTimeout
             return this
         }
 
@@ -358,7 +392,6 @@ class PoolConfig private constructor(
             val conn = connectionConfig ?: throw IllegalArgumentException("connectionConfig is required")
             val spec = creationSpec ?: throw IllegalArgumentException("creationSpec is required")
 
-            val warmup = warmupConcurrency ?: ceil(max * 0.2).toInt().coerceAtLeast(1)
             val resolvedAcquireMinRemainingTtl =
                 acquireMinRemainingTtl ?: defaultAcquireMinRemainingTtl(idleTimeout)
 
@@ -366,13 +399,13 @@ class PoolConfig private constructor(
                 poolName = name,
                 ownerId = owner,
                 maxIdle = max,
-                warmupConcurrency = warmup,
+                warmupCreateQps = warmupCreateQps,
+                warmupConcurrency = warmupConcurrency,
                 primaryLockTtl = primaryLockTtl,
                 stateStore = store,
                 connectionConfig = conn,
                 creationSpec = spec,
                 sandboxCreator = sandboxCreator,
-                reconcileInterval = reconcileInterval,
                 degradedThreshold = degradedThreshold,
                 acquireReadyTimeout = acquireReadyTimeout,
                 acquireHealthCheckPollingInterval = acquireHealthCheckPollingInterval,
@@ -380,9 +413,12 @@ class PoolConfig private constructor(
                 acquireSkipHealthCheck = acquireSkipHealthCheck,
                 acquireMinRemainingTtl = resolvedAcquireMinRemainingTtl,
                 warmupReadyTimeout = warmupReadyTimeout,
+                warmupHealthCheckInitialDelay = warmupHealthCheckInitialDelay,
                 warmupHealthCheckPollingInterval = warmupHealthCheckPollingInterval,
                 warmupHealthCheck = warmupHealthCheck,
                 warmupSandboxPreparer = warmupSandboxPreparer,
+                warmupPostPrepareHealthCheck = warmupPostPrepareHealthCheck,
+                warmupPostPrepareHealthCheckTimeout = warmupPostPrepareHealthCheckTimeout,
                 warmupSkipHealthCheck = warmupSkipHealthCheck,
                 idleTimeout = idleTimeout,
                 drainTimeout = drainTimeout,

@@ -45,6 +45,7 @@ import type {
   RenewSandboxExpirationResponse,
   SandboxId,
   SandboxInfo,
+  SandboxLifecycle,
   SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
@@ -171,6 +172,10 @@ export interface SandboxCreateOptions {
    * Opaque extension parameters passed through to the server as-is.
    */
   extensions?: Record<string, string>;
+  /**
+   * Optional declarative lifecycle hooks executed inside the sandbox.
+   */
+  lifecycle?: SandboxLifecycle;
   /**
    * Optional runtime platform constraint used for provisioning.
    */
@@ -412,6 +417,7 @@ export class Sandbox {
       credentialProxy: opts.credentialProxy,
       volumes: opts.volumes,
       extensions: opts.extensions ?? {},
+      lifecycle: opts.lifecycle,
       platform: opts.platform,
     };
     if (timeoutSeconds !== null) {

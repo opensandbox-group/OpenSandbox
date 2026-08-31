@@ -96,7 +96,7 @@ class TestKubernetesSandboxServiceCreate:
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
         create_sandbox_request.credential_proxy = CredentialProxyConfig(enabled=True)
         k8s_service.app_config.egress = EgressConfig(
-            image="opensandbox/egress:v1.1.6", mode=EGRESS_MODE_DNS
+            image="opensandbox/egress:v1.1.7", mode=EGRESS_MODE_DNS
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -247,6 +247,7 @@ class TestKubernetesSandboxServiceCreate:
 
         # Override config values
         k8s_service.app_config.kubernetes.sandbox_create_timeout_seconds = 120
+        k8s_service.app_config.kubernetes.pool_acquisition_timeout_seconds = 15
         k8s_service.app_config.kubernetes.sandbox_create_poll_interval_seconds = 0.5
 
         with patch.object(k8s_service, "_wait_for_sandbox_ready", wraps=k8s_service._wait_for_sandbox_ready) as mock_wait:
@@ -255,7 +256,37 @@ class TestKubernetesSandboxServiceCreate:
         mock_wait.assert_called_once()
         _, kwargs = mock_wait.call_args
         assert kwargs["timeout_seconds"] == 120
+        assert kwargs["pool_acquisition_timeout_seconds"] == 15
         assert kwargs["poll_interval_seconds"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_cleans_up_workload_after_pool_capacity_timeout(
+        self, k8s_service, create_sandbox_request
+    ):
+        create_sandbox_request.extensions = {"poolRef": "*"}
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        capacity_error = HTTPException(
+            status_code=429,
+            detail={
+                "code": SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED,
+                "message": "Pool capacity remained unavailable",
+            },
+            headers={"Retry-After": "5"},
+        )
+
+        with patch.object(
+            k8s_service,
+            "_wait_for_sandbox_ready",
+            side_effect=capacity_error,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert exc_info.value is capacity_error
+        k8s_service.workload_provider.delete_workload.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_rejects_image_auth_when_provider_not_supported(
@@ -319,11 +350,19 @@ class TestKubernetesSandboxServiceCreate:
         assert kwargs["labels"].get(SANDBOX_MANUAL_CLEANUP_LABEL) == "true"
 
     @pytest.mark.asyncio
-    async def test_create_sandbox_with_network_policy_passes_egress_token_and_annotations(
+    async def test_create_sandbox_with_network_policy_passes_unified_egress_settings(
         self, k8s_service, create_sandbox_request
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
-        k8s_service.app_config.egress = EgressConfig(image="opensandbox/egress:v1.1.6")
+        create_sandbox_request.env = {
+            "OPENSANDBOX_EGRESS_LOG_LEVEL": "debug",
+            "SANDBOX_ENV": "value",
+        }
+        k8s_service.app_config.egress = EgressConfig(
+            image="opensandbox/egress:v1.1.7",
+            disable_ipv6=False,
+            requests={"cpu": "25m"},
+        )
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-id", "uid": "uid-1"
         }
@@ -340,8 +379,17 @@ class TestKubernetesSandboxServiceCreate:
             await k8s_service.create_sandbox(create_sandbox_request)
 
         _, kwargs = k8s_service.workload_provider.create_workload.call_args
-        assert kwargs["egress_auth_token"] == "egress-token"
-        assert kwargs["egress_mode"] == EGRESS_MODE_DNS
+        egress_settings = kwargs["egress_settings"]
+        assert egress_settings.network_policy is create_sandbox_request.network_policy
+        assert egress_settings.auth_token == "egress-token"
+        assert egress_settings.image == "opensandbox/egress:v1.1.7"
+        assert egress_settings.mode == EGRESS_MODE_DNS
+        assert egress_settings.disable_ipv6 is False
+        assert egress_settings.resource_requests == {"cpu": "25m"}
+        assert egress_settings.resource_limits is None
+        assert egress_settings.env == {"OPENSANDBOX_EGRESS_LOG_LEVEL": "debug"}
+        assert kwargs["env"] == {"SANDBOX_ENV": "value"}
+        assert "network_policy" not in kwargs
         assert kwargs["annotations"][SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] == "egress-token"
 
     @pytest.mark.asyncio
@@ -397,7 +445,7 @@ class TestKubernetesSandboxServiceCreate:
     ):
         create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
         k8s_service.app_config.egress = EgressConfig(
-            image="opensandbox/egress:v1.1.6",
+            image="opensandbox/egress:v1.1.7",
             mode=EGRESS_MODE_DNS_NFT,
         )
         k8s_service.workload_provider.create_workload.return_value = {
@@ -416,7 +464,7 @@ class TestKubernetesSandboxServiceCreate:
             await k8s_service.create_sandbox(create_sandbox_request)
 
         _, kwargs = k8s_service.workload_provider.create_workload.call_args
-        assert kwargs["egress_mode"] == EGRESS_MODE_DNS_NFT
+        assert kwargs["egress_settings"].mode == EGRESS_MODE_DNS_NFT
 
     @pytest.mark.asyncio
     async def test_create_sandbox_passes_platform_to_workload_provider(
@@ -837,6 +885,11 @@ class TestKubernetesSandboxServiceCreate:
 
 class TestWaitForSandboxReady:
     """_wait_for_sandbox_ready method tests"""
+
+    def test_pool_capacity_retry_after_matches_acquisition_window(self, k8s_service):
+        error = k8s_service._pool_capacity_exhausted_error(30)
+
+        assert error.headers == {"Retry-After": "30"}
     
     @pytest.mark.asyncio
     async def test_wait_for_running_pod_succeeds(self, k8s_service, mock_workload):
@@ -898,6 +951,141 @@ class TestWaitForSandboxReady:
         
         assert exc_info.value.status_code == 504  # Gateway Timeout
         assert "timeout" in exc_info.value.detail["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_wait_returns_retryable_error_when_pool_capacity_stays_exhausted(
+        self, k8s_service, mock_workload
+    ):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Pending",
+            "reason": "POOL_CAPACITY_EXHAUSTED",
+            "message": "Pool capacity is exhausted",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=1,
+                poll_interval_seconds=0.01,
+                pool_acquisition_timeout_seconds=0.02,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert (
+            exc_info.value.detail["code"]
+            == SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED
+        )
+        assert exc_info.value.headers == {"Retry-After": "1"}
+
+    @pytest.mark.asyncio
+    async def test_wait_succeeds_when_pool_capacity_is_released(
+        self, k8s_service, mock_workload
+    ):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.side_effect = [
+            {
+                "state": "Pending",
+                "reason": "POOL_CAPACITY_EXHAUSTED",
+                "message": "Pool capacity is exhausted",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+            {
+                "state": "Running",
+                "reason": "RUNNING",
+                "message": "Sandbox is running",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+        ]
+
+        result = await k8s_service._wait_for_sandbox_ready(
+            "test-sandbox-id",
+            timeout_seconds=1,
+            poll_interval_seconds=0.01,
+            pool_acquisition_timeout_seconds=0.2,
+        )
+
+        assert result == mock_workload
+
+    @pytest.mark.asyncio
+    async def test_overall_timeout_preserves_pool_capacity_error_classification(
+        self, k8s_service, mock_workload
+    ):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Pending",
+            "reason": "POOL_CAPACITY_EXHAUSTED",
+            "message": "Pool capacity is exhausted",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=0.02,
+                poll_interval_seconds=0.01,
+                pool_acquisition_timeout_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert (
+            exc_info.value.detail["code"]
+            == SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED
+        )
+
+    @pytest.mark.asyncio
+    async def test_wait_accumulates_pool_capacity_across_transient_recovery(
+        self, k8s_service, mock_workload
+    ):
+        clock = SimpleNamespace(now=0.0)
+
+        async def advance_clock(seconds: float) -> None:
+            clock.now += seconds
+
+        capacity_status = {
+            "state": "Pending",
+            "reason": "POOL_CAPACITY_EXHAUSTED",
+            "message": "Pool capacity is exhausted",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        generic_pending_status = {
+            "state": "Pending",
+            "reason": "BATCHSANDBOX_PENDING",
+            "message": "Sandbox is pending",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.side_effect = [
+            capacity_status,
+            generic_pending_status,
+            capacity_status,
+            generic_pending_status,
+        ]
+
+        with (
+            patch(
+                "opensandbox_server.services.k8s.kubernetes_service.time.time",
+                side_effect=lambda: clock.now,
+            ),
+            patch(
+                "opensandbox_server.services.k8s.kubernetes_service.asyncio.sleep",
+                new=advance_clock,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=4,
+                poll_interval_seconds=1,
+                pool_acquisition_timeout_seconds=2,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert (
+            exc_info.value.detail["code"]
+            == SandboxErrorCodes.K8S_POOL_CAPACITY_EXHAUSTED
+        )
 
     @pytest.mark.asyncio
     async def test_wait_returns_400_when_scheduler_marks_platform_unschedulable(self, k8s_service, mock_workload):

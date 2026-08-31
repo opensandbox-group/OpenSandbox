@@ -33,6 +33,7 @@ import (
 )
 
 type finalizeStore interface {
+	BindStreamKind(api.StreamRef) error
 	GetFinalizeIntent(streamRef string, revision uint64) (state.FinalizeIntent, bool, error)
 	PutFinalizeIntent(state.FinalizeIntent) error
 	ListFinalizeIntents() ([]state.FinalizeIntent, error)
@@ -81,6 +82,7 @@ type Pipeline struct {
 	sandboxBytes  map[string]int64
 	budgetChanged chan struct{}
 	limiters      map[string]*rate.Limiter
+	limiterUsers  map[string]int
 	metrics       pipelineMetrics
 }
 
@@ -95,6 +97,8 @@ type pipelineMetrics struct {
 
 type worker struct {
 	streamRef   api.StreamRef
+	resource    api.Resource
+	metadata    api.StreamMetadata
 	input       chan admittedEvent
 	done        chan struct{}
 	predecessor <-chan struct{}
@@ -159,11 +163,11 @@ func New(cfg Config, source api.Source, sink api.Sink, store finalizeStore, targ
 		cancelWorkers()
 		return nil, err
 	}
-	return &Pipeline{cfg: cfg, source: source, sink: sink, state: store, targetID: targetID, log: log.Named("pipeline"), onError: onError, workers: make(map[string]*worker), handoffs: make(map[string]<-chan struct{}), workerCtx: workerCtx, cancelWorkers: cancelWorkers, workerErrors: make(chan error, 1), sandboxBytes: make(map[string]int64), budgetChanged: make(chan struct{}, 1), limiters: make(map[string]*rate.Limiter), metrics: metrics}, nil
+	return &Pipeline{cfg: cfg, source: source, sink: sink, state: store, targetID: targetID, log: log.Named("pipeline"), onError: onError, workers: make(map[string]*worker), handoffs: make(map[string]<-chan struct{}), workerCtx: workerCtx, cancelWorkers: cancelWorkers, workerErrors: make(chan error, 1), sandboxBytes: make(map[string]int64), budgetChanged: make(chan struct{}, 1), limiters: make(map[string]*rate.Limiter), limiterUsers: make(map[string]int), metrics: metrics}, nil
 }
 
 func (p *Pipeline) Run(ctx context.Context, events <-chan api.SourceEvent) error {
-	if err := p.reconcileFinalizeIntents(); err != nil {
+	if err := p.reconcileFinalizeIntents(ctx); err != nil {
 		return err
 	}
 	for {
@@ -186,11 +190,12 @@ func (p *Pipeline) Run(ctx context.Context, events <-chan api.SourceEvent) error
 				}
 				return errors.New("source event channel closed unexpectedly")
 			}
-			if !event.Valid() {
-				return errors.New("invalid source event")
+			event = cloneSourceEventMetadata(event)
+			if err := validateSourceEvent(event); err != nil {
+				return err
 			}
 			streamRef := eventStream(event)
-			worker, err := p.getWorker(streamRef)
+			worker, err := p.getWorker(streamRef, eventResource(event), eventMetadata(event))
 			if err != nil {
 				return err
 			}
@@ -232,7 +237,7 @@ func (p *Pipeline) sendEvent(ctx context.Context, worker *worker, event api.Sour
 	return nil
 }
 
-func (p *Pipeline) reconcileFinalizeIntents() error {
+func (p *Pipeline) reconcileFinalizeIntents(ctx context.Context) error {
 	intents, err := p.state.ListFinalizeIntents()
 	if err != nil {
 		return err
@@ -241,21 +246,44 @@ func (p *Pipeline) reconcileFinalizeIntents() error {
 		if intent.TargetID != p.targetID || intent.FinalizeID != identity.FinalizeID(intent.StreamRef, intent.Revision, p.targetID) {
 			return fmt.Errorf("finalize intent identity mismatch for stream %s revision %d", intent.StreamRef, intent.Revision)
 		}
+	}
+	for _, intent := range intents {
 		if intent.SourceDone && !intent.SinkDone {
 			return fmt.Errorf("finalize intent for stream %s revision %d completed Source before Sink", intent.StreamRef, intent.Revision)
 		}
 		if intent.SourceDone {
 			continue
 		}
-		stream, found, err := p.state.GetSourceStream(intent.StreamRef)
-		if err != nil {
-			return err
-		}
-		if !found || stream.AcknowledgedRevision < intent.Revision {
+		if intent.StreamKind == "" {
+			stream, found, err := p.state.GetSourceStream(intent.StreamRef)
+			if err != nil {
+				return err
+			}
+			if !found || stream.AcknowledgedRevision < intent.Revision {
+				continue
+			}
+			if !intent.SinkDone {
+				return fmt.Errorf("source revision %d is acknowledged without a durable Sink completion", intent.Revision)
+			}
+			intent.SourceDone = true
+			if err := p.state.PutFinalizeIntent(intent); err != nil {
+				return err
+			}
 			continue
 		}
+
+		request := finalizeRequest(intent)
 		if !intent.SinkDone {
-			return fmt.Errorf("source revision %d is acknowledged without a durable Sink completion", intent.Revision)
+			if err := p.finalizeSinkWithRetry(ctx, request); err != nil {
+				return err
+			}
+			intent.SinkDone = true
+			if err := p.state.PutFinalizeIntent(intent); err != nil {
+				return err
+			}
+		}
+		if err := p.acknowledgeEndWithRetry(ctx, cloneEndToken(*intent.EndToken)); err != nil {
+			return err
 		}
 		intent.SourceDone = true
 		if err := p.state.PutFinalizeIntent(intent); err != nil {
@@ -265,7 +293,7 @@ func (p *Pipeline) reconcileFinalizeIntents() error {
 	return nil
 }
 
-func (p *Pipeline) getWorker(streamRef api.StreamRef) (*worker, error) {
+func (p *Pipeline) getWorker(streamRef api.StreamRef, resource api.Resource, metadata api.StreamMetadata) (*worker, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -273,15 +301,29 @@ func (p *Pipeline) getWorker(streamRef api.StreamRef) (*worker, error) {
 	}
 	p.activeSends.Add(1)
 	if existing := p.workers[streamRef.ID]; existing != nil {
+		if existing.streamRef != streamRef {
+			p.activeSends.Done()
+			return nil, errors.New("stream kind changed for an active stream")
+		}
+		if existing.resource != resource || !existing.metadata.Equal(metadata) {
+			p.activeSends.Done()
+			return nil, errors.New("stream identity or metadata changed")
+		}
 		return existing, nil
+	}
+	if err := p.state.BindStreamKind(streamRef); err != nil {
+		p.activeSends.Done()
+		return nil, err
 	}
 	predecessor := p.handoffs[streamRef.ID]
 	delete(p.handoffs, streamRef.ID)
-	w := &worker{streamRef: streamRef, input: make(chan admittedEvent, perStreamQueueSize), done: make(chan struct{}), predecessor: predecessor}
+	w := &worker{streamRef: streamRef, resource: resource, metadata: metadata.Clone(), input: make(chan admittedEvent, perStreamQueueSize), done: make(chan struct{}), predecessor: predecessor}
 	p.workers[streamRef.ID] = w
+	p.retainLimiter(resource.SandboxID)
 	p.wg.Add(1)
 	safego.Go(func() {
 		defer p.wg.Done()
+		defer p.releaseLimiter(resource.SandboxID)
 		defer func() {
 			close(w.done)
 			p.clearHandoff(w)
@@ -328,7 +370,7 @@ func (p *Pipeline) runWorker(ctx context.Context, worker *worker) error {
 		if len(items) == 0 {
 			return nil
 		}
-		if err := p.consumeWithRetry(ctx, worker.streamRef, items); err != nil {
+		if err := p.consumeWithRetry(ctx, worker.streamRef, worker.metadata, items); err != nil {
 			return err
 		}
 		for _, item := range items {
@@ -378,7 +420,7 @@ func (p *Pipeline) runWorker(ctx context.Context, worker *worker) error {
 	}
 }
 
-func (p *Pipeline) consumeWithRetry(ctx context.Context, streamRef api.StreamRef, pendingItems []pending) error {
+func (p *Pipeline) consumeWithRetry(ctx context.Context, streamRef api.StreamRef, metadata api.StreamMetadata, pendingItems []pending) error {
 	scope := &retryScope{}
 	defer scope.close()
 	batch := api.Batch{StreamRef: streamRef, Items: make([]api.BatchItem, len(pendingItems))}
@@ -388,6 +430,7 @@ func (p *Pipeline) consumeWithRetry(ctx context.Context, streamRef api.StreamRef
 	err := p.retry(ctx, retryOperation{
 		call: func(callCtx context.Context) error {
 			started := time.Now()
+			batch.Metadata = metadata.Clone()
 			err := p.sink.Consume(callCtx, batch)
 			p.metrics.consumeMillis.Record(context.Background(), float64(time.Since(started).Microseconds())/1000)
 			return err
@@ -421,6 +464,7 @@ func (p *Pipeline) finalize(ctx context.Context, worker *worker, end *api.Stream
 		return errors.New("stream end has an invalid coverage boundary")
 	}
 	finalizeID := identity.FinalizeID(end.StreamRef.ID, end.Revision, p.targetID)
+	outcome := worker.mergeDropOutcome(end.Outcome)
 	intent, found, err := p.state.GetFinalizeIntent(end.StreamRef.ID, end.Revision)
 	if err != nil {
 		return err
@@ -430,15 +474,24 @@ func (p *Pipeline) finalize(ctx context.Context, worker *worker, end *api.Stream
 		if finalizedAt.Before(end.CoverageStartedAt) {
 			finalizedAt = end.CoverageStartedAt
 		}
-		intent = state.FinalizeIntent{FinalizeID: finalizeID, TargetID: p.targetID, StreamRef: end.StreamRef.ID, Revision: end.Revision, CoverageStartedAt: end.CoverageStartedAt, FinalizedAt: finalizedAt}
+		intent = newFinalizeIntent(finalizeID, p.targetID, finalizedAt, end, outcome)
 		if err := p.state.PutFinalizeIntent(intent); err != nil {
 			return err
 		}
-	} else if intent.FinalizeID != finalizeID || intent.TargetID != p.targetID || !intent.CoverageStartedAt.Equal(end.CoverageStartedAt) {
-		return errors.New("finalize intent identity mismatch")
+	} else {
+		if intent.FinalizeID != finalizeID || intent.TargetID != p.targetID || !intent.CoverageStartedAt.Equal(end.CoverageStartedAt) {
+			return errors.New("finalize intent identity mismatch")
+		}
+		if intent.StreamKind == "" {
+			intent = enrichLegacyFinalizeIntent(intent, end, outcome)
+			if err := p.state.PutFinalizeIntent(intent); err != nil {
+				return err
+			}
+		} else if !finalizeIntentMatchesEvent(intent, end, outcome) {
+			return errors.New("stream end does not match persisted finalize intent")
+		}
 	}
-	outcome := worker.mergeDropOutcome(end.Outcome)
-	request := api.FinalizeRequest{FinalizeID: intent.FinalizeID, TargetID: intent.TargetID, StreamRef: end.StreamRef, Revision: end.Revision, CoverageStartedAt: intent.CoverageStartedAt, Resource: end.Resource, Outcome: outcome, FinalizedAt: intent.FinalizedAt}
+	request := finalizeRequest(intent)
 	if !intent.SinkDone {
 		if err := p.finalizeSinkWithRetry(ctx, request); err != nil {
 			return err
@@ -449,7 +502,7 @@ func (p *Pipeline) finalize(ctx context.Context, worker *worker, end *api.Stream
 		}
 	}
 	if !intent.SourceDone {
-		if err := p.acknowledgeEndWithRetry(ctx, end.EndToken); err != nil {
+		if err := p.acknowledgeEndWithRetry(ctx, cloneEndToken(*intent.EndToken)); err != nil {
 			return err
 		}
 		intent.SourceDone = true
@@ -457,10 +510,86 @@ func (p *Pipeline) finalize(ctx context.Context, worker *worker, end *api.Stream
 			return err
 		}
 	}
-	p.budgetMu.Lock()
-	delete(p.limiters, end.Resource.SandboxID)
-	p.budgetMu.Unlock()
 	return nil
+}
+
+func newFinalizeIntent(finalizeID, targetID string, finalizedAt time.Time, end *api.StreamEnd, outcome api.SourceOutcome) state.FinalizeIntent {
+	resource := end.Resource
+	frozenOutcome := cloneSourceOutcome(outcome)
+	endToken := cloneEndToken(end.EndToken)
+	return state.FinalizeIntent{
+		FinalizeID:        finalizeID,
+		TargetID:          targetID,
+		StreamRef:         end.StreamRef.ID,
+		StreamKind:        end.StreamRef.Kind,
+		Revision:          end.Revision,
+		CoverageStartedAt: end.CoverageStartedAt,
+		FinalizedAt:       finalizedAt,
+		Resource:          &resource,
+		Metadata:          end.Metadata.Clone(),
+		Outcome:           &frozenOutcome,
+		EndToken:          &endToken,
+	}
+}
+
+func enrichLegacyFinalizeIntent(intent state.FinalizeIntent, end *api.StreamEnd, outcome api.SourceOutcome) state.FinalizeIntent {
+	replay := newFinalizeIntent(intent.FinalizeID, intent.TargetID, intent.FinalizedAt, end, outcome)
+	intent.StreamKind = replay.StreamKind
+	intent.Resource = replay.Resource
+	intent.Metadata = replay.Metadata
+	intent.Outcome = replay.Outcome
+	intent.EndToken = replay.EndToken
+	return intent
+}
+
+func finalizeIntentMatchesEvent(intent state.FinalizeIntent, end *api.StreamEnd, outcome api.SourceOutcome) bool {
+	return intent.StreamRef == end.StreamRef.ID &&
+		intent.StreamKind == end.StreamRef.Kind &&
+		intent.Revision == end.Revision &&
+		intent.Resource != nil && *intent.Resource == end.Resource &&
+		intent.Metadata.Equal(end.Metadata) &&
+		intent.Outcome != nil && equalSourceOutcome(*intent.Outcome, outcome) &&
+		intent.EndToken != nil && equalEndToken(*intent.EndToken, end.EndToken)
+}
+
+func finalizeRequest(intent state.FinalizeIntent) api.FinalizeRequest {
+	return api.FinalizeRequest{
+		FinalizeID:        intent.FinalizeID,
+		TargetID:          intent.TargetID,
+		StreamRef:         api.StreamRef{ID: intent.StreamRef, Kind: intent.StreamKind},
+		Revision:          intent.Revision,
+		CoverageStartedAt: intent.CoverageStartedAt,
+		Resource:          *intent.Resource,
+		Metadata:          intent.Metadata.Clone(),
+		Outcome:           cloneSourceOutcome(*intent.Outcome),
+		FinalizedAt:       intent.FinalizedAt,
+	}
+}
+
+func cloneSourceOutcome(outcome api.SourceOutcome) api.SourceOutcome {
+	outcome.LossReasons = append([]string(nil), outcome.LossReasons...)
+	return outcome
+}
+
+func cloneEndToken(token api.EndToken) api.EndToken {
+	token.Value = append([]byte(nil), token.Value...)
+	return token
+}
+
+func equalSourceOutcome(left, right api.SourceOutcome) bool {
+	if left.HadDrops != right.HadDrops || left.HadSourceGaps != right.HadSourceGaps || len(left.LossReasons) != len(right.LossReasons) {
+		return false
+	}
+	for index := range left.LossReasons {
+		if left.LossReasons[index] != right.LossReasons[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalEndToken(left, right api.EndToken) bool {
+	return left.ID == right.ID && left.Source == right.Source && left.StreamRef == right.StreamRef && string(left.Value) == string(right.Value)
 }
 
 func (p *Pipeline) acknowledgeEndWithRetry(ctx context.Context, token api.EndToken) error {
@@ -709,6 +838,29 @@ func (p *Pipeline) limiter(sandboxID string) *rate.Limiter {
 	return limiter
 }
 
+func (p *Pipeline) retainLimiter(sandboxID string) {
+	if p.cfg.PerSandboxRateLimit <= 0 {
+		return
+	}
+	p.budgetMu.Lock()
+	p.limiterUsers[sandboxID]++
+	p.budgetMu.Unlock()
+}
+
+func (p *Pipeline) releaseLimiter(sandboxID string) {
+	if p.cfg.PerSandboxRateLimit <= 0 {
+		return
+	}
+	p.budgetMu.Lock()
+	if p.limiterUsers[sandboxID] <= 1 {
+		delete(p.limiterUsers, sandboxID)
+		delete(p.limiters, sandboxID)
+	} else {
+		p.limiterUsers[sandboxID]--
+	}
+	p.budgetMu.Unlock()
+}
+
 func (p *Pipeline) release(bytes int64, sandboxID string) {
 	if bytes == 0 {
 		return
@@ -745,6 +897,9 @@ func eventBytes(delivery *api.Delivery) int64 {
 	for key, value := range delivery.Record.Attributes {
 		size += int64(len(key) + len(value))
 	}
+	for key, value := range delivery.Metadata {
+		size += int64(len(key) + len(value))
+	}
 	return size
 }
 
@@ -778,13 +933,84 @@ func eventStream(event api.SourceEvent) api.StreamRef {
 	return event.End.StreamRef
 }
 
+func eventResource(event api.SourceEvent) api.Resource {
+	if event.Delivery != nil {
+		return event.Delivery.Record.Resource
+	}
+	return event.End.Resource
+}
+
+func eventMetadata(event api.SourceEvent) api.StreamMetadata {
+	if event.Delivery != nil {
+		return event.Delivery.Metadata
+	}
+	return event.End.Metadata
+}
+
+func cloneSourceEventMetadata(event api.SourceEvent) api.SourceEvent {
+	if event.Delivery != nil {
+		delivery := *event.Delivery
+		delivery.Metadata = delivery.Metadata.Clone()
+		event.Delivery = &delivery
+	}
+	if event.End != nil {
+		end := *event.End
+		end.Metadata = end.Metadata.Clone()
+		event.End = &end
+	}
+	return event
+}
+
 func compatible(source, sink api.Capabilities) bool {
-	for _, sourceKind := range source.RecordKinds {
-		for _, sinkKind := range sink.RecordKinds {
-			if sourceKind == sinkKind {
-				return true
-			}
+	if len(source.RecordKinds) == 0 || len(sink.RecordKinds) == 0 {
+		return false
+	}
+	accepted := make(map[api.RecordKind]struct{}, len(sink.RecordKinds))
+	for _, kind := range sink.RecordKinds {
+		if kind != "" {
+			accepted[kind] = struct{}{}
 		}
 	}
-	return false
+	for _, sourceKind := range source.RecordKinds {
+		if sourceKind == "" {
+			return false
+		}
+		if _, ok := accepted[sourceKind]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func validateSourceEvent(event api.SourceEvent) error {
+	if !event.Valid() {
+		return errors.New("invalid source event")
+	}
+	if event.Delivery != nil {
+		delivery := event.Delivery
+		if delivery.StreamRef.ID == "" || delivery.StreamRef.Kind == "" {
+			return errors.New("delivery has an invalid stream reference")
+		}
+		if delivery.Record.Kind != delivery.StreamRef.Kind {
+			return fmt.Errorf("record kind %q does not match stream kind %q", delivery.Record.Kind, delivery.StreamRef.Kind)
+		}
+		if delivery.AckToken.StreamRef != delivery.StreamRef {
+			return errors.New("ack token stream reference does not match delivery")
+		}
+		if err := delivery.Metadata.Validate(); err != nil {
+			return fmt.Errorf("delivery has invalid stream metadata: %w", err)
+		}
+		return nil
+	}
+	end := event.End
+	if end.StreamRef.ID == "" || end.StreamRef.Kind == "" {
+		return errors.New("stream end has an invalid stream reference")
+	}
+	if end.EndToken.StreamRef != end.StreamRef {
+		return errors.New("end token stream reference does not match stream end")
+	}
+	if err := end.Metadata.Validate(); err != nil {
+		return fmt.Errorf("stream end has invalid metadata: %w", err)
+	}
+	return nil
 }

@@ -205,6 +205,7 @@ public sealed class Sandbox : IAsyncDisposable
             Env = options.Env,
             SecureAccess = options.SecureAccess,
             Metadata = options.Metadata,
+            Lifecycle = options.Lifecycle,
             Platform = options.Platform,
             NetworkPolicy = options.NetworkPolicy != null
                 ? new NetworkPolicy

@@ -41,7 +41,7 @@ const (
 )
 
 // BatchSandboxConditionType represents the type of BatchSandbox condition.
-// +kubebuilder:validation:Enum=Ready;Progressing;Paused;PauseFailed;ResumeFailed;PodFailed
+// +kubebuilder:validation:Enum=Ready;Progressing;Paused;PauseFailed;ResumeFailed;PodFailed;PoolAllocationPending
 type BatchSandboxConditionType string
 
 const (
@@ -57,6 +57,8 @@ const (
 	BatchSandboxConditionResumeFailed BatchSandboxConditionType = "ResumeFailed"
 	// BatchSandboxConditionPodFailed is set when the sandbox pod enters a failed state.
 	BatchSandboxConditionPodFailed BatchSandboxConditionType = "PodFailed"
+	// BatchSandboxConditionPoolAllocationPending is set while Pool capacity prevents allocation.
+	BatchSandboxConditionPoolAllocationPending BatchSandboxConditionType = "PoolAllocationPending"
 )
 
 // BatchSandboxCondition represents a condition of a BatchSandbox
@@ -182,7 +184,7 @@ type BatchSandboxStatus struct {
 	// +optional
 	PauseObservedGeneration int64 `json:"pauseObservedGeneration,omitempty"`
 
-	// Conditions records operation failure context
+	// Conditions records lifecycle and operational state details.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

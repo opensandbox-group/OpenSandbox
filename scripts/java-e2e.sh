@@ -74,6 +74,11 @@ cd ..
 # wait for server
 sleep 10
 
+# Wipe stale locally-published SDK artifacts from the shared runner's mavenLocal:
+# tests/java resolves 'latest.integration', and a stale higher-version jar published
+# by another job would otherwise win over the version built from this checkout.
+rm -rf "${HOME:?HOME must be set}/.m2/repository/com/alibaba/opensandbox"
+
 cd sdks/sandbox/kotlin
 ./gradlew clean publishToMavenLocal --no-build-cache
 cd ../../../

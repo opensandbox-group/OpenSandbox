@@ -45,6 +45,9 @@ var (
 // WebSocketProxy is an HTTP Handler that takes an incoming WebSocket
 // connection and proxies it to another server.
 type WebSocketProxy struct {
+	responseObserver func(*http.Response)
+	errorObserver    func(error)
+
 	// director, if non-nil, is a function that may copy additional request
 	// headers from the incoming WebSocket connection into the output headers
 	// which will be forwarded to another server.
@@ -66,20 +69,21 @@ type WebSocketProxy struct {
 
 // ProxyHandler returns a new http.Handler interface that reverse proxies the
 // request to the given target.
-func ProxyHandler(target *url.URL) http.Handler { return NewWebSocketProxy(target) }
+func ProxyHandler(target *url.URL) http.Handler { return NewWebSocketProxy(target, nil) }
 
 // NewWebSocketProxy returns a new Websocket reverse proxy that rewrites the
 // URL's to the scheme, host and base path provider in target.
-func NewWebSocketProxy(target *url.URL) *WebSocketProxy {
+func NewWebSocketProxy(target *url.URL, responseObserver func(*http.Response)) *WebSocketProxy {
 	backend := func(r *http.Request) *url.URL {
 		// Shallow copy
 		u := *target
 		u.Fragment = r.URL.Fragment
 		u.Path = r.URL.Path
+		u.RawPath = r.URL.RawPath
 		u.RawQuery = r.URL.RawQuery
 		return &u
 	}
-	return &WebSocketProxy{backend: backend}
+	return &WebSocketProxy{backend: backend, responseObserver: responseObserver}
 }
 
 //nolint:gocognit
@@ -160,7 +164,13 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// Connect to the backend URL, also pass the headers we get from the requst
 	// together with the Forwarded headers we prepared above.
 	connBackend, resp, err := dialer.Dial(backendURL.String(), requestHeader)
+	if err != nil && resp != nil && w.responseObserver != nil {
+		w.responseObserver(resp)
+	}
 	if err != nil {
+		if resp == nil && r.Context().Err() == nil && w.errorObserver != nil {
+			w.errorObserver(err)
+		}
 		Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("WebSocketProxy: couldn't dial to remote backend")
 		if resp != nil {
 			// If the WebSocket handshake fails, ErrBadHandshake is returned

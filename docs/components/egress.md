@@ -61,6 +61,8 @@ See [Network Isolation](/architecture/network-isolation#allowing-legitimate-in-c
 
 ## Configuration
 
+For non-pooled Kubernetes sandboxes, configure independent sidecar requests and limits to avoid inheriting workload-sized `LimitRange` defaults. See [Kubernetes deployment](/kubernetes/deployment#configure-egress-sidecar-resources).
+
 Most deployments only need these settings:
 
 - **Mode**: `OPENSANDBOX_EGRESS_MODE`
@@ -81,7 +83,7 @@ Optional advanced features:
 - Denied hostname webhook: `OPENSANDBOX_EGRESS_DENY_WEBHOOK` (server injects `OPENSANDBOX_EGRESS_SANDBOX_ID` automatically; not user-settable)
 - DoH/DoT controls: `OPENSANDBOX_EGRESS_BLOCK_DOH_443`, `OPENSANDBOX_EGRESS_DOH_BLOCKLIST`
 - Custom DNS upstream: `OPENSANDBOX_EGRESS_DNS_UPSTREAM` (comma-separated IPs, optional `:port`), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT` (default `5` seconds)
-- DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (enable), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC`
+- DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (probe name; default is root IN NS, set an FQDN your resolvers always answer), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC` (default `30`)
 - Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
 - Metrics: `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (extra key=value attributes for OTLP metrics and structured log fields)
 
@@ -93,7 +95,7 @@ Static rule files under `/var/egress/rules/` are loaded at startup and take prio
 |------|---------|
 | `/var/egress/rules/deny.always` | Domains always denied, overrides user and allow rules |
 | `/var/egress/rules/allow.always` | Domains always allowed, overrides user rules |
-| `/var/egress/rules/log_skip.always` | Domain patterns whose DNS blocks are not logged (noise reduction) |
+| `/var/egress/rules/log_skip.always` | Domain patterns whose successful outbound DNS resolutions are not logged (noise reduction); failed/denied lookups are still logged |
 
 Format: one domain per line (supports wildcards like `*.example.com`). Lines starting with `#` are comments. Missing files are silently ignored.
 
@@ -238,6 +240,66 @@ them. From inside the sandbox that is indistinguishable from a denial, while
 `egress.policy.denied_total` stays flat — a fail-closed outage with no other signal.
 
 Full metric inventory and attribute semantics: [egress OpenTelemetry reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/opentelemetry.md).
+
+## Fleet Profile (multi-sandbox control plane)
+
+> Experimental: design per [OSEP-0022](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0022-multi-sandbox-egress-control-plane.md).
+
+The default `sidecar` profile serves exactly one sandbox sharing one network
+namespace. The opt-in `fleet` profile (`OPENSANDBOX_EGRESS_PROFILE=fleet`)
+serves N sandboxes sharing one host/network domain (fast-sandbox Fastlet
+Pod): a single egress process hosts one **subject** per sandbox, each with its
+own policy, credentials, and kernel rules. The sidecar profile and its API are
+unchanged; both profiles are mutually exclusive deployment forms.
+
+- **Identity**: subjects are observed read-only from the fastlet slot store
+  (`OPENSANDBOX_EGRESS_SLOT_STORE_DIR`, default `/run/fast-sandbox/network`)
+  via polling (`OPENSANDBOX_EGRESS_SLOT_POLL_INTERVAL`, seconds). A subject is
+  deny-first from observation until its policy lands.
+- **Control surface**: the listener binds the Pod netns loopback only
+  (`OPENSANDBOX_EGRESS_HTTP_ADDR`, default `127.0.0.1:18080`). Policy and
+  credential pushes from the server are routed per subject by the
+  `X-Fast-Sandbox-Uid` header (added by fastlet-proxy, the only peer). A push
+  for a UID whose slot has not appeared is cached and applied on registration
+  (`OPENSANDBOX_EGRESS_PENDING_PUSH_TTL`, seconds, default `30`); a stale
+  push carrying a mismatched `X-Fast-Sandbox-Generation` is discarded.
+- **DNS**: one shared proxy on loopback `127.0.0.1:15353` (never collides
+  with a host DNS service on `:53`); per-subject prerouting REDIRECTs
+  forward sandbox DNS addressed to `slot.Gateway:53` to it, preserving the
+  source IP, and per-query policy is dispatched by source IP.
+- **Enforcement**: nftables `hook forward` in the Pod netns with a
+  drop-by-default master chain; per-subject chains and static sets are swapped
+  atomically. Dynamic DNS-learned sets carry bounded leases. A second,
+  per-sandbox netns OUTPUT chain mirrors each subject's policy as defense in
+  depth (installed from the host via `nsenter --net=<slot.hostNetnsPath>`),
+  and a per-subject connection refresh loop (Pod netns conntrack, bucketed by
+  source IP, every 30s, one batched transaction per tick) keeps the dynamic
+  leases of active connections alive in both layers. Only TCP sessions are
+  renewed; UDP/QUIC (HTTP/3) relies on the DNS lease TTLs — same limitation
+  as the sidecar profile. A sandbox-layer mirror miss marks the IPs pending
+  and redelivers them on the next tick, so a transient failure can never
+  self-lock a subject until the lease expires.
+- **Encrypted-DNS blocking**: DoT 853 is always dropped in the master chain.
+  With `OPENSANDBOX_EGRESS_BLOCK_DOH_443=true`, TCP 443 to the
+  `OPENSANDBOX_EGRESS_DOH_BLOCKLIST` IP/CIDR list is dropped too — same
+  semantics as the sidecar profile, applied globally to every subject.
+  > Warning: when the blocklist is empty (strict mode) ALL TCP 443 is
+  > dropped globally, ahead of every per-subject allow verdict — an explicit
+  > policy allow cannot override it. Only TCP is blocked: UDP/QUIC
+  > (HTTP/3, DoH-over-UDP) is not intercepted by this mechanism.
+- **Telemetry**: OpenTelemetry metrics are exported exactly as in the sidecar
+  profile; nft updates are attributed per fleet operation (`deny_first`,
+  `static_apply`, `dynamic_add`, `dispatch_update`, `reset`, `remove`).
+- **Credentials**: memory-only, per subject; complete vault revisions are
+  pushed over the proxy route (OSEP-0012 model). No Secret volume, no egress
+  disk state.
+- **Recovery**: on restart, egress wipes stale rules, rescans the slot store
+  (every live subject re-enters `denying`), and the server re-pushes
+  policies.
+
+For how policy is applied, how outbound traffic flows through the nftables
+dispatch, and how the credential vault works in the fleet profile, see
+[policy, traffic flow, and credential vault](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/policy-traffic-vault-flow.md).
 
 ## Build & Run
 

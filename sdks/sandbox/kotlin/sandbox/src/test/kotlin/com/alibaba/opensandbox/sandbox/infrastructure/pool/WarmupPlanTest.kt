@@ -21,48 +21,45 @@ import org.junit.jupiter.api.Test
 
 class WarmupPlanTest {
     @Test
-    fun `empty pool fills all available warmup slots`() {
+    fun `empty pool admits at most one second of create qps`() {
         val plan =
             WarmupPlan.calculate(
                 idleCount = 0,
                 warmingCount = 0,
                 maxIdle = 10,
-                warmupConcurrency = 3,
+                warmupCreateQps = 3,
             )
 
         assertEquals(10, plan.deficit)
-        assertEquals(3, plan.availableSlots)
         assertEquals(3, plan.toSubmit)
     }
 
     @Test
-    fun `in-flight warmups count toward idle target and concurrency`() {
+    fun `in-flight warmups count toward idle target`() {
         val plan =
             WarmupPlan.calculate(
                 idleCount = 4,
                 warmingCount = 2,
                 maxIdle = 8,
-                warmupConcurrency = 3,
+                warmupCreateQps = 3,
             )
 
         assertEquals(2, plan.deficit)
-        assertEquals(1, plan.availableSlots)
-        assertEquals(1, plan.toSubmit)
+        assertEquals(2, plan.toSubmit)
     }
 
     @Test
-    fun `full warmup window submits no additional work`() {
+    fun `large in-flight count does not independently cap admission`() {
         val plan =
             WarmupPlan.calculate(
                 idleCount = 0,
                 warmingCount = 4,
                 maxIdle = 10,
-                warmupConcurrency = 4,
+                warmupCreateQps = 4,
             )
 
         assertEquals(6, plan.deficit)
-        assertEquals(0, plan.availableSlots)
-        assertEquals(0, plan.toSubmit)
+        assertEquals(4, plan.toSubmit)
     }
 
     @Test
@@ -73,7 +70,7 @@ class WarmupPlanTest {
                 idleCount = 5,
                 warmingCount = 0,
                 maxIdle = 5,
-                warmupConcurrency = 2,
+                warmupCreateQps = 2,
             ).toSubmit,
         )
         assertEquals(
@@ -82,7 +79,7 @@ class WarmupPlanTest {
                 idleCount = 0,
                 warmingCount = 0,
                 maxIdle = 0,
-                warmupConcurrency = 1,
+                warmupCreateQps = 1,
             ).toSubmit,
         )
     }

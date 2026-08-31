@@ -16,6 +16,7 @@ package assign
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -116,5 +117,34 @@ func TestCapacityPredicate(t *testing.T) {
 					got, tt.expect, tt.poolMax, tt.allocated, tt.replicas)
 			}
 		})
+	}
+}
+
+func TestCapacityPredicateProvidesStableRejectionReason(t *testing.T) {
+	p, err := newCapacityPredicate(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	withReason, ok := p.(PredicateWithReason)
+	if !ok {
+		t.Fatal("capacity predicate must expose a stable rejection reason")
+	}
+
+	sbx := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1"},
+		Spec:       sandboxv1alpha1.BatchSandboxSpec{Replicas: int32Ptr(1)},
+	}
+	pool := &sandboxv1alpha1.Pool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-full"},
+		Spec: sandboxv1alpha1.PoolSpec{
+			CapacitySpec: sandboxv1alpha1.CapacitySpec{PoolMax: 2},
+		},
+		Status: sandboxv1alpha1.PoolStatus{Allocated: 2},
+	}
+
+	reason := withReason.Reason(context.Background(), sbx, pool)
+	if !strings.Contains(reason, "capacity exhausted") {
+		t.Fatalf("capacity rejection reason %q is not machine-identifiable", reason)
 	}
 }

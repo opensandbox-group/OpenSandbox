@@ -1,0 +1,108 @@
+name: Dependency Lock Stability
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "**/go.mod"
+      - "**/go.sum"
+      - "**/uv.lock"
+      - "**/pyproject.toml"
+      - "**/package.json"
+      - "**/pnpm-lock.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-modules:
+    name: go.mod tidy (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: components/execd
+          - module: components/egress
+          - module: components/ingress
+          - module: components/internal
+          - module: components/nodeagent
+          - module: kubernetes
+          - module: sdks/sandbox/go
+          - module: sdks/sandbox/go/poolredis
+          - module: tests/go
+          - module: examples/chrome
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.9"
+
+      - name: Check go.mod is tidy
+        working-directory: ${{ matrix.module }}
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  uv-lockfiles:
+    name: uv.lock (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: server
+          - project: cli
+          - project: sdks/sandbox/python
+          - project: sdks/code-interpreter/python
+          - project: sdks/mcp/sandbox/python
+          - project: tests/python
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Check uv.lock is up to date
+        working-directory: ${{ matrix.project }}
+        run: |
+          uv lock --check
+
+  js-lockfile:
+    name: pnpm-lock.yaml (tests/javascript)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: tests/javascript/pnpm-lock.yaml
+
+      - name: Check pnpm-lock.yaml is in sync (tests/javascript)
+        working-directory: tests/javascript
+        run: |
+          pnpm install --frozen-lockfile --lockfile-only --ignore-scripts
+
+      - name: Check pnpm-lock.yaml is in sync (docs)
+        working-directory: docs
+        run: |
+          pnpm install --frozen-lockfile --lockfile-only --ignore-scripts

@@ -85,6 +85,11 @@ class SnapshotRepository(Protocol):
         Delete a snapshot record by id.
         """
 
+    def close(self) -> None:
+        """
+        Release resources owned by the repository.
+        """
+
 
 __all__ = [
     "SnapshotRepository",

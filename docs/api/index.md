@@ -40,6 +40,11 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
 - `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint for a service port
 
+**Optional `Sandbox.allocation` response field:**
+- Returned only when the runtime confirms the sandbox's current concrete Pool allocation.
+- Omitted for unconfirmed allocations, non-Pool sandboxes, and allocations being released.
+- This field is not a request echo, allocation history, or readiness signal, and does not expose Pod names or other Kubernetes-internal fields.
+
 **Authentication:**
 - HTTP Header: `OPEN-SANDBOX-API-KEY: your-api-key`
 - Environment Variable: `OPEN_SANDBOX_API_KEY` (for SDK clients)

@@ -26,13 +26,13 @@ Install the controller and CRDs before the lifecycle server. The server runs in 
 Choose a published `opensandbox-server` chart from [GitHub Releases](https://github.com/opensandbox-group/OpenSandbox/releases?q=helm%2Fopensandbox-server&expanded=true), then set both versions from that release:
 
 ```sh
-APP_VERSION="<app-version>"
 CHART_VERSION="<chart-version>"
-CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${APP_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
+APP_VERSION="<app-version>"
+CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${CHART_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
 ```
 
 ::: info Versioning
-The release tag identifies the server application version, while the `.tgz` filename uses the Helm chart version. These versions are independent and are listed on each GitHub Release.
+The release tag and `.tgz` filename identify the Helm chart version. The server application version is independent and is listed on each GitHub Release.
 :::
 
 ### Configure API authentication
@@ -68,6 +68,48 @@ server:
 Use an external secret manager instead of creating the Secret manually in production environments.
 
 The chart installs the server into `opensandbox-system`, while the default `configToml` creates sandbox and pool resources in `opensandbox`. If you change `[kubernetes].namespace` in `configToml`, create that namespace instead of `opensandbox` before submitting workloads.
+
+### Use PostgreSQL for server persistence
+
+Create a Secret containing the PostgreSQL connection string:
+
+```bash
+read -s OPENSANDBOX_POSTGRESQL_DSN
+kubectl create secret generic opensandbox-postgresql \
+  --namespace opensandbox-system \
+  --from-literal=dsn="${OPENSANDBOX_POSTGRESQL_DSN}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset OPENSANDBOX_POSTGRESQL_DSN
+```
+
+In `values-server.yaml`, set `server.replicaCount` to `1`, add the Secret-backed
+environment variable below, and add the shown `[store]` tables to the complete
+`configToml` value:
+
+```yaml
+server:
+  replicaCount: 1
+  env:
+    - name: OPENSANDBOX_STORE_POSTGRESQL_DSN
+      valueFrom:
+        secretKeyRef:
+          name: opensandbox-postgresql
+          key: dsn
+
+configToml: |
+  # Keep the rest of the chart's complete server configuration here.
+  [store]
+  type = "postgresql"
+
+  [store.postgresql]
+  min_pool_size = 1
+  max_pool_size = 10
+```
+
+::: warning
+Snapshot recovery is not coordinated across server replicas. Keep
+`server.replicaCount: 1` when replicas use the same PostgreSQL database.
+:::
 
 ### Install and verify
 
@@ -114,9 +156,25 @@ curl --fail http://127.0.0.1:8080/health
 | `server.env` | Additional container environment variables | Use it with `secretKeyRef` for `OPENSANDBOX_SERVER_API_KEY`. |
 | `configToml` | Complete server configuration | Mounted at `/etc/opensandbox/config.toml`; overriding it replaces the complete default TOML, including the workload namespace. |
 | `server.gateway.enabled` | Deploy the ingress gateway with the server | Defaults to `false`. |
+| `server.service.type` | Service type for the server | Defaults to `ClusterIP`. Use `NodePort` or `LoadBalancer` for access from outside the cluster; pin the port with `server.service.nodePort`. |
 | `namespaceOverride` | Namespace used by chart resources | Defaults to `opensandbox-system`. |
 
-The server container and its `ClusterIP` Service use port `80`. Keep `[server].port = 80` when replacing `configToml` unless the chart templates are also updated to use a different port.
+The server container and its Service use port `80`. Keep `[server].port = 80` when replacing `configToml` unless the chart templates are also updated to use a different port. The Service is `ClusterIP` by default; set `server.service.type` to reach the server from outside the cluster.
+
+### Configure egress sidecar resources
+
+When a create request includes `networkPolicy`, the lifecycle server adds an egress sidecar to each non-pooled sandbox Pod. Namespace `LimitRange` defaults apply to this container when it does not declare resources, which can reserve substantially more capacity than basic DNS/nft enforcement needs.
+
+Add optional resource settings to the `[egress]` section of `configToml`:
+
+```toml
+[egress]
+image = "opensandbox/egress:v1.1.7"
+requests = { cpu = "25m", memory = "64Mi" }
+limits = { cpu = "250m", memory = "256Mi" }
+```
+
+You can omit either `requests` or `limits`. Treat these values as a starting point and tune them from observed usage; Credential Vault and transparent mitmproxy generally need more headroom than basic DNS/nft enforcement.
 
 ### Upgrade
 

@@ -66,6 +66,7 @@ func (c *PTYController) CreatePTYSession() {
 			model.ErrorCodeRuntimeError,
 			fmt.Sprintf("error creating pty session: %v", err),
 		)
+		return
 	}
 	c.ctx.JSON(http.StatusCreated, model.CreatePTYSessionResponse{SessionID: id})
 }

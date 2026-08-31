@@ -70,36 +70,44 @@ func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.Netw
 	nftMgr.StartConnectionRefresh(ctx)
 }
 
+// parseDoHBlocklist parses the comma-separated OPENSANDBOX_EGRESS_DOH_BLOCKLIST
+// value (IP or CIDR entries) into v4/v6 lists. Invalid entries are logged and
+// skipped. Shared by the sidecar and fleet profiles so both enforce the same
+// DoH-443 semantics.
+func parseDoHBlocklist(raw string) (v4, v6 []string) {
+	for _, p := range strings.Split(raw, ",") {
+		target := strings.TrimSpace(p)
+		if target == "" {
+			continue
+		}
+		if addr, err := netip.ParseAddr(target); err == nil {
+			if addr.Is4() {
+				v4 = append(v4, target)
+			} else if addr.Is6() {
+				v6 = append(v6, target)
+			}
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(target); err == nil {
+			if prefix.Addr().Is4() {
+				v4 = append(v4, target)
+			} else if prefix.Addr().Is6() {
+				v6 = append(v6, target)
+			}
+			continue
+		}
+		log.Warnf("ignoring invalid DoH blocklist entry: %s", target)
+	}
+	return v4, v6
+}
+
 func parseNftOptions() nftables.Options {
 	opts := nftables.Options{BlockDoT: true}
 	if constants.IsTruthy(os.Getenv(constants.EnvBlockDoH443)) {
 		opts.BlockDoH443 = true
 	}
 	if raw := os.Getenv(constants.EnvDoHBlocklist); strings.TrimSpace(raw) != "" {
-		parts := strings.Split(raw, ",")
-		for _, p := range parts {
-			target := strings.TrimSpace(p)
-			if target == "" {
-				continue
-			}
-			if addr, err := netip.ParseAddr(target); err == nil {
-				if addr.Is4() {
-					opts.DoHBlocklistV4 = append(opts.DoHBlocklistV4, target)
-				} else if addr.Is6() {
-					opts.DoHBlocklistV6 = append(opts.DoHBlocklistV6, target)
-				}
-				continue
-			}
-			if prefix, err := netip.ParsePrefix(target); err == nil {
-				if prefix.Addr().Is4() {
-					opts.DoHBlocklistV4 = append(opts.DoHBlocklistV4, target)
-				} else if prefix.Addr().Is6() {
-					opts.DoHBlocklistV6 = append(opts.DoHBlocklistV6, target)
-				}
-				continue
-			}
-			log.Warnf("ignoring invalid DoH blocklist entry: %s", target)
-		}
+		opts.DoHBlocklistV4, opts.DoHBlocklistV6 = parseDoHBlocklist(raw)
 	}
 	return opts
 }

@@ -206,20 +206,10 @@ func TestForwardClassifiesFailures(t *testing.T) {
 func TestSetOnResolved(t *testing.T) {
 	proxy, err := New(policy.DefaultDenyPolicy(), "", nil, nil)
 	require.NoError(t, err)
-	var called bool
-	var capturedDomain string
-	var capturedIPs []nftables.ResolvedIP
-	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) {
-		called = true
-		capturedDomain = domain
-		capturedIPs = ips
-	})
+	proxy.SetOnResolved(func(_ string, _ []nftables.ResolvedIP) {})
 	require.NotNil(t, proxy.onResolved, "SetOnResolved did not set callback")
 	proxy.SetOnResolved(nil)
 	require.Nil(t, proxy.onResolved, "SetOnResolved(nil) did not clear callback")
-	_ = called
-	_ = capturedDomain
-	_ = capturedIPs
 }
 
 func TestMaybeNotifyResolved_CallsCallbackWhenAOrAAAA(t *testing.T) {

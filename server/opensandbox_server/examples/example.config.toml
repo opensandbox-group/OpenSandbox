@@ -27,12 +27,20 @@ max_sandbox_timeout_seconds = 86400
 # - Interactive TTY: type YES when prompted
 # - Non-interactive: set OPENSANDBOX_INSECURE_SERVER=YES
 
+[proxy]
+# When True (default), the sandbox reverse-proxy targets the sandbox's
+# internal Docker bridge container IP. Set to False to target the
+# server-local host-mapped port instead. Use False when the server process
+# cannot route to bridge container IPs, e.g. a launchd/systemd user session
+# on macOS where such traffic is blocked.
+resolve_internal = true
+
 [log]
 level = "INFO"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.22"
+execd_image = "opensandbox/execd:v1.1.0"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
@@ -46,6 +54,14 @@ volume_default_size = "1Gi"
 [store]
 type = "sqlite"
 path = "~/.opensandbox/opensandbox.db"
+# For an external PostgreSQL store, set type = "postgresql" and configure:
+# [store.postgresql]
+# min_pool_size = 1
+# max_pool_size = 10
+# connect_timeout_seconds = 5
+# pool_timeout_seconds = 5
+# Inject the DSN with OPENSANDBOX_STORE_POSTGRESQL_DSN in production.
+# Use only one active server process per PostgreSQL database.
 
 [docker]
 network_mode = "bridge"
@@ -74,8 +90,9 @@ seccomp_profile = ""
 mode = "direct"
 
 [egress]
-image = "opensandbox/egress:v1.1.6"
+image = "opensandbox/egress:v1.1.7"
 mode = "dns"
+readiness_timeout_seconds = 30.0
 
 # Renew-on-access. Off by default — see server/README.md.
 [renew_intent]

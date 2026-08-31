@@ -31,7 +31,8 @@ from opensandbox_server.services.snapshot_restore import (
 )
 
 
-def test_snapshot_restore_resolves_effective_image(monkeypatch, tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_snapshot_restore_resolves_effective_image(monkeypatch, tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     repo.create(
         SnapshotRecord(
@@ -45,7 +46,7 @@ def test_snapshot_restore_resolves_effective_image(monkeypatch, tmp_path) -> Non
         )
     )
     monkeypatch.setattr(
-        "opensandbox_server.services.snapshot_restore.create_snapshot_repository",
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository",
         lambda: repo,
     )
 
@@ -54,14 +55,15 @@ def test_snapshot_restore_resolves_effective_image(monkeypatch, tmp_path) -> Non
         resourceLimits=ResourceLimits(root={"cpu": "500m"}),
     )
 
-    resolved = resolve_sandbox_image_from_request(request)
+    resolved = await resolve_sandbox_image_from_request(request)
     assert resolved.image is not None
     assert resolved.image.uri == "registry.example.com/snapshots/snap-001:latest"
     assert resolved.snapshot_id == "snap-001"
     assert resolved.entrypoint == DEFAULT_SNAPSHOT_RESTORE_ENTRYPOINT
 
 
-def test_snapshot_restore_preserves_explicit_entrypoint(monkeypatch, tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_snapshot_restore_preserves_explicit_entrypoint(monkeypatch, tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     repo.create(
         SnapshotRecord(
@@ -75,7 +77,7 @@ def test_snapshot_restore_preserves_explicit_entrypoint(monkeypatch, tmp_path) -
         )
     )
     monkeypatch.setattr(
-        "opensandbox_server.services.snapshot_restore.create_snapshot_repository",
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository",
         lambda: repo,
     )
 
@@ -85,14 +87,15 @@ def test_snapshot_restore_preserves_explicit_entrypoint(monkeypatch, tmp_path) -
         entrypoint=["python", "app.py"],
     )
 
-    resolved = resolve_sandbox_image_from_request(request)
+    resolved = await resolve_sandbox_image_from_request(request)
     assert resolved.image is not None
     assert resolved.image.uri == "registry.example.com/snapshots/snap-003:latest"
     assert resolved.snapshot_id == "snap-003"
     assert resolved.entrypoint == ["python", "app.py"]
 
 
-def test_snapshot_restore_rejects_unready_snapshot(monkeypatch, tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_snapshot_restore_rejects_unready_snapshot(monkeypatch, tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     repo.create(
         SnapshotRecord(
@@ -106,7 +109,7 @@ def test_snapshot_restore_rejects_unready_snapshot(monkeypatch, tmp_path) -> Non
         )
     )
     monkeypatch.setattr(
-        "opensandbox_server.services.snapshot_restore.create_snapshot_repository",
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository",
         lambda: repo,
     )
 
@@ -116,5 +119,5 @@ def test_snapshot_restore_rejects_unready_snapshot(monkeypatch, tmp_path) -> Non
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        resolve_sandbox_image_from_request(request)
+        await resolve_sandbox_image_from_request(request)
     assert exc_info.value.status_code == 409

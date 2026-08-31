@@ -12,28 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sink
+package runtime
 
-import (
-	"bytes"
-	"time"
-
-	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
-)
-
-func SameResourceIdentity(left, right api.Resource) bool {
-	return left == right
+// LayerState reports whether a hardening layer is actually enforced.
+type LayerState struct {
+	State   string // "active" | "disabled" | "degraded" | "unsupported"
+	Message string
 }
 
-func EncodeBatch(batch api.Batch) []byte {
-	var out bytes.Buffer
-	for _, item := range batch.Items {
-		out.WriteString(item.Record.Timestamp.UTC().Format(time.RFC3339Nano))
-		out.WriteByte(' ')
-		out.WriteString(item.Record.Attributes["stream"])
-		out.WriteByte(' ')
-		out.Write(item.Record.Body)
-		out.WriteByte('\n')
-	}
-	return out.Bytes()
+// HardeningReport describes the hardening state for the capabilities
+// endpoint (OSEP-0018 §6).
+type HardeningReport struct {
+	InitMode     string
+	SignalShield bool
+	CapDrop      LayerState
+	Seccomp      LayerState
+	Landlock     LayerState
+	Ebpf         LayerState
 }

@@ -101,6 +101,7 @@ func (r *SandboxSnapshotReconciler) persistResolvedData(
 	ctx context.Context,
 	snapshot *sandboxv1alpha1.SandboxSnapshot,
 	sourcePodName, sourceNodeName string,
+	format sandboxv1alpha1.SandboxSnapshotFormat,
 	containers []sandboxv1alpha1.ContainerSnapshot,
 ) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -110,6 +111,7 @@ func (r *SandboxSnapshotReconciler) persistResolvedData(
 		}
 		latest.Status.SourcePodName = sourcePodName
 		latest.Status.SourceNodeName = sourceNodeName
+		latest.Status.Format = format
 		latest.Status.Containers = containers
 		return r.Status().Update(ctx, latest)
 	})

@@ -258,3 +258,89 @@ type AcquireOptions struct {
 
 // DefaultIdleTimeout is the default TTL for idle pool entries (24 hours, per OSEP-0005).
 const DefaultIdleTimeout = 24 * time.Hour
+
+// PoolDestroyState represents the destroy lifecycle of a pool namespace as seen
+// by every process sharing the same state store.
+//
+//   - ACTIVE: the namespace is usable.
+//   - DESTROYING: a destroy fence is in place. Peer pools must stop replenishing
+//     and must not fall back to direct create.
+//   - DESTROYED: a tombstone is in place. Callers must not rebind the namespace
+//     until the tombstone expires.
+type PoolDestroyState int
+
+const (
+	PoolDestroyStateActive PoolDestroyState = iota
+	PoolDestroyStateDestroying
+	PoolDestroyStateDestroyed
+)
+
+func (s PoolDestroyState) String() string {
+	switch s {
+	case PoolDestroyStateActive:
+		return "ACTIVE"
+	case PoolDestroyStateDestroying:
+		return "DESTROYING"
+	case PoolDestroyStateDestroyed:
+		return "DESTROYED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// PoolDestroyStrategy selects how a namespace is retired. Only FORCE is
+// implemented; the iota order MUST stay append-only.
+type PoolDestroyStrategy int
+
+const (
+	PoolDestroyForce PoolDestroyStrategy = iota
+)
+
+func (s PoolDestroyStrategy) String() string {
+	switch s {
+	case PoolDestroyForce:
+		return "FORCE"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// DefaultPoolDrainTimeout bounds the idle-drain phase of a pool destroy.
+const DefaultPoolDrainTimeout = 30 * time.Second
+
+// DefaultPoolTombstoneTTL is how long a DESTROYED tombstone survives before the
+// namespace may be rebound.
+const DefaultPoolTombstoneTTL = 7 * 24 * time.Hour
+
+// PoolDestroyOptions configures a single SandboxPoolManager.Destroy call.
+// The zero value is valid and selects FORCE with all defaults.
+type PoolDestroyOptions struct {
+	// Strategy selects the destroy algorithm. Only PoolDestroyForce is supported.
+	Strategy PoolDestroyStrategy
+
+	// DrainTimeout bounds the idle-drain loop. Nil selects DefaultPoolDrainTimeout;
+	// an explicit zero drains without a deadline. Must not be negative.
+	DrainTimeout *time.Duration
+
+	// TombstoneTTL is how long the DESTROYED tombstone survives. Nil selects
+	// DefaultPoolTombstoneTTL; an explicit zero writes a tombstone that never
+	// expires. Must not be negative.
+	TombstoneTTL *time.Duration
+}
+
+// PoolDestroyResult reports what a destroy actually did.
+type PoolDestroyResult struct {
+	PoolName string
+	State    PoolDestroyState
+
+	// DrainedIdleCount is how many idle entries were taken from the store.
+	DrainedIdleCount int
+
+	// KilledIdleCount is how many of those sandboxes were successfully killed.
+	// Killing is best-effort, so this may be lower than DrainedIdleCount.
+	KilledIdleCount int
+
+	// PersistentStateCleared reports whether this call cleared the coordination
+	// state. It is false when the namespace was already tombstoned.
+	PersistentStateCleared bool
+}

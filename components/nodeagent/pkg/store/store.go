@@ -17,8 +17,8 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -55,22 +55,28 @@ type Resource struct {
 type Store struct {
 	nodeName  string
 	clusterID string
-	logRoot   string
 	informer  cache.SharedIndexInformer
 
 	mu            sync.RWMutex
 	resources     map[string]Resource
-	changes       chan struct{}
+	subscribers   map[string]*sourceView
+	released      map[string]map[string]struct{}
 	watchFailedAt time.Time
 }
 
-func New(client kubernetes.Interface, nodeName, clusterID, logRoot string) *Store {
+type sourceView struct {
+	store   *Store
+	source  string
+	changes chan struct{}
+}
+
+func New(client kubernetes.Interface, nodeName, clusterID string) *Store {
 	s := &Store{
-		nodeName:  nodeName,
-		clusterID: clusterID,
-		logRoot:   logRoot,
-		resources: make(map[string]Resource),
-		changes:   make(chan struct{}, 1),
+		nodeName:    nodeName,
+		clusterID:   clusterID,
+		resources:   make(map[string]Resource),
+		subscribers: make(map[string]*sourceView),
+		released:    make(map[string]map[string]struct{}),
 	}
 	selector := fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
 	lw := &cache.ListWatch{
@@ -113,7 +119,23 @@ func (s *Store) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) Changes() <-chan struct{} { return s.changes }
+// ForSource returns an isolated view of the shared Pod cache. Each Source gets
+// its own change notification channel and must release terminated identities
+// independently; one Source therefore cannot discard state still needed by
+// another Source.
+func (s *Store) ForSource(source string) (View, error) {
+	if source == "" {
+		return nil, errors.New("source name is empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.subscribers[source]; exists {
+		return nil, fmt.Errorf("source %q already has a Store view", source)
+	}
+	view := &sourceView{store: s, source: source, changes: make(chan struct{}, 1)}
+	s.subscribers[source] = view
+	return view, nil
+}
 
 func (s *Store) Stale(now time.Time, threshold time.Duration) bool {
 	s.mu.RLock()
@@ -135,31 +157,50 @@ func (s *Store) markWatchSuccessful() {
 	s.mu.Unlock()
 }
 
-func (s *Store) List() []Resource {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Resource, 0, len(s.resources))
-	for _, resource := range s.resources {
+func (s *Store) forget(source, uid string) {
+	s.mu.Lock()
+	resource, ok := s.resources[uid]
+	if ok && resource.Terminated {
+		released := s.released[uid]
+		if released == nil {
+			released = make(map[string]struct{})
+			s.released[uid] = released
+		}
+		released[source] = struct{}{}
+		if len(released) == len(s.subscribers) {
+			delete(s.resources, uid)
+			delete(s.released, uid)
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (v *sourceView) List() []Resource {
+	v.store.mu.RLock()
+	defer v.store.mu.RUnlock()
+	out := make([]Resource, 0, len(v.store.resources))
+	for uid, resource := range v.store.resources {
+		if _, released := v.store.released[uid][v.source]; released {
+			continue
+		}
 		out = append(out, resource)
 	}
 	return out
 }
 
-func (s *Store) GetByUID(uid string) (Resource, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	resource, ok := s.resources[uid]
+func (v *sourceView) GetByUID(uid string) (Resource, bool) {
+	v.store.mu.RLock()
+	defer v.store.mu.RUnlock()
+	if _, released := v.store.released[uid][v.source]; released {
+		return Resource{}, false
+	}
+	resource, ok := v.store.resources[uid]
 	return resource, ok
 }
 
-func (s *Store) Forget(uid string) {
-	s.mu.Lock()
-	resource, ok := s.resources[uid]
-	if ok && resource.Terminated {
-		delete(s.resources, uid)
-	}
-	s.mu.Unlock()
-}
+func (v *sourceView) Forget(uid string) { v.store.forget(v.source, uid) }
+
+func (v *sourceView) Changes() <-chan struct{} { return v.changes }
 
 func (s *Store) upsert(obj any) {
 	pod, ok := obj.(*corev1.Pod)
@@ -175,14 +216,13 @@ func (s *Store) upsert(obj any) {
 	terminated := pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
 	resource := Resource{
 		Resource: api.Resource{
-			SandboxID:    sandboxID,
-			ClusterName:  s.clusterID,
-			Namespace:    pod.Namespace,
-			PodName:      pod.Name,
-			PodUID:       string(pod.UID),
-			NodeName:     pod.Spec.NodeName,
-			Container:    ContainerName,
-			LogDirectory: filepath.Join(s.logRoot, fmt.Sprintf("%s_%s_%s", pod.Namespace, pod.Name, pod.UID), ContainerName),
+			SandboxID:   sandboxID,
+			ClusterName: s.clusterID,
+			Namespace:   pod.Namespace,
+			PodName:     pod.Name,
+			PodUID:      string(pod.UID),
+			NodeName:    pod.Spec.NodeName,
+			Container:   ContainerName,
 		},
 		Terminated: terminated,
 	}
@@ -192,6 +232,9 @@ func (s *Store) upsert(obj any) {
 		s.resources[resource.PodUID] = previous
 	} else {
 		s.resources[resource.PodUID] = resource
+		if !resource.Terminated {
+			delete(s.released, resource.PodUID)
+		}
 	}
 	s.mu.Unlock()
 	s.notify()
@@ -223,9 +266,13 @@ func (s *Store) markTerminated(uid string) {
 }
 
 func (s *Store) notify() {
-	select {
-	case s.changes <- struct{}{}:
-	default:
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, subscriber := range s.subscribers {
+		select {
+		case subscriber.changes <- struct{}{}:
+		default:
+		}
 	}
 }
 

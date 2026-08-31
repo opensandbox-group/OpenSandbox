@@ -17,20 +17,29 @@ package renewintent
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestNewIntent(t *testing.T) {
-	intent := NewIntent("sb-123", 8080, "/api/foo")
+	intent := NewIntent("tenant-a", "sb-123", 8080, "/api/foo")
+	assert.Equal(t, "tenant-a", intent.Namespace)
 	assert.Equal(t, "sb-123", intent.SandboxID)
 	assert.Equal(t, 8080, intent.Port)
 	assert.Equal(t, "/api/foo", intent.RequestURI)
 	assert.NotEmpty(t, intent.ObservedAt)
 }
 
+func TestThrottleKeyIncludesNamespace(t *testing.T) {
+	publisher := &RedisPublisher{cfg: RedisPublisherConfig{MinInterval: time.Minute}}
+	assert.True(t, publisher.shouldSendIntent("tenant-a", "same-id"))
+	assert.False(t, publisher.shouldSendIntent("tenant-a", "same-id"))
+	assert.True(t, publisher.shouldSendIntent("tenant-b", "same-id"))
+}
+
 func TestIntent_JSONRoundTrip(t *testing.T) {
-	intent := NewIntent("my-sandbox", 80, "/")
+	intent := NewIntent("tenant-a", "my-sandbox", 80, "/")
 	data, err := json.Marshal(intent)
 	assert.NoError(t, err)
 	var decoded Intent
@@ -42,13 +51,13 @@ func TestIntent_JSONRoundTrip(t *testing.T) {
 }
 
 func TestIntent_JSONHasRequiredFields(t *testing.T) {
-	intent := NewIntent("id", 0, "")
+	intent := NewIntent("tenant-a", "id", 0, "")
 	data, err := json.Marshal(intent)
 	assert.NoError(t, err)
 	var m map[string]interface{}
 	err = json.Unmarshal(data, &m)
 	assert.NoError(t, err)
-	for _, key := range []string{"sandbox_id", "observed_at"} {
+	for _, key := range []string{"namespace", "sandbox_id", "observed_at"} {
 		_, ok := m[key]
 		assert.True(t, ok, "missing required JSON field %q", key)
 	}

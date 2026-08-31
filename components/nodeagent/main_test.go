@@ -15,33 +15,11 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/alibaba/opensandbox/nodeagent/pkg/config"
 )
-
-func TestRuntimeFailureWaitsForSignal(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		waitForRuntimeFailureSignal(ctx)
-		close(done)
-	}()
-	select {
-	case <-done:
-		t.Fatal("runtime failure wait returned before shutdown signal")
-	case <-time.After(20 * time.Millisecond):
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("runtime failure wait did not return after shutdown signal")
-	}
-}
 
 func TestServerAddressesForInvalidConfig(t *testing.T) {
 	tests := []struct {

@@ -49,7 +49,79 @@ jobs:
       - name: Validate Helm chart
         run: |
           helm lint kubernetes/charts/opensandbox-node-agent
-          helm template nodeagent kubernetes/charts/opensandbox-node-agent >/dev/null
+          helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+            > /tmp/nodeagent-default-sources.yaml
+          grep -A1 'name: NODEAGENT_SOURCES' /tmp/nodeagent-default-sources.yaml \
+            | grep -q 'value: "container-logs"'
+          helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+            --set 'config.sources={source-a,source-b}' \
+            > /tmp/nodeagent-non-log-sources.yaml
+          helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+            --set 'config.sources={container-logs,source-a}' \
+            > /tmp/nodeagent-mixed-sources.yaml
+          grep -A1 'name: NODEAGENT_SOURCES' /tmp/nodeagent-mixed-sources.yaml \
+            | grep -q 'value: "container-logs,source-a"'
+          grep -q 'NODEAGENT_LOG_ROOT' /tmp/nodeagent-mixed-sources.yaml
+          grep -q 'name: pod-logs' /tmp/nodeagent-mixed-sources.yaml
+          helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+            --set 'config.sources={source-a,source-b}' \
+            --set hostPaths.logs=null \
+            --set config.maxLineBytes=null \
+            --set config.partialTimeout=null \
+            --set config.endedStateRetention=null >/dev/null
+          grep -A1 'name: NODEAGENT_SOURCES' /tmp/nodeagent-non-log-sources.yaml \
+            | grep -q 'value: "source-a,source-b"'
+          for nodeagent_log_marker in NODEAGENT_LOG_ROOT NODEAGENT_MAX_LINE_BYTES NODEAGENT_PARTIAL_TIMEOUT NODEAGENT_ENDED_STATE_RETENTION 'name: pod-logs'; do
+            if ! grep -q "${nodeagent_log_marker}" /tmp/nodeagent-default-sources.yaml; then
+              echo "container-log marker missing from the default render: ${nodeagent_log_marker}" >&2
+              exit 1
+            fi
+            if grep -q "${nodeagent_log_marker}" /tmp/nodeagent-non-log-sources.yaml; then
+              echo "container-log host access rendered while the Source is disabled: ${nodeagent_log_marker}" >&2
+              exit 1
+            fi
+          done
+          for nodeagent_common_marker in NODEAGENT_STATE_DIR 'name: state'; do
+            if ! grep -q "${nodeagent_common_marker}" /tmp/nodeagent-non-log-sources.yaml; then
+              echo "common marker missing while only non-log Sources are enabled: ${nodeagent_common_marker}" >&2
+              exit 1
+            fi
+          done
+          nodeagent_source_schema_error=""
+          if nodeagent_source_schema_error="$(helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+            --set hostPaths.logs=null 2>&1)"; then
+            echo "container-logs configuration without hostPaths.logs passed schema validation" >&2
+            exit 1
+          fi
+          if ! grep -Eiq "(don't meet the specifications of the schema|values don't meet)" <<<"$nodeagent_source_schema_error" \
+            || ! grep -Eiq 'hostPaths.*logs|missing property.*logs' <<<"$nodeagent_source_schema_error"; then
+            echo "container-logs configuration failed for an unexpected reason: $nodeagent_source_schema_error" >&2
+            exit 1
+          fi
+          for nodeagent_required_setting in maxLineBytes partialTimeout endedStateRetention; do
+            nodeagent_source_schema_error=""
+            if nodeagent_source_schema_error="$(helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+              --set "config.${nodeagent_required_setting}=null" 2>&1)"; then
+              echo "container-logs configuration without config.${nodeagent_required_setting} passed schema validation" >&2
+              exit 1
+            fi
+            if ! grep -Eiq "(don't meet the specifications of the schema|values don't meet)" <<<"$nodeagent_source_schema_error" \
+              || ! grep -Eiq "(/config/${nodeagent_required_setting}|config[.:][[:space:]]*${nodeagent_required_setting}|missing propert(y|ies).*${nodeagent_required_setting})" <<<"$nodeagent_source_schema_error"; then
+              echo "container-logs configuration failed for an unexpected reason: $nodeagent_source_schema_error" >&2
+              exit 1
+            fi
+          done
+          nodeagent_source_schema_error=""
+          if nodeagent_source_schema_error="$(helm template nodeagent kubernetes/charts/opensandbox-node-agent \
+            --set 'config.sources={invalid/source}' 2>&1)"; then
+            echo "invalid Source name passed schema validation" >&2
+            exit 1
+          fi
+          if ! grep -Eiq "(don't meet the specifications of the schema|values don't meet)" <<<"$nodeagent_source_schema_error" \
+            || ! grep -Eiq '(config[./]sources([./]0)?).*(pattern|match)' <<<"$nodeagent_source_schema_error"; then
+            echo "invalid Source name failed for an unexpected reason: $nodeagent_source_schema_error" >&2
+            exit 1
+          fi
           helm template nodeagent kubernetes/charts/opensandbox-node-agent \
             --set sink.type=oss \
             --set sink.oss.endpoint=https://oss-cn-hangzhou.aliyuncs.com \

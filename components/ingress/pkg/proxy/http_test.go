@@ -66,6 +66,10 @@ func (m *mockProvider) GetEndpoint(sandboxId string) (*sandbox.EndpointInfo, err
 	}, nil
 }
 
+func (m *mockProvider) ResolveEndpoint(_ context.Context, target sandbox.EndpointTarget) (*sandbox.EndpointInfo, error) {
+	return m.GetEndpoint(target.SandboxID)
+}
+
 func (m *mockProvider) Start(_ context.Context) error {
 	return nil
 }
@@ -94,7 +98,7 @@ func httpProxyWithHeaderMode(t *testing.T) {
 
 	ctx := context.Background()
 	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
-	proxy := NewProxy(ctx, provider, ModeHeader, nil, nil)
+	proxy := NewProxy(ctx, provider, ModeHeader, nil, nil, nil)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)
@@ -168,7 +172,7 @@ func httpProxyWithURIMode(t *testing.T) {
 
 	ctx := context.Background()
 	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
-	proxy := NewProxy(ctx, provider, ModeURI, nil, nil)
+	proxy := NewProxy(ctx, provider, ModeURI, nil, nil, nil)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)

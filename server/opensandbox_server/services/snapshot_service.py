@@ -39,7 +39,7 @@ from opensandbox_server.api.schema import (
     Snapshot,
     SnapshotStatus,
 )
-from opensandbox_server.repositories.snapshots.factory import create_snapshot_repository
+from opensandbox_server.repositories.snapshots.factory import get_snapshot_repository
 from opensandbox_server.services.constants import SnapshotErrorCodes
 from opensandbox_server.services.snapshot_runtime import (
     NoopSnapshotRuntime,
@@ -562,7 +562,7 @@ def create_snapshot_service(sandbox_service) -> SnapshotService:
     )
 
     return PersistedSnapshotService(
-        snapshot_repository=create_snapshot_repository(),
+        snapshot_repository=get_snapshot_repository(),
         sandbox_service=sandbox_service,
         snapshot_runtime=snapshot_runtime,
     )

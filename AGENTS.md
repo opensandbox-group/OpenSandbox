@@ -106,7 +106,7 @@ docs/
 ### Docs conventions
 
 - Engine: VitePress. Config is a static `config.mts` with no build-time code generation.
-- All images go in `docs/public/images/`, referenced as `/images/filename` in markdown.
+- All images go in `docs/public/images/`. Reference them with a document-relative path to that directory (for example, `../public/images/filename` from `docs/guides/`) so they render in both repository previews and VitePress.
 - Every page must have YAML frontmatter with `title` and `description`.
 - Internal links use VitePress absolute paths (e.g., `/sdks/python`, `/guides/credential-vault`).
 - Links to source code or specs use full GitHub URLs.

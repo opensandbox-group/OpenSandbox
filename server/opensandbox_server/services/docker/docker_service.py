@@ -153,6 +153,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._bootstrap_script_cache: Dict[str, bytes] = {}
         self._bwrap_archive_cache: Dict[str, bytes] = {}
         self._session_gate_archive_cache: Dict[str, bytes] = {}
+        self._launcher_archive_cache: Dict[str, bytes] = {}
         self._windows_profile_cache: Dict[str, bytes] = {}
         self._daemon_platform: Optional[PlatformSpec] = None
         self._metadata_store = DockerMetadataStore()
@@ -636,6 +637,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         Raises:
             HTTPException: If sandbox creation fails
         """
+        if request.lifecycle is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": "lifecycle hooks are not supported by the Docker provider.",
+                },
+            )
         if (request.extensions or {}).get("poolRef", "").strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -644,7 +653,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     "message": "poolRef is not supported by the Docker provider. Use Kubernetes BatchSandbox provider instead.",
                 },
             )
-        request = resolve_sandbox_image_from_request(request)
+        request = await resolve_sandbox_image_from_request(request)
         ensure_entrypoint(request.entrypoint or [])
         ensure_metadata_labels(request.metadata)
         ensure_platform_valid(request.platform)

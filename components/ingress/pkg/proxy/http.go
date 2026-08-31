@@ -23,38 +23,40 @@ import (
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
-type HTTPProxy struct{}
+type HTTPProxy struct {
+	responseObservers []func(*http.Response)
+	errorObserver     func(error)
+}
 
-func NewHTTPProxy() *HTTPProxy {
-	return &HTTPProxy{}
+func NewHTTPProxy(observers ...func(*http.Response)) *HTTPProxy {
+	return &HTTPProxy{responseObservers: observers}
 }
 
 func (hp *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	targetURL := r.URL.String()
+	targetURL := *r.URL
 
-	proxy, err := hp.newReverseProxy(targetURL)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
+	proxy := hp.newReverseProxy(&targetURL)
 
 	proxy.ServeHTTP(w, r)
 }
 
-func (hp *HTTPProxy) newReverseProxy(targetHost string) (*httputil.ReverseProxy, error) {
-	url, err := url.Parse(targetHost)
-	if err != nil {
-		return nil, err
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(url)
+func (hp *HTTPProxy) newReverseProxy(targetURL *url.URL) *httputil.ReverseProxy {
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = url.Scheme
-		req.URL.Host = url.Host
-		req.Host = url.Host
+		req.URL.Scheme = targetURL.Scheme
+		req.URL.Host = targetURL.Host
+		req.URL.Path = targetURL.Path
+		req.URL.RawPath = targetURL.RawPath
+		req.URL.RawQuery = targetURL.RawQuery
+		req.Host = targetURL.Host
 		req.Header.Del(SandboxIngress)
 	}
 	proxy.ModifyResponse = func(response *http.Response) error {
+		for _, observe := range hp.responseObservers {
+			if observe != nil {
+				observe(response)
+			}
+		}
 		response.Header.Add(ReverseProxyServerPowerBy, "OpenSandbox-ingress")
 		return nil
 	}
@@ -68,9 +70,12 @@ func (hp *HTTPProxy) newReverseProxy(targetHost string) (*httputil.ReverseProxy,
 			slogger.Field{Key: "uri", Value: req.RequestURI},
 			slogger.Field{Key: "method", Value: req.Method},
 		).Errorf("ingress: reverse proxy upstream error")
+		if req.Context().Err() == nil && hp.errorObserver != nil {
+			hp.errorObserver(err)
+		}
 
 		// Attempt to set 502; this is a no-op if headers are already sent.
 		rw.WriteHeader(http.StatusBadGateway)
 	}
-	return proxy, nil
+	return proxy
 }

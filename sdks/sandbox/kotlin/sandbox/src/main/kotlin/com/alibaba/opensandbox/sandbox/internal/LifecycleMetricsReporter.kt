@@ -63,7 +63,7 @@ internal object LifecycleMetricsReporter {
         success: Boolean,
         client: OkHttpClient? = null,
     ) {
-        if (connectionConfig.isMetricsDisabled()) {
+        if (connectionConfig.isCreateMetricsDisabled()) {
             return
         }
 

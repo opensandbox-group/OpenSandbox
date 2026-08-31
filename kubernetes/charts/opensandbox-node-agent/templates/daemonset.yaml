@@ -1,5 +1,7 @@
 {{- if .Values.enabled }}
 {{- $nodeSelector := mergeOverwrite (deepCopy (default dict .Values.nodeSelector)) (dict "kubernetes.io/os" "linux") }}
+{{- $sources := .Values.config.sources }}
+{{- $containerLogsEnabled := has "container-logs" $sources }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -47,11 +49,9 @@ spec:
             - name: NODEAGENT_CLUSTER_ID
               value: {{ .Values.config.clusterID | quote }}
             - name: NODEAGENT_SOURCES
-              value: container-logs
+              value: {{ join "," $sources | quote }}
             - name: NODEAGENT_SINKS
               value: {{ .Values.sink.type | quote }}
-            - name: NODEAGENT_LOG_ROOT
-              value: {{ required "hostPaths.logs is required" .Values.hostPaths.logs | quote }}
             - name: NODEAGENT_STATE_DIR
               value: {{ .Values.config.stateDir | quote }}
             - name: NODEAGENT_STATE_MAX_BYTES
@@ -62,20 +62,24 @@ spec:
               value: {{ .Values.config.perSandboxQueueBytes | int64 | quote }}
             - name: NODEAGENT_PER_SANDBOX_RATE_LIMIT
               value: {{ .Values.config.perSandboxRateLimit | quote }}
-            - name: NODEAGENT_MAX_LINE_BYTES
-              value: {{ .Values.config.maxLineBytes | int64 | quote }}
-            - name: NODEAGENT_PARTIAL_TIMEOUT
-              value: {{ .Values.config.partialTimeout | quote }}
             - name: NODEAGENT_DROP_POLICY
               value: {{ .Values.config.dropPolicy | quote }}
             - name: NODEAGENT_SINK_TIMEOUT
               value: {{ .Values.config.sinkTimeout | quote }}
             - name: NODEAGENT_RETRY_MAX_INTERVAL
               value: {{ .Values.config.retryMaxInterval | quote }}
-            - name: NODEAGENT_ENDED_STATE_RETENTION
-              value: {{ .Values.config.endedStateRetention | quote }}
             - name: NODEAGENT_SERVER_ADDR
               value: {{ .Values.config.serverAddr | quote }}
+            {{- if $containerLogsEnabled }}
+            - name: NODEAGENT_LOG_ROOT
+              value: {{ required "hostPaths.logs is required when the container-logs Source is enabled" .Values.hostPaths.logs | quote }}
+            - name: NODEAGENT_MAX_LINE_BYTES
+              value: {{ .Values.config.maxLineBytes | int64 | quote }}
+            - name: NODEAGENT_PARTIAL_TIMEOUT
+              value: {{ .Values.config.partialTimeout | quote }}
+            - name: NODEAGENT_ENDED_STATE_RETENTION
+              value: {{ .Values.config.endedStateRetention | quote }}
+            {{- end }}
             {{- if .Values.config.pprofAddr }}
             - name: NODEAGENT_PPROF_ADDR
               value: {{ .Values.config.pprofAddr | quote }}
@@ -132,9 +136,11 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            {{- if $containerLogsEnabled }}
             - name: pod-logs
-              mountPath: {{ required "hostPaths.logs is required" .Values.hostPaths.logs | quote }}
+              mountPath: {{ required "hostPaths.logs is required when the container-logs Source is enabled" .Values.hostPaths.logs | quote }}
               readOnly: true
+            {{- end }}
             - name: state
               mountPath: {{ .Values.config.stateDir | quote }}
             {{- if and (eq .Values.sink.type "file") .Values.sink.file.path }}
@@ -142,10 +148,12 @@ spec:
               mountPath: {{ .Values.sink.file.path | quote }}
             {{- end }}
       volumes:
+        {{- if $containerLogsEnabled }}
         - name: pod-logs
           hostPath:
-            path: {{ required "hostPaths.logs is required" .Values.hostPaths.logs | quote }}
+            path: {{ required "hostPaths.logs is required when the container-logs Source is enabled" .Values.hostPaths.logs | quote }}
             type: Directory
+        {{- end }}
         - name: state
           hostPath:
             path: {{ required "hostPaths.state is required" .Values.hostPaths.state | quote }}

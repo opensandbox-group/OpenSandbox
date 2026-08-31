@@ -1,6 +1,6 @@
 apiVersion: v2
 name: opensandbox-node-agent
-description: Node-level sandbox log collection for OpenSandbox
+description: Node-level sandbox data collection for OpenSandbox
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

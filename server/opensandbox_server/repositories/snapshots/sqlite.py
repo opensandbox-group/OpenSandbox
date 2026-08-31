@@ -114,9 +114,7 @@ class SQLiteSnapshotRepository:
             params.append(query.name)
 
         if query.states:
-            clauses.append(
-                f"state IN ({', '.join('?' for _ in query.states)})"
-            )
+            clauses.append(f"state IN ({', '.join('?' for _ in query.states)})")
             params.extend(query.states)
 
         where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -181,7 +179,7 @@ class SQLiteSnapshotRepository:
                     record.namespace,
                     record.name,
                     record.description,
-                    json.dumps(self._restore_config_to_dict(record.restore_config), sort_keys=True),
+                    json.dumps(record.restore_config.to_dict(), sort_keys=True),
                     record.status.state.value,
                     record.status.reason,
                     record.status.message,
@@ -221,7 +219,7 @@ class SQLiteSnapshotRepository:
                     record.namespace,
                     record.name,
                     record.description,
-                    json.dumps(self._restore_config_to_dict(record.restore_config), sort_keys=True),
+                    json.dumps(record.restore_config.to_dict(), sort_keys=True),
                     record.status.state.value,
                     record.status.reason,
                     record.status.message,
@@ -237,6 +235,9 @@ class SQLiteSnapshotRepository:
     def delete(self, snapshot_id: str) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM snapshots WHERE id = ?", (snapshot_id,))
+
+    def close(self) -> None:
+        """SQLite connections are scoped to individual operations."""
 
     def _initialize_schema(self) -> None:
         with self._connect() as conn:
@@ -282,9 +283,7 @@ class SQLiteSnapshotRepository:
         rows = conn.execute("PRAGMA table_info(snapshots)").fetchall()
         columns = {row["name"] for row in rows}
         if "namespace" not in columns:
-            conn.execute(
-                "ALTER TABLE snapshots ADD COLUMN namespace TEXT DEFAULT NULL"
-            )
+            conn.execute("ALTER TABLE snapshots ADD COLUMN namespace TEXT DEFAULT NULL")
 
     @staticmethod
     def _migrate_namespace_nullable(conn: sqlite3.Connection) -> None:
@@ -343,7 +342,7 @@ class SQLiteSnapshotRepository:
             record.namespace,
             record.name,
             record.description,
-            json.dumps(self._restore_config_to_dict(record.restore_config), sort_keys=True),
+            json.dumps(record.restore_config.to_dict(), sort_keys=True),
             record.status.state.value,
             record.status.reason,
             record.status.message,
@@ -351,12 +350,6 @@ class SQLiteSnapshotRepository:
             self._datetime_to_str(record.created_at),
             self._datetime_to_str(record.updated_at),
         )
-
-    @staticmethod
-    def _restore_config_to_dict(config: SnapshotRestoreConfig) -> dict[str, str | None]:
-        return {
-            "image": config.image,
-        }
 
     @staticmethod
     def _datetime_to_str(value) -> str | None:
@@ -371,14 +364,14 @@ class SQLiteSnapshotRepository:
             namespace=row["namespace"],
             name=row["name"],
             description=row["description"],
-            restore_config=SnapshotRestoreConfig(
-                image=restore_config.get("image"),
-            ),
+            restore_config=SnapshotRestoreConfig.from_dict(restore_config),
             status=SnapshotStatusRecord(
                 state=SnapshotState(row["state"]),
                 reason=row["reason"],
                 message=row["message"],
-                last_transition_at=SQLiteSnapshotRepository._str_to_datetime(row["last_transition_at"]),
+                last_transition_at=SQLiteSnapshotRepository._str_to_datetime(
+                    row["last_transition_at"]
+                ),
             ),
             created_at=SQLiteSnapshotRepository._str_to_datetime(row["created_at"]),
             updated_at=SQLiteSnapshotRepository._str_to_datetime(row["updated_at"]),

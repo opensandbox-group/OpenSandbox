@@ -35,6 +35,9 @@ SESSION_GATE_SOURCE_INSTALL_DIR := /usr/local/libexec
 SESSION_GATE_RUNTIME_DIR := /opt/opensandbox
 SESSION_GATE_CFLAGS ?= $(CFLAGS) -O2 -Wall -Wextra -Werror
 SESSION_GATE_LDFLAGS ?= -static -s
+LAUNCHER_BINARY := bin/opensandbox-launcher
+LAUNCHER_SOURCE := native/launcher.c
+LAUNCHER_RUNTIME_DIR := /opt/opensandbox
 INSTALL ?= install
 DESTDIR ?=
 ifeq ($(strip $(DESTDIR)),)
@@ -49,7 +52,7 @@ PROJECT_LDFLAGS := -buildid= -B none -X 'github.com/alibaba/opensandbox/internal
 GO_BUILD_FLAGS := $(strip $(GOFLAGS) $(PROJECT_GOFLAGS))
 GO_LDFLAGS := $(strip $(LDFLAGS) $(PROJECT_LDFLAGS))
 
-.PHONY: build-session-gate install-session-gate
+.PHONY: build-session-gate install-session-gate build-launcher install-launcher
 build-session-gate:
 	@set -eu; \
 	host_goos="$$(go env GOHOSTOS)"; \
@@ -99,10 +102,87 @@ install-session-gate:
 	$(INSTALL) $(SESSION_GATE_INSTALL_OWNER_ARGS) -m 0555 "$(SESSION_GATE_BINARY)" \
 		"$(DESTDIR)$(SESSION_GATE_RUNTIME_DIR)/opensandbox-session-gate"
 
+build-launcher:
+	@set -eu; \
+	host_goos="$$(go env GOHOSTOS)"; \
+	host_goarch="$$(go env GOHOSTARCH)"; \
+	target_goos="$(if $(GOOS),$(GOOS),$$(go env GOOS))"; \
+	target_goarch="$(if $(GOARCH),$(GOARCH),$$(go env GOARCH))"; \
+	if [ "$$target_goos" != "linux" ]; then \
+		echo "Skipping launcher: hardening requires Linux (target=$$target_goos/$$target_goarch)"; \
+		exit 0; \
+	fi; \
+	if [ "$$host_goos/$$host_goarch" != "$$target_goos/$$target_goarch" ]; then \
+		echo "launcher cross-build is unsupported (host=$$host_goos/$$host_goarch, target=$$target_goos/$$target_goarch)" >&2; \
+		echo "use the execd Docker build for multi-architecture Linux artifacts" >&2; \
+		exit 1; \
+	fi; \
+	mkdir -p bin; \
+	$(CC) $(CPPFLAGS) $(SESSION_GATE_CFLAGS) "$(LAUNCHER_SOURCE)" \
+		$(SESSION_GATE_LDFLAGS) -o "$(LAUNCHER_BINARY).tmp"; \
+	mv -f "$(LAUNCHER_BINARY).tmp" "$(LAUNCHER_BINARY)"
+
+install-launcher:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		echo "install-launcher requires Linux" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -x "$(LAUNCHER_BINARY)" ]; then \
+		echo "$(LAUNCHER_BINARY) is missing; run make build-launcher first" >&2; \
+		exit 1; \
+	fi
+	@if [ -z "$(DESTDIR)" ] && [ "$$(id -u)" -ne 0 ]; then \
+		echo "install-launcher requires root unless DESTDIR is set" >&2; \
+		exit 1; \
+	fi
+	@umask 022; mkdir -p "$(DESTDIR)$(LAUNCHER_RUNTIME_DIR)"
+	@if [ -z "$(DESTDIR)" ]; then \
+		chown root:root "$(DESTDIR)$(LAUNCHER_RUNTIME_DIR)"; \
+	fi
+	chmod go-w "$(DESTDIR)$(LAUNCHER_RUNTIME_DIR)"
+	$(INSTALL) $(SESSION_GATE_INSTALL_OWNER_ARGS) -m 0555 "$(LAUNCHER_BINARY)" \
+		"$(DESTDIR)$(LAUNCHER_RUNTIME_DIR)/opensandbox-launcher"
+
 .PHONY: build
-build: vet build-session-gate ## Build execd and the Linux session gate.
+build: vet build-session-gate build-launcher ## Build execd and the Linux native helpers.
 	@mkdir -p bin
 	go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/execd main.go
+
+.PHONY: build-ebpf
+build-ebpf: ## Build the execd-ebpf observation variant (CGO + cilium/ebpf).
+	@if [ "$$(uname -s 2>/dev/null || echo non-linux)" != "Linux" ]; then \
+		echo "execd-ebpf requires Linux (BPF attachable host)" >&2; \
+		exit 1; \
+	fi
+	@mkdir -p bin
+	$(MAKE) generate-ebpf ARCH=$(shell go env GOARCH)
+	CGO_ENABLED=1 go build -tags ebpf $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/execd-ebpf main.go
+	@echo "built bin/execd-ebpf"
+
+# Regenerate the CO-RE audit bytecode for one architecture from
+# prog/audit.bpf.c + prog/audit_types.h. The types header declares only the
+# kernel members the programs touch (resolved by name against the target
+# kernel BTF at load time), so no vmlinux.h is needed and the bytecode is
+# hermetic across architectures (issue #1563).
+#
+#   make generate-ebpf ARCH=amd64   # or arm64; defaults to GOARCH
+#
+# Requires clang with the bpf target. bpf2go writes audit_bpf_<target>.{go,o};
+# the Go build picks the right one via build tags.
+.PHONY: generate-ebpf
+ARCH ?= $(shell go env GOARCH)
+generate-ebpf:
+	@case "$(ARCH)" in \
+		amd64|arm64) ;; \
+		*) echo "generate-ebpf: unsupported ARCH=$(ARCH) (amd64|arm64)" >&2; exit 1 ;; \
+	esac
+	go run github.com/cilium/ebpf/cmd/bpf2go@v0.16.0 \
+		-cc clang -no-strip \
+		-cflags "-Ipkg/ebpf/prog" \
+		-target $(ARCH) \
+		-go-package ebpf -output-dir pkg/ebpf \
+		audit pkg/ebpf/prog/audit.bpf.c
+	@echo "regenerated pkg/ebpf/audit_bpf_$(ARCH).{go,o}"
 
 .PHONY: test-integration
 test-integration: ## Run integration tests (Linux + bwrap required).

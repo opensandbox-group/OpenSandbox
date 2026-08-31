@@ -211,6 +211,10 @@ func (a *AgentSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, err
 	}, nil
 }
 
+func (a *AgentSandboxProvider) ResolveEndpoint(_ context.Context, target EndpointTarget) (*EndpointInfo, error) {
+	return a.GetEndpoint(target.SandboxID)
+}
+
 func (a *AgentSandboxProvider) resolveEndpointFromSandbox(sandboxId string, u *unstructured.Unstructured) (string, error) {
 	status, ok := u.Object["status"].(map[string]any)
 	if !ok {

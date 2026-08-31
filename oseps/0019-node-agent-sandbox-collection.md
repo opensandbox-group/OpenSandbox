@@ -3,7 +3,7 @@ title: Node Agent for Node-Level Sandbox Collection
 authors:
   - "@peijianping"
 creation-date: 2026-07-23
-last-updated: 2026-08-11
+last-updated: 2026-08-27
 status: implementing
 ---
 
@@ -99,10 +99,11 @@ high sandbox density, the per-Pod CPU, memory, and connection overhead grows wit
 sandboxes on the node. That is the density OpenSandbox is designed to optimize.
 
 The selected design keeps discovery, enrichment, Source lifecycle, and acknowledgement coordination
-in the Node Agent. Records go directly to a backend through a Sink registered at compile time and
-selected at startup. A durable Sink acknowledgement advances the Source checkpoint through a
-Source-owned acknowledgement token (`AckToken`). The Agent does not implement a separate disk spool
-or general multi-backend fan-out.
+in the Node Agent. One or more Sources and one Sink are registered at compile time and selected at
+startup. A Source multiplexer merges their events and routes acknowledgements back to the owning
+Source. A durable Sink acknowledgement advances that Source's checkpoint through a Source-owned
+acknowledgement token (`AckToken`). The Agent does not implement a separate disk spool or general
+multi-backend fan-out.
 
 ### Goals
 
@@ -257,7 +258,8 @@ The following terms are normative:
 
 | Term | Meaning |
 | --- | --- |
-| `StreamRef` | One logical Source stream. For `container-logs`: Source name, Pod UID, and container name. |
+| `StreamRef` | One logical Source stream, including a Source-namespaced ID and immutable RecordKind. For `container-logs`, the ID contains the Source name, Pod UID, and container name. |
+| `StreamMetadata` | Immutable, format-specific stream identity that is carried with Delivery and StreamEnd, persisted for finalization recovery, and never interpreted by Pipeline. |
 | `FileRef` / `SourceSpan` | One physical CRI generation and a half-open byte range within it. Source generations are independent from Sink object generations. |
 | `AckToken` | Source-created acknowledgement token for input that became a Delivery. Pipeline may validate the common envelope but cannot interpret or construct its `Value`; Sink never receives it. |
 | committed / processed cursor | Durable progress after Sink persistence and Source transaction / best-effort progress after synchronous output handling. Restart trusts only the applicable cursor. |
@@ -288,6 +290,8 @@ type Resource struct {
     Container   string
 }
 
+type StreamMetadata map[string]string
+
 type Record struct {
     Kind       RecordKind
     Timestamp  time.Time
@@ -297,7 +301,8 @@ type Record struct {
 }
 
 type StreamRef struct {
-    ID string // container-logs: Source name + Pod UID + container
+    ID   string // Source name + Source-local stream identity
+    Kind RecordKind
 }
 
 type AckToken struct {
@@ -342,6 +347,7 @@ type SourceOutcome struct {
 type Delivery struct {
     Record    Record
     StreamRef StreamRef
+    Metadata  StreamMetadata
     AckToken  AckToken
     RecordID  string
 }
@@ -352,6 +358,7 @@ type StreamEnd struct {
     Revision          uint64
     CoverageStartedAt time.Time
     Resource          Resource
+    Metadata          StreamMetadata
     Outcome           SourceOutcome
 }
 
@@ -375,6 +382,7 @@ type BatchItem struct {
 
 type Batch struct {
     StreamRef StreamRef
+    Metadata  StreamMetadata
     Items     []BatchItem
 }
 
@@ -385,6 +393,7 @@ type FinalizeRequest struct {
     Revision          uint64
     CoverageStartedAt time.Time
     Resource          Resource
+    Metadata          StreamMetadata
     Outcome           SourceOutcome
     FinalizedAt       time.Time
 }
@@ -397,6 +406,16 @@ type Sink interface {
     Close(context.Context) error
 }
 ```
+
+Every enabled Source owns its StreamRef namespace, private checkpoint namespace, and isolated Store
+view. Startup assembly gives each Source its private state and Store view. The Source multiplexer
+combines Source event streams, validates event namespace, kind, and token ownership, and routes
+`AckToken` and `EndToken` values by their Source field. A StreamRef cannot change RecordKind or
+StreamMetadata during its lifetime. Each RecordKind has a compile-time format that defines encoding,
+content type, object metadata, and object-family layout. The existing `container-log` layout remains
+unchanged; other kinds are isolated below `<cluster>/_streams/<record-kind>/`. This is static
+extensibility: adding a Source or format requires rebuilding the binary, and configuration does not
+load code or hot-reload Sources.
 
 `CoverageStartedAt` is persisted once and remains identical in every Revision for a StreamRef.
 `SourceOutcome.HadDrops` and drop reasons are cumulative and monotonic. `HadSourceGaps` instead means
@@ -539,10 +558,11 @@ additionally sets `attributes.source` to `container.stdout` or `container.stderr
 `log.file.path`. `NODEAGENT_CLUSTER_ID` is stable for the cluster lifetime and prevents collisions
 when clusters share a target.
 
-Body is bytes rather than a required UTF-8 string. OSS and file write canonical text lines; an
-optional NDJSON helper Base64-encodes invalid UTF-8 and marks the encoding. Delivery-only StreamRef,
-AckToken, and RecordID are not written into the default text line. RecordID is deterministic from
-StreamRef and stable SourceSpan identities so a custom idempotent Sink can use it.
+Body is bytes rather than a required UTF-8 string. For `container-log`, the built-in OSS and file
+formats write canonical text lines; each other RecordKind defines its own encoding. An optional
+NDJSON helper Base64-encodes invalid UTF-8 and marks the encoding. Delivery-only StreamRef, AckToken,
+and RecordID are not written into the default container-log text line. RecordID is deterministic
+from StreamRef and stable SourceSpan identities so a custom idempotent Sink can use it.
 
 ```plain
 # raw CRI input
@@ -594,9 +614,10 @@ Batch reaches the backend's durable point. Finalize is idempotent for `(target_i
 Revision, FinalizeID)`.
 
 **Durable file.** `NODEAGENT_FILE_PATH` resolves once to a persistent `canonical_root`. Each
-StreamRef owns `<cluster_id>/<namespace>/<sandbox_id>/<pod_uid>/`; generation 0 is
-`<container>.log`, then `<container>.<generation>.log`. Opens begin from the root directory fd, use
-`openat`/`O_NOFOLLOW`, reject non-regular files and `..`, and validate persisted device/inode.
+StreamRef uses the object family defined by its RecordKind format. For `container-log`, that family
+is `<cluster_id>/<namespace>/<sandbox_id>/<pod_uid>/`; generation 0 is `<container>.log`, then
+`<container>.<generation>.log`. Opens begin from the root directory fd, use `openat`/`O_NOFOLLOW`,
+reject non-regular files and `..`, and validate persisted device/inode.
 
 Before appending L bytes at position P, persist `append_intent={P,L,request_sha256,device,inode}`.
 Write, flush, `fdatasync`, then transactionally commit position and CRC64 and clear the intent.
@@ -614,7 +635,8 @@ tombstone, then a cleanup intent, atomically renames the directory into GC stagi
 parent, and deletes asynchronously. Non-empty orphan files are identity-bound and quarantined before
 Source replay; they are never silently adopted.
 
-**OSS append.** The object family prefix is:
+**OSS append.** Each StreamRef uses the object family, content type, encoding, and format-specific
+metadata defined by its RecordKind. For `container-log`, the object family prefix is:
 
 ```plain
 <prefix>/<cluster_id>/<namespace>/<sandbox_id>/<pod_uid>/
@@ -623,13 +645,14 @@ Source replay; they are never silently adopted.
   <container>.finalized.<revision>.json
 ```
 
-Each record is one `<RFC3339Nano timestamp> <stdout|stderr> <body>\n` byte line. Data objects use
-`application/octet-stream`; identity remains in object metadata and markers rather than being
-repeated in every line.
+Each `container-log` record is one `<RFC3339Nano timestamp> <stdout|stderr> <body>\n` byte line, and
+its data objects use `application/octet-stream`. Identity remains in object metadata and markers
+rather than being repeated in every record.
 
 The first AppendObject creates an object at position 0 with writer ID, target ID, StreamRef,
-generation, Resource, and original log-directory metadata. Later appends carry no metadata. Before
-sending L bytes at server position P, persist an append intent with request digest. Query server
+generation, Resource, and the format-specific metadata; for `container-log`, this includes the
+original log directory. Later appends carry no metadata. Before sending L bytes at server position
+P, persist an append intent with request digest. Query server
 length Q after an unknown outcome:
 
 | Observation | Same process | After restart |
@@ -700,7 +723,9 @@ Target identity excludes credentials. Define `lp(x)=ASCII(UTF-8 byte length)+":"
 lowercasing the HTTPS scheme/host, removing default `:443` and trailing `/`, and rejecting endpoint
 path/query/fragment, OSS uses `"sha256:"+lowerhex(SHA-256("opensandbox-nodeagent-target-v1\0" ||
 lp("oss") || lp(endpoint) || lp(bucket) || lp(prefix) || lp(cluster_id)))`. Durable file substitutes
-`lp("file") || lp(canonical_root) || lp(cluster_id) || lp(node_name)`. `finalize_id` is
+`lp("file") || lp(canonical_root) || lp(cluster_id) || lp(node_name)`. The marker's scalar
+`stream_ref` member and the `stream_ref` input below are `StreamRef.ID`; RecordKind is fixed by the
+owning object family and the persisted StreamRef binding. `finalize_id` is
 `"sha256:"+lowerhex(SHA-256("opensandbox-nodeagent-finalize-v1\0" || lp(stream_ref) ||
 lp(decimal_revision) || lp(target_id)))`. Prefix loses leading/trailing `/`; decimal Revision has no
 leading zero; `\0` is one zero byte. FinalizeID identifies an operation and is not a marker-content
@@ -727,6 +752,9 @@ the process alive but starts no Source and reports a specific readiness reason. 
 loaded from environment variables at startup; rotating the backing Secret requires an Agent restart
 and does not change target identity.
 
+Disabling or renaming a Source while durable state still refers to its namespace fails startup
+closed. Operators must first drain or migrate that state; the Agent never silently discards it.
+
 Byte/file values are unsigned ASCII decimal without unit suffix; applicable limits are positive
 except rate limit and file retention, whose zero meanings are documented below. Durations use Go
 `time.ParseDuration` and must be positive except zero file retention. Helm schema validates
@@ -737,7 +765,7 @@ concurrency, flush grouping, and safety reserve are derived and are not public c
 | Key | v1 contract |
 | --- | --- |
 | `NODE_NAME` / `NODEAGENT_CLUSTER_ID` | Required node and stable cluster identity matching `[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?`. |
-| `NODEAGENT_SOURCES` / `NODEAGENT_SINKS` | Exactly `container-logs` and one compiled Sink: `oss` or `file`. |
+| `NODEAGENT_SOURCES` / `NODEAGENT_SINKS` | A non-empty comma-separated set of compiled Sources and exactly one compiled Sink. The stock v1 binary contains only `container-logs`; its Sinks are `oss` and `file`. |
 | `NODEAGENT_OSS_ENDPOINT`, `NODEAGENT_OSS_BUCKET`, `NODEAGENT_OSS_KEY_PREFIX` | Required OSS target identity; HTTPS endpoint. |
 | `OSS_ACCESS_KEY_ID`, `OSS_ACCESS_KEY_SECRET`, optional `OSS_SESSION_TOKEN` | OSS credentials; short-lived STS/refreshable provider preferred. |
 | `NODEAGENT_FILE_PATH` | Optional persistent absolute root. Absent means best-effort stdout; present means durable file. |
@@ -760,9 +788,10 @@ whole state directory; per-StreamRef state deletion is not a supported target mi
 
 Ship an optional `kubernetes/charts/opensandbox-node-agent` chart and umbrella dependency. The
 DaemonSet runs only on Linux, obtains `NODE_NAME` from the Downward API, tolerates the intended node
-set, mounts `/var/log/pods` read-only, and mounts a node-persistent state directory writable.
-Durable-file data uses a separate persistent host path whose lifetime is no shorter than state.
-emptyDir, shared RWX storage, and external logrotate are outside v1.
+set, and mounts a node-persistent state directory writable. It mounts `/var/log/pods` read-only only
+when `container-logs` is enabled. Durable-file data uses a separate persistent host path whose
+lifetime is no shorter than state. emptyDir, shared RWX storage, and external logrotate are outside
+v1.
 
 RBAC grants only Pod list/watch. The request field selector reduces returned data but is not an
 authorization boundary. The process may need UID 0 to read host Pod logs on common distributions,

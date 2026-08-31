@@ -220,3 +220,70 @@ func TestFileStore_Concurrency(t *testing.T) {
 		<-done
 	}
 }
+
+// TestFileStore_AtomicPublish locks in the guarantee writeTaskFile actually owes
+// its callers: task.json is published by an atomic rename, so a reader never sees
+// a partial file and no temp file is left behind. This is the invariant that must
+// survive independently of whether the write is fsynced.
+func TestFileStore_AtomicPublish(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewFileStore(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+
+	ctx := context.Background()
+	task := &types.Task{
+		Name: "atomic-task",
+		Process: &api.Process{
+			Command: []string{"echo", "hello"},
+		},
+	}
+
+	taskDir := filepath.Join(tmpDir, task.Name)
+	taskFile := filepath.Join(taskDir, "task.json")
+	tmpFile := taskFile + ".tmp"
+
+	if err := store.Create(ctx, task); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := os.Stat(taskFile); err != nil {
+		t.Fatalf("task.json missing after Create: %v", err)
+	}
+	if _, err := os.Stat(tmpFile); !os.IsNotExist(err) {
+		t.Error("temp file left behind after Create")
+	}
+
+	// Update must publish through the same rename, leaving no temp file either.
+	now := time.Now()
+	task.DeletionTimestamp = &now
+	if err := store.Update(ctx, task); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if _, err := os.Stat(tmpFile); !os.IsNotExist(err) {
+		t.Error("temp file left behind after Update")
+	}
+	got, err := store.Get(ctx, task.Name)
+	if err != nil {
+		t.Fatalf("Get after update failed: %v", err)
+	}
+	if got.DeletionTimestamp == nil {
+		t.Error("Update did not persist DeletionTimestamp")
+	}
+
+	// A temp file stranded by a writer that died mid-write must not be visible to
+	// readers: they only ever resolve task.json.
+	if err := os.WriteFile(tmpFile, []byte("{ truncated"), 0644); err != nil {
+		t.Fatalf("failed to plant stale temp file: %v", err)
+	}
+	if _, err := store.Get(ctx, task.Name); err != nil {
+		t.Errorf("Get must ignore a stale temp file, got: %v", err)
+	}
+	tasks, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Name != task.Name {
+		t.Errorf("List must ignore a stale temp file, got %d tasks", len(tasks))
+	}
+}

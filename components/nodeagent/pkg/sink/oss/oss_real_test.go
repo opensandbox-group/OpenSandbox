@@ -28,8 +28,8 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/identity"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/marker"
-	lineformat "github.com/alibaba/opensandbox/nodeagent/pkg/sink"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
+	"github.com/alibaba/opensandbox/nodeagent/pkg/streamformat"
 )
 
 func TestRealOSSSmoke(t *testing.T) {
@@ -51,24 +51,26 @@ func TestRealOSSSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	sink, err := New(Config{Endpoint: endpoint, Bucket: bucket, Prefix: prefix, ClusterID: "integration", AccessKeyID: accessKeyID, AccessKeySecret: accessKeySecret, SessionToken: os.Getenv("OSS_SESSION_TOKEN"), WriterID: db.WriterID(), TargetID: targetID, MaxObjectBytes: 1 << 20, Timeout: 30 * time.Second}, db)
+	sink, err := newOSSSink(ossConfig{Endpoint: endpoint, Bucket: bucket, Prefix: prefix, ClusterID: "integration", AccessKeyID: accessKeyID, AccessKeySecret: accessKeySecret, SessionToken: os.Getenv("OSS_SESSION_TOKEN"), WriterID: db.WriterID(), TargetID: targetID, MaxObjectBytes: 1 << 20, Timeout: 30 * time.Second}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource := api.Resource{SandboxID: "sb-smoke", ClusterName: "integration", Namespace: "default", PodName: "pod", PodUID: "uid-" + strconv.FormatInt(time.Now().UnixNano(), 10), NodeName: "node", Container: "sandbox", LogDirectory: "/var/log/pods/default_pod_uid/sandbox"}
-	streamRef := api.StreamRef{ID: "container-logs/" + resource.PodUID + "/sandbox"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	resource := api.Resource{SandboxID: "sb-smoke", ClusterName: "integration", Namespace: "default", PodName: "pod", PodUID: "uid-" + strconv.FormatInt(time.Now().UnixNano(), 10), NodeName: "node", Container: "sandbox"}
+	streamRef := api.StreamRef{ID: "container-logs/" + resource.PodUID + "/sandbox", Kind: api.RecordKindContainerLog}
+	streamMetadata := api.StreamMetadata{streamformat.ContainerLogDirectoryMetadata: "/var/log/pods/default_pod_uid/sandbox"}
+	batch := api.Batch{StreamRef: streamRef, Metadata: streamMetadata, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	request := api.FinalizeRequest{FinalizeID: identity.FinalizeID(streamRef.ID, 1, targetID), TargetID: targetID, StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, FinalizedAt: time.Now().UTC().Truncate(time.Second)}
+	request := api.FinalizeRequest{FinalizeID: identity.FinalizeID(streamRef.ID, 1, targetID), TargetID: targetID, StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, Metadata: streamMetadata, FinalizedAt: time.Now().UTC().Truncate(time.Second)}
 	if err := sink.Finalize(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
 	dataKey := objectKey(prefix, resource, 0)
 	data, err := sink.backend.Get(context.Background(), dataKey)
-	if err != nil || !bytes.Equal(data, lineformat.EncodeBatch(batch)) {
-		t.Fatalf("data=%q err=%v", data, err)
+	_, _, expected, encodeErr := streamformat.EncodeBatch(batch)
+	if err != nil || encodeErr != nil || !bytes.Equal(data, expected) {
+		t.Fatalf("data=%q get error=%v encode error=%v", data, err, encodeErr)
 	}
 	metadata, err := sink.backend.Head(context.Background(), dataKey)
 	if err != nil {

@@ -19,7 +19,12 @@ package com.alibaba.opensandbox.sandbox
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
 import com.alibaba.opensandbox.sandbox.transport.RetryInterceptor
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.context.Context
+import io.opentelemetry.context.propagation.TextMapPropagator
+import io.opentelemetry.context.propagation.TextMapSetter
 import okhttp3.ConnectionPool
+import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -44,12 +49,27 @@ class HttpClientProvider(
     private val connectionPoolOwnedBySdk: Boolean = config.connectionPool == null
 
     private val baseBuilder: OkHttpClient.Builder
-        get() =
-            OkHttpClient.Builder()
-                .connectionPool(connectionPool)
-                .addInterceptor(UserAgentInterceptor(config.userAgent))
-                .addInterceptor(ExtraHeadersInterceptor(config.headers))
-                .addInterceptor(ClientIpInterceptor { ClientIpDetector.clientIp() })
+        get() {
+            val builder =
+                OkHttpClient.Builder()
+                    .connectionPool(connectionPool)
+                    .addInterceptor(UserAgentInterceptor(config.userAgent))
+                    .addInterceptor(ExtraHeadersInterceptor(config.headers))
+                    .addInterceptor(ClientIpInterceptor { ClientIpDetector.clientIp() })
+            if (config.enableTracing) {
+                // Propagate the active trace context (W3C traceparent) so the
+                // lifecycle server can join the same trace. No-op when there
+                // is no active span in the current context.
+                try {
+                    builder.addInterceptor(
+                        TraceContextInterceptor(GlobalOpenTelemetry.getPropagators().textMapPropagator),
+                    )
+                } catch (_: Throwable) {
+                    // OpenTelemetry is best-effort; keep the original request path operational.
+                }
+            }
+            return builder
+        }
 
     // 1. Explicit lazy definition to allow checking initialization status
     private val httpClientLazy =
@@ -62,6 +82,22 @@ class HttpClientProvider(
         }
 
     val httpClient: OkHttpClient by httpClientLazy
+
+    // A staged warmup already retries health through its DelayQueue. Clone the
+    // regular client so the warmup-only probe shares its dispatcher, connection
+    // pool, headers, tracing, timeouts, and logging while skipping both retry
+    // owners for exactly one HTTP attempt.
+    private val singleAttemptClientLazy =
+        lazy {
+            httpClient.newBuilder()
+                .apply {
+                    interceptors().removeAll { it is RetryInterceptor }
+                }
+                .retryOnConnectionFailure(false)
+                .build()
+        }
+
+    internal val singleAttemptClient: OkHttpClient by singleAttemptClientLazy
 
     // 2. Explicit lazy definition for authenticated client
     private val authenticatedClientLazy =
@@ -107,6 +143,10 @@ class HttpClientProvider(
      * false), this is a no-op — the caller relies on OkHttp defaults.
      */
     private fun OkHttpClient.Builder.addRetryInterceptor(): OkHttpClient.Builder {
+        if (!config.retryOnConnectionFailure) {
+            retryOnConnectionFailure(false)
+            return this
+        }
         if (config.retryPolicy.wrapsTransport()) {
             retryOnConnectionFailure(false)
             addInterceptor(RetryInterceptor(config.retryPolicy))
@@ -199,6 +239,34 @@ class HttpClientProvider(
                 builder.addHeader(name, value)
             }
             return chain.proceed(builder.build())
+        }
+    }
+
+    /**
+     * Injects the W3C `traceparent` / `tracestate` headers of the current
+     * OpenTelemetry context into every request. When no span is active the
+     * propagator injects nothing and the request passes through unchanged.
+     */
+    private class TraceContextInterceptor(
+        private val propagators: TextMapPropagator,
+    ) : Interceptor {
+        private val setter =
+            TextMapSetter<Headers.Builder> { carrier: Headers.Builder?, key, value ->
+                carrier?.set(key, value)
+            }
+
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            val headers = request.headers.newBuilder()
+            val tracedRequest =
+                try {
+                    propagators.inject(Context.current(), headers, setter)
+                    request.newBuilder().headers(headers.build()).build()
+                } catch (_: Throwable) {
+                    // Trace propagation is best-effort and must never fail an HTTP request.
+                    request
+                }
+            return chain.proceed(tracedRequest)
         }
     }
 

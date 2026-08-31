@@ -25,11 +25,18 @@ COPY go.mod go.sum ./
 RUN  GOPROXY=https://goproxy.cn,direct go mod download
 
 # Copy source code
+COPY internal/snapshot/ internal/snapshot/
 COPY cmd/image-committer/ cmd/image-committer/
 COPY pkg/imagecommitter/ pkg/imagecommitter/
+COPY cmd/qemu-checkpoint-helper/ cmd/qemu-checkpoint-helper/
+COPY cmd/vmstate-loader/ cmd/vmstate-loader/
 
-# Build binary
+# Build binaries. The helper is copied into the running QEMU container only for
+# the duration of checkpoint/recovery; the loader is embedded in the VMState
+# image and copied into the restore emptyDir by its init container.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/image-committer ./cmd/image-committer/
+RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/qemu-checkpoint-helper ./cmd/qemu-checkpoint-helper/
+RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/vmstate-loader ./cmd/vmstate-loader/
 
 # Runtime stage
 FROM alpine:3.19
@@ -37,15 +44,18 @@ FROM alpine:3.19
 # Use Aliyun mirror for faster downloads in China
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
-# Registry pushes use the system CA bundle.
-RUN apk add --no-cache ca-certificates
+# Registry pushes use the system CA bundle. The QEMU VMState snapshot path
+# uses nerdctl for container lifecycle, exec, image commit, and image push.
+RUN apk add --no-cache ca-certificates nerdctl
 
 # Create directory for containerd socket mount
 RUN mkdir -p /var/run/containerd
 
 # Copy the built binary from builder stage
 COPY --from=builder /usr/local/bin/image-committer /usr/local/bin/image-committer
-RUN chmod +x /usr/local/bin/image-committer
+COPY --from=builder /usr/local/bin/qemu-checkpoint-helper /usr/local/bin/qemu-checkpoint-helper
+COPY --from=builder /usr/local/bin/vmstate-loader /usr/local/bin/vmstate-loader
+RUN chmod +x /usr/local/bin/image-committer /usr/local/bin/qemu-checkpoint-helper /usr/local/bin/vmstate-loader
 
 WORKDIR /workspace
 

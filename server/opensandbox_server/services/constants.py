@@ -14,6 +14,8 @@
 
 """Shared constants for sandbox services."""
 
+from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
+
 RESERVED_LABEL_PREFIX = "opensandbox.io/"
 
 SANDBOX_ID_LABEL = "opensandbox.io/id"
@@ -113,6 +115,7 @@ class SandboxErrorCodes:
     K8S_POOL_ALREADY_EXISTS = "KUBERNETES::POOL_ALREADY_EXISTS"
     K8S_POOL_API_ERROR = "KUBERNETES::POOL_API_ERROR"
     K8S_POOL_NOT_SUPPORTED = "KUBERNETES::POOL_NOT_SUPPORTED"
+    K8S_POOL_CAPACITY_EXHAUSTED = "KUBERNETES::POOL_CAPACITY_EXHAUSTED"
 
     # Volume error codes
     INVALID_VOLUME_NAME = "VOLUME::INVALID_NAME"
@@ -176,6 +179,7 @@ __all__ = [
     "ALLOWED_EGRESS_ENV_VARS",
     "OPENSANDBOX_RUNTIME_VOLUME_NAME",
     "OPENSANDBOX_RUNTIME_MOUNT_PATH",
+    "OPENSANDBOX_LIFECYCLE",
     "SandboxErrorCodes",
     "SnapshotErrorCodes",
 ]

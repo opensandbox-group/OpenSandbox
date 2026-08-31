@@ -36,10 +36,12 @@ from opensandbox_server.config import (
     RenewIntentConfig,
     RuntimeConfig,
     ServerConfig,
+    StoreConfig,
     StorageConfig,
     load_config,
 )
 from opensandbox_server.logging_config import configure_logging
+from opensandbox_server.repositories.snapshots.migrate import DEFAULT_SQLITE_SNAPSHOT_PATH
 
 
 def _strip_optional(annotation: Any) -> Any:
@@ -108,12 +110,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Overwrite existing file when generating config.",
     )
 
+    migrate_parser = subparsers.add_parser(
+        "migrate-snapshots",
+        help="Copy snapshot records from a SQLite database to PostgreSQL.",
+    )
+    migrate_parser.add_argument(
+        "--from",
+        dest="sqlite_path",
+        default=str(DEFAULT_SQLITE_SNAPSHOT_PATH),
+        help=f"Source SQLite database path (default: {DEFAULT_SQLITE_SNAPSHOT_PATH}).",
+    )
+    migrate_parser.add_argument(
+        "--to",
+        dest="postgresql_dsn",
+        required=True,
+        help="Target PostgreSQL connection string.",
+    )
+    migrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be migrated without writing to PostgreSQL.",
+    )
+
     parser.epilog = (
         "Subcommands:\n"
         "  init-config [path] [--example {docker,docker-zh,k8s,k8s-zh}] [--force]\n"
         "    Generate a config file. Without --example it renders the full skeleton (placeholders only).\n"
         "    --example    Copy a packaged example config.\n"
         "    --force      Overwrite destination if it exists.\n"
+        "  migrate-snapshots --from <sqlite-path> --to <postgresql-dsn> [--dry-run]\n"
+        "    Copy snapshot records from SQLite to PostgreSQL before switching store.type.\n"
     )
     return parser
 
@@ -259,6 +285,7 @@ def render_full_config(destination: str | Path | None = None, *, force: bool = F
         ),
         _render_section("ingress", IngressConfig),
         _render_section("storage", StorageConfig),
+        _render_section("store", StoreConfig),
     ]
 
     content = "\n\n".join(sections) + "\n"
@@ -281,6 +308,27 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"Failed to write config template: {exc}\n")
             raise SystemExit(1)
+        return
+
+    if args.command == "migrate-snapshots":
+        from opensandbox_server.repositories.snapshots.migrate import (
+            migrate_sqlite_snapshots_to_postgresql,
+        )
+
+        try:
+            result = migrate_sqlite_snapshots_to_postgresql(
+                args.sqlite_path,
+                args.postgresql_dsn,
+                dry_run=args.dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Failed to migrate snapshots: {exc}\n")
+            raise SystemExit(1)
+        mode = "dry-run" if result.dry_run else "migrated"
+        print(
+            f"Snapshots {mode}: total={result.total}, "
+            f"migrated={result.migrated}, skipped={result.skipped}\n"
+        )
         return
 
     if args.config:

@@ -37,6 +37,7 @@ import (
 	healthserver "github.com/alibaba/opensandbox/nodeagent/pkg/server"
 	_ "github.com/alibaba/opensandbox/nodeagent/pkg/sink/file"
 	_ "github.com/alibaba/opensandbox/nodeagent/pkg/sink/oss"
+	sourcegroup "github.com/alibaba/opensandbox/nodeagent/pkg/source"
 	_ "github.com/alibaba/opensandbox/nodeagent/pkg/source/containerlogs"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/store"
@@ -108,8 +109,14 @@ func run() (exitCode int) {
 			exitCode = 1
 		}
 	}()
+	if err := checkpoint.ValidateEnabledSources(cfg.Sources); err != nil {
+		readiness.Replace("source-state-conflict")
+		log.Errorf("Source configuration conflicts with recovery state: %v", err)
+		<-signalCtx.Done()
+		return
+	}
 
-	sink, err := buildSink(cfg, checkpoint)
+	sink, err := registry.BuildSink(cfg.Sink, registry.SinkDependencies{Config: cfg, State: checkpoint})
 	if err != nil {
 		readiness.Replace("sink-unavailable")
 		log.Errorf("sink unavailable: %v", err)
@@ -138,7 +145,7 @@ func run() (exitCode int) {
 		<-signalCtx.Done()
 		return
 	}
-	identityStore := store.New(client, cfg.NodeName, cfg.ClusterID, cfg.LogRoot)
+	identityStore := store.New(client, cfg.NodeName, cfg.ClusterID)
 	if err := identityStore.Start(runCtx); err != nil {
 		readiness.Replace("store-not-synced")
 		log.Errorf("Sandbox Store failed to sync: %v", err)
@@ -163,14 +170,39 @@ func run() (exitCode int) {
 		readiness.Set("runtime-error", true)
 		log.Errorf("runtime error: %v", err)
 	}
-	source, err := registry.BuildSource(cfg.Source, registry.Dependencies{Config: cfg, Store: identityStore, State: checkpoint, Logger: log, OnError: onRuntimeError})
+	sourceChildren := make([]sourcegroup.Child, 0, len(cfg.Sources))
+	for _, sourceName := range cfg.Sources {
+		sourceStore, viewErr := identityStore.ForSource(sourceName)
+		if viewErr != nil {
+			readiness.Replace("source-unavailable")
+			log.Errorf("source Store view failed: %v", viewErr)
+			<-signalCtx.Done()
+			return
+		}
+		sourceState, stateErr := checkpoint.SourceState(sourceName)
+		if stateErr != nil {
+			readiness.Replace("source-unavailable")
+			log.Errorf("source state namespace invalid: %v", stateErr)
+			<-signalCtx.Done()
+			return
+		}
+		implementation, buildErr := registry.BuildSource(sourceName, registry.SourceDependencies{Config: cfg, Store: sourceStore, State: sourceState, Logger: log, OnError: onRuntimeError})
+		if buildErr != nil {
+			readiness.Replace("source-unavailable")
+			log.Errorf("source factory failed: %v", buildErr)
+			<-signalCtx.Done()
+			return
+		}
+		sourceChildren = append(sourceChildren, sourcegroup.Child{Name: sourceName, Source: implementation})
+	}
+	sources, err := sourcegroup.NewMux(sourceChildren, onRuntimeError)
 	if err != nil {
 		readiness.Replace("source-unavailable")
-		log.Errorf("source factory failed: %v", err)
+		log.Errorf("source group invalid: %v", err)
 		<-signalCtx.Done()
 		return
 	}
-	p, err := pipeline.New(pipeline.Config{BatchMaxItems: config.InternalBatchMaxItems, FlushInterval: config.InternalBatchFlushInterval, SinkTimeout: cfg.SinkTimeout, RetryMaxInterval: cfg.RetryMaxInterval, OnRetryStateChange: func(active bool) { readiness.Set("operation-retrying", active) }, MemoryBudgetBytes: cfg.MemoryBudgetBytes, PerSandboxQueueBytes: cfg.PerSandboxQueueBytes, PerSandboxRateLimit: cfg.PerSandboxRateLimit, DropPolicy: cfg.DropPolicy}, source, sink, checkpoint, targetID, log, onRuntimeError)
+	p, err := pipeline.New(pipeline.Config{BatchMaxItems: config.InternalBatchMaxItems, FlushInterval: config.InternalBatchFlushInterval, SinkTimeout: cfg.SinkTimeout, RetryMaxInterval: cfg.RetryMaxInterval, OnRetryStateChange: func(active bool) { readiness.Set("operation-retrying", active) }, MemoryBudgetBytes: cfg.MemoryBudgetBytes, PerSandboxQueueBytes: cfg.PerSandboxQueueBytes, PerSandboxRateLimit: cfg.PerSandboxRateLimit, DropPolicy: cfg.DropPolicy}, sources, sink, checkpoint, targetID, log, onRuntimeError)
 	if err != nil {
 		readiness.Replace("pipeline-invalid")
 		log.Errorf("pipeline invalid: %v", err)
@@ -178,7 +210,7 @@ func run() (exitCode int) {
 		return
 	}
 	events := make(chan api.SourceEvent)
-	if err := source.Start(runCtx, events); err != nil {
+	if err := sources.Start(runCtx, events); err != nil {
 		readiness.Replace("source-unavailable")
 		log.Errorf("source failed to start: %v", err)
 		<-signalCtx.Done()
@@ -227,7 +259,7 @@ func run() (exitCode int) {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.SinkTimeout)
 	defer shutdownCancel()
 	cancelRun()
-	stopErr := source.Stop(shutdownCtx)
+	stopErr := sources.Stop(shutdownCtx)
 	if !pipelineFinished {
 		select {
 		case runErr = <-pipelineDone:
@@ -244,18 +276,14 @@ func run() (exitCode int) {
 	if shutdownErr != nil {
 		log.Errorf("shutdown incomplete: %v", shutdownErr)
 		if runtimeFailure {
-			waitForRuntimeFailureSignal(signalCtx)
+			<-signalCtx.Done()
 		}
 		return 1
 	}
 	if runtimeFailure {
-		waitForRuntimeFailureSignal(signalCtx)
+		<-signalCtx.Done()
 	}
 	return 0
-}
-
-func waitForRuntimeFailureSignal(ctx context.Context) {
-	<-ctx.Done()
 }
 
 var errPipelinePanicked = errors.New("pipeline goroutine panicked")
@@ -264,10 +292,6 @@ func runPipeline(done chan<- error, run func() error) {
 	runErr := errPipelinePanicked
 	defer func() { done <- runErr }()
 	runErr = run()
-}
-
-func buildSink(cfg config.Config, checkpoint *state.DB) (api.Sink, error) {
-	return registry.BuildSink(cfg.Sink, registry.Dependencies{Config: cfg, State: checkpoint})
 }
 
 func waitForSignal() {

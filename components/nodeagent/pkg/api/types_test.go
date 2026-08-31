@@ -52,3 +52,12 @@ func TestPermanent(t *testing.T) {
 		t.Fatal("Permanent(nil) must remain nil")
 	}
 }
+
+func TestStreamMetadataEqualDistinguishesMissingEmptyValues(t *testing.T) {
+	if (StreamMetadata{"first": ""}).Equal(StreamMetadata{"second": ""}) {
+		t.Fatal("metadata with different empty-valued keys compared equal")
+	}
+	if !(StreamMetadata{"first": ""}).Equal(StreamMetadata{"first": ""}) {
+		t.Fatal("identical metadata did not compare equal")
+	}
+}

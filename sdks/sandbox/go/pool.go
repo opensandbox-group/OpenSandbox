@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -90,6 +91,20 @@ func (p *DefaultSandboxPool) Start(ctx context.Context) error {
 	p.lifecycleState = PoolLifecycleStarting
 	startMaxIdle := p.config.MaxIdle
 	p.mu.Unlock()
+
+	// Refuse to bind a retired namespace. Only a definite fence blocks startup;
+	// a store outage is left to the writes below to surface.
+	if err := p.ensureNamespaceActive(ctx); err != nil {
+		var destroyed *PoolDestroyedError
+		if errors.As(err, &destroyed) {
+			p.mu.Lock()
+			if p.lifecycleState == PoolLifecycleStarting {
+				p.lifecycleState = PoolLifecycleNotStarted
+			}
+			p.mu.Unlock()
+			return err
+		}
+	}
 
 	// Initialize state store with pool configuration.
 	if err := p.config.StateStore.SetMaxIdle(ctx, p.config.PoolName, startMaxIdle); err != nil {
@@ -187,6 +202,17 @@ func (p *DefaultSandboxPool) syncHealthState() {
 func (p *DefaultSandboxPool) runReconcileTick(ctx context.Context) {
 	p.reconMu.Lock()
 	defer p.reconMu.Unlock()
+
+	// A destroy fences the namespace for every peer. Stop rather than keep
+	// replenishing a pool that is being retired.
+	if err := p.ensureNamespaceActive(ctx); err != nil {
+		var destroyed *PoolDestroyedError
+		if errors.As(err, &destroyed) {
+			p.stopAfterNamespaceDestroyed(destroyed.State)
+			return
+		}
+	}
+
 	createFn := func(ctx context.Context, reason PooledSandboxCreateReason) (string, error) {
 		return p.createOneSandbox(ctx, reason)
 	}
@@ -213,6 +239,12 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 	policy := p.config.EmptyBehavior
 	if opts.Policy != nil {
 		policy = *opts.Policy
+	}
+
+	// A fenced namespace must not mint new sandboxes, so this has to run before the
+	// direct-create fallthrough below and not only on the store write paths.
+	if err := p.ensureNamespaceActiveForAcquire(ctx, policy); err != nil {
+		return nil, err
 	}
 
 	// Resolve minTTL.
@@ -297,6 +329,12 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 				go p.killDiscardedAliveSandboxes(pendingKill)
 				return nil, &PoolNotRunningError{PoolName: p.config.PoolName, State: currentState}
 			}
+			// A destroy may have landed since the preflight check. Stop retrying rather
+			// than pop further idle IDs out from under the drain.
+			if err := p.ensureNamespaceActiveForAcquire(ctx, policy); err != nil {
+				go p.killDiscardedAliveSandboxes(pendingKill)
+				return nil, err
+			}
 			continue
 		}
 		// Connect + readiness succeeded. From here on the sandbox is a healthy, borrowable idle:
@@ -319,6 +357,15 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 				go p.killDiscardedAliveSandboxes(pendingKill)
 				return nil, fmt.Errorf("opensandbox: pool acquire: renew after connect failed: %w", renewErr)
 			}
+		}
+		// TryTakeIdle is unfenced so the destroy manager can drain, so this ID is
+		// already out of the store and a destroy can no longer reach it. Re-check
+		// before handing it over, fail-closed: if the store cannot confirm the
+		// namespace is ACTIVE, kill the sandbox rather than leak it into a
+		// namespace that may be retired.
+		if err := p.ensureNamespaceActiveAfterCreate(ctx, sb, nil); err != nil {
+			go p.killDiscardedAliveSandboxes(pendingKill)
+			return nil, err
 		}
 		go p.killDiscardedAliveSandboxes(pendingKill)
 		p.config.Logger.Debug("acquire: from idle",
@@ -348,7 +395,7 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 		"attempted_any", attemptedAny,
 		"loop_exhausted", loopExhausted,
 		"last_sandbox_id", lastSandboxID)
-	return p.directCreate(ctx, opts)
+	return p.directCreate(ctx, opts, policy)
 }
 
 // tryTakeIdle wraps the store's take primitives, returning a nil result on a legitimate empty
@@ -404,7 +451,7 @@ func (p *DefaultSandboxPool) connectIdle(ctx context.Context, sandboxID string, 
 	})
 }
 
-func (p *DefaultSandboxPool) directCreate(ctx context.Context, opts AcquireOptions) (*Sandbox, error) {
+func (p *DefaultSandboxPool) directCreate(ctx context.Context, opts AcquireOptions, policy AcquirePolicy) (*Sandbox, error) {
 	var sb *Sandbox
 	var err error
 
@@ -428,7 +475,15 @@ func (p *DefaultSandboxPool) directCreate(ctx context.Context, opts AcquireOptio
 	if err != nil {
 		return nil, err
 	}
-	return p.postCreateChecks(ctx, sb, opts)
+	sb, err = p.postCreateChecks(ctx, sb, opts)
+	if err != nil {
+		return nil, err
+	}
+	// Re-check: a destroy may have landed while this sandbox was being created.
+	if err := p.ensureNamespaceActiveAfterCreate(ctx, sb, &policy); err != nil {
+		return nil, err
+	}
+	return sb, nil
 }
 
 // postCreateChecks applies renew to a freshly created sandbox.
@@ -808,6 +863,109 @@ done:
 		}
 	}
 	return nil
+}
+
+// ensureNamespaceActive returns *PoolDestroyedError when a destroy has fenced or
+// tombstoned this pool's namespace, and *PoolStateStoreUnavailableError when the
+// state store cannot answer.
+func (p *DefaultSandboxPool) ensureNamespaceActive(ctx context.Context) error {
+	state, err := p.config.StateStore.GetDestroyState(ctx, p.config.PoolName)
+	if err != nil {
+		var unavailable *PoolStateStoreUnavailableError
+		if errors.As(err, &unavailable) {
+			return err
+		}
+		return &PoolStateStoreUnavailableError{Operation: "GetDestroyState", Cause: err}
+	}
+	if state != PoolDestroyStateActive {
+		return &PoolDestroyedError{PoolName: p.config.PoolName, State: state}
+	}
+	return nil
+}
+
+// ensureNamespaceActiveForAcquire is ensureNamespaceActive with the same
+// store-outage degradation the take path already applies: policies that fall
+// through to direct create treat an unreachable store as "state unknown" and
+// proceed, so a full store outage does not make them less available than
+// documented (OSEP-0005 error-code matrix). Fail-closed policies surface it.
+func (p *DefaultSandboxPool) ensureNamespaceActiveForAcquire(ctx context.Context, policy AcquirePolicy) error {
+	err := p.ensureNamespaceActive(ctx)
+	if err == nil {
+		return nil
+	}
+	var unavailable *PoolStateStoreUnavailableError
+	if errors.As(err, &unavailable) && policyFallsThroughToDirectCreate(policy) {
+		p.config.Logger.Warn("acquire: state store unavailable during namespace check, "+
+			"assuming ACTIVE and degrading to direct create",
+			"pool_name", p.config.PoolName,
+			"policy", policy,
+			"error", err)
+		return nil
+	}
+	return err
+}
+
+// ensureNamespaceActiveAfterCreate re-checks the fence once the acquire path holds
+// a live sandbox, so a destroy that landed mid-acquire does not leak one into a
+// retired namespace. On a fence the sandbox is killed and closed.
+//
+// policy is non-nil only for the direct-create path, where a store outage degrades
+// the same way the rest of that path does. The idle path passes nil and stays
+// fail-closed: that sandbox is already out of the store, so an unconfirmed
+// namespace has to be treated as retired.
+func (p *DefaultSandboxPool) ensureNamespaceActiveAfterCreate(ctx context.Context, sb *Sandbox, policy *AcquirePolicy) error {
+	err := p.ensureNamespaceActive(ctx)
+	if err == nil {
+		return nil
+	}
+	var unavailable *PoolStateStoreUnavailableError
+	if errors.As(err, &unavailable) && policy != nil && policyFallsThroughToDirectCreate(*policy) {
+		p.config.Logger.Warn("acquire: state store unavailable during post-create namespace check, "+
+			"keeping sandbox and degrading per policy",
+			"pool_name", p.config.PoolName,
+			"sandbox_id", sb.ID(),
+			"policy", *policy,
+			"error", err)
+		return nil
+	}
+	go p.killSandboxBestEffort(sb.ID())
+	_ = sb.Close()
+	return err
+}
+
+// stopAfterNamespaceDestroyed stops the pool once its namespace has been retired.
+// It runs on the reconcile goroutine, so unlike Shutdown it must not wait on p.wg.
+func (p *DefaultSandboxPool) stopAfterNamespaceDestroyed(state PoolDestroyState) {
+	p.mu.Lock()
+	if p.lifecycleState == PoolLifecycleStopped || p.lifecycleState == PoolLifecycleDraining {
+		p.mu.Unlock()
+		return
+	}
+	p.lifecycleState = PoolLifecycleStopped
+	if p.ticker != nil {
+		p.ticker.Stop()
+	}
+	if p.done != nil && !p.doneClosed {
+		close(p.done)
+		p.doneClosed = true
+	}
+	cancelFn := p.reconCancel
+	sdCh := p.shutdownDone
+	p.mu.Unlock()
+
+	if cancelFn != nil {
+		cancelFn()
+	}
+	if sdCh != nil {
+		select {
+		case <-sdCh:
+		default:
+			close(sdCh)
+		}
+	}
+	p.config.Logger.Info("pool stopped: namespace destroyed",
+		"pool_name", p.config.PoolName,
+		"destroy_state", state)
 }
 
 const (

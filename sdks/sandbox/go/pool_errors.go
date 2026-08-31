@@ -63,3 +63,31 @@ func (e *PoolStateStoreUnavailableError) Error() string {
 }
 
 func (e *PoolStateStoreUnavailableError) Unwrap() error { return e.Cause }
+
+// PoolDestroyedError is returned when a write targets a pool namespace that a
+// destroy has fenced, i.e. one that is DESTROYING or DESTROYED.
+type PoolDestroyedError struct {
+	PoolName string
+	State    PoolDestroyState
+}
+
+func (e *PoolDestroyedError) Error() string {
+	return fmt.Sprintf("opensandbox: pool %q is %s", e.PoolName, e.State)
+}
+
+// PoolDestroyIncompleteError is returned when a destroy could not run to
+// completion. The namespace stays DESTROYING and the caller should retry.
+type PoolDestroyIncompleteError struct {
+	PoolName string
+	Reason   string
+	Cause    error
+}
+
+func (e *PoolDestroyIncompleteError) Error() string {
+	if e.Cause == nil {
+		return fmt.Sprintf("opensandbox: pool %q destroy incomplete: %s", e.PoolName, e.Reason)
+	}
+	return fmt.Sprintf("opensandbox: pool %q destroy incomplete: %s: %v", e.PoolName, e.Reason, e.Cause)
+}
+
+func (e *PoolDestroyIncompleteError) Unwrap() error { return e.Cause }

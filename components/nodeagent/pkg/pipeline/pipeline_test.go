@@ -26,10 +26,16 @@ import (
 	"github.com/alibaba/opensandbox/internal/logger"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/identity"
+	sourcepkg "github.com/alibaba/opensandbox/nodeagent/pkg/source"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
+	"golang.org/x/time/rate"
 )
 
 var pipelineTestCoverageStartedAt = time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC)
+
+func testStreamRef() api.StreamRef {
+	return api.StreamRef{ID: "stream", Kind: api.RecordKindContainerLog}
+}
 
 type fakeSource struct {
 	acked         chan []api.AckResult
@@ -43,6 +49,16 @@ type fakeSource struct {
 	endGate       <-chan struct{}
 	endGateOnce   sync.Once
 	endAckStarted chan api.EndToken
+	endMutator    func(*api.EndToken)
+}
+
+type multiKindSource struct {
+	*fakeSource
+	kinds []api.RecordKind
+}
+
+func (s *multiKindSource) Capabilities() api.Capabilities {
+	return api.Capabilities{RecordKinds: append([]api.RecordKind(nil), s.kinds...)}
 }
 
 func (*fakeSource) Capabilities() api.Capabilities {
@@ -72,6 +88,9 @@ func (s *fakeSource) AcknowledgeEnd(ctx context.Context, token api.EndToken) err
 		return err
 	}
 	s.endMu.Unlock()
+	if s.endMutator != nil {
+		s.endMutator(&token)
+	}
 	wait := false
 	s.endGateOnce.Do(func() { wait = s.endGate != nil })
 	if wait {
@@ -100,6 +119,51 @@ type fakeSink struct {
 	consumeCalls int
 	consumeStart chan struct{}
 }
+
+type multiKindSink struct {
+	*fakeSink
+	kinds []api.RecordKind
+}
+
+func (s *multiKindSink) Capabilities() api.Capabilities {
+	return api.Capabilities{RecordKinds: append([]api.RecordKind(nil), s.kinds...)}
+}
+
+type muxPipelineSource struct {
+	kind   api.RecordKind
+	events chan<- api.SourceEvent
+	acked  chan []api.AckResult
+	ended  chan api.EndToken
+}
+
+func (s *muxPipelineSource) Capabilities() api.Capabilities {
+	return api.Capabilities{RecordKinds: []api.RecordKind{s.kind}}
+}
+
+func (s *muxPipelineSource) Start(_ context.Context, events chan<- api.SourceEvent) error {
+	s.events = events
+	return nil
+}
+
+func (s *muxPipelineSource) Acknowledge(ctx context.Context, results []api.AckResult) error {
+	select {
+	case s.acked <- append([]api.AckResult(nil), results...):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *muxPipelineSource) AcknowledgeEnd(ctx context.Context, token api.EndToken) error {
+	select {
+	case s.ended <- cloneEndToken(token):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (*muxPipelineSource) Stop(context.Context) error { return nil }
 
 type nonRetryableTestError struct{}
 
@@ -187,8 +251,8 @@ func TestPipelineFinalizeIsNotBoundedBySingleRequestTimeout(t *testing.T) {
 	events := make(chan api.SourceEvent, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
-	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt}}
+	streamRef := testStreamRef()
+	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt, Resource: api.Resource{SandboxID: "sb"}}}
 	select {
 	case <-source.ended:
 	case <-time.After(2 * time.Second):
@@ -231,7 +295,7 @@ func TestPipelineAcknowledgesOnlyAfterSink(t *testing.T) {
 	events := make(chan api.SourceEvent, 2)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	token := api.AckToken{ID: "ack", Source: "fake", StreamRef: streamRef}
 	events <- api.SourceEvent{Delivery: &api.Delivery{StreamRef: streamRef, AckToken: token, RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Resource: api.Resource{SandboxID: "sb"}}}}
 	select {
@@ -242,7 +306,7 @@ func TestPipelineAcknowledgesOnlyAfterSink(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("acknowledgement timed out")
 	}
-	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt}}
+	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt, Resource: api.Resource{SandboxID: "sb"}}}
 	select {
 	case <-source.ended:
 	case <-time.After(2 * time.Second):
@@ -262,6 +326,156 @@ func TestPipelineAcknowledgesOnlyAfterSink(t *testing.T) {
 	defer sink.mu.Unlock()
 	if len(sink.batches) != 1 || len(sink.finalized) != 1 {
 		t.Fatalf("batches=%d finalized=%d", len(sink.batches), len(sink.finalized))
+	}
+}
+
+func TestMuxPipelineRoutesTwoKinds(t *testing.T) {
+	const (
+		logKind     api.RecordKind = "test-log"
+		syscallKind api.RecordKind = "test-syscall"
+	)
+	db, err := state.Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	logs := &muxPipelineSource{kind: logKind, acked: make(chan []api.AckResult, 1), ended: make(chan api.EndToken, 1)}
+	syscalls := &muxPipelineSource{kind: syscallKind, acked: make(chan []api.AckResult, 1), ended: make(chan api.EndToken, 1)}
+	mux, err := sourcepkg.NewMux([]sourcepkg.Child{
+		{Name: "logs", Source: logs},
+		{Name: "syscalls", Source: syscalls},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseSink := &fakeSink{}
+	sink := &multiKindSink{fakeSink: baseSink, kinds: []api.RecordKind{logKind, syscallKind}}
+	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
+	p, err := New(testConfig(), mux, sink, db, "target", log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make(chan api.SourceEvent)
+	if err := mux.Start(ctx, events); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- p.Run(ctx, events) }()
+
+	logRef := api.StreamRef{ID: "logs/stream", Kind: logKind}
+	syscallRef := api.StreamRef{ID: "syscalls/stream", Kind: syscallKind}
+	logs.events <- api.SourceEvent{Delivery: &api.Delivery{
+		Record:    api.Record{Kind: logKind, Body: []byte("log"), Resource: api.Resource{SandboxID: "logs"}},
+		StreamRef: logRef,
+		AckToken:  api.AckToken{ID: "log-ack", Source: "logs", StreamRef: logRef},
+		RecordID:  "log-record",
+	}}
+	syscalls.events <- api.SourceEvent{Delivery: &api.Delivery{
+		Record:    api.Record{Kind: syscallKind, Body: []byte("syscall"), Resource: api.Resource{SandboxID: "syscalls"}},
+		StreamRef: syscallRef,
+		AckToken:  api.AckToken{ID: "syscall-ack", Source: "syscalls", StreamRef: syscallRef},
+		RecordID:  "syscall-record",
+	}}
+
+	select {
+	case results := <-logs.acked:
+		if len(results) != 1 || results[0].Token.Source != "logs" || results[0].Token.StreamRef != logRef {
+			t.Fatalf("log ACK results = %+v", results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("log ACK was not routed to the log Source")
+	}
+	select {
+	case results := <-syscalls.acked:
+		if len(results) != 1 || results[0].Token.Source != "syscalls" || results[0].Token.StreamRef != syscallRef {
+			t.Fatalf("syscall ACK results = %+v", results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("syscall ACK was not routed to the syscall Source")
+	}
+
+	cancel()
+	if err := <-runDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Pipeline Run error = %v", err)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	if err := mux.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	baseSink.mu.Lock()
+	defer baseSink.mu.Unlock()
+	if len(baseSink.batches) != 2 || baseSink.batches[0].StreamRef.Kind == baseSink.batches[1].StreamRef.Kind {
+		t.Fatalf("batches = %+v", baseSink.batches)
+	}
+}
+
+func TestPipelineRejectsStreamIDReusedWithAnotherKind(t *testing.T) {
+	const (
+		firstKind  api.RecordKind = "first-kind"
+		secondKind api.RecordKind = "second-kind"
+	)
+	kinds := []api.RecordKind{firstKind, secondKind}
+	for _, test := range []struct {
+		name      string
+		persisted bool
+	}{
+		{name: "after worker retirement"},
+		{name: "after restart", persisted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := state.Open(t.TempDir(), "target", 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			first := api.StreamRef{ID: "source/shared", Kind: firstKind}
+			resource := api.Resource{SandboxID: "sb"}
+			outcome := api.SourceOutcome{LossReasons: []string{}}
+			endToken := api.EndToken{ID: "end", Source: "source", StreamRef: first}
+			if test.persisted {
+				if err := db.PutFinalizeIntent(state.FinalizeIntent{FinalizeID: identity.FinalizeID(first.ID, 1, "target"), TargetID: "target", StreamRef: first.ID, StreamKind: first.Kind, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt, FinalizedAt: pipelineTestCoverageStartedAt.Add(time.Minute), Resource: &resource, Outcome: &outcome, EndToken: &endToken, SinkDone: true, SourceDone: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			baseSource := &fakeSource{acked: make(chan []api.AckResult, 1), ended: make(chan api.EndToken, 1)}
+			baseSink := &fakeSink{}
+			log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
+			p, err := New(testConfig(), &multiKindSource{fakeSource: baseSource, kinds: kinds}, &multiKindSink{fakeSink: baseSink, kinds: kinds}, db, "target", log, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.persisted {
+				if err := db.BindStreamKind(first); err != nil {
+					t.Fatal(err)
+				}
+			}
+			second := api.StreamRef{ID: first.ID, Kind: secondKind}
+			events := make(chan api.SourceEvent, 1)
+			events <- api.SourceEvent{Delivery: &api.Delivery{StreamRef: second, AckToken: api.AckToken{ID: "ack", Source: "source", StreamRef: second}, RecordID: "record", Record: api.Record{Kind: secondKind, Resource: resource}}}
+			if err := p.Run(context.Background(), events); err == nil || !strings.Contains(err.Error(), "changed record kind") {
+				t.Fatalf("Pipeline.Run() error = %v", err)
+			}
+			baseSink.mu.Lock()
+			consumeCalls := baseSink.consumeCalls
+			baseSink.mu.Unlock()
+			if consumeCalls != 0 {
+				t.Fatalf("Sink.Consume() calls = %d, want 0", consumeCalls)
+			}
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer closeCancel()
+			if err := p.Close(closeCtx); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -288,7 +502,7 @@ func TestPipelineRetriesSourceAcknowledgeWithoutReconsuming(t *testing.T) {
 	events := make(chan api.SourceEvent, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	events <- api.SourceEvent{Delivery: &api.Delivery{StreamRef: streamRef, AckToken: api.AckToken{ID: "ack", Source: "fake", StreamRef: streamRef}, RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Resource: api.Resource{SandboxID: "sb"}}}}
 	select {
 	case <-source.acked:
@@ -336,7 +550,7 @@ func TestPipelineDropPolicyRecordsOutcomeWithoutCallingSink(t *testing.T) {
 	events := make(chan api.SourceEvent)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	events <- api.SourceEvent{Delivery: &api.Delivery{StreamRef: streamRef, AckToken: api.AckToken{ID: "large", Source: "fake", StreamRef: streamRef}, RecordID: "large", Record: api.Record{Kind: api.RecordKindContainerLog, Body: make([]byte, 2048), Resource: api.Resource{SandboxID: "sb"}}}}
 	select {
 	case results := <-source.acked:
@@ -346,7 +560,7 @@ func TestPipelineDropPolicyRecordsOutcomeWithoutCallingSink(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("drop acknowledgement timed out")
 	}
-	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt}}
+	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt, Resource: api.Resource{SandboxID: "sb"}}}
 	select {
 	case <-source.ended:
 	case <-time.After(2 * time.Second):
@@ -388,7 +602,7 @@ func TestPipelineRetriesFinalizeWithStableIntent(t *testing.T) {
 	events := make(chan api.SourceEvent, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	endToken := api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}
 	coverageStartedAt := time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC)
 	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: endToken, Revision: 1, CoverageStartedAt: coverageStartedAt}}
@@ -435,7 +649,7 @@ func TestPipelineRejectsMissingCoverageBoundaryBeforeFinalize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	err = p.finalize(context.Background(), &worker{streamRef: streamRef}, &api.StreamEnd{StreamRef: streamRef, Revision: 1})
 	if err == nil || !strings.Contains(err.Error(), "coverage boundary") {
 		t.Fatalf("finalize error=%v", err)
@@ -464,7 +678,7 @@ func TestPipelineRetriesSourceEndAcknowledgement(t *testing.T) {
 	events := make(chan api.SourceEvent, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt}}
 	select {
 	case <-source.ended:
@@ -506,7 +720,7 @@ func TestPipelineStopsOnNonRetryableFinalizeFailure(t *testing.T) {
 	events := make(chan api.SourceEvent, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt}}
 	select {
 	case err := <-done:
@@ -554,7 +768,7 @@ func TestPipelineKeepsDropOutcomeOnSuccessorWorker(t *testing.T) {
 	events := make(chan api.SourceEvent, 3)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	firstEnd := api.EndToken{ID: "end-1", Source: "fake", StreamRef: streamRef}
 	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: firstEnd, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt, Resource: api.Resource{SandboxID: "sb"}}}
 	select {
@@ -626,7 +840,7 @@ func TestPipelineStopsOnNonRetryableSinkFailure(t *testing.T) {
 	events := make(chan api.SourceEvent, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	events <- api.SourceEvent{Delivery: &api.Delivery{StreamRef: streamRef, AckToken: api.AckToken{ID: "ack", Source: "fake", StreamRef: streamRef}, RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Resource: api.Resource{SandboxID: "sb"}}}}
 	select {
 	case err := <-done:
@@ -682,7 +896,7 @@ func TestPipelineKeepsRetryStateAcrossSinkAndSourceRecovery(t *testing.T) {
 	events := make(chan api.SourceEvent, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	events <- api.SourceEvent{Delivery: &api.Delivery{StreamRef: streamRef, AckToken: api.AckToken{ID: "ack", Source: "fake", StreamRef: streamRef}, RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Resource: api.Resource{SandboxID: "sb"}}}}
 	select {
 	case active := <-states:
@@ -805,7 +1019,7 @@ func TestPipelineStopsOnNonRetryableSourceAcknowledgeFailure(t *testing.T) {
 	events := make(chan api.SourceEvent, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	events <- api.SourceEvent{Delivery: &api.Delivery{StreamRef: streamRef, AckToken: api.AckToken{ID: "ack", Source: "fake", StreamRef: streamRef}, RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Resource: api.Resource{SandboxID: "sb"}}}}
 	select {
 	case err := <-done:
@@ -878,7 +1092,7 @@ func TestPipelineRetiresFinalizedWorkerAndRecreatesForLateRevision(t *testing.T)
 	events := make(chan api.SourceEvent, 2)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 
 	first := api.EndToken{ID: "1", Source: "fake", StreamRef: streamRef}
 	second := api.EndToken{ID: "2", Source: "fake", StreamRef: streamRef}
@@ -959,7 +1173,7 @@ func TestPipelineReleasesQueuedSuccessorWhenPredecessorIsCanceled(t *testing.T) 
 	events := make(chan api.SourceEvent, 2)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: streamRef, EndToken: api.EndToken{ID: "1", Source: "fake", StreamRef: streamRef}, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt}}
 	select {
 	case <-source.endAckStarted:
@@ -1045,6 +1259,145 @@ func TestPipelineReconcilesSourceDoneFinalizeIntentAfterRestart(t *testing.T) {
 	}
 }
 
+func TestPipelineReplaysSelfContainedFinalizeIntentAfterRestart(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		sinkDone          bool
+		wantFinalizeCalls int
+	}{
+		{name: "before sink completion", wantFinalizeCalls: 1},
+		{name: "after sink completion", sinkDone: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := state.Open(t.TempDir(), "target", 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			ref := testStreamRef()
+			resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
+			metadata := api.StreamMetadata{"test.format": "value"}
+			outcome := api.SourceOutcome{HadDrops: true, LossReasons: []string{"test-drop"}}
+			token := api.EndToken{ID: "end", Source: "fake", StreamRef: ref, Value: []byte("opaque")}
+			intent := state.FinalizeIntent{
+				FinalizeID:        identity.FinalizeID(ref.ID, 1, "target"),
+				TargetID:          "target",
+				StreamRef:         ref.ID,
+				StreamKind:        ref.Kind,
+				Revision:          1,
+				CoverageStartedAt: pipelineTestCoverageStartedAt,
+				FinalizedAt:       pipelineTestCoverageStartedAt.Add(time.Minute),
+				Resource:          &resource,
+				Metadata:          metadata,
+				Outcome:           &outcome,
+				EndToken:          &token,
+				SinkDone:          test.sinkDone,
+			}
+			if err := db.PutFinalizeIntent(intent); err != nil {
+				t.Fatal(err)
+			}
+			source := &fakeSource{
+				acked: make(chan []api.AckResult, 1),
+				ended: make(chan api.EndToken, 1),
+				endMutator: func(token *api.EndToken) {
+					token.Value[0] = 'X'
+				},
+			}
+			sink := &fakeSink{}
+			log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
+			p, err := New(testConfig(), source, sink, db, "target", log, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- p.Run(ctx, make(chan api.SourceEvent)) }()
+			select {
+			case got := <-source.ended:
+				if string(got.Value) != "Xpaque" {
+					t.Fatalf("mutated EndToken value = %q, want %q", got.Value, "Xpaque")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("replayed end acknowledgement timed out")
+			}
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+			got, found, err := db.GetFinalizeIntent(ref.ID, 1)
+			if err != nil || !found || !got.SinkDone || !got.SourceDone || got.EndToken == nil || string(got.EndToken.Value) != "opaque" {
+				t.Fatalf("finalize intent = %+v found=%v err=%v", got, found, err)
+			}
+			sink.mu.Lock()
+			if len(sink.finalized) != test.wantFinalizeCalls {
+				t.Fatalf("Finalize calls = %d, want %d", len(sink.finalized), test.wantFinalizeCalls)
+			}
+			if len(sink.finalized) == 1 {
+				replayed := sink.finalized[0]
+				if replayed.StreamRef != ref || replayed.Resource != resource || !replayed.Metadata.Equal(metadata) || !equalSourceOutcome(replayed.Outcome, outcome) {
+					t.Fatalf("replayed finalize request = %+v", replayed)
+				}
+			}
+			sink.mu.Unlock()
+			if err := p.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPipelineEnrichesLegacyFinalizeIntentWhenSourceReplaysEnd(t *testing.T) {
+	db, err := state.Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ref := testStreamRef()
+	legacy := state.FinalizeIntent{FinalizeID: identity.FinalizeID(ref.ID, 1, "target"), TargetID: "target", StreamRef: ref.ID, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt, FinalizedAt: pipelineTestCoverageStartedAt.Add(time.Minute), SinkDone: true}
+	if err := db.PutFinalizeIntent(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSourceStream(state.SourceStream{StreamRef: ref.ID, Resource: state.FrozenResource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: "/var/log/pods/ns_pod_uid/sandbox"}, Revision: 1, FinalizingRevision: 1, FinalizingOutcome: &state.OutcomeSnapshot{LossReasons: []string{}}}); err != nil {
+		t.Fatal(err)
+	}
+	source := &fakeSource{acked: make(chan []api.AckResult, 1), ended: make(chan api.EndToken, 1)}
+	sink := &fakeSink{}
+	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
+	p, err := New(testConfig(), source, sink, db, "target", log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan api.SourceEvent, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, events) }()
+	resource := api.Resource{SandboxID: "sb"}
+	outcome := api.SourceOutcome{LossReasons: []string{}}
+	token := api.EndToken{ID: "end", Source: "fake", StreamRef: ref, Value: []byte("opaque")}
+	events <- api.SourceEvent{End: &api.StreamEnd{StreamRef: ref, EndToken: token, Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt, Resource: resource, Outcome: outcome}}
+	select {
+	case <-source.ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy end acknowledgement timed out")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if err := p.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := db.GetFinalizeIntent(ref.ID, 1)
+	if err != nil || !found || !got.SourceDone || got.StreamKind != ref.Kind || got.Resource == nil || *got.Resource != resource || got.Outcome == nil || !equalSourceOutcome(*got.Outcome, outcome) || got.EndToken == nil || !equalEndToken(*got.EndToken, token) {
+		t.Fatalf("enriched finalize intent = %+v found=%v err=%v", got, found, err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.finalized) != 0 {
+		t.Fatalf("Finalize calls = %d, want 0 for legacy SinkDone intent", len(sink.finalized))
+	}
+}
+
 func TestPipelineCloseWhileRunIsSending(t *testing.T) {
 	db, err := state.Open(t.TempDir(), "target", 1<<20)
 	if err != nil {
@@ -1059,7 +1412,7 @@ func TestPipelineCloseWhileRunIsSending(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := make(chan api.SourceEvent, 128)
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	for index := 0; index < 100; index++ {
 		id := string(rune(index + 1))
 		events <- api.SourceEvent{Delivery: &api.Delivery{StreamRef: streamRef, AckToken: api.AckToken{ID: id, Source: "fake", StreamRef: streamRef}, RecordID: id, Record: api.Record{Kind: api.RecordKindContainerLog, Body: []byte("record"), Resource: api.Resource{SandboxID: "sb"}}}}
@@ -1101,7 +1454,7 @@ func TestPipelineCloseTimeoutCancelsStalledSendAndRun(t *testing.T) {
 	events := make(chan api.SourceEvent, 4)
 	runDone := make(chan error, 1)
 	go func() { runDone <- p.Run(context.Background(), events) }()
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := testStreamRef()
 	delivery := api.Delivery{StreamRef: streamRef, AckToken: api.AckToken{Source: "fake", StreamRef: streamRef}, Record: api.Record{Kind: api.RecordKindContainerLog, Body: []byte("record"), Resource: api.Resource{SandboxID: "sb"}}}
 	for index := 0; index < 3; index++ {
 		eventDelivery := delivery
@@ -1159,6 +1512,86 @@ func TestPipelineCloseTimeoutCancelsStalledSendAndRun(t *testing.T) {
 	defer p.budgetMu.Unlock()
 	if p.globalBytes != 0 || len(p.sandboxBytes) != 0 {
 		t.Fatalf("queue budget leaked: global=%d sandboxes=%v", p.globalBytes, p.sandboxBytes)
+	}
+}
+
+func TestCapabilitiesRequireEverySourceKind(t *testing.T) {
+	first := api.RecordKind("first")
+	second := api.RecordKind("second")
+	if !compatible(
+		api.Capabilities{RecordKinds: []api.RecordKind{first, second}},
+		api.Capabilities{RecordKinds: []api.RecordKind{second, first}},
+	) {
+		t.Fatal("compatible() rejected a Sink that accepts every Source kind")
+	}
+	if compatible(
+		api.Capabilities{RecordKinds: []api.RecordKind{first, second}},
+		api.Capabilities{RecordKinds: []api.RecordKind{first}},
+	) {
+		t.Fatal("compatible() accepted a Sink missing a Source kind")
+	}
+}
+
+func TestEventBytesIncludesStreamMetadata(t *testing.T) {
+	delivery := &api.Delivery{Metadata: api.StreamMetadata{"format-key": "format-value"}}
+	withoutMetadata := *delivery
+	withoutMetadata.Metadata = nil
+	if got, want := eventBytes(delivery)-eventBytes(&withoutMetadata), int64(len("format-key")+len("format-value")); got != want {
+		t.Fatalf("metadata bytes = %d, want %d", got, want)
+	}
+}
+
+func TestPipelineKeepsLimiterWhileSandboxHasAnotherWorker(t *testing.T) {
+	p := &Pipeline{
+		cfg:          Config{PerSandboxRateLimit: 1},
+		limiters:     make(map[string]*rate.Limiter),
+		limiterUsers: make(map[string]int),
+	}
+	p.retainLimiter("sandbox")
+	p.retainLimiter("sandbox")
+	want := p.limiter("sandbox")
+
+	p.releaseLimiter("sandbox")
+	if got := p.limiter("sandbox"); got != want {
+		t.Fatal("finishing one stream reset another stream's sandbox limiter")
+	}
+
+	p.releaseLimiter("sandbox")
+	if _, found := p.limiters["sandbox"]; found {
+		t.Fatal("limiter remained after the sandbox's final worker stopped")
+	}
+}
+
+func TestValidateSourceEventChecksStreamKindAndToken(t *testing.T) {
+	ref := testStreamRef()
+	valid := api.SourceEvent{Delivery: &api.Delivery{
+		Record:    api.Record{Kind: ref.Kind},
+		StreamRef: ref,
+		AckToken:  api.AckToken{StreamRef: ref},
+	}}
+	if err := validateSourceEvent(valid); err != nil {
+		t.Fatalf("validateSourceEvent() error = %v", err)
+	}
+
+	mismatchedKind := valid
+	record := *valid.Delivery
+	record.Record.Kind = "different"
+	mismatchedKind.Delivery = &record
+	if err := validateSourceEvent(mismatchedKind); err == nil {
+		t.Fatal("validateSourceEvent() accepted a mismatched record kind")
+	}
+
+	mismatchedToken := valid
+	record = *valid.Delivery
+	record.AckToken.StreamRef.ID = "other"
+	mismatchedToken.Delivery = &record
+	if err := validateSourceEvent(mismatchedToken); err == nil {
+		t.Fatal("validateSourceEvent() accepted a mismatched ack token")
+	}
+
+	end := api.SourceEvent{End: &api.StreamEnd{StreamRef: ref, EndToken: api.EndToken{StreamRef: api.StreamRef{ID: ref.ID, Kind: "different"}}}}
+	if err := validateSourceEvent(end); err == nil {
+		t.Fatal("validateSourceEvent() accepted a mismatched end token")
 	}
 }
 

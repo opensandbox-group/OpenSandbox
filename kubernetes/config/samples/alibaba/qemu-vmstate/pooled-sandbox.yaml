@@ -1,0 +1,13 @@
+# This lightweight BatchSandbox allocates an already-running QEMU Pod from
+# qemu-pool. The controller copies the Pool Pod template into this object before
+# checkpointing, then clears poolRef so the restored Pod is standalone.
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: qemu-pooled
+  namespace: qemu-manual
+spec:
+  replicas: 1
+  poolRef: qemu-pool
+  # As with the standalone sample, omit pause initially. Add pause: true only
+  # after this BatchSandbox has an allocated Ready Pod.

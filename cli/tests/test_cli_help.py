@@ -221,17 +221,19 @@ class TestDiagnosticsHelp:
         assert "--scope" in result.output
         assert "content URL" in result.output
 
-    def test_diagnostics_logs_help_describes_common_scopes(self, runner: CliRunner) -> None:
+    def test_diagnostics_logs_help_describes_builtin_scopes(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["diagnostics", "logs", "--help"])
         assert result.exit_code == 0
-        assert "lifecycle" in result.output
         assert "container" in result.output
+        assert "all" in result.output
+        assert "lifecycle" not in result.output
 
-    def test_diagnostics_events_help_describes_common_scopes(self, runner: CliRunner) -> None:
+    def test_diagnostics_events_help_describes_builtin_scopes(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["diagnostics", "events", "--help"])
         assert result.exit_code == 0
-        assert "lifecycle" in result.output
         assert "runtime" in result.output
+        assert "all" in result.output
+        assert "lifecycle" not in result.output
 
 
 # ---------------------------------------------------------------------------

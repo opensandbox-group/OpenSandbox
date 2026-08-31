@@ -269,6 +269,19 @@ nbdist/
 generated/
 **/generated/**
 
+# fleets FastPath gRPC stubs are committed intentionally (deterministic protoc
+# output; the server package needs them at install time, so they are checked
+# in rather than regenerated).
+!server/opensandbox_server/services/fleets/generated/
+!server/opensandbox_server/services/fleets/generated/**
+server/opensandbox_server/services/fleets/generated/__pycache__/
+
+# execd eBPF kernel BTF dumps (bpf2go build-time only, never committed —
+# see components/execd/pkg/ebpf/prog/audit.bpf.c; regenerate with:
+#   bpftool btf dump file /sys/kernel/btf/vmlinux format c > .../vmlinux.h)
+components/execd/pkg/ebpf/prog/vmlinux.h
+components/execd/pkg/ebpf/prog/vmlinux_*.h
+
 # gVisor runtime binaries (downloaded dynamically)
 kubernetes/test/kind/gvisor/runsc
 kubernetes/test/kind/gvisor/containerd-shim-runsc-v1

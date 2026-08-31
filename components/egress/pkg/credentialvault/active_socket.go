@@ -32,6 +32,29 @@ func StartActiveSocketServer(
 	if activeHandler == nil {
 		return nil, nil, fmt.Errorf("active credential vault handler is required")
 	}
+	return startActiveSocketServer(func(w http.ResponseWriter, _ *http.Request) { activeHandler(w) }, socketPath, socketGID)
+}
+
+// StartActiveSocketServerRequestAware is the fleet-profile variant: the
+// handler receives the request so it can dispatch on clientIp (source IP ->
+// subject -> that subject's vault snapshot). The sidecar handler stays
+// request-unaware and is unchanged.
+func StartActiveSocketServerRequestAware(
+	activeHandler func(http.ResponseWriter, *http.Request),
+	socketPath string,
+	socketGID int,
+) (*http.Server, func(context.Context) error, error) {
+	if activeHandler == nil {
+		return nil, nil, fmt.Errorf("active credential vault handler is required")
+	}
+	return startActiveSocketServer(activeHandler, socketPath, socketGID)
+}
+
+func startActiveSocketServer(
+	activeHandler func(http.ResponseWriter, *http.Request),
+	socketPath string,
+	socketGID int,
+) (*http.Server, func(context.Context) error, error) {
 	if socketPath == "" {
 		return nil, nil, fmt.Errorf("socket path is required")
 	}
@@ -82,7 +105,7 @@ func StartActiveSocketServer(
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		activeHandler(w)
+		activeHandler(w, r)
 	})
 
 	srv := &http.Server{Handler: mux}

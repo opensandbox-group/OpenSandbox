@@ -24,7 +24,13 @@ from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
 from opensandbox.exceptions import SandboxReadyTimeoutException
 from opensandbox.models.diagnostics import DiagnosticContent
-from opensandbox.models.sandboxes import NetworkPolicy, NetworkRule, SandboxEndpoint
+from opensandbox.models.sandboxes import (
+    LifecycleHook,
+    NetworkPolicy,
+    NetworkRule,
+    SandboxEndpoint,
+    SandboxLifecycle,
+)
 from opensandbox.sync.sandbox import SandboxSync
 
 
@@ -279,6 +285,7 @@ def test_sync_create_passes_new_signature_keywords_even_when_unused(
             snapshot_id=None,
             credential_proxy=None,
             resource_requests=None,
+            lifecycle=None,
         ):
             assert spec is not None
             assert entrypoint is not None
@@ -292,6 +299,9 @@ def test_sync_create_passes_new_signature_keywords_even_when_unused(
             assert platform is None
             assert secure_access is False
             assert snapshot_id is None
+            assert lifecycle is not None
+            assert lifecycle.pre_start is not None
+            assert lifecycle.pre_start.command == ["/opt/hooks/restore.sh"]
             return _CreateResponse()
 
         def get_sandbox_endpoint(self, _sandbox_id, port: int, _use_server_proxy: bool = False):
@@ -334,6 +344,9 @@ def test_sync_create_passes_new_signature_keywords_even_when_unused(
         network_policy=NetworkPolicy(
             defaultAction="deny",
             egress=[NetworkRule(action="allow", target="pypi.org")],
+        ),
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(command=["/opt/hooks/restore.sh"])
         ),
         skip_health_check=True,
     )
@@ -429,6 +442,7 @@ def test_sync_create_restore_from_snapshot_passes_snapshot_id(
             snapshot_id=None,
             credential_proxy=None,
             resource_requests=None,
+            lifecycle=None,
         ):
             assert isinstance(env, dict)
             assert isinstance(metadata, dict)
@@ -505,6 +519,7 @@ def test_sync_create_restore_from_snapshot_preserves_custom_entrypoint(
             snapshot_id=None,
             credential_proxy=None,
             resource_requests=None,
+            lifecycle=None,
         ):
             assert isinstance(env, dict)
             assert isinstance(metadata, dict)

@@ -15,7 +15,7 @@
     },
     "hostPaths": {
       "type": "object",
-      "required": ["logs", "state", "fileData"],
+      "required": ["state", "fileData"],
       "properties": {
         "logs": { "$ref": "#/definitions/absolutePath" },
         "state": { "$ref": "#/definitions/absolutePath" },
@@ -24,8 +24,14 @@
     },
     "config": {
       "type": "object",
-      "required": ["clusterID", "stateDir", "stateMaxBytes", "memoryBudgetBytes", "perSandboxQueueBytes", "perSandboxRateLimit", "maxLineBytes", "partialTimeout", "dropPolicy", "sinkTimeout", "retryMaxInterval", "endedStateRetention", "serverAddr"],
+      "required": ["sources", "clusterID", "stateDir", "stateMaxBytes", "memoryBudgetBytes", "perSandboxQueueBytes", "perSandboxRateLimit", "dropPolicy", "sinkTimeout", "retryMaxInterval", "serverAddr"],
       "properties": {
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[^/,\\s]+$" }
+        },
         "clusterID": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
         "stateDir": { "$ref": "#/definitions/absolutePath" },
         "stateMaxBytes": { "type": "integer", "minimum": 1 },
@@ -78,6 +84,23 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "required": ["config"],
+        "properties": {
+          "config": {
+            "required": ["sources"],
+            "properties": { "sources": { "contains": { "const": "container-logs" } } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "hostPaths": { "required": ["logs"] },
+          "config": { "required": ["maxLineBytes", "partialTimeout", "endedStateRetention"] }
+        }
+      }
+    },
     {
       "if": { "required": ["sink"], "properties": { "sink": { "required": ["type"], "properties": { "type": { "const": "oss" } } } } },
       "then": {

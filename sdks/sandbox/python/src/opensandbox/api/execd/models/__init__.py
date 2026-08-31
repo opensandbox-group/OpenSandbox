@@ -18,6 +18,8 @@
 
 from .bind_mount import BindMount
 from .capabilities_response import CapabilitiesResponse
+from .capabilities_response_hardening import CapabilitiesResponseHardening
+from .capabilities_response_hardening_init_mode import CapabilitiesResponseHardeningInitMode
 from .chmod_files_body import ChmodFilesBody
 from .code_context import CodeContext
 from .code_context_request import CodeContextRequest
@@ -34,6 +36,8 @@ from .file_info import FileInfo
 from .file_info_type import FileInfoType
 from .file_metadata import FileMetadata
 from .get_files_info_response_200 import GetFilesInfoResponse200
+from .hardening_layer_state import HardeningLayerState
+from .hardening_layer_state_state import HardeningLayerStateState
 from .isolated_background_run_response import IsolatedBackgroundRunResponse
 from .isolated_chmod_files_body import IsolatedChmodFilesBody
 from .isolated_create_session_response import IsolatedCreateSessionResponse
@@ -75,6 +79,8 @@ from .upload_file_body import UploadFileBody
 __all__ = (
     "BindMount",
     "CapabilitiesResponse",
+    "CapabilitiesResponseHardening",
+    "CapabilitiesResponseHardeningInitMode",
     "ChmodFilesBody",
     "CodeContext",
     "CodeContextRequest",
@@ -91,6 +97,8 @@ __all__ = (
     "FileInfoType",
     "FileMetadata",
     "GetFilesInfoResponse200",
+    "HardeningLayerState",
+    "HardeningLayerStateState",
     "IsolatedBackgroundRunResponse",
     "IsolatedChmodFilesBody",
     "IsolatedCreateSessionResponse",

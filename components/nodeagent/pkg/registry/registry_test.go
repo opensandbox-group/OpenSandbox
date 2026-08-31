@@ -26,7 +26,7 @@ func TestRegisteredSinkProvidesTargetIdentity(t *testing.T) {
 	RegisterSink(
 		name,
 		func(cfg config.Config) (string, error) { return "target:" + cfg.ClusterID, nil },
-		func(Dependencies) (api.Sink, error) { return nil, nil },
+		func(SinkDependencies) (api.Sink, error) { return nil, nil },
 	)
 
 	got, err := TargetID(name, config.Config{ClusterID: "prod-a"})
@@ -36,4 +36,13 @@ func TestRegisteredSinkProvidesTargetIdentity(t *testing.T) {
 	if got != "target:prod-a" {
 		t.Fatalf("TargetID() = %q", got)
 	}
+}
+
+func TestRegisterSourceRejectsSlashInName(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("RegisterSource() accepted a name that cannot own a stream namespace")
+		}
+	}()
+	RegisterSource("invalid/source", func(SourceDependencies) (api.Source, error) { return nil, nil })
 }

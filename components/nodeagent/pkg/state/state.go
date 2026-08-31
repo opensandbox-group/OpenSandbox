@@ -27,8 +27,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/google/uuid"
 	bolt "go.etcd.io/bbolt"
 )
@@ -45,6 +48,7 @@ var (
 	bucketSource          = []byte("source")
 	bucketSourceFileIndex = []byte("source_file_index")
 	bucketPipeline        = []byte("pipeline")
+	bucketStreamKind      = []byte("stream_kind")
 	bucketSink            = []byte("sink")
 	keySchema             = []byte("schema_version")
 	keyWriterID           = []byte("writer_id")
@@ -189,14 +193,19 @@ type ClosedObject struct {
 }
 
 type FinalizeIntent struct {
-	FinalizeID        string    `json:"finalize_id"`
-	TargetID          string    `json:"target_id"`
-	StreamRef         string    `json:"stream_ref"`
-	Revision          uint64    `json:"revision"`
-	CoverageStartedAt time.Time `json:"coverage_started_at"`
-	FinalizedAt       time.Time `json:"finalized_at"`
-	SinkDone          bool      `json:"sink_done"`
-	SourceDone        bool      `json:"source_done"`
+	FinalizeID        string             `json:"finalize_id"`
+	TargetID          string             `json:"target_id"`
+	StreamRef         string             `json:"stream_ref"`
+	StreamKind        api.RecordKind     `json:"stream_kind,omitempty"`
+	Revision          uint64             `json:"revision"`
+	CoverageStartedAt time.Time          `json:"coverage_started_at"`
+	FinalizedAt       time.Time          `json:"finalized_at"`
+	Resource          *api.Resource      `json:"resource,omitempty"`
+	Metadata          api.StreamMetadata `json:"metadata,omitempty"`
+	Outcome           *api.SourceOutcome `json:"outcome,omitempty"`
+	EndToken          *api.EndToken      `json:"end_token,omitempty"`
+	SinkDone          bool               `json:"sink_done"`
+	SourceDone        bool               `json:"source_done"`
 }
 
 func Open(dir, targetID string, maxBytes int64) (*DB, error) {
@@ -230,7 +239,7 @@ func (d *DB) initialize() error {
 		if err != nil {
 			return err
 		}
-		for _, name := range [][]byte{bucketSource, bucketSourceFileIndex, bucketPipeline, bucketSink} {
+		for _, name := range [][]byte{bucketSource, bucketSourceFileIndex, bucketPipeline, bucketStreamKind, bucketSink, bucketSourcePrivate} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -269,6 +278,97 @@ func (d *DB) Close() error { return d.db.Close() }
 func (d *DB) WriterID() string { return d.writerID }
 
 func (d *DB) TargetID() string { return d.targetID }
+
+// ValidateEnabledSources prevents a configuration change from silently
+// orphaning recovery state owned by a disabled or renamed Source.
+func (d *DB) ValidateEnabledSources(sources []string) error {
+	if len(sources) == 0 {
+		return errors.New("enabled Source set is empty")
+	}
+	enabled := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		if err := validateSourceStateName(source); err != nil {
+			return err
+		}
+		enabled[source] = struct{}{}
+	}
+	return d.db.View(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(bucketStreamKind).ForEach(func(key, _ []byte) error {
+			streamID := string(key)
+			source, localID, found := strings.Cut(streamID, "/")
+			if !found || source == "" || localID == "" {
+				return fmt.Errorf("persisted stream %q has no Source namespace", streamID)
+			}
+			if _, ok := enabled[source]; !ok {
+				return fmt.Errorf("Source %q is disabled while stream %q still has recovery state", source, streamID)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		root := tx.Bucket(bucketSourcePrivate)
+		return root.ForEach(func(key, value []byte) error {
+			if value != nil {
+				return fmt.Errorf("invalid private Source state entry %q", key)
+			}
+			source := string(key)
+			if err := validateSourceStateName(source); err != nil {
+				return fmt.Errorf("invalid private Source state owner %q: %w", source, err)
+			}
+			bucket := root.Bucket(key)
+			if bucket == nil {
+				return fmt.Errorf("private Source state bucket %q is missing", source)
+			}
+			firstKey, _ := bucket.Cursor().First()
+			if firstKey == nil {
+				return nil
+			}
+			if _, ok := enabled[source]; !ok {
+				return fmt.Errorf("Source %q is disabled while private recovery state remains", source)
+			}
+			return nil
+		})
+	})
+}
+
+// BindStreamKind atomically creates or verifies the durable RecordKind binding
+// for a StreamRef.
+func (d *DB) BindStreamKind(streamRef api.StreamRef) error {
+	if err := validateStreamRef(streamRef); err != nil {
+		return err
+	}
+	return d.db.Update(func(tx *bolt.Tx) error {
+		return bindStreamKind(tx.Bucket(bucketStreamKind), streamRef)
+	})
+}
+
+func bindStreamKind(bucket *bolt.Bucket, streamRef api.StreamRef) error {
+	if err := validateStreamRef(streamRef); err != nil {
+		return err
+	}
+	key := []byte(streamRef.ID)
+	if current := bucket.Get(key); current != nil {
+		if string(current) != string(streamRef.Kind) {
+			return fmt.Errorf("stream %q changed record kind from %q to %q", streamRef.ID, current, streamRef.Kind)
+		}
+		return nil
+	}
+	return bucket.Put(key, []byte(streamRef.Kind))
+}
+
+func validateStreamRef(streamRef api.StreamRef) error {
+	if streamRef.ID == "" || streamRef.Kind == "" {
+		return errors.New("invalid stream kind binding")
+	}
+	if !utf8.ValidString(streamRef.ID) || !utf8.ValidString(string(streamRef.Kind)) {
+		return errors.New("stream reference is not valid UTF-8")
+	}
+	if len(streamRef.ID) > bolt.MaxKeySize {
+		return fmt.Errorf("stream reference is too large: %d bytes", len(streamRef.ID))
+	}
+	return nil
+}
 
 func (d *DB) GetFileCheckpoint(streamRef, path string) (FileCheckpoint, bool, error) {
 	var out FileCheckpoint
@@ -430,7 +530,18 @@ func (d *DB) PutFinalizeIntent(intent FinalizeIntent) error {
 	if intent.TargetID != d.targetID {
 		return errors.New("finalize intent target does not match state target")
 	}
-	return d.put(bucketPipeline, stateKey(intent.StreamRef, strconv.FormatUint(intent.Revision, 10)), intent)
+	raw, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	return d.db.Update(func(tx *bolt.Tx) error {
+		if intent.StreamKind != "" {
+			if err := bindStreamKind(tx.Bucket(bucketStreamKind), api.StreamRef{ID: intent.StreamRef, Kind: intent.StreamKind}); err != nil {
+				return err
+			}
+		}
+		return tx.Bucket(bucketPipeline).Put(stateKey(intent.StreamRef, strconv.FormatUint(intent.Revision, 10)), raw)
+	})
 }
 
 func (d *DB) ListFinalizeIntents() ([]FinalizeIntent, error) {
@@ -515,7 +626,7 @@ func (d *DB) DeleteStream(streamRef string) error {
 				}
 			}
 		}
-		return nil
+		return tx.Bucket(bucketStreamKind).Delete([]byte(streamRef))
 	})
 }
 
@@ -689,6 +800,15 @@ func validateFileCheckpoint(checkpoint FileCheckpoint) error {
 }
 
 func validateStoredState(tx *bolt.Tx, targetID string) error {
+	streamKinds := tx.Bucket(bucketStreamKind)
+	if err := streamKinds.ForEach(func(key, value []byte) error {
+		if err := validateStreamRef(api.StreamRef{ID: string(key), Kind: api.RecordKind(value)}); err != nil {
+			return fmt.Errorf("invalid persisted stream kind binding: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
 	if err := tx.Bucket(bucketSource).ForEach(func(key, raw []byte) error {
 		var identity struct {
 			StreamRef string `json:"stream_ref"`
@@ -710,7 +830,7 @@ func validateStoredState(tx *bolt.Tx, targetID string) error {
 		if !bytes.Equal(key, stateKey("stream", stream.StreamRef)) {
 			return fmt.Errorf("source stream %q is stored under a non-canonical key", stream.StreamRef)
 		}
-		return nil
+		return bindStreamKind(streamKinds, api.StreamRef{ID: stream.StreamRef, Kind: api.RecordKindContainerLog})
 	}); err != nil {
 		return err
 	}
@@ -725,11 +845,14 @@ func validateStoredState(tx *bolt.Tx, targetID string) error {
 		if !bytes.Equal(key, stateKey(stream.SinkName, stream.StreamRef)) {
 			return fmt.Errorf("sink stream %q/%q is stored under a non-canonical key", stream.SinkName, stream.StreamRef)
 		}
+		if streamKinds.Get([]byte(stream.StreamRef)) == nil {
+			return bindStreamKind(streamKinds, api.StreamRef{ID: stream.StreamRef, Kind: api.RecordKindContainerLog})
+		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	return tx.Bucket(bucketPipeline).ForEach(func(key, raw []byte) error {
+	if err := tx.Bucket(bucketPipeline).ForEach(func(key, raw []byte) error {
 		var intent FinalizeIntent
 		if err := json.Unmarshal(raw, &intent); err != nil {
 			return fmt.Errorf("decode finalize intent: %w", err)
@@ -744,8 +867,15 @@ func validateStoredState(tx *bolt.Tx, targetID string) error {
 		if !bytes.Equal(key, expected) {
 			return fmt.Errorf("finalize intent for stream %q revision %d is stored under a non-canonical key", intent.StreamRef, intent.Revision)
 		}
-		return nil
-	})
+		kind := intent.StreamKind
+		if kind == "" {
+			kind = api.RecordKindContainerLog
+		}
+		return bindStreamKind(streamKinds, api.StreamRef{ID: intent.StreamRef, Kind: kind})
+	}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func validateSourceStream(stream SourceStream) error {
@@ -927,7 +1057,24 @@ func validateFinalizeIntent(intent FinalizeIntent) error {
 	if intent.FinalizedAt.Before(intent.CoverageStartedAt) {
 		return errors.New("finalize intent precedes its coverage boundary")
 	}
+	hasReplayData := finalizeIntentHasReplayData(intent)
+	if hasReplayData && (intent.StreamKind == "" || intent.Resource == nil || intent.Outcome == nil || intent.EndToken == nil) {
+		return errors.New("finalize intent has incomplete replay data")
+	}
+	if hasReplayData {
+		if err := intent.Metadata.Validate(); err != nil {
+			return fmt.Errorf("finalize intent has invalid metadata: %w", err)
+		}
+		streamRef := api.StreamRef{ID: intent.StreamRef, Kind: intent.StreamKind}
+		if intent.EndToken.ID == "" || intent.EndToken.Source == "" || intent.EndToken.StreamRef != streamRef {
+			return errors.New("finalize intent has an invalid end token")
+		}
+	}
 	return nil
+}
+
+func finalizeIntentHasReplayData(intent FinalizeIntent) bool {
+	return intent.StreamKind != "" || intent.Resource != nil || intent.Metadata != nil || intent.Outcome != nil || intent.EndToken != nil
 }
 
 func equalStrings(left, right []string) bool {

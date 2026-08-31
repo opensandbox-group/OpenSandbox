@@ -1,0 +1,8 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: qemu
+  namespace: qemu-vmstate-e2e
+spec:
+  replicas: 1
+  poolRef: qemu-pool

@@ -23,7 +23,7 @@ level = "DEBUG"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:v1.0.22"
+execd_image = "opensandbox/execd:v1.1.0"
 
 [docker]
 network_mode = "bridge"
@@ -57,12 +57,12 @@ Layered architecture:
 Client → POST /sandboxes
   → Auth Middleware validates API key
   → lifecycle.create_sandbox() receives CreateSandboxRequest
-  → sandbox_service.create_sandbox_async(request)
-  → Returns 202 Accepted with Pending status immediately
-  → Background thread provisions the sandbox
+  → await sandbox_service.create_sandbox(request)
+  → Runtime provisions the sandbox and waits for readiness
+  → Returns 202 Accepted with Running status
 ```
 
-Async provisioning avoids blocking API requests during slow operations (image pull, container start). Sandbox stored in pending state first, transitions to running when ready.
+Creation is synchronous from the client's perspective: the request remains open while the runtime provisions the sandbox. Docker moves blocking provisioning work to a worker thread but awaits its result; Kubernetes waits for the workload to be Running with an IP address. Provisioning failures are returned by the create request rather than a background Pending-to-Running flow.
 
 ### Expiration System
 

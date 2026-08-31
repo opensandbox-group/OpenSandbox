@@ -28,6 +28,7 @@ func TestBuildMitmdumpArgsNoUserScripts(t *testing.T) {
 	require.Contains(t, args, "flow_detail=0")
 	require.Contains(t, args, "-s")
 	require.Contains(t, args, systemScriptPath)
+	require.NotContains(t, args, "--listen-host", "sidecar: the baked-in config.yaml loopback bind stays")
 	// Only one -s (system addon)
 	count := 0
 	for _, a := range args {
@@ -36,6 +37,12 @@ func TestBuildMitmdumpArgsNoUserScripts(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, count)
+}
+
+func TestBuildMitmdumpArgsFleetListenHost(t *testing.T) {
+	args := buildMitmdumpArgs(Config{ListenPort: 18081, ListenHost: "0.0.0.0"})
+	require.Contains(t, args, "--listen-host")
+	require.Contains(t, args, "0.0.0.0")
 }
 
 func TestBuildMitmdumpArgsSingleUserScript(t *testing.T) {

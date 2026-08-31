@@ -21,20 +21,21 @@ Example files in this repository:
 
 1. [Top-level sections](#top-level-sections)
 2. [`[server]`](#server--lifecycle-api)
-3. [`[log]`](#log)
-4. [`[runtime]`](#runtime--required)
-5. [`[docker]`](#docker--only-when-runtime--docker)
-6. [`[kubernetes]`](#kubernetes--only-when-runtime--kubernetes)
-7. [`[agent_sandbox]`](#agent_sandbox--only-with-kubernetes--agent-sandbox)
-8. [`[ingress]`](#ingress)
-9. [`[egress]`](#egress)
-10. [`[storage]`](#storage)
-11. [`[store]`](#store)
-12. [`[secure_runtime]`](#secure_runtime)
-13. [`[renew_intent]`](#renew_intent)
-14. [`[otel]`](#otel)
-15. [Environment variables (outside TOML)](#environment-variables-outside-toml)
-16. [Cross-field validation rules](#cross-field-validation-rules)
+3. [`[proxy]`](#proxy)
+4. [`[log]`](#log)
+5. [`[runtime]`](#runtime--required)
+6. [`[docker]`](#docker--only-when-runtime--docker)
+7. [`[kubernetes]`](#kubernetes--only-when-runtime--kubernetes)
+8. [`[agent_sandbox]`](#agent_sandbox--only-with-kubernetes--agent-sandbox)
+9. [`[ingress]`](#ingress)
+10. [`[egress]`](#egress)
+11. [`[storage]`](#storage)
+12. [`[store]`](#store)
+13. [`[secure_runtime]`](#secure_runtime)
+14. [`[renew_intent]`](#renew_intent)
+15. [`[otel]`](#otel)
+16. [Environment variables (outside TOML)](#environment-variables-outside-toml)
+17. [Cross-field validation rules](#cross-field-validation-rules)
 
 ---
 
@@ -43,6 +44,7 @@ Example files in this repository:
 | Section | Required | When |
 |---------|----------|------|
 | `[server]` | No | Always (defaults apply if omitted) |
+| `[proxy]` | No | Always (defaults apply if omitted); controls the server-side reverse-proxy target |
 | `[log]` | No | Always (defaults apply if omitted) |
 | `[runtime]` | **Yes** | Always |
 | `[docker]` | No | `runtime.type = "docker"` |
@@ -54,7 +56,7 @@ Example files in this repository:
 | `[store]` | No | Server-managed persistent metadata backend |
 | `[secure_runtime]` | No | gVisor / Kata / Firecracker |
 | `[renew_intent]` | No | Auto-renew on access |
-| `[otel]` | No | OTLP export for ingested SDK metrics |
+| `[otel]` | No | OTLP export for Server HTTP and ingested SDK metrics |
 
 ---
 
@@ -77,6 +79,16 @@ Example files in this repository:
 
 ---
 
+## `[proxy]`
+
+Configuration for the server-side reverse-proxy routes.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `resolve_internal` | boolean | `true` | When `true` (default), the server-side reverse-proxy targets the sandbox's internal container IP (Docker bridge) or the provider's internal workload endpoint. When `false`, the proxy targets the **server-local host-mapped port** instead; this is required when the server process cannot route to container bridge IPs (for example a launchd or systemd user session on macOS where such traffic is blocked). On Docker, `false` resolves host-mapped endpoints via the server-local proxy host so deployments that advertise a public `[server]` `eip` still route proxied traffic to a locally reachable host. Backward compatible: the default preserves the historical behavior. |
+
+---
+
 ## `[log]`
 
 | Key | Type | Default | Description |
@@ -96,6 +108,7 @@ Example files in this repository:
 |-----|------|---------|-------------|
 | `type` | string | — | **`docker`** or **`kubernetes`**. Selects which runtime implementation loads. |
 | `execd_image` | string | — | OCI image containing the **execd** binary used to bootstrap command/file access inside the sandbox. |
+| `execd_run_as_init` | boolean | `false` | Run **execd as the sandbox init** (OSEP-0018): sets `EXECD_INIT` in the sandbox environment so `bootstrap.sh` `exec`s into `execd --init` and execd becomes PID 1 — reaping children, owning the container lifecycle, and exposing the hardening floor. Defaults to `false` (classic background-and-wait topology); intended to be flipped on after validation in production. |
 
 ---
 
@@ -130,6 +143,7 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 | `batchsandbox_template_file` | string \| omitted | `null` | Path to **BatchSandbox** CR YAML template when `workload_provider = "batchsandbox"`. |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | Image pull policy for the BatchSandbox main container. Values: **`Always`**, **`IfNotPresent`**, **`Never`**. |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max time to wait for a new sandbox to become ready (e.g. IP assigned), in seconds. |
+| `pool_acquisition_timeout_seconds` | integer | `30` | Max cumulative time to wait while Pool capacity prevents allocation. This does not extend `sandbox_create_timeout_seconds`. |
 | `sandbox_create_poll_interval_seconds` | float | `1.0` | Poll interval while waiting for readiness. |
 | `snapshot_create_timeout_seconds` | integer | `900` | Max time to wait for a Kubernetes public snapshot to become ready, in seconds. Set this greater than the controller snapshot `commitJobTimeout` / `--commit-job-timeout`. |
 | `informer_enabled` | boolean | `true` | **[Beta]** Use informer/watch cache for reads to reduce API load. |
@@ -206,6 +220,18 @@ Configures the **egress sidecar** image and enforcement mode. The server only at
 | `image` | string \| omitted | `null` | OCI image for the egress sidecar. **Required in config** when clients send **`networkPolicy`** (create request). |
 | `mode` | string | `"dns"` | Passed to the sidecar as `OPENSANDBOX_EGRESS_MODE`. Values: **`dns`** — DNS-proxy-based enforcement (CIDR/static IP rules **not** enforced); **`dns+nft`** — adds nftables where available so **CIDR/IP** rules can be enforced. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (especially on Kubernetes). **Default on**; set `false` only when you want IPv6 left up in the netns. Details in [IPv6 and egress](#ipv6-and-egress) below. |
+| `readiness_timeout_seconds` | float | `30.0` | **Docker only.** Maximum time to wait for the egress sidecar health endpoint to become ready. Must be greater than `0`. |
+| `requests` | map string → string \| omitted | `null` | **Kubernetes only.** Resource requests for the generated egress sidecar. |
+| `limits` | map string → string \| omitted | `null` | **Kubernetes only.** Resource limits for the generated egress sidecar. |
+
+```toml
+[egress]
+image = "opensandbox/egress:v1.1.7"
+requests = { cpu = "25m", memory = "64Mi" }
+limits = { cpu = "250m", memory = "256Mi" }
+```
+
+Requests and limits can be omitted independently. Invalid or negative Kubernetes resource quantities cause configuration loading to fail. When both settings are omitted, the egress container does not declare resources and namespace `LimitRange` defaults may apply.
 
 ### IPv6 and egress
 
@@ -215,10 +241,12 @@ OpenSandbox egress does **not** treat IPv6 as a first-class, fully covered path�
 
 - `egress.image` must be set when using `networkPolicy`.
 - Outbound policy requires **`docker.network_mode = "bridge"`**; `networkPolicy` is rejected for incompatible network modes.
+- Increase `egress.readiness_timeout_seconds` when the sidecar needs more than 30 seconds to become ready in the deployment environment.
 
 **Kubernetes notes:**
 
 - When `networkPolicy` is set, the workload includes an egress sidecar built from `egress.image`.
+- Configure `egress.requests` and/or `egress.limits` when namespace-wide `LimitRange` defaults are too large for the sidecar.
 
 See [`components/egress/README.md`](../components/egress/README.md) for sidecar behavior and limits.
 
@@ -247,17 +275,48 @@ the same backend.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `type` | string | `"sqlite"` | Server persistence backend type. Currently only **`sqlite`** is supported. |
+| `type` | string | `"sqlite"` | Server persistence backend type: `sqlite` or `postgresql`. |
 | `path` | string | `"~/.opensandbox/opensandbox.db"` | Filesystem path to the SQLite database file used for server-managed metadata. Parent directories are created automatically when needed. |
+| `postgresql.dsn` | string | unset | PostgreSQL connection string. Required when `type = "postgresql"`. In production, prefer the `OPENSANDBOX_STORE_POSTGRESQL_DSN` environment variable. |
+| `postgresql.min_pool_size` | integer | `1` | Minimum number of PostgreSQL connections retained by each server process. |
+| `postgresql.max_pool_size` | integer | `10` | Maximum number of PostgreSQL connections used by each server process. |
+| `postgresql.connect_timeout_seconds` | integer | `5` | Maximum time to establish the initial PostgreSQL connections. |
+| `postgresql.pool_timeout_seconds` | number | `5` | Maximum time to wait for a pooled PostgreSQL connection. |
 
 **Notes**
 
 - The default SQLite backend gives local and single-node deployments persistent
   metadata without requiring an external database service.
+- PostgreSQL provides externally managed persistence, but snapshot recovery is
+  not coordinated across server processes. Run only one active server process
+  against a PostgreSQL database.
+- `OPENSANDBOX_STORE_POSTGRESQL_DSN` overrides `postgresql.dsn`, keeping database
+  credentials out of configuration files and Kubernetes ConfigMaps.
+- Switching backends does not copy existing snapshot metadata. Start with an
+  empty PostgreSQL database or migrate existing records separately before cutover.
 - `memory` is intentionally **not** the default because server-managed snapshot
   resources must survive process restarts.
 - Higher-level components should depend on repository abstractions rather than
   importing `sqlite3` directly.
+
+Example:
+
+```toml
+[store]
+type = "postgresql"
+
+[store.postgresql]
+min_pool_size = 1
+max_pool_size = 10
+connect_timeout_seconds = 5
+pool_timeout_seconds = 5
+```
+
+```bash
+export OPENSANDBOX_STORE_POSTGRESQL_DSN='postgresql://opensandbox:password@postgres:5432/opensandbox?sslmode=require'
+```
+
+For Kubernetes configuration, see [Kubernetes Deployment](../docs/kubernetes/deployment.md#use-postgresql-for-server-persistence).
 
 ---
 
@@ -302,7 +361,7 @@ Per-sandbox enablement uses create request extensions (see OSEP-0009 and `exampl
 
 ## `[otel]`
 
-Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the ingestion endpoint still accepts events and records them as noop.
+Optional OpenTelemetry metrics export for Server HTTP requests and SDK-reported sandbox creation latency (`POST /v1/metrics/events`). Off by default; the HTTP middleware and ingestion endpoint remain active but record as noops.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -310,6 +369,15 @@ Optional OpenTelemetry metrics export for SDK-reported sandbox creation latency 
 | `endpoint` | string \| omitted | `null` | OTLP HTTP metrics endpoint. When omitted, uses `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`. |
 | `service_name` | string | `"opensandbox-server"` | `service.name` resource attribute. |
 | `export_interval_millis` | integer | `60000` | Periodic export interval (≥ 1000). |
+
+Exported metrics:
+
+| Metric | Type | Unit | Attributes | Description |
+|-----|------|------|------------|-------------|
+| `server.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | Server HTTP request latency. Histogram count provides request volume. |
+| `opensandbox.sandbox.create.duration` | Histogram | `ms` | `sdk.language`, `sdk.version`, `success` | SDK-reported creation latency from create start until ready or failure. |
+
+The HTTP metric uses the matched route template rather than the raw request path. Requests that do not reach a matched route, including early authentication failures and unmatched URLs, use `http_route=unknown`. Standard HTTP methods are recorded in uppercase, while extension methods use `http_method=OTHER` to keep attribute cardinality bounded. The metric never includes sandbox IDs, tenant IDs, API keys, request or response bodies, query strings, or other unbounded request data.
 
 ---
 

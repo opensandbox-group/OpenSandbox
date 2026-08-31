@@ -177,6 +177,23 @@ def test_inspect_snapshot_keeps_pending_snapshot_creating() -> None:
     assert status.reason == "snapshot_runtime_in_progress"
 
 
+def test_inspect_snapshot_rejects_qemu_snapshot_without_public_restore_plan() -> None:
+    k8s_client = FakeK8sClient()
+    snapshot = _snapshot_cr(
+        phase="Succeed",
+        containers=[{"containerName": "sandbox", "imageUri": "registry/sandbox:snap"}],
+    )
+    snapshot["status"]["format"] = "qemu-v1"
+    k8s_client.objects[build_public_snapshot_name(SNAPSHOT_ID)] = snapshot
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    status = runtime.inspect_snapshot(SNAPSHOT_ID)
+
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_restore_qemu_not_supported"
+    assert "BatchSandbox pause/resume" in (status.message or "")
+
+
 def test_inspect_snapshot_maps_failed_condition() -> None:
     k8s_client = FakeK8sClient()
     failed = _snapshot_cr(phase="Failed")

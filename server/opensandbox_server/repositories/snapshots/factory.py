@@ -18,9 +18,11 @@ Factory for selecting the configured snapshot repository backend.
 
 from __future__ import annotations
 
+from functools import cache
 from typing import Optional
 
 from opensandbox_server.config import AppConfig, get_config
+from opensandbox_server.repositories.snapshots.postgresql import PostgreSQLSnapshotRepository
 from opensandbox_server.repositories.snapshots.sqlite import SQLiteSnapshotRepository
 from opensandbox_server.services.snapshot_repository import SnapshotRepository
 
@@ -37,12 +39,41 @@ def create_snapshot_repository(
 
     if store_config.type == "sqlite":
         return SQLiteSnapshotRepository(store_config.path)
+    if store_config.type == "postgresql":
+        postgresql_config = store_config.postgresql
+        dsn = postgresql_config.dsn
+        if dsn is None:
+            raise ValueError("PostgreSQL snapshot store requires a DSN.")
+        return PostgreSQLSnapshotRepository(
+            dsn.get_secret_value(),
+            min_pool_size=postgresql_config.min_pool_size,
+            max_pool_size=postgresql_config.max_pool_size,
+            connect_timeout_seconds=postgresql_config.connect_timeout_seconds,
+            pool_timeout_seconds=postgresql_config.pool_timeout_seconds,
+        )
 
     raise ValueError(
         f"Unsupported snapshot store type: {store_config.type}"
     )
 
 
+@cache
+def get_snapshot_repository() -> SnapshotRepository:
+    """Return the repository shared by the current server process."""
+    return create_snapshot_repository()
+
+
+def close_snapshot_repository() -> None:
+    """Close and discard the repository shared by the current server process."""
+    if get_snapshot_repository.cache_info().currsize == 0:
+        return
+    repository = get_snapshot_repository()
+    get_snapshot_repository.cache_clear()
+    repository.close()
+
+
 __all__ = [
+    "close_snapshot_repository",
     "create_snapshot_repository",
+    "get_snapshot_repository",
 ]

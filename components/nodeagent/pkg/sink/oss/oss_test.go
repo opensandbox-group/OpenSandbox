@@ -24,6 +24,7 @@ import (
 	"hash/crc64"
 	"math"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,14 +33,50 @@ import (
 
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/marker"
-	lineformat "github.com/alibaba/opensandbox/nodeagent/pkg/sink"
+	"github.com/alibaba/opensandbox/nodeagent/pkg/objectlayout"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
+	"github.com/alibaba/opensandbox/nodeagent/pkg/streamformat"
 	aliyunoss "github.com/aliyun/aliyun-oss-go-sdk/oss"
 )
+
+const testAuditKind api.RecordKind = "test-audit"
+
+type auditTestFormat struct{}
+
+func init() { streamformat.Register(auditTestFormat{}) }
+
+func (auditTestFormat) Kind() api.RecordKind { return testAuditKind }
+
+func (auditTestFormat) ContentType() string { return "application/x-ndjson" }
+
+func (auditTestFormat) EncodeBatch(batch api.Batch) ([]byte, error) {
+	var out bytes.Buffer
+	for _, item := range batch.Items {
+		out.WriteString("audit:")
+		out.Write(item.Record.Body)
+		out.WriteByte('\n')
+	}
+	return out.Bytes(), nil
+}
+
+func (auditTestFormat) ObjectFamily(_ api.StreamRef, resource api.Resource, _ api.StreamMetadata) (objectlayout.Family, error) {
+	return objectlayout.NewFamily("", []string{resource.ClusterName, "_streams", string(testAuditKind), resource.Namespace, resource.SandboxID, resource.PodUID}, resource.Container+".audit", ".jsonl")
+}
+
+func (auditTestFormat) ObjectMetadata(api.Resource, api.StreamMetadata) (map[string]string, error) {
+	return map[string]string{"event-format": "test-audit-v1"}, nil
+}
+
+type reservedMetadataFormat struct{ auditTestFormat }
+
+func (reservedMetadataFormat) ObjectMetadata(api.Resource, api.StreamMetadata) (map[string]string, error) {
+	return map[string]string{"nodeagent-stream-ref": "override"}, nil
+}
 
 type memoryObject struct {
 	data               []byte
 	metadata           map[string]string
+	contentType        string
 	objectType         string
 	sealedTime         string
 	nextAppendPosition *int64
@@ -82,7 +119,7 @@ func (s *failFinalCheckpointStore) PutSinkStream(sinkName string, stream state.S
 	return s.DB.PutSinkStream(sinkName, stream)
 }
 
-func (b *blockingAppendBackend) Append(ctx context.Context, key string, data []byte, position int64, metadata map[string]string) (int64, error) {
+func (b *blockingAppendBackend) Append(ctx context.Context, key string, data []byte, position int64, contentType string, metadata map[string]string) (int64, error) {
 	if key == b.blockKey {
 		b.once.Do(func() { close(b.entered) })
 		select {
@@ -91,11 +128,11 @@ func (b *blockingAppendBackend) Append(ctx context.Context, key string, data []b
 			return 0, ctx.Err()
 		}
 	}
-	return b.fakeBackend.Append(ctx, key, data, position, metadata)
+	return b.fakeBackend.Append(ctx, key, data, position, contentType, metadata)
 }
 
-func (b *cancelAfterAppendBackend) Append(ctx context.Context, key string, data []byte, position int64, metadata map[string]string) (int64, error) {
-	next, err := b.fakeBackend.Append(ctx, key, data, position, metadata)
+func (b *cancelAfterAppendBackend) Append(ctx context.Context, key string, data []byte, position int64, contentType string, metadata map[string]string) (int64, error) {
+	next, err := b.fakeBackend.Append(ctx, key, data, position, contentType, metadata)
 	if err != nil {
 		return next, err
 	}
@@ -122,7 +159,7 @@ func (b *fakeBackend) Preflight(ctx context.Context, _ string) error {
 	return ctx.Err()
 }
 
-func (b *fakeBackend) Append(ctx context.Context, key string, data []byte, position int64, metadata map[string]string) (int64, error) {
+func (b *fakeBackend) Append(ctx context.Context, key string, data []byte, position int64, contentType string, metadata map[string]string) (int64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.contexts["append"] = ctx
@@ -152,6 +189,7 @@ func (b *fakeBackend) Append(ctx context.Context, key string, data []byte, posit
 	}
 	if position == 0 {
 		object.metadata = cloneMap(metadata)
+		object.contentType = contentType
 		object.objectType = appendableObjectType
 	}
 	if result == "foreign-same-size" {
@@ -295,7 +333,7 @@ func TestOSSAppendUnknownResultAndFinalize(t *testing.T) {
 	backend := newFakeBackend()
 	backend.appendResult = "after"
 	sink := newWithBackend(testOSSConfig(db), db, backend)
-	if err := sink.Preflight(context.Background()); err != nil {
+	if err := sink.preflight(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	batch, resource := testOSSBatch()
@@ -304,11 +342,11 @@ func TestOSSAppendUnknownResultAndFinalize(t *testing.T) {
 	}
 	key := objectKey("logs", resource, 0)
 	object := backend.objects[key]
-	want := lineformat.EncodeBatch(batch)
-	if !bytes.Equal(object.data, want) || object.metadata["nodeagent-target-id"] != "target" || object.metadata["nodeagent-stream-ref"] != batch.StreamRef.ID {
-		t.Fatalf("object=%+v data=%q", object.metadata, object.data)
+	want := mustEncodeBatch(t, batch)
+	if !bytes.Equal(object.data, want) || object.contentType != "application/octet-stream" || !reflect.DeepEqual(object.metadata, testOSSMetadata(testOSSConfig(db), batch.StreamRef, resource, 0)) {
+		t.Fatalf("object=%+v content-type=%q data=%q", object.metadata, object.contentType, object.data)
 	}
-	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: batch.StreamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
+	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: batch.StreamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
 	if err := sink.Finalize(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -320,8 +358,89 @@ func TestOSSAppendUnknownResultAndFinalize(t *testing.T) {
 	if backend.preflights != 2 {
 		t.Fatalf("preflight count=%d", backend.preflights)
 	}
-	if _, _, cached := sink.cachedStream(batch.StreamRef.ID); cached {
+	if _, _, _, _, cached := sink.cachedStream(batch.StreamRef.ID); cached {
 		t.Fatal("finalized stream remained in the OSS memory cache")
+	}
+}
+
+func TestOSSSupportsRegisteredFormats(t *testing.T) {
+	db, err := state.Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	backend := newFakeBackend()
+	sink := newWithBackend(testOSSConfig(db), db, backend)
+	if !hasRecordKind(sink.Capabilities(), api.RecordKindContainerLog) || !hasRecordKind(sink.Capabilities(), testAuditKind) {
+		t.Fatalf("capabilities=%+v", sink.Capabilities())
+	}
+
+	logBatch, resource := testOSSBatch()
+	auditBatch := api.Batch{
+		StreamRef: api.StreamRef{ID: "test-audit/uid/sandbox", Kind: testAuditKind},
+		Items:     []api.BatchItem{{RecordID: "audit", Record: api.Record{Kind: testAuditKind, Body: []byte(`{"syscall":"openat"}`), Resource: resource}}},
+	}
+	if err := sink.Consume(context.Background(), logBatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Consume(context.Background(), auditBatch); err != nil {
+		t.Fatal(err)
+	}
+
+	logObject := backend.objects[objectKey("logs", resource, 0)]
+	if string(logObject.data) != "2026-07-23T10:00:00Z stdout hello\n" || logObject.contentType != "application/octet-stream" {
+		t.Fatalf("container log content-type=%q data=%q", logObject.contentType, logObject.data)
+	}
+	if !reflect.DeepEqual(logObject.metadata, testOSSMetadata(testOSSConfig(db), logBatch.StreamRef, resource, 0)) {
+		t.Fatalf("container log metadata=%+v", logObject.metadata)
+	}
+	auditFormat, err := streamformat.Lookup(testAuditKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditFamily, err := streamformat.ResolveFamily(auditFormat, "logs", auditBatch.StreamRef, resource, auditBatch.Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditKey := auditFamily.DataKey(0)
+	auditObject := backend.objects[auditKey]
+	if string(auditObject.data) != "audit:{\"syscall\":\"openat\"}\n" || auditObject.contentType != "application/x-ndjson" {
+		t.Fatalf("audit content-type=%q data=%q", auditObject.contentType, auditObject.data)
+	}
+	wantAuditMetadata := testOSSMetadata(testOSSConfig(db), auditBatch.StreamRef, resource, 0)
+	delete(wantAuditMetadata, "log-directory")
+	wantAuditMetadata["event-format"] = "test-audit-v1"
+	if !reflect.DeepEqual(auditObject.metadata, wantAuditMetadata) {
+		t.Fatalf("audit metadata=%+v want=%+v", auditObject.metadata, wantAuditMetadata)
+	}
+	drift := auditBatch
+	drift.StreamRef.Kind = api.RecordKindContainerLog
+	drift.Metadata = logBatch.Metadata.Clone()
+	drift.Items[0].Record.Kind = api.RecordKindContainerLog
+	drift.Items[0].Record.Timestamp = time.Now().UTC()
+	drift.Items[0].Record.Attributes = map[string]string{"stream": "stdout"}
+	if err := sink.Consume(context.Background(), drift); err == nil || api.IsRetryableError(err) {
+		t.Fatalf("kind drift error=%v retryable=%v", err, api.IsRetryableError(err))
+	}
+	// Recreate the Sink so finalization must recover the generic stream from
+	// persisted state and verify its format-specific object metadata.
+	sink = newWithBackend(testOSSConfig(db), db, backend)
+	request := api.FinalizeRequest{FinalizeID: "audit-final", TargetID: "target", StreamRef: auditBatch.StreamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, Metadata: auditBatch.Metadata, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
+	if err := sink.Finalize(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := backend.objects[auditFamily.MarkerKey(1)]; !exists {
+		t.Fatalf("audit marker %q was not created", auditFamily.MarkerKey(1))
+	}
+
+	unknown := auditBatch
+	unknown.StreamRef = api.StreamRef{ID: "unknown/uid/sandbox", Kind: "unknown"}
+	unknown.Items[0].Record.Kind = "unknown"
+	if err := sink.Consume(context.Background(), unknown); err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "no stream format") {
+		t.Fatalf("unknown format error=%v retryable=%v", err, api.IsRetryableError(err))
+	}
+	if _, err := sink.objectIdentityMetadata(auditBatch.StreamRef, resource, auditBatch.Metadata, reservedMetadataFormat{}, 0); err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "overrides reserved key") {
+		t.Fatalf("reserved metadata error=%v retryable=%v", err, api.IsRetryableError(err))
 	}
 }
 
@@ -341,7 +460,7 @@ func TestOSSRetryWhenUnknownResultDidNotAppend(t *testing.T) {
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	if got := backend.objects[objectKey("logs", resource, 0)].data; !bytes.Equal(got, lineformat.EncodeBatch(batch)) {
+	if got := backend.objects[objectKey("logs", resource, 0)].data; !bytes.Equal(got, mustEncodeBatch(t, batch)) {
 		t.Fatalf("data=%q", got)
 	}
 }
@@ -362,14 +481,14 @@ func TestOSSRetainsSameProcessIntentWhenRecoveryContextExpires(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("first consume error=%v", err)
 	}
-	stream, _, cached := sink.cachedStream(batch.StreamRef.ID)
+	stream, _, _, _, cached := sink.cachedStream(batch.StreamRef.ID)
 	if !cached || stream.AppendIntent == nil {
 		t.Fatalf("stream=%+v cached=%v", stream, cached)
 	}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := backend.objects[objectKey("logs", resource, 0)].data, lineformat.EncodeBatch(batch); !bytes.Equal(got, want) {
+	if got, want := backend.objects[objectKey("logs", resource, 0)].data, mustEncodeBatch(t, batch); !bytes.Equal(got, want) {
 		t.Fatalf("same-process recovery duplicated data: got=%q want=%q", got, want)
 	}
 }
@@ -406,7 +525,7 @@ func TestOSSRecoversUnexpectedNextPosition(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if got, want := backend.objects[objectKey("logs", resource, 0)].data, lineformat.EncodeBatch(batch); !bytes.Equal(got, want) {
+			if got, want := backend.objects[objectKey("logs", resource, 0)].data, mustEncodeBatch(t, batch); !bytes.Equal(got, want) {
 				t.Fatalf("data=%q want=%q", got, want)
 			}
 		})
@@ -445,7 +564,7 @@ func TestOSSRestartReplaysWhenUnknownAppendWasAccepted(t *testing.T) {
 	backend := newFakeBackend()
 	cfg := testOSSConfig(db)
 	batch, resource := testOSSBatch()
-	data := lineformat.EncodeBatch(batch)
+	data := mustEncodeBatch(t, batch)
 	key := objectKey("logs", resource, 0)
 	metadata := testOSSMetadata(cfg, batch.StreamRef, resource, 0)
 	backend.objects[key] = memoryObject{data: append([]byte(nil), data...), metadata: metadata, objectType: appendableObjectType}
@@ -472,7 +591,7 @@ func TestOSSRestartRejectsConflictingPosition(t *testing.T) {
 	backend := newFakeBackend()
 	cfg := testOSSConfig(db)
 	batch, resource := testOSSBatch()
-	data := lineformat.EncodeBatch(batch)
+	data := mustEncodeBatch(t, batch)
 	key := objectKey("logs", resource, 0)
 	backend.objects[key] = memoryObject{data: append(append([]byte(nil), data...), 'x'), metadata: testOSSMetadata(cfg, batch.StreamRef, resource, 0), objectType: appendableObjectType}
 	digest := sha256.Sum256(data)
@@ -499,7 +618,7 @@ func TestOSSRestartRejectsForeignZeroLengthObject(t *testing.T) {
 			key := objectKey("logs", resource, 0)
 			stream := state.SinkStream{StreamRef: batch.StreamRef.ID, ObjectKey: key}
 			if withIntent {
-				data := lineformat.EncodeBatch(batch)
+				data := mustEncodeBatch(t, batch)
 				digest := sha256.Sum256(data)
 				stream.AppendIntent = &state.AppendIntent{Position: 0, Length: int64(len(data)), SHA256: hex.EncodeToString(digest[:])}
 			}
@@ -537,7 +656,7 @@ func TestOSSRestartAcceptsOwnedZeroLengthObject(t *testing.T) {
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := backend.objects[key].data, lineformat.EncodeBatch(batch); !bytes.Equal(got, want) {
+	if got, want := backend.objects[key].data, mustEncodeBatch(t, batch); !bytes.Equal(got, want) {
 		t.Fatalf("data=%q want=%q", got, want)
 	}
 }
@@ -592,7 +711,7 @@ func TestOSSRolloverKeepsMarkerGenerationsContinuous(t *testing.T) {
 	backend := newFakeBackend()
 	batch, resource := testOSSBatch()
 	cfg := testOSSConfig(db)
-	cfg.MaxObjectBytes = int64(len(lineformat.EncodeBatch(batch)))
+	cfg.MaxObjectBytes = int64(len(mustEncodeBatch(t, batch)))
 	sink := newWithBackend(cfg, db, backend)
 	for index := 0; index < 3; index++ {
 		current := batch
@@ -602,7 +721,7 @@ func TestOSSRolloverKeepsMarkerGenerationsContinuous(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: batch.StreamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
+	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: batch.StreamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
 	if err := sink.Finalize(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -631,14 +750,14 @@ func TestOSSPropagatesOperationContextToBackend(t *testing.T) {
 	backend := newFakeBackend()
 	sink := newWithBackend(testOSSConfig(db), db, backend)
 	ctx := context.WithValue(context.Background(), backendContextKey{}, "request")
-	if err := sink.Preflight(ctx); err != nil {
+	if err := sink.preflight(ctx); err != nil {
 		t.Fatal(err)
 	}
 	batch, resource := testOSSBatch()
 	if err := sink.Consume(ctx, batch); err != nil {
 		t.Fatal(err)
 	}
-	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: batch.StreamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
+	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: batch.StreamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
 	if err := sink.Finalize(ctx, request); err != nil {
 		t.Fatal(err)
 	}
@@ -847,7 +966,7 @@ func TestOSSHead404WithoutCodeIsTreatedAsAMissingObject(t *testing.T) {
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	if got := backend.objects[objectKey("logs", resource, 0)].data; !bytes.Equal(got, lineformat.EncodeBatch(batch)) {
+	if got := backend.objects[objectKey("logs", resource, 0)].data; !bytes.Equal(got, mustEncodeBatch(t, batch)) {
 		t.Fatalf("data=%q", got)
 	}
 }
@@ -1097,7 +1216,7 @@ func TestOSSRejectsResourceChangeAcrossBatches(t *testing.T) {
 	}
 	batch.Items[0].Record.Resource.PodName = "different-pod"
 	err = sink.Consume(context.Background(), batch)
-	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "resource identity changed") {
+	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "identity or metadata changed") {
 		t.Fatalf("error=%v retryable=%v", err, api.IsRetryableError(err))
 	}
 }
@@ -1117,18 +1236,31 @@ func TestOSSRejectsUnsafeMetadataValue(t *testing.T) {
 	}
 }
 
-func testOSSConfig(db *state.DB) Config {
-	return Config{Prefix: "logs", ClusterID: "prod-a", WriterID: db.WriterID(), TargetID: db.TargetID(), MaxObjectBytes: 1 << 20, Timeout: time.Second}
+func TestValidateFormatMetadataKey(t *testing.T) {
+	for _, key := range []string{"event-format", "v1", "a-1"} {
+		if err := validateFormatMetadata(map[string]string{key: "value"}); err != nil {
+			t.Fatalf("valid key %q: %v", key, err)
+		}
+	}
+	for _, key := range []string{"", "Event-format", "event_format", "event format", "event:format", "事件", "x-oss-meta"} {
+		if err := validateFormatMetadata(map[string]string{key: "value"}); err == nil {
+			t.Fatalf("invalid key %q was accepted", key)
+		}
+	}
+}
+
+func testOSSConfig(db *state.DB) ossConfig {
+	return ossConfig{Prefix: "logs", ClusterID: "prod-a", WriterID: db.WriterID(), TargetID: db.TargetID(), MaxObjectBytes: 1 << 20, Timeout: time.Second}
 }
 
 func testOSSBatch() (api.Batch, api.Resource) {
-	resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: "/var/log/pods/ns_pod_uid/sandbox"}
-	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
+	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox", Kind: api.RecordKindContainerLog}
+	batch := api.Batch{StreamRef: streamRef, Metadata: api.StreamMetadata{streamformat.ContainerLogDirectoryMetadata: "/var/log/pods/ns_pod_uid/sandbox"}, Items: []api.BatchItem{{RecordID: "r", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	return batch, resource
 }
 
-func testOSSMetadata(cfg Config, streamRef api.StreamRef, resource api.Resource, generation uint64) map[string]string {
+func testOSSMetadata(cfg ossConfig, streamRef api.StreamRef, resource api.Resource, generation uint64) map[string]string {
 	return map[string]string{
 		"nodeagent-writer-id":  cfg.WriterID,
 		"nodeagent-target-id":  cfg.TargetID,
@@ -1141,7 +1273,7 @@ func testOSSMetadata(cfg Config, streamRef api.StreamRef, resource api.Resource,
 		"k8s-pod-uid":          resource.PodUID,
 		"k8s-container-name":   resource.Container,
 		"k8s-node-name":        resource.NodeName,
-		"log-directory":        resource.LogDirectory,
+		"log-directory":        "/var/log/pods/ns_pod_uid/sandbox",
 	}
 }
 
@@ -1158,4 +1290,38 @@ func cloneMap(input map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func mustEncodeBatch(t *testing.T, batch api.Batch) []byte {
+	t.Helper()
+	_, _, encoded, err := streamformat.EncodeBatch(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func objectKey(prefix string, resource api.Resource, generation uint64) string {
+	return legacyLogFamily(prefix, resource).DataKey(generation)
+}
+
+func markerKey(prefix string, resource api.Resource, revision uint64) string {
+	return legacyLogFamily(prefix, resource).MarkerKey(revision)
+}
+
+func legacyLogFamily(prefix string, resource api.Resource) objectlayout.Family {
+	family, err := objectlayout.NewFamily(prefix, []string{resource.ClusterName, resource.Namespace, resource.SandboxID, resource.PodUID}, resource.Container, ".log")
+	if err != nil {
+		panic(err)
+	}
+	return family
+}
+
+func hasRecordKind(capabilities api.Capabilities, want api.RecordKind) bool {
+	for _, kind := range capabilities.RecordKinds {
+		if kind == want {
+			return true
+		}
+	}
+	return false
 }

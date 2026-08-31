@@ -2,7 +2,7 @@ apiVersion: v2
 name: opensandbox-controller
 description: A Kubernetes operator for managing sandbox environments with resource pooling and batch delivery
 type: application
-version: 0.2.0
+version: 0.2.1
 appVersion: "0.2.0"
 
 keywords:

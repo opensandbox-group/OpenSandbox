@@ -59,13 +59,13 @@
     <rect x="430" y="290" width="320" height="120" fill="#ffffff" stroke="#6d28d9" stroke-width="1.5" rx="6"/>
     <text x="590" y="318" class="box-title" text-anchor="middle">Reconcile loop</text>
     <text x="590" y="338" class="box-text" text-anchor="middle">(leader-only replenish / shrink)</text>
-    <text x="590" y="366" class="box-text" text-anchor="middle">fires every reconcile_interval</text>
+    <text x="590" y="366" class="box-text" text-anchor="middle">configured (Py/Go); fixed 1s (Kotlin)</text>
     <text x="590" y="386" class="box-text" text-anchor="middle">acquire lock → compute gap → dispatch</text>
 
     <rect x="430" y="440" width="320" height="120" fill="#ffffff" stroke="#6d28d9" stroke-width="1.5" rx="6"/>
     <text x="590" y="468" class="box-title" text-anchor="middle">Warmup workers</text>
-    <text x="590" y="488" class="box-text" text-anchor="middle">parallelism = warmup_concurrency</text>
-    <text x="590" y="516" class="box-text" text-anchor="middle">create → ready → (preparer)</text>
+    <text x="590" y="488" class="box-text" text-anchor="middle">Kotlin: staged concurrency</text>
+    <text x="590" y="516" class="box-text" text-anchor="middle">create → ready → prepare → validate</text>
     <text x="590" y="536" class="box-text" text-anchor="middle">→ push id into idle buffer</text>
   </g>
 

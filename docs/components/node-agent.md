@@ -1,14 +1,15 @@
 ---
 title: Node Agent
-description: Deploy and operate the optional node-level OpenSandbox CRI log collector with durable file or Alibaba Cloud OSS storage.
+description: Deploy and operate the node-level OpenSandbox data collector with durable file or Alibaba Cloud OSS storage.
 ---
 
 # Node Agent
 
-Node Agent is an optional Linux DaemonSet that collects stdout and stderr from
-non-pooled OpenSandbox Pods on the same node. It reads kubelet CRI log files,
-adds the sandbox and Kubernetes identity, and sends each stream to one
-configured file or Alibaba Cloud OSS target.
+Node Agent is an optional Linux DaemonSet that runs one or more Sources compiled
+into its image and sends their sandbox records to one configured Sink. The
+published image currently includes the `container-logs` Source, which reads
+stdout and stderr from non-pooled OpenSandbox Pods on the same node, and the
+`file` and Alibaba Cloud `oss` Sinks.
 
 ::: warning Experimental capacity
 The recovery protocol is implemented, but production resource defaults require
@@ -33,9 +34,18 @@ helm install nodeagent ./kubernetes/charts/opensandbox-node-agent \
   --set sink.type=file
 ```
 
-The DaemonSet mounts `/var/log/pods` read-only. Its checkpoint directory and
-durable-file target are separate writable host paths. Their lifecycle must be
-at least as long as the kubelet logs being collected.
+With the default `container-logs` Source, the DaemonSet mounts `/var/log/pods`
+read-only. Its checkpoint directory and durable-file target are separate
+writable host paths. Their lifecycle must be at least as long as the kubelet
+logs being collected.
+
+`config.sources` selects the Sources compiled into the image and defaults to
+`[container-logs]`. An unknown name leaves the Agent unready instead of
+starting a partial pipeline. When `container-logs` is not selected, the chart
+does not mount the Pod log directory or render its Source-specific settings.
+Disabling or renaming a Source while its checkpoint namespace or stream-kind
+bindings remain also leaves the Agent unready; drain and remove that Source's
+state before changing the enabled set.
 
 For OSS, create a Secret with `access-key-id`, `access-key-secret`, and
 optionally `session-token`, then configure:
@@ -62,7 +72,9 @@ not update Secret-backed environment variables in running containers.
 
 ## Storage layout
 
-Both durable targets use one object family per container stream:
+Each record kind has a compile-time storage format that defines its encoding,
+Content-Type, metadata, and object family. The current `container-log` format
+uses the same layout in both durable targets:
 
 ```text
 <cluster>/<namespace>/<sandbox_id>/<pod_uid>/
@@ -102,11 +114,13 @@ active/reopenable streams and GC backlog, confirm tracked log directories are
 gone, stop Node Agent, then archive and remove the entire state directory.
 Per-stream state reset is not supported.
 
-For the durable file sink, cleanup starts only after the fixed late-repair
-deadline, `NODEAGENT_FILE_RETENTION`, disappearance of the tracked CRI log
-directory, and successful finalization. Cleanup writes a bbolt tombstone,
-moves the complete object family into `.gc`, syncs the parent directories, and
-then removes the staged family. It never deletes one generation to make room.
+For the durable file sink, automatic cleanup currently applies only to
+`container-log` object families. It starts after the fixed late-repair deadline,
+`NODEAGENT_FILE_RETENTION`, disappearance of the tracked CRI log directory, and
+successful finalization. Cleanup writes a bbolt tombstone, moves the complete
+object family into `.gc`, syncs the parent directories, and then removes the
+staged family. It never deletes one generation to make room. Other record
+formats require format-specific cleanup support.
 
 OSS cleanup is offline. Run `nodeagent-oss-cleanup` with separate delete
 credentials and a durable `--state-file`. First run without `--apply` to persist

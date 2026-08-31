@@ -399,6 +399,19 @@ spec:
   poolRef: example-pool
 ```
 
+::: info Pool capacity back-pressure
+When a lifecycle request cannot obtain a slot because the selected Pool is at
+`poolMax`, the controller records `PoolAllocationPending=True` with reason
+`PoolCapacityExhausted` on the BatchSandbox. The Server waits up to
+`kubernetes.pool_acquisition_timeout_seconds` (30 seconds by default), without
+extending the overall sandbox creation timeout. If capacity remains unavailable,
+the request returns HTTP `429`, error code
+`KUBERNETES::POOL_CAPACITY_EXHAUSTED`, and a `Retry-After` header. A slot released
+during the acquisition window can still satisfy the request. Capacity-blocked
+time accumulates across polls, so brief status transitions do not make the final
+error depend on the last observed status.
+:::
+
 ::: warning Per-request network policies
 Pool pods are created before allocation. The lifecycle API therefore rejects `networkPolicy` together with `extensions.poolRef`; it cannot inject an egress sidecar into an existing pool pod. Configure required network controls in the Pool pod template before pods are created, or use a non-pooled sandbox for per-request policies.
 :::

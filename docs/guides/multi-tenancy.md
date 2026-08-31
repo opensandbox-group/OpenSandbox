@@ -186,6 +186,21 @@ spec:
     type: Container
 ```
 
+The `Container` defaults apply to every container that omits the corresponding resource setting, including the OpenSandbox egress sidecar. Configure smaller, sidecar-specific values in the lifecycle server so egress containers do not inherit defaults intended for sandbox workloads.
+
+### 4. Egress sidecar resources (recommended)
+
+Add Kubernetes resource settings to the server's `[egress]` configuration:
+
+```toml
+[egress]
+image = "opensandbox/egress:v1.1.7"
+requests = { cpu = "25m", memory = "64Mi" }
+limits = { cpu = "250m", memory = "256Mi" }
+```
+
+Requests and limits can be configured independently. These values are a starting point for basic DNS/nft enforcement; benchmark your workload and allow more headroom when using Credential Vault or transparent mitmproxy. If your `LimitRange` defines minimum values, the egress settings must satisfy them.
+
 ### 5. Server RBAC
 
 The default Helm chart (`opensandbox-server`) already deploys a ClusterRole + ClusterRoleBinding with cross-namespace access. No additional RBAC changes are needed for multi-tenancy — the server ServiceAccount can already operate in any namespace.

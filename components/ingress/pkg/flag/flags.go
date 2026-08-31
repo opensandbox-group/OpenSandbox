@@ -34,4 +34,8 @@ var (
 	RenewIntentMinIntervalSec int
 
 	SecureAccessKeys string
+
+	FastPathEndpoint          string
+	FastPathAccessMode        string
+	FastPathWaitTimeoutMillis int
 )

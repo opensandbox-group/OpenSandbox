@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	bolt "go.etcd.io/bbolt"
 	berrors "go.etcd.io/bbolt/errors"
 )
@@ -74,6 +75,121 @@ func TestCheckpointPersistsAndTargetIsBound(t *testing.T) {
 
 	if _, err := Open(dir, "target-b", 1<<20); err == nil {
 		t.Fatal("expected target mismatch")
+	}
+}
+
+func TestStreamKindBindingPersistsMigratesAndIsRemovedWithStreamState(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir, "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := api.StreamRef{ID: "source/first", Kind: "first-kind"}
+	if err := db.BindStreamKind(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSinkStream("file", SinkStream{SinkName: "file", StreamRef: "container-logs/legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(dir, "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, streamRef := range []api.StreamRef{
+		{ID: first.ID, Kind: "second-kind"},
+		{ID: "container-logs/legacy", Kind: "second-kind"},
+	} {
+		if err := db.BindStreamKind(streamRef); err == nil || !strings.Contains(err.Error(), "changed record kind") {
+			t.Fatalf("BindStreamKind(%+v) error = %v", streamRef, err)
+		}
+	}
+	if err := db.DeleteStream(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BindStreamKind(api.StreamRef{ID: first.ID, Kind: "second-kind"}); err != nil {
+		t.Fatalf("BindStreamKind() after DeleteStream: %v", err)
+	}
+}
+
+func TestStreamKindBindingRejectsInvalidReferences(t *testing.T) {
+	db, err := Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, streamRef := range []api.StreamRef{
+		{ID: string([]byte{0xff}), Kind: "kind"},
+		{ID: "source/stream", Kind: api.RecordKind(string([]byte{0xff}))},
+		{ID: strings.Repeat("x", bolt.MaxKeySize+1), Kind: "kind"},
+	} {
+		if err := db.BindStreamKind(streamRef); err == nil {
+			t.Fatalf("BindStreamKind(%q, %q) accepted an invalid reference", streamRef.ID, streamRef.Kind)
+		}
+	}
+}
+
+func TestValidateEnabledSourcesRejectsOrphanedStreamState(t *testing.T) {
+	db, err := Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.ValidateEnabledSources([]string{"new-source"}); err != nil {
+		t.Fatalf("ValidateEnabledSources() without state: %v", err)
+	}
+	streamRef := api.StreamRef{ID: "old-source/stream", Kind: "kind"}
+	if err := db.BindStreamKind(streamRef); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ValidateEnabledSources([]string{"new-source", "old-source"}); err != nil {
+		t.Fatalf("ValidateEnabledSources() with owning Source: %v", err)
+	}
+	if err := db.ValidateEnabledSources([]string{"new-source"}); err == nil || !strings.Contains(err.Error(), "old-source") {
+		t.Fatalf("ValidateEnabledSources() with disabled owner error=%v", err)
+	}
+	if err := db.DeleteStream(streamRef.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ValidateEnabledSources([]string{"new-source"}); err != nil {
+		t.Fatalf("ValidateEnabledSources() after cleanup: %v", err)
+	}
+}
+
+func TestValidateEnabledSourcesRejectsOrphanedPrivateState(t *testing.T) {
+	db, err := Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	oldSource, err := db.SourceState("old-source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := []byte("global-checkpoint")
+	if err := oldSource.Update(func(tx SourceStateWriter) error {
+		return tx.Put(key, []byte("checkpoint"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ValidateEnabledSources([]string{"new-source", "old-source"}); err != nil {
+		t.Fatalf("ValidateEnabledSources() with private-state owner: %v", err)
+	}
+	if err := db.ValidateEnabledSources([]string{"new-source"}); err == nil || !strings.Contains(err.Error(), "old-source") {
+		t.Fatalf("ValidateEnabledSources() with disabled private-state owner error=%v", err)
+	}
+	if err := oldSource.Update(func(tx SourceStateWriter) error { return tx.Delete(key) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ValidateEnabledSources([]string{"new-source"}); err != nil {
+		t.Fatalf("ValidateEnabledSources() after private-state cleanup: %v", err)
 	}
 }
 

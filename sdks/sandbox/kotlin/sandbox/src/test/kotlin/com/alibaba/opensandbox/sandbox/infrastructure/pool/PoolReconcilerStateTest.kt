@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class PoolReconcilerStateTest {
     @Test
     fun `recordFailure transitions to DEGRADED when failure count reaches threshold`() {
-        val state = ReconcileState(degradedThreshold = 3, backoffBase = Duration.ofMillis(10), backoffMax = Duration.ofSeconds(1))
+        val state = ReconcileState(degradedThreshold = 3)
         state.recordFailure("boom-1")
         state.recordFailure("boom-2")
         assertEquals(PoolState.HEALTHY, state.state)
@@ -44,37 +44,14 @@ class PoolReconcilerStateTest {
     }
 
     @Test
-    fun `default degraded backoff caps at one day`() {
-        val state = ReconcileState(degradedThreshold = 1)
-
-        repeat(20) { state.recordFailure("boom") }
-
-        assertEquals(PoolState.DEGRADED, state.state)
-        assertEquals(20, state.failureCount)
-        assertEquals(true, state.isBackoffActive(Instant.now().plus(Duration.ofHours(23))))
-        assertFalse(state.isBackoffActive(Instant.now().plus(Duration.ofHours(25))))
-    }
-
-    @Test
-    fun `default degraded backoff starts at thirty seconds`() {
+    fun `degraded state is observable without suppressing later admission`() {
         val state = ReconcileState(degradedThreshold = 1)
 
         state.recordFailure("boom")
 
-        assertEquals(true, state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(29))))
-        assertFalse(state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(31))))
-    }
-
-    @Test
-    fun `rolling failures advance backoff once while current window is active`() {
-        val state = ReconcileState(degradedThreshold = 3)
-
-        repeat(10) { state.recordAsyncFailure("boom-$it") }
-
-        assertEquals(10, state.failureCount)
         assertEquals(PoolState.DEGRADED, state.state)
-        assertEquals(true, state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(29))))
-        assertFalse(state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(31))))
+        assertEquals(1, state.failureCount)
+        assertFalse(state.isBackoffActive())
     }
 
     @Test
@@ -96,7 +73,6 @@ class PoolReconcilerStateTest {
         PoolReconciler.runReconcileTick(
             config = config,
             stateStore = stateStore,
-            reconcileState = state,
             warmingCount = 0,
             submitWarmups = { submitted.addAndGet(it) },
         )
@@ -117,14 +93,12 @@ class PoolReconcilerStateTest {
         PoolReconciler.runReconcileTick(
             config = primaryConfig,
             stateStore = stateStore,
-            reconcileState = state,
             warmingCount = 0,
             submitWarmups = { primarySubmissions.addAndGet(it) },
         )
         PoolReconciler.runReconcileTick(
             config = secondaryConfig,
             stateStore = stateStore,
-            reconcileState = state,
             warmingCount = 0,
             submitWarmups = { secondarySubmissions.addAndGet(it) },
         )
@@ -143,7 +117,6 @@ class PoolReconcilerStateTest {
         PoolReconciler.runReconcileTick(
             config = config,
             stateStore = stateStore,
-            reconcileState = state,
             warmingCount = 0,
             submitWarmups = { submitted.addAndGet(it) },
         )
@@ -173,7 +146,6 @@ class PoolReconcilerStateTest {
             config = config,
             stateStore = stateStore,
             onDiscardSandbox = { discarded += it },
-            reconcileState = state,
             warmingCount = 0,
             submitWarmups = { submitted.addAndGet(it) },
         )
@@ -194,7 +166,6 @@ class PoolReconcilerStateTest {
             config = config,
             stateStore = stateStore,
             onDiscardSandbox = { discarded += it },
-            reconcileState = state,
             warmingCount = 0,
             submitWarmups = { error("secondary must not submit warmups: $it") },
         )
@@ -223,7 +194,6 @@ class PoolReconcilerStateTest {
             config = config,
             stateStore = stateStore,
             onDiscardSandbox = { discarded += it },
-            reconcileState = state,
             warmingCount = 0,
             submitWarmups = { error("shrink must not submit warmups: $it") },
         )

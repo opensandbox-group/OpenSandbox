@@ -19,6 +19,7 @@ from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     SANDBOX_EMBEDDING_PROXY_PORT_LABEL,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
+    SANDBOX_HTTP_PORT_LABEL,
 )
 from opensandbox_server.services.docker import DockerSandboxService
 from opensandbox_server.config import AppConfig, RuntimeConfig, DockerConfig, ServerConfig
@@ -248,6 +249,66 @@ def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_uses_proxy_
     endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
 
     assert endpoint.endpoint == "127.0.0.1:50002/proxy/18080"
+    assert endpoint.headers is None
+
+
+def test_get_endpoint_bridge_public_uses_eip_when_set(mock_docker_service):
+    """Client-facing host-mapped endpoint (use_proxy_host default) keeps the public EIP."""
+    service, mock_client = mock_docker_service
+    service.app_config.server.host = "0.0.0.0"
+    service.app_config.server.eip = "203.0.113.10"
+    service.app_config.docker.network_mode = "bridge"
+    service.network_mode = "bridge"
+
+    labels = {
+        SANDBOX_EMBEDDING_PROXY_PORT_LABEL: "50002",
+        SANDBOX_HTTP_PORT_LABEL: "51000",
+    }
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {"Labels": labels},
+        "NetworkSettings": {"IPAddress": "10.0.0.5"},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+
+    endpoint = service.get_endpoint("sbx-123", 8080, resolve_internal=False)
+
+    assert endpoint.endpoint == "203.0.113.10:51000"
+
+
+def test_get_endpoint_bridge_proxy_uses_local_host_not_eip_when_use_proxy_host(
+    mock_docker_service,
+):
+    """Server-side proxy target (use_proxy_host=True) uses the local proxy host, not the EIP.
+
+    Regression for the resolve_internal=false + server.eip scenario: proxied
+    requests must be routed to a locally reachable host even when the deployment
+    advertises a public EIP.
+    """
+    service, mock_client = mock_docker_service
+    service.app_config.server.host = "0.0.0.0"
+    service.app_config.server.eip = "203.0.113.10"
+    service.app_config.docker.network_mode = "bridge"
+    service.network_mode = "bridge"
+
+    labels = {
+        SANDBOX_EMBEDDING_PROXY_PORT_LABEL: "50002",
+        SANDBOX_HTTP_PORT_LABEL: "51000",
+    }
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {"Labels": labels},
+        "NetworkSettings": {"IPAddress": "10.0.0.5"},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+
+    endpoint = service.get_endpoint(
+        "sbx-123", 8080, resolve_internal=False, use_proxy_host=True
+    )
+
+    assert endpoint.endpoint == "127.0.0.1:51000"
     assert endpoint.headers is None
 
 

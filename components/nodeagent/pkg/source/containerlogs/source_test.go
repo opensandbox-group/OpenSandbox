@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,16 +36,76 @@ import (
 )
 
 type fakeView struct {
-	resources []store.Resource
+	resources []streamResource
 	changes   chan struct{}
 }
 
-func testResource(resource api.Resource, terminated ...bool) store.Resource {
-	result := store.Resource{Resource: resource}
-	if len(terminated) > 0 {
-		result.Terminated = terminated[0]
+func testResource(resource api.Resource, logDirectory ...any) streamResource {
+	result := streamResource{Resource: resource}
+	for _, value := range logDirectory {
+		switch value := value.(type) {
+		case string:
+			result.LogDirectory = value
+		case bool:
+			result.Terminated = value
+		}
 	}
 	return result
+}
+
+func testLogDirectory(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	directory := filepath.Join(root, "ns_pod_uid", "sandbox")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
+func newTestSource(cfg sourceConfig, view store.View, stateValue any, log logger.Logger, onError func(error)) *containerLogSource {
+	checkpoints, ok := stateValue.(checkpointStore)
+	if stateValue == nil {
+		checkpoints = nil
+	} else if !ok {
+		db, dbOK := stateValue.(*state.DB)
+		if !dbOK {
+			panic(fmt.Sprintf("unsupported test checkpoint store %T", stateValue))
+		}
+		sourceState, err := db.SourceState(sourceName)
+		if err != nil {
+			panic(err)
+		}
+		checkpoints, err = sourceState.LegacyContainerLogCheckpoint()
+		if err != nil {
+			panic(err)
+		}
+	}
+	if cfg.LogRoot == "" {
+		if resources, ok := view.(*fakeView); ok && len(resources.resources) != 0 {
+			cfg.LogRoot = filepath.Dir(filepath.Dir(resources.resources[0].LogDirectory))
+			for _, resource := range resources.resources {
+				expected := filepath.Join(cfg.LogRoot, fmt.Sprintf("%s_%s_%s", resource.Namespace, resource.PodName, resource.PodUID), resource.Container)
+				if filepath.Clean(resource.LogDirectory) != expected {
+					panic(fmt.Sprintf("test resource log directory %q does not match LogRoot layout %q", resource.LogDirectory, expected))
+				}
+			}
+		}
+	}
+	return newSource(cfg, view, checkpoints, log, onError)
+}
+
+func newTestCheckpointStore(t testing.TB, db *state.DB) checkpointStore {
+	t.Helper()
+	sourceState, err := db.SourceState(sourceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoints, err := sourceState.LegacyContainerLogCheckpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return checkpoints
 }
 
 type countingCheckpointStore struct {
@@ -74,29 +135,52 @@ func (s *countingCheckpointStore) CommitSource(checkpoints []state.FileCheckpoin
 }
 
 func TestAcknowledgeClassifiesInvalidTokenAsNonRetryable(t *testing.T) {
-	source := &Source{}
+	source := &containerLogSource{}
 	err := source.Acknowledge(context.Background(), []api.AckResult{{Token: api.AckToken{Source: "other"}}})
 	if err == nil || api.IsRetryableError(err) {
 		t.Fatalf("error=%v retryable=%v", err, api.IsRetryableError(err))
 	}
 }
 
+func testEndToken(streamID string, revision uint64) api.EndToken {
+	ref := api.StreamRef{ID: streamID, Kind: api.RecordKindContainerLog}
+	value := []byte(strconv.FormatUint(revision, 10))
+	return api.EndToken{ID: endTokenID(streamID, value), Source: sourceName, StreamRef: ref, Value: value}
+}
+
 func TestAcknowledgeEndClassifiesValidationErrorsAsNonRetryable(t *testing.T) {
+	db, err := state.Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
 	runtime := &streamRuntime{
 		revision:  2,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 2, AcknowledgedRevision: 1, FinalizingRevision: 2, FinalizingOutcome: &state.OutcomeSnapshot{LossReasons: []string{}}},
 		pending:   []*pendingSpan{{}},
 	}
-	source := &Source{streams: map[string]*streamRuntime{"stream": runtime}}
+	source := &containerLogSource{state: newTestCheckpointStore(t, db), streams: map[string]*streamRuntime{"stream": runtime}}
+	wrongSource := testEndToken("stream", 2)
+	wrongSource.Source = "other"
+	badValue := testEndToken("stream", 2)
+	badValue.Value = []byte("bad")
+	missingStream := testEndToken("missing", 1)
+	wrongRevision := testEndToken("stream", 3)
+	badKind := testEndToken("stream", 2)
+	badKind.StreamRef.Kind = "other"
+	badID := testEndToken("stream", 2)
+	badID.ID = "wrong"
 	for _, test := range []struct {
 		name  string
 		token api.EndToken
 	}{
-		{name: "source", token: api.EndToken{Source: "other"}},
-		{name: "value", token: api.EndToken{Source: sourceName, StreamRef: api.StreamRef{ID: "stream"}, Value: []byte("bad")}},
-		{name: "stream", token: api.EndToken{Source: sourceName, StreamRef: api.StreamRef{ID: "missing"}, Value: []byte("1")}},
-		{name: "revision", token: api.EndToken{Source: sourceName, StreamRef: api.StreamRef{ID: "stream"}, Value: []byte("3")}},
-		{name: "pending", token: api.EndToken{Source: sourceName, StreamRef: api.StreamRef{ID: "stream"}, Value: []byte("2")}},
+		{name: "source", token: wrongSource},
+		{name: "value", token: badValue},
+		{name: "stream", token: missingStream},
+		{name: "revision", token: wrongRevision},
+		{name: "kind", token: badKind},
+		{name: "id", token: badID},
+		{name: "pending", token: testEndToken("stream", 2)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := source.AcknowledgeEnd(context.Background(), test.token)
@@ -116,10 +200,48 @@ func TestAcknowledgeEndLeavesStateErrorsRetryable(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &streamRuntime{revision: 1, persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 1, FinalizingRevision: 1, FinalizingOutcome: &state.OutcomeSnapshot{LossReasons: []string{}}}}
-	source := &Source{state: db, streams: map[string]*streamRuntime{"stream": runtime}}
-	err = source.AcknowledgeEnd(context.Background(), api.EndToken{Source: sourceName, StreamRef: api.StreamRef{ID: "stream"}, Value: []byte("1")})
+	source := &containerLogSource{state: newTestCheckpointStore(t, db), streams: map[string]*streamRuntime{"stream": runtime}}
+	err = source.AcknowledgeEnd(context.Background(), testEndToken("stream", 1))
 	if err == nil || !api.IsRetryableError(err) {
 		t.Fatalf("AcknowledgeEnd() error=%v retryable=%v", err, api.IsRetryableError(err))
+	}
+}
+
+func TestAcknowledgeEndRecoversWithoutRuntime(t *testing.T) {
+	db, err := state.Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	persisted := state.SourceStream{
+		StreamRef:          "stream",
+		Resource:           testFrozenResourceState(),
+		Revision:           1,
+		FinalizingRevision: 1,
+		FinalizingOutcome:  &state.OutcomeSnapshot{LossReasons: []string{}},
+	}
+	if err := db.PutSourceStream(persisted); err != nil {
+		t.Fatal(err)
+	}
+	source := &containerLogSource{
+		cfg:     sourceConfig{EndedStateRetention: time.Hour},
+		state:   newTestCheckpointStore(t, db),
+		streams: make(map[string]*streamRuntime),
+		epochID: "agent-epoch",
+	}
+	token := testEndToken("stream", 1)
+	if err := source.AcknowledgeEnd(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.AcknowledgeEnd(context.Background(), token); err != nil {
+		t.Fatalf("idempotent AcknowledgeEnd() error = %v", err)
+	}
+	got, found, err := db.GetSourceStream("stream")
+	if err != nil || !found {
+		t.Fatalf("GetSourceStream() found=%v err=%v", found, err)
+	}
+	if got.AcknowledgedRevision != 1 || got.FinalizingRevision != 0 || !got.Ended || got.FinalizingOutcome != nil || got.RepairDeadline == nil {
+		t.Fatalf("source stream after recovered acknowledgement = %+v", got)
 	}
 }
 
@@ -129,7 +251,7 @@ func TestSourceDoesNotReportContextCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	reported := false
-	source := &Source{log: log.Named(sourceName), onError: func(error) { reported = true }}
+	source := &containerLogSource{log: log.Named(sourceName), onError: func(error) { reported = true }}
 	source.fail(context.Canceled)
 	if reported {
 		t.Fatal("context cancellation was reported as a source failure")
@@ -155,7 +277,7 @@ func TestAcknowledgeRecordsDropForEveryPendingSpan(t *testing.T) {
 		revision:  1,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 1},
 	}
-	source := &Source{state: db, streams: map[string]*streamRuntime{"stream": runtime}}
+	source := &containerLogSource{state: newTestCheckpointStore(t, db), streams: map[string]*streamRuntime{"stream": runtime}}
 	combined := first
 	combined.EndOffset = second.EndOffset
 	value, err := json.Marshal(tokenValue{Spans: []sourceSpan{combined}, Revision: 1})
@@ -203,7 +325,7 @@ func TestCommitCompletedDoesNotReplaceReboundPathCheckpoint(t *testing.T) {
 		revision:  1,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 1},
 	}
-	source := &Source{state: db}
+	source := &containerLogSource{state: newTestCheckpointStore(t, db)}
 	if err := source.commitCompletedLocked(runtime); err != nil {
 		t.Fatal(err)
 	}
@@ -247,8 +369,8 @@ func TestAcknowledgeCommitsSameStreamBatchAtomically(t *testing.T) {
 		revision:  1,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 1},
 	}
-	checkpoints := &countingCheckpointStore{checkpointStore: db, failCommitCall: 2}
-	source := &Source{state: checkpoints, streams: map[string]*streamRuntime{"stream": runtime}}
+	checkpoints := &countingCheckpointStore{checkpointStore: newTestCheckpointStore(t, db), failCommitCall: 2}
+	source := &containerLogSource{state: checkpoints, streams: map[string]*streamRuntime{"stream": runtime}}
 	resultFor := func(tokenID string, span sourceSpan) api.AckResult {
 		value, marshalErr := json.Marshal(tokenValue{Spans: []sourceSpan{span}, Revision: 1})
 		if marshalErr != nil {
@@ -291,7 +413,7 @@ func TestAcknowledgeFailsClosedOnSupersededCheckpoint(t *testing.T) {
 		revision:  1,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 1},
 	}
-	source := &Source{state: db, streams: map[string]*streamRuntime{"stream": runtime}}
+	source := &containerLogSource{state: newTestCheckpointStore(t, db), streams: map[string]*streamRuntime{"stream": runtime}}
 	value, err := json.Marshal(tokenValue{Spans: []sourceSpan{span}, Revision: runtime.revision})
 	if err != nil {
 		t.Fatal(err)
@@ -340,7 +462,7 @@ func TestRepairGapResolvesOnlyAfterContiguousAckAndStableEOF(t *testing.T) {
 		revision:  2,
 		persisted: persisted,
 	}
-	source := &Source{state: db}
+	source := &containerLogSource{state: newTestCheckpointStore(t, db)}
 	if err := source.commitCompletedLocked(runtime); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +508,7 @@ func TestRepairAckAfterGapBecomesCoverageStillCommits(t *testing.T) {
 		revision:  1,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 1, HadSourceGaps: true, LossReasons: []string{gap.Reason}, Gaps: []state.GapRecord{gap}},
 	}
-	if err := (&Source{state: db}).commitCompletedLocked(runtime); err != nil {
+	if err := (&containerLogSource{state: newTestCheckpointStore(t, db)}).commitCompletedLocked(runtime); err != nil {
 		t.Fatal(err)
 	}
 	if file.committed != second.EndOffset || len(runtime.pending) != 0 {
@@ -409,7 +531,7 @@ func TestShrunkenRepairFileMakesBoundGapCoverage(t *testing.T) {
 	file := &fileRuntime{fileID: gap.FileID, path: "/logs/recovered.log", repairGapID: gap.ID}
 	runtime := &streamRuntime{persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 1, HadSourceGaps: true, LossReasons: []string{gap.Reason}, Gaps: []state.GapRecord{gap}}}
 	runtime.mu.Lock()
-	err = (&Source{state: db}).makeBoundRepairGapCoverageLocked(runtime, file)
+	err = (&containerLogSource{state: newTestCheckpointStore(t, db)}).makeBoundRepairGapCoverageLocked(runtime, file)
 	runtime.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -441,7 +563,7 @@ func TestCommitCompletedHandlesRepairAfterFileRuntimeRebind(t *testing.T) {
 		revision:  2,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 2, AcknowledgedRevision: 1, HadSourceGaps: true, LossReasons: []string{gap.Reason}, Gaps: []state.GapRecord{gap}},
 	}
-	source := &Source{state: db}
+	source := &containerLogSource{state: newTestCheckpointStore(t, db)}
 	if err := source.commitCompletedLocked(runtime); err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +597,7 @@ func TestRepairGapRejectsNonContiguousAck(t *testing.T) {
 		revision:  1,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 1, HadSourceGaps: true, LossReasons: []string{"file-reclaimed"}, Gaps: []state.GapRecord{{ID: "gap", FileID: file.fileID, Path: file.path, FromOffset: 0, Device: 1, Inode: 2, PrefixHash: "hash", HashBytes: 4, Reason: "file-reclaimed"}}},
 	}
-	err = (&Source{state: db}).commitCompletedLocked(runtime)
+	err = (&containerLogSource{state: newTestCheckpointStore(t, db)}).commitCompletedLocked(runtime)
 	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "not contiguous") {
 		t.Fatalf("commitCompletedLocked() error=%v retryable=%v", err, api.IsRetryableError(err))
 	}
@@ -518,7 +640,7 @@ func TestFindRepairCheckpointMatchesRecoveredFingerprint(t *testing.T) {
 	repairOffset := int64(3)
 	gap := state.GapRecord{ID: "gap", FileID: "file", Path: "/old/0.log", FromOffset: 1, RepairOffset: &repairOffset, Device: fingerprint.Device, Inode: fingerprint.Inode, PrefixHash: fingerprint.PrefixHash, HashBytes: fingerprint.HashBytes, Reason: "file-reclaimed"}
 	runtime := &streamRuntime{revision: 2, persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 2, AcknowledgedRevision: 1, Gaps: []state.GapRecord{gap}}}
-	checkpoint, gapID, found, err := (&Source{}).findRepairCheckpoint(runtime, path)
+	checkpoint, gapID, found, err := (&containerLogSource{}).findRepairCheckpoint(runtime, path)
 	if err != nil || !found || gapID != gap.ID || checkpoint.FileID != gap.FileID || checkpoint.Path != path || checkpoint.Offset != repairOffset {
 		t.Fatalf("checkpoint=%+v gapID=%q found=%v err=%v", checkpoint, gapID, found, err)
 	}
@@ -553,7 +675,7 @@ func TestShortRepairCandidateDoesNotCreateSecondGap(t *testing.T) {
 		outcome:   outcomeFromState(persisted),
 		persisted: persisted,
 	}
-	source := &Source{cfg: Config{MaxLineBytes: 1024, PartialTimeout: time.Second}, state: db, out: make(chan api.SourceEvent, 1)}
+	source := &containerLogSource{cfg: sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second}, state: newTestCheckpointStore(t, db), out: make(chan api.SourceEvent, 1)}
 	if _, err := source.scanFile(context.Background(), api.StreamRef{ID: persisted.StreamRef}, runtime, path); err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +734,7 @@ func TestStableRepairDoesNotResolveBeforeObservedExtent(t *testing.T) {
 		revision:  2,
 		persisted: state.SourceStream{StreamRef: "stream", Resource: testFrozenResourceState(), Revision: 2, AcknowledgedRevision: 1, HadSourceGaps: true, LossReasons: []string{gap.Reason}, Gaps: []state.GapRecord{gap}},
 	}
-	source := &Source{state: db}
+	source := &containerLogSource{state: newTestCheckpointStore(t, db)}
 	runtime.mu.Lock()
 	err = source.resolveStableRepairGapsLocked(runtime)
 	runtime.mu.Unlock()
@@ -639,7 +761,7 @@ func TestStableRepairDoesNotResolveBeforeObservedExtent(t *testing.T) {
 }
 
 func TestSourceDoesNotCommitDropPastUnacknowledgedDelivery(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	valid := "2026-07-23T10:00:00Z stdout F hello\n"
 	malformed := "not-a-cri-line\n"
 	path := filepath.Join(dir, "0.log")
@@ -651,13 +773,13 @@ func TestSourceDoesNotCommitDropPastUnacknowledgedDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, err := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -696,7 +818,7 @@ func TestSourceDoesNotCommitDropPastUnacknowledgedDelivery(t *testing.T) {
 }
 
 func TestSourceBatchesConsecutiveMalformedLines(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	raw := []byte(strings.Repeat("not-a-cri-line\n", 100))
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
@@ -707,11 +829,11 @@ func TestSourceBatchesConsecutiveMalformedLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	checkpoints := &countingCheckpointStore{checkpointStore: db}
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	checkpoints := &countingCheckpointStore{checkpointStore: newTestCheckpointStore(t, db)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		t.Fatal(err)
@@ -735,7 +857,7 @@ func TestSourceBatchesConsecutiveMalformedLines(t *testing.T) {
 }
 
 func TestSourceRetriesMalformedCommitBeforeValidLine(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	malformed := "not-a-cri-line\n"
 	valid := "2026-07-23T10:00:00Z stdout F hello\n"
@@ -747,11 +869,11 @@ func TestSourceRetriesMalformedCommitBeforeValidLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	checkpoints := &countingCheckpointStore{checkpointStore: db, failCommitCall: 2}
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	checkpoints := &countingCheckpointStore{checkpointStore: newTestCheckpointStore(t, db), failCommitCall: 2}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
 	events := make(chan api.SourceEvent, 1)
 	source.out = events
 	ref := streamRef(resource)
@@ -782,7 +904,7 @@ func TestSourceRetriesMalformedCommitBeforeValidLine(t *testing.T) {
 }
 
 func TestSourceRetriesMalformedCommitAtEOF(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	raw := []byte(strings.Repeat("not-a-cri-line\n", 10))
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
@@ -793,11 +915,11 @@ func TestSourceRetriesMalformedCommitAtEOF(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	checkpoints := &countingCheckpointStore{checkpointStore: db, failCommitCall: 2}
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	checkpoints := &countingCheckpointStore{checkpointStore: newTestCheckpointStore(t, db), failCommitCall: 2}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
 	ref := streamRef(resource)
 	runtime, err := source.getOrCreateRuntime(ref, resource)
 	if err != nil {
@@ -828,7 +950,7 @@ func TestCompletedDropsDoNotMergeAcrossFileNames(t *testing.T) {
 }
 
 func TestSourceCommitsPartialAcrossRotatedFiles(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	rotated := filepath.Join(dir, "0.log.20260723")
 	base := filepath.Join(dir, "0.log")
 	if err := os.WriteFile(rotated, []byte("2026-07-23T10:00:00Z stdout P hello \n"), 0o600); err != nil {
@@ -842,10 +964,10 @@ func TestSourceCommitsPartialAcrossRotatedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -871,7 +993,7 @@ func TestSourceCommitsPartialAcrossRotatedFiles(t *testing.T) {
 }
 
 func TestSourceDoesNotAssemblePartialAcrossRestarts(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	if err := os.WriteFile(filepath.Join(dir, "0.log"), []byte("2026-07-23T10:00:00Z stdout P old-\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -883,10 +1005,10 @@ func TestSourceDoesNotAssemblePartialAcrossRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Hour, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Hour, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -904,22 +1026,22 @@ func TestSourceDoesNotAssemblePartialAcrossRestarts(t *testing.T) {
 }
 
 func TestLostLatePersistsGapAndClearsPendingTogether(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	db, err := state.Open(t.TempDir(), "target", 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
 	ref := streamRef(resource)
 	persisted := state.SourceStream{StreamRef: ref.ID, Resource: freezeResource(resource), Revision: 1, AcknowledgedRevision: 1, Ended: true, LatePending: true, LossReasons: []string{}}
 	if err := db.PutSourceStream(persisted); err != nil {
 		t.Fatal(err)
 	}
-	checkpoints := &countingCheckpointStore{checkpointStore: db}
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	checkpoints := &countingCheckpointStore{checkpointStore: newTestCheckpointStore(t, db)}
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Hour, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Hour, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
 	persisted.CoverageStartedAt = time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	persisted.InitialScanComplete = true
 	persisted.MonitoringEpoch = source.epochID
@@ -945,13 +1067,13 @@ func TestLostLatePersistsGapAndClearsPendingTogether(t *testing.T) {
 }
 
 func TestLostLateBeforeEndAcknowledgementSurvivesRestart(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	db, err := state.Open(t.TempDir(), "target", 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
 	ref := streamRef(resource)
 	coverageStartedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	persisted := state.SourceStream{StreamRef: ref.ID, Resource: freezeResource(resource), CoverageStartedAt: coverageStartedAt, InitialScanComplete: true, MonitoringEpoch: "previous-agent", Revision: 1, FinalizingRevision: 1, FinalizingOutcome: &state.OutcomeSnapshot{LossReasons: []string{}}, LatePending: true, LossReasons: []string{}}
@@ -961,10 +1083,10 @@ func TestLostLateBeforeEndAcknowledgementSurvivesRestart(t *testing.T) {
 	if err := db.PutFinalizeIntent(state.FinalizeIntent{FinalizeID: "final", TargetID: "target", StreamRef: ref.ID, Revision: 1, CoverageStartedAt: coverageStartedAt, FinalizedAt: time.Now().UTC().Truncate(time.Second), SinkDone: true}); err != nil {
 		t.Fatal(err)
 	}
-	checkpoints := &countingCheckpointStore{checkpointStore: db}
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	checkpoints := &countingCheckpointStore{checkpointStore: newTestCheckpointStore(t, db)}
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Hour, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Hour, EndedStateRetention: time.Hour}, view, checkpoints, log, nil)
 	events := make(chan api.SourceEvent, 1)
 	source.out = events
 	watcher, err := fsnotify.NewWatcher()
@@ -996,7 +1118,7 @@ func TestLostLateBeforeEndAcknowledgementSurvivesRestart(t *testing.T) {
 }
 
 func TestCompressedHistoryMakesFinalOutcomeIncomplete(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	if err := os.WriteFile(filepath.Join(dir, "0.log.20260723.gz"), []byte("compressed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1005,10 +1127,10 @@ func TestCompressedHistoryMakesFinalOutcomeIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -1026,7 +1148,7 @@ func TestCompressedHistoryMakesFinalOutcomeIncomplete(t *testing.T) {
 }
 
 func TestUnterminatedTailIsCoveredBeforeFinalization(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	tail := "2026-07-23T10:00:00Z stdout F unterminated"
 	if err := os.WriteFile(path, []byte(tail), 0o600); err != nil {
@@ -1037,10 +1159,10 @@ func TestUnterminatedTailIsCoveredBeforeFinalization(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -1070,7 +1192,7 @@ func TestUnterminatedTailIsCoveredBeforeFinalization(t *testing.T) {
 }
 
 func TestUnterminatedTailDoesNotCrossUnacknowledgedPartial(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	partial := "2026-07-23T10:00:00Z stdout P partial\n"
 	tail := "unterminated"
@@ -1082,10 +1204,10 @@ func TestUnterminatedTailDoesNotCrossUnacknowledgedPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Hour, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Hour, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -1114,7 +1236,7 @@ func TestUnterminatedTailDoesNotCrossUnacknowledgedPartial(t *testing.T) {
 }
 
 func TestSourceWaitsForDeliveryCommitBeforeFinalizing(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	if err := os.WriteFile(path, []byte("2026-07-23T10:00:00Z stdout F delivered\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1124,10 +1246,10 @@ func TestSourceWaitsForDeliveryCommitBeforeFinalizing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
 	events := make(chan api.SourceEvent, 2)
 	source.out = events
 	watcher, err := fsnotify.NewWatcher()
@@ -1165,16 +1287,16 @@ func TestSourceWaitsForDeliveryCommitBeforeFinalizing(t *testing.T) {
 }
 
 func TestMissingLogDirectoryDoesNotTerminateActiveResource(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "not-created-yet")
+	dir := filepath.Join(t.TempDir(), "ns_pod_uid", "sandbox")
 	db, err := state.Open(t.TempDir(), "target", 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 1)
 	if err := source.Start(ctx, events); err != nil {
@@ -1193,7 +1315,7 @@ func TestMissingLogDirectoryDoesNotTerminateActiveResource(t *testing.T) {
 }
 
 func TestSourceRestartMatchesRenamedFileWithoutReplayingIt(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	base := filepath.Join(dir, "0.log")
 	firstLine := "2026-07-23T10:00:00Z stdout F first\n"
 	secondLine := "2026-07-23T10:00:01Z stdout F second\n"
@@ -1205,10 +1327,10 @@ func TestSourceRestartMatchesRenamedFileWithoutReplayingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	first := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
+	first := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := first.Start(ctx, events); err != nil {
@@ -1227,7 +1349,7 @@ func TestSourceRestartMatchesRenamedFileWithoutReplayingIt(t *testing.T) {
 	if err := os.WriteFile(base, []byte(secondLine), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	second := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
+	second := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel = context.WithCancel(context.Background())
 	events = make(chan api.SourceEvent, 4)
 	if err := second.Start(ctx, events); err != nil {
@@ -1257,7 +1379,7 @@ func TestSourceRestartMatchesRenamedFileWithoutReplayingIt(t *testing.T) {
 }
 
 func TestSourceRestartMarksMissingUncommittedFileAsReclaimed(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	line := "2026-07-23T10:00:00Z stdout F first\n"
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
@@ -1268,12 +1390,12 @@ func TestSourceRestartMarksMissingUncommittedFileAsReclaimed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	cfg := Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}
+	cfg := sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}
 
-	first := New(cfg, view, db, log, nil)
+	first := newTestSource(cfg, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := first.Start(ctx, events); err != nil {
@@ -1289,7 +1411,7 @@ func TestSourceRestartMarksMissingUncommittedFileAsReclaimed(t *testing.T) {
 	}
 	view.resources[0].Terminated = true
 
-	second := New(cfg, view, db, log, nil)
+	second := newTestSource(cfg, view, db, log, nil)
 	ctx, cancel = context.WithCancel(context.Background())
 	events = make(chan api.SourceEvent, 2)
 	if err := second.Start(ctx, events); err != nil {
@@ -1307,7 +1429,7 @@ func TestSourceRestartMarksMissingUncommittedFileAsReclaimed(t *testing.T) {
 }
 
 func TestSourceRestartRecordsObservedFileShrink(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	line := "2026-07-23T10:00:00Z stdout F " + strings.Repeat("x", 64) + "\n"
 	prefix := strings.Repeat(line, 64)
@@ -1324,7 +1446,7 @@ func TestSourceRestartRecordsObservedFileShrink(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
 	ref := streamRef(resource)
 	checkpoint := state.FileCheckpoint{
 		StreamRef: ref.ID, FileID: "file", Path: path, Offset: int64(len(prefix)), ObservedSize: int64(len(raw)), Revision: 1,
@@ -1338,9 +1460,9 @@ func TestSourceRestartRecordsObservedFileShrink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 32)
 	if err := source.Start(ctx, events); err != nil {
@@ -1397,8 +1519,8 @@ shrinkRecorded:
 	}
 	stopSource(t, source, cancel)
 	resource.Terminated = true
-	view = &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
-	source = New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	view = &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
+	source = newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel = context.WithCancel(context.Background())
 	events = make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -1431,7 +1553,7 @@ func TestSourceRestartClassifiesMissingCommittedFile(t *testing.T) {
 		wantGap bool
 	}{{name: "rotated", file: "0.log.20260723"}, {name: "active-base", file: "0.log", wantGap: true}} {
 		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := testLogDirectory(t)
 			path := filepath.Join(dir, test.file)
 			line := "2026-07-23T10:00:00Z stdout F first\n"
 			if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
@@ -1442,12 +1564,12 @@ func TestSourceRestartClassifiesMissingCommittedFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-			view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+			resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+			view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 			log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-			cfg := Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}
+			cfg := sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}
 
-			first := New(cfg, view, db, log, nil)
+			first := newTestSource(cfg, view, db, log, nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			events := make(chan api.SourceEvent, 2)
 			if err := first.Start(ctx, events); err != nil {
@@ -1466,7 +1588,7 @@ func TestSourceRestartClassifiesMissingCommittedFile(t *testing.T) {
 			}
 			view.resources[0].Terminated = true
 
-			second := New(cfg, view, db, log, nil)
+			second := newTestSource(cfg, view, db, log, nil)
 			ctx, cancel = context.WithCancel(context.Background())
 			events = make(chan api.SourceEvent, 2)
 			if err := second.Start(ctx, events); err != nil {
@@ -1486,7 +1608,7 @@ func TestSourceRestartClassifiesMissingCommittedFile(t *testing.T) {
 }
 
 func TestCompressedRotationWaitsForPendingDelivery(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	base := filepath.Join(dir, "0.log.20260723")
 	compressed := base + ".gz"
 	if err := os.WriteFile(base, []byte("2026-07-23T10:00:00Z stdout F pending\n"), 0o600); err != nil {
@@ -1497,10 +1619,10 @@ func TestCompressedRotationWaitsForPendingDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -1526,7 +1648,7 @@ func TestCompressedRotationWaitsForPendingDelivery(t *testing.T) {
 }
 
 func TestCompressedRotationAfterAcknowledgementDoesNotCreateGap(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	base := filepath.Join(dir, "0.log.20260723")
 	compressed := base + ".gz"
 	if err := os.WriteFile(base, []byte("2026-07-23T10:00:00Z stdout F delivered\n"), 0o600); err != nil {
@@ -1537,10 +1659,10 @@ func TestCompressedRotationAfterAcknowledgementDoesNotCreateGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 2)
 	if err := source.Start(ctx, events); err != nil {
@@ -1563,7 +1685,7 @@ func TestCompressedRotationAfterAcknowledgementDoesNotCreateGap(t *testing.T) {
 }
 
 func TestCompressedRotationWithoutObservedRenameCreatesGap(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	base := filepath.Join(dir, "0.log")
 	compressed := base + ".gz"
 	if err := os.WriteFile(base, []byte("2026-07-23T10:00:00Z stdout F delivered\n"), 0o600); err != nil {
@@ -1574,10 +1696,10 @@ func TestCompressedRotationWithoutObservedRenameCreatesGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 3)
 	if err := source.Start(ctx, events); err != nil {
@@ -1612,7 +1734,7 @@ func TestMissingFileFromStaleSnapshotDefersGapDecision(t *testing.T) {
 		wantGap bool
 	}{{name: "covered compressed rotation", rotate: true}, {name: "reclaimed file", wantGap: true}} {
 		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := testLogDirectory(t)
 			name := "0.log"
 			if test.rotate {
 				name = "0.log.20260723"
@@ -1627,10 +1749,10 @@ func TestMissingFileFromStaleSnapshotDefersGapDecision(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-			view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+			resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+			view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 			log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-			source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
+			source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
 			events := make(chan api.SourceEvent, 1)
 			source.out = events
 			ref := streamRef(resource)
@@ -1677,16 +1799,16 @@ func TestMissingFileFromStaleSnapshotDefersGapDecision(t *testing.T) {
 }
 
 func TestNewFileMissingFromStaleSnapshotMarksScanChanged(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	db, err := state.Open(t.TempDir(), "target", 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ref := streamRef(resource)
 	runtime, err := source.getOrCreateRuntime(ref, resource)
 	if err != nil {
@@ -1699,7 +1821,7 @@ func TestNewFileMissingFromStaleSnapshotMarksScanChanged(t *testing.T) {
 }
 
 func TestCoveredCompressedRotationDoesNotReopenEndedStream(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	base := filepath.Join(dir, "0.log.20260723")
 	compressed := base + ".gz"
 	if err := os.WriteFile(base, []byte("2026-07-23T10:00:00Z stdout F delivered\n"), 0o600); err != nil {
@@ -1710,10 +1832,10 @@ func TestCoveredCompressedRotationDoesNotReopenEndedStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 4)
 	if err := source.Start(ctx, events); err != nil {
@@ -1750,7 +1872,7 @@ func TestCoveredCompressedRotationDoesNotReopenEndedStream(t *testing.T) {
 }
 
 func TestCoveredUncompressedRotationDoesNotReopenEndedStream(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	base := filepath.Join(dir, "0.log")
 	rotated := filepath.Join(dir, "0.log.20260723")
 	if err := os.WriteFile(base, []byte("2026-07-23T10:00:00Z stdout F delivered\n"), 0o600); err != nil {
@@ -1761,10 +1883,10 @@ func TestCoveredUncompressedRotationDoesNotReopenEndedStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 4)
 	if err := source.Start(ctx, events); err != nil {
@@ -1804,7 +1926,7 @@ func TestFileSinkPruneDropsRuntimeButKeepsDurableState(t *testing.T) {
 	}
 	defer db.Close()
 	deadline := time.Now().Add(-time.Minute)
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: filepath.Join(t.TempDir(), "removed")}, true)
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, filepath.Join(t.TempDir(), "removed"), true)
 	streamRef := streamRef(resource)
 	persisted := state.SourceStream{StreamRef: streamRef.ID, Resource: freezeResource(resource), Revision: 1, AcknowledgedRevision: 1, Ended: true, RepairDeadline: &deadline}
 	if err := db.PutSourceStream(persisted); err != nil {
@@ -1812,7 +1934,7 @@ func TestFileSinkPruneDropsRuntimeButKeepsDurableState(t *testing.T) {
 	}
 	view := &fakeView{changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, PruneEndedState: false}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, PruneEndedState: false}, view, db, log, nil)
 	runtime := runtimeFromState(source.cfg, resource, persisted)
 	source.streams[streamRef.ID] = runtime
 	pruned, err := source.pruneEndedRuntime(streamRef, runtime, time.Now())
@@ -1852,7 +1974,7 @@ func TestStdoutFileSinkPruneDeletesDurableState(t *testing.T) {
 	}
 	defer db.Close()
 	deadline := time.Now().Add(-time.Minute)
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: filepath.Join(t.TempDir(), "removed")}, true)
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, filepath.Join(t.TempDir(), "removed"), true)
 	streamRef := streamRef(resource)
 	persisted := state.SourceStream{StreamRef: streamRef.ID, Resource: freezeResource(resource), Revision: 1, AcknowledgedRevision: 1, Ended: true, RepairDeadline: &deadline}
 	if err := db.PutSourceStream(persisted); err != nil {
@@ -1860,7 +1982,7 @@ func TestStdoutFileSinkPruneDeletesDurableState(t *testing.T) {
 	}
 	view := &fakeView{changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, PruneEndedState: true}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second, PruneEndedState: true}, view, db, log, nil)
 	runtime := runtimeFromState(source.cfg, resource, persisted)
 	source.streams[streamRef.ID] = runtime
 	pruned, err := source.pruneEndedRuntime(streamRef, runtime, time.Now())
@@ -1876,7 +1998,7 @@ func TestStdoutFileSinkPruneDeletesDurableState(t *testing.T) {
 }
 
 func TestSourceDoesNotReuseCursorAfterLiveBaseReplacement(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	base := filepath.Join(dir, "0.log")
 	if err := os.WriteFile(base, []byte("2026-07-23T10:00:00Z stdout F first\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1886,10 +2008,10 @@ func TestSourceDoesNotReuseCursorAfterLiveBaseReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
+	source := newTestSource(sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 4)
 	if err := source.Start(ctx, events); err != nil {
@@ -1955,7 +2077,7 @@ func TestEndedRuntimeDetectsSamePathReplacement(t *testing.T) {
 			}
 			file := &fileRuntime{fileID: "file", path: path, readOffset: int64(len(original)), committed: int64(len(original)), observedSize: int64(len(original)), fingerprint: fingerprintValue}
 			runtime := &streamRuntime{files: map[string]*fileRuntime{path: file}, persisted: state.SourceStream{StreamRef: "stream"}}
-			changed, err := (&Source{}).runtimeHasNewBytes(runtime, []string{path})
+			changed, err := (&containerLogSource{}).runtimeHasNewBytes(runtime, []string{path})
 			if err != nil || !changed {
 				t.Fatalf("runtimeHasNewBytes()=%v err=%v, want replacement detected", changed, err)
 			}
@@ -1964,7 +2086,7 @@ func TestEndedRuntimeDetectsSamePathReplacement(t *testing.T) {
 }
 
 func TestSourceReopensOnlyWhenLateBytesExist(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	if err := os.WriteFile(path, []byte("2026-07-23T10:00:00Z stdout F first\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1974,11 +2096,11 @@ func TestSourceReopensOnlyWhenLateBytesExist(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir}, true)
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir, true)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	cfg := Config{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}
-	first := New(cfg, view, db, log, nil)
+	cfg := sourceConfig{MaxLineBytes: 1024, PartialTimeout: time.Second, ReconcileInterval: 10 * time.Millisecond, EndedStateRetention: time.Hour}
+	first := newTestSource(cfg, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 4)
 	if err := first.Start(ctx, events); err != nil {
@@ -1997,7 +2119,7 @@ func TestSourceReopensOnlyWhenLateBytesExist(t *testing.T) {
 	}
 	stopSource(t, first, cancel)
 
-	second := New(cfg, view, db, log, nil)
+	second := newTestSource(cfg, view, db, log, nil)
 	ctx, cancel = context.WithCancel(context.Background())
 	events = make(chan api.SourceEvent, 4)
 	if err := second.Start(ctx, events); err != nil {
@@ -2036,7 +2158,7 @@ func TestSourceReopensOnlyWhenLateBytesExist(t *testing.T) {
 	stopSource(t, second, cancel)
 }
 
-func stopSource(t *testing.T, source *Source, cancel context.CancelFunc) {
+func stopSource(t *testing.T, source *containerLogSource, cancel context.CancelFunc) {
 	t.Helper()
 	cancel()
 	ctx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2087,7 +2209,7 @@ func TestRestoreStreamsRejectsResourceStreamRefMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: t.TempDir()})
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, testLogDirectory(t))
 	expected := streamRef(resource).ID
 	if err := db.PutSourceStream(state.SourceStream{StreamRef: expected + "-corrupt", Resource: freezeResource(resource), Revision: 1}); err != nil {
 		t.Fatal(err)
@@ -2096,7 +2218,7 @@ func TestRestoreStreamsRejectsResourceStreamRefMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}, db, log, nil)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		t.Fatal(err)
@@ -2117,7 +2239,7 @@ func TestRestoreStreamsRejectsZeroFingerprintPastOffsetZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: t.TempDir()})
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, testLogDirectory(t))
 	ref := streamRef(resource).ID
 	if err := db.PutSourceStream(state.SourceStream{StreamRef: ref, Resource: freezeResource(resource), Revision: 1}); err != nil {
 		t.Fatal(err)
@@ -2129,7 +2251,7 @@ func TestRestoreStreamsRejectsZeroFingerprintPastOffsetZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}, db, log, nil)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		t.Fatal(err)
@@ -2142,7 +2264,7 @@ func TestRestoreStreamsRejectsZeroFingerprintPastOffsetZero(t *testing.T) {
 }
 
 func TestSourcePromotesEmptyFileFingerprintBeforeDelivery(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -2152,13 +2274,13 @@ func TestSourcePromotesEmptyFileFingerprintBeforeDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, err := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan api.SourceEvent, 1)
 	if err := source.Start(ctx, events); err != nil {
@@ -2264,7 +2386,7 @@ func TestReadPhysicalLineForScanReturnsNonEOFError(t *testing.T) {
 
 func TestRuntimeHasNewBytesReturnsStatErrors(t *testing.T) {
 	runtime := &streamRuntime{files: make(map[string]*fileRuntime), persisted: state.SourceStream{StreamRef: "stream", Revision: 1}}
-	if _, err := (&Source{}).runtimeHasNewBytes(runtime, []string{"\x00"}); err == nil {
+	if _, err := (&containerLogSource{}).runtimeHasNewBytes(runtime, []string{"\x00"}); err == nil {
 		t.Fatal("runtimeHasNewBytes() swallowed a non-ENOENT stat error")
 	}
 }
@@ -2284,14 +2406,14 @@ func TestResumeMonitoringPersistsInterruptedCoverage(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: t.TempDir()})
+			resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, t.TempDir())
 			boundary := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 			persisted := state.SourceStream{StreamRef: streamRef(resource).ID, Resource: freezeResource(resource), CoverageStartedAt: boundary, InitialScanComplete: test.initialScanComplete, MonitoringEpoch: "old-epoch", Revision: 1}
 			if err := db.PutSourceStream(persisted); err != nil {
 				t.Fatal(err)
 			}
 			log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-			source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{changes: make(chan struct{}, 1)}, db, log, nil)
+			source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{changes: make(chan struct{}, 1)}, db, log, nil)
 			runtime := runtimeFromState(source.cfg, resource, persisted)
 			if err := source.resumeMonitoring(runtime, true, nil); err != nil {
 				t.Fatal(err)
@@ -2306,11 +2428,11 @@ func TestResumeMonitoringPersistsInterruptedCoverage(t *testing.T) {
 
 func TestResumeMonitoringRejectsProgressWithoutCoverageBoundary(t *testing.T) {
 	runtime := &streamRuntime{
-		resource:  testResource(api.Resource{LogDirectory: t.TempDir()}),
+		resource:  testResource(api.Resource{}, t.TempDir()),
 		files:     map[string]*fileRuntime{"/logs/0.log": {fileID: "file", path: "/logs/0.log"}},
 		persisted: state.SourceStream{StreamRef: "stream", Revision: 1},
 	}
-	err := (&Source{epochID: "epoch"}).resumeMonitoring(runtime, true, nil)
+	err := (&containerLogSource{epochID: "epoch"}).resumeMonitoring(runtime, true, nil)
 	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "progress without a coverage boundary") {
 		t.Fatalf("resumeMonitoring() error=%v retryable=%v", err, api.IsRetryableError(err))
 	}
@@ -2336,9 +2458,9 @@ func TestMissingPodDirectoryDefersCoverageUntilLeafWatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: logDirectory}, true)
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, logDirectory, true)
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}, db, log, nil)
 	events := make(chan api.SourceEvent, 1)
 	source.out = events
 	watcher, err := fsnotify.NewWatcher()
@@ -2424,9 +2546,9 @@ func TestMissingLeafAfterCoverageRecordsDiscontinuityAndReconciles(t *testing.T)
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: logDirectory})
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, logDirectory)
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}, db, log, nil)
 	events := make(chan api.SourceEvent, 1)
 	source.out = events
 	watcher, err := fsnotify.NewWatcher()
@@ -2477,9 +2599,9 @@ func TestMissingLeafAfterCoverageRecordsDiscontinuityAndReconciles(t *testing.T)
 func TestSharedLogRootReplacementBroadcastsDiscontinuity(t *testing.T) {
 	parent := t.TempDir()
 	logRoot := filepath.Join(parent, "pods")
-	resources := []store.Resource{
-		testResource(api.Resource{SandboxID: "sb-a", ClusterName: "cluster", Namespace: "ns", PodName: "pod-a", PodUID: "uid-a", NodeName: "node", Container: "sandbox", LogDirectory: filepath.Join(logRoot, "ns_pod-a_uid-a", "sandbox")}),
-		testResource(api.Resource{SandboxID: "sb-b", ClusterName: "cluster", Namespace: "ns", PodName: "pod-b", PodUID: "uid-b", NodeName: "node", Container: "sandbox", LogDirectory: filepath.Join(logRoot, "ns_pod-b_uid-b", "sandbox")}),
+	resources := []streamResource{
+		testResource(api.Resource{SandboxID: "sb-a", ClusterName: "cluster", Namespace: "ns", PodName: "pod-a", PodUID: "uid-a", NodeName: "node", Container: "sandbox"}, filepath.Join(logRoot, "ns_pod-a_uid-a", "sandbox")),
+		testResource(api.Resource{SandboxID: "sb-b", ClusterName: "cluster", Namespace: "ns", PodName: "pod-b", PodUID: "uid-b", NodeName: "node", Container: "sandbox"}, filepath.Join(logRoot, "ns_pod-b_uid-b", "sandbox")),
 	}
 	for _, resource := range resources {
 		if err := os.MkdirAll(resource.LogDirectory, 0o700); err != nil {
@@ -2492,8 +2614,8 @@ func TestSharedLogRootReplacementBroadcastsDiscontinuity(t *testing.T) {
 	}
 	defer db.Close()
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	checkpoints := &countingCheckpointStore{checkpointStore: db}
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: resources, changes: make(chan struct{}, 1)}, checkpoints, log, nil)
+	checkpoints := &countingCheckpointStore{checkpointStore: newTestCheckpointStore(t, db)}
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, &fakeView{resources: resources, changes: make(chan struct{}, 1)}, checkpoints, log, nil)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		t.Fatal(err)
@@ -2559,7 +2681,7 @@ func TestRemoveResourceWatchesRetainsOnlySharedLogRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour}, &fakeView{changes: make(chan struct{}, 1)}, nil, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour}, &fakeView{changes: make(chan struct{}, 1)}, nil, log, nil)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		t.Fatal(err)
@@ -2586,10 +2708,10 @@ func TestUnobservedCreateDeleteEventPersistsCoverageGap(t *testing.T) {
 	}
 	defer db.Close()
 	logRoot := t.TempDir()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: filepath.Join(logRoot, "ns_pod_uid", "sandbox")})
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, filepath.Join(logRoot, "ns_pod_uid", "sandbox"))
 	boundary := time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC)
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour}, &fakeView{changes: make(chan struct{}, 1)}, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour}, &fakeView{changes: make(chan struct{}, 1)}, db, log, nil)
 	persisted := state.SourceStream{StreamRef: streamRef(resource).ID, Resource: freezeResource(resource), CoverageStartedAt: boundary, InitialScanComplete: true, MonitoringEpoch: source.epochID, Revision: 1}
 	if err := db.PutSourceStream(persisted); err != nil {
 		t.Fatal(err)
@@ -2617,7 +2739,7 @@ func TestCoveredCompressedWatchRemovalUsesUncompressedCheckpoint(t *testing.T) {
 	defer db.Close()
 	logRoot := t.TempDir()
 	logDirectory := filepath.Join(logRoot, "ns_pod_uid", "sandbox")
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: logDirectory})
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, logDirectory)
 	boundary := time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC)
 	ref := streamRef(resource).ID
 	persisted := state.SourceStream{StreamRef: ref, Resource: freezeResource(resource), CoverageStartedAt: boundary, InitialScanComplete: true, MonitoringEpoch: "epoch", Revision: 1}
@@ -2629,7 +2751,7 @@ func TestCoveredCompressedWatchRemovalUsesUncompressedCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour}, &fakeView{changes: make(chan struct{}, 1)}, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour}, &fakeView{changes: make(chan struct{}, 1)}, db, log, nil)
 	source.streams[ref] = runtimeFromState(source.cfg, resource, persisted)
 	compressed := uncompressed + ".gz"
 	for _, op := range []fsnotify.Op{fsnotify.Remove, fsnotify.Rename} {
@@ -2649,10 +2771,10 @@ func TestFinalizingOutcomeStaysFrozenAcrossWatchDiscontinuity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: t.TempDir()}, true)
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, t.TempDir(), true)
 	boundary := time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC)
 	log, _ := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
-	source := New(Config{ReconcileInterval: time.Hour, EndedStateRetention: time.Hour}, &fakeView{changes: make(chan struct{}, 1)}, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, EndedStateRetention: time.Hour}, &fakeView{changes: make(chan struct{}, 1)}, db, log, nil)
 	persisted := state.SourceStream{StreamRef: streamRef(resource).ID, Resource: freezeResource(resource), CoverageStartedAt: boundary, InitialScanComplete: true, MonitoringEpoch: source.epochID, Revision: 1}
 	if err := db.PutSourceStream(persisted); err != nil {
 		t.Fatal(err)
@@ -2717,11 +2839,17 @@ func commitFileCheckpointForTest(db *state.DB, checkpoint state.FileCheckpoint) 
 	return db.CommitSource([]state.FileCheckpoint{checkpoint}, stream)
 }
 
-func (v *fakeView) List() []store.Resource { return append([]store.Resource(nil), v.resources...) }
+func (v *fakeView) List() []store.Resource {
+	resources := make([]store.Resource, 0, len(v.resources))
+	for _, resource := range v.resources {
+		resources = append(resources, store.Resource{Resource: resource.Resource, Terminated: resource.Terminated})
+	}
+	return resources
+}
 func (v *fakeView) GetByUID(uid string) (store.Resource, bool) {
 	for _, item := range v.resources {
 		if item.PodUID == uid {
-			return item, true
+			return store.Resource{Resource: item.Resource, Terminated: item.Terminated}, true
 		}
 	}
 	return store.Resource{}, false
@@ -2737,7 +2865,7 @@ func (v *fakeView) Forget(uid string) {
 func (v *fakeView) Changes() <-chan struct{} { return v.changes }
 
 func TestSourceReadsCRIAndCommitsAck(t *testing.T) {
-	dir := t.TempDir()
+	dir := testLogDirectory(t)
 	path := filepath.Join(dir, "0.log")
 	if err := os.WriteFile(path, []byte("2026-07-23T10:00:00.123456789Z stdout F hello\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -2747,13 +2875,13 @@ func TestSourceReadsCRIAndCommitsAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: dir})
-	view := &fakeView{resources: []store.Resource{resource}, changes: make(chan struct{}, 1)}
+	resource := testResource(api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}, dir)
+	view := &fakeView{resources: []streamResource{resource}, changes: make(chan struct{}, 1)}
 	log, err := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := New(Config{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, view, db, log, nil)
+	source := newTestSource(sourceConfig{ReconcileInterval: time.Hour, MaxLineBytes: 1024, PartialTimeout: time.Second}, view, db, log, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events := make(chan api.SourceEvent, 1)

@@ -30,8 +30,40 @@ import (
 
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/marker"
+	"github.com/alibaba/opensandbox/nodeagent/pkg/objectlayout"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
+	"github.com/alibaba/opensandbox/nodeagent/pkg/streamformat"
 )
+
+const testAuditKind api.RecordKind = "test-audit"
+
+type auditTestFormat struct{}
+
+func init() {
+	streamformat.Register(auditTestFormat{})
+}
+
+func (auditTestFormat) Kind() api.RecordKind { return testAuditKind }
+
+func (auditTestFormat) ContentType() string { return "application/x-ndjson" }
+
+func (auditTestFormat) EncodeBatch(batch api.Batch) ([]byte, error) {
+	var out bytes.Buffer
+	for _, item := range batch.Items {
+		out.WriteString("audit:")
+		out.Write(item.Record.Body)
+		out.WriteByte('\n')
+	}
+	return out.Bytes(), nil
+}
+
+func (auditTestFormat) ObjectFamily(_ api.StreamRef, resource api.Resource, _ api.StreamMetadata) (objectlayout.Family, error) {
+	return objectlayout.NewFamily("", []string{resource.ClusterName, "_streams", string(testAuditKind), resource.Namespace, resource.SandboxID, resource.PodUID}, resource.Container+".audit", ".jsonl")
+}
+
+func (auditTestFormat) ObjectMetadata(api.Resource, api.StreamMetadata) (map[string]string, error) {
+	return map[string]string{"event-format": "test-audit-v1"}, nil
+}
 
 type failFinalCheckpointStore struct {
 	*state.DB
@@ -66,13 +98,13 @@ func TestDurableFileConsumeAndFinalize(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	sink, err := New(Config{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resource := api.Resource{SandboxID: "sb-abc", ClusterName: "prod-a", Namespace: "team-a", PodName: "pod", PodUID: "u123", NodeName: "node-1", Container: "sandbox"}
-	streamRef := api.StreamRef{ID: "container-logs/u123/sandbox"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	streamRef := api.StreamRef{ID: "container-logs/u123/sandbox", Kind: api.RecordKindContainerLog}
+	batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +116,7 @@ func TestDurableFileConsumeAndFinalize(t *testing.T) {
 	if got := string(raw); got != "2026-07-23T10:00:00Z stdout hello\n" {
 		t.Fatalf("log=%q", got)
 	}
-	request := api.FinalizeRequest{FinalizeID: "sha256:final", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
+	request := api.FinalizeRequest{FinalizeID: "sha256:final", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
 	if err := sink.Finalize(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +154,74 @@ func TestDurableFileConsumeAndFinalize(t *testing.T) {
 	}
 }
 
+func TestDurableFileSupportsRegisteredFormats(t *testing.T) {
+	root := t.TempDir()
+	db, err := state.Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRecordKind(sink.Capabilities(), api.RecordKindContainerLog) || !hasRecordKind(sink.Capabilities(), testAuditKind) {
+		t.Fatalf("capabilities=%+v", sink.Capabilities())
+	}
+
+	resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
+	logBatch := api.Batch{
+		StreamRef: api.StreamRef{ID: "container-logs/uid/sandbox", Kind: api.RecordKindContainerLog},
+		Metadata:  testContainerLogMetadata(),
+		Items:     []api.BatchItem{{RecordID: "log", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}},
+	}
+	auditBatch := api.Batch{
+		StreamRef: api.StreamRef{ID: "test-audit/uid/sandbox", Kind: testAuditKind},
+		Metadata:  api.StreamMetadata{"schema": "v1"},
+		Items:     []api.BatchItem{{RecordID: "audit", Record: api.Record{Kind: testAuditKind, Body: []byte(`{"syscall":"openat"}`), Resource: resource}}},
+	}
+	if err := sink.Consume(context.Background(), logBatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Consume(context.Background(), auditBatch); err != nil {
+		t.Fatal(err)
+	}
+
+	logPath := filepath.Join(root, "prod-a", "ns", "sb", "uid", "sandbox.log")
+	auditPath := filepath.Join(root, "prod-a", "_streams", string(testAuditKind), "ns", "sb", "uid", "sandbox.audit.jsonl")
+	if raw, err := os.ReadFile(logPath); err != nil || string(raw) != "2026-07-23T10:00:00Z stdout hello\n" {
+		t.Fatalf("container log=%q err=%v", raw, err)
+	}
+	if raw, err := os.ReadFile(auditPath); err != nil || string(raw) != "audit:{\"syscall\":\"openat\"}\n" {
+		t.Fatalf("audit=%q err=%v", raw, err)
+	}
+	if err := sink.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sink, err = newFileSink(fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditBatch.Items[0].RecordID = "audit-2"
+	auditBatch.Items[0].Record.Body = []byte(`{"syscall":"close"}`)
+	if err := sink.Consume(context.Background(), auditBatch); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(auditPath); err != nil || string(raw) != "audit:{\"syscall\":\"openat\"}\naudit:{\"syscall\":\"close\"}\n" {
+		t.Fatalf("recovered audit=%q err=%v", raw, err)
+	}
+
+	drift := auditBatch
+	drift.StreamRef.Kind = api.RecordKindContainerLog
+	drift.Metadata = testContainerLogMetadata()
+	drift.Items[0].Record.Kind = api.RecordKindContainerLog
+	drift.Items[0].Record.Timestamp = time.Now().UTC()
+	drift.Items[0].Record.Attributes = map[string]string{"stream": "stdout"}
+	if err := sink.Consume(context.Background(), drift); err == nil || api.IsRetryableError(err) {
+		t.Fatalf("kind drift error=%v retryable=%v", err, api.IsRetryableError(err))
+	}
+}
+
 func TestDurableFileFinalizeHonorsCanceledContext(t *testing.T) {
 	root := t.TempDir()
 	db, err := state.Open(t.TempDir(), "target", 1<<20)
@@ -129,19 +229,19 @@ func TestDurableFileFinalizeHonorsCanceledContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	sink, err := New(Config{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resource := api.Resource{SandboxID: "sb-abc", ClusterName: "prod-a", Namespace: "team-a", PodName: "pod", PodUID: "u123", NodeName: "node-1", Container: "sandbox"}
-	streamRef := api.StreamRef{ID: "container-logs/u123/sandbox"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	streamRef := api.StreamRef{ID: "container-logs/u123/sandbox", Kind: api.RecordKindContainerLog}
+	batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("hello"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, FinalizedAt: time.Now().UTC()}
+	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Now().UTC()}
 	if err := sink.Finalize(ctx, request); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Finalize() error=%v, want context canceled", err)
 	}
@@ -166,12 +266,12 @@ func TestDurableFilePermanentCapacityErrorsAreNonRetryable(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			sink, err := New(Config{Root: t.TempDir(), ClusterID: "cluster", MaxFileBytes: test.maxFileBytes, MaxFiles: 2, MaxTotalBytes: test.maxTotalBytes}, db)
+			sink, err := newFileSink(fileConfig{Root: t.TempDir(), ClusterID: "cluster", MaxFileBytes: test.maxFileBytes, MaxFiles: 2, MaxTotalBytes: test.maxTotalBytes}, db)
 			if err != nil {
 				t.Fatal(err)
 			}
 			resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodUID: "uid", Container: "sandbox"}
-			batch := api.Batch{StreamRef: api.StreamRef{ID: "stream"}, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+			batch := api.Batch{StreamRef: api.StreamRef{ID: streamformat.ContainerLogStreamID(resource.PodUID, resource.Container), Kind: api.RecordKindContainerLog}, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 			err = sink.Consume(context.Background(), batch)
 			if err == nil || api.IsRetryableError(err) {
 				t.Fatalf("error=%v retryable=%v", err, api.IsRetryableError(err))
@@ -191,9 +291,9 @@ func TestDurableFileCapacityExhaustionIsRetryable(t *testing.T) {
 	}
 	defer db.Close()
 	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodUID: "uid", Container: "sandbox"}
-	batch := api.Batch{StreamRef: api.StreamRef{ID: "stream"}, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	batch := api.Batch{StreamRef: api.StreamRef{ID: streamformat.ContainerLogStreamID(resource.PodUID, resource.Container), Kind: api.RecordKindContainerLog}, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	encoded := lineBytes(batch)
-	sink, err := New(Config{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1024 + int64(len(encoded)) - 1}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1024 + int64(len(encoded)) - 1}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,12 +314,17 @@ func TestDurableFileGenerationLimitPrecedesRetryableCapacityError(t *testing.T) 
 	}
 	defer db.Close()
 	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodUID: "uid", Container: "sandbox"}
-	sink, err := New(Config{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 1, MaxTotalBytes: 1024}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 1, MaxTotalBytes: 1024}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink.writers["stream"] = &writer{stream: state.SinkStream{StreamRef: "stream", CurrentClosed: true}, resource: resource}
-	batch := api.Batch{StreamRef: api.StreamRef{ID: "stream"}, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	family, err := containerLogFamily(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamRef := streamformat.ContainerLogStreamID(resource.PodUID, resource.Container)
+	sink.writers[streamRef] = &writer{stream: state.SinkStream{StreamRef: streamRef, CurrentClosed: true}, kind: api.RecordKindContainerLog, resource: resource, metadata: testContainerLogMetadata(), family: family}
+	batch := api.Batch{StreamRef: api.StreamRef{ID: streamRef, Kind: api.RecordKindContainerLog}, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	err = sink.Consume(context.Background(), batch)
 	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "generation limit") {
 		t.Fatalf("error=%v retryable=%v", err, api.IsRetryableError(err))
@@ -232,14 +337,14 @@ func TestDurableFileRejectsInconsistentBatchResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	sink, err := New(Config{Root: t.TempDir(), ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
+	sink, err := newFileSink(fileConfig{Root: t.TempDir(), ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodUID: "uid", Container: "sandbox"}
-	batch := api.Batch{StreamRef: api.StreamRef{ID: "stream"}, Items: []api.BatchItem{
-		{RecordID: "first", Record: api.Record{Resource: resource}},
-		{RecordID: "second", Record: api.Record{Resource: resource}},
+	batch := api.Batch{StreamRef: api.StreamRef{ID: streamformat.ContainerLogStreamID(resource.PodUID, resource.Container), Kind: api.RecordKindContainerLog}, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{
+		{RecordID: "first", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}},
+		{RecordID: "second", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}},
 	}}
 	batch.Items[1].Record.Resource.PodUID = "other-pod"
 	err = sink.Consume(context.Background(), batch)
@@ -255,16 +360,16 @@ func TestDurableFileRejectsPersistedObjectKeyOutsideStreamLayout(t *testing.T) {
 	}
 	defer db.Close()
 	root := t.TempDir()
-	sink, err := New(Config{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodUID: "uid", Container: "sandbox"}
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := api.StreamRef{ID: streamformat.ContainerLogStreamID(resource.PodUID, resource.Container), Kind: api.RecordKindContainerLog}
 	if err := db.PutSinkStream(name, state.SinkStream{StreamRef: streamRef.ID, ObjectKey: "other/family.log"}); err != nil {
 		t.Fatal(err)
 	}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Resource: resource}}}}
+	batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	err = sink.Consume(context.Background(), batch)
 	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "object key") {
 		t.Fatalf("error=%v retryable=%v", err, api.IsRetryableError(err))
@@ -278,17 +383,17 @@ func TestDurableFileRejectsClosedObjectCountMismatchBeforeAppend(t *testing.T) {
 	}
 	defer db.Close()
 	root := t.TempDir()
-	sink, err := New(Config{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodUID: "uid", Container: "sandbox"}
-	streamRef := api.StreamRef{ID: "stream"}
+	streamRef := api.StreamRef{ID: streamformat.ContainerLogStreamID(resource.PodUID, resource.Container), Kind: api.RecordKindContainerLog}
 	stream := state.SinkStream{StreamRef: streamRef.ID, ObjectKey: "cluster/ns/sb/uid/sandbox.log", CurrentClosed: true}
 	if err := db.PutSinkStream(name, stream); err != nil {
 		t.Fatal(err)
 	}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Resource: resource}}}}
+	batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	err = sink.Consume(context.Background(), batch)
 	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "closed objects") {
 		t.Fatalf("layout error=%v retryable=%v", err, api.IsRetryableError(err))
@@ -304,12 +409,12 @@ func TestDurableFileRejectsResourceChangeAcrossBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	sink, err := New(Config{Root: t.TempDir(), ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
+	sink, err := newFileSink(fileConfig{Root: t.TempDir(), ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: "/logs"}
-	batch := api.Batch{StreamRef: api.StreamRef{ID: "stream"}, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Timestamp: time.Now().UTC(), Resource: resource}}}}
+	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
+	batch := api.Batch{StreamRef: api.StreamRef{ID: streamformat.ContainerLogStreamID(resource.PodUID, resource.Container), Kind: api.RecordKindContainerLog}, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
@@ -327,18 +432,18 @@ func TestDurableFileRejectsResourceChangeAtFinalize(t *testing.T) {
 	}
 	defer db.Close()
 	root := t.TempDir()
-	sink, err := New(Config{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "cluster", MaxFileBytes: 1 << 20, MaxFiles: 2, MaxTotalBytes: 1 << 20}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: "/logs"}
-	streamRef := api.StreamRef{ID: "stream"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Timestamp: time.Now().UTC(), Resource: resource}}}}
+	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
+	streamRef := api.StreamRef{ID: streamformat.ContainerLogStreamID(resource.PodUID, resource.Container), Kind: api.RecordKindContainerLog}
+	batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "record", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
 	resource.PodName = "different-pod"
-	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, FinalizedAt: time.Now().UTC()}
+	request := api.FinalizeRequest{FinalizeID: "final", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Now().UTC()}
 	err = sink.Finalize(context.Background(), request)
 	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "resource identity changed") {
 		t.Fatalf("finalize error=%v retryable=%v", err, api.IsRetryableError(err))
@@ -355,14 +460,14 @@ func TestDurableFileRecoversPartialAppendIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	cfg := Config{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}
-	sink, err := New(cfg, db)
+	cfg := fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}
+	sink, err := newFileSink(cfg, db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
-	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("first"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox", Kind: api.RecordKindContainerLog}
+	batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("first"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +478,7 @@ func TestDurableFileRecoversPartialAppendIntent(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("stream=%+v found=%v err=%v", stream, found, err)
 	}
-	replay := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r2", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 1, 0, time.UTC), Body: []byte("second"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	replay := api.Batch{StreamRef: streamRef, Metadata: batch.Metadata.Clone(), Items: []api.BatchItem{{RecordID: "r2", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 1, 0, time.UTC), Body: []byte("second"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	encoded := lineBytes(replay)
 	digest := sha256.Sum256(encoded)
 	stream.AppendIntent = &state.AppendIntent{
@@ -402,7 +507,7 @@ func TestDurableFileRecoversPartialAppendIntent(t *testing.T) {
 	// The committed bytes plus this replay exactly fit the total capacity.
 	// Recovery must truncate the uncommitted tail before reserving the replay.
 	cfg.MaxTotalBytes = stream.Position + int64(len(encoded))
-	recovered, err := New(cfg, db)
+	recovered, err := newFileSink(cfg, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,11 +531,11 @@ func TestDurableFileFinalizeClosesRestoredGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	cfg := Config{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}
+	cfg := fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}
 	resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
-	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("before restart"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
-	first, err := New(cfg, db)
+	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox", Kind: api.RecordKindContainerLog}
+	batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("before restart"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	first, err := newFileSink(cfg, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,11 +546,11 @@ func TestDurableFileFinalizeClosesRestoredGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	recovered, err := New(cfg, db)
+	recovered, err := newFileSink(cfg, db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := api.FinalizeRequest{FinalizeID: "finalize", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
+	request := api.FinalizeRequest{FinalizeID: "finalize", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
 	if err := recovered.Finalize(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -479,17 +584,17 @@ func TestDurableFileRetryAfterFinalCheckpointFailureDoesNotDuplicate(t *testing.
 	}
 	defer db.Close()
 	store := &failFinalCheckpointStore{DB: db, fail: true}
-	sink, err := New(Config{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, store)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
-	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("once"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox", Kind: api.RecordKindContainerLog}
+	batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("once"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err == nil || !strings.Contains(err.Error(), "injected final checkpoint failure") {
 		t.Fatalf("first consume error=%v", err)
 	}
-	request := api.FinalizeRequest{FinalizeID: "finalize", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, FinalizedAt: time.Now().UTC()}
+	request := api.FinalizeRequest{FinalizeID: "finalize", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Now().UTC()}
 	if err := sink.Finalize(context.Background(), request); err == nil || !strings.Contains(err.Error(), "unresolved append intent") {
 		t.Fatalf("finalize with unresolved append error=%v", err)
 	}
@@ -523,14 +628,14 @@ func TestDurableFileFinalizeRecoversExistingTemporaryMarkerAtCapacity(t *testing
 				t.Fatal(err)
 			}
 			defer db.Close()
-			cfg := Config{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}
-			sink, err := New(cfg, db)
+			cfg := fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}
+			sink, err := newFileSink(cfg, db)
 			if err != nil {
 				t.Fatal(err)
 			}
 			resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
-			streamRef := api.StreamRef{ID: "container-logs/uid/sandbox"}
-			batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+			streamRef := api.StreamRef{ID: "container-logs/uid/sandbox", Kind: api.RecordKindContainerLog}
+			batch := api.Batch{StreamRef: streamRef, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "r1", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 			if err := sink.Consume(context.Background(), batch); err != nil {
 				t.Fatal(err)
 			}
@@ -538,15 +643,12 @@ func TestDurableFileFinalizeRecoversExistingTemporaryMarkerAtCapacity(t *testing
 			if err := sink.closeGeneration(writer); err != nil {
 				t.Fatal(err)
 			}
-			request := api.FinalizeRequest{FinalizeID: "finalize", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
+			request := api.FinalizeRequest{FinalizeID: "finalize", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Date(2026, 7, 23, 9, 58, 0, 0, time.UTC), Resource: resource, Metadata: batch.Metadata, FinalizedAt: time.Date(2026, 7, 23, 10, 5, 0, 0, time.UTC)}
 			raw, err := marker.Encode(marker.New(request, writer.stream.ClosedObjects))
 			if err != nil {
 				t.Fatal(err)
 			}
-			dir, err := familyDir(root, resource)
-			if err != nil {
-				t.Fatal(err)
-			}
+			dir := filepath.Join(root, filepath.FromSlash(writer.family.Directory()))
 			digest := sha256.Sum256(raw)
 			markerPath := filepath.Join(dir, "sandbox.finalized.1.json")
 			tmpName := filepath.Join(dir, ".sandbox.finalized.1."+hex.EncodeToString(digest[:8])+".tmp")
@@ -573,7 +675,7 @@ func TestDurableFileFinalizeRecoversExistingTemporaryMarkerAtCapacity(t *testing
 			}
 
 			cfg.MaxTotalBytes = int64(len(lineBytes(batch)) + len(raw))
-			recovered, err := New(cfg, db)
+			recovered, err := newFileSink(cfg, db)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -655,11 +757,11 @@ func TestDurableFileQuarantinesUnknownNonEmptyObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	sink, err := New(Config{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch := api.Batch{StreamRef: api.StreamRef{ID: "container-logs/uid/sandbox"}, Items: []api.BatchItem{{RecordID: "r", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("new"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	batch := api.Batch{StreamRef: api.StreamRef{ID: "container-logs/uid/sandbox", Kind: api.RecordKindContainerLog}, Metadata: testContainerLogMetadata(), Items: []api.BatchItem{{RecordID: "r", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("new"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
@@ -680,22 +782,24 @@ func TestDurableFileCleanupStagesWholeFamily(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	sink, err := New(Config{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
+	sink, err := newFileSink(fileConfig{Root: root, ClusterID: "prod-a", MaxFileBytes: 1 << 20, MaxFiles: 4, MaxTotalBytes: 1 << 24}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox", LogDirectory: filepath.Join(t.TempDir(), "gone")}
-	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox"}
-	batch := api.Batch{StreamRef: streamRef, Items: []api.BatchItem{{RecordID: "r", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
+	logDirectory := filepath.Join(t.TempDir(), "gone")
+	resource := api.Resource{SandboxID: "sb", ClusterName: "prod-a", Namespace: "ns", PodName: "pod", PodUID: "uid", NodeName: "node", Container: "sandbox"}
+	streamRef := api.StreamRef{ID: "container-logs/uid/sandbox", Kind: api.RecordKindContainerLog}
+	metadata := api.StreamMetadata{streamformat.ContainerLogDirectoryMetadata: logDirectory}
+	batch := api.Batch{StreamRef: streamRef, Metadata: metadata, Items: []api.BatchItem{{RecordID: "r", Record: api.Record{Kind: api.RecordKindContainerLog, Timestamp: time.Now().UTC(), Body: []byte("data"), Resource: resource, Attributes: map[string]string{"stream": "stdout"}}}}}
 	if err := sink.Consume(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	request := api.FinalizeRequest{FinalizeID: "f", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, FinalizedAt: time.Now().UTC().Truncate(time.Second)}
+	request := api.FinalizeRequest{FinalizeID: "f", TargetID: "target", StreamRef: streamRef, Revision: 1, CoverageStartedAt: time.Now().UTC().Add(-time.Minute).Truncate(time.Second), Resource: resource, Metadata: metadata, FinalizedAt: time.Now().UTC().Truncate(time.Second)}
 	if err := sink.Finalize(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(-time.Hour)
-	if err := db.PutSourceStream(state.SourceStream{StreamRef: streamRef.ID, Resource: state.FrozenResource{SandboxID: resource.SandboxID, ClusterName: resource.ClusterName, Namespace: resource.Namespace, PodName: resource.PodName, PodUID: resource.PodUID, NodeName: resource.NodeName, Container: resource.Container, LogDirectory: resource.LogDirectory, Terminated: true}, Revision: 1, AcknowledgedRevision: 1, Ended: true, RepairDeadline: &deadline}); err != nil {
+	if err := db.PutSourceStream(state.SourceStream{StreamRef: streamRef.ID, Resource: state.FrozenResource{SandboxID: resource.SandboxID, ClusterName: resource.ClusterName, Namespace: resource.Namespace, PodName: resource.PodName, PodUID: resource.PodUID, NodeName: resource.NodeName, Container: resource.Container, LogDirectory: logDirectory, Terminated: true}, Revision: 1, AcknowledgedRevision: 1, Ended: true, RepairDeadline: &deadline}); err != nil {
 		t.Fatal(err)
 	}
 	if err := sink.CollectExpired(context.Background(), time.Now()); err != nil {
@@ -761,7 +865,7 @@ func TestDurableFileCleanupCheckpointConflictsAreNonRetryable(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			sink := &Sink{cfg: Config{Root: root}, state: db, writers: make(map[string]*writer)}
+			sink := &fileSink{cfg: fileConfig{Root: root}, state: db, writers: make(map[string]*writer)}
 			err = sink.CollectExpired(context.Background(), time.Now())
 			if err == nil || api.IsRetryableError(err) {
 				t.Fatalf("CollectExpired() error=%v retryable=%v", err, api.IsRetryableError(err))
@@ -778,8 +882,8 @@ func TestDurableFileCleanupContinuesAfterPoisonedStream(t *testing.T) {
 	}
 	defer db.Close()
 	deadline := time.Now().Add(-time.Hour)
-	poisonedRef := "a-poisoned"
-	cleanRef := "z-clean"
+	poisonedRef := streamformat.ContainerLogStreamID("uid-poisoned", "sandbox")
+	cleanRef := streamformat.ContainerLogStreamID("uid-clean", "sandbox")
 	for _, item := range []struct {
 		streamRef string
 		sandboxID string
@@ -808,7 +912,7 @@ func TestDurableFileCleanupContinuesAfterPoisonedStream(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cleanFamily, "sandbox.log"), []byte("data"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	sink := &Sink{cfg: Config{Root: root}, state: db, writers: make(map[string]*writer)}
+	sink := &fileSink{cfg: fileConfig{Root: root}, state: db, writers: make(map[string]*writer)}
 	err = sink.CollectExpired(context.Background(), time.Now())
 	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), poisonedRef) {
 		t.Fatalf("CollectExpired() error=%v retryable=%v", err, api.IsRetryableError(err))
@@ -828,7 +932,7 @@ func TestDurableFileCleanupContinuesAfterPoisonedStream(t *testing.T) {
 }
 
 func TestStartNextGenerationRejectsOverflowedCheckpoint(t *testing.T) {
-	sink := &Sink{cfg: Config{MaxFiles: 2}}
+	sink := &fileSink{cfg: fileConfig{MaxFiles: 2}}
 	w := &writer{stream: state.SinkStream{Generation: ^uint64(0)}}
 	err := sink.startNextGeneration(w)
 	if err == nil || api.IsRetryableError(err) || !strings.Contains(err.Error(), "generation limit") {
@@ -845,15 +949,16 @@ func TestStartNextGenerationRetriesTransitionCheckpoint(t *testing.T) {
 	defer db.Close()
 	store := &failGenerationTransitionStore{DB: db, fail: true}
 	resource := api.Resource{SandboxID: "sb", ClusterName: "cluster", Namespace: "ns", PodUID: "uid", Container: "sandbox"}
-	dir, err := familyDir(root, resource)
+	family, err := containerLogFamily(resource)
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir := filepath.Join(root, filepath.FromSlash(family.Directory()))
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	w := &writer{stream: state.SinkStream{StreamRef: "stream", ObjectKey: "cluster/ns/sb/uid/sandbox.log", CurrentClosed: true}, resource: resource}
-	sink := &Sink{cfg: Config{Root: root, MaxFiles: 2}, state: store}
+	w := &writer{stream: state.SinkStream{StreamRef: "stream", ObjectKey: "cluster/ns/sb/uid/sandbox.log", CurrentClosed: true}, resource: resource, family: family}
+	sink := &fileSink{cfg: fileConfig{Root: root, MaxFiles: 2}, state: store}
 	if err := sink.startNextGeneration(w); err == nil || !strings.Contains(err.Error(), "injected generation transition failure") {
 		t.Fatalf("first startNextGeneration() error=%v", err)
 	}
@@ -873,4 +978,33 @@ func TestStartNextGenerationRetriesTransitionCheckpoint(t *testing.T) {
 func lineBytes(batch api.Batch) []byte {
 	item := batch.Items[0]
 	return []byte(item.Record.Timestamp.Format(time.RFC3339Nano) + " " + item.Record.Attributes["stream"] + " " + string(item.Record.Body) + "\n")
+}
+
+func hasRecordKind(capabilities api.Capabilities, want api.RecordKind) bool {
+	for _, kind := range capabilities.RecordKinds {
+		if kind == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containerLogFamily(resource api.Resource) (objectlayout.Family, error) {
+	format, err := streamformat.Lookup(api.RecordKindContainerLog)
+	if err != nil {
+		return objectlayout.Family{}, err
+	}
+	return streamformat.ResolveFamily(format, "", api.StreamRef{ID: streamformat.ContainerLogStreamID(resource.PodUID, resource.Container), Kind: api.RecordKindContainerLog}, resource, testContainerLogMetadata())
+}
+
+func testContainerLogMetadata() api.StreamMetadata {
+	return api.StreamMetadata{streamformat.ContainerLogDirectoryMetadata: "/var/log/pods/ns_pod_uid/sandbox"}
+}
+
+func familyDir(root string, resource api.Resource) (string, error) {
+	family, err := containerLogFamily(resource)
+	if err != nil {
+		return "", api.Permanent(err)
+	}
+	return filepath.Join(root, filepath.FromSlash(family.Directory())), nil
 }

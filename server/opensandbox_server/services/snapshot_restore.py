@@ -19,16 +19,19 @@ Helpers for resolving sandbox create requests from snapshots.
 from __future__ import annotations
 
 from fastapi import HTTPException, status
+from starlette.concurrency import run_in_threadpool
 
 from opensandbox_server.api.schema import CreateSandboxRequest, ImageSpec
-from opensandbox_server.repositories.snapshots.factory import create_snapshot_repository
+from opensandbox_server.repositories.snapshots.factory import get_snapshot_repository
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.tenants.context import get_current_tenant
 
 DEFAULT_SNAPSHOT_RESTORE_ENTRYPOINT = ["tail", "-f", "/dev/null"]
 
 
-def resolve_sandbox_image_from_request(request: CreateSandboxRequest) -> CreateSandboxRequest:
+async def resolve_sandbox_image_from_request(
+    request: CreateSandboxRequest,
+) -> CreateSandboxRequest:
     """
     Normalize a sandbox create request to an effective image-backed request.
 
@@ -50,8 +53,8 @@ def resolve_sandbox_image_from_request(request: CreateSandboxRequest) -> CreateS
             },
         )
 
-    snapshot_repository = create_snapshot_repository()
-    snapshot = snapshot_repository.get(snapshot_id)
+    snapshot_repository = get_snapshot_repository()
+    snapshot = await run_in_threadpool(snapshot_repository.get, snapshot_id)
     if snapshot is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

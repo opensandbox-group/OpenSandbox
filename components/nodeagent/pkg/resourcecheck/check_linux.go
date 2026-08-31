@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/config"
 	"golang.org/x/sys/unix"
 )
@@ -36,15 +37,17 @@ func validateHost(cfg config.Config) error {
 	} else if limit.Cur < 1024 {
 		errs = append(errs, fmt.Errorf("file-descriptor soft limit %d is below 1024", limit.Cur))
 	}
-	for path, minimum := range map[string]uint64{
-		"/proc/sys/fs/inotify/max_user_instances": 16,
-		"/proc/sys/fs/inotify/max_user_watches":   1024,
-	} {
-		value, err := readUint(path)
-		if err != nil {
-			errs = append(errs, err)
-		} else if value < minimum {
-			errs = append(errs, fmt.Errorf("%s=%d is below required reserve %d", path, value, minimum))
+	if cfg.HasSource(api.SourceNameContainerLogs) {
+		for path, minimum := range map[string]uint64{
+			"/proc/sys/fs/inotify/max_user_instances": 16,
+			"/proc/sys/fs/inotify/max_user_watches":   1024,
+		} {
+			value, err := readUint(path)
+			if err != nil {
+				errs = append(errs, err)
+			} else if value < minimum {
+				errs = append(errs, fmt.Errorf("%s=%d is below required reserve %d", path, value, minimum))
+			}
 		}
 	}
 	if err := checkDiskReserve(cfg.StateDir, reserveFor(cfg.StateMaxBytes)); err != nil {

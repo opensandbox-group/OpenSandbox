@@ -19,8 +19,11 @@ import json
 from datetime import timedelta
 
 import httpx
+import pytest
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.exceptions import SandboxConnectionException
+from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
 
@@ -202,3 +205,73 @@ def test_sync_run_in_session_non_zero_exit_updates_exit_code() -> None:
     assert execution.error.value == "7"
     assert execution.complete is None
     assert execution.exit_code == 7
+
+
+class _EarlyCloseAfterCompleteStream(httpx.SyncByteStream):
+    """Byte stream that yields the SSE body then fails, simulating a peer
+    that closes the connection before sending the chunked terminator."""
+
+    def __init__(self, sse: bytes) -> None:
+        self._sse = sse
+
+    def __iter__(self):
+        yield self._sse
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+
+
+class _EarlyCloseTransport(httpx.BaseTransport):
+    """Transport whose SSE response body closes early right after the
+    ``execution_complete`` event, before the chunked terminator is sent."""
+
+    def __init__(self, sse: bytes) -> None:
+        self._sse = sse
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=_EarlyCloseAfterCompleteStream(self._sse),
+            request=request,
+        )
+
+
+_EARLY_CLOSE_SSE = (
+    b'data: {"type":"init","text":"exec-bg","timestamp":1}\n\n'
+    b'data: {"type":"execution_complete","timestamp":2,"execution_time":3}\n\n'
+)
+
+
+def test_sync_run_background_command_breaks_on_complete_before_terminator() -> None:
+    """Background commands must not wait for the chunked terminator: once
+    ``execution_complete`` arrives, the SDK should stop reading the stream
+    even if the connection is closed early (#1528)."""
+    cfg = ConnectionConfigSync(
+        protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
+    )
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    execution = adapter.run("sleep 1", opts=RunCommandOpts(background=True))
+
+    assert execution.id == "exec-bg"
+    assert execution.complete is not None
+    assert execution.complete.execution_time_in_millis == 3
+    # Background executions do not synthesize an exit code from the stream.
+    assert execution.exit_code is None
+
+
+def test_sync_run_foreground_command_still_waits_for_terminator() -> None:
+    """Foreground commands must keep waiting for the stream terminator
+    after ``execution_complete`` — an early close is still surfaced as an
+    error, proving the background early-break did not change this path."""
+    cfg = ConnectionConfigSync(
+        protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
+    )
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    with pytest.raises(SandboxConnectionException):
+        adapter.run("sleep 1", opts=RunCommandOpts(background=False))

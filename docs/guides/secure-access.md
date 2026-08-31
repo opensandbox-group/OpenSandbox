@@ -26,7 +26,7 @@ Normative design: [OSEP-0011](https://github.com/opensandbox-group/OpenSandbox/b
 
 ## How It Works
 
-![Secure Access request flow](/images/secure-access.svg)
+![Secure Access request flow](../public/images/secure-access.svg)
 
 On the **control plane**, creating a sandbox with `secureAccess: true` and
 calling `GetEndpoint` yields a per-sandbox opaque `SecureAccessToken`.

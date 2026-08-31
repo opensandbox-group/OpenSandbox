@@ -13,7 +13,7 @@ This page lists the OpenTelemetry metrics currently implemented in egress.
 | `egress.dns.query.duration` | Histogram | `s` | Upstream DNS forward latency (recorded for allowed queries). |
 | `egress.dns.query.failed_total` | Counter | - | Queries the proxy could not resolve, by `reason`. |
 | `egress.policy.denied_total` | Counter | - | Number of DNS queries denied by policy. |
-| `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply. |
+| `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fleet profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
 | `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
 | `egress.system.memory.usage_bytes` | Observable Gauge | `By` | System memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
@@ -65,10 +65,16 @@ queried name nor the error text is ever attached:
 | `rcode` | The last resolver answered with a failover-worthy rcode, e.g. `SERVFAIL`. |
 
 `egress.nftables.updates.failed_total` covers the other silent failure. Its `operation`
-attribute is one of `static_apply`, `dynamic_add` or `remove`; `dynamic_add` is the one to
+attribute is one of `static_apply`, `dynamic_add`, `remove`, or — in the fleet profile
+(OSEP-0022) — `deny_first`, `dispatch_update`, `reset`; `dynamic_add` is the one to
 alert on, because a failed add means the kernel never learned about IPs the policy allows,
 so the chain drops traffic that should pass — which looks exactly like a policy denial from
 inside the sandbox while `egress.policy.denied_total` stays flat.
+
+The per-sandbox netns layer (fleet profile) counts its updates under the same operations;
+two expected cases are deliberately NOT counted as failures: a sandbox-layer removal whose
+netns is already destroyed (the rules died with it), and the startup recovery sweep of
+netns that never had a table installed.
 
 A `static_apply` failure happens during startup, where the sidecar logs and exits. Metrics
 leave through a periodic reader and `os.Exit` skips the deferred shutdown, so that path
@@ -91,10 +97,47 @@ Metric export is enabled only when at least one OTLP endpoint is set.
 
 If both are unset, egress keeps metrics local (no OTLP export).
 
+### Automatic Egress Allow Rule
+
+When an OTLP destination is configured — the endpoint env vars below, or the
+exporter fallback node IP (`HOST_IP` / `/etc/hostinfo`) when both are unset —
+egress automatically injects an always-allow egress rule for that host
+(domain or IP, any port), so telemetry export works under the default deny-all
+policy without manually managing allowlist rules. This also covers the egress
+sidecar's own metric export, which shares the sandbox network namespace and
+would otherwise be blocked by its own egress chain.
+
+- The rule follows the standard precedence: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+  wins over `OTEL_EXPORTER_OTLP_ENDPOINT`; the fallback node IP applies only
+  when neither is set. A set-but-invalid endpoint never falls back (the
+  exporter does not either), so no rule is injected in that case.
+- The endpoint must be a URL (`https://host:4318/v1/metrics`) — the
+  `otlpmetrichttp` env-var form. Bare `host:port` or `host` values are not
+  accepted (the exporter parses them as opaque URLs with an empty host); a
+  trailing root dot on FQDNs is trimmed to match DNS policy normalization.
+- The rule lives in the always-allow layer: it survives user `POST`/`PATCH`/`DELETE`
+  policy updates and always-rule file reloads. Operators can still block the target
+  with `deny.always`, which takes precedence.
+- Rules are host-scoped (any port), matching the egress rule model; ports are not
+  enforced per rule.
+
+> **Note**: use a fully-qualified service name or an IP in the endpoint.
+> Single-label names (e.g. `otel-collector`) are subject to resolver
+> search-domain expansion, and the deny-all DNS proxy answers the expanded
+> names (e.g. `otel-collector.<ns>.svc.cluster.local`) with NXDOMAIN without
+> falling back to the bare name, so the auto-generated exact-host allow rule
+> would not be reached.
+
 ### Minimal Example
 
 ```bash
-export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector:4318"
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector.sandbox.svc.cluster.local:4318"
+```
+
+An IP endpoint works as well:
+
+```bash
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://10.0.0.5:4318"
 ```
 
 ### Service Name

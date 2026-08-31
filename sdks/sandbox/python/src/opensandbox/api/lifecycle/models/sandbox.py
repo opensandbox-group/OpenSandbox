@@ -27,6 +27,7 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.allocation_summary import AllocationSummary
     from ..models.image_spec import ImageSpec
     from ..models.platform_spec import PlatformSpec
     from ..models.sandbox_extensions import SandboxExtensions
@@ -69,6 +70,7 @@ class Sandbox:
               request must fail explicitly.
         metadata (SandboxMetadata | Unset): Custom metadata from creation request
         extensions (SandboxExtensions | Unset): Opaque extension data restored from provider-specific storage
+        allocation (AllocationSummary | Unset): Public summary of a confirmed active pool allocation.
         expires_at (datetime.datetime | Unset): Timestamp when sandbox will auto-terminate. Omitted when manual cleanup
             is enabled.
     """
@@ -82,6 +84,7 @@ class Sandbox:
     platform: PlatformSpec | Unset = UNSET
     metadata: SandboxMetadata | Unset = UNSET
     extensions: SandboxExtensions | Unset = UNSET
+    allocation: AllocationSummary | Unset = UNSET
     expires_at: datetime.datetime | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -112,6 +115,10 @@ class Sandbox:
         if not isinstance(self.extensions, Unset):
             extensions = self.extensions.to_dict()
 
+        allocation: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.allocation, Unset):
+            allocation = self.allocation.to_dict()
+
         expires_at: str | Unset = UNSET
         if not isinstance(self.expires_at, Unset):
             expires_at = self.expires_at.isoformat()
@@ -136,6 +143,8 @@ class Sandbox:
             field_dict["metadata"] = metadata
         if extensions is not UNSET:
             field_dict["extensions"] = extensions
+        if allocation is not UNSET:
+            field_dict["allocation"] = allocation
         if expires_at is not UNSET:
             field_dict["expiresAt"] = expires_at
 
@@ -143,6 +152,7 @@ class Sandbox:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.allocation_summary import AllocationSummary
         from ..models.image_spec import ImageSpec
         from ..models.platform_spec import PlatformSpec
         from ..models.sandbox_extensions import SandboxExtensions
@@ -188,6 +198,13 @@ class Sandbox:
         else:
             extensions = SandboxExtensions.from_dict(_extensions)
 
+        _allocation = d.pop("allocation", UNSET)
+        allocation: AllocationSummary | Unset
+        if isinstance(_allocation, Unset):
+            allocation = UNSET
+        else:
+            allocation = AllocationSummary.from_dict(_allocation)
+
         _expires_at = d.pop("expiresAt", UNSET)
         expires_at: datetime.datetime | Unset
         if isinstance(_expires_at, Unset):
@@ -205,6 +222,7 @@ class Sandbox:
             platform=platform,
             metadata=metadata,
             extensions=extensions,
+            allocation=allocation,
             expires_at=expires_at,
         )
 

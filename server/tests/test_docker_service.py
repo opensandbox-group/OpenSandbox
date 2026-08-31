@@ -68,6 +68,7 @@ from opensandbox_server.api.schema import (
     CredentialProxyConfig,
     Host,
     ImageSpec,
+    LifecycleHook,
     ListSandboxesRequest,
     NetworkPolicy,
     OSSFS,
@@ -76,6 +77,7 @@ from opensandbox_server.api.schema import (
     PVC,
     ResourceLimits,
     RenewSandboxExpirationRequest,
+    SandboxLifecycle,
     SandboxStatus,
     Volume,
 )
@@ -96,7 +98,17 @@ def test_parse_memory_limit_handles_units():
 def test_parse_nano_cpus():
     assert parse_nano_cpus("500m") == 500_000_000
     assert parse_nano_cpus("2") == 2_000_000_000
+    assert parse_nano_cpus("1.5") == 1_500_000_000
+    assert parse_nano_cpus("250.5m") == 250_500_000
     assert parse_nano_cpus("bad") is None
+
+
+@pytest.mark.parametrize(
+    "value", ["nan", "inf", "-inf", "1e10", "1e308", "1e309", "-1e309"]
+)
+def test_parse_nano_cpus_rejects_non_finite_and_overflow_values(value: str):
+    assert parse_nano_cpus(value) is None
+
 
 def test_parse_gpu_request():
     assert parse_gpu_request("1") == 1
@@ -410,6 +422,32 @@ async def test_create_sandbox_rejects_pool_ref_on_docker(mock_docker):
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == "SANDBOX::UNSUPPORTED_POOL_REF"
     mock_client.containers.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_rejects_lifecycle_hooks_on_docker(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        entrypoint=["python"],
+        resourceLimits=ResourceLimits(root={}),
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(command=["true"]),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await service.create_sandbox(request)
+
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+    mock_client.containers.create.assert_not_called()
+
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -859,7 +897,7 @@ async def test_egress_sidecar_injection_and_capabilities(mock_docker):
 
     cfg = _app_config()
     cfg.docker.network_mode = "bridge"
-    cfg.egress = EgressConfig(image="egress:latest")
+    cfg.egress = EgressConfig(image="egress:latest", readiness_timeout_seconds=75.5)
     service = DockerSandboxService(config=cfg)
 
     req = CreateSandboxRequest(
@@ -879,13 +917,18 @@ async def test_egress_sidecar_injection_and_capabilities(mock_docker):
             return_value={
                 "44772": ("0.0.0.0", 44772),
                 "8080": ("0.0.0.0", 8080),
+                "18080": ("0.0.0.0", 18080),
             },
         ),
         patch.object(service, "_ensure_image_available"),
         patch.object(service, "_prepare_sandbox_runtime"),
-        patch.object(service, "_wait_for_egress_sidecar_ready"),
+        patch.object(service, "_wait_for_egress_sidecar_ready") as wait_for_egress_ready,
     ):
         await service.create_sandbox(req)
+
+    wait_for_egress_ready.assert_called_once()
+    assert wait_for_egress_ready.call_args.args[1:] == (18080, "egress-token")
+    assert wait_for_egress_ready.call_args.kwargs == {"timeout_seconds": 75.5}
 
     assert len(mock_client.api.create_container.call_args_list) == 2
     sidecar_call = mock_client.api.create_container.call_args_list[0]
@@ -1567,6 +1610,37 @@ def test_build_labels_marks_manual_cleanup_without_expiration():
     assert labels[SANDBOX_MANUAL_CLEANUP_LABEL] == "true"
     assert "opensandbox.io/expires-at" not in labels
 
+
+def test_build_env_omits_execd_run_as_init_by_default():
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        env={"FOO": "bar"},
+        entrypoint=["python"],
+    )
+
+    _, environment = service._build_labels_and_env("sandbox-manual", request, None)
+
+    assert "FOO=bar" in environment
+    assert not any(e.startswith("EXECD_INIT=") for e in environment)
+
+
+def test_build_env_injects_execd_run_as_init_when_enabled():
+    config = _app_config()
+    config.runtime.execd_run_as_init = True
+    service = DockerSandboxService(config=config)
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        entrypoint=["python"],
+    )
+
+    _, environment = service._build_labels_and_env("sandbox-manual", request, None)
+
+    assert "EXECD_INIT=1" in environment
+
 def test_build_labels_stores_extensions_json():
     service = DockerSandboxService(config=_app_config())
     request = CreateSandboxRequest(
@@ -1892,7 +1966,7 @@ async def test_create_sandbox_windows_profile_injects_runtime_defaults(mock_dock
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.22"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.1.0"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -1975,7 +2049,7 @@ async def test_create_sandbox_windows_profile_rejects_missing_runtime_devices(mo
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.22"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.1.0"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -2014,7 +2088,7 @@ async def test_create_sandbox_windows_profile_rejects_below_minimum_resource_lim
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.22"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.1.0"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -2051,7 +2125,7 @@ async def test_create_sandbox_windows_profile_accepts_dockur_demo_like_request(m
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.22"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.1.0"
     cfg.docker.network_mode = "bridge"
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
@@ -2105,7 +2179,7 @@ async def test_create_sandbox_windows_profile_with_network_policy_maps_windows_p
     mock_docker.from_env.return_value = mock_client
 
     cfg = _app_config()
-    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.0.22"
+    cfg.runtime.execd_image = "ghcr.io/opensandbox/execd:v1.1.0"
     cfg.docker.network_mode = "bridge"
     cfg.egress = EgressConfig(image="opensandbox/egress:latest")
     service = DockerSandboxService(config=cfg)
