@@ -1850,7 +1850,12 @@ func restartTestPod(name, endpoint string, createdAt, restartedAt metav1.Time) *
 
 func setRestartBaselineAnnotation(t *testing.T, pod *corev1.Pod, batchSandboxUID types.UID, startedAt int64) {
 	t.Helper()
-	record, err := json.Marshal(podRestartBaselineRecord{BatchSandboxUID: batchSandboxUID, StartedAt: startedAt})
+	setRestartBaselineRecordAnnotation(t, pod, podRestartBaselineRecord{BatchSandboxUID: batchSandboxUID, StartedAt: startedAt})
+}
+
+func setRestartBaselineRecordAnnotation(t *testing.T, pod *corev1.Pod, baseline podRestartBaselineRecord) {
+	t.Helper()
+	record, err := json.Marshal(baseline)
 	require.NoError(t, err)
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
@@ -1874,9 +1879,10 @@ func assertRestartHistoryIgnored(t *testing.T, view runtimeView, readyAt metav1.
 func TestBuildRuntimeView_FailsWhenContainerRestartsAfterReady(t *testing.T) {
 	readyAt := metav1.NewTime(time.Now().Add(-time.Minute))
 	restartedAt := metav1.NewTime(readyAt.Add(30 * time.Second))
-	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.10"), []*corev1.Pod{
-		restartTestPod("oom-restarted", "10.0.0.10", metav1.Time{}, restartedAt),
-	})
+	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	pod := restartTestPod("oom-restarted", "10.0.0.10", metav1.Time{}, restartedAt)
+	setRestartBaselineAnnotation(t, pod, bs.UID, readyAt.UnixNano())
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
 
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
 	for _, condition := range view.status.Conditions {
@@ -1894,10 +1900,10 @@ func TestBuildRuntimeView_DetectsRestartAcrossSpecOnlyUpdate(t *testing.T) {
 	bs := restartTestSandbox(readyAt, "10.0.0.10")
 	bs.Generation = 2
 	bs.Status.ObservedGeneration = 1
+	pod := restartTestPod("oom-restarted", "10.0.0.10", metav1.Time{}, restartedAt)
+	setRestartBaselineAnnotation(t, pod, bs.UID, readyAt.UnixNano())
 
-	view := buildRuntimeView(bs, []*corev1.Pod{
-		restartTestPod("oom-restarted", "10.0.0.10", metav1.Time{}, restartedAt),
-	})
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
 
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
 }
@@ -1909,8 +1915,10 @@ func TestBuildRuntimeView_FailsWhenMainContainerTerminatesAfterReady(t *testing.
 	pod.Status.ContainerStatuses[0].RestartCount = 0
 	pod.Status.ContainerStatuses[0].State.Terminated = pod.Status.ContainerStatuses[0].LastTerminationState.Terminated
 	pod.Status.ContainerStatuses[0].LastTerminationState = corev1.ContainerState{}
+	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	setRestartBaselineAnnotation(t, pod, bs.UID, readyAt.UnixNano())
 
-	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.10"), []*corev1.Pod{pod})
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
 
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
 }
@@ -1925,6 +1933,18 @@ func TestGetPodFailureReasonAndMessage_IgnoresSidecarRestart(t *testing.T) {
 	assert.False(t, failed)
 	assert.Empty(t, reason)
 	assert.Empty(t, message)
+}
+
+func TestGetPodFailureReasonAndMessage_DetectsRestartInBaselineSecond(t *testing.T) {
+	second := time.Now().UTC().Truncate(time.Second)
+	baseline := metav1.NewTime(second.Add(900 * time.Millisecond))
+	terminatedAt := metav1.NewTime(second)
+	pod := restartTestPod("same-second-restart", "10.0.0.10", metav1.Time{}, terminatedAt)
+
+	reason, _, failed := getPodFailureReasonAndMessage(pod, &baseline)
+
+	assert.True(t, failed)
+	assert.Equal(t, "OOMKilled", reason)
 }
 
 func TestBuildRuntimeView_IgnoresContainerRestartBeforeReady(t *testing.T) {
@@ -1949,10 +1969,52 @@ func TestBuildRuntimeView_IgnoresRestartHistoryFromNewPodReusingEndpoint(t *test
 	readyAt := metav1.NewTime(time.Now().Add(-2 * time.Minute))
 	createdAt := metav1.NewTime(readyAt.Add(30 * time.Second))
 	restartedAt := metav1.NewTime(createdAt.Add(30 * time.Second))
-	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.10"), []*corev1.Pod{
-		restartTestPod("replacement-pod", "10.0.0.10", createdAt, restartedAt),
-	})
+	pod := restartTestPod("replacement-pod", "10.0.0.10", createdAt, restartedAt)
+	pod.UID = "replacement-uid"
+	view := buildRuntimeView(restartTestSandbox(readyAt, "10.0.0.10"), []*corev1.Pod{pod})
 	assertRestartHistoryIgnored(t, view, readyAt)
+	record, exists := view.restartDetectionBaseline[string(pod.UID)]
+	require.True(t, exists)
+	require.NotNil(t, record.RestartCount)
+	assert.Equal(t, pod.Status.ContainerStatuses[0].RestartCount, *record.RestartCount)
+}
+
+func TestBuildRuntimeView_DetectsRestartAfterEndpointPatchWithoutActivationWrite(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	bs.UID = "test-bs-uid"
+	pod := restartTestPod("published", "10.0.0.10", metav1.Time{}, metav1.NewTime(time.Now()))
+	pod.UID = "published-uid"
+	restartCount := int32(0)
+	setRestartBaselineRecordAnnotation(t, pod, podRestartBaselineRecord{
+		BatchSandboxUID: bs.UID,
+		StartedAt:       time.Now().Add(-time.Second).UTC().Truncate(time.Second).UnixNano(),
+		RestartCount:    &restartCount,
+	})
+
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
+
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+}
+
+func TestBuildRuntimeView_RetainsRestartDetectionWhilePending(t *testing.T) {
+	readyAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	bs.UID = "test-bs-uid"
+	bs.Status.Phase = sandboxv1alpha1.BatchSandboxPhasePending
+	bs.Status.Conditions = nil
+	pod := restartTestPod("temporarily-unready", "10.0.0.10", metav1.Time{}, metav1.NewTime(time.Now()))
+	pod.UID = "pending-uid"
+	restartCount := int32(0)
+	setRestartBaselineRecordAnnotation(t, pod, podRestartBaselineRecord{
+		BatchSandboxUID: bs.UID,
+		StartedAt:       readyAt.UnixNano(),
+		RestartCount:    &restartCount,
+	})
+
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
+
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
 }
 
 func TestBuildRuntimeView_DetectsExistingPodRestartDuringScaleUp(t *testing.T) {
@@ -1960,9 +2022,11 @@ func TestBuildRuntimeView_DetectsExistingPodRestartDuringScaleUp(t *testing.T) {
 	restartedAt := metav1.NewTime(readyAt.Add(time.Minute))
 	createdBeforeReady := metav1.NewTime(readyAt.Add(-time.Minute))
 	bs := restartTestSandbox(readyAt, "10.0.0.10")
+	existing := restartTestPod("existing-restarted", "10.0.0.10", createdBeforeReady, restartedAt)
+	setRestartBaselineAnnotation(t, existing, bs.UID, readyAt.UnixNano())
 
 	view := buildRuntimeView(bs, []*corev1.Pod{
-		restartTestPod("existing-restarted", "10.0.0.10", createdBeforeReady, restartedAt),
+		existing,
 		restartTestPod("new-prewarmed", "10.0.0.11", createdBeforeReady, restartedAt),
 	})
 
@@ -1983,6 +2047,7 @@ func TestBuildRuntimeView_DetectsDelayedExistingPodRestartAfterScaleUp(t *testin
 	bs := restartTestSandbox(readyAt, "10.0.0.10")
 
 	existing := restartTestPod("existing", "10.0.0.10", createdBeforeReady, preReadyRestart)
+	setRestartBaselineAnnotation(t, existing, bs.UID, readyAt.UnixNano())
 	newPod := restartTestPod("new-prewarmed", "10.0.0.11", createdBeforeReady, preReadyRestart)
 	firstView := buildRuntimeView(bs, []*corev1.Pod{existing, newPod})
 	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, firstView.status.Phase)
@@ -1991,12 +2056,13 @@ func TestBuildRuntimeView_DetectsDelayedExistingPodRestartAfterScaleUp(t *testin
 	endpointRaw, err := json.Marshal(firstView.endpointIPs)
 	require.NoError(t, err)
 	bs.Annotations[AnnotationSandboxEndpoints] = string(endpointRaw)
-	setRestartBaselineAnnotation(t, newPod, bs.UID, firstView.restartDetectionBaseline[newPod.Name])
+	setRestartBaselineRecordAnnotation(t, newPod, firstView.restartDetectionBaseline[newPod.Name])
 
 	// The informer reports the old Pod's restart only after the scale-up
 	// reconcile. Its original baseline must still detect the delayed evidence.
 	delayedRestart := metav1.NewTime(readyAt.Add(time.Minute))
 	existing = restartTestPod("existing", "10.0.0.10", createdBeforeReady, delayedRestart)
+	setRestartBaselineAnnotation(t, existing, bs.UID, readyAt.UnixNano())
 	secondView := buildRuntimeView(bs, []*corev1.Pod{existing, newPod})
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, secondView.status.Phase)
 }
@@ -2012,23 +2078,21 @@ func TestBuildRuntimeView_DetectsNewPodRestartAfterEndpointExposure(t *testing.T
 	assertRestartHistoryIgnored(t, firstView, readyAt)
 	pending, exists := firstView.restartDetectionBaseline[newPod.Name]
 	require.True(t, exists)
-	assert.Zero(t, pending)
-	setRestartBaselineAnnotation(t, newPod, bs.UID, 0)
+	assert.Positive(t, pending.StartedAt)
+	setRestartBaselineRecordAnnotation(t, newPod, pending)
 
 	endpointRaw, err := json.Marshal(firstView.endpointIPs)
 	require.NoError(t, err)
 	bs.Annotations[AnnotationSandboxEndpoints] = string(endpointRaw)
 	publishedView := buildRuntimeView(bs, []*corev1.Pod{newPod})
-	exposedAtNanos, exists := publishedView.restartDetectionBaseline[newPod.Name]
-	require.True(t, exists)
-	exposedAt := time.Unix(0, exposedAtNanos)
-	assert.True(t, exposedAt.After(preExposureRestart.Time))
-
-	setRestartBaselineAnnotation(t, newPod, bs.UID, exposedAtNanos)
+	_, exists = publishedView.restartDetectionBaseline[newPod.Name]
+	assert.False(t, exists)
+	exposedAt := time.Unix(0, pending.StartedAt)
 
 	postExposureRestart := metav1.NewTime(exposedAt.Add(time.Second))
 	newPod = restartTestPod("new-prewarmed", "10.0.0.11", metav1.Time{}, postExposureRestart)
-	setRestartBaselineAnnotation(t, newPod, bs.UID, exposedAtNanos)
+	newPod.Status.ContainerStatuses[0].RestartCount = *pending.RestartCount + 1
+	setRestartBaselineRecordAnnotation(t, newPod, pending)
 	secondView := buildRuntimeView(bs, []*corev1.Pod{newPod})
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, secondView.status.Phase)
 }
@@ -2045,15 +2109,19 @@ func TestBuildRuntimeView_ReassignedPodDoesNotReusePriorSandboxBaseline(t *testi
 	assertRestartHistoryIgnored(t, view, readyAt)
 	desired, exists := view.restartDetectionBaseline[pod.Name]
 	require.True(t, exists)
-	assert.Zero(t, desired)
+	assert.Positive(t, desired.StartedAt)
 }
 
-func TestBuildRuntimeView_InitialPodsUseReadyTransitionWithoutPodBaseline(t *testing.T) {
+func TestBuildRuntimeView_InitialPodsGetPodBaselineBeforeEndpointPublication(t *testing.T) {
 	bs := &sandboxv1alpha1.BatchSandbox{}
 	pod := restartTestPod("initial", "10.0.0.10", metav1.Time{}, metav1.Time{})
 
 	view := buildRuntimeView(bs, []*corev1.Pod{pod})
-	assert.Empty(t, view.restartDetectionBaseline)
+	baseline, exists := view.restartDetectionBaseline[pod.Name]
+	require.True(t, exists)
+	assert.Positive(t, baseline.StartedAt)
+	require.NotNil(t, baseline.RestartCount)
+	assert.Equal(t, pod.Status.ContainerStatuses[0].RestartCount, *baseline.RestartCount)
 	for _, condition := range view.status.Conditions {
 		if condition.Type == sandboxv1alpha1.BatchSandboxConditionReady {
 			require.NotNil(t, condition.LastTransitionTime)
@@ -2169,7 +2237,7 @@ func TestPersistRuntimeView_KeepsPodBaselinePendingWhenEndpointPatchFails(t *tes
 	bs.UID = "test-bs-uid"
 	newPod := restartTestPod("new", "10.0.0.11", metav1.Time{}, metav1.NewTime(time.Now().Add(-time.Second)))
 	newPod.UID = "new-uid"
-	setRestartBaselineAnnotation(t, newPod, bs.UID, 0)
+	setRestartBaselineRecordAnnotation(t, newPod, newPodRestartBaselineRecord(bs.UID, newPod))
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(testscheme).
@@ -2204,7 +2272,7 @@ func TestPersistRuntimeView_KeepsPodBaselinePendingWhenEndpointPatchFails(t *tes
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: newPod.Namespace, Name: newPod.Name}, persistedPod))
 	pendingRecord, exists := restartBaselineRecordFromPod(persistedPod, bs.UID)
 	require.True(t, exists)
-	assert.Zero(t, pendingRecord.StartedAt)
+	assert.Positive(t, pendingRecord.StartedAt)
 }
 
 func TestPersistRuntimeView_IgnoresRestartBeforeEndpointPublication(t *testing.T) {
@@ -2230,33 +2298,60 @@ func TestPersistRuntimeView_IgnoresRestartBeforeEndpointPublication(t *testing.T
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: newPod.Namespace, Name: newPod.Name}, pendingPod))
 	pendingRecord, exists := restartBaselineRecordFromPod(pendingPod, bs.UID)
 	require.True(t, exists)
-	assert.Zero(t, pendingRecord.StartedAt)
+	assert.Positive(t, pendingRecord.StartedAt)
+	require.NotNil(t, pendingRecord.RestartCount)
+	assert.Zero(t, *pendingRecord.RestartCount)
 
 	intermediate := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, intermediate))
 	assert.Equal(t, `["10.0.0.10"]`, intermediate.Annotations[AnnotationSandboxEndpoints])
 
-	// A restart observed while pending is ignored. Endpoint publication then
-	// activates the baseline using a timestamp captured after the patch succeeds.
+	// A restart observed while pending refreshes the persisted state snapshot
+	// before endpoint publication, so pre-publication history is ignored.
 	restartedPod := restartTestPod("new", "10.0.0.11", metav1.Time{}, prePublicationRestart)
 	pendingPod.Status = restartedPod.Status
-	view = buildRuntimeView(bs.DeepCopy(), []*corev1.Pod{pendingPod})
+	require.NoError(t, r.Status().Update(context.Background(), pendingPod))
+	observedPendingPod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: newPod.Namespace, Name: newPod.Name}, observedPendingPod))
+	view = buildRuntimeView(bs.DeepCopy(), []*corev1.Pod{observedPendingPod})
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, view.status.Phase)
+	desiredRefresh, exists := view.restartDetectionBaseline[string(newPod.UID)]
+	require.True(t, exists)
+	require.NotNil(t, desiredRefresh.RestartCount)
+	assert.Equal(t, int32(1), *desiredRefresh.RestartCount)
 	requeue, errs = r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
 	require.Empty(t, errs)
 	assert.Equal(t, time.Second, requeue)
+
+	stillPending := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, stillPending))
+	assert.Equal(t, `["10.0.0.10"]`, stillPending.Annotations[AnnotationSandboxEndpoints])
+	refreshedPod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: newPod.Namespace, Name: newPod.Name}, refreshedPod))
+	refreshedRecord, exists := restartBaselineRecordFromPod(refreshedPod, bs.UID)
+	require.True(t, exists)
+	require.NotNil(t, refreshedRecord.RestartCount)
+	assert.Equal(t, int32(1), *refreshedRecord.RestartCount)
+
+	// Once the refreshed snapshot is observed, endpoint publication needs no
+	// follow-up activation patch.
+	view = buildRuntimeView(bs.DeepCopy(), []*corev1.Pod{refreshedPod})
+	requeue, errs = r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
+	require.Empty(t, errs)
+	assert.Zero(t, requeue)
 
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, updated))
 	assert.Equal(t, `["10.0.0.11"]`, updated.Annotations[AnnotationSandboxEndpoints])
 	activePod := &corev1.Pod{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: newPod.Namespace, Name: newPod.Name}, activePod))
-	activeBaseline, exists := restartBaselineFromPod(activePod, bs.UID)
+	activeBaseline, exists := restartBaselineRecordFromPod(activePod, bs.UID)
 	require.True(t, exists)
-	assert.Greater(t, activeBaseline, prePublicationRestart.UnixNano())
+	assert.Greater(t, activeBaseline.StartedAt, prePublicationRestart.UnixNano())
 
 	activePod.Status = restartedPod.Status
-	postPublicationRestart := metav1.NewTime(time.Unix(0, activeBaseline).Add(time.Second))
+	activePod.Status.ContainerStatuses[0].RestartCount = *activeBaseline.RestartCount + 1
+	postPublicationRestart := metav1.NewTime(time.Unix(0, activeBaseline.StartedAt).Add(time.Second))
 	activePod.Status.ContainerStatuses[0].LastTerminationState.Terminated.FinishedAt = postPublicationRestart
 	postPublicationView := buildRuntimeView(updated, []*corev1.Pod{activePod})
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, postPublicationView.status.Phase)
@@ -2274,10 +2369,13 @@ func TestPersistRuntimeView_DoesNotExposeEndpointsFromStaleRuntimeView(t *testin
 	r.StatusRVExpectation.Expect(&sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{UID: bs.UID, ResourceVersion: "2"}})
 
 	view := runtimeView{
-		status:                   bs.Status.DeepCopy(),
-		endpointIPs:              []string{"10.0.0.10", "10.0.0.11"},
-		pods:                     []*corev1.Pod{},
-		restartDetectionBaseline: map[string]int64{"existing-uid": readyAt.UnixNano(), "new-uid": time.Now().UnixNano()},
+		status:      bs.Status.DeepCopy(),
+		endpointIPs: []string{"10.0.0.10", "10.0.0.11"},
+		pods:        []*corev1.Pod{},
+		restartDetectionBaseline: map[string]podRestartBaselineRecord{
+			"existing-uid": {BatchSandboxUID: bs.UID, StartedAt: readyAt.UnixNano()},
+			"new-uid":      {BatchSandboxUID: bs.UID, StartedAt: time.Now().UnixNano()},
+		},
 	}
 	requeue, errs := r.persistRuntimeView(context.Background(), bs.DeepCopy(), view)
 	require.Empty(t, errs)
@@ -2299,10 +2397,11 @@ func TestBuildRuntimeView_DetectsDelayedRestartAfterPodOrderChanges(t *testing.T
 
 	// A Pod list reorder must not advance the Ready baseline while the
 	// endpoint membership is unchanged and restart status is still stale.
-	firstView := buildRuntimeView(bs, []*corev1.Pod{
-		restartTestPod("pod-2", "10.0.0.2", createdBeforeReady, preReadyRestart),
-		restartTestPod("pod-1", "10.0.0.1", createdBeforeReady, preReadyRestart),
-	})
+	pod2 := restartTestPod("pod-2", "10.0.0.2", createdBeforeReady, preReadyRestart)
+	pod1 := restartTestPod("pod-1", "10.0.0.1", createdBeforeReady, preReadyRestart)
+	setRestartBaselineAnnotation(t, pod2, bs.UID, readyAt.UnixNano())
+	setRestartBaselineAnnotation(t, pod1, bs.UID, readyAt.UnixNano())
+	firstView := buildRuntimeView(bs, []*corev1.Pod{pod2, pod1})
 	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, firstView.status.Phase)
 	var preservedReadyAt *metav1.Time
 	for i := range firstView.status.Conditions {
@@ -2322,10 +2421,11 @@ func TestBuildRuntimeView_DetectsDelayedRestartAfterPodOrderChanges(t *testing.T
 	require.NoError(t, err)
 	bs.Annotations[AnnotationSandboxEndpoints] = string(reorderedEndpoints)
 	delayedRestart := metav1.NewTime(readyAt.Add(time.Minute))
-	secondView := buildRuntimeView(bs, []*corev1.Pod{
-		restartTestPod("pod-2", "10.0.0.2", createdBeforeReady, preReadyRestart),
-		restartTestPod("pod-1", "10.0.0.1", createdBeforeReady, delayedRestart),
-	})
+	pod2 = restartTestPod("pod-2", "10.0.0.2", createdBeforeReady, preReadyRestart)
+	pod1 = restartTestPod("pod-1", "10.0.0.1", createdBeforeReady, delayedRestart)
+	setRestartBaselineAnnotation(t, pod2, bs.UID, readyAt.UnixNano())
+	setRestartBaselineAnnotation(t, pod1, bs.UID, readyAt.UnixNano())
+	secondView := buildRuntimeView(bs, []*corev1.Pod{pod2, pod1})
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, secondView.status.Phase)
 }
 
