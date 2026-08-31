@@ -55,7 +55,17 @@ func (c *PTYController) CreatePTYSession() {
 	}
 
 	id := runtime.NewPTYSessionID()
-	_, err := codeRunner.CreatePTYSession(id, req.Cwd, req.Command)
+	// Wrap the ingress request id into the shell command so the PTY shell's
+	// argv carries it (runtime audit correlation); descendant processes
+	// inherit it via the environment. Only non-empty commands are wrapped:
+	// an absent command means an interactive login shell, where injecting a
+	// prefix would flip the session into one-shot `sh -c` mode and exit
+	// immediately (the request id is simply not propagated there).
+	command := req.Command
+	if rid := requestIDFromRequest(c.basicController); rid != "" && command != "" {
+		command = runtime.WrapCommandWithRequestID(req.Command, rid)
+	}
+	_, err := codeRunner.CreatePTYSession(id, req.Cwd, command)
 	if err != nil {
 		c.RespondError(
 			http.StatusInternalServerError,

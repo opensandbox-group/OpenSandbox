@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
@@ -89,4 +90,33 @@ func TestGetBackgroundCommandOutput_MissingID(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, model.ErrorCodeMissingQuery, resp.Code)
 	require.Equal(t, "missing command execution id", resp.Message)
+}
+
+// TestSanitizeRequestID verifies the drop-not-mutate policy for caller
+// supplied request ids: oversized ids and ids outside the safe charset are
+// dropped entirely (returning ""), so the propagated id always matches the
+// id the ingress layer logged and stays sound in POSIX and cmd.exe shells.
+func TestSanitizeRequestID(t *testing.T) {
+	cases := []struct {
+		name string
+		rid  string
+		want string
+	}{
+		{"empty passes through as empty", "", ""},
+		{"uuid style accepted", "3f2b9c1e-8d4a-4e7f-9b0c-1a2b3c4d5e6f", "3f2b9c1e-8d4a-4e7f-9b0c-1a2b3c4d5e6f"},
+		{"plain alnum accepted", "req-abc_123", "req-abc_123"},
+		{"oversized dropped", strings.Repeat("a", maxRequestIDLen+1), ""},
+		{"exactly at cap accepted", strings.Repeat("a", maxRequestIDLen), strings.Repeat("a", maxRequestIDLen)},
+		{"shell metacharacters dropped", "'; touch /tmp/pwned; '", ""},
+		{"cmd metacharacters dropped", "a&calc", ""},
+		{"variable expansion dropped", "$HOME", ""},
+		{"space dropped", "req abc", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeRequestID(tc.rid); got != tc.want {
+				t.Fatalf("sanitizeRequestID(%q) = %q, want %q", tc.rid, got, tc.want)
+			}
+		})
+	}
 }
