@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,4 +139,91 @@ func TestNativeCommandResolution(t *testing.T) {
 	cmd, err = prepareCommand(context.Background(), req)
 	require.Error(t, err)
 	require.Nil(t, cmd)
+}
+
+// TestPrepareCommandInjectsRequestIDEnv verifies the direct env injection of
+// the ingress request id: it must be present for shell-mode and native argv
+// execution alike, so descendants inherit the correlation id on every
+// platform (including Windows, where no shell wrap is applied).
+func TestPrepareCommandInjectsRequestIDEnv(t *testing.T) {
+	req := &ExecuteCodeRequest{Code: "true", RequestID: "req-env-1"}
+	cmd, err := prepareCommand(context.Background(), req)
+	require.NoError(t, err)
+	require.Contains(t, cmd.Env, "SANDBOX_REQUEST_ID=req-env-1")
+
+	argvReq := &ExecuteCodeRequest{Argv: []string{"true"}, RequestID: "req-env-2"}
+	cmd, err = prepareCommand(context.Background(), argvReq)
+	require.NoError(t, err)
+	require.Contains(t, cmd.Env, "SANDBOX_REQUEST_ID=req-env-2")
+
+	// The no-ID case asserts prepareCommand itself injects nothing: unset the
+	// variable from the test process environment first, because an inherited
+	// SANDBOX_REQUEST_ID (e.g. running `go test` as a descendant of an
+	// instrumented execd) legitimately flows through os.Environ().
+	t.Setenv(RequestIDEnvVar, "")
+	noID := &ExecuteCodeRequest{Code: "true"}
+	cmd, err = prepareCommand(context.Background(), noID)
+	require.NoError(t, err)
+	for _, entry := range cmd.Env {
+		if value, ok := strings.CutPrefix(entry, RequestIDEnvVar+"="); ok {
+			require.Empty(t, value, "unexpected injected %s", entry)
+		}
+	}
+}
+
+// TestPrepareCommandReservesRequestIDEnv locks in that SANDBOX_REQUEST_ID is
+// execd-owned: a value supplied through request.Envs can neither override the
+// header-derived id nor be planted when the header is absent. Both execution
+// modes are covered because native argv relies on the env as the only carrier.
+func TestPrepareCommandReservesRequestIDEnv(t *testing.T) {
+	// Keep an inherited value out of the picture so each case is deterministic.
+	t.Setenv(RequestIDEnvVar, "")
+	spoof := map[string]string{RequestIDEnvVar: "spoofed-by-caller"}
+
+	assertSingle := func(t *testing.T, env []string, want string) {
+		t.Helper()
+		matches := 0
+		for _, entry := range env {
+			value, ok := strings.CutPrefix(entry, RequestIDEnvVar+"=")
+			if !ok {
+				continue
+			}
+			require.Equal(t, want, value, "unexpected %s entry: %s", RequestIDEnvVar, entry)
+			matches++
+		}
+		require.Equal(t, 1, matches, "expected exactly one %s=%s entry in %v", RequestIDEnvVar, want, env)
+	}
+	assertAbsent := func(t *testing.T, env []string) {
+		t.Helper()
+		for _, entry := range env {
+			require.False(t, strings.HasPrefix(entry, RequestIDEnvVar+"="), "spoofed entry leaked: %s", entry)
+		}
+	}
+
+	builders := map[string]func(rid string) *ExecuteCodeRequest{
+		"shell": func(rid string) *ExecuteCodeRequest {
+			return &ExecuteCodeRequest{Code: "true", RequestID: rid, Envs: spoof}
+		},
+		"native argv": func(rid string) *ExecuteCodeRequest {
+			return &ExecuteCodeRequest{Argv: []string{"true"}, RequestID: rid, Envs: spoof}
+		},
+	}
+	for name, build := range builders {
+		t.Run(name+"/header wins", func(t *testing.T) {
+			cmd, err := prepareCommand(context.Background(), build("req-trusted-1"))
+			require.NoError(t, err)
+			assertSingle(t, cmd.Env, "req-trusted-1")
+		})
+		t.Run(name+"/no header drops the planted value", func(t *testing.T) {
+			cmd, err := prepareCommand(context.Background(), build(""))
+			require.NoError(t, err)
+			assertAbsent(t, cmd.Env)
+		})
+	}
+}
+
+// TestShellQuoteEscapesEmbeddedSingleQuote pins the exact escape form so the
+// doc comment cannot drift from the emitted string again.
+func TestShellQuoteEscapesEmbeddedSingleQuote(t *testing.T) {
+	require.Equal(t, `'it'"'"'s'`, shellQuote("it's"))
 }
