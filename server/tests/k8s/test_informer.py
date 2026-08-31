@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -24,7 +25,8 @@ from opensandbox_server.services.k8s.informer import WorkloadInformer
 def _make_informer(**kwargs) -> WorkloadInformer:
     """Return a WorkloadInformer with a mocked list_fn (watch disabled)."""
     list_fn = kwargs.pop("list_fn", MagicMock(return_value={"items": [], "metadata": {}}))
-    return WorkloadInformer(list_fn=list_fn, enable_watch=False, **kwargs)
+    enable_watch = kwargs.pop("enable_watch", False)
+    return WorkloadInformer(list_fn=list_fn, enable_watch=enable_watch, **kwargs)
 
 
 def _list_response(*names: str) -> dict:
@@ -38,32 +40,21 @@ def _list_response(*names: str) -> dict:
 class TestWorkloadInformerInit:
     """Construction and property defaults."""
 
-    def test_has_synced_is_false_before_start(self):
-        """has_synced starts as False before the first list completes."""
+    def test_cache_is_unavailable_before_start(self):
+        """Cache reads fall back before the first list completes."""
         informer = _make_informer()
-        assert informer.has_synced is False
+        assert informer.list_if_synced() is None
 
     def test_get_returns_none_before_sync(self):
         """get() returns None before the cache is populated."""
         informer = _make_informer()
-        assert informer.get("anything") is None
+        assert informer.get_if_synced("anything") is None
 
     def test_resync_and_watch_params_stored(self):
         """Constructor stores resync and watch timeout parameters."""
         informer = _make_informer(resync_period_seconds=120, watch_timeout_seconds=30)
         assert informer.resync_period_seconds == 120
         assert informer.watch_timeout_seconds == 30
-
-    def test_custom_thread_name_is_stored(self):
-        """thread_name parameter is stored and used when start() is called."""
-        informer = _make_informer(thread_name="informer-foos-default")
-        assert informer._thread_name == "informer-foos-default"
-
-    def test_default_thread_name(self):
-        """Default thread_name is 'workload-informer' when not specified."""
-        informer = _make_informer()
-        assert informer._thread_name == "workload-informer"
-
 
 class TestWorkloadInformerFullResync:
     """_full_resync populates the cache correctly."""
@@ -72,84 +63,113 @@ class TestWorkloadInformerFullResync:
         """After _full_resync, objects from list_fn are accessible via get()."""
         list_fn = MagicMock(return_value=_list_response("alpha", "beta"))
         informer = _make_informer(list_fn=list_fn)
-        informer._full_resync()
+        assert informer._full_resync() is True
 
-        assert informer.get("alpha") is not None
-        assert informer.get("beta") is not None
-        assert informer.get("gamma") is None
+        assert informer.get_if_synced("alpha") is not None
+        assert informer.get_if_synced("beta") is not None
+        assert informer.get_if_synced("gamma") is None
 
-    def test_full_resync_sets_has_synced(self):
+    def test_full_resync_publishes_cache(self):
         """_full_resync marks the informer as synced."""
         list_fn = MagicMock(return_value=_list_response("x"))
         informer = _make_informer(list_fn=list_fn)
         informer._full_resync()
-        assert informer.has_synced is True
+        assert informer.list_if_synced() is not None
 
-    def test_full_resync_stores_resource_version(self):
-        """_full_resync saves the resourceVersion from the list metadata."""
-        list_fn = MagicMock(return_value=_list_response("x"))
-        informer = _make_informer(list_fn=list_fn)
-        informer._full_resync()
-        assert informer._resource_version == "42"
+    def test_full_resync_preserves_opaque_resource_version(self):
+        """LIST cursor is stored without parsing or comparison."""
+        response = _list_response("x")
+        response["metadata"]["resourceVersion"] = "rv:abc/7"
+        informer = _make_informer(list_fn=MagicMock(return_value=response))
+
+        assert informer._full_resync() is True
+        assert informer._resource_version == "rv:abc/7"
 
     def test_full_resync_replaces_stale_cache(self):
         """A second _full_resync replaces the previous cache contents."""
         list_fn = MagicMock(return_value=_list_response("old"))
         informer = _make_informer(list_fn=list_fn)
         informer._full_resync()
-        assert informer.get("old") is not None
+        assert informer.get_if_synced("old") is not None
 
         list_fn.return_value = _list_response("new")
         informer._full_resync()
-        assert informer.get("old") is None
-        assert informer.get("new") is not None
+        assert informer.get_if_synced("old") is None
+        assert informer.get_if_synced("new") is not None
+
+    def test_full_resync_abandons_snapshot_invalidated_during_list(self):
+        """An in-flight LIST cannot publish across a completed direct mutation."""
+        list_started = threading.Event()
+        release_list = threading.Event()
+
+        def list_fn():
+            list_started.set()
+            assert release_list.wait(timeout=2)
+            return _list_response("candidate")
+
+        informer = _make_informer(list_fn=list_fn)
+        old = {"metadata": {"name": "old", "resourceVersion": "old-item-rv"}}
+        informer._cache = {"old": old}
+        informer._resource_version = "old-cursor"
+        informer._last_contact_at = 123.0
+        informer._has_synced = True
+        result = []
+        thread = threading.Thread(target=lambda: result.append(informer._full_resync()))
+
+        thread.start()
+        assert list_started.wait(timeout=2)
+        informer.invalidate()
+        release_list.set()
+        thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        assert result == [False]
+        assert informer._cache == {"old": old}
+        assert informer._resource_version == "old-cursor"
+        assert informer._last_contact_at == 123.0
+        assert informer.list_if_synced() is None
+
+        informer.list_fn = MagicMock(return_value=_list_response("recovered"))
+        assert informer._full_resync() is True
+        assert informer.get_if_synced("old") is None
+        assert informer.get_if_synced("recovered") is not None
+        assert informer.list_if_synced() is not None
+
+    def test_full_resync_build_failure_does_not_partially_publish(self):
+        """Malformed LIST items leave all published state untouched."""
+        informer = _make_informer(list_fn=MagicMock(return_value=_list_response("old")))
+        assert informer._full_resync() is True
+        old_cache = informer._cache
+        old_cursor = informer._resource_version
+        old_contact = informer._last_contact_at
+        informer.list_fn.return_value = {
+            "metadata": {"resourceVersion": "new-cursor"},
+            "items": [{"metadata": {"name": "new"}}, None],
+        }
+
+        with pytest.raises(AttributeError):
+            informer._full_resync()
+
+        assert informer._cache is old_cache
+        assert informer._resource_version == old_cursor
+        assert informer._last_contact_at == old_contact
 
 
-class TestWorkloadInformerUpdateCache:
-    """update_cache upserts objects into the cache."""
+class TestWorkloadInformerInvalidation:
+    """Direct mutations only invalidate the published LIST/WATCH state."""
 
-    def test_update_cache_adds_new_object(self):
-        """update_cache makes a previously missing object retrievable."""
-        informer = _make_informer()
-        obj = {"metadata": {"name": "foo", "resourceVersion": "5"}}
-        informer.update_cache(obj)
-        assert informer.get("foo") == obj
+    def test_invalidate_marks_cache_unsynced_without_changing_cache_or_cursor(self):
+        informer = _make_informer(list_fn=MagicMock(return_value=_list_response("foo")))
+        assert informer._full_resync() is True
+        cached = informer.get_if_synced("foo")
+        cursor = informer._resource_version
 
-    def test_update_cache_overwrites_existing_object(self):
-        """update_cache replaces the cached version of an object."""
-        informer = _make_informer()
-        informer.update_cache({"metadata": {"name": "foo", "resourceVersion": "1"}})
-        updated = {"metadata": {"name": "foo", "resourceVersion": "2"}}
-        informer.update_cache(updated)
-        assert informer.get("foo") == updated
+        informer.invalidate()
 
-    def test_update_cache_ignores_object_without_name(self):
-        """update_cache silently ignores objects that lack a metadata.name."""
-        informer = _make_informer()
-        informer.update_cache({"metadata": {}})
-        # Cache remains empty — no exception raised
-        assert informer._cache == {}
-
-    def test_update_cache_updates_resource_version(self):
-        """update_cache advances _resource_version from object metadata."""
-        informer = _make_informer()
-        informer.update_cache({"metadata": {"name": "foo", "resourceVersion": "99"}})
-        assert informer._resource_version == "99"
-
-    def test_update_cache_does_not_downgrade_resource_version(self):
-        """update_cache never rolls back _resource_version to an older value."""
-        informer = _make_informer()
-        informer._resource_version = "200"
-        informer.update_cache({"metadata": {"name": "foo", "resourceVersion": "100"}})
-        assert informer._resource_version == "200"
-
-    def test_update_cache_advances_resource_version_when_newer(self):
-        """update_cache advances _resource_version when the incoming value is strictly newer."""
-        informer = _make_informer()
-        informer._resource_version = "50"
-        informer.update_cache({"metadata": {"name": "foo", "resourceVersion": "99"}})
-        assert informer._resource_version == "99"
-
+        assert informer.list_if_synced() is None
+        assert informer._cache["foo"] is cached
+        assert informer._resource_version == cursor
+        assert informer._invalidation_generation == 1
 
 class TestWorkloadInformerHandleEvent:
     """_handle_event applies watch events to the cache."""
@@ -159,7 +179,7 @@ class TestWorkloadInformerHandleEvent:
         informer = _make_informer()
         obj = {"metadata": {"name": "bar", "resourceVersion": "10"}}
         informer._handle_event({"type": "ADDED", "object": obj})
-        assert informer.get("bar") == obj
+        assert informer._cache["bar"] == obj
 
     def test_handle_modified_event_replaces_object(self):
         """MODIFIED event replaces the cached object."""
@@ -167,25 +187,20 @@ class TestWorkloadInformerHandleEvent:
         informer._cache["bar"] = {"metadata": {"name": "bar", "resourceVersion": "1"}}
         updated = {"metadata": {"name": "bar", "resourceVersion": "2"}}
         informer._handle_event({"type": "MODIFIED", "object": updated})
-        assert informer.get("bar") == updated
+        assert informer._cache["bar"] == updated
 
     def test_handle_deleted_event_removes_object(self):
         """DELETED event removes the object from the cache."""
         informer = _make_informer()
         informer._cache["bar"] = {"metadata": {"name": "bar"}}
         informer._handle_event({"type": "DELETED", "object": {"metadata": {"name": "bar"}}})
-        assert informer.get("bar") is None
+        assert "bar" not in informer._cache
 
-    def test_handle_event_ignores_none_object(self):
-        """Events with a None object are silently ignored."""
+    @pytest.mark.parametrize("obj", [None, {"metadata": {}}])
+    def test_handle_event_ignores_unusable_object(self, obj):
+        """Events without a usable named object are ignored."""
         informer = _make_informer()
-        informer._handle_event({"type": "ADDED", "object": None})
-        assert informer._cache == {}
-
-    def test_handle_event_ignores_object_without_name(self):
-        """Events whose object has no metadata.name are silently ignored."""
-        informer = _make_informer()
-        informer._handle_event({"type": "ADDED", "object": {"metadata": {}}})
+        informer._handle_event({"type": "ADDED", "object": obj})
         assert informer._cache == {}
 
     def test_handle_event_converts_non_dict_object(self):
@@ -194,7 +209,7 @@ class TestWorkloadInformerHandleEvent:
         sdk_obj = MagicMock()
         sdk_obj.to_dict.return_value = {"metadata": {"name": "sdk-obj", "resourceVersion": "3"}}
         informer._handle_event({"type": "ADDED", "object": sdk_obj})
-        assert informer.get("sdk-obj") is not None
+        assert "sdk-obj" in informer._cache
 
     def test_handle_event_updates_resource_version(self):
         """_handle_event advances _resource_version from the object metadata."""
@@ -205,19 +220,32 @@ class TestWorkloadInformerHandleEvent:
         })
         assert informer._resource_version == "77"
 
-    def test_handle_event_does_not_downgrade_resource_version(self):
-        """_handle_event never rolls back _resource_version to an older value."""
+    def test_handle_event_uses_stream_order_for_opaque_resource_version(self):
+        """The last consumed WATCH RV wins without numeric ordering."""
         informer = _make_informer()
         informer._resource_version = "200"
         informer._handle_event({
             "type": "MODIFIED",
-            "object": {"metadata": {"name": "foo", "resourceVersion": "50"}},
+            "object": {"metadata": {"name": "foo", "resourceVersion": "rv:abc/7"}},
         })
-        assert informer._resource_version == "200"
+        assert informer._resource_version == "rv:abc/7"
+
+    def test_handle_event_without_resource_version_requires_resync(self):
+        """A cursor-less WATCH event updates internal state but unpublishes it."""
+        informer = _make_informer(list_fn=MagicMock(return_value=_list_response("old")))
+        assert informer._full_resync() is True
+        cursor = informer._resource_version
+        updated = {"metadata": {"name": "old", "value": "new"}}
+
+        informer._handle_event({"type": "MODIFIED", "object": updated})
+
+        assert informer._cache["old"] == updated
+        assert informer._resource_version == cursor
+        assert informer.list_if_synced() is None
 
 
 class TestWorkloadInformerStaleness:
-    """has_synced reflects whether the cache is still being maintained."""
+    """Cache reads reflect whether the informer is still being maintained."""
 
     def _synced_informer(self) -> WorkloadInformer:
         informer = _make_informer(
@@ -228,25 +256,25 @@ class TestWorkloadInformerStaleness:
         informer._full_resync()
         return informer
 
-    def test_has_synced_false_once_contact_goes_stale(self):
+    def test_cache_unavailable_once_contact_goes_stale(self):
         """A watch that stalls without raising must not leave readers on a frozen cache."""
         informer = self._synced_informer()
-        assert informer.has_synced is True
+        assert informer.list_if_synced() is not None
 
         informer._last_contact_at -= informer._staleness_limit_seconds + 1
-        assert informer.has_synced is False
+        assert informer.list_if_synced() is None
 
-    def test_has_synced_true_within_staleness_limit(self):
+    def test_cache_available_within_staleness_limit(self):
         """Recent contact keeps the cache usable."""
         informer = self._synced_informer()
         informer._last_contact_at -= informer._staleness_limit_seconds - 1
-        assert informer.has_synced is True
+        assert informer.list_if_synced() is not None
 
-    def test_has_synced_false_after_stop(self):
+    def test_cache_unavailable_after_stop(self):
         """A stopped informer will never refresh again, however recent its last contact."""
         informer = self._synced_informer()
         informer.stop()
-        assert informer.has_synced is False
+        assert informer.list_if_synced() is None
 
     def test_completed_watch_stream_refreshes_contact(self):
         """An idle watch that closes cleanly still proves the API server is reachable."""
@@ -261,7 +289,7 @@ class TestWorkloadInformerStaleness:
         ):
             informer._run_watch_loop(60)
 
-        assert informer.has_synced is True
+        assert informer.list_if_synced() is not None
 
 
 class TestWorkloadInformerWatchResilience:
@@ -308,7 +336,7 @@ class TestWorkloadInformerWatchResilience:
             with pytest.raises(ApiException):
                 informer._run_watch_loop(60)
 
-        assert informer.has_synced is False
+        assert informer.list_if_synced() is None
 
 
 class TestWorkloadInformerStartStop:
@@ -318,10 +346,12 @@ class TestWorkloadInformerStartStop:
         """start() spawns a daemon thread that is alive."""
         list_fn = MagicMock(return_value={"items": [], "metadata": {}})
         informer = WorkloadInformer(list_fn=list_fn, enable_watch=False,
-                                    resync_period_seconds=9999)
+                                    resync_period_seconds=9999,
+                                    thread_name="informer-foos-default")
         informer.start()
         assert informer._thread is not None
         assert informer._thread.is_alive()
+        assert informer._thread.name == "informer-foos-default"
         informer.stop()
 
     def test_start_is_idempotent(self):
@@ -340,6 +370,70 @@ class TestWorkloadInformerStartStop:
         informer = _make_informer()
         informer.stop()
         assert informer._stop_event.is_set()
+
+    def test_stopped_informer_cannot_be_restarted(self):
+        """start() preserves the terminal stopped state."""
+        informer = _make_informer()
+        informer.stop()
+
+        informer.start()
+
+        assert informer._thread is None
+
+    def test_resync_conflicts_use_bounded_backoff_before_recovery(self):
+        """Repeated invalidation conflicts wait instead of spinning."""
+        informer = _make_informer(enable_watch=True)
+        informer._full_resync = MagicMock(side_effect=[False, False, True])
+        waits = []
+        informer._stop_event.wait = MagicMock(side_effect=lambda timeout: waits.append(timeout))
+
+        def stop_after_watch(_timeout_seconds):
+            informer.stop()
+
+        informer._run_watch_loop = MagicMock(side_effect=stop_after_watch)
+
+        informer._run()
+
+        assert waits == [1.0, 2.0]
+        assert informer._full_resync.call_count == 3
+        informer._run_watch_loop.assert_called_once()
+
+    def test_resync_build_error_backs_off_then_recovers(self):
+        """A failed candidate build retries and publishes the next valid LIST."""
+        list_fn = MagicMock(
+            side_effect=[
+                {"metadata": {"resourceVersion": "bad"}, "items": [None]},
+                _list_response("recovered"),
+            ]
+        )
+        informer = _make_informer(list_fn=list_fn, enable_watch=True)
+        waits = []
+        informer._stop_event.wait = MagicMock(side_effect=lambda timeout: waits.append(timeout))
+        informer._run_watch_loop = MagicMock(side_effect=lambda _timeout: informer.stop())
+
+        informer._run()
+
+        assert waits == [1.0]
+        assert list_fn.call_count == 2
+        assert "recovered" in informer._cache
+        assert informer._resource_version == "42"
+        informer._run_watch_loop.assert_called_once()
+
+    def test_stop_interrupts_resync_conflict_backoff(self):
+        """The conflict wait uses the stop event and exits without another LIST."""
+        informer = _make_informer(enable_watch=True)
+        informer._full_resync = MagicMock(return_value=False)
+
+        def stop_during_wait(_timeout):
+            informer.stop()
+            return True
+
+        informer._stop_event.wait = MagicMock(side_effect=stop_during_wait)
+
+        informer._run()
+
+        informer._stop_event.wait.assert_called_once_with(1.0)
+        informer._full_resync.assert_called_once_with()
 
     def test_poll_mode_resets_has_synced_after_wait(self):
         """In poll mode (enable_watch=False), _has_synced is reset after each wait so the
@@ -404,8 +498,8 @@ class TestWorkloadInformerStartStop:
 
         assert watch_timeouts == [5, 5]
         assert list_fn.call_count == 2
-        assert informer.get("stale") is None
-        assert informer.get("fresh") is not None
+        assert "stale" not in informer._cache
+        assert "fresh" in informer._cache
 
     def test_watch_mode_does_not_resync_before_period(self):
         """Short watch timeouts resume until the full-resync deadline is reached."""

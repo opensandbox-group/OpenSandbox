@@ -29,14 +29,15 @@ logger = logging.getLogger(__name__)
 # ``timeout_seconds``, so the client read timeout must sit above it.
 _WATCH_READ_TIMEOUT_BUFFER_SECONDS = 10
 _WATCH_CONNECT_TIMEOUT_SECONDS = 10
+_MAX_BACKOFF_SECONDS = 30.0
 
 
 class WorkloadInformer:
-    """Maintain an in-memory cache of a namespaced custom resource via watch."""
+    """Maintain a LIST/WATCH-owned cache of a namespaced custom resource."""
 
     def __init__(
         self,
-        list_fn: Callable[..., Any],
+        list_fn: Callable[..., Dict[str, Any]],
         resync_period_seconds: int = 300,
         watch_timeout_seconds: int = 60,
         enable_watch: bool = True,
@@ -64,27 +65,9 @@ class WorkloadInformer:
         self._resource_version: Optional[str] = None
         self._has_synced = False
         self._last_contact_at: Optional[float] = None
+        self._invalidation_generation = 0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-
-    @property
-    def has_synced(self) -> bool:
-        """Return True while the cache is populated and still being maintained.
-
-        A watch can stop delivering without raising — a dead connection leaves the
-        reader parked forever — so a "listed once" latch would keep readers on a
-        frozen cache.  Going stale makes them fall back to a live request.
-
-        A stopped informer is likewise considered not synced, however recent its
-        last contact, since nothing will refresh the cache again.
-        """
-        if self._stop_event.is_set():
-            # Stopped: nothing will refresh the cache again, however recent it is.
-            return False
-        with self._lock:
-            if not self._has_synced or self._last_contact_at is None:
-                return False
-            return time.monotonic() - self._last_contact_at <= self._staleness_limit_seconds
 
     @property
     def _staleness_limit_seconds(self) -> float:
@@ -93,6 +76,8 @@ class WorkloadInformer:
 
     def start(self) -> None:
         """Start the background watch thread if not already running."""
+        if self._stop_event.is_set():
+            return
         if self._thread and self._thread.is_alive():
             return
 
@@ -107,56 +92,38 @@ class WorkloadInformer:
         """Stop the background watch thread."""
         self._stop_event.set()
 
-    def get(self, name: str) -> Optional[Dict[str, Any]]:
-        """Return cached object by name, if present."""
+    def get_if_synced(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return a cached object only while the cache is safe to publish."""
         with self._lock:
+            if not self._cache_is_available():
+                return None
             return self._cache.get(name)
 
-    def list(self) -> List[Dict[str, Any]]:
-        """Return a snapshot of every cached object."""
+    def list_if_synced(self) -> Optional[List[Dict[str, Any]]]:
+        """Return a cache snapshot, or None when callers must use the live API."""
         with self._lock:
+            if not self._cache_is_available():
+                return None
             return list(self._cache.values())
 
-    def update_cache(self, obj: Dict[str, Any]) -> None:
-        """Upsert a single object into the cache.
+    def _cache_is_available(self) -> bool:
+        """Return whether cache reads are publishable. Caller must hold ``_lock``."""
+        if self._stop_event.is_set() or not self._has_synced:
+            return False
+        if self._last_contact_at is None:
+            return False
+        return time.monotonic() - self._last_contact_at <= self._staleness_limit_seconds
 
-        Only advances ``_resource_version`` if the incoming version is strictly
-        newer, preventing a stale API response from rolling back the watch cursor.
+    def invalidate(self) -> None:
+        """Make the published cache unavailable after a successful direct mutation.
+
+        The cached objects and watch cursor remain owned exclusively by LIST/WATCH.
+        A generation change also prevents an in-flight LIST from publishing a
+        snapshot that may not include the completed mutation.
         """
-        metadata = obj.get("metadata", {})
-        name = metadata.get("name")
-        if not name:
-            return
-
         with self._lock:
-            self._cache[name] = obj
-            self._advance_resource_version(metadata.get("resourceVersion"))
-
-    def delete_from_cache(self, name: str) -> None:
-        """Evict a single object from the cache by name."""
-        with self._lock:
-            self._cache.pop(name, None)
-
-    def _advance_resource_version(self, rv: Optional[str]) -> None:
-        """Advance ``_resource_version`` only when *rv* is strictly newer.
-
-        K8s resourceVersions are opaque strings but etcd encodes them as
-        monotonically increasing integers.  If the conversion fails we skip the
-        update (conservative: keep the current, newer cursor).
-
-        Must be called with ``self._lock`` already held.
-        """
-        if not rv:
-            return
-        if self._resource_version is None:
-            self._resource_version = rv
-            return
-        try:
-            if int(rv) > int(self._resource_version):
-                self._resource_version = rv
-        except ValueError:
-            # Non-integer resourceVersion — skip to avoid downgrade.
-            pass
+            self._invalidation_generation += 1
+            self._has_synced = False
 
     def _run(self) -> None:
         backoff = 1.0
@@ -164,7 +131,11 @@ class WorkloadInformer:
         while not self._stop_event.is_set():
             try:
                 if not self._has_synced:
-                    self._full_resync()
+                    published = self._full_resync()
+                    if not published:
+                        logger.debug("Informer full resync invalidated before publication")
+                        backoff = self._wait_before_retry(backoff)
+                        continue
                     last_full_resync_at = time.monotonic()
                     backoff = 1.0
 
@@ -198,21 +169,27 @@ class WorkloadInformer:
                 else:
                     logger.warning(f"Informer watch error: {exc}", exc_info=True)
                     self._has_synced = False
-                    self._stop_event.wait(min(backoff, 30.0))
-                    backoff = min(backoff * 2, 30.0)
+                    backoff = self._wait_before_retry(backoff)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning(f"Unexpected informer error: {exc}", exc_info=True)
                 self._has_synced = False
-                self._stop_event.wait(min(backoff, 30.0))
-                backoff = min(backoff * 2, 30.0)
+                backoff = self._wait_before_retry(backoff)
 
-    def _full_resync(self) -> None:
-        """Perform a full list to refresh the cache."""
+    def _wait_before_retry(self, backoff: float) -> float:
+        """Wait interruptibly and return the next bounded retry delay."""
+        self._stop_event.wait(backoff)
+        return min(backoff * 2, _MAX_BACKOFF_SECONDS)
+
+    def _full_resync(self) -> bool:
+        """Atomically publish a full LIST snapshot unless a mutation invalidated it."""
+        with self._lock:
+            start_generation = self._invalidation_generation
+
         resp = self.list_fn()
 
         # list response is a dict for CustomObjectsApi
-        items = resp.get("items", []) if isinstance(resp, dict) else []
-        metadata = resp.get("metadata", {}) if isinstance(resp, dict) else {}
+        items = resp.get("items", [])
+        metadata = resp.get("metadata", {})
         resource_version = metadata.get("resourceVersion")
 
         # Build new cache outside the lock to avoid blocking readers
@@ -223,10 +200,14 @@ class WorkloadInformer:
                 new_cache[name] = item
 
         with self._lock:
+            if self._invalidation_generation != start_generation:
+                return False
+
             self._cache = new_cache
-            self._advance_resource_version(resource_version)
+            self._resource_version = resource_version
             self._has_synced = True
             self._last_contact_at = time.monotonic()
+            return True
 
     def _run_watch_loop(self, timeout_seconds: int) -> None:
         """Stream watch events to keep the cache fresh."""
@@ -244,6 +225,8 @@ class WorkloadInformer:
             ):
                 if self._stop_event.is_set():
                     break
+                if not isinstance(event, dict):
+                    raise TypeError("Informer watch returned a non-dict event")
                 self._handle_event(event)
         finally:
             w.stop()
@@ -274,4 +257,12 @@ class WorkloadInformer:
                 self._cache.pop(name, None)
             else:
                 self._cache[name] = obj
-            self._advance_resource_version(metadata.get("resourceVersion"))
+            resource_version = metadata.get("resourceVersion")
+            if resource_version:
+                # resourceVersion is opaque. Watch stream order, not numeric
+                # comparison, determines the last consumed cursor.
+                self._resource_version = resource_version
+            else:
+                # The cache update is retained internally, but cannot be
+                # published until a LIST supplies a trustworthy cursor again.
+                self._has_synced = False

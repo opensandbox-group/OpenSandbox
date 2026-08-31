@@ -143,6 +143,67 @@ class SandboxRateLimitException
         )
 
 /**
+ * Thrown when the control plane reports that the target sandbox instance does not exist.
+ *
+ * Recognizes the bare `SANDBOX_NOT_FOUND` code as well as runtime-backend-prefixed variants
+ * (e.g. `DOCKER::SANDBOX_NOT_FOUND`, `KUBERNETES::SANDBOX_NOT_FOUND`). Detection is intentionally
+ * restricted to these explicit server error codes rather than a bare HTTP 404: a 404 whose body
+ * cannot be parsed into such a code stays a plain [SandboxApiException] with
+ * [SandboxError.UNEXPECTED_RESPONSE], because it may indicate an endpoint/routing/configuration
+ * regression that must remain loud. See [Throwable.isSandboxNotFound].
+ *
+ * Note that [Throwable.isSandboxNotFound] matches the [error] code, so a manually constructed
+ * instance carrying a different [SandboxError.code] does not satisfy the predicate even when
+ * `statusCode` is 404.
+ */
+class SandboxNotFoundException
+    @JvmOverloads
+    constructor(
+        message: String? = null,
+        cause: Throwable? = null,
+        statusCode: Int? = 404,
+        error: SandboxError = SandboxError(SandboxError.SANDBOX_NOT_FOUND, message),
+        requestId: String? = null,
+        responseBody: String? = null,
+        isRetryable: Boolean = false,
+    ) : SandboxApiException(
+            message = message,
+            cause = cause,
+            statusCode = statusCode,
+            error = error,
+            requestId = requestId,
+            responseBody = responseBody,
+            isRetryable = isRetryable,
+        )
+
+/**
+ * Thrown when a data-plane operation is rejected because the sandbox workspace is over its
+ * storage capacity (server responds with HTTP 507).
+ *
+ * Structured `code` values parsed from the response body are preserved on [error]; the
+ * [SandboxError.STORAGE_CAPACITY_EXCEEDED] constant is only used when the body carries no code.
+ */
+class SandboxCapacityExceededException
+    @JvmOverloads
+    constructor(
+        message: String? = null,
+        cause: Throwable? = null,
+        statusCode: Int? = 507,
+        error: SandboxError = SandboxError(SandboxError.STORAGE_CAPACITY_EXCEEDED, message),
+        requestId: String? = null,
+        responseBody: String? = null,
+        isRetryable: Boolean = false,
+    ) : SandboxApiException(
+            message = message,
+            cause = cause,
+            statusCode = statusCode,
+            error = error,
+            requestId = requestId,
+            responseBody = responseBody,
+            isRetryable = isRetryable,
+        )
+
+/**
  * Thrown when an unexpected internal error occurs within the SDK
  */
 open class SandboxInternalException(
@@ -342,6 +403,16 @@ data class SandboxError(
 
         /** The requested file or directory does not exist (server responds with HTTP 404). */
         const val FILE_NOT_FOUND = "FILE_NOT_FOUND"
+
+        /**
+         * The target sandbox instance does not exist on the runtime backend. Reported bare
+         * (`SANDBOX_NOT_FOUND`) or prefixed with the runtime backend (`DOCKER::SANDBOX_NOT_FOUND`,
+         * `KUBERNETES::SANDBOX_NOT_FOUND`, ...).
+         */
+        const val SANDBOX_NOT_FOUND = "SANDBOX_NOT_FOUND"
+
+        /** The sandbox workspace is over its storage capacity (server responds with HTTP 507). */
+        const val STORAGE_CAPACITY_EXCEEDED = "STORAGE_CAPACITY_EXCEEDED"
 
         /** Pool-specific: no idle sandbox and policy is FAIL_FAST. */
         const val POOL_EMPTY = "POOL_EMPTY"

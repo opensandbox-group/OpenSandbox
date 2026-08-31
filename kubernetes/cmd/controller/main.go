@@ -457,6 +457,7 @@ func main() {
 	}
 	if err := (&controller.PoolReconciler{
 		Client:     mgr.GetClient(),
+		APIReader:  mgr.GetAPIReader(),
 		Scheme:     mgr.GetScheme(),
 		Recorder:   mgr.GetEventRecorderFor("pool-controller"),
 		Allocator:  controller.NewDefaultAllocator(mgr.GetClient()),

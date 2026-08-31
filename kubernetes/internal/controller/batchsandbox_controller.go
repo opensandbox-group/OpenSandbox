@@ -431,6 +431,16 @@ func (r *BatchSandboxReconciler) reconcileTasks(
 	pods []*corev1.Pod,
 ) (*taskScheduleResult, error) {
 	log := logf.FromContext(ctx)
+	isDeleting := batchSbx.DeletionTimestamp != nil
+
+	// Once this controller's cleanup finalizer is gone, task cleanup is complete.
+	// Another controller (for example, the Pool controller) may still keep the
+	// object terminating with its own finalizer. Do not recreate an in-memory task
+	// scheduler or keep polling such objects every three seconds.
+	if isDeleting && !controllerutil.ContainsFinalizer(batchSbx, FinalizerTaskCleanup) {
+		r.deleteTaskScheduler(ctx, batchSbx)
+		return nil, nil
+	}
 
 	sch, err := r.getTaskScheduler(ctx, batchSbx, pods)
 	if err != nil {
@@ -438,9 +448,12 @@ func (r *BatchSandboxReconciler) reconcileTasks(
 	}
 
 	// Because tasks are in-memory and there is no event mechanism, periodic reconciliation is required.
-	DurationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), 3*time.Second)
+	// Terminating objects only need polling while task cleanup is still unfinished.
+	if !isDeleting {
+		DurationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), 3*time.Second)
+	}
 
-	if batchSbx.DeletionTimestamp != nil {
+	if isDeleting {
 		stoppingTasks := sch.StopTask()
 		if len(stoppingTasks) > 0 {
 			log.Info("stopping tasks", "count", len(stoppingTasks))
@@ -455,20 +468,18 @@ func (r *BatchSandboxReconciler) reconcileTasks(
 	log.Info("schedule tasks completed", "costMs", time.Since(now).Milliseconds(), "task schedule result", utils.DumpJSON(ts))
 
 	// check task cleanup is finished
-	if batchSbx.DeletionTimestamp != nil {
+	if isDeleting {
 		unfinishedTasks := r.getTasksCleanupUnfinished(batchSbx, sch)
 		if len(unfinishedTasks) > 0 {
 			log.Info("tasks cleanup is unfinished", "unfinishedCount", len(unfinishedTasks))
+			DurationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), 3*time.Second)
 		} else {
-			var cleanupErr error
-			if controllerutil.ContainsFinalizer(batchSbx, FinalizerTaskCleanup) {
-				cleanupErr = utils.UpdateFinalizer(r.Client, batchSbx, utils.RemoveFinalizerOpType, FinalizerTaskCleanup)
-				if cleanupErr != nil {
-					if errors.IsNotFound(cleanupErr) {
-						cleanupErr = nil
-					} else {
-						log.Error(cleanupErr, "failed to remove finalizer", "finalizer", FinalizerTaskCleanup)
-					}
+			cleanupErr := utils.UpdateFinalizer(r.Client, batchSbx, utils.RemoveFinalizerOpType, FinalizerTaskCleanup)
+			if cleanupErr != nil {
+				if errors.IsNotFound(cleanupErr) {
+					cleanupErr = nil
+				} else {
+					log.Error(cleanupErr, "failed to remove finalizer", "finalizer", FinalizerTaskCleanup)
 				}
 			}
 			if cleanupErr == nil {

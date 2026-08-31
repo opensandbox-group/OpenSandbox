@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
+import threading
 from unittest.mock import MagicMock, patch
 
+import pytest
 from kubernetes.client import ApiClient, ApiException, CoreV1Api
 
 from opensandbox_server.config import KubernetesRuntimeConfig
 from opensandbox_server.services.k8s.client import K8sClient
+from opensandbox_server.services.k8s.informer import WorkloadInformer
 
 class TestK8sClient:
     
@@ -135,6 +137,27 @@ class TestK8sClient:
         c._node_v1_api = MagicMock()
         return c
 
+    def _attach_informer(self, c, informer):
+        c._informers[("g", "v1", "foos", "ns")] = informer
+        c.config = MagicMock(
+            informer_enabled=True,
+            informer_resync_seconds=300,
+            informer_watch_timeout_seconds=60,
+            read_qps=0.0,
+            write_qps=0.0,
+        )
+        return informer
+
+    def _attach_real_informer(self, c, items, cursor="cursor"):
+        informer = WorkloadInformer(
+            list_fn=MagicMock(
+                return_value={"metadata": {"resourceVersion": cursor}, "items": items}
+            ),
+            enable_watch=False,
+        )
+        assert informer._full_resync() is True
+        return self._attach_informer(c, informer)
+
     def test_create_custom_object_delegates_to_api(self, k8s_runtime_config):
         """create_custom_object forwards arguments to the raw API."""
         c = self._make_client(k8s_runtime_config)
@@ -144,38 +167,43 @@ class TestK8sClient:
             group="g", version="v1", namespace="ns", plural="foos", body=body
         )
 
-    def test_create_custom_object_updates_informer_cache(self, k8s_runtime_config):
-        """create_custom_object upserts the new object into an existing informer cache."""
+    def test_create_custom_object_invalidates_informer(self, k8s_runtime_config):
+        """A successful create invalidates without writing its direct response."""
         c = self._make_client(k8s_runtime_config)
         created = {"metadata": {"name": "foo-1", "resourceVersion": "11"}}
         c._custom_objects_api.create_namespaced_custom_object.return_value = created
-        fake_informer = MagicMock()
-        c._informers[("g", "v1", "foos", "ns")] = fake_informer
-        c.config = MagicMock(informer_enabled=True, read_qps=0.0, write_qps=0.0)
+        fake_informer = self._attach_informer(c, MagicMock())
         result = c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "foo-1"}})
         assert result == created
-        fake_informer.update_cache.assert_called_once_with(created)
+        fake_informer.invalidate.assert_called_once_with()
 
-    def test_patch_custom_object_updates_informer_cache(self, k8s_runtime_config):
-        """patch_custom_object upserts the patched object into an existing informer cache."""
+    def test_patch_custom_object_invalidates_informer(self, k8s_runtime_config):
+        """A successful patch invalidates without writing its direct response."""
         c = self._make_client(k8s_runtime_config)
         patched = {"metadata": {"name": "foo-1", "resourceVersion": "12"}}
         c._custom_objects_api.patch_namespaced_custom_object.return_value = patched
-        fake_informer = MagicMock()
-        c._informers[("g", "v1", "foos", "ns")] = fake_informer
-        c.config = MagicMock(informer_enabled=True, read_qps=0.0, write_qps=0.0)
+        fake_informer = self._attach_informer(c, MagicMock())
         result = c.patch_custom_object("g", "v1", "ns", "foos", "foo-1", {"spec": {"x": 1}})
         assert result == patched
-        fake_informer.update_cache.assert_called_once_with(patched)
+        fake_informer.invalidate.assert_called_once_with()
 
-    def test_delete_custom_object_evicts_informer_cache(self, k8s_runtime_config):
-        """delete_custom_object removes the object from an existing informer cache."""
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"metadata": {"name": "foo-1", "resourceVersion": "13"}},
+            {"kind": "Status", "status": "Success"},
+            None,
+        ],
+    )
+    def test_delete_custom_object_invalidates_for_any_response(
+        self, k8s_runtime_config, response
+    ):
+        """Delete response shape never becomes cache state."""
         c = self._make_client(k8s_runtime_config)
-        fake_informer = MagicMock()
-        c._informers[("g", "v1", "foos", "ns")] = fake_informer
-        c.config = MagicMock(informer_enabled=True, read_qps=0.0, write_qps=0.0)
+        c._custom_objects_api.delete_namespaced_custom_object.return_value = response
+        fake_informer = self._attach_informer(c, MagicMock())
         c.delete_custom_object("g", "v1", "ns", "foos", "foo-1")
-        fake_informer.delete_from_cache.assert_called_once_with("foo-1")
+        fake_informer.invalidate.assert_called_once_with()
 
     def test_write_paths_skip_cache_when_no_informer(self, k8s_runtime_config):
         """Write paths must not crash when no informer has been started yet."""
@@ -187,6 +215,32 @@ class TestK8sClient:
         c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "x"}})
         c.patch_custom_object("g", "v1", "ns", "foos", "x", {})
         c.delete_custom_object("g", "v1", "ns", "foos", "x")
+        assert c._informers == {}
+
+    @pytest.mark.parametrize("operation", ["create", "patch", "delete"])
+    def test_failed_write_does_not_invalidate(self, k8s_runtime_config, operation):
+        """Only mutations confirmed successful invalidate the informer."""
+        c = self._make_client(k8s_runtime_config)
+        fake_informer = self._attach_informer(c, MagicMock())
+        api_method = getattr(
+            c._custom_objects_api,
+            {
+                "create": "create_namespaced_custom_object",
+                "patch": "patch_namespaced_custom_object",
+                "delete": "delete_namespaced_custom_object",
+            }[operation],
+        )
+        api_method.side_effect = ApiException(status=500)
+
+        with pytest.raises(ApiException):
+            if operation == "create":
+                c.create_custom_object("g", "v1", "ns", "foos", {})
+            elif operation == "patch":
+                c.patch_custom_object("g", "v1", "ns", "foos", "foo", {})
+            else:
+                c.delete_custom_object("g", "v1", "ns", "foos", "foo")
+
+        fake_informer.invalidate.assert_not_called()
 
     def test_get_custom_object_returns_none_on_404(self, k8s_runtime_config):
         """get_custom_object returns None when the API raises a 404."""
@@ -203,20 +257,106 @@ class TestK8sClient:
         result = c.get_custom_object("g", "v1", "ns", "foos", "foo-1")
         assert result == obj
 
-    def test_get_custom_object_updates_informer_cache_on_api_hit(self, k8s_runtime_config):
-        """get_custom_object calls informer.update_cache with the returned object."""
+    def test_late_patch_and_get_responses_cannot_revive_watch_deleted_object(
+        self, k8s_runtime_config
+    ):
+        """Direct responses never overwrite LIST/WATCH-owned object state or cursor."""
         c = self._make_client(k8s_runtime_config)
-        obj = {"metadata": {"name": "foo-1", "resourceVersion": "10"}}
-        c._custom_objects_api.get_namespaced_custom_object.return_value = obj
-        fake_informer = MagicMock()
-        fake_informer.has_synced = False
-        c._informers[("g", "v1", "foos", "ns")] = fake_informer
-        c.config = MagicMock(informer_enabled=True,
-                             informer_resync_seconds=300,
-                             informer_watch_timeout_seconds=60,
-                             read_qps=0.0, write_qps=0.0)
-        c.get_custom_object("g", "v1", "ns", "foos", "foo-1")
-        fake_informer.update_cache.assert_called_once_with(obj)
+        informer = self._attach_real_informer(
+            c,
+            [{"metadata": {"name": "foo", "resourceVersion": "rv:12"}}],
+            cursor="rv:list",
+        )
+        informer._handle_event(
+            {
+                "type": "DELETED",
+                "object": {"metadata": {"name": "foo", "resourceVersion": "rv:deleted"}},
+            }
+        )
+        stale = {"metadata": {"name": "foo", "resourceVersion": "rv:11"}}
+        c._custom_objects_api.patch_namespaced_custom_object.return_value = stale
+
+        assert c.patch_custom_object("g", "v1", "ns", "foos", "foo", {}) == stale
+        assert "foo" not in informer._cache
+        assert informer._resource_version == "rv:deleted"
+        assert informer.list_if_synced() is None
+
+        generation = informer._invalidation_generation
+        c._custom_objects_api.get_namespaced_custom_object.return_value = stale
+        assert c.get_custom_object("g", "v1", "ns", "foos", "foo") == stale
+        assert "foo" not in informer._cache
+        assert informer._resource_version == "rv:deleted"
+        assert informer._invalidation_generation == generation
+
+    def test_mutation_forces_get_and_list_to_live_api(self, k8s_runtime_config):
+        """Reads cannot serve the pre-mutation cache until LIST republishes it."""
+        c = self._make_client(k8s_runtime_config)
+        old = {"metadata": {"name": "foo", "resourceVersion": "old"}}
+        informer = self._attach_real_informer(c, [old])
+        c._custom_objects_api.create_namespaced_custom_object.return_value = {
+            "metadata": {"name": "bar"}
+        }
+        live = {"metadata": {"name": "foo", "resourceVersion": "live"}}
+        c._custom_objects_api.get_namespaced_custom_object.return_value = live
+        c._custom_objects_api.list_namespaced_custom_object.return_value = {"items": [live]}
+
+        c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "bar"}})
+        assert c.get_custom_object("g", "v1", "ns", "foos", "foo") is live
+        assert c.list_custom_objects("g", "v1", "ns", "foos") == [live]
+        c._custom_objects_api.get_namespaced_custom_object.assert_called_once()
+        c._custom_objects_api.list_namespaced_custom_object.assert_called_once()
+        assert informer._cache["foo"] is old
+
+    def test_delete_then_late_patch_response_only_invalidates(self, k8s_runtime_config):
+        """A delayed patch response after delete cannot become cache state."""
+        c = self._make_client(k8s_runtime_config)
+        old = {"metadata": {"name": "foo", "resourceVersion": "rv:10"}}
+        informer = self._attach_real_informer(c, [old])
+        patch_started = threading.Event()
+        release_patch = threading.Event()
+        stale_patch = {"metadata": {"name": "foo", "resourceVersion": "rv:11"}}
+
+        def delayed_patch(**_kwargs):
+            patch_started.set()
+            assert release_patch.wait(timeout=2)
+            return stale_patch
+
+        c._custom_objects_api.patch_namespaced_custom_object.side_effect = delayed_patch
+        c._custom_objects_api.delete_namespaced_custom_object.return_value = {
+            "kind": "Status",
+            "status": "Success",
+        }
+        patch_result = []
+        thread = threading.Thread(
+            target=lambda: patch_result.append(
+                c.patch_custom_object("g", "v1", "ns", "foos", "foo", {})
+            )
+        )
+
+        thread.start()
+        assert patch_started.wait(timeout=2)
+        c.delete_custom_object("g", "v1", "ns", "foos", "foo")
+        release_patch.set()
+        thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        assert patch_result == [stale_patch]
+        assert informer._cache["foo"] is old
+        assert informer._resource_version == "cursor"
+        assert informer._invalidation_generation == 2
+        assert informer.list_if_synced() is None
+
+    def test_stopped_informer_is_not_restarted_for_read(self, k8s_runtime_config):
+        """An existing stopped informer stays stopped and the read falls back live."""
+        c = self._make_client(k8s_runtime_config)
+        informer = WorkloadInformer(list_fn=MagicMock(), enable_watch=False)
+        informer.stop()
+        self._attach_informer(c, informer)
+        live = {"metadata": {"name": "foo"}}
+        c._custom_objects_api.get_namespaced_custom_object.return_value = live
+
+        assert c.get_custom_object("g", "v1", "ns", "foos", "foo") is live
+        assert informer._thread is None
 
     def test_get_custom_object_reraises_non_404(self, k8s_runtime_config):
         """get_custom_object re-raises non-404 API exceptions."""
@@ -229,15 +369,8 @@ class TestK8sClient:
         """get_custom_object returns cached value and skips API when informer is synced."""
         c = self._make_client(k8s_runtime_config)
         cached_obj = {"metadata": {"name": "foo-1"}}
-        fake_informer = MagicMock()
-        fake_informer.has_synced = True
-        fake_informer.get.return_value = cached_obj
-        c._informers[("g", "v1", "foos", "ns")] = fake_informer
-        # Disable real informer creation
-        c.config = MagicMock(informer_enabled=True,
-                             informer_resync_seconds=300,
-                             informer_watch_timeout_seconds=60,
-                             read_qps=0.0, write_qps=0.0)
+        fake_informer = self._attach_informer(c, MagicMock())
+        fake_informer.get_if_synced.return_value = cached_obj
 
         result = c.get_custom_object("g", "v1", "ns", "foos", "foo-1")
 
@@ -263,6 +396,17 @@ class TestK8sClient:
         result = c.list_custom_objects("g", "v1", "ns", "foos")
         assert len(result) == 2
 
+    def test_list_skips_selector_parsing_without_informer(self, k8s_runtime_config):
+        """Selector parsing is only part of the informer cache path."""
+        c = self._make_client(k8s_runtime_config)
+        c.config = MagicMock(informer_enabled=False, read_qps=0.0)
+        c._custom_objects_api.list_namespaced_custom_object.return_value = {"items": []}
+
+        with patch("opensandbox_server.services.k8s.client.parse_selector") as parse:
+            assert c.list_custom_objects("g", "v1", "ns", "foos", "team=infra") == []
+
+        parse.assert_not_called()
+
     def test_list_custom_objects_returns_empty_on_404(self, k8s_runtime_config):
         """list_custom_objects returns [] when the API raises a 404."""
         c = self._make_client(k8s_runtime_config)
@@ -279,17 +423,8 @@ class TestK8sClient:
 
     def _attach_synced_informer(self, c, items):
         fake_informer = MagicMock()
-        fake_informer.has_synced = True
-        fake_informer.list.return_value = list(items)
-        c._informers[("g", "v1", "foos", "ns")] = fake_informer
-        c.config = MagicMock(
-            informer_enabled=True,
-            informer_resync_seconds=300,
-            informer_watch_timeout_seconds=60,
-            read_qps=0.0,
-            write_qps=0.0,
-        )
-        return fake_informer
+        fake_informer.list_if_synced.return_value = list(items)
+        return self._attach_informer(c, fake_informer)
 
     def test_list_custom_objects_returns_cached_when_synced(self, k8s_runtime_config):
         """When the informer is synced, list_custom_objects serves from cache."""
@@ -336,24 +471,16 @@ class TestK8sClient:
     def test_list_custom_objects_falls_back_when_informer_unsynced(
         self, k8s_runtime_config
     ):
-        """Cache miss when has_synced=False routes to direct API."""
+        """An unavailable cache routes to the direct API."""
         c = self._make_client(k8s_runtime_config)
-        fake_informer = MagicMock()
-        fake_informer.has_synced = False
-        c._informers[("g", "v1", "foos", "ns")] = fake_informer
-        c.config = MagicMock(
-            informer_enabled=True,
-            informer_resync_seconds=300,
-            informer_watch_timeout_seconds=60,
-            read_qps=0.0,
-            write_qps=0.0,
-        )
+        fake_informer = self._attach_informer(c, MagicMock())
+        fake_informer.list_if_synced.return_value = None
         c._custom_objects_api.list_namespaced_custom_object.return_value = {
             "items": [{"metadata": {"name": "z"}}]
         }
         result = c.list_custom_objects("g", "v1", "ns", "foos")
         assert [obj["metadata"]["name"] for obj in result] == ["z"]
-        fake_informer.list.assert_not_called()
+        fake_informer.list_if_synced.assert_called_once_with()
         c._custom_objects_api.list_namespaced_custom_object.assert_called_once()
 
     def test_list_custom_objects_falls_back_on_unsupported_selector(

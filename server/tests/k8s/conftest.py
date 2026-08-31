@@ -27,13 +27,13 @@ def stub_workload_informer(monkeypatch):
     Prevent real informer threads in unit tests.
     
     Stubs the WorkloadInformer used inside K8sClient so that watch threads are
-    not started during unit tests. Cache is always empty (has_synced=False),
-    so get_custom_object falls through to the mocked API call.
+    not started during unit tests. Cache reads always return unavailable, so
+    get_custom_object falls through to the mocked API call.
     """
 
     class _FakeInformer:
         def __init__(self, *args, **kwargs):
-            self.has_synced = False
+            pass
 
         def start(self):
             return None
@@ -41,10 +41,13 @@ def stub_workload_informer(monkeypatch):
         def stop(self):
             return None
 
-        def get(self, name):
+        def get_if_synced(self, name):
             return None
 
-        def update_cache(self, obj):
+        def list_if_synced(self):
+            return None
+
+        def invalidate(self):
             return None
 
     monkeypatch.setattr(

@@ -798,6 +798,10 @@ func TestBatchSandboxReconciler_reconcileTasks(t *testing.T) {
 			}(),
 			wantErr: false,
 			checker: func(r *BatchSandboxReconciler, batchSbx *sandboxv1alpha1.BatchSandbox) error {
+				key := types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String()
+				if requeueAfter := DurationStore.Pop(key); requeueAfter != 0 {
+					return fmt.Errorf("completed task cleanup should not requeue, got %v", requeueAfter)
+				}
 				// Verify finalizer is removed by getting from client
 				updated := &sandboxv1alpha1.BatchSandbox{}
 				if err := r.Client.Get(context.Background(), types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}, updated); err != nil {
