@@ -237,6 +237,78 @@ func TestSchedule(t *testing.T) {
 			},
 		},
 		{
+			name: "dead pod triggers re-allocation - allocated pod deleted externally",
+			spec: &AllocSpec{
+				Pods: []*corev1.Pod{
+					// pod1 was allocated but is now gone (not in Pods list).
+					// pod2 is a new available pod in the pool.
+					{ObjectMeta: metav1.ObjectMeta{Name: "pod2"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}},
+				},
+				Pool: &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool1"}},
+				Sandboxes: []*sandboxv1alpha1.BatchSandbox{
+					{ObjectMeta: metav1.ObjectMeta{Name: "sbx1"}, Spec: sandboxv1alpha1.BatchSandboxSpec{Replicas: &replica1}},
+				},
+			},
+			poolAlloc:     &PoolAllocation{PodAllocation: map[string]string{"pod1": "sbx1"}},
+			sandboxAllocs: map[string]*SandboxAllocation{"sbx1": {Pods: []string{"pod1"}}},
+			releases:      map[string]*AllocationRelease{"sbx1": {Pods: []string{}}},
+			released:      map[string]*AllocationReleased{"sbx1": {Pods: []string{}}},
+			wantAction: &algorithm.AllocAction{
+				ToAllocate:    map[string][]string{"sbx1": {"pod2"}},
+				ToRelease:     map[string][]string{"sbx1": {"pod1"}},
+				PodSupplement: 0,
+			},
+		},
+		{
+			name: "released pod does not block second re-allocation",
+			spec: &AllocSpec{
+				Pods: []*corev1.Pod{
+					// pod1 was previously allocated and released (recycled).
+					// pod2 was the replacement but is now also deleted.
+					// pod3 is a new available pod.
+					{ObjectMeta: metav1.ObjectMeta{Name: "pod3"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}},
+				},
+				Pool: &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool1"}},
+				Sandboxes: []*sandboxv1alpha1.BatchSandbox{
+					{ObjectMeta: metav1.ObjectMeta{Name: "sbx1"}, Spec: sandboxv1alpha1.BatchSandboxSpec{Replicas: &replica1}},
+				},
+			},
+			poolAlloc:     &PoolAllocation{PodAllocation: map[string]string{"pod1": "sbx1", "pod2": "sbx1"}},
+			sandboxAllocs: map[string]*SandboxAllocation{"sbx1": {Pods: []string{"pod1", "pod2"}}},
+			releases:      map[string]*AllocationRelease{"sbx1": {Pods: []string{}}},
+			released:      map[string]*AllocationReleased{"sbx1": {Pods: []string{"pod1"}}},
+			wantAction: &algorithm.AllocAction{
+				ToAllocate:    map[string][]string{"sbx1": {"pod3"}},
+				ToRelease:     map[string][]string{"sbx1": {"pod2"}},
+				PodSupplement: 0,
+			},
+		},
+		{
+			name: "terminal pod (Failed) triggers re-allocation",
+			spec: &AllocSpec{
+				Pods: []*corev1.Pod{
+					// pod1 exists but is in Failed state — should not count as live.
+					{ObjectMeta: metav1.ObjectMeta{Name: "pod1"}, Status: corev1.PodStatus{Phase: corev1.PodFailed}},
+					// pod2 is ready and available.
+					{ObjectMeta: metav1.ObjectMeta{Name: "pod2"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}},
+				},
+				Pool: &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool1"}},
+				Sandboxes: []*sandboxv1alpha1.BatchSandbox{
+					{ObjectMeta: metav1.ObjectMeta{Name: "sbx1"}, Spec: sandboxv1alpha1.BatchSandboxSpec{Replicas: &replica1}},
+				},
+			},
+			poolAlloc:     &PoolAllocation{PodAllocation: map[string]string{"pod1": "sbx1"}},
+			sandboxAllocs: map[string]*SandboxAllocation{"sbx1": {Pods: []string{"pod1"}}},
+			releases:      map[string]*AllocationRelease{"sbx1": {Pods: []string{}}},
+			released:      map[string]*AllocationReleased{"sbx1": {Pods: []string{}}},
+			wantAction: &algorithm.AllocAction{
+				// Terminal pod is queued for release to clean alloc-status/store.
+				ToAllocate:    map[string][]string{"sbx1": {"pod2"}},
+				ToRelease:     map[string][]string{"sbx1": {"pod1"}},
+				PodSupplement: 0,
+			},
+		},
+		{
 			name: "orphan sandbox - pods in store but sandbox no longer in spec",
 			spec: &AllocSpec{
 				Pods: []*corev1.Pod{
