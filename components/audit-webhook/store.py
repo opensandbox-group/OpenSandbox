@@ -54,8 +54,10 @@ CREATE INDEX IF NOT EXISTS idx_sandbox_access_log_sandbox_time
 # (synced from Kubernetes); deleted rows are hidden from the UI/API.
 # ``accessed`` is FALSE on rows inserted by the cluster discovery for
 # sandboxes that have not been accessed yet - their request fields are
-# NULL until the first audit event arrives. ``created_at`` holds the
-# sandbox's BatchSandbox creationTimestamp on discovery-inserted rows.
+# NULL until the first audit event arrives.
+# ``created_at`` holds the sandbox's BatchSandbox creationTimestamp on
+# discovery-inserted rows; ``node_ip`` is the IP of the node the sandbox
+# pod runs on (synced from the cluster).
 _CREATE_SUMMARY_TABLE = """
 CREATE TABLE IF NOT EXISTS sandbox_access_latest (
     sandbox_id    TEXT        PRIMARY KEY,
@@ -67,18 +69,20 @@ CREATE TABLE IF NOT EXISTS sandbox_access_latest (
     deleted       BOOLEAN     NOT NULL DEFAULT FALSE,
     accessed      BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at    TIMESTAMPTZ,
+    node_ip       TEXT,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT date_trunc('second', now())
 );
 """
 
 # Migrations for tables created before the ``deleted``/``accessed``/
-# ``created_at`` columns existed; the request columns must be nullable to
-# hold unaccessed rows.
+# ``created_at``/``node_ip`` columns existed; the request columns must be
+# nullable to hold unaccessed rows.
 _ALTER_SUMMARY_MIGRATIONS = """
 ALTER TABLE sandbox_access_latest
     ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS accessed BOOLEAN NOT NULL DEFAULT TRUE,
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS node_ip TEXT;
 ALTER TABLE sandbox_access_latest
     ALTER COLUMN uri DROP NOT NULL,
     ALTER COLUMN method DROP NOT NULL,
@@ -137,7 +141,7 @@ RETURNING (xmax = 0) AS inserted
 # load costs one round trip instead of two; the plain COUNT remains as a
 # fallback for pages past the end (no rows returned -> no total known).
 _LIST_LATEST = """
-SELECT sandbox_id, uri, method, target, request_time, request_count, accessed, created_at,
+SELECT sandbox_id, uri, method, target, request_time, request_count, accessed, created_at, node_ip,
        count(*) OVER () AS __total
 FROM sandbox_access_latest
 WHERE NOT deleted {extra}
@@ -152,7 +156,8 @@ WHERE NOT deleted {extra}
 """
 
 # Whitelisted sort orders for the summary table. Never-accessed rows have
-# a NULL request_time and always sort last within an accessed group.
+# a NULL request_time and always sort last within an accessed group;
+# discovered rows without a creation timestamp always sort last.
 _LATEST_ORDERS = {
     "request_time": "request_time ASC",
     "-request_time": "request_time DESC NULLS LAST",
@@ -160,6 +165,8 @@ _LATEST_ORDERS = {
     "-request_count": "request_count DESC",
     "accessed": "accessed ASC, request_time DESC NULLS LAST",
     "-accessed": "accessed DESC, request_time DESC NULLS LAST",
+    "created_at": "created_at ASC NULLS LAST",
+    "-created_at": "created_at DESC NULLS LAST",
 }
 
 _LIST_DETAILS = """
@@ -222,10 +229,11 @@ class AuditStore:
         """List per-sandbox latest requests, sorted by ``sort``.
 
         Rows marked deleted (sandbox resource gone) are excluded.
-        ``search`` filters sandbox ids by substring (case-insensitive,
-        fuzzy). ``time_from``/``time_to`` bound the latest request time
-        (inclusive; naive timestamps are assumed to be UTC). ``sort`` is a
-        whitelisted key from ``_LATEST_ORDERS`` (``-`` prefix means
+        ``search`` matches sandbox ids by substring (case-insensitive,
+        fuzzy) OR node IPs exactly - typing an IP returns every sandbox
+        on that node. ``time_from``/``time_to`` bound the latest request
+        time (inclusive; naive timestamps are assumed to be UTC). ``sort``
+        is a whitelisted key from ``_LATEST_ORDERS`` (``-`` prefix means
         descending); default is newest first.
         """
         try:
@@ -236,10 +244,15 @@ class AuditStore:
         params: dict = {"limit": limit, "offset": offset}
         conditions = []
         if search:
-            # Fuzzy match on sandbox_id; escape LIKE wildcards in the input
-            # so user input is matched literally.
+            # Fuzzy match on sandbox_id OR exact match on node_ip; escape
+            # LIKE wildcards in the input so user input is matched
+            # literally. node_ip is a plain equality (IPs are not fuzzy).
             params["pattern"] = f"%{_like_escape(search)}%"
-            conditions.append("sandbox_id ILIKE %(pattern)s ESCAPE '\\'")
+            params["node_ip"] = search
+            conditions.append(
+                "(sandbox_id ILIKE %(pattern)s ESCAPE '\\'"
+                " OR node_ip = %(node_ip)s)"
+            )
         if time_from is not None:
             params["time_from"] = _ensure_utc(time_from)
             conditions.append("request_time >= %(time_from)s")
@@ -331,6 +344,34 @@ class AuditStore:
             "discovered": sum(1 for flag in flags if flag),
             "backfilled": sum(1 for flag in flags if not flag),
         }
+
+    def update_node_ips(self, nodes: dict[str, str]) -> int:
+        """Refresh ``node_ip`` from the sandbox pods' host IPs.
+
+        ``nodes`` maps sandbox id -> node IP (from the cluster). Rows
+        whose id is present get ``node_ip`` set (a rescheduled pod's new
+        node overwrites the old value); ids absent from the map are left
+        as they are (the pod may be gone or not scheduled yet). Returns
+        the number of rows whose value actually changed.
+        """
+        if not nodes:
+            return 0
+        # One statement for all ids - each round trip to a remote
+        # database can be slow.
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE sandbox_access_latest AS latest
+                    SET node_ip = mapped.node_ip
+                    FROM unnest(%(ids)s::text[], %(ips)s::text[])
+                        AS mapped(sandbox_id, node_ip)
+                    WHERE latest.sandbox_id = mapped.sandbox_id
+                      AND latest.node_ip IS DISTINCT FROM mapped.node_ip
+                    """,
+                    {"ids": list(nodes), "ips": list(nodes.values())},
+                )
+                return cur.rowcount
 
     def sync_deleted_flags(self, live_ids: list[str]) -> dict:
         """Reconcile the ``deleted`` flag against live sandbox resources.

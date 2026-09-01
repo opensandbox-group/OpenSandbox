@@ -34,6 +34,7 @@ class FakeStore:
         # created_at per known row (event rows start as None); mimics the
         # backfill in upsert_discovered_sandboxes.
         self.created_at = {}
+        self.node_ips = {}  # sandbox_id -> node IP
 
     def init_schema(self):
         pass
@@ -70,6 +71,19 @@ class FakeStore:
             self.created_at[sandbox["name"]] = sandbox["created_at"]
         return {"discovered": len(discovered), "backfilled": len(backfilled)}
 
+    def update_node_ips(self, nodes):
+        if self.fail:
+            raise RuntimeError("db down")
+        known = set(self.created_at) | set(self.unaccessed)
+        changed = [
+            sandbox_id
+            for sandbox_id, ip in nodes.items()
+            if sandbox_id in known and self.node_ips.get(sandbox_id) != ip
+        ]
+        for sandbox_id in changed:
+            self.node_ips[sandbox_id] = nodes[sandbox_id]
+        return len(changed)
+
     def list_latest(
         self,
         search=None,
@@ -81,6 +95,16 @@ class FakeStore:
     ):
         if self.fail:
             raise RuntimeError("db down")
+
+        def matches_search(sandbox_id):
+            if search is None:
+                return True
+            # Mimic the SQL: fuzzy on sandbox_id OR exact on node_ip.
+            return (
+                search.lower() in sandbox_id.lower()
+                or self.node_ips.get(sandbox_id) == search
+            )
+
         items = [
             {
                 "sandbox_id": event["sandbox_id"],
@@ -91,10 +115,11 @@ class FakeStore:
                 "request_count": 1,
                 "accessed": True,
                 "created_at": self.created_at.get(event["sandbox_id"]),
+                "node_ip": self.node_ips.get(event["sandbox_id"]),
             }
             for event in self.events
             if event["sandbox_id"] not in self.deleted_ids
-            and (search is None or search.lower() in event["sandbox_id"].lower())
+            and matches_search(event["sandbox_id"])
             and (time_from is None or time_from <= event["request_time"])
             and (time_to is None or event["request_time"] <= time_to)
         ]
@@ -111,10 +136,11 @@ class FakeStore:
                     "request_count": 0,
                     "accessed": False,
                     "created_at": created_at,
+                    "node_ip": self.node_ips.get(sandbox_id),
                 }
                 for sandbox_id, created_at in self.unaccessed.items()
                 if sandbox_id not in self.deleted_ids
-                and (search is None or search.lower() in sandbox_id.lower())
+                and matches_search(sandbox_id)
             )
         return {
             "total": len(items),
@@ -149,8 +175,12 @@ class FakeStore:
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
     fake = FakeStore()
+    # Force auth off regardless of the local audit.toml so tests are
+    # independent of the developer's configuration (auth-specific tests
+    # override this via monkeypatch themselves).
+    monkeypatch.setattr(main, "UI_PASSWORD", "")
     # Bypass the lifespan (which opens a real PostgreSQL pool) by injecting
     # the fake store directly into app state.
     main.app.state.store = fake
@@ -382,6 +412,11 @@ def test_list_sandboxes_sort(client):
     assert response.status_code == 200
     assert response.json()["sort"] == "accessed"
 
+    # Sort by created_at (sandbox creation timestamp) is allowed.
+    response = test_client.get("/api/sandboxes", params={"sort": "-created_at"})
+    assert response.status_code == 200
+    assert response.json()["sort"] == "-created_at"
+
     # Unknown sort keys are rejected.
     response = test_client.get("/api/sandboxes", params={"sort": "sandbox_id"})
     assert response.status_code == 422
@@ -485,14 +520,20 @@ def test_normalize_truncates_to_seconds():
 
 
 class FakeK8sClient:
-    def __init__(self, names, created_at=None):
+    def __init__(self, names, created_at=None, pod_nodes=None):
         self.names = names
         self.created_at = created_at
+        # sandbox_id -> node IP; defaults to none (no pods listed).
+        self.pod_nodes = pod_nodes or {}
         self.calls = 0
 
     def list_batch_sandboxes(self, namespace):
         self.calls += 1
         return [{"name": name, "created_at": self.created_at} for name in self.names]
+
+    def list_sandbox_pod_nodes(self, namespace):
+        self.calls += 1
+        return dict(self.pod_nodes)
 
 
 def test_sync_deleted_marks_missing_sandboxes(monkeypatch, client):
@@ -655,6 +696,70 @@ def test_sync_backfills_creation_timestamp(monkeypatch, client):
         assert test_client.post("/api/sync-deleted").json()["backfilled"] == 0
     finally:
         main.app.state.k8s_client = None
+
+
+def test_sync_updates_node_ips(monkeypatch, client):
+    """The sync refreshes node_ip from the sandbox pods' host IPs."""
+    monkeypatch.setattr(main, "K8S_NAMESPACE", "opensandbox")
+    test_client, fake = client
+    fake.record([EVENT, {**EVENT, "sandbox_id": "other"}])
+    fake_k8s = FakeK8sClient(
+        ["test-sandbox", "other"],
+        pod_nodes={"test-sandbox": "10.0.0.1", "other": "10.0.0.2"},
+    )
+    monkeypatch.setattr(main.k8s, "K8sClient", lambda _: fake_k8s)
+    main.app.state.k8s_client = fake_k8s
+    try:
+        response = test_client.post("/api/sync-deleted")
+    finally:
+        main.app.state.k8s_client = None
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["node_updated"] == 2
+
+    items = {
+        item["sandbox_id"]: item
+        for item in test_client.get("/api/sandboxes").json()["items"]
+    }
+    assert items["test-sandbox"]["node_ip"] == "10.0.0.1"
+    assert items["other"]["node_ip"] == "10.0.0.2"
+
+    # Searching by node IP returns every sandbox on that node.
+    listing = test_client.get("/api/sandboxes", params={"search": "10.0.0.1"})
+    assert listing.status_code == 200
+    assert listing.json()["total"] == 1
+    assert listing.json()["items"][0]["sandbox_id"] == "test-sandbox"
+
+    # A rescheduled pod (new host IP) overwrites the old value; unchanged
+    # rows are not counted again.
+    fake_k8s.pod_nodes = {"test-sandbox": "10.0.0.9", "other": "10.0.0.2"}
+    main.app.state.k8s_client = fake_k8s
+    try:
+        response = test_client.post("/api/sync-deleted")
+    finally:
+        main.app.state.k8s_client = None
+    assert response.json()["node_updated"] == 1
+    items = {
+        item["sandbox_id"]: item
+        for item in test_client.get("/api/sandboxes").json()["items"]
+    }
+    assert items["test-sandbox"]["node_ip"] == "10.0.0.9"
+
+
+def test_search_by_ip_finds_unaccessed_sandboxes(monkeypatch, client):
+    """IP search also matches discovered-but-never-accessed rows."""
+    monkeypatch.setattr(main, "K8S_NAMESPACE", "opensandbox")
+    test_client, fake = client
+    fake.upsert_discovered_sandboxes([{"name": "fresh", "created_at": None}])
+    fake.update_node_ips({"fresh": "10.0.0.5"})
+
+    listing = test_client.get("/api/sandboxes", params={"search": "10.0.0.5"})
+
+    assert listing.status_code == 200
+    assert listing.json()["total"] == 1
+    assert listing.json()["items"][0]["sandbox_id"] == "fresh"
+    assert listing.json()["items"][0]["node_ip"] == "10.0.0.5"
 
 
 def test_discovered_sandbox_becomes_accessed_on_first_event(monkeypatch, client):

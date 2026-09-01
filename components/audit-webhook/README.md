@@ -14,7 +14,8 @@ Two tables are maintained (auto-created on startup):
 - `sandbox_access_latest` - **总表**: one row per sandbox id, holding the
   latest request and the total request count. BatchSandbox resources
   whose sandbox id has no row yet are inserted with `accessed = FALSE`
-  (request fields NULL) and shown in the UI as `未访问`.
+  (request fields NULL) and shown in the UI as `未访问`; each row also
+  carries the node IP of the node its sandbox pod runs on.
 
 A built-in web UI (React + Ant Design; source in `frontend/`, built
 output in `static/`) displays the records on two pages (password
@@ -23,7 +24,9 @@ protected when `server.ui_password` is set):
 - `GET /` - **总表页**: per-sandbox latest requests; fuzzy search on
   sandbox id, a date-range filter on the latest request time, sortable
   columns (request time / request count / accessed status), and
-  auto-refresh; sandboxes that exist in the cluster but were never
+  auto-refresh; the node IP column shows which node each sandbox pod
+  runs on and the search box accepts a node IP to list every sandbox
+  on that node; sandboxes that exist in the cluster but were never
   accessed are listed with an `未访问` marker; clicking a sandbox id
   navigates to its detail page.
 - `GET /details?sandbox_id=<id>` - **请求详情页**: request details with
@@ -105,10 +108,11 @@ Responses:
 ### `GET /` (Summary Page)
 
 Web page listing the latest request per sandbox id with the total request
-count. Supports fuzzy search on sandbox id, sorting by request time /
-request count (click the column headers to toggle ascending/descending),
-and a date-range filter on the latest request time (two date pickers -
-start/end, both inclusive, interpreted in the browser's local timezone).
+count. Supports fuzzy search on sandbox id, sorting by status / creation
+time / request time / request count (click the column headers to toggle
+descending/ascending), and a date-range filter on the latest request time
+(two date pickers - start/end, both inclusive, interpreted in the
+browser's local timezone).
 Clicking a sandbox id navigates to
 `GET /details?sandbox_id=<id>` showing that sandbox's request history.
 
@@ -131,9 +135,10 @@ List per-sandbox latest requests (summary table).
 
 Query params:
 - `search` - fuzzy-match sandbox ids (case-insensitive substring;
-  `%`/`_` in the input are matched literally)
-- `sort` - `request_time`, `request_count` or `accessed`; prefix with
-  `-` for descending (default: `-request_time`, newest first;
+  `%`/`_` in the input are matched literally) OR exact-match node
+  IPs - an IP returns every sandbox on that node
+- `sort` - `request_time`, `request_count`, `created_at` or `accessed`;
+  prefix with `-` for descending (default: `-request_time`, newest first;
   `accessed` ascending puts never-accessed sandboxes first)
 - `time_from` / `time_to` - ISO 8601 bounds on the latest request time
   (inclusive; naive values are assumed to be UTC); the summary page's
@@ -143,7 +148,8 @@ Query params:
 ```json
 {"total": 2, "items": [{"sandbox_id": "my-sandbox", "uri": "/ws", "method": "GET",
   "target": "10.0.0.1:8080", "request_time": "2026-08-20T10:00:00+00:00",
-  "request_count": 2, "accessed": true}]}
+  "request_count": 2, "accessed": true, "created_at": "2026-08-20T09:00:00Z",
+  "node_ip": "10.0.0.7"}]}
 ```
 
 `accessed` is `false` (and the request fields `null`, `request_count` `0`)
@@ -178,14 +184,17 @@ query APIs), accessing Kubernetes through the kubeconfig at
    UI with an `未访问` marker. Existing rows whose `created_at` is
    still NULL get it backfilled. The first audit event for such a
    sandbox flips the row to `accessed = TRUE`.
-2. The `deleted` flags are reconciled against the
+2. The node IP of each sandbox pod (label `opensandbox.io/id`, the
+   pod's `status.hostIP`) is refreshed into `node_ip`; a rescheduled
+   pod overwrites the old value.
+3. The `deleted` flags are reconciled against the
    `batchsandboxes.sandbox.opensandbox.io` resource names (the resource
    name is the sandbox id): summary rows whose sandbox id is not among
    them are marked `deleted` (hidden from the UI and `/api/sandboxes`);
    previously deleted ids that reappear are restored.
 
 Responses:
-- `200 {"namespace": "...", "live": <n>, "discovered": <n>, "backfilled": <n>, "deleted": <n>, "restored": <n>}`
+- `200 {"namespace": "...", "live": <n>, "discovered": <n>, "backfilled": <n>, "node_updated": <n>, "deleted": <n>, "restored": <n>}`
 - `400` - `kubernetes.namespace` is not configured
 - `502` - the Kubernetes API or the database write failed
 
@@ -218,6 +227,7 @@ CREATE TABLE sandbox_access_latest (
     request_count BIGINT      NOT NULL DEFAULT 1,  -- 累计请求数
     deleted       BOOLEAN     NOT NULL DEFAULT FALSE,  -- 沙箱资源已不存在（前端不展示）
     accessed      BOOLEAN     NOT NULL DEFAULT TRUE,   -- 集群中发现但从未访问
+    node_ip       TEXT,                 -- 沙箱 pod 所在节点 IP
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -244,6 +254,9 @@ Behavior notes:
   creationTimestamp); existing rows missing `created_at` get it
   backfilled; a first request flips them to `accessed = TRUE` even
   when it is older than the (NULL) stored request time.
+- `node_ip` is refreshed from each sandbox pod's `status.hostIP` on
+  every sync; searching `/api/sandboxes` by a node IP returns every
+  sandbox on that node.
 
 ## Docker
 

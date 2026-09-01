@@ -1,0 +1,80 @@
+body {
+  margin: 0;
+  background: #f5f6f8;
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei",
+    "Helvetica Neue", Arial, sans-serif;
+}
+
+.app-header {
+  background: #fff;
+  border-bottom: 1px solid #e3e6ea;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.app-header h1 {
+  font-size: 18px;
+  margin: 0;
+  font-weight: 600;
+  color: #24292f;
+}
+
+.app-main {
+  padding: 20px 24px;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.table-card {
+  background: #fff;
+  border: 1px solid #e3e6ea;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.table-toolbar .spacer {
+  flex: 1;
+}
+
+.hint {
+  font-size: 13px;
+  color: #6a737d;
+  margin: 0 0 12px;
+}
+
+.uri-cell {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: bottom;
+}
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(160deg, #eef2ff 0%, #f5f6f8 60%);
+}
+
+.login-card {
+  width: 360px;
+  box-shadow: 0 8px 30px rgba(36, 41, 47, 0.08);
+}

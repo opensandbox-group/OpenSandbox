@@ -1,0 +1,6 @@
+# Local configuration (contains credentials) - copy from audit.toml.example
+audit.toml
+config
+
+# Frontend build inputs/outputs
+frontend/node_modules/

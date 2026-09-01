@@ -82,8 +82,8 @@ UI_PASSWORD = _config["ui_password"]
 # (the resource name is the sandbox id). sync_interval (seconds) enables a
 # periodic background sync; 0 means sync only via POST /api/sync-deleted.
 # Each sync discovers sandboxes that exist in the cluster but not in the
-# database (inserted as never-accessed rows) and reconciles the deleted
-# flags.
+# database (inserted as never-accessed rows), refreshes each sandbox
+# pod's node IP, and reconciles the deleted flags.
 KUBECONFIG_PATH = _config["kubeconfig"]
 K8S_NAMESPACE = _config["k8s_namespace"]
 K8S_SYNC_INTERVAL = _config["k8s_sync_interval"]
@@ -168,20 +168,30 @@ async def _periodic_sync(store: AuditStore) -> None:
 
 
 def _sync_sandboxes(store: AuditStore, k8s_client: k8s.K8sClient) -> dict:
-    """Discover unaccessed sandboxes and reconcile the ``deleted`` flags.
+    """Discover unaccessed sandboxes, refresh node IPs, and reconcile the
+    ``deleted`` flags.
 
     The BatchSandbox resource name is the sandbox id. Sandbox ids that
     exist in the cluster but have no summary row are inserted as
     never-accessed rows carrying the resource's creationTimestamp
     (shown in the UI with an ``未访问`` marker); existing rows missing a
-    creation timestamp get it backfilled; rows whose sandbox id is gone
-    from the cluster are flagged deleted.
+    creation timestamp get it backfilled. The ``node_ip`` of every
+    sandbox pod's host is refreshed. Rows whose sandbox id is gone from
+    the cluster are flagged deleted.
     """
     sandboxes = k8s_client.list_batch_sandboxes(K8S_NAMESPACE)
     discovered = store.upsert_discovered_sandboxes(sandboxes)
+    node_updated = store.update_node_ips(
+        k8s_client.list_sandbox_pod_nodes(K8S_NAMESPACE)
+    )
     names = [sandbox["name"] for sandbox in sandboxes]
     result = store.sync_deleted_flags(names)
-    return {"live": len(sandboxes), **discovered, **result}
+    return {
+        "live": len(sandboxes),
+        "node_updated": node_updated,
+        **discovered,
+        **result,
+    }
 
 
 app = FastAPI(
@@ -330,7 +340,7 @@ def list_sandboxes(
     store: StoreDep,
     search: Annotated[str | None, Query(min_length=1)] = None,
     sort: Annotated[
-        str, Query(pattern=r"^-?(request_time|request_count|accessed)$")
+        str, Query(pattern=r"^-?(request_time|request_count|accessed|created_at)$")
     ] = "-request_time",
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -339,12 +349,14 @@ def list_sandboxes(
 ) -> dict:
     """List per-sandbox latest requests.
 
-    ``search`` fuzzy-matches sandbox ids (case-insensitive substring).
-    ``sort`` is ``request_time``, ``request_count`` or ``accessed``;
-    prefix with ``-`` for descending (default: newest first; sorting by
-    ``accessed`` ascending puts never-accessed sandboxes first).
-    ``time_from``/``time_to`` bound the latest request time (ISO 8601,
-    inclusive; naive values are assumed to be UTC).
+    ``search`` matches sandbox ids by substring (case-insensitive,
+    fuzzy) OR node IPs exactly - typing an IP returns every sandbox on
+    that node. ``sort`` is ``request_time``, ``request_count``,
+    ``created_at`` or ``accessed``; prefix with ``-`` for descending
+    (default: newest first; sorting by ``accessed`` ascending puts
+    never-accessed sandboxes first). ``time_from``/``time_to`` bound the
+    latest request time (ISO 8601, inclusive; naive values are assumed
+    to be UTC).
     """
     _require_api_auth(request)
     return _safe_query(
@@ -384,7 +396,8 @@ def sync_deleted(request: Request, store: StoreDep) -> dict:
     never-accessed rows (``accessed = FALSE``, ``created_at`` = the
     resource's creationTimestamp, shown in the UI with an ``未访问``
     marker); existing rows missing a creation timestamp get it
-    backfilled. Then the ``deleted`` flags are reconciled: summary rows
+    backfilled. Each sandbox pod's node IP is refreshed into
+    ``node_ip``. Then the ``deleted`` flags are reconciled: summary rows
     whose sandbox id is not among the live resource names (the resource
     name is the sandbox id) are marked ``deleted`` and hidden from the
     UI/API; previously deleted ids that reappear are restored.

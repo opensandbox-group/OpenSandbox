@@ -1,0 +1,34 @@
+# OpenSandbox audit webhook configuration.
+#
+# Copy to audit.toml (next to main.py) or set AUDIT_CONFIG_PATH to this
+# file's location. All keys are optional; missing keys use the defaults
+# shown here.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+# When non-empty, the web UI and query APIs require login with this
+# password (event ingestion POST /events is never protected).
+ui_password = ""
+
+[database]
+url = "postgresql://postgres:postgres@localhost:5432/opensandbox_audit"
+pool_min = 1
+pool_max = 10
+
+[kubernetes]
+# Kubeconfig file path for the cluster sync; empty = default kubeconfig,
+# falling back to in-cluster credentials.
+kubeconfig = ""
+# Namespace whose batchsandboxes.sandbox.opensandbox.io resources mark
+# live sandbox ids (the resource name is the sandbox id; required by
+# POST /api/sync-deleted).
+namespace = ""
+# When > 0 (seconds), sync against the cluster periodically in the
+# background: discover sandbox ids that have no database row yet
+# (inserted as never-accessed rows shown in the UI) and reconcile the
+# deleted flags; 0 = manual sync via POST /api/sync-deleted only.
+sync_interval = 0
+
+[log]
+level = "INFO"
