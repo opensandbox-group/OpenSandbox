@@ -1419,6 +1419,139 @@ def test_egress_sidecar_retries_without_ipv6_sysctls_when_daemon_rejects_them(mo
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
+def test_egress_sidecar_retries_on_port_publish_error(mock_docker):
+    """When docker start fails with a port-publish error, the sidecar is
+    recreated with freshly-allocated ports and started again."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+
+    call_count = 0
+
+    def create_container_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return {"Id": f"sidecar-id-{call_count}"}
+
+    mock_client.api.create_container.side_effect = create_container_side_effect
+
+    def start_side_effect(*args, **kwargs):
+        if start_side_effect.attempt == 0:
+            start_side_effect.attempt += 1
+            raise DockerException(
+                "ports are not available: exposing port TCP 0.0.0.0:49870 -> "
+                "127.0.0.1:0: listen tcp4 0.0.0.0:49870: bind: An attempt was "
+                "made to access a socket in a way forbidden by its access permissions."
+            )
+        start_side_effect.attempt += 1
+
+    start_side_effect.attempt = 0
+    mock_client.containers.get.return_value = MagicMock(start=start_side_effect)
+
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest")
+    service = DockerSandboxService(config=cfg)
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_docker_operation") as mock_op,
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            side_effect=[
+                {"44772": ("0.0.0.0", 51000), "8080": ("0.0.0.0", 51001)},
+            ],
+        ) as mock_alloc,
+    ):
+        mock_op.return_value.__enter__.return_value = None
+        mock_op.return_value.__exit__.return_value = None
+        service._start_egress_sidecar(
+            "sandbox-id",
+            NetworkPolicy(defaultAction="deny", egress=[]),
+            egress_token="egress-token",
+            host_execd_port=49870,
+            host_http_port=50000,
+            port_allocator=mock_alloc,
+        )
+
+    assert mock_client.api.create_container.call_count == 2
+    first_bindings = mock_client.api.create_container.call_args_list[0].kwargs["host_config"][
+        "port_bindings"
+    ]
+    second_bindings = mock_client.api.create_container.call_args_list[1].kwargs["host_config"][
+        "port_bindings"
+    ]
+    first_execd = first_bindings["44772"][1]
+    second_execd = second_bindings["44772"][1]
+    assert int(first_execd) != int(second_execd)
+    # Allocator called once during retry (initial ports passed as parameters).
+    assert mock_alloc.call_count == 1
+    assert mock_client.api.remove_container.call_count == 1
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_egress_sidecar_raises_on_second_port_failure(mock_docker):
+    """When both the initial start and the retry fail with port-publish errors,
+    an HTTPException is raised with the real Docker error."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+    mock_client.api.create_container.return_value = {"Id": "sidecar-id"}
+
+    def start_side_effect(*args, **kwargs):
+        raise DockerException(
+            "ports are not available: exposing port TCP 0.0.0.0:49870 -> "
+            "127.0.0.1:0: listen tcp4 0.0.0.0:49870: bind: permission denied"
+        )
+
+    mock_client.containers.get.return_value = MagicMock(start=start_side_effect)
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest")
+    service = DockerSandboxService(config=cfg)
+
+    def failing_allocator(*args, **kwargs):
+        return {"44772": ("0.0.0.0", 51000), "8080": ("0.0.0.0", 51001)}
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_docker_operation") as mock_op,
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            side_effect=failing_allocator,
+        ),
+    ):
+        mock_op.return_value.__enter__.return_value = None
+        mock_op.return_value.__exit__.return_value = None
+        with pytest.raises(HTTPException) as exc_info:
+            service._start_egress_sidecar(
+                "sandbox-id",
+                NetworkPolicy(defaultAction="deny", egress=[]),
+                egress_token="egress-token",
+                host_execd_port=49870,
+                host_http_port=50000,
+                port_allocator=failing_allocator,
+            )
+
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert detail["code"] == SandboxErrorCodes.CONTAINER_START_FAILED
+    assert "failed to start" in detail["message"].lower()
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
 def test_egress_sidecar_injects_sandbox_id_env(mock_docker):
     """Server unconditionally injects OPENSANDBOX_EGRESS_SANDBOX_ID into the sidecar env."""
     mock_client = MagicMock()
