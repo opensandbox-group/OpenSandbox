@@ -308,6 +308,124 @@ and how roadmap items are managed.
 - Discord: Join the [OpenSandbox Discord community](https://discord.gg/g7FuPs8YeD)
 - DingTalk: Join the [OpenSandbox technical discussion group](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11)
 
+
+## FAQ
+
+### What is OpenSandbox?
+
+OpenSandbox is a **general-purpose sandbox platform** for AI applications, developed by Alibaba. It provides secure, isolated execution environments for AI coding agents, GUI agents, agent evaluation, code execution, and RL training.
+
+### How does OpenSandbox compare to other sandbox solutions?
+
+| Feature | OpenSandbox | E2B | Daytona | Modal |
+|---------|-------------|-----|---------|-------|
+| Multi-language SDKs | ✅ 5 langs | Python/JS | Limited | Python |
+| Kubernetes Runtime | ✅ Built-in | ❌ | ❌ | ❌ |
+| MCP Support | ✅ Native | ❌ | ❌ | ❌ |
+| Secure Containers | ✅ gVisor/Kata/Firecracker | ✅ Firecracker | ✅ Docker | ❌ |
+| Network Egress Control | ✅ Per-sandbox | ❌ | ❌ | ✅ |
+| Open Source | ✅ Apache 2.0 | ✅ | ✅ | ❌ |
+
+### What are the key features of OpenSandbox?
+
+| Feature | Description |
+|---------|-------------|
+| **Multi-language SDKs** | Python, Java/Kotlin, JavaScript/TypeScript, C#/.NET, Go |
+| **Sandbox Protocol** | Lifecycle management APIs and execution APIs |
+| **Sandbox Runtime** | Docker and high-performance Kubernetes runtime |
+| **Sandbox Environments** | Command, Filesystem, Code Interpreter implementations |
+| **Network Policy** | Ingress Gateway + per-sandbox egress controls |
+| **Strong Isolation** | gVisor, Kata Containers, Firecracker microVM support |
+| **CLI Tool** | `osb` for sandbox creation, commands, files, diagnostics |
+| **MCP Server** | Native MCP support for Claude Code, Cursor |
+
+### What SDKs are available?
+
+| Language | Install Command |
+|----------|----------------|
+| Python | `pip install opensandbox` |
+| Java/Kotlin (Gradle) | `implementation("com.alibaba.opensandbox:sandbox:{version}")` |
+| JavaScript/TypeScript | `npm install @alibaba-group/opensandbox` |
+| C#/.NET | `dotnet add package Alibaba.OpenSandbox` |
+| Go | `go get github.com/alibaba/OpenSandbox/sdks/sandbox/go` |
+
+### How do I use the CLI?
+
+```bash
+# Install
+pip install opensandbox-cli
+
+# Configure
+osb config init
+osb config set connection.domain localhost:8080
+osb config set connection.protocol http
+
+# Create sandbox
+osb sandbox create --image python:3.12 --timeout 30m
+
+# Run command
+osb command run <sandbox-id> -- python -c "print(1 + 1)"
+```
+
+### What is the MCP server?
+
+The OpenSandbox MCP server exposes sandbox operations to MCP-capable clients like Claude Code and Cursor:
+
+```bash
+# Install and run
+pip install opensandbox-mcp
+opensandbox-mcp --domain localhost:8080 --protocol http
+```
+
+### What use cases does OpenSandbox support?
+
+| Category | Examples |
+|----------|----------|
+| **Coding Agents** | Claude Code, Gemini CLI, Codex CLI, Qwen Code, Kimi CLI |
+| **Agent Frameworks** | LangGraph, Google ADK, OpenClaw |
+| **Browser Automation** | Chrome, Playwright, Desktop (VNC) |
+| **ML Training** | RL training (DQN CartPole) |
+| **Code Interpreter** | Python, Java, JS, C#, Go code execution |
+
+### What secure container runtimes are supported?
+
+| Runtime | Isolation Level | Use Case |
+|---------|-----------------|----------|
+| **gVisor** | Kernel-level | General AI workloads |
+| **Kata Containers** | VM-level | High-security scenarios |
+| **Firecracker microVM** | Lightweight VM | Fast startup, multi-tenant |
+
+### How do I deploy on Kubernetes?
+
+OpenSandbox provides Kubernetes runtime for large-scale distributed scheduling. See [kubernetes/](kubernetes/README.md) for deployment guides.
+
+### What is the project structure?
+
+| Directory | Purpose |
+|-----------|---------|
+| `sdks/` | Multi-language SDKs |
+| `specs/` | OpenAPI specs |
+| `server/` | FastAPI lifecycle server |
+| `cli/` | Command-line interface |
+| `kubernetes/` | K8s deployment |
+| `components/` | Exec daemon, ingress, egress |
+| `examples/` | Integration examples |
+
+### What license does OpenSandbox use?
+
+OpenSandbox is open source under the [Apache 2.0 License](LICENSE).
+
+### Where can I get help?
+
+| Resource | Link |
+|----------|------|
+| Documentation | [open-sandbox.ai](https://open-sandbox.ai/) |
+| Architecture | [docs/architecture.md](docs/architecture.md) |
+| Examples | [examples/](examples/README.md) |
+| Roadmap | [ROADMAP.md](ROADMAP.md) |
+| DingTalk Group | [Join Discussion](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=) |
+| GitHub Issues | [Submit bugs/features](https://github.com/alibaba/OpenSandbox/issues) |
+
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=opensandbox-group/OpenSandbox&type=date&legend=top-left)](https://star-history.dera.page/#opensandbox-group/OpenSandbox&type=date&legend=top-left)
