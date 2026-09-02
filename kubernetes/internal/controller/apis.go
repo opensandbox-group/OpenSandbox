@@ -73,9 +73,19 @@ func setSandboxAllocation(obj metav1.Object, alloc SandboxAllocation) {
 	obj.GetAnnotations()[AnnoAllocStatusKey] = utils.DumpJSON(alloc)
 }
 
-func parseSandboxReleased(obj metav1.Object) (AllocationRelease, error) {
+func parseSandboxRelease(obj metav1.Object) (AllocationRelease, error) {
 	ret := AllocationRelease{}
 	if raw := obj.GetAnnotations()[AnnoAllocReleaseKey]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &ret); err != nil {
+			return ret, err
+		}
+	}
+	return ret, nil
+}
+
+func parseSandboxReleased(obj metav1.Object) (AllocationReleased, error) {
+	ret := AllocationReleased{}
+	if raw := obj.GetAnnotations()[AnnoAllocReleasedKey]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &ret); err != nil {
 			return ret, err
 		}
