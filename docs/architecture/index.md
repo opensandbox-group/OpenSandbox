@@ -180,7 +180,9 @@ Core responsibilities:
 - Attach an egress sidecar when `networkPolicy` is requested and Docker networking is compatible.
 - Create Docker-backed persistent snapshots as local images and restore sandboxes from those snapshot images.
 
-Docker pause/resume uses container-level pause/resume. Docker snapshots are exposed through the public snapshot API.
+Docker pause/resume uses container-level pause/resume. For sandboxes with an egress sidecar,
+pause freezes the sandbox container before the sidecar, while resume unfreezes the sidecar
+before the sandbox container. Docker snapshots are exposed through the public snapshot API.
 
 ### 4.2 Kubernetes Runtime
 
@@ -343,7 +345,7 @@ Create request with networkPolicy
 ```text
 Pause / resume
   -> lifecycle server delegates to runtime provider
-  -> Docker pauses/resumes the container
+  -> Docker pauses/resumes the sandbox container and its egress sidecar when present
   -> BatchSandbox uses rootfs snapshot commit/recreate for supported single-replica sandboxes
 
 Public snapshot API

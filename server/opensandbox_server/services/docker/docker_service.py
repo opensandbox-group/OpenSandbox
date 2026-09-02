@@ -291,6 +291,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
         return containers[0]
 
+    def _get_egress_sidecars(self, sandbox_id: str) -> list[Any]:
+        """Return all egress sidecars associated with a sandbox."""
+        return self.docker_client.containers.list(
+            all=True, filters={"label": f"{EGRESS_SIDECAR_LABEL}={sandbox_id}"}
+        )
+
     def _schedule_expiration(
         self,
         sandbox_id: str,
@@ -1123,6 +1129,20 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 },
             )
 
+        labels = container.attrs.get("Config", {}).get("Labels") or {}
+        egress_expected = bool(labels.get(SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY))
+        try:
+            with self._docker_operation("query egress sidecar", sandbox_id):
+                sidecars = self._get_egress_sidecars(sandbox_id)
+        except DockerException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.SANDBOX_PAUSE_FAILED,
+                    "message": f"Failed to query egress sidecar: {str(exc)}",
+                },
+            ) from exc
+
         try:
             with self._docker_operation("pause sandbox container", sandbox_id):
                 container.pause()
@@ -1132,6 +1152,65 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 detail={
                     "code": SandboxErrorCodes.SANDBOX_PAUSE_FAILED,
                     "message": f"Failed to pause sandbox container: {str(exc)}",
+                },
+            ) from exc
+
+        if egress_expected and not sidecars:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.SANDBOX_PAUSE_FAILED,
+                    "message": (
+                        "Sandbox container was paused, but the expected egress sidecar was not found."
+                    ),
+                },
+            )
+
+        paused_sidecars: list[Any] = []
+        try:
+            for sidecar in sidecars:
+                sidecar_state = sidecar.attrs.get("State", {})
+                if sidecar_state.get("Paused", False):
+                    continue
+                if not sidecar_state.get("Running", False):
+                    raise DockerException(
+                        f"Egress sidecar {sidecar.id} is not in a running state."
+                    )
+                with self._docker_operation("pause egress sidecar", sandbox_id):
+                    sidecar.pause()
+                paused_sidecars.append(sidecar)
+        except DockerException as exc:
+            rollback_errors: list[str] = []
+            for paused_sidecar in reversed(paused_sidecars):
+                try:
+                    with self._docker_operation("rollback egress sidecar pause", sandbox_id):
+                        paused_sidecar.unpause()
+                except DockerException as rollback_exc:
+                    logger.warning(
+                        "sandbox=%s | failed to rollback egress sidecar pause: %s",
+                        sandbox_id,
+                        rollback_exc,
+                    )
+                    rollback_errors.append(str(rollback_exc))
+            try:
+                with self._docker_operation("rollback sandbox pause", sandbox_id):
+                    container.unpause()
+            except DockerException as rollback_exc:
+                logger.warning(
+                    "sandbox=%s | failed to rollback sandbox pause: %s",
+                    sandbox_id,
+                    rollback_exc,
+                )
+                rollback_errors.append(str(rollback_exc))
+
+            message = f"Failed to pause egress sidecar: {str(exc)}"
+            if rollback_errors:
+                message += f"; rollback failed: {'; '.join(rollback_errors)}"
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.SANDBOX_PAUSE_FAILED,
+                    "message": message,
                 },
             ) from exc
 
@@ -1156,15 +1235,70 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 },
             )
 
+        labels = container.attrs.get("Config", {}).get("Labels") or {}
+        egress_expected = bool(labels.get(SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY))
         try:
-            with self._docker_operation("resume sandbox container", sandbox_id):
-                container.unpause()
+            with self._docker_operation("query egress sidecar", sandbox_id):
+                sidecars = self._get_egress_sidecars(sandbox_id)
         except DockerException as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={
                     "code": SandboxErrorCodes.SANDBOX_RESUME_FAILED,
-                    "message": f"Failed to resume sandbox container: {str(exc)}",
+                    "message": f"Failed to query egress sidecar: {str(exc)}",
+                },
+            ) from exc
+
+        if egress_expected and not sidecars:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.SANDBOX_RESUME_FAILED,
+                    "message": "The expected egress sidecar was not found; sandbox remains paused.",
+                },
+            )
+
+        resumed_sidecars: list[Any] = []
+        resuming_main = False
+        try:
+            for sidecar in sidecars:
+                sidecar_state = sidecar.attrs.get("State", {})
+                if not sidecar_state.get("Paused", False):
+                    if sidecar_state.get("Running", False):
+                        continue
+                    raise DockerException(
+                        f"Egress sidecar {sidecar.id} is not in a paused state."
+                    )
+                with self._docker_operation("resume egress sidecar", sandbox_id):
+                    sidecar.unpause()
+                resumed_sidecars.append(sidecar)
+
+            resuming_main = True
+            with self._docker_operation("resume sandbox container", sandbox_id):
+                container.unpause()
+        except DockerException as exc:
+            rollback_errors: list[str] = []
+            for resumed_sidecar in reversed(resumed_sidecars):
+                try:
+                    with self._docker_operation("rollback egress sidecar resume", sandbox_id):
+                        resumed_sidecar.pause()
+                except DockerException as rollback_exc:
+                    logger.warning(
+                        "sandbox=%s | failed to rollback egress sidecar resume: %s",
+                        sandbox_id,
+                        rollback_exc,
+                    )
+                    rollback_errors.append(str(rollback_exc))
+
+            failed_component = "sandbox container" if resuming_main else "egress sidecar"
+            message = f"Failed to resume {failed_component}: {str(exc)}"
+            if rollback_errors:
+                message += f"; rollback failed: {'; '.join(rollback_errors)}"
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.SANDBOX_RESUME_FAILED,
+                    "message": message,
                 },
             ) from exc
 

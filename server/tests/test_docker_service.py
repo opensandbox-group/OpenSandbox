@@ -1502,6 +1502,239 @@ def test_egress_sidecar_normalizes_windows_port_bindings(mock_docker):
     assert "3389/udp" in sidecar_kwargs["ports"]
     assert "8006" in sidecar_kwargs["ports"]
 
+
+def _lifecycle_container(
+    container_id: str,
+    *,
+    running: bool,
+    paused: bool,
+    egress_expected: bool = False,
+) -> MagicMock:
+    container = MagicMock()
+    container.id = container_id
+    labels = {}
+    if egress_expected:
+        labels[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] = "egress-token"
+    container.attrs = {
+        "Config": {"Labels": labels},
+        "State": {"Running": running, "Paused": paused},
+    }
+    return container
+
+
+def test_pause_sandbox_pauses_main_before_egress_sidecar():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=False, egress_expected=True)
+    sidecar = _lifecycle_container("sidecar-id", running=True, paused=False)
+    events: list[str] = []
+    main.pause.side_effect = lambda: events.append("main.pause")
+    sidecar.pause.side_effect = lambda: events.append("sidecar.pause")
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[sidecar]),
+    ):
+        service.pause_sandbox("sandbox-id")
+
+    assert events == ["main.pause", "sidecar.pause"]
+
+
+def test_resume_sandbox_resumes_egress_sidecar_before_main():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=True, egress_expected=True)
+    sidecar = _lifecycle_container("sidecar-id", running=True, paused=True)
+    events: list[str] = []
+    sidecar.unpause.side_effect = lambda: events.append("sidecar.unpause")
+    main.unpause.side_effect = lambda: events.append("main.unpause")
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[sidecar]),
+    ):
+        service.resume_sandbox("sandbox-id")
+
+    assert events == ["sidecar.unpause", "main.unpause"]
+
+
+def test_pause_sandbox_without_egress_sidecar_preserves_main_only_behavior():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=False)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[]),
+    ):
+        service.pause_sandbox("sandbox-id")
+
+    main.pause.assert_called_once_with()
+
+
+def test_resume_sandbox_without_egress_sidecar_preserves_main_only_behavior():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=True)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[]),
+    ):
+        service.resume_sandbox("sandbox-id")
+
+    main.unpause.assert_called_once_with()
+
+
+def test_pause_sandbox_pauses_main_when_expected_egress_sidecar_is_missing():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=False, egress_expected=True)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[]),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        service.pause_sandbox("sandbox-id")
+
+    assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.SANDBOX_PAUSE_FAILED
+    assert "expected egress sidecar was not found" in exc_info.value.detail["message"]
+    main.pause.assert_called_once_with()
+    main.unpause.assert_not_called()
+
+
+def test_resume_sandbox_fails_closed_when_expected_egress_sidecar_is_missing():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=True, egress_expected=True)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[]),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        service.resume_sandbox("sandbox-id")
+
+    assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.SANDBOX_RESUME_FAILED
+    assert "expected egress sidecar was not found" in exc_info.value.detail["message"]
+    main.unpause.assert_not_called()
+
+
+def test_pause_sandbox_rolls_back_main_when_egress_sidecar_pause_fails():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=False, egress_expected=True)
+    sidecar = _lifecycle_container("sidecar-id", running=True, paused=False)
+    events: list[str] = []
+    main.pause.side_effect = lambda: events.append("main.pause")
+    main.unpause.side_effect = lambda: events.append("main.unpause")
+
+    def fail_sidecar_pause() -> None:
+        events.append("sidecar.pause")
+        raise DockerException("sidecar pause failed")
+
+    sidecar.pause.side_effect = fail_sidecar_pause
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[sidecar]),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        service.pause_sandbox("sandbox-id")
+
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.SANDBOX_PAUSE_FAILED
+    assert events == ["main.pause", "sidecar.pause", "main.unpause"]
+
+
+def test_resume_sandbox_rolls_back_sidecar_when_main_resume_fails():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=True, egress_expected=True)
+    sidecar = _lifecycle_container("sidecar-id", running=True, paused=True)
+    events: list[str] = []
+    sidecar.unpause.side_effect = lambda: events.append("sidecar.unpause")
+    sidecar.pause.side_effect = lambda: events.append("sidecar.pause")
+
+    def fail_main_resume() -> None:
+        events.append("main.unpause")
+        raise DockerException("main resume failed")
+
+    main.unpause.side_effect = fail_main_resume
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[sidecar]),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        service.resume_sandbox("sandbox-id")
+
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.SANDBOX_RESUME_FAILED
+    assert events == ["sidecar.unpause", "main.unpause", "sidecar.pause"]
+
+
+def test_pause_sandbox_does_not_mutate_when_egress_query_fails():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=False, egress_expected=True)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(
+            service,
+            "_get_egress_sidecars",
+            side_effect=DockerException("sidecar query failed"),
+        ),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        service.pause_sandbox("sandbox-id")
+
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.SANDBOX_PAUSE_FAILED
+    main.pause.assert_not_called()
+
+
+def test_resume_sandbox_does_not_mutate_when_egress_query_fails():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=True, egress_expected=True)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(
+            service,
+            "_get_egress_sidecars",
+            side_effect=DockerException("sidecar query failed"),
+        ),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        service.resume_sandbox("sandbox-id")
+
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.SANDBOX_RESUME_FAILED
+    main.unpause.assert_not_called()
+
+
+def test_pause_sandbox_skips_egress_sidecar_that_is_already_paused():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=False, egress_expected=True)
+    sidecar = _lifecycle_container("sidecar-id", running=True, paused=True)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[sidecar]),
+    ):
+        service.pause_sandbox("sandbox-id")
+
+    main.pause.assert_called_once_with()
+    sidecar.pause.assert_not_called()
+
+
+def test_resume_sandbox_skips_egress_sidecar_that_is_already_running():
+    service = DockerSandboxService(config=_app_config())
+    main = _lifecycle_container("main-id", running=True, paused=True, egress_expected=True)
+    sidecar = _lifecycle_container("sidecar-id", running=True, paused=False)
+
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", return_value=main),
+        patch.object(service, "_get_egress_sidecars", return_value=[sidecar]),
+    ):
+        service.resume_sandbox("sandbox-id")
+
+    sidecar.unpause.assert_not_called()
+    main.unpause.assert_called_once_with()
+
+
 def test_expire_cleans_sidecar():
     service = DockerSandboxService(config=_app_config())
     mock_container = MagicMock()
