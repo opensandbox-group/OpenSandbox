@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.25.9-bookworm AS builder
+FROM golang:1.26.5-alpine3.23 AS builder
 
 WORKDIR /workspace
 
@@ -75,41 +75,30 @@ RUN cd /workspace/components/internal && \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /out/opensandbox-supervisor ./cmd/supervisor
 
-FROM debian:bookworm-slim
+FROM cgr.dev/chainguard/wolfi-base@sha256:07e60ff6586b56f03c625e27b604f9f7d29498fef32f099f6560f0d207b4a056
 
-# iptables is needed for DNS REDIRECT; ca-certificates for TLS to upstream resolvers
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        iptables \
-        iproute2 \
-        nftables \
+# Keep only the packages required by the egress runtime. The prior diagnostic
+# toolbelt materially expanded the image's vulnerability surface and is not
+# used by the entrypoint or enforcement code.
+RUN apk add --no-cache \
         ca-certificates \
-        sudo \
-        curl \
-        wget \
-        net-tools \
-        dnsutils \
-        netcat-openbsd \
-        iputils-ping \
-        traceroute \
-        telnet \
-        tcpdump \
-        nmap \
-        htop \
+        iproute2 \
+        iptables \
+        nftables \
         procps \
-        strace \
-        lsof \
-        python3 \
-        python3-pip \
-    && rm -rf /var/lib/apt/lists/*
+        py3.12-pip \
+        python-3.12 \
+        sudo
 
 # Python mitmproxy (transparent mode): mitmdump runs as user mitmproxy; iptables skips this uid.
 # /var/lib/mitmproxy is mitm's home, used as the confdir (CA + config.yaml live under .mitmproxy/).
-RUN useradd -r -u 10042 -d /var/lib/mitmproxy -s /usr/sbin/nologin mitmproxy \
+RUN addgroup -S -g 10042 mitmproxy \
+    && adduser -S -D -H -u 10042 -G mitmproxy -h /var/lib/mitmproxy -s /sbin/nologin mitmproxy \
     && mkdir -p /var/lib/mitmproxy/.mitmproxy \
     && chown -R mitmproxy:mitmproxy /var/lib/mitmproxy \
-    && pip3 install --no-cache-dir --break-system-packages 'mitmproxy==11.0.2' \
+    && pip3.12 install --no-cache-dir 'mitmproxy==12.2.3' \
     && (command -v mitmdump && mitmdump --version) \
+    && rm -rf /root/.cache \
     && mkdir -p /var/egress/mitmscripts
 
 # Static mitmproxy options (mode, listen_host, connection_strategy, stream_large_bodies,
