@@ -161,3 +161,49 @@ def test_partial_allocation_failure_releases_reserved_ports(monkeypatch) -> None
         assert bindings["8080"][1] == 45678
     finally:
         port_allocator.release_port_bindings(bindings)
+
+
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "driver failed programming external connectivity on endpoint sandbox-1: Bind for 0.0.0.0:41077 failed: port is already allocated",
+        "ports are not available: exposing port TCP 0.0.0.0:49870 -> 127.0.0.1:0: listen tcp4 0.0.0.0:49870: bind: An attempt was made to access a socket in a way forbidden by its access permissions.",
+        "ports are not available: exposing port TCP 0.0.0.0:49870 -> 127.0.0.1:0: listen tcp4 0.0.0.0:49870: bind: permission denied",
+        "listen tcp4 0.0.0.0:41000: bind: address already in use",
+    ],
+)
+def test_is_port_publish_error_matches_port_conflicts(error_message: str) -> None:
+    assert port_allocator.is_port_publish_error(RuntimeError(error_message)) is True
+
+    http_exc = HTTPException(
+        status_code=500,
+        detail={"code": "CONTAINER_START_FAILED", "message": f"Failed: {error_message}"},
+    )
+    assert port_allocator.is_port_publish_error(http_exc) is True
+
+
+def test_is_port_publish_error_inspects_cause() -> None:
+    cause = RuntimeError("Bind for 0.0.0.0:41077 failed: port is already allocated")
+    http_exc = HTTPException(
+        status_code=500,
+        detail={"code": "CONTAINER_START_FAILED", "message": "Failed to create or start container"},
+    )
+    http_exc.__cause__ = cause
+    assert port_allocator.is_port_publish_error(http_exc) is True
+
+
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "repository python not found: does not exist or no pull access",
+        "executable file not found in $PATH",
+        "container killed due to out of memory",
+    ],
+)
+def test_is_port_publish_error_ignores_unrelated_errors(error_message: str) -> None:
+    assert port_allocator.is_port_publish_error(RuntimeError(error_message)) is False
+    http_exc = HTTPException(
+        status_code=500,
+        detail={"code": "CONTAINER_START_FAILED", "message": error_message},
+    )
+    assert port_allocator.is_port_publish_error(http_exc) is False

@@ -71,7 +71,9 @@ from opensandbox_server.services.docker.networking import (
 from opensandbox_server.services.docker.container_ops import DockerContainerOpsMixin
 from opensandbox_server.services.docker.metadata import DockerMetadataStore
 from opensandbox_server.services.docker.port_allocator import (
+    MAX_PORT_PUBLISH_ATTEMPTS,
     allocate_port_bindings,
+    is_port_publish_error,
     normalize_port_bindings,
     release_port_bindings,
 )
@@ -917,16 +919,61 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     sandbox_id,
                 )
 
-            created_container = self._create_and_start_container(
-                sandbox_id,
-                image_uri,
-                request.entrypoint,
-                labels,
-                environment,
-                host_config_kwargs,
-                container_exposed_ports,
-                request.platform,
-            )
+            if self.network_mode != HOST_NETWORK_MODE and request.network_policy is None:
+                for attempt in range(MAX_PORT_PUBLISH_ATTEMPTS):
+                    try:
+                        created_container = self._create_and_start_container(
+                            sandbox_id,
+                            image_uri,
+                            request.entrypoint,
+                            labels,
+                            environment,
+                            host_config_kwargs,
+                            container_exposed_ports,
+                            request.platform,
+                        )
+                        break
+                    except Exception as exc:
+                        if (
+                            attempt + 1 < MAX_PORT_PUBLISH_ATTEMPTS
+                            and is_port_publish_error(exc)
+                        ):
+                            logger.warning(
+                                "sandbox %s: container start failed due to host port conflict: %s. "
+                                "Retrying with fresh ports (attempt %d/%d)...",
+                                sandbox_id,
+                                exc,
+                                attempt + 1,
+                                MAX_PORT_PUBLISH_ATTEMPTS,
+                            )
+                            if reserved_port_bindings:
+                                release_port_bindings(reserved_port_bindings)
+                                reserved_port_bindings = {}
+
+                            port_bindings = allocate_port_bindings(
+                                exposed_ports,
+                                min_port=self.app_config.docker.port_range_min,
+                                max_port=self.app_config.docker.port_range_max,
+                            )
+                            reserved_port_bindings = port_bindings
+                            host_execd_port = port_bindings["44772"][1]
+                            host_http_port = port_bindings["8080"][1]
+                            host_config_kwargs["port_bindings"] = normalize_port_bindings(port_bindings)
+                            labels[SANDBOX_EMBEDDING_PROXY_PORT_LABEL] = str(host_execd_port)
+                            labels[SANDBOX_HTTP_PORT_LABEL] = str(host_http_port)
+                            continue
+                        raise
+            else:
+                created_container = self._create_and_start_container(
+                    sandbox_id,
+                    image_uri,
+                    request.entrypoint,
+                    labels,
+                    environment,
+                    host_config_kwargs,
+                    container_exposed_ports,
+                    request.platform,
+                )
         except Exception:
             if sidecar_container is not None:
                 try:
