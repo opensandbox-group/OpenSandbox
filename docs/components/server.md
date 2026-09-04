@@ -67,7 +67,7 @@ opensandbox-server init-config ~/.sandbox.toml --example docker
 
 2. Edit the file for your environment. Full reference: [configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md) (all keys, defaults, validation, env vars).
 
-   Topics covered there include: Docker `network_mode` / `host_ip` (e.g. server in Docker Compose), `[egress]` when clients send `networkPolicy`, `[ingress]`, `[secure_runtime]`, Kubernetes `workload_provider` / `batchsandbox_template_file`, `[agent_sandbox]`, TTL caps, `[renew_intent]`.
+   Topics covered there include: Docker `network_mode` / `host_ip` and `[proxy] resolve_internal` (e.g. server in Docker Compose), `[egress]` when clients send `networkPolicy`, `[ingress]`, `[secure_runtime]`, Kubernetes `workload_provider` / `batchsandbox_template_file`, `[agent_sandbox]`, TTL caps, `[renew_intent]`.
    The server-wide persistence backend is configured under `[store]`; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records. PostgreSQL can be selected for externally managed persistence; see the [store configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#store).
 
 ### PostgreSQL persistence

@@ -85,7 +85,7 @@ Configuration for the server-side reverse-proxy routes.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `resolve_internal` | boolean | `true` | When `true` (default), the server-side reverse-proxy targets the sandbox's internal container IP (Docker bridge) or the provider's internal workload endpoint. When `false`, the proxy targets the **server-local host-mapped port** instead; this is required when the server process cannot route to container bridge IPs (for example a launchd or systemd user session on macOS where such traffic is blocked). On Docker, `false` resolves host-mapped endpoints via the server-local proxy host so deployments that advertise a public `[server]` `eip` still route proxied traffic to a locally reachable host. Backward compatible: the default preserves the historical behavior. |
+| `resolve_internal` | boolean | `true` | When `true` (default), the server-side reverse-proxy targets the sandbox's internal container IP (Docker bridge) or the provider's internal workload endpoint. When `false`, the proxy targets the **server-local host-mapped port** instead. Use `false` whenever the server process cannot route to sandbox bridge IPs, including a lifecycle server container attached to a Compose/user-defined network while its mounted Docker socket creates sandboxes on Docker's default bridge, or a launchd/systemd user session on macOS where bridge traffic is blocked. On Docker, `false` resolves host-mapped endpoints via the server-local proxy host so deployments that advertise a public `[server]` `eip` still route proxied traffic to a locally reachable host. Backward compatible: the default preserves the historical behavior. |
 
 ---
 

@@ -5,6 +5,12 @@ configs:
       host = "0.0.0.0"
       port = 8090
 
+      [proxy]
+      # The lifecycle server is attached to opensandbox-net, while sandboxes
+      # created through the mounted Docker socket use Docker's bridge network.
+      # Route through host-published ports instead of unreachable sandbox IPs.
+      resolve_internal = false
+
       [log]
       level = "INFO"
 
@@ -20,8 +26,8 @@ configs:
 
       [docker]
       network_mode = "bridge"
-      # When server runs in a container, set host_ip to the host's IP or hostname so bridge-mode endpoints are reachable (e.g. host.docker.internal or the host LAN IP).
-      # It's required when server deployed with docker container under host.
+      # Required when the server runs in a container: host-mapped endpoints and
+      # proxy targets must resolve back to the Docker host.
       host_ip = "host.docker.internal"
       port_range_min = 40000
       port_range_max = 60000
@@ -43,6 +49,8 @@ services:
     container_name: opensandbox-server
     networks:
       - opensandbox-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8090:8090"
     volumes:
@@ -58,6 +66,8 @@ services:
     container_name: sdk-client
     networks:
       - opensandbox-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: >
       sh -c "pip install opensandbox && tail -f /dev/null"
     environment:
