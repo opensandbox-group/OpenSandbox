@@ -216,6 +216,26 @@ controller:
 
 Point your Prometheus stack at the `metrics` container port (for example via a `ServiceMonitor` or `PodMonitoring`).
 
+### Business capacity metrics
+
+The elected controller also exports low-cardinality business capacity metrics over OTLP/HTTP when `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set. This is independent of the controller-runtime Prometheus endpoint and remains disabled when neither variable is configured.
+
+```yaml
+extraEnv:
+  - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+    value: http://otel-collector.observability:4318/v1/metrics
+```
+
+| Metric | Unit | Attributes | Description |
+|--------|------|------------|-------------|
+| `controller.pool.pods` | `{pod}` | `namespace`, `pool_name`, `state` | Current Pool Pods, where `state` is `total`, `allocated`, `available`, or `updated` |
+| `controller.pool.cpu.requested` | `{cpu}` | `namespace`, `pool_name`, `state` | Scheduler-equivalent CPU requests represented by total, allocated, or available Pool Pods |
+| `controller.pool.memory.requested` | `By` | `namespace`, `pool_name`, `state` | Scheduler-equivalent memory requests represented by total, allocated, or available Pool Pods |
+| `controller.batchsandbox.count` | `{batchsandbox}` | `namespace`, `phase`, `allocation_mode` | Current BatchSandbox objects by lifecycle phase and pool/direct mode |
+| `controller.batchsandbox.pods` | `{pod}` | `namespace`, `state`, `allocation_mode` | Desired, current, allocated, and ready BatchSandbox Pod counts |
+
+The metrics deliberately omit sandbox, BatchSandbox, and Pod identifiers. Only the leader exports them, so multiple controller replicas do not duplicate cluster totals. An unset initial BatchSandbox phase is exported as `Unknown`. Derive Pool utilization from `allocated / total` and calculate peak, valley, or percentile capacity in the telemetry backend. Actual CPU and memory usage remains available from kubelet/cAdvisor rather than being duplicated here.
+
 ## Configure the Server for Kubernetes
 
 Generate a Kubernetes-oriented server config:

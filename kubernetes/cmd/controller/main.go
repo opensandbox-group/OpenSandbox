@@ -444,6 +444,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	poolAllocator := controller.NewDefaultAllocator(mgr.GetClient())
+	if err := controller.SetupCapacityMetricsWithManager(mgr, poolAllocator); err != nil {
+		setupLog.Error(err, "unable to register capacity metrics")
+		os.Exit(1)
+	}
+
 	if err := (&controller.BatchSandboxReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
@@ -460,7 +466,7 @@ func main() {
 		APIReader:  mgr.GetAPIReader(),
 		Scheme:     mgr.GetScheme(),
 		Recorder:   mgr.GetEventRecorderFor("pool-controller"),
-		Allocator:  controller.NewDefaultAllocator(mgr.GetClient()),
+		Allocator:  poolAllocator,
 		RestConfig: mgr.GetConfig(),
 	}).SetupWithManager(mgr, poolConcurrency); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pool")
