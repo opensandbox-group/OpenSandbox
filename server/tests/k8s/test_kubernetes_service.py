@@ -15,6 +15,7 @@
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
+from typing import cast
 from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
 
@@ -935,6 +936,47 @@ class TestWaitForSandboxReady:
         result = await k8s_service._wait_for_sandbox_ready("test-sandbox-id", timeout_seconds=10)
         
         assert result == mock_workload
+
+    @pytest.mark.asyncio
+    async def test_wait_fails_immediately_for_terminal_pod(self, k8s_service, mock_workload):
+        clock = SimpleNamespace(now=0.0)
+
+        async def advance_clock(seconds: float) -> None:
+            clock.now += seconds
+
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Failed",
+            "reason": "FAILED",
+            "message": (
+                "1/1 observed pods failed; primary reason=InitContainerFailed; "
+                "sample pod=sandbox-0"
+            ),
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with (
+            patch(
+                "opensandbox_server.services.k8s.kubernetes_service.time.time",
+                side_effect=lambda: clock.now,
+            ),
+            patch(
+                "opensandbox_server.services.k8s.kubernetes_service.asyncio.sleep",
+                new=advance_clock,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 500
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert detail["code"] == SandboxErrorCodes.K8S_POD_FAILED
+        assert "InitContainerFailed" in detail["message"]
+        assert k8s_service.workload_provider.get_status.call_count == 1
     
     @pytest.mark.asyncio
     async def test_wait_timeout_raises_exception(self, k8s_service, mock_workload):

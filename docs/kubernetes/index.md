@@ -528,12 +528,12 @@ For a BatchSandbox with multiple replicas, `Succeed` also does not mean that eve
 
 | `status.phase` | Meaning |
 |---|---|
-| `Pending` | The controller has not observed a Running and Ready sandbox Pod yet. |
+| `Pending` | The controller has not observed a Running and Ready sandbox Pod yet. Scheduling waits and retryable image-pull states remain Pending. |
 | `Succeed` | At least one sandbox Pod is Running and Ready; the sandbox is available. |
 | `Pausing` | A pause operation is in progress. |
 | `Paused` | The sandbox is paused and its runtime resources have been released. |
 | `Resuming` | The controller is restoring runtime resources after a pause. |
-| `Failed` | The controller detected a sandbox runtime failure. Inspect conditions and Pod events for details. |
+| `Failed` | The controller detected a terminal sandbox runtime failure. A Pod in Kubernetes phase `Failed` is terminal; inspect conditions and Pod events for details. |
 
 The controller records active conditions with `status: "True"`:
 
@@ -542,7 +542,9 @@ The controller records active conditions with `status: "True"`:
 | `Ready` | The phase is `Succeed`; reason `PodsReady` means the sandbox is running. |
 | `Progressing` | The sandbox is being created, paused, or resumed. |
 | `Paused` | The sandbox is fully paused. |
-| `PauseFailed`, `ResumeFailed`, `PodFailed` | The corresponding operation or runtime failed; inspect `reason` and `message`. |
+| `PauseFailed`, `ResumeFailed`, `PodFailed` | The corresponding operation or runtime failed; inspect `reason` and `message`. A terminal init-container or container exit is summarized on `PodFailed`. |
+
+`status.taskFailed` remains the number of failed optional tasks. Pod or init-container failures are reported through `status.phase` and `PodFailed`; they do not overwrite task counters. During synchronous sandbox creation, the Server converts a terminal `Failed` phase into `KUBERNETES::POD_FAILED` immediately instead of waiting for the Pod readiness timeout.
 
 Treat a condition as satisfied only when the matching entry exists with `status: "True"`. Check `status.observedGeneration` against `metadata.generation` before acting on status after a spec update.
 
