@@ -838,6 +838,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     runtime_volume_name=runtime_volume_name,
                     credential_proxy_enabled=credential_proxy_enabled,
                     extra_env=egress_env or None,
+                    port_allocator=allocate_port_bindings,
                 )
                 labels[SANDBOX_EMBEDDING_PROXY_PORT_LABEL] = str(host_execd_port)
                 labels[SANDBOX_HTTP_PORT_LABEL] = str(host_http_port)

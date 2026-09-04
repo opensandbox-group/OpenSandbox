@@ -28,7 +28,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from docker.errors import DockerException, NotFound as DockerNotFound
 from fastapi import HTTPException, status
@@ -78,6 +78,15 @@ def _docker_error_indicates_unsupported_ipv6_sysctls(exc: DockerException) -> bo
             or "no such file or directory" in message
             or "sysctl" in message
         )
+    )
+
+
+def _is_port_publish_error(exc: DockerException) -> bool:
+    """Return True when Docker reports an unavailable / reserved host port."""
+    message = str(exc).lower()
+    return (
+        "ports are not available" in message
+        or ("bind:" in message and "forbidden" in message)
     )
 
 
@@ -407,6 +416,9 @@ class DockerNetworkingMixin:
         runtime_volume_name: Optional[str] = None,
         credential_proxy_enabled: bool = False,
         extra_env: Optional[Dict[str, Optional[str]]] = None,
+        port_allocator: Optional[
+            Callable[..., dict[str, tuple[str, int]]]
+        ] = None,
     ):
         sidecar_name = f"sandbox-egress-{sandbox_id}"
         sidecar_labels = {
@@ -472,6 +484,10 @@ class DockerNetworkingMixin:
 
         sidecar_container = None
         sidecar_container_id: Optional[str] = None
+        # Track whether the last start() failed due to a port-publish error so
+        # we can retry with freshly-allocated ports (e.g. Docker Desktop /
+        # Windows OS-reserved ranges that the container-side probe cannot see).
+        last_port_error: Optional[DockerException] = None
         try:
             try:
                 with self._docker_operation("create egress sidecar", sandbox_id):
@@ -519,7 +535,11 @@ class DockerNetworkingMixin:
                 )
             sidecar_container = self.docker_client.containers.get(sidecar_container_id)
             with self._docker_operation("start egress sidecar", sandbox_id):
-                sidecar_container.start()
+                try:
+                    sidecar_container.start()
+                except DockerException as start_exc:
+                    last_port_error = start_exc
+                    raise
             if egress_api_host_port is not None:
                 self._wait_for_egress_sidecar_ready(
                     sandbox_id,
@@ -529,6 +549,116 @@ class DockerNetworkingMixin:
                 )
             return sidecar_container
         except Exception as exc:
+            # Retry once with freshly-allocated ports when the initial start
+            # failed due to a port-publish error (e.g. Docker Desktop / Windows
+            # OS-reserved ranges invisible from the container-side probe).
+            if (
+                last_port_error is not None
+                and port_allocator is not None
+                and not _is_port_publish_error(last_port_error)
+            ):
+                raise
+            if last_port_error is not None and port_allocator is not None:
+                logger.warning(
+                    "sandbox=%s | egress sidecar start failed with port error (%s); "
+                    "retrying with newly-allocated ports",
+                    sandbox_id,
+                    last_port_error,
+                )
+                try:
+                    # Re-allocate fresh ports; the old ones may now be released
+                    # or Docker may have picked different reserved ranges.
+                    retry_bindings = port_allocator(
+                        list(sidecar_port_bindings.keys()),
+                        min_port=self.app_config.docker.port_range_min,
+                        max_port=self.app_config.docker.port_range_max,
+                    )
+                    sidecar_port_bindings = retry_bindings
+                    # Rebuild the base host config so port_bindings reflects
+                    # the newly-allocated ports (the shallow copy in
+                    # build_sidecar_host_config would otherwise keep the old dict).
+                    base_sidecar_host_config_kwargs = {
+                        "network_mode": BRIDGE_NETWORK_MODE,
+                        "cap_add": ["NET_ADMIN"],
+                        "port_bindings": normalize_port_bindings(sidecar_port_bindings),
+                    }
+                    if runtime_volume_name:
+                        base_sidecar_host_config_kwargs["binds"] = [
+                            f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
+                        ]
+                    sidecar_host_config = build_sidecar_host_config(
+                        include_ipv6_sysctls=include_ipv6_sysctls
+                    )
+                    # Clean up the container that was created with the old ports.
+                    if sidecar_container_id:
+                        try:
+                            with self._docker_operation(
+                                "cleanup egress sidecar (port-retry)", sandbox_id
+                            ):
+                                self.docker_client.api.remove_container(
+                                    sidecar_container_id, force=True
+                                )
+                        except DockerException as cleanup_exc:
+                            logger.warning(
+                                "Failed to cleanup egress sidecar for sandbox %s "
+                                "during port-retry: %s",
+                                sandbox_id,
+                                cleanup_exc,
+                            )
+                    with self._docker_operation("create egress sidecar (retry)", sandbox_id):
+                        sidecar_resp = self.docker_client.api.create_container(
+                            image=egress_image,
+                            name=sidecar_name,
+                            host_config=sidecar_host_config,
+                            labels=sidecar_labels,
+                            environment=sidecar_env,
+                            ports=[
+                                normalize_container_port_spec(p)
+                                for p in sidecar_port_bindings.keys()
+                            ],
+                        )
+                    sidecar_container_id = sidecar_resp.get("Id")
+                    if not sidecar_container_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail={
+                                "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+                                "message": "Docker did not return an egress sidecar container ID.",
+                            },
+                        )
+                    sidecar_container = self.docker_client.containers.get(
+                        sidecar_container_id
+                    )
+                    with self._docker_operation("start egress sidecar (retry)", sandbox_id):
+                        sidecar_container.start()
+                except DockerException as retry_exc:
+                    # If the retry also fails with a port error, re-raise with the
+                    # original error context so the caller sees the real cause.
+                    if _is_port_publish_error(retry_exc):
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail={
+                                "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+                                "message": (
+                                    f"Egress sidecar container failed to start: "
+                                    f"{retry_exc}"
+                                ),
+                            },
+                        ) from retry_exc
+                    raise
+                if egress_api_host_port is not None:
+                    # Find the new host port for the egress API on retry.
+                    retry_api_host_port = next(
+                        (b[1] for b in sidecar_port_bindings.values()),
+                        egress_api_host_port,
+                    )
+                    self._wait_for_egress_sidecar_ready(
+                        sandbox_id,
+                        retry_api_host_port,
+                        egress_token,
+                        timeout_seconds=self.app_config.egress.readiness_timeout_seconds,
+                    )
+                return sidecar_container
             if sidecar_container is not None:
                 try:
                     with self._docker_operation("cleanup egress sidecar", sandbox_id):
