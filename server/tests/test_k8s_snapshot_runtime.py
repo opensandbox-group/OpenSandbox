@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
 from kubernetes.client import ApiException
 
 from opensandbox_server.services.k8s.snapshot_runtime import (
@@ -24,6 +25,7 @@ from opensandbox_server.services.k8s.snapshot_runtime import (
     build_public_snapshot_tag,
 )
 from opensandbox_server.services.snapshot_models import SnapshotState
+from opensandbox_server.services.snapshot_runtime import SnapshotRuntimeUnsupportedError
 
 
 SNAPSHOT_ID = "11111111-2222-4333-8444-555555555555"
@@ -34,6 +36,9 @@ SANDBOX_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 class FakeK8sClient:
     def __init__(self) -> None:
         self.objects: dict[str, dict] = {}
+        self.workloads: dict[str, dict] = {}
+        self.pods: dict[str, dict] = {}
+        self.runtime_classes: dict[str, dict] = {}
         self.created: list[dict] = []
         self.deleted: list[str] = []
 
@@ -47,8 +52,25 @@ class FakeK8sClient:
         return stored
 
     def get_custom_object(self, *, group: str, version: str, namespace: str, plural: str, name: str):
-        obj = self.objects.get(name)
+        objects = {
+            "batchsandboxes": self.workloads,
+            "sandboxsnapshots": self.objects,
+        }[plural]
+        obj = objects.get(name)
         return deepcopy(obj) if obj is not None else None
+
+    def read_pod(self, namespace: str, name: str):
+        pod = self.pods.get(name)
+        return deepcopy(pod) if pod is not None else None
+
+    def list_pods(self, namespace: str, label_selector: str = ""):
+        return [deepcopy(pod) for pod in self.pods.values()]
+
+    def read_runtime_class(self, name: str):
+        runtime_class = self.runtime_classes.get(name)
+        if runtime_class is None:
+            raise ApiException(status=404, reason="Not Found")
+        return deepcopy(runtime_class)
 
     def delete_custom_object(self, *, group: str, version: str, namespace: str, plural: str, name: str, **kwargs):
         self.deleted.append(name)
@@ -122,6 +144,66 @@ def _snapshot_cr(*, phase: str, containers: list[dict] | None = None, sandbox_id
 def test_public_snapshot_name_and_tag_are_derived_from_snapshot_id() -> None:
     assert build_public_snapshot_name(SNAPSHOT_ID) == f"osb-snap-{SNAPSHOT_HEX}"
     assert build_public_snapshot_tag(SNAPSHOT_ID) == f"snap-{SNAPSHOT_HEX}"
+
+
+def test_preflight_rejects_gvisor_runtimeclass_before_snapshot_cr_creation() -> None:
+    k8s_client = FakeK8sClient()
+    k8s_client.workloads[SANDBOX_ID] = {
+        "spec": {"template": {"spec": {"runtimeClassName": "sandboxed"}}},
+    }
+    k8s_client.pods[f"{SANDBOX_ID}-0"] = {
+        "spec": {"runtimeClassName": "sandboxed"},
+        "status": {"phase": "Running"},
+    }
+    k8s_client.runtime_classes["sandboxed"] = {"handler": "runsc"}
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    with pytest.raises(SnapshotRuntimeUnsupportedError, match="gVisor"):
+        runtime.preflight_create_snapshot(SANDBOX_ID)
+
+    assert k8s_client.created == []
+
+
+def test_preflight_allows_non_gvisor_runtimeclass() -> None:
+    k8s_client = FakeK8sClient()
+    k8s_client.workloads[SANDBOX_ID] = {
+        "spec": {"template": {"spec": {"runtimeClassName": "native"}}},
+    }
+    k8s_client.pods[f"{SANDBOX_ID}-0"] = {
+        "spec": {"runtimeClassName": "native"},
+        "status": {"phase": "Running"},
+    }
+    k8s_client.runtime_classes["native"] = {"handler": "runc"}
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    runtime.preflight_create_snapshot(SANDBOX_ID)
+
+    assert k8s_client.created == []
+
+
+def test_preflight_uses_allocated_pool_pod_runtimeclass() -> None:
+    k8s_client = FakeK8sClient()
+    k8s_client.workloads[SANDBOX_ID] = {
+        "metadata": {
+            "annotations": {
+                "sandbox.opensandbox.io/alloc-status": (
+                    '{"pods":["pool-pod-1"],"poolRef":"gvisor-pool"}'
+                ),
+            },
+        },
+        "spec": {"poolRef": "gvisor-pool"},
+    }
+    k8s_client.pods["pool-pod-1"] = {
+        "spec": {"runtimeClassName": "sandboxed"},
+        "status": {"phase": "Running"},
+    }
+    k8s_client.runtime_classes["sandboxed"] = {"handler": "runsc"}
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    with pytest.raises(SnapshotRuntimeUnsupportedError, match="gVisor"):
+        runtime.preflight_create_snapshot(SANDBOX_ID)
+
+    assert k8s_client.created == []
 
 
 def test_create_snapshot_creates_cr_and_maps_succeed_to_ready() -> None:

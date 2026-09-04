@@ -150,6 +150,8 @@ class SnapshotErrorCodes:
     """Canonical error codes for snapshot service operations."""
 
     INVALID_SOURCE_STATE = "SNAPSHOT::INVALID_SOURCE_STATE"
+    RUNTIME_PREFLIGHT_FAILED = "SNAPSHOT::RUNTIME_PREFLIGHT_FAILED"
+    UNSUPPORTED_RUNTIME = "SNAPSHOT::UNSUPPORTED_RUNTIME"
 
 
 __all__ = [

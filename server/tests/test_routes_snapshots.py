@@ -226,6 +226,14 @@ def test_snapshot_routes_can_use_persisted_service(
             return ""
 
         @staticmethod
+        def preflight_create_snapshot(
+            sandbox_id: str,
+            *,
+            namespace: str | None = None,
+        ) -> None:
+            return None
+
+        @staticmethod
         def create_snapshot(snapshot_id: str, sandbox_id: str):
             return None
 

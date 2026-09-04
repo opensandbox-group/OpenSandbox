@@ -36,6 +36,14 @@ class SnapshotRuntimeStatus:
     message: Optional[str] = None
 
 
+class SnapshotRuntimePreflightError(RuntimeError):
+    """Snapshot creation cannot safely start for the current source runtime."""
+
+
+class SnapshotRuntimeUnsupportedError(SnapshotRuntimePreflightError):
+    """The source runtime is known to be incompatible with snapshot creation."""
+
+
 class SnapshotRuntime(Protocol):
     def supports_create_snapshot(self) -> bool:
         """
@@ -46,6 +54,14 @@ class SnapshotRuntime(Protocol):
         """
         Human-readable message used when snapshot creation is unsupported.
         """
+
+    def preflight_create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        """Validate source-specific compatibility before persisting a snapshot."""
 
     def create_snapshot(
         self,
@@ -85,6 +101,16 @@ class NoopSnapshotRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return "Snapshot management is not implemented for this runtime."
 
+    def preflight_create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        raise SnapshotRuntimeUnsupportedError(
+            self.create_snapshot_unsupported_message()
+        )
+
     def create_snapshot(
         self,
         snapshot_id: str,
@@ -110,6 +136,8 @@ class NoopSnapshotRuntime:
 
 __all__ = [
     "SnapshotRuntime",
+    "SnapshotRuntimePreflightError",
     "SnapshotRuntimeStatus",
+    "SnapshotRuntimeUnsupportedError",
     "NoopSnapshotRuntime",
 ]

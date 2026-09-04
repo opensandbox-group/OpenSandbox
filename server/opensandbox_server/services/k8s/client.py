@@ -420,6 +420,20 @@ class K8sClient:
         )
         return resp.items
 
+    def read_pod(self, namespace: str, name: str) -> Any | None:
+        """Read a Pod by name, returning None when it no longer exists."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        try:
+            return self.get_core_v1_api().read_namespaced_pod(
+                namespace=namespace,
+                name=name,
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return None
+            raise
+
     def read_runtime_class(self, name: str) -> Any:
         """Read a RuntimeClass from the cluster."""
         if self._read_limiter:
