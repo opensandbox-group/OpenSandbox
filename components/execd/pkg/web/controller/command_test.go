@@ -20,7 +20,9 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 	"github.com/stretchr/testify/require"
@@ -87,4 +89,31 @@ func TestGetBackgroundCommandOutput_MissingID(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, model.ErrorCodeMissingQuery, resp.Code)
 	require.Equal(t, "missing command execution id", resp.Message)
+}
+
+func TestRunCommandReturnsBeforeGracefulShutdownTimeoutAfterImmediateComplete(t *testing.T) {
+	previousRunner := codeRunner
+	previousTimeout := flag.ApiGracefulShutdownTimeout
+	codeRunner = &fakeCodeRunner{
+		execute: func(request *runtime.ExecuteCodeRequest) error {
+			request.Hooks.OnExecuteComplete(5 * time.Millisecond)
+			return nil
+		},
+	}
+	flag.ApiGracefulShutdownTimeout = 200 * time.Millisecond
+	t.Cleanup(func() {
+		codeRunner = previousRunner
+		flag.ApiGracefulShutdownTimeout = previousTimeout
+	})
+
+	body := []byte(`{"command":"echo hi"}`)
+	ctx, w := newTestContext(http.MethodPost, "/command", body)
+	ctrl := NewCodeInterpretingController(ctx)
+
+	start := time.Now()
+	ctrl.RunCommand()
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Less(t, elapsed, flag.ApiGracefulShutdownTimeout/2)
 }
