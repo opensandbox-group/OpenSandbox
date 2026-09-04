@@ -334,6 +334,9 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 		// 1. Get latest Pool CR
 		latestPool := &sandboxv1alpha1.Pool{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(pool), latestPool); err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
 			return err
 		}
 
@@ -344,10 +347,11 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 		}
 
 		// 3. Schedule sandbox (compute + persist + sync)
-		schedResult, err := r.scheduleSandbox(ctx, latestPool, batchSandboxes, schedulePods)
-		if err != nil {
-			return err
+		schedResult, scheduleSbxErr := r.scheduleSandbox(ctx, latestPool, batchSandboxes, schedulePods)
+		if scheduleSbxErr != nil {
+			r.Recorder.Eventf(latestPool, corev1.EventTypeWarning, EventReasonFailedSchedule, "Pool schedule error %v", scheduleSbxErr)
 		}
+
 		// Requeue if there are pending sandboxes waiting for scheduling
 		if schedResult.SupplyCnt > 0 {
 			result = ctrl.Result{RequeueAfter: defaultRetryTime}
@@ -366,9 +370,9 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 		}
 
 		// 4. Handle pool upgrade
-		updateResult, err := r.updatePool(ctx, latestPool, schedulePods, schedResult.IdlePods)
-		if err != nil {
-			return err
+		updateResult, updatePoolErr := r.updatePool(ctx, latestPool, schedulePods, schedResult.IdlePods)
+		if updatePoolErr != nil {
+			r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedUpdate, "Pool update error %v", updatePoolErr)
 		}
 
 		// 5. Handle pool scale
@@ -383,20 +387,20 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 			supplyCnt:      schedResult.SupplyCnt + updateResult.SupplyUpdateRevision,
 		}
 
-		if err := r.scalePool(ctx, latestPool, args); err != nil {
-			return err
+		scalePoolErr := r.scalePool(ctx, latestPool, args)
+		if scalePoolErr != nil {
+			r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedScale, "Pool scale error %v", scalePoolErr)
 		}
 
 		// 6. Update pool status
-		if err := r.updatePoolStatus(ctx, updateResult.UpdateRevision, latestPool, pods, schedulePods, schedResult.LatestAllocation); err != nil {
-			return err
-		}
+		updatePoolStatusErr := r.updatePoolStatus(ctx, updateResult.UpdateRevision, latestPool, pods, schedulePods, schedResult.LatestAllocation)
 
-		if evictionErr != nil {
-			return evictionErr
+		for _, err := range []error{evictionErr, scheduleSbxErr, updatePoolErr, scalePoolErr, updatePoolStatusErr} {
+			if errors.IsConflict(err) {
+				return err
+			}
 		}
-
-		return nil
+		return gerrors.Join(evictionErr, scheduleSbxErr, updatePoolErr, scalePoolErr, updatePoolStatusErr)
 	})
 
 	return result, err
@@ -981,7 +985,7 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 	allocAction, err := r.Allocator.Schedule(ctx, spec)
 	if err != nil {
 		r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonAllocationFailed, "Failed to schedule sandboxes: %v", err)
-		return nil, err
+		return r.bestEffortScheduleResult(ctx, pool, pods), err
 	}
 	log.Info("Allocate action", "pool", pool.Name, "toAllocate", allocAction.ToAllocate, "toRelease", allocAction.ToRelease)
 
@@ -989,7 +993,7 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 	// 2.1 Execute ToAllocate / update in-memory store.
 	err = r.doAllocate(ctx, pool, batchSandboxes, pods, allocAction.ToAllocate)
 	if err != nil {
-		return nil, err
+		return r.bestEffortScheduleResult(ctx, pool, pods), err
 	}
 
 	// Emit allocation events.
@@ -1012,13 +1016,13 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 	// 2.2 Execute ToRelease / release in-memory store.
 	toDeletePods, err := r.doRelease(ctx, pool, batchSandboxes, pods, allocAction.ToRelease)
 	if err != nil {
-		return nil, err
+		return r.bestEffortScheduleResult(ctx, pool, pods), err
 	}
 
 	// 3. Return schedule result
 	latestAllocation, err := r.Allocator.GetPoolAllocation(ctx, pool)
 	if err != nil {
-		return nil, err
+		return r.bestEffortScheduleResult(ctx, pool, pods), err
 	}
 	idlePods := make([]string, 0)
 	for _, pod := range pods {
@@ -1037,10 +1041,27 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 	return result, nil
 }
 
+// bestEffortScheduleResult builds a fallback result from the last persisted
+// allocation so update/scale/status can proceed when scheduling fails.
+func (r *PoolReconciler) bestEffortScheduleResult(ctx context.Context, pool *sandboxv1alpha1.Pool, pods []*corev1.Pod) *ScheduleResult {
+	allocation, err := r.Allocator.GetPoolAllocation(ctx, pool)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "Failed to read pool allocation for best-effort schedule result", "pool", pool.Name)
+		allocation = map[string]string{}
+	}
+	idlePods := make([]string, 0)
+	for _, pod := range pods {
+		if _, ok := allocation[pod.Name]; !ok {
+			idlePods = append(idlePods, pod.Name)
+		}
+	}
+	return &ScheduleResult{LatestAllocation: allocation, IdlePods: idlePods}
+}
+
 func (r *PoolReconciler) updatePool(ctx context.Context, pool *sandboxv1alpha1.Pool, pods []*corev1.Pod, idlePods []string) (*UpdateResult, error) {
 	updateRevision, err := r.calculateRevision(pool)
 	if err != nil {
-		return nil, err
+		return &UpdateResult{}, err
 	}
 	strategy := NewPoolUpdateStrategy(pool)
 	result := strategy.Compute(ctx, updateRevision, pods, idlePods)
