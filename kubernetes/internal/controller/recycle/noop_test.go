@@ -19,27 +19,51 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/stretchr/testify/assert"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
+// TestNoopRecycler verifies that NoopRecycler deletes the pod on release (NeedDelete=true)
+// so that a fresh replacement is created by the pool controller and no stale data persists.
 func TestNoopRecycler(t *testing.T) {
+	now := metav1.Now()
 	tests := []struct {
-		name string
-		pod  *corev1.Pod
+		name           string
+		pod            *corev1.Pod
+		wantState      string
+		wantNeedDelete bool
 	}{
-		{name: "NilPod", pod: nil},
-		{name: "WithPod", pod: &corev1.Pod{}},
+		{
+			name:           "NilPod_Succeeded",
+			pod:            nil,
+			wantState:      StateSucceeded,
+			wantNeedDelete: false,
+		},
+		{
+			// Pod is terminating but not yet gone; report Recycling so the pool
+			// does not re-allocate it before it fully disappears.
+			name:           "PodWithDeletionTimestamp_Recycling",
+			pod:            &corev1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now}},
+			wantState:      StateRecycling,
+			wantNeedDelete: false,
+		},
+		{
+			name:           "PodStillExists_NeedDelete",
+			pod:            &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1"}},
+			wantState:      StateRecycling,
+			wantNeedDelete: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			n := NewNoopRecycler()
 			status, err := n.TryRecycle(context.Background(), &sandboxv1alpha1.Pool{}, tt.pod, &Spec{ID: "sbx1"})
 			assert.NoError(t, err)
-			assert.Equal(t, StateSucceeded, status.State)
-			assert.False(t, status.NeedDelete)
+			assert.Equal(t, tt.wantState, status.State)
+			assert.Equal(t, tt.wantNeedDelete, status.NeedDelete)
 		})
 	}
 }
