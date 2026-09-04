@@ -56,7 +56,11 @@ volume_default_size = "1Gi"
 type = "sqlite"
 path = "~/.opensandbox/opensandbox.db"
 # To use PostgreSQL, set type = "postgresql", configure [store.postgresql], and
-# inject OPENSANDBOX_STORE_POSTGRESQL_DSN. Use only one active server replica.
+# inject OPENSANDBOX_STORE_POSTGRESQL_DSN. The deployment default is one Server
+# replica. An explicit two-replica topology supports multi-active public snapshots
+# only when PostgreSQL is paired with the Kubernetes runtime.
+# [store.postgresql]
+# snapshot_recovery_interval_seconds = 15
 
 [kubernetes]
 # Path to kubeconfig file. Leave as null to use in-cluster configuration

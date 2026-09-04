@@ -56,7 +56,7 @@ Reference the Secret from a values file:
 ```yaml
 # values-server.yaml
 server:
-  replicaCount: 2
+  replicaCount: 1
   env:
     - name: OPENSANDBOX_SERVER_API_KEY
       valueFrom:
@@ -82,9 +82,9 @@ kubectl create secret generic opensandbox-postgresql \
 unset OPENSANDBOX_POSTGRESQL_DSN
 ```
 
-In `values-server.yaml`, set `server.replicaCount` to `1`, add the Secret-backed
-environment variable below, and add the shown `[store]` tables to the complete
-`configToml` value:
+In `values-server.yaml`, keep the default `server.replicaCount` at `1`, add the
+Secret-backed environment variable below, and add the shown `[store]` tables to
+the complete `configToml` value:
 
 ```yaml
 server:
@@ -104,11 +104,14 @@ configToml: |
   [store.postgresql]
   min_pool_size = 1
   max_pool_size = 10
+  snapshot_recovery_interval_seconds = 15
 ```
 
-::: warning
-Snapshot recovery is not coordinated across server replicas. Keep
-`server.replicaCount: 1` when replicas use the same PostgreSQL database.
+::: info
+The chart default remains one Server replica. You may explicitly set
+`server.replicaCount: 2` for multi-active public snapshot handling only when
+both replicas use the same PostgreSQL database and the Kubernetes runtime.
+SQLite and Docker snapshot execution do not support this multi-active topology.
 :::
 
 ### Install and verify

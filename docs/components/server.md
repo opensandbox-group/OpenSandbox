@@ -81,6 +81,7 @@ type = "postgresql"
 [store.postgresql]
 min_pool_size = 1
 max_pool_size = 10
+snapshot_recovery_interval_seconds = 15
 ```
 
 ```bash
@@ -88,11 +89,27 @@ export OPENSANDBOX_STORE_POSTGRESQL_DSN='postgresql://opensandbox:password@postg
 opensandbox-server
 ```
 
-::: warning
-Snapshot recovery is not coordinated across server processes. Run only one active server process against a PostgreSQL database.
+::: info
+Multiple active Server processes are supported for public snapshots only when
+PostgreSQL is paired with the Kubernetes runtime. They observe the deterministic
+`SandboxSnapshot` CR before creating it, recover unfinished PostgreSQL rows
+periodically, and use state CAS for the terminal database result. A process
+crash or transient Kubernetes observation timeout therefore leaves the row
+recoverable instead of assigning a database lease.
 :::
 
-For Kubernetes Secret and Helm values wiring, see [Kubernetes Deployment](/kubernetes/deployment#use-postgresql-for-server-persistence).
+::: warning
+SQLite and Docker snapshot execution keep their existing single-process
+recovery behavior. The PostgreSQL recovery interval changes peer takeover
+latency for Kubernetes snapshots; it does not provide an exactly-once guarantee
+across PostgreSQL, Kubernetes, and the image registry.
+:::
+
+The Helm chart still defaults to one Server replica. An explicitly configured
+two-replica topology is supported for public snapshots only under the
+PostgreSQL-plus-Kubernetes conditions above. For Secret, configuration, and
+Helm values wiring, see
+[Kubernetes Deployment](/kubernetes/deployment#use-postgresql-for-server-persistence).
 
 ### OpenTelemetry metrics
 

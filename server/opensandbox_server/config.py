@@ -1099,6 +1099,14 @@ class PostgreSQLStoreConfig(BaseModel):
         gt=0,
         description="Maximum time in seconds to wait for a pooled PostgreSQL connection.",
     )
+    snapshot_recovery_interval_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        description=(
+            "Interval between unfinished snapshot recovery scans when PostgreSQL is paired "
+            "with the Kubernetes runtime. This controls takeover latency, not correctness."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_pool_size(self) -> "PostgreSQLStoreConfig":

@@ -241,6 +241,92 @@ def test_create_snapshot_retries_transient_inspect_error_until_controller_ready(
     assert status.image == "registry/sandbox:snap"
 
 
+def test_postgresql_ha_observation_error_keeps_snapshot_creating() -> None:
+    k8s_client = TransientGetK8sClient(failures=1)
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        postgresql_ha_enabled=True,
+    )
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status.state == SnapshotState.CREATING
+    assert status.reason == "snapshot_runtime_inspect_failed"
+    assert k8s_client.created == []
+
+
+def test_postgresql_ha_observes_existing_cr_before_create() -> None:
+    k8s_client = FakeK8sClient()
+    k8s_client.objects[build_public_snapshot_name(SNAPSHOT_ID)] = _snapshot_cr(
+        phase="Succeed",
+        containers=[
+            {"containerName": "sandbox", "imageUri": "registry/sandbox:snap"},
+        ],
+    )
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        postgresql_ha_enabled=True,
+    )
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status.state == SnapshotState.READY
+    assert k8s_client.created == []
+
+
+def test_postgresql_ha_can_create_cr_missing_after_creator_crash() -> None:
+    k8s_client = TransientThenReadyK8sClient(failures=0)
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        wait_timeout_seconds=1,
+        poll_interval_seconds=0,
+        postgresql_ha_enabled=True,
+    )
+
+    recovered = runtime.inspect_snapshot(SNAPSHOT_ID)
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert recovered.state == SnapshotState.CREATING
+    assert recovered.reason == "snapshot_recovery_missing_snapshot"
+    assert status.state == SnapshotState.READY
+    assert len(k8s_client.created) == 1
+
+
+def test_postgresql_ha_wait_timeout_keeps_snapshot_creating() -> None:
+    k8s_client = FakeK8sClient()
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        wait_timeout_seconds=0,
+        poll_interval_seconds=0,
+        postgresql_ha_enabled=True,
+    )
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status.state == SnapshotState.CREATING
+    assert status.reason == "snapshot_runtime_timeout"
+    assert "remains Creating" in (status.message or "")
+
+
+def test_default_kubernetes_wait_timeout_remains_failed() -> None:
+    k8s_client = FakeK8sClient()
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        wait_timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_timeout"
+
+
 def test_delete_snapshot_deletes_cr_and_ignores_missing_cr() -> None:
     k8s_client = FakeK8sClient()
     runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
@@ -268,6 +354,23 @@ def test_create_snapshot_fails_when_existing_cr_points_to_different_sandbox() ->
     assert status.state == SnapshotState.FAILED
     assert status.reason == "snapshot_runtime_conflict"
     assert "different source sandbox" in (status.message or "")
+
+
+def test_postgresql_ha_rejects_existing_cr_without_source_sandbox() -> None:
+    k8s_client = FakeK8sClient()
+    snapshot = _snapshot_cr(phase="Pending")
+    snapshot["spec"] = {}
+    k8s_client.objects[build_public_snapshot_name(SNAPSHOT_ID)] = snapshot
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        postgresql_ha_enabled=True,
+    )
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_conflict"
 
 
 def test_create_snapshot_marks_ambiguous_multi_container_restore_failed() -> None:

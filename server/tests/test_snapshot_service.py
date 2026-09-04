@@ -14,6 +14,7 @@
 
 from concurrent.futures import Future
 from types import SimpleNamespace
+import time
 
 import pytest
 from fastapi import HTTPException
@@ -26,8 +27,13 @@ from opensandbox_server.services.snapshot_models import (
     SnapshotState,
     SnapshotStatusRecord,
 )
+from opensandbox_server.services import snapshot_service as snapshot_service_module
 from opensandbox_server.services.snapshot_runtime import NoopSnapshotRuntime, SnapshotRuntimeStatus
-from opensandbox_server.services.snapshot_service import PersistedSnapshotService
+from opensandbox_server.services.snapshot_service import (
+    PersistedSnapshotService,
+    PostgreSQLKubernetesSnapshotService,
+    create_snapshot_service,
+)
 
 
 class StubSandboxService:
@@ -509,6 +515,83 @@ def test_snapshot_service_worker_cleans_up_snapshot_deleted_during_creation(tmp_
     assert repo.get(created.id) is None
 
 
+def test_postgresql_kubernetes_worker_preserves_deleting_row_without_artifact(
+    tmp_path,
+) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    service = PostgreSQLKubernetesSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        recovery_interval_seconds=60,
+    )
+    service._recovery_stop.set()
+    service._recovery_thread.join()
+    try:
+        record = _snapshot_record("snap-delete-recovery", SnapshotState.DELETING)
+        repo.create(record)
+
+        service._complete_snapshot(
+            record,
+            SnapshotRuntimeStatus(
+                state=SnapshotState.CREATING,
+                reason="snapshot_runtime_timeout",
+                message="Snapshot creation is still recoverable.",
+            ),
+        )
+
+        stored = repo.get(record.id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.DELETING
+        assert runtime.delete_calls == []
+    finally:
+        service.close()
+
+
+def test_postgresql_kubernetes_worker_preserves_deleting_row_on_cleanup_failure(
+    tmp_path,
+) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+
+    def fail_delete(*args, **kwargs) -> None:
+        raise RuntimeError("temporary Kubernetes delete failure")
+
+    runtime.delete_snapshot = fail_delete
+    service = PostgreSQLKubernetesSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        recovery_interval_seconds=60,
+    )
+    service._recovery_stop.set()
+    service._recovery_thread.join()
+    try:
+        record = _snapshot_record(
+            "snap-delete-retry",
+            SnapshotState.DELETING,
+            image="registry/sandbox:snapshot",
+        )
+        repo.create(record)
+
+        service._complete_snapshot(
+            record,
+            SnapshotRuntimeStatus(
+                state=SnapshotState.READY,
+                image="registry/sandbox:snapshot",
+                reason="snapshot_runtime_ready",
+                message="Snapshot image is ready.",
+            ),
+        )
+
+        stored = repo.get(record.id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.DELETING
+    finally:
+        service.close()
+
+
 def test_snapshot_service_worker_does_not_overwrite_transitioned_snapshot(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = StubSnapshotRuntime()
@@ -565,6 +648,77 @@ def test_snapshot_service_close_shuts_down_executor(tmp_path) -> None:
 
     assert executor.shutdown_called is True
     assert executor.shutdown_wait is True
+
+
+def test_postgresql_kubernetes_recovery_does_not_queue_duplicate_local_workers(
+    tmp_path,
+) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    repo.create(_snapshot_record("snap-inflight", SnapshotState.CREATING))
+    runtime = StubSnapshotRuntime()
+    runtime.inspect_status_by_snapshot_id["snap-inflight"] = SnapshotRuntimeStatus(
+        state=SnapshotState.CREATING,
+        reason="snapshot_runtime_in_progress",
+        message="Snapshot is still running.",
+    )
+    executor = CapturingExecutor()
+    service = PostgreSQLKubernetesSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        recovery_interval_seconds=0.01,
+        snapshot_executor=executor,
+    )
+    try:
+        deadline = time.monotonic() + 1
+        while not executor.submitted and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        service.recover_unfinished_snapshots()
+        service.recover_unfinished_snapshots()
+
+        assert len(executor.submitted) == 1
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize(
+    ("store_type", "runtime_type", "expected_type"),
+    [
+        ("postgresql", "kubernetes", PostgreSQLKubernetesSnapshotService),
+        ("sqlite", "kubernetes", PersistedSnapshotService),
+        ("postgresql", "docker", PersistedSnapshotService),
+    ],
+)
+def test_snapshot_service_factory_limits_ha_to_postgresql_kubernetes(
+    tmp_path,
+    monkeypatch,
+    store_type,
+    runtime_type,
+    expected_type,
+) -> None:
+    repository = SQLiteSnapshotRepository(tmp_path / f"{store_type}-{runtime_type}.db")
+    config = SimpleNamespace(
+        store=SimpleNamespace(
+            type=store_type,
+            postgresql=SimpleNamespace(snapshot_recovery_interval_seconds=1),
+        ),
+        runtime=SimpleNamespace(type=runtime_type),
+    )
+    monkeypatch.setattr(snapshot_service_module, "get_config", lambda: config)
+    monkeypatch.setattr(snapshot_service_module, "get_snapshot_repository", lambda: repository)
+    monkeypatch.setattr(
+        snapshot_service_module,
+        "create_snapshot_runtime",
+        lambda *args, **kwargs: StubSnapshotRuntime(),
+    )
+
+    service = create_snapshot_service(StubSandboxService())
+    try:
+        assert type(service) is expected_type
+    finally:
+        service.close()
+        repository.close()
 
 
 def test_snapshot_service_propagates_missing_sandbox(tmp_path) -> None:

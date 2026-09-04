@@ -27,6 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
 from math import ceil
+from threading import Event, Lock, Thread
 from uuid import uuid4
 
 from fastapi import HTTPException, status
@@ -39,6 +40,7 @@ from opensandbox_server.api.schema import (
     Snapshot,
     SnapshotStatus,
 )
+from opensandbox_server.config import get_config
 from opensandbox_server.repositories.snapshots.factory import get_snapshot_repository
 from opensandbox_server.services.constants import SnapshotErrorCodes
 from opensandbox_server.services.snapshot_runtime import (
@@ -96,6 +98,8 @@ class PersistedSnapshotService(SnapshotService):
     Snapshot service backed by the configured repository.
     """
 
+    _preserve_deleting_on_cleanup_failure = False
+
     def __init__(
         self,
         snapshot_repository: SnapshotRepository,
@@ -145,11 +149,7 @@ class PersistedSnapshotService(SnapshotService):
             updated_at=now,
         )
         self._snapshot_repository.create(record)
-        future = self._snapshot_executor.submit(
-            self._create_snapshot_worker,
-            record,
-        )
-        future.add_done_callback(self._log_worker_failure)
+        self._submit_snapshot_worker(record)
         return self._to_snapshot_response(record)
 
     def list_snapshots(self, request: ListSnapshotsRequest) -> ListSnapshotsResponse:
@@ -238,7 +238,7 @@ class PersistedSnapshotService(SnapshotService):
     def _default_pagination():
         from opensandbox_server.api.schema import PaginationRequest
 
-        return PaginationRequest()
+        return PaginationRequest(page=1, pageSize=20)
 
     @staticmethod
     def _get_tenant_namespace() -> str | None:
@@ -334,6 +334,13 @@ class PersistedSnapshotService(SnapshotService):
         except Exception as exc:  # noqa: BLE001
             logger.exception("Snapshot worker exited unexpectedly: %s", exc)
 
+    def _submit_snapshot_worker(self, record: SnapshotRecord) -> None:
+        future = self._snapshot_executor.submit(
+            self._create_snapshot_worker,
+            record,
+        )
+        future.add_done_callback(self._log_worker_failure)
+
     def _complete_snapshot(self, record: SnapshotRecord, runtime_status) -> None:
         current_record = self._snapshot_repository.get(record.id)
         if current_record is None:
@@ -341,7 +348,13 @@ class PersistedSnapshotService(SnapshotService):
             return
 
         if current_record.status.state == SnapshotState.DELETING:
-            self._cleanup_runtime_artifact(current_record.id, runtime_status.image, current_record.namespace)
+            cleaned = self._cleanup_runtime_artifact(
+                current_record.id,
+                runtime_status.image,
+                current_record.namespace,
+            )
+            if self._preserve_deleting_on_cleanup_failure and not cleaned:
+                return
             self._snapshot_repository.delete(current_record.id)
             return
 
@@ -404,11 +417,7 @@ class PersistedSnapshotService(SnapshotService):
                 namespace=record.namespace,
             )
             if runtime_status.state == SnapshotState.CREATING:
-                future = self._snapshot_executor.submit(
-                    self._create_snapshot_worker,
-                    record,
-                )
-                future.add_done_callback(self._log_worker_failure)
+                self._submit_snapshot_worker(record)
                 return False
             self._complete_snapshot(record, runtime_status)
             return True
@@ -496,12 +505,18 @@ class PersistedSnapshotService(SnapshotService):
 
         return None
 
-    def _cleanup_runtime_artifact(self, snapshot_id: str, image: str | None, namespace: str = "default") -> None:
+    def _cleanup_runtime_artifact(
+        self,
+        snapshot_id: str,
+        image: str | None,
+        namespace: str | None = "default",
+    ) -> bool:
         if not image:
-            return
+            return False
 
         try:
             self._snapshot_runtime.delete_snapshot(snapshot_id, image=image, namespace=namespace)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Failed to cleanup snapshot artifact for %s: %s",
@@ -509,6 +524,7 @@ class PersistedSnapshotService(SnapshotService):
                 exc,
                 exc_info=True,
             )
+            return False
 
     @staticmethod
     def _ensure_source_sandbox_running(sandbox) -> None:
@@ -553,13 +569,101 @@ class PersistedSnapshotService(SnapshotService):
         )
 
 
+class PostgreSQLKubernetesSnapshotService(PersistedSnapshotService):
+    """Periodic unfinished-operation recovery for PostgreSQL + Kubernetes only."""
+
+    _preserve_deleting_on_cleanup_failure = True
+
+    def __init__(
+        self,
+        snapshot_repository: SnapshotRepository,
+        sandbox_service,
+        snapshot_runtime: SnapshotRuntime,
+        *,
+        recovery_interval_seconds: float,
+        snapshot_executor=None,
+    ) -> None:
+        if recovery_interval_seconds <= 0:
+            raise ValueError("recovery_interval_seconds must be greater than zero")
+        self._recovery_interval_seconds = recovery_interval_seconds
+        self._recovery_stop = Event()
+        self._inflight_snapshot_ids: set[str] = set()
+        self._inflight_lock = Lock()
+        super().__init__(
+            snapshot_repository,
+            sandbox_service,
+            snapshot_runtime=snapshot_runtime,
+            snapshot_executor=snapshot_executor,
+            recover_unfinished_snapshots=False,
+        )
+        self._recovery_thread = Thread(
+            target=self._run_recovery_loop,
+            name="postgresql-kubernetes-snapshot-recovery",
+            daemon=True,
+        )
+        self._recovery_thread.start()
+
+    def close(self) -> None:
+        self._recovery_stop.set()
+        self._recovery_thread.join()
+        super().close()
+
+    def _run_recovery_loop(self) -> None:
+        while not self._recovery_stop.is_set():
+            try:
+                self.recover_unfinished_snapshots()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "PostgreSQL Kubernetes snapshot recovery scan failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+            self._recovery_stop.wait(self._recovery_interval_seconds)
+
+    def _submit_snapshot_worker(self, record: SnapshotRecord) -> None:
+        with self._inflight_lock:
+            if record.id in self._inflight_snapshot_ids:
+                return
+            self._inflight_snapshot_ids.add(record.id)
+
+        def run_tracked_worker() -> None:
+            try:
+                self._create_snapshot_worker(record)
+            finally:
+                with self._inflight_lock:
+                    self._inflight_snapshot_ids.discard(record.id)
+
+        try:
+            future = self._snapshot_executor.submit(run_tracked_worker)
+        except BaseException:
+            with self._inflight_lock:
+                self._inflight_snapshot_ids.discard(record.id)
+            raise
+        future.add_done_callback(self._log_worker_failure)
+
+
 def create_snapshot_service(sandbox_service) -> SnapshotService:
     """
     Build the default persisted snapshot service.
     """
+    active_config = get_config()
     snapshot_runtime: SnapshotRuntime = create_snapshot_runtime(
+        active_config,
         docker_client=getattr(sandbox_service, "docker_client", None),
     )
+
+    if (
+        active_config.store.type == "postgresql"
+        and active_config.runtime.type == "kubernetes"
+    ):
+        return PostgreSQLKubernetesSnapshotService(
+            snapshot_repository=get_snapshot_repository(),
+            sandbox_service=sandbox_service,
+            snapshot_runtime=snapshot_runtime,
+            recovery_interval_seconds=(
+                active_config.store.postgresql.snapshot_recovery_interval_seconds
+            ),
+        )
 
     return PersistedSnapshotService(
         snapshot_repository=get_snapshot_repository(),
@@ -571,6 +675,7 @@ def create_snapshot_service(sandbox_service) -> SnapshotService:
 __all__ = [
     "SnapshotService",
     "PersistedSnapshotService",
+    "PostgreSQLKubernetesSnapshotService",
     "create_snapshot_service",
     "SNAPSHOT_WORKER_MAX_WORKERS",
 ]

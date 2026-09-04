@@ -282,14 +282,24 @@ the same backend.
 | `postgresql.max_pool_size` | integer | `10` | Maximum number of PostgreSQL connections used by each server process. |
 | `postgresql.connect_timeout_seconds` | integer | `5` | Maximum time to establish the initial PostgreSQL connections. |
 | `postgresql.pool_timeout_seconds` | number | `5` | Maximum time to wait for a pooled PostgreSQL connection. |
+| `postgresql.snapshot_recovery_interval_seconds` | number | `15` | Interval between unfinished snapshot recovery scans when PostgreSQL is paired with the Kubernetes runtime. This controls takeover latency, not correctness. |
 
 **Notes**
 
 - The default SQLite backend gives local and single-node deployments persistent
   metadata without requiring an external database service.
-- PostgreSQL provides externally managed persistence, but snapshot recovery is
-  not coordinated across server processes. Run only one active server process
-  against a PostgreSQL database.
+- PostgreSQL plus the Kubernetes runtime supports multiple active Server
+  processes for public snapshot create, recovery, and delete. Servers coordinate
+  through the deterministic `SandboxSnapshot` name and PostgreSQL state CAS;
+  every replica may scan unfinished rows, but Kubernetes admits only one CR and
+  only one terminal database transition wins.
+- Kubernetes observation errors and create wait timeouts leave the PostgreSQL
+  record in `Creating` for a later scan. The recovery interval controls how soon
+  an already-active peer retries after a process crash; it is not a lease or an
+  exactly-once guarantee.
+- SQLite deployments and Docker snapshot execution retain their existing
+  single-process recovery behavior. Do not use this setting as a general
+  multi-active guarantee for those combinations.
 - `OPENSANDBOX_STORE_POSTGRESQL_DSN` overrides `postgresql.dsn`, keeping database
   credentials out of configuration files and Kubernetes ConfigMaps.
 - Switching backends does not copy existing snapshot metadata. Start with an
@@ -310,6 +320,7 @@ min_pool_size = 1
 max_pool_size = 10
 connect_timeout_seconds = 5
 pool_timeout_seconds = 5
+snapshot_recovery_interval_seconds = 15
 ```
 
 ```bash
