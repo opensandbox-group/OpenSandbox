@@ -19,6 +19,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from opensandbox_server.api.schema import PlatformSpec
+from opensandbox_server.services.k8s.egress_helper import prep_execd_init_for_egress
 from opensandbox_server.services.k8s.provider_common import DEFAULT_ENTRYPOINT
 from opensandbox_server.services.windows_common import (
     inject_windows_resource_limits_env,
@@ -87,8 +88,9 @@ def apply_windows_profile_overrides(
         "chmod 0644 /oem/install.bat /oem/execd.exe"
     )
     if disable_ipv6_for_egress:
-        init_container["args"] = [f"set -e; echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 && {init_script}"]
-        init_container["securityContext"] = {"privileged": True}
+        init_script, security_context = prep_execd_init_for_egress(init_script)
+        init_container["args"] = [init_script]
+        init_container["securityContext"] = security_context
     else:
         init_container["args"] = [init_script]
         init_container.pop("securityContext", None)
