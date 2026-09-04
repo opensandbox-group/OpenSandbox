@@ -257,8 +257,16 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 			}
 		}
 	}
+	portDeny, portAllow := p.PortScopedRules()
+	// Port-scoped deny goes first so it wins over every allow, port-scoped or
+	// not (fail-closed, matching the precedence StaticIPSets already gives
+	// plain IP/CIDR rules). Port-scoped allow goes after the plain deny set
+	// for the same reason, but before the dynamic/plain allow sets since it
+	// is a more specific grant.
+	writePortScopedRules(&b, portDeny, "drop")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s drop\n", tableName, chainName, denyV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s drop\n", tableName, chainName, denyV6Set)
+	writePortScopedRules(&b, portAllow, "accept")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, dynAllowV6Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
@@ -275,6 +283,32 @@ func writeElements(b *strings.Builder, setName string, elems []string) {
 		return
 	}
 	fmt.Fprintf(b, "add element inet %s %s { %s }\n", tableName, setName, strings.Join(elems, ", "))
+}
+
+// writePortScopedRules emits one "add rule" line per policy.PortScopedRule,
+// preserving declaration order (the caller passes either the deny or the
+// allow bucket from policy.NetworkPolicy.PortScopedRules, never both, so
+// order-within-verb is all that matters here). A rule with no Target applies
+// to all destinations: emitting bare "tcp dport { ... }" with no daddr match
+// naturally covers both IPv4 and IPv6, so target-less rules need no v4/v6
+// split. Port-scoping is TCP-only for now; see docs/components/egress.md.
+func writePortScopedRules(b *strings.Builder, rules []policy.PortScopedRule, verb string) {
+	for _, r := range rules {
+		ports := make([]string, len(r.Ports))
+		for i, port := range r.Ports {
+			ports[i] = fmt.Sprintf("%d", port)
+		}
+		portsClause := strings.Join(ports, ", ")
+		if r.Target == "" {
+			fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } %s\n", tableName, chainName, portsClause, verb)
+			continue
+		}
+		daddr := "ip daddr"
+		if r.IsV6 {
+			daddr = "ip6 daddr"
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } %s\n", tableName, chainName, daddr, r.Target, portsClause, verb)
+	}
 }
 
 func defaultRunner(ctx context.Context, script string) ([]byte, error) {

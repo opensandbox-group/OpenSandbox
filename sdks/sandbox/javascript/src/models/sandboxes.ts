@@ -56,10 +56,21 @@ export interface NetworkRule extends Record<string, unknown> {
    */
   action: NetworkRuleAction;
   /**
-   * FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-   * IP/CIDR is not supported in the egress MVP.
+   * FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP address, or CIDR.
+   * May be omitted when `ports` is set; otherwise required.
    */
-  target: string;
+  target?: string;
+  /**
+   * Restricts this rule to specific TCP destination ports (1-65535).
+   *
+   * - Omitted target with ports set: applies to these ports across all IPv4/IPv6 destinations.
+   * - `target` is an IP or CIDR: applies to that destination only, on these ports.
+   * - `target` is a domain: rejected — domain rules are evaluated at the DNS layer, which has
+   *   no port dimension.
+   *
+   * TCP only for now. A rule must set `target`, `ports`, or both. Max 256 ports per rule.
+   */
+  ports?: number[];
 }
 
 export interface NetworkPolicy extends Record<string, unknown> {

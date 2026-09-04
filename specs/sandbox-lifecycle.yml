@@ -1677,9 +1677,34 @@ components:
         target:
           type: string
           description: |
-            FQDN or wildcard domain (e.g., "example.com", "*.example.com").
-            IP/CIDR not yet supported in the egress MVP.
-      required: [action, target]
+            FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP
+            address, or CIDR. May be omitted when `ports` is set (see below);
+            otherwise required.
+        ports:
+          type: array
+          minItems: 1
+          items:
+            type: integer
+            minimum: 1
+            maximum: 65535
+          description: |
+            Restricts this rule to specific TCP destination ports.
+
+            - `target` omitted, `ports` set: the rule applies to these ports
+              across all IPv4/IPv6 destinations.
+            - `target` is an IP or CIDR, `ports` set: the rule applies to that
+              destination only on these ports.
+            - `target` is a domain: `ports` is rejected with a validation
+              error. Domain rules are evaluated at the DNS layer, which has no
+              port dimension; combining them is not supported yet.
+
+            TCP only for now; UDP port scoping is not supported. A rule must
+            set `target`, `ports`, or both (enforced by the server/sidecar,
+            not expressible as a plain-object OpenAPI constraint without an
+            `anyOf` that this repo's Python/TypeScript generators do not
+            translate into a useful type — see PR discussion). Max 256
+            ports per rule.
+      required: [action]
       additionalProperties: false
 
     Volume:
