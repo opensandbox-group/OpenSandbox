@@ -81,6 +81,8 @@ metadata:
     {{- include "opensandbox-server.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.server.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "opensandbox-server.selectorLabels" . | nindent 6 }}
