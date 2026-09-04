@@ -125,6 +125,7 @@ type podFailureSummary struct {
 	failed        int
 	primaryReason string
 	samplePod     string
+	podUIDs       []types.UID
 }
 
 func summarizePodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
@@ -140,6 +141,9 @@ func summarizePodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
 		}
 
 		summary.failed++
+		if pod.UID != "" {
+			summary.podUIDs = append(summary.podUIDs, pod.UID)
+		}
 		if _, exists := firstPodByReason[reason]; !exists {
 			firstPodByReason[reason] = pod.Name
 		}
@@ -211,13 +215,45 @@ func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods 
 	if summary, hasFailures := summarizePodFailures(pods); hasFailures {
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(false))
+		status.FailedPodUIDs = nil
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
 		return
 	}
 	if status.Ready > 0 {
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
+		status.FailedPodUIDs = nil
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
 	}
+}
+
+func failedPodsRecovered(failedPodUIDs []types.UID, pods []*corev1.Pod) bool {
+	// Without provenance, recovery is unsafe because a replacement Pod may reuse the same name.
+	if len(failedPodUIDs) == 0 {
+		return false
+	}
+
+	recoveredUIDs := make(map[types.UID]struct{}, len(failedPodUIDs))
+	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil || !utils.IsPodReady(pod) || len(pod.Spec.Containers) == 0 {
+			continue
+		}
+
+		// The first container is the sandbox's main runtime container by convention.
+		mainContainerName := pod.Spec.Containers[0].Name
+		for _, containerStatus := range pod.Status.ContainerStatuses {
+			if containerStatus.Name == mainContainerName && containerStatus.State.Running != nil {
+				recoveredUIDs[pod.UID] = struct{}{}
+				break
+			}
+		}
+	}
+
+	for _, uid := range failedPodUIDs {
+		if _, recovered := recoveredUIDs[uid]; !recovered {
+			return false
+		}
+	}
+	return true
 }
 
 func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod) {
@@ -228,6 +264,9 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 			// cached phase is not Resuming; keep the resume failure semantics anyway.
 			if isResumeInFlight(batchSbx) {
 				setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, summary.primaryReason, summary.message(true))
+				status.FailedPodUIDs = nil
+			} else {
+				status.FailedPodUIDs = append([]types.UID(nil), summary.podUIDs...)
 			}
 			status.Phase = sandboxv1alpha1.BatchSandboxPhaseFailed
 		}
@@ -235,9 +274,12 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	}
 
 	if status.Phase == sandboxv1alpha1.BatchSandboxPhaseFailed {
-		return
+		if !failedPodsRecovered(status.FailedPodUIDs, pods) {
+			return
+		}
 	}
 
+	status.FailedPodUIDs = nil
 	setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
 	if status.Ready > 0 {
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
@@ -343,7 +385,20 @@ func (r *BatchSandboxReconciler) updateStatus(ctx context.Context, batchSandbox 
 	log := logf.FromContext(ctx)
 	mergedStatus := newStatus.DeepCopy()
 	mergedStatus.Conditions = mergeLifecycleConditions(mergedStatus.Conditions, batchSandbox.Status.Conditions)
-	patchData, err := json.Marshal(map[string]any{"status": mergedStatus})
+	statusPatch := make(map[string]any)
+	statusJSON, err := json.Marshal(mergedStatus)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status patch: %w", err)
+	}
+	if err := json.Unmarshal(statusJSON, &statusPatch); err != nil {
+		return fmt.Errorf("failed to unmarshal status patch: %w", err)
+	}
+	// JSON merge patches preserve fields omitted by omitempty. Explicitly clear
+	// recorded failure provenance when the desired status no longer has it.
+	if len(batchSandbox.Status.FailedPodUIDs) > 0 && len(mergedStatus.FailedPodUIDs) == 0 {
+		statusPatch["failedPodUIDs"] = nil
+	}
+	patchData, err := json.Marshal(map[string]any{"status": statusPatch})
 	if err != nil {
 		return fmt.Errorf("failed to marshal status patch: %w", err)
 	}

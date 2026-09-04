@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // +kubebuilder:validation:Enum=Pending;Succeed;Pausing;Paused;Resuming;Failed
@@ -178,6 +179,12 @@ type BatchSandboxStatus struct {
 	// Server reads this field directly without combining multiple fields.
 	// +optional
 	Phase BatchSandboxPhase `json:"phase,omitempty"`
+
+	// FailedPodUIDs records the Pods whose transient runtime failures caused the
+	// current Failed phase. The controller uses these UIDs to distinguish an
+	// in-place recovery from a replacement Pod that reuses the same name.
+	// +optional
+	FailedPodUIDs []types.UID `json:"failedPodUIDs,omitempty"`
 
 	// PauseObservedGeneration is the generation most recently ACKed by the Controller
 	// when entering pause/resume dispatch logic. Written immediately to prevent reentry (idempotent gating).

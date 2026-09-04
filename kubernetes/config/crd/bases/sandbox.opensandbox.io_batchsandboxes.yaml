@@ -187,6 +187,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failedPodUIDs:
+                description: |-
+                  FailedPodUIDs records the Pods whose transient runtime failures caused the
+                  current Failed phase. The controller uses these UIDs to distinguish an
+                  in-place recovery from a replacement Pod that reuses the same name.
+                items:
+                  description: |-
+                    UID is a type that holds unique ID values, including UUIDs.  Because we
+                    don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                    intent and helps make sure that UIDs and names do not get conflated.
+                  type: string
+                type: array
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed for this BatchSandbox. It corresponds to the
