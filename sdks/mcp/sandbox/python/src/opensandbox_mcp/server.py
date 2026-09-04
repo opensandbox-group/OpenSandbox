@@ -67,19 +67,23 @@ class ServerState:
 class StatusResponse(BaseModel):
     status: str = Field(description="Operation status string.")
 
+
 class DirectoryEntryInput(BaseModel):
     path: str = Field(description="Directory path.")
     mode: int = Field(default=755, description="Unix permissions for the directory.")
     owner: str | None = Field(default=None, description="Owner username.")
     group: str | None = Field(default=None, description="Group name.")
 
+
 class SandboxInfoResponse(BaseModel):
     sandbox_id: str = Field(description="Sandbox identifier.")
     info: SandboxInfo = Field(description="Sandbox info payload.")
 
+
 class SandboxHealthResponse(BaseModel):
     sandbox_id: str = Field(description="Sandbox identifier.")
     healthy: bool = Field(description="Sandbox health status.")
+
 
 class FileReadResponse(BaseModel):
     path: str = Field(description="File path.")
@@ -142,6 +146,8 @@ def register_tools(
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
         entrypoint: list[str] | None = None,
+        host_path: str | None = None,
+        mount_path: str | None = None,
     ) -> SandboxInfoResponse:
         """Create a sandbox and store it in the MCP server session.
 
@@ -167,6 +173,8 @@ def register_tools(
                 )
             extensions: Opaque extension parameters passed through to the server.
             entrypoint: Entrypoint command list.
+            host_path: Optional host path to mount (must be whitelisted on the manager).
+            mount_path: Optional internal container target path (e.g., "/workspace").
 
         Returns:
             A dict with:
@@ -182,14 +190,20 @@ def register_tools(
                 image="python:3.11",
                 env={"PYTHONPATH": "/app"},
                 resource={"cpu": "1", "memory": "2Gi"},
+                host_path="/var/lib/sandboxes/workspaces",
+                mount_path="/workspace",
             )
         """
         if ctx:
-            await ctx.report_progress(progress=0.1, total=1.0, message="Validating input")
+            await ctx.report_progress(
+                progress=0.1, total=1.0, message="Validating input"
+            )
         image_auth = None
         if auth_username or auth_password:
             if not auth_username or not auth_password:
-                raise ValueError("auth_username and auth_password must be provided together")
+                raise ValueError(
+                    "auth_username and auth_password must be provided together"
+                )
             image_auth = SandboxImageAuth(
                 username=auth_username,
                 password=auth_password,
@@ -199,6 +213,22 @@ def register_tools(
             await ctx.report_progress(
                 progress=0.3, total=1.0, message="Creating sandbox"
             )
+
+        volumes = None
+        if (host_path is not None) != (mount_path is not None):
+            raise ValueError("Both 'host_path' and 'mount_path' must be provided together to enable persistence.")
+
+        if host_path and mount_path:
+            from opensandbox.models.sandboxes import Host, Volume
+
+            volumes = [
+                Volume(
+                    name="mcp-persistent-storage",
+                    host=Host(path=host_path),
+                    mount_path=mount_path,
+                )
+            ]
+
         sandbox = await Sandbox.create(
             image_spec,
             timeout=timedelta(seconds=timeout_seconds),
@@ -214,6 +244,7 @@ def register_tools(
             ),
             skip_health_check=skip_health_check,
             connection_config=state.connection_config,
+            volumes=volumes,
         )
         await state.add(sandbox)
         if ctx:
@@ -308,9 +339,7 @@ def register_tools(
         sandbox = await state.get(sandbox_id)
         if sandbox is not None:
             return await sandbox.get_info()
-        manager = await SandboxManager.create(
-            connection_config=state.connection_config
-        )
+        manager = await SandboxManager.create(connection_config=state.connection_config)
         try:
             info = await manager.get_sandbox_info(sandbox_id)
         finally:
@@ -333,11 +362,11 @@ def register_tools(
             Paginated sandbox list.
         """
         if ctx:
-            await ctx.report_progress(progress=0.1, total=1.0, message="Listing sandboxes")
+            await ctx.report_progress(
+                progress=0.1, total=1.0, message="Listing sandboxes"
+            )
         filter = filter or SandboxFilter()
-        manager = await SandboxManager.create(
-            connection_config=state.connection_config
-        )
+        manager = await SandboxManager.create(connection_config=state.connection_config)
         try:
             result = await manager.list_sandbox_infos(filter)
         finally:
