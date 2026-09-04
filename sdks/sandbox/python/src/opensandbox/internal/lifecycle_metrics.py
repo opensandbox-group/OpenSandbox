@@ -25,6 +25,11 @@ from typing import Any, Protocol
 
 import httpx
 
+from opensandbox._httpx import (
+    build_async_redirect_event_hooks,
+    build_redirect_event_hooks,
+)
+
 logger = logging.getLogger(__name__)
 
 _DISABLE_METRICS_ENV = "OPENSANDBOX_DISABLE_METRICS"
@@ -37,6 +42,7 @@ class _MetricsConnection(Protocol):
     headers: dict[str, str]
     user_agent: str
     disable_metrics: bool
+    follow_redirects: bool
 
     def get_api_key(self) -> str: ...
 
@@ -94,14 +100,24 @@ def _post_sync(config: _MetricsConnection, payload: dict[str, Any]) -> None:
     # Deliberately does not reuse the SDK's shared transport: closing the
     # httpx.Client below would also close that shared transport and break
     # every other adapter on this connection_config.
-    url = f"{config.get_base_url().rstrip('/')}/metrics/events"
-    with httpx.Client(timeout=_timeout_seconds(config)) as client:
+    base_url = config.get_base_url().rstrip("/")
+    url = f"{base_url}/metrics/events"
+    with httpx.Client(
+        timeout=_timeout_seconds(config),
+        follow_redirects=config.follow_redirects,
+        event_hooks=build_redirect_event_hooks(base_url),
+    ) as client:
         client.post(url, json=payload, headers=_headers(config))
 
 
 async def _post_async(config: _MetricsConnection, payload: dict[str, Any]) -> None:
-    url = f"{config.get_base_url().rstrip('/')}/metrics/events"
-    async with httpx.AsyncClient(timeout=_timeout_seconds(config)) as client:
+    base_url = config.get_base_url().rstrip("/")
+    url = f"{base_url}/metrics/events"
+    async with httpx.AsyncClient(
+        timeout=_timeout_seconds(config),
+        follow_redirects=config.follow_redirects,
+        event_hooks=build_async_redirect_event_hooks(base_url),
+    ) as client:
         await client.post(url, json=payload, headers=_headers(config))
 
 

@@ -24,6 +24,7 @@ import logging
 
 import httpx
 
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.config import ConnectionConfig
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.health import Health
@@ -65,6 +66,7 @@ class HealthAdapter(Health):
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         self._httpx_client = httpx.AsyncClient(
@@ -72,6 +74,7 @@ class HealthAdapter(Health):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 

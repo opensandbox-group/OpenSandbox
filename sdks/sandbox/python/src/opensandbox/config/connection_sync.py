@@ -25,6 +25,7 @@ from datetime import timedelta
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from opensandbox._httpx import SyncEventHook
 from opensandbox.transport import RetryPolicy, RetrySyncTransport
 
 
@@ -58,6 +59,21 @@ class ConnectionConfigSync(BaseModel):
         default="OpenSandbox-Python-SDK/0.1.17.dev0", description="User agent string"
     )
     headers: dict[str, str] = Field(default_factory=dict, description="User defined headers")
+    follow_redirects: bool = Field(
+        default=False,
+        description=(
+            "Whether HTTP clients should follow redirects. Cross-origin redirects strip "
+            "headers prefixed OPEN-SANDBOX- or OPENSANDBOX-, but other sensitive custom "
+            "headers may still be forwarded."
+        ),
+    )
+    event_hooks: dict[str, list[SyncEventHook]] = Field(
+        default_factory=dict,
+        description=(
+            "Additional httpx event hooks for SDK-created sync clients. SDK security "
+            "hooks run after configured request hooks."
+        ),
+    )
 
     transport: httpx.BaseTransport | None = Field(
         default=None,

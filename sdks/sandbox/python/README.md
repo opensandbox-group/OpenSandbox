@@ -402,8 +402,30 @@ The `ConnectionConfig` class manages API server connection settings.
 | `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
+| `follow_redirects` | Follow HTTP redirects for SDK requests      | `False`                      | -                      |
+| `event_hooks`     | Additional httpx hooks for adapter clients   | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry)  | SDK-created per instance     | -                      |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
+
+When `follow_redirects` is enabled, same-origin redirects preserve request
+headers. An origin is the combination of scheme, host, and port, so changing
+any of those values is cross-origin. Before following a cross-origin redirect,
+the SDK removes every header whose name starts with `OPEN-SANDBOX-` or
+`OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped
+automatically.
+
+File uploads never follow redirects, even when `follow_redirects` is enabled,
+because streamed or file-backed multipart request bodies cannot always be
+safely replayed. This applies to both direct chunked uploads and uploads through
+the server proxy. A redirect response from an upload is surfaced as a
+`SandboxApiException` with the original 3xx status.
+
+`ConnectionConfig.event_hooks` accepts async httpx hooks, while
+`ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured
+request hooks run before the SDK safety hook, so they cannot re-add protected
+OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors
+`follow_redirects` and the SDK safety hook, but does not invoke configured user
+hooks.
 
 ```python
 from datetime import timedelta

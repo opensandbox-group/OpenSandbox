@@ -27,6 +27,7 @@ from uuid import UUID
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
@@ -88,9 +89,14 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
 
-        self._client = Client(base_url=base_url, timeout=timeout)
+        self._client = Client(
+            base_url=base_url,
+            timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
+        )
         self._client.set_httpx_client(self._httpx_client)
 
     def _get_url(self, path_template: str) -> str:
@@ -223,7 +229,11 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
                 multipart_parts.append(("file", (entry.path, content, content_type)))
 
             url = self._get_url(self.UPLOAD_PATH)
-            response = self._httpx_client.post(url, files=multipart_parts)
+            response = self._httpx_client.post(
+                url,
+                files=multipart_parts,
+                follow_redirects=False,
+            )
             response.raise_for_status()
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
