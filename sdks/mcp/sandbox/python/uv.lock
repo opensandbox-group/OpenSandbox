@@ -554,7 +554,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.0" },
-    { name = "mcp", extras = ["cli"] },
+    { name = "mcp", extras = ["cli"], specifier = "<2" },
     { name = "opensandbox", editable = "../../../sandbox/python" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pyjwt", specifier = ">=2.13.0" },
