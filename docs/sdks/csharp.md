@@ -230,6 +230,8 @@ await sandbox.Files.DeleteDirectoriesAsync(new[] { "/tmp/demo" });
 await sandbox.Files.DeleteFilesAsync(new[] { "/tmp/demo/hello.txt" });
 ```
 
+Use `ReadBytesDetailedAsync` or `ReadBytesStreamDetailedAsync` when Range response metadata is required. Dispose a detailed stream body if it is not fully consumed.
+
 ### 5. Endpoints
 
 `GetEndpointAsync()` returns an endpoint **without a scheme** (for example `"localhost:44772"`). Use `GetEndpointUrlAsync()` if you want a ready-to-use absolute URL.

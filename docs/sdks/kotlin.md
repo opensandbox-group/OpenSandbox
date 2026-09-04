@@ -219,6 +219,8 @@ files.forEach(f -> System.out.println("Found: " + f.getPath()));
 sandbox.files().deleteFiles(List.of("/tmp/hello.txt"));
 ```
 
+Use `readByteArrayDetailed` or `readStreamDetailed` when Range response metadata is required.
+
 ### 5. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.

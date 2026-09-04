@@ -122,6 +122,20 @@ public interface ISandboxFiles
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Reads a file as bytes together with HTTP response metadata.
+    /// </summary>
+    /// <param name="path">The file path.</param>
+    /// <param name="options">Optional read options.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The file content and HTTP response metadata.</returns>
+    /// <exception cref="InvalidArgumentException">Thrown when request values are invalid.</exception>
+    /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
+    Task<ReadBytesResponse<byte[]>> ReadBytesDetailedAsync(
+        string path,
+        ReadBytesOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Reads a file as a stream of byte chunks.
     /// </summary>
     /// <param name="path">The file path.</param>
@@ -131,6 +145,20 @@ public interface ISandboxFiles
     /// <exception cref="InvalidArgumentException">Thrown when request values are invalid.</exception>
     /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
     IAsyncEnumerable<byte[]> ReadBytesStreamAsync(
+        string path,
+        ReadBytesOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads a file as a byte stream together with HTTP response metadata.
+    /// </summary>
+    /// <param name="path">The file path.</param>
+    /// <param name="options">Optional read options.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The byte stream and HTTP response metadata.</returns>
+    /// <exception cref="InvalidArgumentException">Thrown when request values are invalid.</exception>
+    /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
+    Task<ReadBytesResponse<IAsyncReadBytesStream>> ReadBytesStreamDetailedAsync(
         string path,
         ReadBytesOptions? options = null,
         CancellationToken cancellationToken = default);

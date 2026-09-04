@@ -415,6 +415,8 @@ for f in files:
 await sandbox.files.delete_files(["/tmp/hello.txt"])
 ```
 
+Use `read_bytes_detailed` or `read_bytes_stream_detailed` when Range response metadata is required. Close a detailed stream body if it is not fully consumed.
+
 ### 5. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.

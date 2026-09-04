@@ -543,8 +543,14 @@ public class SandboxEgressLifecycleTests
         public Task<byte[]> ReadBytesAsync(string path, ReadBytesOptions? options = null, CancellationToken cancellationToken = default) =>
             throw new NotImplementedException();
 
+        public Task<ReadBytesResponse<byte[]>> ReadBytesDetailedAsync(string path, ReadBytesOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new NotImplementedException();
+
         public IAsyncEnumerable<byte[]> ReadBytesStreamAsync(string path, ReadBytesOptions? options = null, CancellationToken cancellationToken = default) =>
             AsyncEnumerable.Empty<byte[]>();
+
+        public Task<ReadBytesResponse<IAsyncReadBytesStream>> ReadBytesStreamDetailedAsync(string path, ReadBytesOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new NotImplementedException();
 
         public Task DeleteFilesAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default) =>
             throw new NotImplementedException();

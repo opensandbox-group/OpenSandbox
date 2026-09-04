@@ -66,6 +66,36 @@ export type FilesInfoResponse = Record<string, FileInfo>;
 
 export type SearchFilesResponse = FileInfo[];
 
+export interface ByteRange {
+  /** Inclusive first byte offset, or -1 if parsing failed. */
+  start: number;
+  /** Inclusive last byte offset, or -1 if parsing failed. */
+  end: number;
+  /** Complete file size, or -1 if unknown or parsing failed. */
+  total: number;
+  /** Original Content-Range header value. */
+  raw: string;
+}
+
+export interface ReadBytesResponse<TBody> {
+  body: TBody;
+  statusCode: number;
+  contentType?: string;
+  contentDisposition?: string;
+  /** Response body size, or -1 if the Content-Length header is unavailable. */
+  contentLength: number;
+  /** Complete file size, or -1 if unknown. */
+  totalSize: number;
+  contentRange?: ByteRange;
+  /** Whether the server returned 206 Partial Content. */
+  isPartial: boolean;
+}
+
+/** A single-use download body that can be closed without consuming it. */
+export interface ReadBytesStream extends AsyncIterable<Uint8Array> {
+  close(): Promise<void>;
+}
+
 // High-level filesystem facade models used by `sandbox.files`.
 export interface WriteEntry {
   path: string;

@@ -188,6 +188,8 @@ console.log(files.map((f) => f.path));
 await sandbox.files.deleteDirectories(["/tmp/demo"]);
 ```
 
+Use `readBytesDetailed` or `readBytesStreamDetailed` when Range response metadata is required. Close a detailed stream body if it is not fully consumed.
+
 ### 5. Endpoints
 
 `getEndpoint()` returns an endpoint **without a scheme** (for example `"localhost:44772"`). Use `getEndpointUrl()` if you want a ready-to-use absolute URL (for example `"http://localhost:44772"`).

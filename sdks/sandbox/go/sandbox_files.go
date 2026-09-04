@@ -103,6 +103,15 @@ func (s *Sandbox) DownloadFile(ctx context.Context, remotePath, rangeHeader stri
 	return s.execd.DownloadFile(ctx, remotePath, rangeHeader, opts...)
 }
 
+// DownloadFileResponse downloads a file and returns its body and response
+// metadata. The caller must close the response body.
+func (s *Sandbox) DownloadFileResponse(ctx context.Context, remotePath, rangeHeader string, opts ...DownloadFileOptions) (*DownloadFileResponse, error) {
+	if s.execd == nil {
+		return nil, fmt.Errorf("opensandbox: execd client not initialized")
+	}
+	return s.execd.DownloadFileResponse(ctx, remotePath, rangeHeader, opts...)
+}
+
 // CreateDirectory creates a directory in the sandbox.
 // Mode is octal digits as int (e.g. 755 for rwxr-xr-x).
 func (s *Sandbox) CreateDirectory(ctx context.Context, path string, mode int) error {
