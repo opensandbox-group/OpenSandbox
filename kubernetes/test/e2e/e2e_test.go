@@ -77,6 +77,20 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
 
+		// Delete custom resources while the controller is still running so their
+		// finalizers can complete before the CRDs are removed by undeploy.
+		By("cleaning up any remaining batchsandboxes")
+		cmd = exec.Command("kubectl", "delete", "batchsandboxes", "--all", "--all-namespaces", "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up any remaining sandboxsnapshots")
+		cmd = exec.Command("kubectl", "delete", "sandboxsnapshots", "--all", "--all-namespaces", "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up any remaining pools")
+		cmd = exec.Command("kubectl", "delete", "pools", "--all", "--all-namespaces", "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
