@@ -32,6 +32,26 @@ PORT_PROBE_HOST = DOCKER_PUBLISH_HOST
 # concurrent sandbox creations in this server process cannot select the same port.
 _RESERVED_HOST_PORTS: set[int] = set()
 _RESERVATION_LOCK = Lock()
+MAX_PORT_PUBLISH_ATTEMPTS = 3
+
+
+def is_port_publish_error(exc: Exception) -> bool:
+    """Return True when Docker reports an unavailable / reserved / conflicting host port."""
+    if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
+        message = str(exc.detail.get("message", "")).lower()
+    else:
+        message = str(exc).lower()
+
+    if getattr(exc, "__cause__", None) is not None:
+        message = f"{message} {str(exc.__cause__).lower()}"
+
+    return (
+        "port is already allocated" in message
+        or "ports are not available" in message
+        or "address already in use" in message
+        or ("bind:" in message and "forbidden" in message)
+        or ("bind:" in message and "permission denied" in message)
+    )
 
 
 def normalize_container_port_spec(port_spec: str) -> str:

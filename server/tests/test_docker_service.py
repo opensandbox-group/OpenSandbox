@@ -43,7 +43,9 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
+    SANDBOX_EMBEDDING_PROXY_PORT_LABEL,
     SANDBOX_EXPIRES_AT_LABEL,
+    SANDBOX_HTTP_PORT_LABEL,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
@@ -4237,3 +4239,217 @@ def test_get_container_by_sandbox_id_maps_docker_error_to_500(
     assert exc.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert exc.value.detail["code"] == SandboxErrorCodes.CONTAINER_QUERY_FAILED
     mock_client.containers.list.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_retries_on_host_port_publish_error(mock_docker):
+    """When container start fails with a port conflict, create_sandbox retries with fresh ports and succeeds."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    config = _app_config()
+    config.docker.network_mode = "bridge"
+    service = DockerSandboxService(config=config)
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+    )
+
+    first_bindings = {
+        "44772": ("0.0.0.0", 41077),
+        "8080": ("0.0.0.0", 41078),
+    }
+    second_bindings = {
+        "44772": ("0.0.0.0", 42001),
+        "8080": ("0.0.0.0", 42002),
+    }
+
+    port_error = HTTPException(
+        status_code=500,
+        detail={
+            "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+            "message": (
+                "Failed to create or start container: 500 Server Error for "
+                "http+docker://localhost/v1.55/containers/.../start: Internal Server Error "
+                '("failed to set up container networking: driver failed programming external connectivity '
+                'on endpoint sandbox-1: Bind for 0.0.0.0:41077 failed: port is already allocated")'
+            ),
+        },
+    )
+
+    mock_container = MagicMock()
+    mock_container.id = "test-container-id"
+    mock_container.attrs = {"Config": {"Image": "python:3.11"}}
+
+    calls = []
+
+    def mock_create_and_start(
+        sandbox_id,
+        image_uri,
+        bootstrap_command,
+        labels,
+        environment,
+        host_config_kwargs,
+        container_exposed_ports,
+        platform,
+    ):
+        calls.append((dict(labels), dict(host_config_kwargs)))
+        if len(calls) == 1:
+            raise port_error
+        return mock_container
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_create_and_start_container", side_effect=mock_create_and_start),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            side_effect=[first_bindings, second_bindings],
+        ),
+        patch(
+            "opensandbox_server.services.docker.docker_service.release_port_bindings"
+        ) as mock_release,
+    ):
+        resp = await service.create_sandbox(request)
+
+    assert resp.status.state == "Running"
+    assert len(calls) == 2
+    # First attempt used first_bindings (port 41077, 41078)
+    assert calls[0][0][SANDBOX_EMBEDDING_PROXY_PORT_LABEL] == "41077"
+    assert calls[0][0][SANDBOX_HTTP_PORT_LABEL] == "41078"
+    assert calls[0][1]["port_bindings"]["44772"] == ("0.0.0.0", 41077)
+    assert calls[0][1]["port_bindings"]["8080"] == ("0.0.0.0", 41078)
+    # Second attempt used second_bindings (port 42001, 42002)
+    assert calls[1][0][SANDBOX_EMBEDDING_PROXY_PORT_LABEL] == "42001"
+    assert calls[1][0][SANDBOX_HTTP_PORT_LABEL] == "42002"
+    assert calls[1][1]["port_bindings"]["44772"] == ("0.0.0.0", 42001)
+    assert calls[1][1]["port_bindings"]["8080"] == ("0.0.0.0", 42002)
+
+    # First bindings released when retrying, second released in finally
+    assert mock_release.call_count == 2
+    mock_release.assert_any_call(first_bindings)
+    mock_release.assert_any_call(second_bindings)
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_raises_after_exhausting_port_retries(mock_docker):
+    """When container start repeatedly fails with port conflicts, raise HTTPException after max retries."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    config = _app_config()
+    config.docker.network_mode = "bridge"
+    service = DockerSandboxService(config=config)
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+    )
+
+    port_error = HTTPException(
+        status_code=500,
+        detail={
+            "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+            "message": "Failed to create or start container: ports are not available: bind: forbidden",
+        },
+    )
+
+    attempt_count = 0
+
+    def mock_create_and_start(*args, **kwargs):
+        nonlocal attempt_count
+        attempt_count += 1
+        raise port_error
+
+    bindings = {
+        "44772": ("0.0.0.0", 41077),
+        "8080": ("0.0.0.0", 41078),
+    }
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_create_and_start_container", side_effect=mock_create_and_start),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value=bindings,
+        ),
+        patch(
+            "opensandbox_server.services.docker.docker_service.release_port_bindings"
+        ) as mock_release,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await service.create_sandbox(request)
+
+    assert exc.value.status_code == 500
+    assert attempt_count == 3  # MAX_PORT_PUBLISH_ATTEMPTS
+    assert mock_release.call_count == 3
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_does_not_retry_on_non_port_error(mock_docker):
+    """Non-port errors fail immediately without retry."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+
+    config = _app_config()
+    config.docker.network_mode = "bridge"
+    service = DockerSandboxService(config=config)
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+    )
+
+    generic_error = HTTPException(
+        status_code=500,
+        detail={
+            "code": SandboxErrorCodes.CONTAINER_START_FAILED,
+            "message": "Failed to create or start container: repository python not found",
+        },
+    )
+
+    attempt_count = 0
+
+    def mock_create_and_start(*args, **kwargs):
+        nonlocal attempt_count
+        attempt_count += 1
+        raise generic_error
+
+    bindings = {
+        "44772": ("0.0.0.0", 41077),
+        "8080": ("0.0.0.0", 41078),
+    }
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_create_and_start_container", side_effect=mock_create_and_start),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value=bindings,
+        ),
+        patch(
+            "opensandbox_server.services.docker.docker_service.release_port_bindings"
+        ) as mock_release,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await service.create_sandbox(request)
+
+    assert exc.value.status_code == 500
+    assert attempt_count == 1  # Did NOT retry
+    mock_release.assert_called_once_with(bindings)
+
