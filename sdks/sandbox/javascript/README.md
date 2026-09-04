@@ -64,6 +64,47 @@ try {
 }
 ```
 
+## Client-side sandbox pool
+
+`SandboxPool` maintains a best-effort buffer of clean, ready sandboxes. An
+acquired sandbox becomes caller-owned and is never returned to the pool; kill
+it when the work is complete. The pool replenishes the idle buffer in the
+background.
+
+```ts
+import {
+  AcquirePolicy,
+  InMemoryPoolStateStore,
+  SandboxPool,
+} from "@alibaba-group/opensandbox";
+
+const pool = SandboxPool.create({
+  poolName: "workers",
+  maxIdle: 2,
+  stateStore: new InMemoryPoolStateStore(),
+  connectionConfig: { apiKey: process.env.OPEN_SANDBOX_API_KEY },
+  creationSpec: { image: "ubuntu:24.04" },
+});
+
+await pool.start();
+const sandbox = await pool.acquire({
+  sandboxTimeoutSeconds: 3600,
+  policy: AcquirePolicy.DIRECT_CREATE,
+});
+
+try {
+  await sandbox.commands.run("echo ready");
+} finally {
+  await sandbox.kill();
+  await sandbox.close();
+  await pool.shutdown();
+}
+```
+
+`InMemoryPoolStateStore` is process-local. Applications that share a logical
+pool across processes must provide a distributed `PoolStateStore` whose take,
+membership, and primary-lock operations are atomic.
+
 ## Usage Examples
 
 ### 1. Lifecycle Management

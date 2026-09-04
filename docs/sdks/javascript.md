@@ -97,6 +97,42 @@ const sandbox = await Sandbox.create({
 
 The Server validates `timeoutSeconds`; `preStart` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
 
+## Client-Side Sandbox Pool
+
+`SandboxPool` keeps a best-effort idle buffer of clean, ready sandboxes. Acquiring removes a sandbox from the pool permanently; the caller kills it after use instead of returning it to the pool.
+
+```ts
+import {
+  AcquirePolicy,
+  InMemoryPoolStateStore,
+  SandboxPool,
+} from "@alibaba-group/opensandbox";
+
+const pool = SandboxPool.create({
+  poolName: "workers",
+  maxIdle: 2,
+  stateStore: new InMemoryPoolStateStore(),
+  connectionConfig: config,
+  creationSpec: { image: "ubuntu:24.04" },
+});
+
+await pool.start();
+const sandbox = await pool.acquire({
+  sandboxTimeoutSeconds: 3600,
+  policy: AcquirePolicy.DIRECT_CREATE,
+});
+
+try {
+  await sandbox.commands.run("echo ready");
+} finally {
+  await sandbox.kill();
+  await sandbox.close();
+  await pool.shutdown();
+}
+```
+
+The built-in `InMemoryPoolStateStore` is limited to one JavaScript process. To share a pool across processes, provide a distributed `PoolStateStore` whose idle-take, membership, and primary-lock operations are atomic.
+
 ## Usage Examples
 
 ### 1. Lifecycle Management
