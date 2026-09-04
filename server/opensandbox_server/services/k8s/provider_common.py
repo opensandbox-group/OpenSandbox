@@ -45,6 +45,7 @@ from opensandbox_server.services.k8s.security_context import (
 DEFAULT_ENTRYPOINT = ["tail", "-f", "/dev/null"]
 
 _GPU_RESOURCE_LIMIT_KEY = "gpu"
+_KVM_RESOURCE_LIMIT_KEY = "kvm"
 # Canonical extended-resource name advertised by the NVIDIA device plugin.
 # Hardcoded for parity with the Docker runtime fix (#775), which targets
 # NVIDIA only via DeviceRequest capabilities=[["gpu"]]. Other vendor keys
@@ -52,12 +53,28 @@ _GPU_RESOURCE_LIMIT_KEY = "gpu"
 _K8S_NVIDIA_GPU_RESOURCE = "nvidia.com/gpu"
 
 
+def _validate_kvm_resource_limits_for_k8s(
+    resource_limits: Dict[str, str],
+) -> None:
+    if _KVM_RESOURCE_LIMIT_KEY in resource_limits:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    "resourceLimits.kvm is not supported by the Kubernetes runtime."
+                ),
+            },
+        )
+
+
 def _translate_resource_limits_for_k8s(
     resource_limits: Dict[str, str],
 ) -> Dict[str, str]:
     """Translate request-level resource limits into Kubernetes resource keys.
 
-    The lifecycle API exposes a portable ``gpu`` key on ``resourceLimits``.
+    The Kubernetes runtime does not support the lifecycle API's ``kvm`` key.
+    The lifecycle API also exposes a portable ``gpu`` key on ``resourceLimits``;
     Kubernetes requires the canonical extended-resource name
     (``nvidia.com/gpu``) so the device plugin can schedule the request;
     otherwise the value is silently treated as an unknown extended resource.
@@ -66,18 +83,20 @@ def _translate_resource_limits_for_k8s(
         resource_limits: Raw resource limits from the create request.
 
     Returns:
-        A new dict with the ``gpu`` key translated to ``nvidia.com/gpu``
-        and any unparseable GPU value dropped. Other keys (cpu, memory, ...)
-        are passed through unchanged.
+        A new dict with the ``gpu`` key translated to ``nvidia.com/gpu`` and
+        any unparseable GPU value dropped. Other supported keys (cpu, memory,
+        ...) are passed through unchanged.
 
     Raises:
-        HTTPException: If ``gpu`` is the ``"all"`` sentinel. Docker accepts
-            ``"all"`` (mapped to an unbounded DeviceRequest), but Kubernetes
-            extended resources require an integer count, so we surface a
-            400 rather than silently scheduling without a GPU.
+        HTTPException: If ``kvm`` is present or ``gpu`` is the ``"all"``
+            sentinel. Docker accepts these values, but Kubernetes cannot
+            fulfill them, so we surface a 400 rather than silently scheduling
+            without the requested resource.
     """
     if not resource_limits:
         return {}
+
+    _validate_kvm_resource_limits_for_k8s(resource_limits)
 
     translated: Dict[str, str] = {
         key: value
