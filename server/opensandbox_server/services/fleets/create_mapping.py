@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Map OpenSandbox CreateSandboxRequest into fast-sandbox FastPath v2 CreateRequest.
+"""Map OpenSandbox CreateSandboxRequest into FastPath v2 CreateSandboxRequest.
 
 The fleets backend accepts a strict subset of the public create contract.
 Unsupported fields are rejected with a clear error instead of being silently
@@ -34,18 +34,10 @@ from opensandbox_server.services.fleets.generated import (
     fastpath_pb2 as pb2,
 )
 
-#: fleets-reserved FastPath metadata key persisting the renew-on-access
-#: extension value. Stripped from public metadata and list filters.
-#: fast-sandbox persists metadata as labels under `metadata.sandbox.fast.io/`,
-#: so the key must be a DNS1123 label (lowercase alphanumeric + hyphens).
-RENEW_EXTEND_SECONDS_METADATA_KEY = "renew-extend-seconds"
-
 #: Public extensions keys accepted by the fleets backend.
-SUPPORTED_EXTENSION_KEYS = frozenset(
-    {"poolRef", "access.renew.extend.seconds"}
-)
+SUPPORTED_EXTENSION_KEYS = frozenset({"poolRef"})
 
-#: FastPath CreateRequest has no nullable timeout; fleets requires an explicit one.
+#: FastPath CreateSandboxRequest has no nullable timeout; fleets requires an explicit one.
 ERROR_TIMEOUT_REQUIRED = (
     "timeout is required on fleets: fast-sandbox persists an absolute "
     "expires_at in the first Create write and has no non-expiring sandboxes."
@@ -70,8 +62,8 @@ def map_create_request(
     now: Optional[datetime] = None,
     expires_at_unix_seconds: Optional[int] = None,
     pool_resources: Optional[dict] = None,
-) -> pb2.CreateRequest:
-    """Map the accepted CreateSandboxRequest subset to a FastPath v2 CreateRequest.
+) -> pb2.CreateSandboxRequest:
+    """Map the accepted request subset to a FastPath v2 CreateSandboxRequest.
 
     Raises UnsupportedFieldError for any field the shared-Fastlet model cannot
     honor. The caller supplies the OpenSandbox sandbox_id, which becomes the
@@ -118,12 +110,13 @@ def map_create_request(
         now = now or datetime.now(timezone.utc)
         expires_at = int(now.timestamp()) + request.timeout
 
-    create = pb2.CreateRequest(
+    create = pb2.CreateSandboxRequest(
         request_id=sandbox_id,
         namespace=namespace,
         image=image.uri,
         command=list(request.entrypoint),
         expires_at_unix_seconds=expires_at,
+        completion=pb2.CREATE_COMPLETION_READY,
     )
 
     if request.env:
@@ -145,10 +138,6 @@ def map_create_request(
     pool_ref = (extensions.get("poolRef") or "").strip()
     create.pool_ref = pool_ref or default_pool_ref
 
-    renew_value = extensions.get("access.renew.extend.seconds")
-    if renew_value is not None:
-        create.metadata[RENEW_EXTEND_SECONDS_METADATA_KEY] = renew_value
-
     # fast-sandbox persists metadata as labels (metadata.sandbox.fast.io/<key>)
     # and validates every entry; reject incompatible keys/values here so users
     # get a clear error instead of a confusing gRPC rejection.
@@ -157,9 +146,7 @@ def map_create_request(
     return create
 
 
-def _validate_resource_limits(
-    request: CreateSandboxRequest, pool_resources: dict
-) -> None:
+def _validate_resource_limits(request: CreateSandboxRequest, pool_resources: dict) -> None:
     if request.resource_limits is None:
         return
     limits = request.resource_limits.root
@@ -191,19 +178,13 @@ _MAX_LABEL_LENGTH = 63
 def _validate_metadata(metadata: dict) -> None:
     """Reject metadata entries fast-sandbox cannot persist as labels."""
     for key, value in metadata.items():
-        if (
-            len(key) > _MAX_LABEL_LENGTH
-            or not re.fullmatch(_DNS_LABEL_PATTERN, key)
-        ):
+        if len(key) > _MAX_LABEL_LENGTH or not re.fullmatch(_DNS_LABEL_PATTERN, key):
             raise UnsupportedFieldError(
                 "metadata",
                 f"metadata key {key!r} must be a DNS label (lowercase alphanumeric "
                 "and hyphens, max 63 chars): fast-sandbox persists metadata as labels",
             )
-        if (
-            len(value) > _MAX_LABEL_LENGTH
-            or not re.fullmatch(_LABEL_VALUE_PATTERN, value)
-        ):
+        if len(value) > _MAX_LABEL_LENGTH or not re.fullmatch(_LABEL_VALUE_PATTERN, value):
             raise UnsupportedFieldError(
                 "metadata",
                 f"metadata value for {key!r} must be a Kubernetes label value "
@@ -244,9 +225,7 @@ def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
     if request.snapshot_id:
         raise UnsupportedFieldError("snapshotId", "snapshots are not supported on fleets")
     if request.platform is not None:
-        raise UnsupportedFieldError(
-            "platform", "scheduling is per Fastlet pool, not per sandbox"
-        )
+        raise UnsupportedFieldError("platform", "scheduling is per Fastlet pool, not per sandbox")
     if request.resource_requests is not None:
         raise UnsupportedFieldError(
             "resourceRequests",
@@ -272,7 +251,7 @@ def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
             "secureAccess",
             "secure access on fleets is deferred to phase 1b; not supported in phase 1a",
         )
-    for key in (request.extensions or {}):
+    for key in request.extensions or {}:
         if key not in SUPPORTED_EXTENSION_KEYS:
             raise UnsupportedFieldError(
                 f"extensions[{key!r}]",

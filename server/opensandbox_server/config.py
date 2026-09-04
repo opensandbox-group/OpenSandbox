@@ -881,9 +881,9 @@ class EgressConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    """Runtime selection (docker, kubernetes, etc.)."""
+    """Runtime selection (docker, kubernetes, fleets, etc.)."""
 
-    type: Literal["docker", "kubernetes"] = Field(
+    type: Literal["docker", "kubernetes", "fleets"] = Field(
         ...,
         description="Active sandbox runtime implementation.",
     )
@@ -902,6 +902,41 @@ class RuntimeConfig(BaseModel):
             "topology); intended to be flipped on after a few releases once "
             "the init mode is validated in production."
         ),
+    )
+
+
+class FleetsRuntimeConfig(BaseModel):
+    """fleets (fast-sandbox) runtime configuration (OSEP-0007, Phase 1a)."""
+
+    fastpath_endpoint: str = Field(
+        default="fast-sandbox-fastpath.opensandbox.svc:9090",
+        description="fast-sandbox Fast-Path Server gRPC endpoint.",
+    )
+    fastpath_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Per-RPC gRPC deadline for FastPath calls.",
+    )
+    wait_ready_timeout_millis: int = Field(
+        default=30000,
+        ge=1000,
+        description="Bounded readiness wait for DataPlaneReady after Create.",
+    )
+    namespace: str = Field(
+        default="default",
+        min_length=1,
+        description=(
+            "fast-sandbox namespace used when no tenant is configured. "
+            "With [tenants] enabled, each tenant maps to its own namespace."
+        ),
+    )
+    default_pool_ref: str = Field(
+        default="default-pool",
+        description="Default SandboxPool when extensions.poolRef is unset.",
+    )
+    execd_component_name: str = Field(
+        default="execd",
+        description="Pool Infra Component used for public execd port 44772.",
     )
 
 
@@ -1207,6 +1242,7 @@ class AppConfig(BaseModel):
     runtime: RuntimeConfig = Field(..., description="Sandbox runtime configuration.")
     kubernetes: Optional[KubernetesRuntimeConfig] = None
     agent_sandbox: Optional["AgentSandboxRuntimeConfig"] = None
+    fleets: Optional[FleetsRuntimeConfig] = None
     ingress: Optional[IngressConfig] = None
     docker: DockerConfig = Field(default_factory=DockerConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
@@ -1241,6 +1277,9 @@ class AppConfig(BaseModel):
                 raise ValueError(
                     "agent_sandbox block requires kubernetes.workload_provider = 'agent-sandbox'."
                 )
+        elif self.runtime.type == "fleets":
+            if self.fleets is None:
+                self.fleets = FleetsRuntimeConfig()
         else:
             raise ValueError(f"Unsupported runtime type '{self.runtime.type}'.")
         return self

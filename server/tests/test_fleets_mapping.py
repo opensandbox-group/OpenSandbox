@@ -33,16 +33,11 @@ from opensandbox_server.api.schema import (
     Volume,
 )
 from opensandbox_server.services.fleets.create_mapping import (
-    RENEW_EXTEND_SECONDS_METADATA_KEY,
     UnsupportedFieldError,
     map_create_request,
 )
 from opensandbox_server.services.fleets.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fleets.status_mapping import (
-    RESERVED_METADATA_KEYS,
-    map_sandbox,
-    map_state,
-)
+from opensandbox_server.services.fleets.status_mapping import map_reason, map_state
 
 NOW = datetime(2026, 8, 18, 12, 0, 0, tzinfo=timezone.utc)
 EXPECTED_EXPIRY = int(NOW.timestamp()) + 3600
@@ -93,6 +88,7 @@ def test_map_create_request_maps_core_fields():
     assert create.metadata["team"] == "agents"
     assert create.pool_ref == "ml-pool"
     assert create.expires_at_unix_seconds == EXPECTED_EXPIRY
+    assert create.completion == pb2.CREATE_COMPLETION_READY
 
 
 def test_map_create_request_defaults_pool_ref():
@@ -115,10 +111,11 @@ def test_map_create_request_strips_pool_ref():
     assert padded.pool_ref == "ml-pool"
 
 
-def test_map_create_request_renew_extension_goes_to_reserved_metadata():
+def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
     request = _base_request(extensions={"access.renew.extend.seconds": "300"})
-    create = map_create_request(request, "sbx-1", "ns-1", now=NOW)
-    assert create.metadata[RENEW_EXTEND_SECONDS_METADATA_KEY] == "300"
+    with pytest.raises(UnsupportedFieldError) as exc_info:
+        map_create_request(request, "sbx-1", "ns-1", now=NOW)
+    assert exc_info.value.field == "extensions['access.renew.extend.seconds']"
 
 
 @pytest.mark.parametrize(
@@ -272,17 +269,13 @@ def test_map_create_request_rejects_mismatched_pool_resources():
 def test_map_create_request_rejects_undefinted_pool_resource_key():
     request = _base_request(resource_limits=ResourceLimits(root={"gpu": "1"}))
     with pytest.raises(UnsupportedFieldError) as exc_info:
-        map_create_request(
-            request, "sbx-1", "ns-1", now=NOW, pool_resources={"cpu": "500m"}
-        )
+        map_create_request(request, "sbx-1", "ns-1", now=NOW, pool_resources={"cpu": "500m"})
     assert exc_info.value.field == "resourceLimits"
 
 
 def test_map_create_request_compares_quantities_canonically():
     # Same quantity expressed differently must not be rejected.
-    request = _base_request(
-        resource_limits=ResourceLimits(root={"cpu": "0.5", "memory": "1Gi"})
-    )
+    request = _base_request(resource_limits=ResourceLimits(root={"cpu": "0.5", "memory": "1Gi"}))
     create = map_create_request(
         request,
         "sbx-1",
@@ -302,76 +295,77 @@ def test_map_create_request_skips_pool_check_when_profile_unknown():
 # -- status mapping -----------------------------------------------------------
 
 
-def _info(**overrides):
-    info = pb2.SandboxInfo(
-        sandbox_uid="uid-1",
-        sandbox_name="sbx-1",
-        namespace="ns-1",
-        runtime_state="Ready",
-        data_plane_state="Ready",
-        image="python:3.11",
-        created_at_unix_seconds=int(NOW.timestamp()),
+def _info(
+    *,
+    runtime_state=pb2.RUNTIME_STATE_READY,
+    data_plane_state=pb2.DATA_PLANE_STATE_READY,
+    ready=False,
+):
+    return pb2.SandboxInfo(
+        identity=pb2.SandboxIdentity(uid="uid-1", name="sbx-1", namespace="ns-1"),
+        runtime=pb2.RuntimeInfo(state=runtime_state),
+        data_plane=pb2.DataPlaneInfo(state=data_plane_state),
+        ready=ready,
     )
-    if "expires_at_unix_seconds" in overrides:
-        info.expires_at_unix_seconds = overrides["expires_at_unix_seconds"]
-    if "metadata" in overrides:
-        info.metadata.update(overrides["metadata"])
-    if "runtime_state" in overrides:
-        info.runtime_state = overrides["runtime_state"]
-    if "data_plane_state" in overrides:
-        info.data_plane_state = overrides["data_plane_state"]
-    return info
 
 
 @pytest.mark.parametrize(
-    "runtime,data_plane,expected",
+    "runtime,data_plane,ready,expected",
     [
-        ("Ready", "Ready", "Running"),
-        ("Ready", "", "Pending"),
-        ("Pending", "", "Pending"),
-        ("Creating", "", "Pending"),
-        ("Draining", "", "Stopping"),
-        ("Stopped", "", "Terminated"),
-        ("Failed", "", "Failed"),
-        ("Unavailable", "", "Failed"),
-        ("", "", "Pending"),
+        (pb2.RUNTIME_STATE_READY, pb2.DATA_PLANE_STATE_READY, True, "Running"),
+        (pb2.RUNTIME_STATE_READY, pb2.DATA_PLANE_STATE_READY, False, "Pending"),
+        (pb2.RUNTIME_STATE_READY, pb2.DATA_PLANE_STATE_PENDING, False, "Pending"),
+        (pb2.RUNTIME_STATE_PENDING, pb2.DATA_PLANE_STATE_UNSPECIFIED, False, "Pending"),
+        (pb2.RUNTIME_STATE_CREATING, pb2.DATA_PLANE_STATE_UNSPECIFIED, False, "Pending"),
+        (pb2.RUNTIME_STATE_STOPPING, pb2.DATA_PLANE_STATE_UNSPECIFIED, False, "Stopping"),
+        (pb2.RUNTIME_STATE_READY, pb2.DATA_PLANE_STATE_DRAINING, False, "Stopping"),
+        (pb2.RUNTIME_STATE_STOPPED, pb2.DATA_PLANE_STATE_UNSPECIFIED, False, "Terminated"),
+        (pb2.RUNTIME_STATE_FAILED, pb2.DATA_PLANE_STATE_UNSPECIFIED, False, "Failed"),
+        (pb2.RUNTIME_STATE_UNAVAILABLE, pb2.DATA_PLANE_STATE_UNSPECIFIED, False, "Failed"),
+        (pb2.RUNTIME_STATE_READY, pb2.DATA_PLANE_STATE_FAILED, False, "Failed"),
+        (pb2.RUNTIME_STATE_READY, pb2.DATA_PLANE_STATE_UNAVAILABLE, False, "Failed"),
+        (
+            pb2.RUNTIME_STATE_UNSPECIFIED,
+            pb2.DATA_PLANE_STATE_UNSPECIFIED,
+            False,
+            "Pending",
+        ),
     ],
 )
-def test_map_state_matrix(runtime, data_plane, expected):
-    assert map_state(_info(runtime_state=runtime, data_plane_state=data_plane)) == expected
-
-
-def test_map_sandbox_builds_public_model():
-    sandbox = map_sandbox(
-        _info(
-            expires_at_unix_seconds=EXPECTED_EXPIRY,
-            metadata={"team": "agents", RENEW_EXTEND_SECONDS_METADATA_KEY: "300"},
-        )
+def test_map_state_matrix(runtime, data_plane, ready, expected):
+    assert (
+        map_state(_info(runtime_state=runtime, data_plane_state=data_plane, ready=ready))
+        == expected
     )
 
-    assert sandbox.id == "sbx-1"
-    assert sandbox.image is not None
-    assert sandbox.image.uri == "python:3.11"
-    assert sandbox.status.state == "Running"
-    assert sandbox.metadata == {"team": "agents"}
-    assert sandbox.expires_at == datetime.fromtimestamp(EXPECTED_EXPIRY, tz=timezone.utc)
-    assert sandbox.created_at == NOW
+
+def test_map_state_accounts_for_components_bindings_and_ready_shortcut():
+    component_failed = _info(ready=True)
+    component_failed.infra_components.add(name="execd", state=pb2.INFRA_COMPONENT_STATE_FAILED)
+    binding_failed = _info(ready=True)
+    binding_failed.action_bindings.add(handler="egress", state=pb2.ACTION_STATE_FAILED)
+    explicitly_ready = _info(
+        runtime_state=pb2.RUNTIME_STATE_PENDING,
+        data_plane_state=pb2.DATA_PLANE_STATE_PENDING,
+    )
+    explicitly_ready.ready = True
+
+    assert map_state(component_failed) == "Failed"
+    assert map_state(binding_failed) == "Failed"
+    assert map_state(explicitly_ready) == "Running"
 
 
-def test_map_sandbox_terminated_on_retained_stopped_crd():
-    # Retained Stopped objects map to Terminated, but the Expired reason
-    # cannot be confirmed from SandboxInfo (no Conditions field), so it stays
-    # unset.
-    sandbox = map_sandbox(_info(runtime_state="Stopped"))
-    assert sandbox.status.state == "Terminated"
-    assert sandbox.status.reason is None
-
-
-def test_map_sandbox_omits_empty_metadata_and_expiry():
-    sandbox = map_sandbox(_info())
-    assert sandbox.metadata is None
-    assert sandbox.expires_at is None
-
-
-def test_reserved_metadata_keys_are_defined():
-    assert RENEW_EXTEND_SECONDS_METADATA_KEY in RESERVED_METADATA_KEYS
+@pytest.mark.parametrize(
+    "runtime,data_plane,ready,expected",
+    [
+        (pb2.RUNTIME_STATE_READY, pb2.DATA_PLANE_STATE_READY, True, None),
+        (pb2.RUNTIME_STATE_UNAVAILABLE, pb2.DATA_PLANE_STATE_READY, False, "RuntimeUnavailable"),
+        (pb2.RUNTIME_STATE_READY, pb2.DATA_PLANE_STATE_UNAVAILABLE, False, "DataPlaneUnavailable"),
+        (pb2.RUNTIME_STATE_FAILED, pb2.DATA_PLANE_STATE_READY, False, "Failed"),
+    ],
+)
+def test_map_reason(runtime, data_plane, ready, expected):
+    assert (
+        map_reason(_info(runtime_state=runtime, data_plane_state=data_plane, ready=ready))
+        == expected
+    )

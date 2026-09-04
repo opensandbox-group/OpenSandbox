@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Optional
 
 from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, get_config
-from opensandbox_server.services.snapshot_runtime import SnapshotRuntime
+from opensandbox_server.services.snapshot_runtime import NoopSnapshotRuntime, SnapshotRuntime
 
 
 def create_snapshot_runtime(
@@ -54,6 +54,11 @@ def create_snapshot_runtime(
             namespace=namespace,
             wait_timeout_seconds=kubernetes_config.snapshot_create_timeout_seconds,
         )
+
+    if runtime_type == "fleets":
+        # fast-sandbox does not support snapshots (explicit non-goal); the
+        # server must still start with snapshot operations cleanly unsupported.
+        return NoopSnapshotRuntime()
 
     raise ValueError(f"Unsupported snapshot runtime type: {runtime_type}")
 

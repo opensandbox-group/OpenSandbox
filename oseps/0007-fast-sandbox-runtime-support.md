@@ -180,7 +180,7 @@ Validation (server-side, at the same point as the existing `CreateSandboxRequest
 | 429 | pool capacity unavailable before acquisition timeout; `Retry-After` |
 | 503 | template artifact or FastPath temporarily unavailable |
 
-Mapping to FastPath `CreateRequest` (template mode):
+Mapping to FastPath `CreateSandboxRequest` (template mode):
 
 | Client field | FastPath mapping |
 | --- | --- |

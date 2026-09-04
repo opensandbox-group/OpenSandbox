@@ -127,19 +127,24 @@ async def lifespan(app: FastAPI):
         tenant_provider.start()
         sandbox_service.set_tenant_provider(tenant_provider)
 
-        # OSEP-0014: startup MUST validate all tenant namespaces exist and
-        # are accessible before serving traffic (fail-fast). Multi-tenancy is
-        # Kubernetes-only, which validate_tenant_config() already enforces.
-        # Providers that cannot enumerate tenants (HTTP) skip with a warning
-        # instead of silently validating an empty set.
-        try:
-            from opensandbox_server.services.k8s.client import K8sClient
+        if app_config.runtime.type == "kubernetes":
+            # OSEP-0014: the Kubernetes backend validates every enumerable
+            # tenant namespace before serving traffic. Fleets is a separate
+            # gRPC control plane and must not require direct cluster access;
+            # FastPath validates its namespaced resources on each request.
+            try:
+                from opensandbox_server.services.k8s.client import K8sClient
 
-            core_v1_api = K8sClient(app_config.kubernetes).get_core_v1_api()
-            validate_tenant_namespaces_on_startup(tenant_provider, core_v1_api)
-        except Exception as exc:
-            logger.error("Tenant namespace validation failed: %s", exc)
-            os._exit(1)
+                core_v1_api = K8sClient(app_config.kubernetes).get_core_v1_api()
+                validate_tenant_namespaces_on_startup(tenant_provider, core_v1_api)
+            except Exception as exc:
+                logger.error("Tenant namespace validation failed: %s", exc)
+                os._exit(1)
+        else:
+            logger.warning(
+                "Skipping direct tenant namespace startup validation for the fleets runtime; "
+                "FastPath validates namespaced resources on each request."
+            )
 
     from anyio.to_thread import current_default_thread_limiter
 
