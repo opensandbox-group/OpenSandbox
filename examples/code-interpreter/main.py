@@ -41,7 +41,7 @@ async def main() -> None:
         entrypoint=["/opt/code-interpreter/code-interpreter.sh"]
     )
 
-    async with sandbox:
+    try:
         interpreter = await CodeInterpreter.create(sandbox=sandbox)
 
         # Python example: show runtime info and return a simple calculation.
@@ -106,7 +106,8 @@ async def main() -> None:
         if ts_exec.error:
             print(f"[TypeScript error] {ts_exec.error.name}: {ts_exec.error.value}")
 
-        await sandbox.kill()
+    finally:
+        await sandbox.destroy()
 
 
 if __name__ == "__main__":
