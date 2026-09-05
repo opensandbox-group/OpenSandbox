@@ -74,7 +74,7 @@ cd server
 uv sync
 
 # Copy example configuration from the source tree
-cp server/opensandbox_server/examples/example.config.toml ~/.sandbox.toml
+cp opensandbox_server/examples/example.config.toml ~/.sandbox.toml
 
 # Edit configuration for development
 # Set [log] level = "DEBUG" and [server] api_key
