@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import SandboxConnectionException
+from opensandbox.exceptions import InvalidArgumentException, SandboxConnectionException
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
@@ -31,7 +31,11 @@ _UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
 
 
 class _SseTransport(httpx.BaseTransport):
+    def __init__(self) -> None:
+        self.last_request: httpx.Request | None = None
+
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.last_request = request
         body = request.content.decode("utf-8") if isinstance(request.content, (bytes, bytearray)) else ""
         payload = json.loads(body) if body else {}
 
@@ -205,6 +209,21 @@ def test_sync_run_in_session_non_zero_exit_updates_exit_code() -> None:
     assert execution.error.value == "7"
     assert execution.complete is None
     assert execution.exit_code == 7
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [timedelta(milliseconds=-1), timedelta(microseconds=-1), timedelta(microseconds=-999)],
+)
+def test_sync_run_in_session_rejects_negative_timeout(timeout: timedelta) -> None:
+    transport = _SseTransport()
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    with pytest.raises(InvalidArgumentException):
+        adapter.run_in_session("sess-1", "pwd", timeout=timeout)
+    assert transport.last_request is None
 
 
 class _EarlyCloseAfterCompleteStream(httpx.SyncByteStream):

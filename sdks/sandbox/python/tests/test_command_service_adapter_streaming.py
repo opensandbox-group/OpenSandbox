@@ -263,6 +263,22 @@ async def test_run_in_session_non_zero_exit_updates_exit_code() -> None:
     assert execution.exit_code == 7
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "timeout",
+    [timedelta(milliseconds=-1), timedelta(microseconds=-1), timedelta(microseconds=-999)],
+)
+async def test_run_in_session_rejects_negative_timeout(timeout: timedelta) -> None:
+    transport = _SseTransport()
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    with pytest.raises(InvalidArgumentException):
+        await adapter.run_in_session("sess-1", "pwd", timeout=timeout)
+    assert transport.last_request is None
+
+
 class _EarlyCloseAfterCompleteStream(httpx.AsyncByteStream):
     """Yields SSE bytes then simulates the connection closing before the
     chunked terminator arrives (regression case for #1528)."""
