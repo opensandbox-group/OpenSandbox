@@ -16,6 +16,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/go-logr/logr"
 	v1 "k8s.io/api/core/v1"
@@ -26,12 +27,11 @@ import (
 // recover reconstructs the task scheduler state from existing pods and their endpoints
 // This function is used to restore the scheduler state after a restart
 func (sch *defaultTaskScheduler) recover() error {
-	var err error
-	sch.once.Do(func() {
-		sch.recoverTaskNodesStatus()
-		sch.logger.Info("task scheduler recovered", "scheduler", sch.name, "task_nodes", len(sch.taskNodes), "all_pods", len(sch.allPods))
-	})
-	return err
+	if err := sch.recoverTaskNodesStatus(); err != nil {
+		return err
+	}
+	sch.logger.Info("task scheduler recovered", "scheduler", sch.name, "task_nodes", len(sch.taskNodes), "all_pods", len(sch.allPods))
+	return nil
 }
 
 func (sch *defaultTaskScheduler) recoverTaskNodesStatus() error {
@@ -52,7 +52,15 @@ func (sch *defaultTaskScheduler) recoverTaskNodesStatus() error {
 	// the recovery may complete after the agent has already finished stopping the task and returned an empty task list.
 	// This could cause the scheduler to be unable to determine whether the task was never executed or has already completed.
 	// It might lead to duplicate execution, but it ensures at-least-once delivery semantics.
-	tasks := sch.taskStatusCollector.Collect(context.Background(), ips)
+	tasks, err := sch.taskStatusCollector.Collect(context.Background(), ips)
+	if err != nil {
+		return fmt.Errorf("collect task status during recovery: %w", err)
+	}
+	for _, ip := range ips {
+		if _, ok := tasks[ip]; !ok {
+			return fmt.Errorf("collect task status during recovery: missing result for pod IP %s", ip)
+		}
+	}
 	for i := range ips {
 		ip := ips[i]
 		pod := pods[i]
