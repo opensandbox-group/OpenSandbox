@@ -1531,6 +1531,7 @@ spec:
         assert result.headers is None
 
     def test_get_internal_endpoint_uses_first_ip(self):
+        """The first annotated IPv4 address is returned with the requested port."""
         provider = BatchSandboxProvider(MagicMock())
         workload = {
             "metadata": {
@@ -1541,6 +1542,20 @@ spec:
         result = provider.get_internal_endpoint(workload, 8080, "sandbox-123")
 
         assert result.endpoint == "10.0.0.1:8080"
+        assert result.headers is None
+
+    def test_get_internal_endpoint_brackets_ipv6_address(self):
+        """An annotated IPv6 Pod address is bracketed for URL-safe host formatting."""
+        provider = BatchSandboxProvider(MagicMock())
+        workload = {
+            "metadata": {
+                "annotations": {"sandbox.opensandbox.io/endpoints": '["fd00::1"]'}
+            }
+        }
+
+        result = provider.get_internal_endpoint(workload, 44772, "sandbox-123")
+
+        assert result.endpoint == "[fd00::1]:44772"
         assert result.headers is None
 
     def test_get_internal_endpoint_returns_none_when_missing(self):
@@ -1816,7 +1831,7 @@ spec:
         assert "process" in result["spec"]
         process_task = result["spec"]["process"]
         assert process_task["env"] == [{"name": "OPENSANDBOX_ID", "value": "bs-1"}]
-        # Without env, command directly calls bootstrap.sh in background
+        # Without env, command directly execs bootstrap.sh.
         command = process_task["command"]
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
@@ -1829,7 +1844,7 @@ spec:
 
         Verifies:
         - Entrypoint is properly escaped
-        - Command runs in background
+        - Command keeps bootstrap as the tracked task process
         """
         provider = BatchSandboxProvider(mock_k8s_client)
 

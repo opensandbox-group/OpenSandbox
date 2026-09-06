@@ -399,14 +399,19 @@ spec:
   poolRef: example-pool
 ```
 
-::: warning Lifecycle Pool requests start an execd task
+::: warning Lifecycle Pool requests must start an execd task
 The example above allocates warm `nginx` pods and is useful when the container's
 own service is the workload. A BatchSandbox created directly without a
 `taskTemplate` keeps this allocation-only behavior.
 
-The lifecycle API creates sandboxes intended for interactive SDK use, so every
+The lifecycle API returns sandboxes intended for interactive SDK use, so every
 Pool request creates a per-allocation `taskTemplate`. If the request omits an
-entrypoint, the task uses the default `tail -f /dev/null` keepalive.
+entrypoint, the task uses the default `tail -f /dev/null` keepalive. The create
+call returns `Running` with reason `EXECD_READY` only after the allocated Pod's
+execd endpoint answers `44772/ping` successfully. If execd does not become
+healthy within `kubernetes.sandbox_create_timeout_seconds`, the server returns
+HTTP `504` with error code `KUBERNETES::EXECD_READY_TIMEOUT` and deletes the
+BatchSandbox to release the Pool allocation.
 
 A Pool used through the lifecycle API must run task-executor on port `5758`,
 provide executable `/opt/opensandbox/bootstrap.sh` and
@@ -416,9 +421,15 @@ start another execd on port `44772` before allocation. The plain `nginx` Pool in
 this example and Pools that prestart execd without task-executor do not satisfy
 this on-demand task contract.
 
-`runtime.execd_run_as_init` controls only the task process topology. In both
-modes the task runs bootstrap as its root process so it remains alive until
-sandbox cleanup. When it is `true`, it additionally injects `EXECD_INIT=1`.
+`runtime.execd_run_as_init` controls only the task process topology. When it is
+`false`, bootstrap is the task's direct process and supervises execd plus the
+user entrypoint; when it is `true`, bootstrap runs execd as its root process
+and injects `EXECD_INIT=1`. Both modes retain the task until cleanup, generate
+a task, and wait for the same execd health check.
+
+The health check guarantees execd availability when creation returns. Later
+execd failures continue to follow the existing workload status model and do not
+retroactively change that creation result.
 :::
 
 ::: info Pool capacity back-pressure

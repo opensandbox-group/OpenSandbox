@@ -19,16 +19,6 @@ from typing import Any, Dict
 POOL_CAPACITY_EXHAUSTED_REASON = "POOL_CAPACITY_EXHAUSTED"
 
 
-def _normalize_create_status(status_info: Dict[str, Any]) -> Dict[str, Any]:
-    if status_info.get("state") != "Allocated":
-        return status_info
-    return {
-        **status_info,
-        "state": "Running",
-        "message": "Pod has IP assigned and sandbox is ready for requests",
-    }
-
-
 def _is_unschedulable_status(status_info: Dict[str, Any]) -> bool:
     reason = str(status_info.get("reason") or "")
     return reason == "POD_PLATFORM_UNSCHEDULABLE"

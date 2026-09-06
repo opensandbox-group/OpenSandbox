@@ -26,6 +26,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
+import httpx
 from fastapi import HTTPException, status
 
 from opensandbox_server.extensions import (
@@ -63,7 +64,6 @@ from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_r
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
     _is_unschedulable_status,
-    _normalize_create_status,
 )
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
@@ -103,6 +103,9 @@ from opensandbox_server.tenants.context import get_current_tenant
 from opensandbox_server.tenants.provider import TenantProvider
 
 logger = logging.getLogger(__name__)
+
+EXECD_PORT = 44772
+EXECD_PROBE_TIMEOUT_SECONDS = 1.0
 
 
 def _is_namespace_not_found(exc: Exception) -> bool:
@@ -240,6 +243,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         timeout_seconds: int = 60,
         poll_interval_seconds: float = 1.0,
         pool_acquisition_timeout_seconds: float | None = None,
+        require_execd_ready: bool = False,
     ) -> Dict[str, Any]:
         """
         Wait for Pod to be Running and have an IP address.
@@ -250,6 +254,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             poll_interval_seconds: Time between polling attempts
             pool_acquisition_timeout_seconds: Maximum cumulative time to wait
                 while the controller reports exhausted Pool capacity
+            require_execd_ready: Whether execd must answer its health endpoint
+                before the workload is returned
             
         Returns:
             Workload dict when Pod is Running with IP
@@ -257,6 +263,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         Raises:
             HTTPException: If timeout or Pod fails
         """
+        # 1、Initialize the shared creation deadline and capacity wait budget.
         logger.info(
             f"Waiting for sandbox {sandbox_id} to be Running with IP (timeout: {timeout_seconds}s)"
         )
@@ -266,6 +273,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         last_message = None
         pool_capacity_started_at: float | None = None
         pool_capacity_blocked_seconds = 0.0
+        waiting_for_execd = False
         if pool_acquisition_timeout_seconds is None:
             pool_acquisition_timeout_seconds = float(timeout_seconds)
         effective_pool_acquisition_timeout_seconds = min(
@@ -273,6 +281,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             float(timeout_seconds),
         )
         
+        # 2、Poll provider state until the workload is truly Running or fails.
         while time.time() - start_time < timeout_seconds:
             try:
                 workload = await asyncio.to_thread(
@@ -283,12 +292,13 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
                 if not workload:
                     logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
-                    await asyncio.sleep(poll_interval_seconds)
+                    remaining_seconds = timeout_seconds - (time.time() - start_time)
+                    await asyncio.sleep(
+                        min(poll_interval_seconds, max(0.0, remaining_seconds))
+                    )
                     continue
                 
-                status_info = _normalize_create_status(
-                    self.workload_provider.get_status(workload)
-                )
+                status_info = self.workload_provider.get_status(workload)
                 current_state = status_info["state"]
                 current_reason = status_info["reason"]
                 current_message = status_info["message"]
@@ -300,8 +310,22 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     last_state = current_state
                     last_message = current_message
 
-                if current_state in ("Running", "Allocated"):
-                    return workload
+                if current_state == "Running":
+                    if not require_execd_ready:
+                        return workload
+
+                    waiting_for_execd = True
+                    endpoint = self.workload_provider.get_internal_endpoint(
+                        workload,
+                        EXECD_PORT,
+                        sandbox_id,
+                    )
+                    remaining_seconds = timeout_seconds - (time.time() - start_time)
+                    if endpoint and remaining_seconds > 0 and await self._is_execd_ready(
+                        endpoint,
+                        min(EXECD_PROBE_TIMEOUT_SECONDS, remaining_seconds),
+                    ):
+                        return workload
                 if _is_unschedulable_status(status_info):
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
@@ -346,18 +370,33 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     exc_info=True
                 )
 
-            await asyncio.sleep(poll_interval_seconds)
+            remaining_seconds = timeout_seconds - (time.time() - start_time)
+            await asyncio.sleep(
+                min(poll_interval_seconds, max(0.0, remaining_seconds))
+            )
 
+        # 3、Preserve the most specific error when the shared deadline expires.
         end_time = time.time()
         elapsed = end_time - start_time
         if pool_capacity_started_at is not None:
             pool_capacity_blocked_seconds += end_time - pool_capacity_started_at
-        if (
+        if pool_capacity_started_at is not None or (
             pool_capacity_blocked_seconds
             >= effective_pool_acquisition_timeout_seconds
         ):
             raise self._pool_capacity_exhausted_error(
                 pool_acquisition_timeout_seconds
+            )
+        if waiting_for_execd:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "code": SandboxErrorCodes.K8S_EXECD_READY_TIMEOUT,
+                    "message": (
+                        f"Timeout waiting for sandbox {sandbox_id} execd to be ready. "
+                        f"Elapsed: {elapsed:.1f}s"
+                    ),
+                },
             )
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
@@ -369,6 +408,22 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 ),
             },
         )
+
+    async def _is_execd_ready(
+        self,
+        endpoint: Endpoint,
+        timeout_seconds: float,
+    ) -> bool:
+        """Return whether the internal execd health endpoint responds successfully."""
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout_seconds,
+                trust_env=False,
+            ) as client:
+                response = await client.get(f"http://{endpoint.endpoint}/ping")
+            return response.is_success
+        except httpx.HTTPError:
+            return False
 
     @staticmethod
     def _pool_capacity_exhausted_error(
@@ -823,6 +878,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         Raises:
             HTTPException: If creation fails, timeout, or invalid parameters
         """
+        # 1、Validate request-level constraints before creating external resources.
         pool_ref = (request.extensions or {}).get("poolRef", "").strip()
         has_pool_ref = bool(pool_ref)
         self._ensure_pool_mode_compatible(request, has_pool_ref)
@@ -860,6 +916,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         workload_left_alive = False
         created_managed_pvcs: list[str] = []
         try:
+            # 2、Build the effective workload context and run side-effect-free checks.
             context = _build_create_workload_context(
                 app_config=self.app_config,
                 request=request,
@@ -870,7 +927,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             )
             apply_access_renew_extend_seconds_to_mapping(context.annotations, request.extensions)
             apply_extensions_to_mapping(context.annotations, request.extensions)
-
             ensure_volumes_valid(
                 request.volumes,
                 self.app_config.storage.allowed_host_paths,
@@ -917,6 +973,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             #   3. Success — flag becomes True so a subsequent
             #      ``_wait_for_sandbox_ready`` failure must rollback before
             #      sweeping (the existing inner try/except handles that).
+            # 3、Create the workload and roll back any partial provider failure.
             try:
                 workload_info = await asyncio.to_thread(
                     self.workload_provider.create_workload,
@@ -993,6 +1050,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 workload_info,
             )
 
+            # 4、Wait for readiness and map the provider result to the public response.
             try:
                 kubernetes_config = self.app_config.kubernetes
                 assert kubernetes_config is not None
@@ -1001,11 +1059,10 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     timeout_seconds=kubernetes_config.sandbox_create_timeout_seconds,
                     poll_interval_seconds=kubernetes_config.sandbox_create_poll_interval_seconds,
                     pool_acquisition_timeout_seconds=kubernetes_config.pool_acquisition_timeout_seconds,
+                    require_execd_ready=has_pool_ref,
                 )
                 
-                status_info = _normalize_create_status(
-                    self.workload_provider.get_status(workload)
-                )
+                status_info = self.workload_provider.get_status(workload)
                 effective_platform = _extract_platform_from_workload(workload)
                 if isinstance(workload, dict):
                     annotations = workload.get("metadata", {}).get("annotations") or {}
@@ -1029,6 +1086,10 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     entrypoint=request.entrypoint,
                     platform=effective_platform or request.platform,
                 )
+                if has_pool_ref:
+                    response.status.state = "Running"
+                    response.status.reason = "EXECD_READY"
+                    response.status.message = "Sandbox execd is ready"
                 # Reached success — the caller now owns the sandbox lifecycle
                 # and any PVCs we created. delete_sandbox is responsible for
                 # the eventual cleanup.
@@ -1038,7 +1099,11 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
             except HTTPException as e:
                 try:
-                    logger.error(f"Creation failed, cleaning up sandbox {sandbox_id}: {e}")
+                    logger.debug(
+                        "Creation failed; rolling back sandbox %s: %s",
+                        sandbox_id,
+                        e,
+                    )
                     await asyncio.to_thread(
                         self.workload_provider.delete_workload,
                         sandbox_id,

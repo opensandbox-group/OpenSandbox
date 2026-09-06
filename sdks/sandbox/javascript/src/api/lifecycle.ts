@@ -143,6 +143,9 @@ export interface paths {
                  *     - `status.reason` and `status.message` indicating current state
                  *     - `metadata`, `expiresAt`, `createdAt`: Core sandbox information
                  *
+                 *     Kubernetes Pool requests return only after execd answers its health
+                 *     endpoint, with `status.reason: "EXECD_READY"`.
+                 *
                  *     Note: startup source details and `updatedAt` are not included in the create response.
                  *     Use GET /sandboxes/{sandboxId} to retrieve the complete sandbox information.
                  */
@@ -171,6 +174,16 @@ export interface paths {
                     };
                 };
                 500: components["responses"]["InternalServerError"];
+                /** @description The sandbox Pod or execd service did not become ready before the creation timeout */
+                504: {
+                    headers: {
+                        "X-Request-ID": components["headers"]["XRequestId"];
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -1163,7 +1176,7 @@ export interface components {
          *     are optional and defined by the Pool CRD template. `entrypoint` is also
          *     optional; when omitted, the server creates a per-allocation task using
          *     `['tail', '-f', '/dev/null']`. The Pool must run task-executor and provide
-         *     bootstrap plus execd.
+         *     bootstrap plus execd. Creation succeeds only after execd becomes healthy.
          *     `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
          *     `credentialProxy.enabled` must not be provided together with `poolRef`.
          *
@@ -1257,8 +1270,10 @@ export interface components {
              *     Optional when `snapshotId` is provided. If omitted for snapshot
              *     restore, the server defaults to `["tail", "-f", "/dev/null"]`.
              *
-             *     Optional when `extensions.poolRef` is provided. If omitted for Pool
-             *     mode, the server uses the same default in a per-allocation task.
+             *     Optional when `extensions.poolRef` is provided. If omitted, the
+             *     server places the same default keepalive in a per-allocation task;
+             *     it does not inherit the Pool container command as the sandbox
+             *     entrypoint.
              *
              *     Explicitly specifies the user's expected main process, allowing the sandbox management
              *     service to reliably inject control processes before executing this command.

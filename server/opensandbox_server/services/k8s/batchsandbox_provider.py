@@ -521,17 +521,17 @@ class BatchSandboxProvider(WorkloadProvider):
     ) -> Dict[str, Any]:
         """Build pool taskTemplate with shell-escaped bootstrap command.
 
-        The task shell always execs bootstrap.sh so task-executor keeps the
-        task alive until bootstrap exits during sandbox cleanup. With
+        The shell always execs bootstrap.sh so task-executor keeps the task
+        active until bootstrap exits and forwards cleanup signals to it. With
         execd_run_as_init enabled, bootstrap execs `execd --init` (the
         EXECD_INIT env is injected below), so execd becomes the root of the
-        task process tree. Without it, bootstrap supervises execd and the
-        user process directly.
+        task process tree. Without it, bootstrap supervises the execd daemon
+        and the user entrypoint itself.
         """
         escaped_entrypoint = ' '.join(shlex.quote(arg) for arg in entrypoint)
-        # Keep bootstrap as task-executor's direct child in both process
-        # topologies, otherwise its shell writes a successful exit marker
-        # before the sandbox has been cleaned up.
+        # exec keeps bootstrap as the task-executor shim's direct child. This
+        # prevents a successful shell exit from releasing a Noop-recycled Pod
+        # while the previous sandbox's bootstrap, execd, or user process runs.
         user_process_cmd = f"exec /opt/opensandbox/bootstrap.sh {escaped_entrypoint}"
 
         wrapped_command = ["/bin/sh", "-c", user_process_cmd]
@@ -929,7 +929,8 @@ class BatchSandboxProvider(WorkloadProvider):
         pod_ip = self._parse_pod_ip(workload)
         if not pod_ip:
             return None
-        return Endpoint(endpoint=f"{pod_ip}:{port}")
+        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+        return Endpoint(endpoint=f"{host}:{port}")
 
     def get_endpoint_info(self, workload: Dict[str, Any], port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Resolve endpoint using gateway ingress or parsed pod IP."""

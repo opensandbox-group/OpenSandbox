@@ -6,18 +6,47 @@ metadata:
 spec:
   template:
     spec:
+      volumes:
+        - name: opensandbox-bin
+          emptyDir: {}
+      initContainers:
+        - name: task-executor-installer
+          image: opensandbox/task-executor:e2e-local
+          command: ["/bin/sh", "-c"]
+          args:
+            - >-
+              cp /workspace/server /opt/opensandbox/task-executor &&
+              chmod +x /opt/opensandbox/task-executor
+          volumeMounts:
+            - name: opensandbox-bin
+              mountPath: /opt/opensandbox
+        - name: execd-installer
+          image: opensandbox/execd:e2e-local
+          command: ["/bin/sh", "-c"]
+          args:
+            - >-
+              cp /execd /opt/opensandbox/execd &&
+              cp /bootstrap.sh /opt/opensandbox/bootstrap.sh &&
+              chmod +x /opt/opensandbox/execd &&
+              chmod +x /opt/opensandbox/bootstrap.sh
+          volumeMounts:
+            - name: opensandbox-bin
+              mountPath: /opt/opensandbox
       containers:
         - name: sandbox-container
           image: opensandbox/execd:e2e-local
-          command: ["/bootstrap.sh", "sleep", "3600"]
+          command:
+            - "/opt/opensandbox/task-executor"
+            - "-listen-addr=0.0.0.0:5758"
+            - "-log-dir=/tmp"
           env:
-            - name: EXECD_INIT
-              value: "1"
-            # The execd image keeps the binary at /execd (no execd-installer
-            # on the Pool path); bootstrap.sh defaults to
-            # /opt/opensandbox/execd, so point it at the real path.
             - name: EXECD
-              value: "/execd"
+              value: "/opt/opensandbox/execd"
+            - name: EXECD_ENVS
+              value: "/opt/opensandbox/.env"
+          volumeMounts:
+            - name: opensandbox-bin
+              mountPath: /opt/opensandbox
   capacitySpec:
     bufferMax: 2
     bufferMin: 1

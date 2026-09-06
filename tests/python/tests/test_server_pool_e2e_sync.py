@@ -17,19 +17,19 @@
 E2E tests for the server pool allocation path.
 
 The Pool CR (``tests/python/tests/support/server-pool.yaml``) is installed
-directly with kubectl; its pod template runs execd as PID 1
-(``/bootstrap.sh sleep 3600`` with ``EXECD_INIT=1``), so pooled sandboxes can
-execute SDK commands through execd. The test then verifies the server-driven
-allocation path: sandboxes created through the SDK with
-``extensions.poolRef`` are allocated from the pre-warmed pool, pool status
-counters move accordingly, and execd interaction works on the pooled pod.
+directly with kubectl. Its warm Pods run task-executor, while each lifecycle
+allocation receives a task that starts bootstrap and execd on demand. The test
+verifies that sandboxes created through the SDK with ``extensions.poolRef``
+are allocated from the pre-warmed pool, return only after execd is healthy,
+move Pool status counters correctly, and execute commands on the pooled Pod.
 
 This is complementary to the SDK-side pool covered by
 ``test_sandbox_pool_e2e_sync.py``, which never creates a Pool CR.
 
-Requires a Kind cluster with the controller deployed and the execd image
-loaded as ``opensandbox/execd:e2e-local`` (scripts/python-k8s-e2e*.sh),
-plus kubectl on PATH.
+Requires a Kind cluster with the controller deployed and the task-executor and
+execd images loaded as ``opensandbox/task-executor:e2e-local`` and
+``opensandbox/execd:e2e-local`` (``E2E_TEST_SUITE=pool
+scripts/python-k8s-e2e.sh``), plus kubectl on PATH.
 """
 
 import logging

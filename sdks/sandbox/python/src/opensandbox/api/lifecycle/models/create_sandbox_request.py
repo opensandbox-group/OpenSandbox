@@ -57,7 +57,7 @@ class CreateSandboxRequest:
     are optional and defined by the Pool CRD template. `entrypoint` is also
     optional; when omitted, the server creates a per-allocation task using
     `['tail', '-f', '/dev/null']`. The Pool must run task-executor and provide
-    bootstrap plus execd.
+    bootstrap plus execd. Creation succeeds only after execd becomes healthy.
     `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
     `credentialProxy.enabled` must not be provided together with `poolRef`.
 
@@ -124,8 +124,10 @@ class CreateSandboxRequest:
                 Optional when `snapshotId` is provided. If omitted for snapshot
                 restore, the server defaults to `["tail", "-f", "/dev/null"]`.
 
-                Optional when `extensions.poolRef` is provided. If omitted for Pool
-                mode, the server uses the same default in a per-allocation task.
+                Optional when `extensions.poolRef` is provided. If omitted, the
+                server places the same default keepalive in a per-allocation task;
+                it does not inherit the Pool container command as the sandbox
+                entrypoint.
 
                 Explicitly specifies the user's expected main process, allowing the sandbox management
                 service to reliably inject control processes before executing this command.

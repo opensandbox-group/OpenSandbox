@@ -46,6 +46,10 @@ k8s_e2e_build_runtime_images() {
   docker build -f server/Dockerfile -t "${SERVER_IMG}" server
   docker build -f components/execd/Dockerfile -t "${EXECD_IMG}" "${REPO_ROOT}"
   docker build -f components/egress/Dockerfile -t "${EGRESS_IMG}" "${REPO_ROOT}"
+  if [ "${E2E_TEST_SUITE:-mini}" = "pool" ]; then
+    make -C kubernetes docker-build-task-executor \
+      TASK_EXECUTOR_IMG=opensandbox/task-executor:e2e-local
+  fi
   if [ "${E2E_SERVER_GATEWAY_ENABLED:-false}" = "true" ]; then
     docker build -f components/ingress/Dockerfile -t "${INGRESS_IMG}" "${REPO_ROOT}"
   fi
@@ -56,6 +60,10 @@ k8s_e2e_kind_load_runtime_images() {
   kind load docker-image --name "${KIND_CLUSTER}" "${SERVER_IMG}"
   kind load docker-image --name "${KIND_CLUSTER}" "${EXECD_IMG}"
   kind load docker-image --name "${KIND_CLUSTER}" "${EGRESS_IMG}"
+  if [ "${E2E_TEST_SUITE:-mini}" = "pool" ]; then
+    kind load docker-image --name "${KIND_CLUSTER}" \
+      opensandbox/task-executor:e2e-local
+  fi
   if [ "${E2E_SERVER_GATEWAY_ENABLED:-false}" = "true" ]; then
     kind load docker-image --name "${KIND_CLUSTER}" "${INGRESS_IMG}"
   fi

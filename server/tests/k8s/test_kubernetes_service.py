@@ -13,9 +13,10 @@
 # limitations under the License.
 
 import pytest
+import httpx
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import HTTPException
 
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
@@ -47,6 +48,14 @@ from opensandbox_server.config import (
     SecureAccessKey,
 )
 from opensandbox_server.api.schema import Endpoint
+
+
+def _configure_execd_ready(k8s_service, address: str = "10.244.0.5:44772") -> None:
+    """Configure a Pool creation test with a successful internal execd probe."""
+    k8s_service.workload_provider.get_internal_endpoint.return_value = Endpoint(
+        endpoint=address
+    )
+    k8s_service._is_execd_ready = AsyncMock(return_value=True)
 
 class TestKubernetesSandboxServiceInit:
     
@@ -207,26 +216,46 @@ class TestKubernetesSandboxServiceCreate:
         }
 
     @pytest.mark.asyncio
-    async def test_create_sandbox_normalizes_allocated_status_to_running(
+    async def test_create_sandbox_waits_past_allocated_status(
         self, k8s_service, create_sandbox_request, mock_workload
     ):
+        """An assigned Pod is not create-ready until the provider reports Running."""
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-sandbox-123",
             "uid": "abc-123",
         }
         k8s_service.workload_provider.get_workload.return_value = mock_workload
-        k8s_service.workload_provider.get_status.return_value = {
-            "state": "Allocated",
-            "reason": "IP_ASSIGNED",
-            "message": "Pod has IP assigned but not ready",
-            "last_transition_at": datetime.now(timezone.utc),
-        }
+        k8s_service.workload_provider.get_status.side_effect = [
+            {
+                "state": "Allocated",
+                "reason": "IP_ASSIGNED",
+                "message": "Pod has IP assigned but not ready",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+            {
+                "state": "Running",
+                "reason": "RUNNING",
+                "message": "Sandbox is running",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+            {
+                "state": "Running",
+                "reason": "RUNNING",
+                "message": "Sandbox is running",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+        ]
 
-        response = await k8s_service.create_sandbox(create_sandbox_request)
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.asyncio.sleep",
+            return_value=None,
+        ):
+            response = await k8s_service.create_sandbox(create_sandbox_request)
 
         assert response.status.state == "Running"
-        assert response.status.reason == "IP_ASSIGNED"
-        assert response.status.message == "Pod has IP assigned and sandbox is ready for requests"
+        assert response.status.reason == "RUNNING"
+        assert response.status.message == "Sandbox is running"
+        assert k8s_service.workload_provider.get_status.call_count == 3
 
     @pytest.mark.asyncio
     async def test_create_sandbox_uses_configured_timeout_and_poll_interval(
@@ -286,6 +315,38 @@ class TestKubernetesSandboxServiceCreate:
                 await k8s_service.create_sandbox(create_sandbox_request)
 
         assert exc_info.value is capacity_error
+        k8s_service.workload_provider.delete_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_cleans_up_workload_after_execd_timeout(
+        self, k8s_service
+    ):
+        """A Pool execd readiness timeout rolls back the allocated workload."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(extensions={"poolRef": "*"})
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-pool",
+            "uid": "pool-123",
+        }
+        execd_error = HTTPException(
+            status_code=504,
+            detail={
+                "code": SandboxErrorCodes.K8S_EXECD_READY_TIMEOUT,
+                "message": "Sandbox execd did not become ready",
+            },
+        )
+
+        with patch.object(
+            k8s_service,
+            "_wait_for_sandbox_ready",
+            side_effect=execd_error,
+        ) as wait_for_ready:
+            with pytest.raises(HTTPException) as exc_info:
+                await k8s_service.create_sandbox(pool_request)
+
+        assert exc_info.value is execd_error
+        assert wait_for_ready.call_args.kwargs["require_execd_ready"] is True
         k8s_service.workload_provider.delete_workload.assert_called_once()
 
     @pytest.mark.asyncio
@@ -769,6 +830,7 @@ class TestKubernetesSandboxServiceCreate:
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "does-not-exist-pool"},
+            env={"START_EXECD": "1"},
         )
         k8s_service.k8s_client.get_custom_object.return_value = None
 
@@ -799,6 +861,7 @@ class TestKubernetesSandboxServiceCreate:
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "*"},
+            env={"START_EXECD": "1"},
         )
 
         k8s_service.workload_provider.create_workload.return_value = {
@@ -812,6 +875,7 @@ class TestKubernetesSandboxServiceCreate:
             "message": "Pod is running",
             "last_transition_at": datetime.now(timezone.utc),
         }
+        _configure_execd_ready(k8s_service)
         k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.5:8080"
         k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
 
@@ -823,16 +887,18 @@ class TestKubernetesSandboxServiceCreate:
         assert k8s_service.workload_provider.create_workload.call_args.kwargs["extensions"] == {"poolRef": "*"}
 
     @pytest.mark.asyncio
-    async def test_create_sandbox_pool_mode_skips_image_and_entrypoint_validation(
+    async def test_create_sandbox_pool_mode_creates_default_task(
         self, k8s_service, mock_workload
     ):
-        """Pool mode: poolRef only, no image/entrypoint/resourceLimits — should succeed."""
+        """A poolRef-only request succeeds after the generated task starts execd."""
         from opensandbox_server.api.schema import CreateSandboxRequest
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
         )
-
+        k8s_service.k8s_client.get_custom_object.return_value = {
+            "metadata": {"name": "my-pool"}
+        }
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-sandbox-pool",
             "uid": "pool-123",
@@ -840,16 +906,103 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.get_workload.return_value = mock_workload
         k8s_service.workload_provider.get_status.return_value = {
             "state": "Running",
-            "reason": "",
-            "message": "Pod is running",
+            "reason": "RUNNING",
+            "message": "Sandbox is running",
             "last_transition_at": datetime.now(timezone.utc),
         }
-        k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.5:8080"
-        k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+        _configure_execd_ready(k8s_service)
 
         response = await k8s_service.create_sandbox(pool_request)
 
-        assert response.id is not None
+        assert response.status.state == "Running"
+        assert response.status.reason == "EXECD_READY"
+        assert response.status.message == "Sandbox execd is ready"
+        k8s_service.workload_provider.create_workload.assert_called_once()
+        k8s_service._is_execd_ready.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_allows_egress_only_env(
+        self, k8s_service, mock_workload
+    ):
+        """Pool mode creates a default task even when only egress env is requested."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "*"},
+            env={"OPENSANDBOX_EGRESS_LOG_LEVEL": "debug"},
+        )
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-pool",
+            "uid": "pool-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "RUNNING",
+            "message": "Sandbox is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        _configure_execd_ready(k8s_service)
+
+        response = await k8s_service.create_sandbox(pool_request)
+
+        assert response.status.reason == "EXECD_READY"
+        k8s_service.k8s_client.get_custom_object.assert_not_called()
+        k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_allows_non_default_entrypoint(
+        self, k8s_service, mock_workload
+    ):
+        """A non-default Pool entrypoint continues to create a task-backed sandbox."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        pool_request = CreateSandboxRequest(
+            extensions={"poolRef": "*"},
+            entrypoint=["/bin/sleep", "3600"],
+        )
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-pool",
+            "uid": "pool-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "RUNNING",
+            "message": "Sandbox is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        _configure_execd_ready(k8s_service)
+
+        response = await k8s_service.create_sandbox(pool_request)
+
+        assert response.status.state == "Running"
+        k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_pool_mode_allows_execd_init_task(
+        self, k8s_service, mock_workload
+    ):
+        """execd init mode makes a poolRef-only request task-backed."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+
+        k8s_service.app_config.runtime.execd_run_as_init = True
+        pool_request = CreateSandboxRequest(extensions={"poolRef": "*"})
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-pool-init",
+            "uid": "pool-init-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "RUNNING",
+            "message": "Sandbox is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        _configure_execd_ready(k8s_service)
+
+        response = await k8s_service.create_sandbox(pool_request)
+
         assert response.status.state == "Running"
         k8s_service.workload_provider.create_workload.assert_called_once()
 
@@ -862,6 +1015,7 @@ class TestKubernetesSandboxServiceCreate:
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
+            env={"START_EXECD": "1"},
         )
         assert pool_request.image is None
 
@@ -876,6 +1030,7 @@ class TestKubernetesSandboxServiceCreate:
             "message": "Pod is running",
             "last_transition_at": datetime.now(timezone.utc),
         }
+        _configure_execd_ready(k8s_service, "10.244.0.6:44772")
         k8s_service.workload_provider.get_endpoint_info.return_value = "10.244.0.6:8080"
         k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
 
@@ -893,6 +1048,7 @@ class TestWaitForSandboxReady:
     
     @pytest.mark.asyncio
     async def test_wait_for_running_pod_succeeds(self, k8s_service, mock_workload):
+        """A non-Pool workload returns as soon as the provider reports Running."""
         k8s_service.workload_provider.get_workload.return_value = mock_workload
         k8s_service.workload_provider.get_status.return_value = {
             "state": "Running",
@@ -904,9 +1060,120 @@ class TestWaitForSandboxReady:
         result = await k8s_service._wait_for_sandbox_ready("test-sandbox-id", timeout_seconds=10)
         
         assert result == mock_workload
+        k8s_service.workload_provider.get_internal_endpoint.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_pool_execd_until_probe_succeeds(
+        self, k8s_service, mock_workload
+    ):
+        """A Running Pool workload is returned only after execd becomes healthy."""
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "RUNNING",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        endpoint = Endpoint(endpoint="10.244.0.5:44772")
+        k8s_service.workload_provider.get_internal_endpoint.return_value = endpoint
+        k8s_service._is_execd_ready = AsyncMock(side_effect=[False, True])
+
+        result = await k8s_service._wait_for_sandbox_ready(
+            "test-sandbox-id",
+            timeout_seconds=10,
+            poll_interval_seconds=0,
+            require_execd_ready=True,
+        )
+
+        assert result == mock_workload
+        assert k8s_service._is_execd_ready.await_count == 2
+        k8s_service.workload_provider.get_internal_endpoint.assert_called_with(
+            mock_workload,
+            44772,
+            "test-sandbox-id",
+        )
+
+    @pytest.mark.asyncio
+    async def test_wait_for_pool_execd_until_internal_endpoint_exists(
+        self, k8s_service, mock_workload
+    ):
+        """A missing Pod IP is retried before the first execd health request."""
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "RUNNING",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        endpoint = Endpoint(endpoint="10.244.0.5:44772")
+        k8s_service.workload_provider.get_internal_endpoint.side_effect = [
+            None,
+            endpoint,
+        ]
+        k8s_service._is_execd_ready = AsyncMock(return_value=True)
+
+        result = await k8s_service._wait_for_sandbox_ready(
+            "test-sandbox-id",
+            timeout_seconds=10,
+            poll_interval_seconds=0,
+            require_execd_ready=True,
+        )
+
+        assert result == mock_workload
+        k8s_service._is_execd_ready.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_pool_execd_timeout_uses_specific_error(
+        self, k8s_service, mock_workload
+    ):
+        """An unhealthy execd stops exactly at the shared creation deadline."""
+        clock = SimpleNamespace(now=0.0)
+
+        async def advance_clock(seconds: float) -> None:
+            """Advance the deterministic readiness clock instead of sleeping."""
+            clock.now += seconds
+
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "RUNNING",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_internal_endpoint.return_value = Endpoint(
+            endpoint="10.244.0.5:44772"
+        )
+        k8s_service._is_execd_ready = AsyncMock(return_value=False)
+
+        with (
+            patch(
+                "opensandbox_server.services.k8s.kubernetes_service.time.time",
+                side_effect=lambda: clock.now,
+            ),
+            patch(
+                "opensandbox_server.services.k8s.kubernetes_service.asyncio.sleep",
+                new=advance_clock,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=2,
+                poll_interval_seconds=5,
+                require_execd_ready=True,
+            )
+
+        assert exc_info.value.status_code == 504
+        assert (
+            exc_info.value.detail["code"]
+            == SandboxErrorCodes.K8S_EXECD_READY_TIMEOUT
+        )
+        assert k8s_service._is_execd_ready.await_count == 1
+        assert clock.now == 2
     
     @pytest.mark.asyncio
     async def test_wait_for_pending_then_running_succeeds(self, k8s_service, mock_workload):
+        """Pending and Allocated states are both polled until Running."""
         # Mock state transition: Pending -> Allocated -> Running
         status_sequence = [
             {"state": "Pending", "reason": "", "message": "Pending", "last_transition_at": datetime.now(timezone.utc)},
@@ -920,21 +1187,35 @@ class TestWaitForSandboxReady:
         result = await k8s_service._wait_for_sandbox_ready("test-sandbox-id", timeout_seconds=10, poll_interval_seconds=0.1)
         
         assert result == mock_workload
-        assert k8s_service.workload_provider.get_status.call_count == 2
+        assert k8s_service.workload_provider.get_status.call_count == 3
     
     @pytest.mark.asyncio
-    async def test_wait_for_allocated_pod_returns_immediately(self, k8s_service, mock_workload):
+    async def test_wait_for_allocated_pod_keeps_polling(self, k8s_service, mock_workload):
+        """Allocated means an IP exists, not that the sandbox is ready."""
         k8s_service.workload_provider.get_workload.return_value = mock_workload
-        k8s_service.workload_provider.get_status.return_value = {
-            "state": "Allocated",
-            "reason": "IP_ASSIGNED",
-            "message": "Pod has IP assigned",
-            "last_transition_at": datetime.now(timezone.utc),
-        }
-        
-        result = await k8s_service._wait_for_sandbox_ready("test-sandbox-id", timeout_seconds=10)
-        
+        k8s_service.workload_provider.get_status.side_effect = [
+            {
+                "state": "Allocated",
+                "reason": "IP_ASSIGNED",
+                "message": "Pod has IP assigned",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+            {
+                "state": "Running",
+                "reason": "RUNNING",
+                "message": "Sandbox is running",
+                "last_transition_at": datetime.now(timezone.utc),
+            },
+        ]
+
+        result = await k8s_service._wait_for_sandbox_ready(
+            "test-sandbox-id",
+            timeout_seconds=10,
+            poll_interval_seconds=0,
+        )
+
         assert result == mock_workload
+        assert k8s_service.workload_provider.get_status.call_count == 2
     
     @pytest.mark.asyncio
     async def test_wait_timeout_raises_exception(self, k8s_service, mock_workload):
@@ -1134,6 +1415,65 @@ class TestWaitForSandboxReady:
         )
 
         assert result == mock_workload
+
+
+class TestExecdReadyProbe:
+    """Tests for the internal execd HTTP health probe."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status_code", "expected"),
+        [(200, True), (204, True), (404, False), (503, False)],
+    )
+    async def test_probe_maps_http_status(
+        self, k8s_service, status_code, expected
+    ):
+        """Only successful HTTP responses mark execd as ready."""
+        client = AsyncMock()
+        client.get.return_value = httpx.Response(status_code)
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=client)
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.httpx.AsyncClient",
+            return_value=context_manager,
+        ) as client_class:
+            ready = await k8s_service._is_execd_ready(
+                Endpoint(endpoint="10.244.0.5:44772"),
+                0.25,
+            )
+
+        assert ready is expected
+        client_class.assert_called_once_with(timeout=0.25, trust_env=False)
+        client.get.assert_awaited_once_with("http://10.244.0.5:44772/ping")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "probe_error",
+        [httpx.ConnectError("connection refused"), httpx.ReadTimeout("timed out")],
+    )
+    async def test_probe_treats_transport_errors_as_not_ready(
+        self, k8s_service, probe_error
+    ):
+        """Connection refusal and read timeout remain retryable readiness states."""
+        client = AsyncMock()
+        client.get.side_effect = probe_error
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=client)
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.httpx.AsyncClient",
+            return_value=context_manager,
+        ):
+            ready = await k8s_service._is_execd_ready(
+                Endpoint(endpoint="10.244.0.5:44772"),
+                0.25,
+            )
+
+        assert ready is False
+
 
 class TestKubernetesSandboxServiceRenew:
     def test_renew_expiration_rejects_manual_cleanup_sandbox(self, k8s_service):
