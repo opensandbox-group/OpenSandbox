@@ -168,6 +168,35 @@ class _ClosingBackendWebSocket:
         raise self._close_exception
 
 
+class _DisconnectingClientWebSocket:
+    """Client side that delivers one frame and then an ASGI ``websocket.disconnect``."""
+
+    def __init__(self, disconnect_code: int | None, reason: str = "") -> None:
+        message: dict[str, Any] = {"type": "websocket.disconnect", "reason": reason}
+        if disconnect_code is not None:
+            message["code"] = disconnect_code
+        self._messages: list[dict[str, Any]] = [
+            {"type": "websocket.receive", "text": "client-text"},
+            message,
+        ]
+
+    async def receive(self) -> dict[str, Any]:
+        return self._messages.pop(0)
+
+
+class _RecordingBackendWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[str | bytes] = []
+        self.close_calls: list[tuple[int, str]] = []
+
+    async def send(self, payload: str | bytes) -> None:
+        self.sent.append(payload)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        Close(code, reason).serialize()
+        self.close_calls.append((code, reason))
+
+
 class _RecordingClientWebSocket:
     def __init__(self) -> None:
         self.text_messages: list[str] = []
@@ -247,6 +276,66 @@ def test_client_websocket_close_code_maps_only_transmittable_codes(
     expected_code: int,
 ) -> None:
     assert proxy_api._client_websocket_close_code(backend_code) == expected_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("disconnect_code", "expected_code"),
+    [
+        (1000, 1000),
+        (1001, 1001),
+        (4001, 4001),
+        (None, 1000),
+        (1005, 1000),
+        (1006, 1001),
+    ],
+)
+async def test_relay_client_messages_maps_non_transmittable_disconnect_code(
+    disconnect_code: int | None,
+    expected_code: int,
+) -> None:
+    websocket = _DisconnectingClientWebSocket(disconnect_code)
+    backend = _RecordingBackendWebSocket()
+    cancelled: list[bool] = []
+    cancel_scope = SimpleNamespace(cancel=lambda: cancelled.append(True))
+
+    await asyncio.wait_for(
+        proxy_api._relay_client_messages(
+            cast(Any, websocket),
+            cast(Any, backend),
+            cast(Any, cancel_scope),
+        ),
+        timeout=0.5,
+    )
+
+    assert backend.sent == ["client-text"]
+    assert backend.close_calls == [(expected_code, "")]
+    assert cancelled == [True]
+
+
+@pytest.mark.parametrize(
+    ("client_code", "expected_code"),
+    [
+        (None, 1000),
+        (999, 1001),
+        (1000, 1000),
+        (1004, 1001),
+        (1005, 1000),
+        (1006, 1001),
+        (1011, 1011),
+        (1015, 1001),
+        (2999, 1001),
+        (3000, 3000),
+        (4001, 4001),
+        (4999, 4999),
+        (5000, 1001),
+    ],
+)
+def test_backend_websocket_close_code_maps_only_transmittable_codes(
+    client_code: int | None,
+    expected_code: int,
+) -> None:
+    assert proxy_api._backend_websocket_close_code(client_code) == expected_code
 
 
 def test_proxy_openapi_operation_ids_are_unique(client: TestClient) -> None:

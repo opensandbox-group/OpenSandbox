@@ -31,7 +31,7 @@ from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection
-from websockets.frames import EXTERNAL_CLOSE_CODES
+from websockets.frames import EXTERNAL_CLOSE_CODES, CloseCode
 from websockets.typing import Origin
 
 from opensandbox_server.api import lifecycle
@@ -431,6 +431,24 @@ def _client_websocket_close_code(code: int | None) -> int:
     return status.WS_1011_INTERNAL_ERROR
 
 
+def _backend_websocket_close_code(code: int | None) -> int:
+    """Map non-transmittable disconnect codes to a legal backend close code.
+
+    ASGI reports ``1005`` when the client closed without a status code and
+    ``1006`` when the connection dropped without a Close frame. RFC 6455 7.4.1
+    reserves both for local use, so relaying either to the backend is rejected
+    when the Close frame is serialized.
+    """
+    if code is None:
+        return status.WS_1000_NORMAL_CLOSURE
+    if code in EXTERNAL_CLOSE_CODES or 3000 <= code < 5000:
+        return code
+    if code == CloseCode.NO_STATUS_RCVD:
+        # The client did send a Close frame, it just carried no status code.
+        return status.WS_1000_NORMAL_CLOSURE
+    return status.WS_1001_GOING_AWAY
+
+
 async def _relay_client_messages(
     websocket: WebSocket,
     backend: ClientConnection,
@@ -446,12 +464,15 @@ async def _relay_client_messages(
                     await backend.send(message["bytes"])
             elif message["type"] == "websocket.disconnect":
                 await backend.close(
-                    code=message.get("code", status.WS_1000_NORMAL_CLOSURE),
+                    code=_backend_websocket_close_code(message.get("code")),
                     reason=message.get("reason") or "",
                 )
                 return
     except WebSocketDisconnect as exc:
-        await backend.close(code=exc.code, reason=getattr(exc, "reason", "") or "")
+        await backend.close(
+            code=_backend_websocket_close_code(exc.code),
+            reason=getattr(exc, "reason", "") or "",
+        )
     finally:
         cancel_scope.cancel()
 
