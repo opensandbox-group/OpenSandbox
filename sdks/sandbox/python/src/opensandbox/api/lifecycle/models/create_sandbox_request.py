@@ -53,8 +53,11 @@ class CreateSandboxRequest:
     sandbox entrypoint to `["tail", "-f", "/dev/null"]`.
 
     **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
-    a pre-configured pool. In this case `image`, `entrypoint`, and
-    `resourceLimits` are all optional (defined by the Pool CRD template).
+    a pre-configured on-demand Pool. In this case `image` and `resourceLimits`
+    are optional and defined by the Pool CRD template. `entrypoint` is also
+    optional; when omitted, the server creates a per-allocation task using
+    `['tail', '-f', '/dev/null']`. The Pool must run task-executor and provide
+    bootstrap plus execd.
     `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
     `credentialProxy.enabled` must not be provided together with `poolRef`.
 
@@ -120,6 +123,9 @@ class CreateSandboxRequest:
 
                 Optional when `snapshotId` is provided. If omitted for snapshot
                 restore, the server defaults to `["tail", "-f", "/dev/null"]`.
+
+                Optional when `extensions.poolRef` is provided. If omitted for Pool
+                mode, the server uses the same default in a per-allocation task.
 
                 Explicitly specifies the user's expected main process, allowing the sandbox management
                 service to reliably inject control processes before executing this command.

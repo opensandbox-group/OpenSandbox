@@ -103,13 +103,17 @@ def sync_detailed(
 ) -> Response[CreateSandboxResponse | ErrorResponse]:
     r"""Create a sandbox
 
-     Creates a new sandbox from a container image or restores one from a
-    persistent sandbox snapshot with optional resource limits, environment
-    variables, and metadata.
+     Creates a new sandbox from a container image, restores one from a
+    persistent sandbox snapshot, or allocates one from a pre-configured
+    Pool, with optional resource limits, environment variables, and metadata.
 
-    Exactly one startup source must be provided:
+    Standard mode requires exactly one startup source:
     - `image` to provision directly from a container image.
     - `snapshotId` to restore from a previously created snapshot.
+
+    Pool mode uses `extensions.poolRef` to select the pre-created Pod and
+    schedules a per-allocation task; `image` and `snapshotId` are not
+    required.
 
     When `image` is provided, `entrypoint` is required. When `snapshotId` is
     provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -133,8 +137,11 @@ def sync_detailed(
             sandbox entrypoint to `["tail", "-f", "/dev/null"]`.
 
             **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
-            a pre-configured pool. In this case `image`, `entrypoint`, and
-            `resourceLimits` are all optional (defined by the Pool CRD template).
+            a pre-configured on-demand Pool. In this case `image` and `resourceLimits`
+            are optional and defined by the Pool CRD template. `entrypoint` is also
+            optional; when omitted, the server creates a per-allocation task using
+            `['tail', '-f', '/dev/null']`. The Pool must run task-executor and provide
+            bootstrap plus execd.
             `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
             `credentialProxy.enabled` must not be provided together with `poolRef`.
 
@@ -166,13 +173,17 @@ def sync(
 ) -> CreateSandboxResponse | ErrorResponse | None:
     r"""Create a sandbox
 
-     Creates a new sandbox from a container image or restores one from a
-    persistent sandbox snapshot with optional resource limits, environment
-    variables, and metadata.
+     Creates a new sandbox from a container image, restores one from a
+    persistent sandbox snapshot, or allocates one from a pre-configured
+    Pool, with optional resource limits, environment variables, and metadata.
 
-    Exactly one startup source must be provided:
+    Standard mode requires exactly one startup source:
     - `image` to provision directly from a container image.
     - `snapshotId` to restore from a previously created snapshot.
+
+    Pool mode uses `extensions.poolRef` to select the pre-created Pod and
+    schedules a per-allocation task; `image` and `snapshotId` are not
+    required.
 
     When `image` is provided, `entrypoint` is required. When `snapshotId` is
     provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -196,8 +207,11 @@ def sync(
             sandbox entrypoint to `["tail", "-f", "/dev/null"]`.
 
             **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
-            a pre-configured pool. In this case `image`, `entrypoint`, and
-            `resourceLimits` are all optional (defined by the Pool CRD template).
+            a pre-configured on-demand Pool. In this case `image` and `resourceLimits`
+            are optional and defined by the Pool CRD template. `entrypoint` is also
+            optional; when omitted, the server creates a per-allocation task using
+            `['tail', '-f', '/dev/null']`. The Pool must run task-executor and provide
+            bootstrap plus execd.
             `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
             `credentialProxy.enabled` must not be provided together with `poolRef`.
 
@@ -224,13 +238,17 @@ async def asyncio_detailed(
 ) -> Response[CreateSandboxResponse | ErrorResponse]:
     r"""Create a sandbox
 
-     Creates a new sandbox from a container image or restores one from a
-    persistent sandbox snapshot with optional resource limits, environment
-    variables, and metadata.
+     Creates a new sandbox from a container image, restores one from a
+    persistent sandbox snapshot, or allocates one from a pre-configured
+    Pool, with optional resource limits, environment variables, and metadata.
 
-    Exactly one startup source must be provided:
+    Standard mode requires exactly one startup source:
     - `image` to provision directly from a container image.
     - `snapshotId` to restore from a previously created snapshot.
+
+    Pool mode uses `extensions.poolRef` to select the pre-created Pod and
+    schedules a per-allocation task; `image` and `snapshotId` are not
+    required.
 
     When `image` is provided, `entrypoint` is required. When `snapshotId` is
     provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -254,8 +272,11 @@ async def asyncio_detailed(
             sandbox entrypoint to `["tail", "-f", "/dev/null"]`.
 
             **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
-            a pre-configured pool. In this case `image`, `entrypoint`, and
-            `resourceLimits` are all optional (defined by the Pool CRD template).
+            a pre-configured on-demand Pool. In this case `image` and `resourceLimits`
+            are optional and defined by the Pool CRD template. `entrypoint` is also
+            optional; when omitted, the server creates a per-allocation task using
+            `['tail', '-f', '/dev/null']`. The Pool must run task-executor and provide
+            bootstrap plus execd.
             `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
             `credentialProxy.enabled` must not be provided together with `poolRef`.
 
@@ -285,13 +306,17 @@ async def asyncio(
 ) -> CreateSandboxResponse | ErrorResponse | None:
     r"""Create a sandbox
 
-     Creates a new sandbox from a container image or restores one from a
-    persistent sandbox snapshot with optional resource limits, environment
-    variables, and metadata.
+     Creates a new sandbox from a container image, restores one from a
+    persistent sandbox snapshot, or allocates one from a pre-configured
+    Pool, with optional resource limits, environment variables, and metadata.
 
-    Exactly one startup source must be provided:
+    Standard mode requires exactly one startup source:
     - `image` to provision directly from a container image.
     - `snapshotId` to restore from a previously created snapshot.
+
+    Pool mode uses `extensions.poolRef` to select the pre-created Pod and
+    schedules a per-allocation task; `image` and `snapshotId` are not
+    required.
 
     When `image` is provided, `entrypoint` is required. When `snapshotId` is
     provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -315,8 +340,11 @@ async def asyncio(
             sandbox entrypoint to `["tail", "-f", "/dev/null"]`.
 
             **Pool mode**: When `extensions.poolRef` is set, the sandbox is created from
-            a pre-configured pool. In this case `image`, `entrypoint`, and
-            `resourceLimits` are all optional (defined by the Pool CRD template).
+            a pre-configured on-demand Pool. In this case `image` and `resourceLimits`
+            are optional and defined by the Pool CRD template. `entrypoint` is also
+            optional; when omitted, the server creates a per-allocation task using
+            `['tail', '-f', '/dev/null']`. The Pool must run task-executor and provide
+            bootstrap plus execd.
             `snapshotId`, `networkPolicy`, `platform`, `volumes`, and
             `credentialProxy.enabled` must not be provided together with `poolRef`.
 

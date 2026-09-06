@@ -386,29 +386,17 @@ class BatchSandboxProvider(WorkloadProvider):
         env: Dict[str, str],
         annotations: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """Create a BatchSandbox by referencing an existing pool."""
+        """Create an interactive BatchSandbox task in an existing on-demand Pool."""
         entrypoint = entrypoint or DEFAULT_ENTRYPOINT
         spec: Dict[str, Any] = {
             "replicas": 1,
             "poolRef": pool_ref,
-        }
-        needs_task_template = (
-            env
-            or entrypoint != DEFAULT_ENTRYPOINT
-            or self.execd_run_as_init
-        )
-        if needs_task_template:
-            spec["taskTemplate"] = self._build_task_template(entrypoint, env, batchsandbox_name)
-        else:
-            # Fast path: the pre-created pool pod keeps running its own warm
-            # entrypoint, so no per-allocation env can reach execd. The
-            # authoritative BatchSandbox id cannot be injected here; eBPF
-            # audit attribution reports unsupported for this allocation.
-            logger.info(
-                "pool sandbox %s: default allocation without a task template cannot inject "
-                "OPENSANDBOX_ID; eBPF audit sandbox_id attribution is unsupported on this path",
+            "taskTemplate": self._build_task_template(
+                entrypoint,
+                env,
                 batchsandbox_name,
-            )
+            ),
+        }
         if expires_at is not None:
             spec["expireTime"] = expires_at.isoformat()
         runtime_manifest = {
@@ -533,20 +521,18 @@ class BatchSandboxProvider(WorkloadProvider):
     ) -> Dict[str, Any]:
         """Build pool taskTemplate with shell-escaped bootstrap command.
 
-        With execd_run_as_init enabled, the task is NOT backgrounded: the
-        shim's shell execs bootstrap.sh, which execs `execd --init` (the
+        The task shell always execs bootstrap.sh so task-executor keeps the
+        task alive until bootstrap exits during sandbox cleanup. With
+        execd_run_as_init enabled, bootstrap execs `execd --init` (the
         EXECD_INIT env is injected below), so execd becomes the root of the
-        task process tree. It reaps orphaned task children (subreaper) and
-        propagates the entrypoint exit code back to the shim. Without it,
-        the classic background-and-wait topology is preserved.
+        task process tree. Without it, bootstrap supervises execd and the
+        user process directly.
         """
         escaped_entrypoint = ' '.join(shlex.quote(arg) for arg in entrypoint)
-        if self.execd_run_as_init:
-            # exec: the task-executor shim's TERM trap signals its direct
-            # child, which must be execd (not an intermediate shell).
-            user_process_cmd = f"exec /opt/opensandbox/bootstrap.sh {escaped_entrypoint}"
-        else:
-            user_process_cmd = f"/opt/opensandbox/bootstrap.sh {escaped_entrypoint} &"
+        # Keep bootstrap as task-executor's direct child in both process
+        # topologies, otherwise its shell writes a successful exit marker
+        # before the sandbox has been cleaned up.
+        user_process_cmd = f"exec /opt/opensandbox/bootstrap.sh {escaped_entrypoint}"
 
         wrapped_command = ["/bin/sh", "-c", user_process_cmd]
 

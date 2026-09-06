@@ -1695,26 +1695,17 @@ spec:
         command = task_template["spec"]["process"]["command"]
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
-        # Command should contain bootstrap.sh execution
-        # Example: /opt/opensandbox/bootstrap.sh python app.py &
-        assert "/opt/opensandbox/bootstrap.sh python app.py" in command[2]
-        assert command[2].endswith(" &")
+        # Command keeps bootstrap as the task's foreground process.
+        assert command[2] == "exec /opt/opensandbox/bootstrap.sh python app.py"
         assert task_template["spec"]["process"]["env"] == [
             {"name": "FOO", "value": "bar"},
             {"name": "OPENSANDBOX_ID", "value": "test-id"},
         ]
 
-    def test_create_workload_poolref_default_fast_path_skips_task_template(self, mock_k8s_client, monkeypatch):
-        """
-        The default pool allocation (no env, default entrypoint, no init mode)
-        must skip the task template and keep the warm fast path, while logging
-        that OPENSANDBOX_ID cannot be injected (eBPF audit attribution
-        unsupported on this path).
-        """
-        import opensandbox_server.services.k8s.batchsandbox_provider as provider_module
-
-        mock_logger = MagicMock()
-        monkeypatch.setattr(provider_module, "logger", mock_logger)
+    def test_create_workload_poolref_default_generates_task_template(
+        self, mock_k8s_client
+    ):
+        """Default Pool allocation starts bootstrap with the SDK keepalive."""
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
             "metadata": {"name": "sandbox-test-id", "uid": "test-uid"}
@@ -1737,9 +1728,15 @@ spec:
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
-        assert "taskTemplate" not in body["spec"]
-        log_messages = " ".join(str(call) for call in mock_logger.info.call_args_list)
-        assert "OPENSANDBOX_ID" in log_messages
+        process = body["spec"]["taskTemplate"]["spec"]["process"]
+        assert process["command"] == [
+            "/bin/sh",
+            "-c",
+            "exec /opt/opensandbox/bootstrap.sh tail -f /dev/null",
+        ]
+        assert process["env"] == [
+            {"name": "OPENSANDBOX_ID", "value": "test-id"}
+        ]
 
     def test_build_task_template_with_env(self, mock_k8s_client):
         """
@@ -1747,11 +1744,11 @@ spec:
 
         Verifies:
         - Command uses shell wrapper: /bin/sh -c "..."
-        - Entrypoint executed via bootstrap.sh in background (&)
+        - Entrypoint executed via bootstrap.sh as the foreground task process
         - Env list formatted correctly for K8s
 
         Generated command example:
-        /bin/sh -c "/opt/opensandbox/bootstrap.sh /usr/bin/python app.py &"
+        /bin/sh -c "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
         """
         provider = BatchSandboxProvider(mock_k8s_client)
 
@@ -1767,12 +1764,8 @@ spec:
         command = process_task["command"]
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
-        # Should execute via bootstrap.sh in background (&)
-        assert "/opt/opensandbox/bootstrap.sh" in command[2]
-        assert "/usr/bin/python" in command[2]
-        assert "app.py" in command[2]
-        # Should end with & (run in background)
-        assert command[2].endswith("&")
+        assert command[2] == "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
+        assert not command[2].endswith(" &")
 
         # Verify env list
         assert process_task["env"] == [
@@ -1810,10 +1803,10 @@ spec:
         """
         Test _build_task_template without environment variables.
 
-        Verifies command is wrapped in shell and executes via bootstrap.sh in background.
+        Verifies command is wrapped in shell and keeps bootstrap as its direct child.
 
         Generated command example:
-        /bin/sh -c "/opt/opensandbox/bootstrap.sh /usr/bin/python app.py &"
+        /bin/sh -c "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
         """
         provider = BatchSandboxProvider(mock_k8s_client)
 
@@ -1828,10 +1821,7 @@ spec:
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
         # Check escaped entrypoint
-        assert "/opt/opensandbox/bootstrap.sh" in command[2]
-        assert "/usr/bin/python" in command[2]
-        assert "app.py" in command[2]
-        assert command[2].endswith(" &")
+        assert command[2] == "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
 
     def test_build_task_template_uses_default_env_path(self, mock_k8s_client):
         """
@@ -1848,11 +1838,8 @@ spec:
         )
 
         command = result["spec"]["process"]["command"][2]
-        # Should execute bootstrap.sh in background
-        assert "/opt/opensandbox/bootstrap.sh" in command
-        assert "python" in command
-        assert "app.py" in command
-        assert command.endswith(" &")
+        # Bootstrap remains the foreground task process until cleanup.
+        assert command == "exec /opt/opensandbox/bootstrap.sh python app.py"
 
     def test_build_task_template_escapes_special_characters(self, mock_k8s_client):
         """
@@ -1928,10 +1915,10 @@ spec:
         # Verify no template field (pool-based doesn't use template)
         assert "template" not in body["spec"]
 
-    def test_create_workload_poolref_default_entrypoint_no_env_omits_task_template(
+    def test_create_workload_poolref_default_entrypoint_no_env_includes_task_template(
         self, mock_k8s_client
     ):
-        """When entrypoint is SDK default and env is empty, taskTemplate is omitted."""
+        """Explicit SDK default entrypoint still generates an interactive task."""
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
             "metadata": {"name": "test-id", "uid": "test-uid"}
@@ -1952,7 +1939,15 @@ spec:
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
-        assert "taskTemplate" not in body["spec"]
+        process = body["spec"]["taskTemplate"]["spec"]["process"]
+        assert process["command"] == [
+            "/bin/sh",
+            "-c",
+            "exec /opt/opensandbox/bootstrap.sh tail -f /dev/null",
+        ]
+        assert process["env"] == [
+            {"name": "OPENSANDBOX_ID", "value": "test-id"}
+        ]
 
     def test_create_workload_poolref_default_entrypoint_with_env_includes_task_template(
         self, mock_k8s_client
@@ -1985,12 +1980,10 @@ spec:
             {"name": "OPENSANDBOX_ID", "value": "test-id"},
         ]
 
-    def test_create_workload_poolref_none_entrypoint_no_env_omits_task_template(self, mock_k8s_client):
-        """When entrypoint is None and env is empty, taskTemplate is omitted.
-
-        SDK pool mode callers omit entrypoint entirely (None), expecting the pool's
-        default command to run. This must not raise a TypeError.
-        """
+    def test_create_workload_poolref_none_entrypoint_no_env_uses_default_task(
+        self, mock_k8s_client
+    ):
+        """Omitted Pool entrypoint uses the SDK keepalive in a generated task."""
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
             "metadata": {"name": "test-id", "uid": "test-uid"}
@@ -2011,7 +2004,15 @@ spec:
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
-        assert "taskTemplate" not in body["spec"]
+        process = body["spec"]["taskTemplate"]["spec"]["process"]
+        assert process["command"] == [
+            "/bin/sh",
+            "-c",
+            "exec /opt/opensandbox/bootstrap.sh tail -f /dev/null",
+        ]
+        assert process["env"] == [
+            {"name": "OPENSANDBOX_ID", "value": "test-id"}
+        ]
 
 
 class TestBatchSandboxProviderEgress:
