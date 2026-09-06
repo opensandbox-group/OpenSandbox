@@ -575,6 +575,49 @@ class TestK8sClient:
         with pytest.raises(Exception, match="network error"):
             c.list_pods("ns")
 
+    def test_get_pod_proxy_status_forwards_port_headers_and_timeout(
+        self, k8s_runtime_config
+    ):
+        """Pod proxy requests use the API server and preserve execd auth headers."""
+        c = self._make_client(k8s_runtime_config)
+        c._core_v1_api.api_client.call_api.return_value = ("", 204, {})
+
+        result = c.get_pod_proxy_status(
+            namespace="ns",
+            pod_name="sandbox-pod",
+            port=44772,
+            path="/ping",
+            headers={"X-EXECD-ACCESS-TOKEN": "probe-token"},
+            timeout_seconds=0.25,
+        )
+
+        assert result == 204
+        c._core_v1_api.api_client.call_api.assert_called_once_with(
+            "/api/v1/namespaces/{namespace}/pods/{name}:{port}/proxy/{path}",
+            "GET",
+            path_params={
+                "namespace": "ns",
+                "name": "sandbox-pod",
+                "port": "44772",
+                "path": "ping",
+            },
+            query_params=[],
+            header_params={
+                "Accept": "*/*",
+                "X-EXECD-ACCESS-TOKEN": "probe-token",
+            },
+            body=None,
+            post_params=[],
+            files={},
+            response_type="str",
+            auth_settings=["BearerToken"],
+            async_req=False,
+            _return_http_data_only=False,
+            _preload_content=True,
+            _request_timeout=0.25,
+            collection_formats={},
+        )
+
     def test_read_runtime_class_delegates_to_api(self, k8s_runtime_config):
         """read_runtime_class forwards to NodeV1Api.read_runtime_class."""
         c = self._make_client(k8s_runtime_config)

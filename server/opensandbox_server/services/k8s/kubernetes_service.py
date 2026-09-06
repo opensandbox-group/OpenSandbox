@@ -20,13 +20,14 @@ using Kubernetes resources for sandbox lifecycle management.
 """
 
 import asyncio
+import json
 import logging
 import math
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
-import httpx
 from fastapi import HTTPException, status
 
 from opensandbox_server.extensions import (
@@ -106,6 +107,16 @@ logger = logging.getLogger(__name__)
 
 EXECD_PORT = 44772
 EXECD_PROBE_TIMEOUT_SECONDS = 1.0
+EXECD_ACCESS_TOKEN_ENV = "EXECD_ACCESS_TOKEN"
+EXECD_ACCESS_TOKEN_HEADER = "X-EXECD-ACCESS-TOKEN"
+POOL_ALLOCATION_STATUS_ANNOTATION = "sandbox.opensandbox.io/alloc-status"
+POOL_ALLOCATION_FINALIZER = "pool.sandbox.opensandbox.io/pool-allocation"
+POOL_RELEASE_ANNOTATION_KEYS = (
+    "sandbox.opensandbox.io/alloc-release",
+    "sandbox.opensandbox.io/alloc-released",
+)
+POOL_NAME_LABEL = "sandbox.opensandbox.io/pool-name"
+POD_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?$")
 
 
 def _is_namespace_not_found(exc: Exception) -> bool:
@@ -118,6 +129,88 @@ def _is_namespace_not_found(exc: Exception) -> bool:
         return exc.status == 404 and "namespace" in str(exc).lower()
     except Exception:
         return False
+
+
+def _get_confirmed_pool_allocation(workload: Any) -> Optional[tuple[str, str]]:
+    """Return the allocated Pod and Pool only when controller evidence is current.
+
+    The returned Pod is still checked against the Pool label before an execd
+    credential is forwarded. This keeps a malformed or stale allocation
+    annotation from selecting an unrelated Pod in the namespace.
+    """
+    if not isinstance(workload, dict):
+        return None
+
+    metadata = workload.get("metadata")
+    spec = workload.get("spec")
+    workload_status = workload.get("status")
+    if not all(isinstance(value, dict) for value in (metadata, spec, workload_status)):
+        return None
+    if metadata.get("deletionTimestamp"):
+        return None
+    if POOL_ALLOCATION_FINALIZER not in metadata.get("finalizers", []):
+        return None
+
+    pool_ref = spec.get("poolRef")
+    if not isinstance(pool_ref, str) or not pool_ref.strip() or pool_ref == "*":
+        return None
+    annotations = metadata.get("annotations")
+    if not isinstance(annotations, dict):
+        return None
+    raw_status = annotations.get(POOL_ALLOCATION_STATUS_ANNOTATION)
+    if not isinstance(raw_status, str):
+        return None
+    try:
+        allocation_status = json.loads(raw_status)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(allocation_status, dict) or allocation_status.get("poolRef") != pool_ref:
+        return None
+
+    pods = allocation_status.get("pods")
+    if (
+        not isinstance(pods, list)
+        or not pods
+        or any(not isinstance(pod, str) or not POD_NAME_PATTERN.fullmatch(pod) for pod in pods)
+        or len(set(pods)) != len(pods)
+    ):
+        return None
+    allocated = workload_status.get("allocated")
+    if (
+        not isinstance(allocated, int)
+        or isinstance(allocated, bool)
+        or allocated != len(pods)
+    ):
+        return None
+
+    # 1、Reject allocations that the controller has already begun releasing.
+    allocation_pod_names = set(pods)
+    for annotation_key in POOL_RELEASE_ANNOTATION_KEYS:
+        if annotation_key not in annotations:
+            continue
+        raw_release = annotations[annotation_key]
+        if not isinstance(raw_release, str):
+            return None
+        try:
+            release_status = json.loads(raw_release)
+        except (TypeError, ValueError):
+            return None
+        released_pods = (
+            release_status.get("pods") if isinstance(release_status, dict) else None
+        )
+        if (
+            not isinstance(released_pods, list)
+            or any(
+                not isinstance(pod, str) or not POD_NAME_PATTERN.fullmatch(pod)
+                for pod in released_pods
+            )
+            or len(set(released_pods)) != len(released_pods)
+            or allocation_pod_names.intersection(released_pods)
+        ):
+            return None
+
+    # 2、A lifecycle sandbox has one replica, so readiness uses its only Pod.
+    return pods[0], pool_ref
 
 
 class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionService):
@@ -244,6 +337,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         poll_interval_seconds: float = 1.0,
         pool_acquisition_timeout_seconds: float | None = None,
         require_execd_ready: bool = False,
+        execd_access_token: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Wait for Pod to be Running and have an IP address.
@@ -256,6 +350,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 while the controller reports exhausted Pool capacity
             require_execd_ready: Whether execd must answer its health endpoint
                 before the workload is returned
+            execd_access_token: Optional token required by the task's execd
+                health endpoint; never logged or included in error responses
             
         Returns:
             Workload dict when Pod is Running with IP
@@ -315,15 +411,13 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         return workload
 
                     waiting_for_execd = True
-                    endpoint = self.workload_provider.get_internal_endpoint(
-                        workload,
-                        EXECD_PORT,
-                        sandbox_id,
-                    )
                     remaining_seconds = timeout_seconds - (time.time() - start_time)
-                    if endpoint and remaining_seconds > 0 and await self._is_execd_ready(
-                        endpoint,
+                    if remaining_seconds > 0 and await self._is_execd_ready(
+                        workload,
+                        sandbox_id,
+                        self._resolve_namespace(),
                         min(EXECD_PROBE_TIMEOUT_SECONDS, remaining_seconds),
+                        execd_access_token,
                     ):
                         return workload
                 if _is_unschedulable_status(status_info):
@@ -380,10 +474,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         elapsed = end_time - start_time
         if pool_capacity_started_at is not None:
             pool_capacity_blocked_seconds += end_time - pool_capacity_started_at
-        if pool_capacity_started_at is not None or (
-            pool_capacity_blocked_seconds
-            >= effective_pool_acquisition_timeout_seconds
-        ):
+        if pool_capacity_blocked_seconds >= effective_pool_acquisition_timeout_seconds:
             raise self._pool_capacity_exhausted_error(
                 pool_acquisition_timeout_seconds
             )
@@ -411,18 +502,55 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
     async def _is_execd_ready(
         self,
-        endpoint: Endpoint,
+        workload: Any,
+        sandbox_id: str,
+        namespace: str,
         timeout_seconds: float,
+        access_token: Optional[str] = None,
     ) -> bool:
-        """Return whether the internal execd health endpoint responds successfully."""
+        """Return whether execd responds through a Kubernetes API-server Pod proxy.
+
+        The probe intentionally uses the API server rather than a Pod IP so a
+        lifecycle Server configured with an external kubeconfig does not need
+        Pod-CIDR routing. A request-provided execd token is forwarded only to
+        this request and is never logged.
+        """
         try:
-            async with httpx.AsyncClient(
-                timeout=timeout_seconds,
-                trust_env=False,
-            ) as client:
-                response = await client.get(f"http://{endpoint.endpoint}/ping")
-            return response.is_success
-        except httpx.HTTPError:
+            # 1、Require current controller evidence before handling a token.
+            allocation = _get_confirmed_pool_allocation(workload)
+            if not allocation:
+                return False
+            pod_name, pool_ref = allocation
+
+            pool_pods = await asyncio.to_thread(
+                self.k8s_client.list_pods,
+                namespace,
+                f"{POOL_NAME_LABEL}={pool_ref}",
+            )
+            if not any(
+                getattr(getattr(pod, "metadata", None), "name", None) == pod_name
+                for pod in pool_pods
+            ):
+                return False
+
+            # 2、Probe the verified Pod through the API server with the shared deadline.
+            headers = (
+                {EXECD_ACCESS_TOKEN_HEADER: access_token}
+                if access_token
+                else None
+            )
+            status_code = await asyncio.to_thread(
+                self.k8s_client.get_pod_proxy_status,
+                namespace,
+                pod_name,
+                EXECD_PORT,
+                "ping",
+                headers,
+                timeout_seconds,
+            )
+            return 200 <= status_code < 300
+        except Exception:
+            logger.debug("execd readiness probe failed for sandbox %s", sandbox_id, exc_info=True)
             return False
 
     @staticmethod
@@ -1060,6 +1188,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     poll_interval_seconds=kubernetes_config.sandbox_create_poll_interval_seconds,
                     pool_acquisition_timeout_seconds=kubernetes_config.pool_acquisition_timeout_seconds,
                     require_execd_ready=has_pool_ref,
+                    execd_access_token=context.sandbox_env.get(EXECD_ACCESS_TOKEN_ENV),
                 )
                 
                 status_info = self.workload_provider.get_status(workload)

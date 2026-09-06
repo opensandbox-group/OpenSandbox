@@ -413,6 +413,11 @@ healthy within `kubernetes.sandbox_create_timeout_seconds`, the server returns
 HTTP `504` with error code `KUBERNETES::EXECD_READY_TIMEOUT` and deletes the
 BatchSandbox to release the Pool allocation.
 
+The readiness probe goes through the Kubernetes API server's Pod proxy, so the
+lifecycle Server does not need direct routing to the Pod CIDR. Its ServiceAccount
+requires `get` permission on `pods/proxy`; the OpenSandbox Server Helm chart
+grants this permission.
+
 A Pool used through the lifecycle API must run task-executor on port `5758`,
 provide executable `/opt/opensandbox/bootstrap.sh` and
 `/opt/opensandbox/execd` files (or set `EXECD` to another installed execd

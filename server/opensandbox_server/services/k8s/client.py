@@ -420,6 +420,54 @@ class K8sClient:
         )
         return resp.items
 
+    def get_pod_proxy_status(
+        self,
+        namespace: str,
+        pod_name: str,
+        port: int,
+        path: str,
+        headers: Optional[Dict[str, str]] = None,
+        timeout_seconds: float = 1.0,
+    ) -> int:
+        """Request a Pod HTTP path through the Kubernetes API proxy.
+
+        The API server is reachable wherever a kubeconfig is usable, so this
+        avoids requiring the lifecycle Server to have a direct route to Pod
+        CIDRs. Callers own response classification and must avoid logging any
+        credential values supplied in ``headers``.
+        """
+        if self._read_limiter:
+            self._read_limiter.acquire()
+
+        # 1、Build the API-server proxy path with the target container port.
+        normalized_path = path.lstrip("/")
+        api_client = self.get_core_v1_api().api_client
+        response = api_client.call_api(
+            "/api/v1/namespaces/{namespace}/pods/{name}:{port}/proxy/{path}",
+            "GET",
+            path_params={
+                "namespace": namespace,
+                "name": pod_name,
+                "port": str(port),
+                "path": normalized_path,
+            },
+            query_params=[],
+            header_params={"Accept": "*/*", **(headers or {})},
+            body=None,
+            post_params=[],
+            files={},
+            response_type="str",
+            auth_settings=["BearerToken"],
+            async_req=False,
+            _return_http_data_only=False,
+            _preload_content=True,
+            _request_timeout=timeout_seconds,
+            collection_formats={},
+        )
+
+        # 2、Return only the status code; response data can contain user data.
+        return int(response[1])
+
     def read_runtime_class(self, name: str) -> Any:
         """Read a RuntimeClass from the cluster."""
         if self._read_limiter:
