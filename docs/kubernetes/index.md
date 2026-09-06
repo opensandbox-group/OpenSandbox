@@ -399,29 +399,27 @@ spec:
   poolRef: example-pool
 ```
 
-::: warning `Ready` does not guarantee SDK exec support
+::: warning Lifecycle Pool requests start an execd task
 The example above allocates warm `nginx` pods and is useful when the container's
-own service is the workload. With the default server setting
-`runtime.execd_run_as_init = false`, a lifecycle API request containing only
-`extensions.poolRef` does not create a `taskTemplate`. In that case, `Running` /
-`Ready` means that the pooled Pod passed its Kubernetes readiness checks; it
-does **not** mean that the OpenSandbox exec service is listening on port `44772`.
+own service is the workload. A BatchSandbox created directly without a
+`taskTemplate` keeps this allocation-only behavior.
 
-When `runtime.execd_run_as_init = true`, the server creates a `taskTemplate`
-even for a pool-only request. That Pool must already run task-executor and
+The lifecycle API creates sandboxes intended for interactive SDK use, so every
+Pool request creates a per-allocation `taskTemplate`. If the request omits an
+entrypoint, the task uses the default `tail -f /dev/null` keepalive.
+
+A Pool used through the lifecycle API must run task-executor on port `5758`,
 provide executable `/opt/opensandbox/bootstrap.sh` and
 `/opt/opensandbox/execd` files (or set `EXECD` to another installed execd
-binary), just like the custom entrypoint and environment path described below.
-The plain `nginx` Pool in this example does not meet that task-execution
-contract.
+binary), and include `/bin/sh` plus `tail` for the default keepalive. It must not
+start another execd on port `44772` before allocation. The plain `nginx` Pool in
+this example and Pools that prestart execd without task-executor do not satisfy
+this on-demand task contract.
 
-For an interactive SDK sandbox, either make the Pool template start execd as
-part of its normal container command, or send a non-default `entrypoint` or a
-non-empty environment in the lifecycle request and configure the Pool with
-task-executor plus executable `/opt/opensandbox/bootstrap.sh` and
-`/opt/opensandbox/execd` files (or an `EXECD` override) as described below. A
-plain service image such as `nginx` cannot serve interactive SDK calls without
-one of those setups.
+`runtime.execd_run_as_init` controls only the task process topology. When it is
+`false`, bootstrap starts in the background; when it is `true`, the task runs
+bootstrap as its root process and injects `EXECD_INIT=1`. Both modes generate a
+task.
 :::
 
 ::: info Pool capacity back-pressure
@@ -444,7 +442,7 @@ Pool pods are created before allocation. The lifecycle API therefore rejects `ne
 ::: tip Entrypoint and environment injection
 Pool pods are also created before a lifecycle request supplies its `entrypoint` or environment variables. The server does not rewrite the allocated Pod's `command`, `args`, or `env`; seeing the original Pool template in the Pod YAML is expected. Instead, it writes the request-specific process to `BatchSandbox.spec.taskTemplate`, and the controller sends that task to an in-pod task-executor on port `5758`.
 
-A Pool used through the lifecycle API with a custom entrypoint or environment must therefore run task-executor, provide an executable `/opt/opensandbox/bootstrap.sh`, and install execd at `/opt/opensandbox/execd` or set `EXECD` to another installed execd binary. See the [Code Interpreter Pool example](/examples/code-interpreter#how-pool-entrypoint-injection-works) for a complete template and troubleshooting commands.
+A Pool used through the lifecycle API must therefore run task-executor, provide an executable `/opt/opensandbox/bootstrap.sh`, and install execd at `/opt/opensandbox/execd` or set `EXECD` to another installed execd binary. When no entrypoint is supplied, the server places its default keepalive in the task rather than inheriting the Pool container command. See the [Code Interpreter Pool example](/examples/code-interpreter#how-pool-entrypoint-injection-works) for a complete template and troubleshooting commands.
 :::
 
 ::: tip Shared storage in Pool mode
