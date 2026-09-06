@@ -416,10 +416,9 @@ start another execd on port `44772` before allocation. The plain `nginx` Pool in
 this example and Pools that prestart execd without task-executor do not satisfy
 this on-demand task contract.
 
-`runtime.execd_run_as_init` controls only the task process topology. When it is
-`false`, bootstrap starts in the background; when it is `true`, the task runs
-bootstrap as its root process and injects `EXECD_INIT=1`. Both modes generate a
-task.
+`runtime.execd_run_as_init` controls only the task process topology. In both
+modes the task runs bootstrap as its root process so it remains alive until
+sandbox cleanup. When it is `true`, it additionally injects `EXECD_INIT=1`.
 :::
 
 ::: info Pool capacity back-pressure

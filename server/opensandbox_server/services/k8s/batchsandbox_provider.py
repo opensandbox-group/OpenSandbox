@@ -521,20 +521,18 @@ class BatchSandboxProvider(WorkloadProvider):
     ) -> Dict[str, Any]:
         """Build pool taskTemplate with shell-escaped bootstrap command.
 
-        With execd_run_as_init enabled, the task is NOT backgrounded: the
-        shim's shell execs bootstrap.sh, which execs `execd --init` (the
+        The task shell always execs bootstrap.sh so task-executor keeps the
+        task alive until bootstrap exits during sandbox cleanup. With
+        execd_run_as_init enabled, bootstrap execs `execd --init` (the
         EXECD_INIT env is injected below), so execd becomes the root of the
-        task process tree. It reaps orphaned task children (subreaper) and
-        propagates the entrypoint exit code back to the shim. Without it,
-        the classic background-and-wait topology is preserved.
+        task process tree. Without it, bootstrap supervises execd and the
+        user process directly.
         """
         escaped_entrypoint = ' '.join(shlex.quote(arg) for arg in entrypoint)
-        if self.execd_run_as_init:
-            # exec: the task-executor shim's TERM trap signals its direct
-            # child, which must be execd (not an intermediate shell).
-            user_process_cmd = f"exec /opt/opensandbox/bootstrap.sh {escaped_entrypoint}"
-        else:
-            user_process_cmd = f"/opt/opensandbox/bootstrap.sh {escaped_entrypoint} &"
+        # Keep bootstrap as task-executor's direct child in both process
+        # topologies, otherwise its shell writes a successful exit marker
+        # before the sandbox has been cleaned up.
+        user_process_cmd = f"exec /opt/opensandbox/bootstrap.sh {escaped_entrypoint}"
 
         wrapped_command = ["/bin/sh", "-c", user_process_cmd]
 

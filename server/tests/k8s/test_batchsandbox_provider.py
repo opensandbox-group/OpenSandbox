@@ -1695,10 +1695,8 @@ spec:
         command = task_template["spec"]["process"]["command"]
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
-        # Command should contain bootstrap.sh execution
-        # Example: /opt/opensandbox/bootstrap.sh python app.py &
-        assert "/opt/opensandbox/bootstrap.sh python app.py" in command[2]
-        assert command[2].endswith(" &")
+        # Command keeps bootstrap as the task's foreground process.
+        assert command[2] == "exec /opt/opensandbox/bootstrap.sh python app.py"
         assert task_template["spec"]["process"]["env"] == [
             {"name": "FOO", "value": "bar"},
             {"name": "OPENSANDBOX_ID", "value": "test-id"},
@@ -1734,7 +1732,7 @@ spec:
         assert process["command"] == [
             "/bin/sh",
             "-c",
-            "/opt/opensandbox/bootstrap.sh tail -f /dev/null &",
+            "exec /opt/opensandbox/bootstrap.sh tail -f /dev/null",
         ]
         assert process["env"] == [
             {"name": "OPENSANDBOX_ID", "value": "test-id"}
@@ -1746,11 +1744,11 @@ spec:
 
         Verifies:
         - Command uses shell wrapper: /bin/sh -c "..."
-        - Entrypoint executed via bootstrap.sh in background (&)
+        - Entrypoint executed via bootstrap.sh as the foreground task process
         - Env list formatted correctly for K8s
 
         Generated command example:
-        /bin/sh -c "/opt/opensandbox/bootstrap.sh /usr/bin/python app.py &"
+        /bin/sh -c "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
         """
         provider = BatchSandboxProvider(mock_k8s_client)
 
@@ -1766,12 +1764,8 @@ spec:
         command = process_task["command"]
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
-        # Should execute via bootstrap.sh in background (&)
-        assert "/opt/opensandbox/bootstrap.sh" in command[2]
-        assert "/usr/bin/python" in command[2]
-        assert "app.py" in command[2]
-        # Should end with & (run in background)
-        assert command[2].endswith("&")
+        assert command[2] == "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
+        assert not command[2].endswith(" &")
 
         # Verify env list
         assert process_task["env"] == [
@@ -1809,10 +1803,10 @@ spec:
         """
         Test _build_task_template without environment variables.
 
-        Verifies command is wrapped in shell and executes via bootstrap.sh in background.
+        Verifies command is wrapped in shell and keeps bootstrap as its direct child.
 
         Generated command example:
-        /bin/sh -c "/opt/opensandbox/bootstrap.sh /usr/bin/python app.py &"
+        /bin/sh -c "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
         """
         provider = BatchSandboxProvider(mock_k8s_client)
 
@@ -1827,10 +1821,7 @@ spec:
         assert command[0] == "/bin/sh"
         assert command[1] == "-c"
         # Check escaped entrypoint
-        assert "/opt/opensandbox/bootstrap.sh" in command[2]
-        assert "/usr/bin/python" in command[2]
-        assert "app.py" in command[2]
-        assert command[2].endswith(" &")
+        assert command[2] == "exec /opt/opensandbox/bootstrap.sh /usr/bin/python app.py"
 
     def test_build_task_template_uses_default_env_path(self, mock_k8s_client):
         """
@@ -1847,11 +1838,8 @@ spec:
         )
 
         command = result["spec"]["process"]["command"][2]
-        # Should execute bootstrap.sh in background
-        assert "/opt/opensandbox/bootstrap.sh" in command
-        assert "python" in command
-        assert "app.py" in command
-        assert command.endswith(" &")
+        # Bootstrap remains the foreground task process until cleanup.
+        assert command == "exec /opt/opensandbox/bootstrap.sh python app.py"
 
     def test_build_task_template_escapes_special_characters(self, mock_k8s_client):
         """
@@ -1955,7 +1943,7 @@ spec:
         assert process["command"] == [
             "/bin/sh",
             "-c",
-            "/opt/opensandbox/bootstrap.sh tail -f /dev/null &",
+            "exec /opt/opensandbox/bootstrap.sh tail -f /dev/null",
         ]
         assert process["env"] == [
             {"name": "OPENSANDBOX_ID", "value": "test-id"}
@@ -2020,7 +2008,7 @@ spec:
         assert process["command"] == [
             "/bin/sh",
             "-c",
-            "/opt/opensandbox/bootstrap.sh tail -f /dev/null &",
+            "exec /opt/opensandbox/bootstrap.sh tail -f /dev/null",
         ]
         assert process["env"] == [
             {"name": "OPENSANDBOX_ID", "value": "test-id"}
