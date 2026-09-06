@@ -164,7 +164,12 @@ def _get_confirmed_pool_allocation(workload: Any) -> Optional[tuple[str, str]]:
         allocation_status = json.loads(raw_status)
     except (TypeError, ValueError):
         return None
-    if not isinstance(allocation_status, dict) or allocation_status.get("poolRef") != pool_ref:
+    if not isinstance(allocation_status, dict):
+        return None
+    if (
+        "poolRef" in allocation_status
+        and allocation_status["poolRef"] != pool_ref
+    ):
         return None
 
     pods = allocation_status.get("pods")

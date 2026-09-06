@@ -52,15 +52,23 @@ def _configure_execd_ready(k8s_service) -> None:
     k8s_service._is_execd_ready = AsyncMock(return_value=True)
 
 
-def _confirmed_pool_workload() -> dict:
-    """Build a BatchSandbox mapping with current single-Pod allocation evidence."""
+def _confirmed_pool_workload(legacy_annotation: bool = False) -> dict:
+    """Build a BatchSandbox mapping with current single-Pod allocation evidence.
+
+    Args:
+        legacy_annotation: Whether to omit the additive ``poolRef`` field from
+            the supported legacy allocation annotation shape.
+    """
+    allocation_status = (
+        '{"pods":["allocated-pod"]}'
+        if legacy_annotation
+        else '{"pods":["allocated-pod"],"poolRef":"test-pool"}'
+    )
     return {
         "metadata": {
             "finalizers": ["pool.sandbox.opensandbox.io/pool-allocation"],
             "annotations": {
-                "sandbox.opensandbox.io/alloc-status": (
-                    '{"pods":["allocated-pod"],"poolRef":"test-pool"}'
-                )
+                "sandbox.opensandbox.io/alloc-status": allocation_status
             },
         },
         "spec": {"poolRef": "test-pool"},
@@ -1548,6 +1556,33 @@ class TestExecdReadyProbe:
         )
         k8s_service.k8s_client.list_pods.assert_called_once_with(
             "test-ns", "sandbox.opensandbox.io/pool-name=test-pool"
+        )
+
+    @pytest.mark.asyncio
+    async def test_probe_accepts_legacy_allocation_before_forwarding_token(
+        self, k8s_service
+    ):
+        """A legacy pods-only allocation remains valid after a Server upgrade."""
+        pod = SimpleNamespace(metadata=SimpleNamespace(name="allocated-pod"))
+        k8s_service.k8s_client.list_pods.return_value = [pod]
+        k8s_service.k8s_client.get_pod_proxy_status.return_value = 200
+
+        ready = await k8s_service._is_execd_ready(
+            _confirmed_pool_workload(legacy_annotation=True),
+            "test-sandbox-id",
+            "test-ns",
+            0.25,
+            "probe-token",
+        )
+
+        assert ready is True
+        k8s_service.k8s_client.get_pod_proxy_status.assert_called_once_with(
+            "test-ns",
+            "allocated-pod",
+            44772,
+            "ping",
+            {"X-EXECD-ACCESS-TOKEN": "probe-token"},
+            0.25,
         )
 
     @pytest.mark.asyncio
