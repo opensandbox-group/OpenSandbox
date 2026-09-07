@@ -290,5 +290,8 @@ func (t *commandOutputTail) read(path string, onExecute func(string), flushIncom
 	// Reuse storage within a poll, but release completed long lines between polls.
 	if t.pending.Len() == 0 {
 		t.pending = bytes.Buffer{}
+	} else if t.pending.Cap() > 4096 && t.pending.Len() < t.pending.Cap()/2 {
+		// Keep a short trailing fragment without retaining a completed long line's storage.
+		t.pending = *bytes.NewBuffer(bytes.Clone(t.pending.Bytes()))
 	}
 }

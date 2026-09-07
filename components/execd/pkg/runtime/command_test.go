@@ -209,6 +209,32 @@ func TestCommandOutputTail_RetainsGrowingLine(t *testing.T) {
 	require.Len(t, got, 2)
 }
 
+func TestCommandOutputTail_ReleasesCompletedLineCapacity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stdout.log")
+	longLine := strings.Repeat("x", 1<<20)
+	require.NoError(t, os.WriteFile(path, []byte(longLine+"\nprompt"), 0o600))
+
+	var tail commandOutputTail
+	var got []string
+	emit := func(s string) { got = append(got, s) }
+	tail.read(path, emit, false)
+	require.Equal(t, []string{longLine}, got)
+	require.Equal(t, "prompt", tail.pending.String())
+	require.LessOrEqual(t, tail.pending.Cap(), 4096, "a short fragment must not retain the completed line's storage")
+
+	tail.read(path, emit, false)
+	require.Len(t, got, 1)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = file.WriteString(" continued\n")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	tail.read(path, emit, true)
+	require.Equal(t, []string{longLine, "prompt continued"}, got)
+	require.Equal(t, int64(len(longLine+"\nprompt continued\n")), tail.offset)
+	require.Zero(t, tail.pending.Cap())
+}
+
 func TestRunCommand_Echo(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("bash not available on windows")
