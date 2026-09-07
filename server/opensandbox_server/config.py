@@ -627,6 +627,24 @@ class KubernetesRuntimeConfig(BaseModel):
             "Can be overridden per-sandbox via image.pull_policy in create request."
         ),
     )
+    sandbox_cpu_request_fraction: float = Field(
+        default=0.25,
+        gt=0,
+        le=1,
+        description=(
+            "Fraction of the CPU limit used as the sandbox CPU request "
+            "(e.g. 0.25 = request is 1/4 of the limit)."
+        ),
+    )
+    sandbox_memory_request_fraction: float = Field(
+        default=0.25,
+        gt=0,
+        le=1,
+        description=(
+            "Fraction of the memory limit used as the sandbox memory request "
+            "(e.g. 0.25 = request is 1/4 of the limit)."
+        ),
+    )
 
 
 class ExecdInitResources(BaseModel):

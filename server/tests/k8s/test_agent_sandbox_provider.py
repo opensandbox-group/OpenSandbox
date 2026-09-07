@@ -40,6 +40,8 @@ def _app_config(
     service_account: str | None = None,
     execd_init_resources: ExecdInitResources | None = None,
     egress: EgressConfig | None = None,
+    cpu_request_fraction: float = 0.25,
+    memory_request_fraction: float = 0.25,
 ) -> AppConfig:
     """Build an AppConfig for AgentSandboxProvider tests."""
     return AppConfig(
@@ -49,6 +51,8 @@ def _app_config(
             service_account=service_account,
             workload_provider="agent-sandbox",
             execd_init_resources=execd_init_resources,
+            sandbox_cpu_request_fraction=cpu_request_fraction,
+            sandbox_memory_request_fraction=memory_request_fraction,
         ),
         agent_sandbox=AgentSandboxRuntimeConfig(shutdown_policy=shutdown_policy),
         egress=egress,
@@ -150,6 +154,32 @@ class TestAgentSandboxProvider:
         assert resources["requests"]["nvidia.com/gpu"] == "2"
         assert "gpu" not in resources["limits"]
         assert "gpu" not in resources["requests"]
+
+    def test_create_workload_uses_configured_request_fractions(self, mock_k8s_client):
+        provider = AgentSandboxProvider(
+            mock_k8s_client, _app_config(cpu_request_fraction=0.5, memory_request_fraction=0.75)
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        resources = body["spec"]["podTemplate"]["spec"]["containers"][0]["resources"]
+
+        assert resources["limits"] == {"cpu": "1", "memory": "1Gi"}
+        assert resources["requests"] == {"cpu": "0.5", "memory": "768Mi"}
 
     def test_create_workload_without_gpu_omits_nvidia_extended_resource(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client, _app_config())

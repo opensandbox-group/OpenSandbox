@@ -64,6 +64,11 @@ workload_provider = "batchsandbox"
 # Values: "Always", "IfNotPresent", "Never".
 image_pull_policy = "IfNotPresent"
 
+# Sandbox resource request = limit * fraction, configurable separately for CPU and memory.
+# Must be in (0, 1]. Defaults to 0.25.
+# sandbox_cpu_request_fraction = 0.25
+# sandbox_memory_request_fraction = 0.25
+
 # Public snapshot wait timeout. Keep this greater than the Kubernetes
 # controller snapshot commit-job-timeout.
 snapshot_create_timeout_seconds = 900

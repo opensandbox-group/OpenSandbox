@@ -157,6 +157,8 @@ def _build_main_container(
     *,
     has_network_policy: bool = False,
     image_pull_policy: Optional[str] = None,
+    cpu_request_fraction: float = 0.25,
+    memory_request_fraction: float = 0.25,
 ) -> V1Container:
     env_vars = [V1EnvVar(name=k, value=v) for k, v in env.items()]
     env_vars.append(V1EnvVar(name="EXECD", value="/opt/opensandbox/bin/execd"))
@@ -164,7 +166,21 @@ def _build_main_container(
     translated_limits = _translate_resource_limits_for_k8s(resource_limits)
     resources = None
     if translated_limits:
-        requests = calculate_resource_requests(translated_limits, fraction=0.25)
+        cpu_requests = calculate_resource_requests(
+            {"cpu": translated_limits["cpu"]}, fraction=cpu_request_fraction
+        ) if "cpu" in translated_limits else {}
+        memory_requests = calculate_resource_requests(
+            {"memory": translated_limits["memory"]}, fraction=memory_request_fraction
+        ) if "memory" in translated_limits else {}
+        requests = {
+            **cpu_requests,
+            **memory_requests,
+            **{
+                resource: value
+                for resource, value in translated_limits.items()
+                if resource not in ("cpu", "memory")
+            },
+        }
         resources = V1ResourceRequirements(
             limits=translated_limits,
             requests=requests,

@@ -78,6 +78,12 @@ class BatchSandboxProvider(WorkloadProvider):
             logger.info(f"Using BatchSandbox template file: {template_file_path}")
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
         self.image_pull_policy = k8s_config.image_pull_policy if k8s_config else "IfNotPresent"
+        self.cpu_request_fraction = (
+            k8s_config.sandbox_cpu_request_fraction if k8s_config else 0.25
+        )
+        self.memory_request_fraction = (
+            k8s_config.sandbox_memory_request_fraction if k8s_config else 0.25
+        )
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
@@ -172,6 +178,8 @@ class BatchSandboxProvider(WorkloadProvider):
             resource_limits=resource_limits,
             has_network_policy=network_policy is not None,
             image_pull_policy=self.image_pull_policy,
+            cpu_request_fraction=self.cpu_request_fraction,
+            memory_request_fraction=self.memory_request_fraction,
         )
         
         containers = [_container_to_dict(main_container)]

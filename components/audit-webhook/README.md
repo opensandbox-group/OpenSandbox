@@ -190,8 +190,8 @@ query APIs), accessing Kubernetes through the kubeconfig at
 3. The `deleted` flags are reconciled against the
    `batchsandboxes.sandbox.opensandbox.io` resource names (the resource
    name is the sandbox id): summary rows whose sandbox id is not among
-   them are marked `deleted` (hidden from the UI and `/api/sandboxes`);
-   previously deleted ids that reappear are restored.
+   them are marked `deleted` (still listed - the UI shows a `已删除`
+   marker); previously deleted ids that reappear are restored.
 
 Responses:
 - `200 {"namespace": "...", "live": <n>, "discovered": <n>, "backfilled": <n>, "node_updated": <n>, "deleted": <n>, "restored": <n>}`
@@ -225,7 +225,7 @@ CREATE TABLE sandbox_access_latest (
     target        TEXT,
     request_time  TIMESTAMPTZ,          -- 最新一次请求时间（未访问沙箱为 NULL）
     request_count BIGINT      NOT NULL DEFAULT 1,  -- 累计请求数
-    deleted       BOOLEAN     NOT NULL DEFAULT FALSE,  -- 沙箱资源已不存在（前端不展示）
+    deleted       BOOLEAN     NOT NULL DEFAULT FALSE,  -- 沙箱资源已不存在（UI 标记为已删除）
     accessed      BOOLEAN     NOT NULL DEFAULT TRUE,   -- 集群中发现但从未访问
     node_ip       TEXT,                 -- 沙箱 pod 所在节点 IP
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -245,9 +245,10 @@ Behavior notes:
   precision); the UI displays them as `YYYY-MM-DD HH:MM:SS` in the
   browser's local timezone.
 - Summary rows flagged `deleted = TRUE` (sandbox resource gone, see
-  `POST /api/sync-deleted`) are excluded from `/api/sandboxes` and the
-  summary page; existing tables are migrated with
-  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+  `POST /api/sync-deleted`) stay listed in `/api/sandboxes` and the
+  summary page with `deleted: true` (a `已删除` marker), keeping the audit
+  history of removed ephemeral sandboxes searchable; existing tables are
+  migrated with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
 - Sandbox ids present on BatchSandbox resources but absent from the
   database are inserted as never-accessed rows (`accessed = FALSE`,
   NULL request fields, `created_at` = the resource's

@@ -22,7 +22,9 @@ holding the latest request.
 A periodic Kubernetes sync (``kubernetes.sync_interval``) also discovers
 BatchSandbox resources whose sandbox id has no database row yet and
 inserts them as never-accessed rows, visible in the UI with an ``未访问``
-marker.
+marker; rows whose sandbox resource is gone are flagged ``deleted`` and
+shown with a ``已删除`` marker (the audit history of removed ephemeral
+sandboxes stays searchable).
 
 Web UI (password protected when ``server.ui_password`` is set):
 - ``GET /``          - per-sandbox latest requests (summary page)
@@ -349,14 +351,15 @@ def list_sandboxes(
 ) -> dict:
     """List per-sandbox latest requests.
 
-    ``search`` matches sandbox ids by substring (case-insensitive,
-    fuzzy) OR node IPs exactly - typing an IP returns every sandbox on
-    that node. ``sort`` is ``request_time``, ``request_count``,
-    ``created_at`` or ``accessed``; prefix with ``-`` for descending
-    (default: newest first; sorting by ``accessed`` ascending puts
-    never-accessed sandboxes first). ``time_from``/``time_to`` bound the
-    latest request time (ISO 8601, inclusive; naive values are assumed
-    to be UTC).
+    Rows whose sandbox resource is gone are included with
+    ``deleted = true`` (the UI shows a ``已删除`` marker). ``search``
+    matches sandbox ids by substring (case-insensitive, fuzzy) OR node
+    IPs exactly - typing an IP returns every sandbox on that node.
+    ``sort`` is ``request_time``, ``request_count``, ``created_at`` or
+    ``accessed``; prefix with ``-`` for descending (default: newest
+    first; sorting by ``accessed`` ascending puts never-accessed
+    sandboxes first). ``time_from``/``time_to`` bound the latest request
+    time (ISO 8601, inclusive; naive values are assumed to be UTC).
     """
     _require_api_auth(request)
     return _safe_query(
@@ -399,8 +402,8 @@ def sync_deleted(request: Request, store: StoreDep) -> dict:
     backfilled. Each sandbox pod's node IP is refreshed into
     ``node_ip``. Then the ``deleted`` flags are reconciled: summary rows
     whose sandbox id is not among the live resource names (the resource
-    name is the sandbox id) are marked ``deleted`` and hidden from the
-    UI/API; previously deleted ids that reappear are restored.
+    name is the sandbox id) are marked ``deleted`` (shown with a ``已删除``
+    marker in the UI); previously deleted ids that reappear are restored.
     """
     _require_api_auth(request)
     if not K8S_NAMESPACE:

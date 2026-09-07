@@ -64,6 +64,11 @@ workload_provider = "batchsandbox"
 # 可选值："Always"、"IfNotPresent"、"Never"。
 image_pull_policy = "IfNotPresent"
 
+# 沙箱资源 request = limit * 比例，CPU 与内存可分别配置。
+# 取值范围 (0, 1]，默认 0.25。
+# sandbox_cpu_request_fraction = 0.25
+# sandbox_memory_request_fraction = 0.25
+
 # public snapshot 等待超时时间。应大于 Kubernetes controller 的
 # snapshot commit-job-timeout。
 snapshot_create_timeout_seconds = 900

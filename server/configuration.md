@@ -134,6 +134,8 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 | `write_qps` | float | `0` | K8s API **write** rate limit (QPS). **0** = unlimited. |
 | `write_burst` | integer | `0` | Burst for write limiter. |
 | `execd_init_resources` | table \| omitted | `null` | Optional resource requests/limits for the **execd init** container. |
+| `sandbox_cpu_request_fraction` | float | `0.25` | Fraction of the sandbox CPU **limit** used as its CPU **request** (e.g. `0.25` → request = 1/4 of limit). Must be in `(0, 1]`. |
+| `sandbox_memory_request_fraction` | float | `0.25` | Fraction of the sandbox memory **limit** used as its memory **request**. Must be in `(0, 1]`. |
 
 ### BatchSandbox vs agent-sandbox
 

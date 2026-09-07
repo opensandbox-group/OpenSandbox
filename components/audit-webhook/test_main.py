@@ -116,10 +116,10 @@ class FakeStore:
                 "accessed": True,
                 "created_at": self.created_at.get(event["sandbox_id"]),
                 "node_ip": self.node_ips.get(event["sandbox_id"]),
+                "deleted": event["sandbox_id"] in self.deleted_ids,
             }
             for event in self.events
-            if event["sandbox_id"] not in self.deleted_ids
-            and matches_search(event["sandbox_id"])
+            if matches_search(event["sandbox_id"])
             and (time_from is None or time_from <= event["request_time"])
             and (time_to is None or event["request_time"] <= time_to)
         ]
@@ -137,10 +137,10 @@ class FakeStore:
                     "accessed": False,
                     "created_at": created_at,
                     "node_ip": self.node_ips.get(sandbox_id),
+                    "deleted": sandbox_id in self.deleted_ids,
                 }
                 for sandbox_id, created_at in self.unaccessed.items()
-                if sandbox_id not in self.deleted_ids
-                and matches_search(sandbox_id)
+                if matches_search(sandbox_id)
             )
         return {
             "total": len(items),
@@ -557,11 +557,14 @@ def test_sync_deleted_marks_missing_sandboxes(monkeypatch, client):
     assert data["restored"] == 0
     assert fake.deleted_ids == {"other"}
 
-    # Deleted sandboxes are hidden from the summary API (and thus the UI).
+    # Deleted sandboxes stay listed, flagged deleted=true (已删除 in the UI),
+    # so their audit history remains searchable.
     listing = test_client.get("/api/sandboxes")
     assert listing.status_code == 200
-    assert listing.json()["total"] == 1
-    assert listing.json()["items"][0]["sandbox_id"] == "test-sandbox"
+    assert listing.json()["total"] == 2
+    by_id = {item["sandbox_id"]: item for item in listing.json()["items"]}
+    assert by_id["test-sandbox"]["deleted"] is False
+    assert by_id["other"]["deleted"] is True
 
 
 def test_sync_deleted_restores_reappeared_sandbox(monkeypatch, client):

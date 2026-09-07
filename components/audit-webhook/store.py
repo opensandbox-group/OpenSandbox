@@ -19,7 +19,9 @@ Two tables are maintained:
 - ``sandbox_access_log``: one row per received request (request detail).
 - ``sandbox_access_latest``: one row per sandbox id, holding the latest
   request and the total request count (summary). Rows whose sandbox
-  resource is gone are flagged ``deleted`` and hidden from the UI/API.
+  resource is gone are flagged ``deleted`` and returned with that flag
+  (shown as ``已删除`` in the UI) - audit history stays searchable even
+  after an ephemeral sandbox is removed from the cluster.
   Sandboxes discovered in the cluster before any request arrived are
   inserted with ``accessed = FALSE`` (request fields NULL) so the UI can
   tell them apart from accessed ones.
@@ -140,11 +142,13 @@ RETURNING (xmax = 0) AS inserted
 # The window count piggybacks the total on the listing query so a page
 # load costs one round trip instead of two; the plain COUNT remains as a
 # fallback for pages past the end (no rows returned -> no total known).
+# Deleted rows stay listed (flagged) - hiding them made date searches
+# empty out as soon as ephemeral sandboxes were removed from the cluster.
 _LIST_LATEST = """
-SELECT sandbox_id, uri, method, target, request_time, request_count, accessed, created_at, node_ip,
+SELECT sandbox_id, uri, method, target, request_time, request_count, accessed, created_at, node_ip, deleted,
        count(*) OVER () AS __total
 FROM sandbox_access_latest
-WHERE NOT deleted {extra}
+WHERE TRUE {extra}
 ORDER BY {order}
 LIMIT %(limit)s OFFSET %(offset)s
 """
@@ -152,7 +156,7 @@ LIMIT %(limit)s OFFSET %(offset)s
 _COUNT_LATEST = """
 SELECT count(*) AS total
 FROM sandbox_access_latest
-WHERE NOT deleted {extra}
+WHERE TRUE {extra}
 """
 
 # Whitelisted sort orders for the summary table. Never-accessed rows have
@@ -228,7 +232,9 @@ class AuditStore:
     ) -> dict:
         """List per-sandbox latest requests, sorted by ``sort``.
 
-        Rows marked deleted (sandbox resource gone) are excluded.
+        Rows whose sandbox resource is gone are included with
+        ``deleted = TRUE`` (shown as ``已删除`` in the UI) - the audit
+        history of removed ephemeral sandboxes stays searchable.
         ``search`` matches sandbox ids by substring (case-insensitive,
         fuzzy) OR node IPs exactly - typing an IP returns every sandbox
         on that node. ``time_from``/``time_to`` bound the latest request

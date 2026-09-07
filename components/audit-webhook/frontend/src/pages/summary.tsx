@@ -30,6 +30,8 @@ interface SandboxRow {
   created_at: string | null;
   /** IP of the node the sandbox pod runs on (synced from the cluster) */
   node_ip: string | null;
+  /** sandbox resource no longer exists in the cluster (已删除 marker) */
+  deleted: boolean;
 }
 
 const { RangePicker } = DatePicker;
@@ -169,8 +171,10 @@ function SummaryPage() {
       sortDirections: [...SORT_DIRECTIONS],
       sortOrder:
         sort === "accessed" ? "ascend" : sort === "-accessed" ? "descend" : null,
-      render: (accessed: boolean) =>
-        accessed ? (
+      render: (accessed: boolean, row: SandboxRow) =>
+        row.deleted ? (
+          <Tag color="red">已删除</Tag>
+        ) : accessed ? (
           <Tag color="green">已访问</Tag>
         ) : (
           <Tag color="orange">未访问</Tag>
@@ -278,7 +282,8 @@ function SummaryPage() {
           </div>
           <p className="hint">
             点击沙箱 ID 查看该沙箱的请求详情；点击「状态」/「创建时间」/「最新请求时间」/「累计请求数」表头排序（降序 ↔ 升序循环）；
-            「未访问」表示沙箱存在于集群但尚无访问记录；搜索框输入节点 IP 可查到该节点上的所有沙箱
+            「未访问」表示沙箱存在于集群但尚无访问记录；「已删除」表示沙箱资源已从集群移除（访问记录保留可查）；
+            搜索框输入节点 IP 可查到该节点上的所有沙箱
           </p>
           <Table<SandboxRow>
             rowKey="sandbox_id"

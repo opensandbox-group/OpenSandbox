@@ -65,6 +65,27 @@ def _app_config_with_image_pull_policy(image_pull_policy: str) -> AppConfig:
         ),
     )
 
+def _app_config_with_request_fractions(cpu: float, memory: float) -> AppConfig:
+    """Build an AppConfig with sandbox_{cpu,memory}_request_fraction set."""
+    return AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="test-ns",
+            sandbox_cpu_request_fraction=cpu,
+            sandbox_memory_request_fraction=memory,
+        ),
+    )
+
+def _app_config_with_resource_request_fraction(fraction: float) -> AppConfig:
+    """Build an AppConfig with kubernetes.sandbox_resource_request_fraction set."""
+    return AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="test-ns",
+            sandbox_resource_request_fraction=fraction,
+        ),
+    )
+
 def _app_config_with_egress_disable_ipv6(disable_ipv6: bool = True) -> AppConfig:
     """Build an AppConfig with ``egress.disable_ipv6`` set (privileged execd init when egress is used)."""
     return AppConfig(
@@ -602,7 +623,7 @@ spec:
         mock_k8s_client.create_custom_object.return_value = {
             "metadata": {"name": "sandbox-test", "uid": "uid"}
         }
-        
+
         provider.create_workload(
             sandbox_id="test-id",
             namespace="test-ns",
@@ -614,12 +635,68 @@ spec:
             expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
             execd_image="execd:latest"
         )
-        
+
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         resources = body["spec"]["template"]["spec"]["containers"][0]["resources"]
-        
+
         assert resources["limits"] == {"cpu": "1", "memory": "1Gi"}
-        assert resources["requests"] == {"cpu": "1", "memory": "1Gi"}
+        # Default request fractions (cpu/memory) are both 0.25.
+        assert resources["requests"] == {"cpu": "0.25", "memory": "256Mi"}
+
+    def test_create_workload_uses_configured_request_fractions(self, mock_k8s_client):
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_request_fractions(cpu=0.5, memory=0.75)
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest"
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        resources = body["spec"]["template"]["spec"]["containers"][0]["resources"]
+
+        assert resources["limits"] == {"cpu": "1", "memory": "1Gi"}
+        assert resources["requests"] == {"cpu": "0.5", "memory": "768Mi"}
+
+    def test_create_workload_request_fractions_do_not_scale_gpu(self, mock_k8s_client):
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_request_fractions(cpu=0.5, memory=0.5)
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "2", "memory": "2Gi", "gpu": "1"},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest"
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        resources = body["spec"]["template"]["spec"]["containers"][0]["resources"]
+
+        assert resources["requests"] == {
+            "cpu": "1",
+            "memory": "1Gi",
+            "nvidia.com/gpu": "1",
+        }
     
     def test_create_workload_handles_empty_resource_limits(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
