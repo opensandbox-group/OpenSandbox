@@ -84,6 +84,23 @@ jobs:
           printf '%s  %s\n' "$package_sha256" "$package_name" >dist/SHA256SUMS
           echo "package_name=$package_name" >>"$GITHUB_OUTPUT"
 
+      - name: Verify single-active Server defaults
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.package_name }}
+        run: |
+          set -euo pipefail
+
+          helm template opensandbox-server kubernetes/charts/opensandbox-server \
+            --show-only templates/server.yaml >/tmp/opensandbox-server-rendered.yaml
+          grep -qx '  replicas: 1' /tmp/opensandbox-server-rendered.yaml
+          grep -qx '    type: Recreate' /tmp/opensandbox-server-rendered.yaml
+
+          helm template opensandbox "dist/$PACKAGE_NAME" \
+            --show-only charts/opensandbox-server/templates/server.yaml \
+            >/tmp/opensandbox-umbrella-server-rendered.yaml
+          grep -qx '  replicas: 1' /tmp/opensandbox-umbrella-server-rendered.yaml
+          grep -qx '    type: Recreate' /tmp/opensandbox-umbrella-server-rendered.yaml
+
       - name: Run exact-package Kind smoke
         env:
           PACKAGE_NAME: ${{ steps.package.outputs.package_name }}

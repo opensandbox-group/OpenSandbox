@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import json
+import shutil
+import subprocess
 from typing import Optional
 
 import pytest
@@ -33,6 +35,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
 )
 from opensandbox_server.services.helpers import split_egress_env
+from opensandbox_server.services.k8s import egress_helper
 from opensandbox_server.services.k8s.workload_provider import EgressWorkloadSettings
 from opensandbox_server.services.k8s.egress_helper import (
     apply_egress_to_spec,
@@ -558,12 +561,57 @@ class TestApplyEgressToSpec:
 
 
 class TestPrepExecdInitForEgress:
-    def test_returns_privileged_security_dict_and_prefixed_script(self):
-        base = "cp ./execd /opt/opensandbox/execd"
-        script, sc = prep_execd_init_for_egress(base)
-        assert sc == {"privileged": True}
-        assert "/proc/sys/net/ipv6/conf/all/disable_ipv6" in script
-        assert script.endswith(base)
+    @staticmethod
+    def _run_script(tmp_path, monkeypatch, ipv6_disable_path):
+        install_marker = tmp_path / "execd-installed"
+        monkeypatch.setattr(
+            egress_helper,
+            "_IPV6_DISABLE_PATH",
+            ipv6_disable_path.relative_to(tmp_path).as_posix(),
+            raising=False,
+        )
+        install_script = "printf installed > execd-installed"
+        script, security_context = prep_execd_init_for_egress(install_script)
+        shell = shutil.which("sh")
+        assert shell is not None
+        result = subprocess.run(
+            [shell, "-c", script],
+            capture_output=True,
+            check=False,
+            text=True,
+            cwd=tmp_path,
+        )
+        return result, install_marker, security_context
+
+    def test_missing_ipv6_path_still_runs_execd_install(self, tmp_path, monkeypatch):
+        ipv6_disable_path = tmp_path / "missing" / "disable_ipv6"
+
+        result, install_marker, security_context = self._run_script(
+            tmp_path, monkeypatch, ipv6_disable_path
+        )
+
+        assert result.returncode == 0
+        assert install_marker.read_text() == "installed"
+        assert security_context == {"privileged": True}
+
+    def test_existing_ipv6_path_is_disabled_before_execd_install(self, tmp_path, monkeypatch):
+        ipv6_disable_path = tmp_path / "disable_ipv6"
+        ipv6_disable_path.write_text("0")
+
+        result, install_marker, _ = self._run_script(tmp_path, monkeypatch, ipv6_disable_path)
+
+        assert result.returncode == 0
+        assert ipv6_disable_path.read_text() == "1\n"
+        assert install_marker.read_text() == "installed"
+
+    def test_existing_ipv6_path_write_failure_stops_execd_install(self, tmp_path, monkeypatch):
+        ipv6_disable_path = tmp_path / "disable_ipv6"
+        ipv6_disable_path.mkdir()
+
+        result, install_marker, _ = self._run_script(tmp_path, monkeypatch, ipv6_disable_path)
+
+        assert result.returncode != 0
+        assert not install_marker.exists()
 
 
 class TestSplitEgressEnv:
@@ -657,6 +705,7 @@ class TestSplitEgressEnv:
 
     def test_allows_all_permitted_vars(self):
         from opensandbox_server.services.constants import ALLOWED_EGRESS_ENV_VARS
+
         env = {key: "val" for key in ALLOWED_EGRESS_ENV_VARS}
         sandbox_env, egress_env = split_egress_env(env)
         assert set(egress_env.keys()) == ALLOWED_EGRESS_ENV_VARS
