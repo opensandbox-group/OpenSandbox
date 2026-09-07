@@ -29,6 +29,10 @@ const (
 	EventReasonPoolAssigned     = "PoolAssigned"
 	EventReasonFailedPoolAssign = "FailedPoolAssign"
 
+	EventReasonFailedSchedule = "FailedSchedule"
+	EventReasonFailedScale    = "FailedScale"
+	EventReasonFailedUpdate   = "FailedUpdate"
+
 	// Pod release — recorded on BatchSandbox
 	EventReasonPodReleased   = "PodReleased"
 	EventReasonFailedRelease = "FailedRelease"
