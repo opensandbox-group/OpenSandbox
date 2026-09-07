@@ -805,7 +805,8 @@ public sealed class Sandbox : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         _logger.LogDebug("Start readiness check for sandbox {SandboxId} (timeoutSeconds={TimeoutSeconds})", Id, options.ReadyTimeoutSeconds);
-        var deadline = DateTime.UtcNow.AddSeconds(options.ReadyTimeoutSeconds);
+        var timeout = TimeSpan.FromSeconds(options.ReadyTimeoutSeconds);
+        var stopwatch = Stopwatch.StartNew();
         var attempt = 0;
         var errorDetail = "Health check returned false continuously.";
 
@@ -813,7 +814,7 @@ public sealed class Sandbox : IAsyncDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (DateTime.UtcNow > deadline)
+            if (stopwatch.Elapsed > timeout)
             {
                 var context = $"domain={ConnectionConfig.Domain}, useServerProxy={ConnectionConfig.UseServerProxy}";
                 throw new SandboxReadyTimeoutException(
@@ -847,7 +848,15 @@ public sealed class Sandbox : IAsyncDisposable
                 errorDetail = $"Last health check error: {ex.Message}";
             }
 
-            await Task.Delay(options.PollingIntervalMillis, cancellationToken).ConfigureAwait(false);
+            var remaining = timeout - stopwatch.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                continue;
+            }
+
+            var pollingInterval = TimeSpan.FromMilliseconds(options.PollingIntervalMillis);
+            var delay = pollingInterval < remaining ? pollingInterval : remaining;
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
         }
     }
 

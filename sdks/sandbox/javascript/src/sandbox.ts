@@ -803,11 +803,7 @@ export class Sandbox {
     // Wait until execd becomes reachable and passes health check.
     while (true) {
       throwIfAborted(opts.signal);
-      if (Date.now() > deadline) {
-        throw new SandboxReadyTimeoutException({
-          message: buildTimeoutMessage(),
-        });
-      }
+      if (Date.now() >= deadline) break;
       attempt++;
       try {
         if (opts.healthCheck) {
@@ -829,7 +825,14 @@ export class Sandbox {
         const message = err instanceof Error ? err.message : String(err);
         errorDetail = `Last health check error: ${message}`;
       }
-      await sleep(opts.pollingIntervalMillis, opts.signal);
+      // Clamp the sleep to the remaining budget so the final failed check
+      // does not overshoot the timeout by a full polling interval.
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(opts.pollingIntervalMillis, remaining), opts.signal);
     }
+    throw new SandboxReadyTimeoutException({
+      message: buildTimeoutMessage(),
+    });
   }
 }

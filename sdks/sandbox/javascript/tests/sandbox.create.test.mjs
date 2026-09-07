@@ -597,6 +597,39 @@ test("Sandbox.create readiness timeout omits network configuration hints", async
   );
 });
 
+test("Sandbox.create readiness timeout does not overshoot by a polling interval", async () => {
+  const { adapterFactory } = createAdapterFactory();
+  adapterFactory.createExecdStack = () => ({
+    commands: {},
+    files: {},
+    health: {
+      async ping() {
+        return false;
+      },
+    },
+    metrics: {},
+  });
+
+  const connectionConfig = new ConnectionConfig({
+    domain: "http://127.0.0.1:8080",
+    disableMetrics: true,
+  });
+
+  const started = Date.now();
+  await assert.rejects(
+    Sandbox.create({
+      adapterFactory,
+      connectionConfig,
+      image: "python:3.12",
+      readyTimeoutSeconds: 0.02,
+      healthCheckPollingInterval: 2000,
+    }),
+    /Sandbox health check timed out after 0\.02s/
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 500, `expected timeout in ~20ms, took ${elapsed}ms`);
+});
+
 test("Sandbox.create metrics synchronous throw does not change create error", async () => {
   // Regression test: previously, payload/URL/headers construction and
   // `connectionConfig.fetch(...)` ran outside any try/catch in the reporter.
