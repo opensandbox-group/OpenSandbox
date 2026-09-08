@@ -15,7 +15,7 @@
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
 from kubernetes.client import ApiException
 
@@ -40,6 +40,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
+    SandboxErrorCodes,
 )
 from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 from opensandbox_server.services.k8s.workload_provider import EgressWorkloadSettings
@@ -1634,6 +1635,34 @@ spec:
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
+
+    def test_create_workload_poolref_rejects_kvm_resource_limit(self, mock_k8s_client):
+        provider = BatchSandboxProvider(mock_k8s_client)
+
+        with (
+            patch.object(provider, "_create_workload_from_pool") as create_from_pool,
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="", auth=None),
+                entrypoint=["python", "app.py"],
+                env={},
+                resource_limits={"cpu": "1", "memory": "1Gi", "kvm": "1"},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+                extensions={"poolRef": "my-pool"},
+            )
+
+        assert excinfo.value.status_code == 400
+        assert excinfo.value.detail == {
+            "code": SandboxErrorCodes.INVALID_PARAMETER,
+            "message": "resourceLimits.kvm is not supported by the Kubernetes runtime.",
+        }
+        create_from_pool.assert_not_called()
+        mock_k8s_client.create_custom_object.assert_not_called()
 
     def test_create_workload_poolref_rejects_network_policy(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)

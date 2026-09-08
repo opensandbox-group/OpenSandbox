@@ -44,6 +44,7 @@ from opensandbox_server.services.k8s.provider_common import (
     _build_main_container,
     _container_to_dict,
     _extract_platform_unschedulable_message_from_pod,
+    _validate_kvm_resource_limits_for_k8s,
     _workload_platform_constraint_scope,
 )
 from opensandbox_server.services.k8s.status_helpers import (
@@ -150,6 +151,7 @@ class BatchSandboxProvider(WorkloadProvider):
     ) -> Dict[str, Any]:
         """Create a BatchSandbox in template mode or pool mode."""
         extensions = extensions or {}
+        _validate_kvm_resource_limits_for_k8s(resource_limits)
         windows_profile = is_windows_profile(platform)
 
         if self.runtime_class:

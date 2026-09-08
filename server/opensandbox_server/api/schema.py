@@ -485,7 +485,11 @@ class CreateSandboxRequest(BaseModel):
     resource_limits: Optional[ResourceLimits] = Field(
         None,
         alias="resourceLimits",
-        description="Runtime resource constraints (hard caps) for the sandbox instance. Optional when poolRef is provided.",
+        description=(
+            "Runtime resource constraints (hard caps) for the sandbox instance. "
+            "On a local Docker runtime, kvm='1' exposes a validated /dev/kvm device "
+            "to a Linux sandbox. Optional when poolRef is provided."
+        ),
     )
     resource_requests: Optional[ResourceLimits] = Field(
         None,

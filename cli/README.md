@@ -130,6 +130,16 @@ Manual cleanup mode:
 osb sandbox create --image python:3.12 --timeout none
 ```
 
+Linux KVM access on a local Docker runtime:
+
+```bash
+osb sandbox create --image python:3.12 --resource kvm=1
+```
+
+The server accepts only the exact value `kvm=1`, validates the host
+`/dev/kvm` device, and fails closed for missing or unsafe devices and remote
+Docker endpoints. This resource is not supported by the Kubernetes runtime.
+
 Explicit entrypoint argv:
 
 ```bash

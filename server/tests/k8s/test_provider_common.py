@@ -63,13 +63,29 @@ def test_translate_resource_limits_no_gpu_key_unchanged():
     assert result is not inputs
 
 
+@pytest.mark.parametrize("kvm_value", ["1", "0", ""])
+def test_translate_resource_limits_rejects_kvm(kvm_value):
+    with pytest.raises(HTTPException) as excinfo:
+        _translate_resource_limits_for_k8s({"kvm": kvm_value})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == {
+        "code": SandboxErrorCodes.INVALID_PARAMETER,
+        "message": "resourceLimits.kvm is not supported by the Kubernetes runtime.",
+    }
+
+
 def test_translate_resource_limits_rejects_all():
     with pytest.raises(HTTPException) as excinfo:
         _translate_resource_limits_for_k8s({"gpu": "all"})
     assert excinfo.value.status_code == 400
-    detail = excinfo.value.detail
-    assert detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
-    assert "positive integer" in detail["message"]
+    assert excinfo.value.detail == {
+        "code": SandboxErrorCodes.INVALID_PARAMETER,
+        "message": (
+            "Kubernetes runtime requires resourceLimits.gpu to be a positive "
+            "integer; 'all' is not supported."
+        ),
+    }
 
 
 @pytest.mark.parametrize("bad_value", ["0", "-1", "bad", ""])
