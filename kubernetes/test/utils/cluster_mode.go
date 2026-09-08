@@ -14,7 +14,10 @@
 
 package utils
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 const (
 	// ModeKind runs e2e against a local Kind cluster (default).
@@ -114,4 +117,21 @@ func PodSecurityEnforce() string {
 		return v
 	}
 	return "restricted"
+}
+
+// LabelFilter returns the ginkgo label-filter that selects the specs run by
+// the suite (e.g. "Core" or "PauseResume"). The Makefile targets set
+// E2E_LABEL_FILTER so BeforeSuite can provision only the assets the selected
+// specs need. An empty filter means all specs run.
+func LabelFilter() string {
+	return os.Getenv("E2E_LABEL_FILTER")
+}
+
+// PauseResumeAssetsRequired reports whether the suite run includes the
+// PauseResume-labelled specs, which need the image-committer image plus the
+// in-cluster docker-registry and alpine images. Runs that only select other
+// labels (e.g. Core) skip provisioning those assets.
+func PauseResumeAssetsRequired() bool {
+	filter := strings.ToLower(LabelFilter())
+	return filter == "" || strings.Contains(filter, "pauseresume")
 }

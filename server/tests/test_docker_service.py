@@ -36,6 +36,7 @@ from opensandbox_server.config import (
 from opensandbox_server.extensions import ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY
 from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
+    OTEL_EXPORTER_OTLP_ENDPOINT,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
@@ -246,8 +247,18 @@ async def test_create_sandbox_applies_config_sandbox_env_and_binds(mock_docker):
     assert binds == ["/opt/certs/root-ca.crt:/etc/ssl/private-ca/root-ca.crt:ro"]
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "limits, memory, cpu, gpu",
+    [
+        ({"gpu": "2"}, None, None, 2),
+        ({"memory": "512Mi", "cpu": "500m", "gpu": "all"}, 512 * 1024**2, 500_000_000, -1),
+        ({"memory": "1G", "cpu": "1.5"}, 1_000_000_000, 1_500_000_000, None),
+        ({}, None, None, None),
+        ({"disk": "custom-value"}, None, None, None),
+    ],
+)
 @patch("opensandbox_server.services.docker.docker_service.docker")
-async def test_create_sandbox_passes_gpu_device_requests(mock_docker):
+async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memory, cpu, gpu):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_client.api.create_container.return_value = {"Id": "cid"}
@@ -258,7 +269,7 @@ async def test_create_sandbox_passes_gpu_device_requests(mock_docker):
     request = CreateSandboxRequest(
         image=ImageSpec(uri="python:3.11"),
         timeout=120,
-        resourceLimits=ResourceLimits(root={"gpu": "2"}),
+        resourceLimits=ResourceLimits(root=limits),
         env={},
         metadata={},
         entrypoint=["python"],
@@ -278,13 +289,69 @@ async def test_create_sandbox_passes_gpu_device_requests(mock_docker):
         await service.create_sandbox(request)
 
     create_host_config_kwargs = mock_client.api.create_host_config.call_args.kwargs
+    for key, expected in (("mem_limit", memory), ("nano_cpus", cpu)):
+        if expected is None:
+            assert key not in create_host_config_kwargs
+        else:
+            assert create_host_config_kwargs[key] == expected
     device_requests = create_host_config_kwargs.get("device_requests")
+    if gpu is None:
+        assert "device_requests" not in create_host_config_kwargs
+        return
     assert device_requests is not None
     assert len(device_requests) == 1
     # DeviceRequest is a dict subclass keyed with the Docker Engine's
     # capitalized field names.
-    assert device_requests[0]["Count"] == 2
+    assert device_requests[0]["Count"] == gpu
     assert device_requests[0]["Capabilities"] == [["gpu"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key, value",
+    [(key, value) for key in ("memory", "cpu", "gpu") for value in ("", " ", "0", "-1", "invalid")]
+    + [("memory", "0Mi"), ("memory", "9" * 5000)]
+    + [("cpu", value) for value in ("nan", "inf", "-inf", "1e10", "1e308", "1e309", "0.0000000001")]
+    + [("gpu", "1.5")]
+    + [(key, "x" * 5000) for key in ("cpu", "gpu")],
+    ids=lambda value: value if len(value) < 80 else "oversized-integer",
+)
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_rejects_invalid_resource_limits_before_side_effects(mock_docker, key, value):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={key: value}),
+        entrypoint=["python"],
+    )
+    with (
+        patch.object(service, "_validate_volumes") as validate_volumes,
+        patch.object(service, "_ensure_image_available") as ensure_image,
+        patch.object(service, "_create_and_start_container") as create_container,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await service.create_sandbox(request)
+
+    assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+    assert f"resourceLimits.{key}" in exc_info.value.detail["message"]
+    message = exc_info.value.detail["message"]
+    if len(value) > 80:
+        assert len(message) < 250
+        assert repr(value) not in message
+        assert value[:80] in message
+        assert f"{len(value)} characters" in message
+    else:
+        assert repr(value) in message
+    validate_volumes.assert_not_called()
+    ensure_image.assert_not_called()
+    create_container.assert_not_called()
+    mock_client.volumes.create.assert_not_called()
+    mock_client.api.create_container.assert_not_called()
+
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -1472,6 +1539,89 @@ def test_egress_sidecar_injects_sandbox_id_env(mock_docker):
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
+def test_egress_sidecar_injects_otlp_endpoint_env_when_configured(mock_docker):
+    """egress.otlp_endpoint is injected into the sidecar as OTEL_EXPORTER_OTLP_ENDPOINT."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+    mock_client.api.create_container.return_value = {"Id": "sidecar-id"}
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(
+        image="egress:latest",
+        disable_ipv6=False,
+        otlp_endpoint="http://otel-collector.observability:4318",
+    )
+    service = DockerSandboxService(config=cfg)
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_docker_operation") as mock_op,
+    ):
+        mock_op.return_value.__enter__.return_value = None
+        mock_op.return_value.__exit__.return_value = None
+        service._start_egress_sidecar(
+            "sbx-abc123",
+            NetworkPolicy(defaultAction="deny", egress=[]),
+            egress_token="egress-token",
+            host_execd_port=44772,
+            host_http_port=8080,
+        )
+
+    sidecar_env = mock_client.api.create_container.call_args.kwargs["environment"]
+    assert (
+        f"{OTEL_EXPORTER_OTLP_ENDPOINT}=http://otel-collector.observability:4318"
+        in sidecar_env
+    )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_egress_sidecar_omits_otlp_endpoint_env_when_not_configured(mock_docker):
+    """Without egress.otlp_endpoint, the sidecar env carries no OTEL_EXPORTER_OTLP_ENDPOINT."""
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+    mock_client.api.create_container.return_value = {"Id": "sidecar-id"}
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest", disable_ipv6=False)
+    service = DockerSandboxService(config=cfg)
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_docker_operation") as mock_op,
+    ):
+        mock_op.return_value.__enter__.return_value = None
+        mock_op.return_value.__exit__.return_value = None
+        service._start_egress_sidecar(
+            "sbx-abc123",
+            NetworkPolicy(defaultAction="deny", egress=[]),
+            egress_token="egress-token",
+            host_execd_port=44772,
+            host_http_port=8080,
+        )
+
+    sidecar_env = mock_client.api.create_container.call_args.kwargs["environment"]
+    assert not any(
+        entry.startswith(f"{OTEL_EXPORTER_OTLP_ENDPOINT}=") for entry in sidecar_env
+    )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
 def test_egress_sidecar_normalizes_windows_port_bindings(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
@@ -2097,8 +2247,19 @@ async def test_create_sandbox_windows_profile_rejects_missing_runtime_devices(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "limits, field",
+    [
+        ({"cpu": "1"}, "cpu"),
+        ({"memory": "3 G"}, "memory"),
+        ({"disk": "63G"}, "disk"),
+        ({"memory": "invalid"}, "memory"),
+    ],
+)
 @patch("opensandbox_server.services.docker.docker_service.docker")
-async def test_create_sandbox_windows_profile_rejects_below_minimum_resource_limits(mock_docker):
+async def test_create_sandbox_windows_profile_rejects_invalid_resource_limits_before_side_effects(
+    mock_docker, limits, field
+):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -2109,7 +2270,7 @@ async def test_create_sandbox_windows_profile_rejects_below_minimum_resource_lim
     service = DockerSandboxService(config=cfg)
     request = CreateSandboxRequest(
         image=ImageSpec(uri="dockurr/windows:latest"),
-        resourceLimits=ResourceLimits(root={"cpu": "1", "memory": "2G", "disk": "32G"}),
+        resourceLimits=ResourceLimits(root=limits),
         entrypoint=["cmd", "/c", "echo ready"],
         platform=PlatformSpec(os="windows", arch="amd64"),
     )
@@ -2118,6 +2279,8 @@ async def test_create_sandbox_windows_profile_rejects_below_minimum_resource_lim
             "opensandbox_server.services.docker.docker_service.validate_windows_runtime_prerequisites",
             return_value=None,
         ),
+        patch.object(service, "_validate_volumes") as validate_volumes,
+        patch.object(service, "_ensure_image_available") as ensure_image,
         patch.object(service, "_create_and_start_container") as mock_create,
         pytest.raises(HTTPException) as exc_info,
     ):
@@ -2125,13 +2288,17 @@ async def test_create_sandbox_windows_profile_rejects_below_minimum_resource_lim
 
     assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
-    assert "resourceLimits.cpu >= 2" in exc_info.value.detail["message"]
+    assert f"resourceLimits.{field}" in exc_info.value.detail["message"]
+    validate_volumes.assert_not_called()
+    ensure_image.assert_not_called()
+    mock_client.volumes.create.assert_not_called()
     mock_create.assert_not_called()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("memory, expected_ram", [("8G", "8G"), ("4 G", "4G"), ("4096 Mi", "4G")])
 @patch("opensandbox_server.services.docker.docker_service.docker")
-async def test_create_sandbox_windows_profile_accepts_dockur_demo_like_request(mock_docker):
+async def test_create_sandbox_windows_profile_accepts_dockur_demo_like_request(mock_docker, memory, expected_ram):
     """
     Use a dockur/windows-style request payload (VERSION env) and verify
     it is forwarded through the windows profile create path.
@@ -2149,7 +2316,7 @@ async def test_create_sandbox_windows_profile_accepts_dockur_demo_like_request(m
         resourceLimits=ResourceLimits(
             root={
                 "cpu": "4",
-                "memory": "8G",
+                "memory": memory,
                 "disk": "64G",
             }
         ),
@@ -2177,11 +2344,12 @@ async def test_create_sandbox_windows_profile_accepts_dockur_demo_like_request(m
     host_config_kwargs = mock_create.call_args.args[5]
     assert "VERSION=11" in forwarded_env
     assert "CPU_CORES=4" in forwarded_env
-    assert "RAM_SIZE=8G" in forwarded_env
+    assert f"RAM_SIZE={expected_ram}" in forwarded_env
     assert "DISK_SIZE=64G" in forwarded_env
     assert "USER_PORTS=44772,8080,3389,8006" in forwarded_env
     assert "mem_limit" not in host_config_kwargs
     assert "nano_cpus" not in host_config_kwargs
+    assert "device_requests" not in host_config_kwargs
     assert response.platform is not None
     assert response.platform.os == "windows"
     assert response.platform.arch == "amd64"

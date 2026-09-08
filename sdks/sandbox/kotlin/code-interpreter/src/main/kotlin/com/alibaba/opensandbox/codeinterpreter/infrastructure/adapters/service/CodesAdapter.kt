@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.codeinterpreter.infrastructure.adapters.converter
 import com.alibaba.opensandbox.codeinterpreter.infrastructure.adapters.converter.CodeExecutionConverter.toCodeContext
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.execd.CodeInterpretingApi
+import com.alibaba.opensandbox.sandbox.api.execd.HealthApi
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
@@ -174,4 +175,20 @@ class CodesAdapter(
             throw e.toSandboxException()
         }
     }
+
+    override fun ping(): Boolean {
+        return try {
+            healthApi.ping()
+            true
+        } catch (e: Exception) {
+            logger.debug("Code interpreter ping failed: {}", e.message)
+            false
+        }
+    }
+
+    private val healthApi =
+        HealthApi(
+            baseUrl,
+            apiClient,
+        )
 }

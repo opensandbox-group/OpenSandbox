@@ -130,6 +130,15 @@ export class CodesAdapter implements Codes {
     throwOnOpenApiFetchError({ error, response }, "Interrupt code failed");
   }
 
+  async ping(signal?: AbortSignal): Promise<boolean> {
+    const { error, response } = await this.client.GET("/ping", {
+      parseAs: "text",
+      signal,
+    });
+    throwOnOpenApiFetchError({ error, response }, "Execd ping failed");
+    return true;
+  }
+
   async *runStream(req: ApiRunCodeRequest, signal?: AbortSignal): AsyncIterable<ServerStreamEvent> {
     const url = joinUrl(this.opts.baseUrl, "/code");
     const body = JSON.stringify(req);

@@ -11,6 +11,11 @@ test("CodeInterpreter.create forwards endpoint headers to adapter factory", asyn
       protocol: "https",
       headers: { "x-global": "global" },
     },
+    commands: {
+      async run() {
+        return { error: null };
+      },
+    },
     async getEndpoint(port) {
       assert.equal(port, DEFAULT_EXECD_PORT);
       return {
@@ -19,7 +24,12 @@ test("CodeInterpreter.create forwards endpoint headers to adapter factory", asyn
       };
     },
   };
-  const codes = { kind: "codes" };
+  const codes = {
+    kind: "codes",
+    async ping() {
+      return true;
+    },
+  };
   const adapterFactory = {
     createCodes(opts) {
       calls.push(opts);

@@ -37,6 +37,7 @@ from opensandbox_server.api.schema import Endpoint, NetworkPolicy
 from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
     EGRESS_RULES_ENV,
+    OTEL_EXPORTER_OTLP_ENDPOINT,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
@@ -428,6 +429,10 @@ class DockerNetworkingMixin:
             f"{OPENSANDBOX_EGRESS_TOKEN}={egress_token}",
             f"{OPENSANDBOX_EGRESS_SANDBOX_ID}={sandbox_id}",
         ]
+        if self.app_config.egress.otlp_endpoint:
+            sidecar_env.append(
+                f"{OTEL_EXPORTER_OTLP_ENDPOINT}={self.app_config.egress.otlp_endpoint}"
+            )
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
 

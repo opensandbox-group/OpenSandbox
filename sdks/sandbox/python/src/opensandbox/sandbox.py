@@ -447,11 +447,11 @@ class Sandbox:
             f"Waiting for sandbox {self.id} to pass health check (timeout: {timeout.total_seconds()}s)"
         )
 
-        deadline = time.time() + timeout.total_seconds()
+        deadline = time.monotonic() + timeout.total_seconds()
         attempt = 0
         last_exception: Exception | None = None
 
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             attempt += 1
             logger.debug(f"Health check attempt #{attempt} for sandbox {self.id}")
 
@@ -472,7 +472,10 @@ class Sandbox:
                 )
 
             if not is_healthy:
-                await asyncio.sleep(polling_interval.total_seconds())
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(polling_interval.total_seconds(), remaining))
 
         error_detail = (
             f"Last error: {last_exception}"

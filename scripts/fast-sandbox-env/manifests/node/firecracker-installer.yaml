@@ -1,0 +1,108 @@
+# firecracker-installer.yaml — node installer for the Firecracker runtime
+# assets (adapted from fast-sandbox config/runtime-installers/firecracker.yaml;
+# the layout must match the runtime-environments ConfigMap applied by
+# fast-sandbox's config/all-in-one).
+#
+# An init container fetches the pinned Firecracker release (binary + jailer)
+# and the guest kernel, and installs them on a node hostPath; the main
+# container holds the DaemonSet and verifies the installed binaries.
+#
+# Installed layout:
+#   /opt/fast-sandbox/firecracker/firecracker
+#   /opt/fast-sandbox/firecracker/jailer
+#   /opt/fast-sandbox/firecracker/vmlinux.bin
+#
+# The binaries MUST exist before any fastlet pod starts (the controller
+# injects hostPath File mounts for them), which is why fast-sandbox-env.sh
+# applies this manifest before the pool.
+#
+# Downloads come from GitHub releases and s3.amazonaws.com — fine for an
+# integration environment, not for production (use a private mirror and
+# pin FC_VERSION / KERNEL_URL).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: firecracker-runtime-installer
+  namespace: fast-sandbox-system
+  labels:
+    app: fast-sandbox
+    component: firecracker-runtime-installer
+spec:
+  selector:
+    matchLabels:
+      app: fast-sandbox
+      component: firecracker-runtime-installer
+  template:
+    metadata:
+      labels:
+        app: fast-sandbox
+        component: firecracker-runtime-installer
+    spec:
+      nodeSelector:
+        fast-sandbox.io/firecracker-node: "true"
+      hostNetwork: true
+      initContainers:
+      - name: install-firecracker
+        image: curlimages/curl:8.10.1
+        # curlimages/curl runs as a non-root user by default; the hostPath
+        # destination is root-owned, so install as root.
+        securityContext:
+          runAsUser: 0
+          privileged: true
+        command: ["/bin/sh", "-euxc"]
+        args:
+        - |
+          FC_VERSION="${FC_VERSION:-v1.16.1}"
+          DEST="/opt/fast-sandbox/firecracker"
+          ARCH="$(uname -m)"
+          case "$ARCH" in x86_64) ASSET_ARCH="x86_64";; aarch64) ASSET_ARCH="aarch64";; *) echo "unsupported arch $ARCH" >&2; exit 1;; esac
+          # Amazon microvm kernel (Firecracker CI artifact) with ACPI/VMGenID
+          # support: the quickstart vmlinux.bin is Linux 4.14, whose CRNG is
+          # not reseeded at snapshot resume (execd /command hangs, OpenSandbox
+          # issue #1695). The DEFAULT url is arch-aware (an x86_64 kernel on
+          # an aarch64 host boots nothing); KERNEL_URL overrides it verbatim.
+          KERNEL_URL="${KERNEL_URL:-https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260722-38359b8055fc-0/${ASSET_ARCH}/vmlinux-6.1.176}"
+          mkdir -p "$DEST"
+          if [[ ! -x "$DEST/firecracker" || ! -x "$DEST/jailer" ]]; then
+            TARBALL="/tmp/firecracker-${FC_VERSION}-${ASSET_ARCH}.tgz"
+            curl -fL --retry 5 --retry-all-errors -o "$TARBALL" \
+              "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ASSET_ARCH}.tgz"
+            mkdir -p /tmp/fc-extract
+            tar -xzf "$TARBALL" -C /tmp/fc-extract
+            find /tmp/fc-extract -type f -name "firecracker-v*-${ASSET_ARCH}" -exec cp {} "$DEST/firecracker" \;
+            find /tmp/fc-extract -type f -name "jailer-v*-${ASSET_ARCH}" -exec cp {} "$DEST/jailer" \;
+            chmod +x "$DEST/firecracker" "$DEST/jailer"
+            rm -rf /tmp/fc-extract "$TARBALL"
+          fi
+          if [[ ! -f "$DEST/vmlinux.bin" ]]; then
+            curl -fL --retry 5 --retry-all-errors -o "$DEST/vmlinux.bin" "$KERNEL_URL"
+          fi
+          "$DEST/firecracker" --version >/dev/null
+          "$DEST/jailer" --version >/dev/null
+          test -s "$DEST/vmlinux.bin"
+        env:
+        - name: FC_VERSION
+          value: "v1.16.1"
+        volumeMounts:
+        - name: firecracker-assets
+          mountPath: /opt/fast-sandbox/firecracker
+      containers:
+      - name: verify
+        image: alpine:3.19
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |
+          /opt/fast-sandbox/firecracker/firecracker --version
+          /opt/fast-sandbox/firecracker/jailer --version
+          echo "firecracker runtime assets verified on node"
+          while true; do sleep 3600; done
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: firecracker-assets
+          mountPath: /opt/fast-sandbox/firecracker
+      volumes:
+      - name: firecracker-assets
+        hostPath:
+          path: /opt/fast-sandbox/firecracker
+          type: DirectoryOrCreate

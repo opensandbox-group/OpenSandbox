@@ -85,7 +85,7 @@ Configuration for the server-side reverse-proxy routes.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `resolve_internal` | boolean | `true` | When `true` (default), the server-side reverse-proxy targets the sandbox's internal container IP (Docker bridge) or the provider's internal workload endpoint. When `false`, the proxy targets the **server-local host-mapped port** instead; this is required when the server process cannot route to container bridge IPs (for example a launchd or systemd user session on macOS where such traffic is blocked). On Docker, `false` resolves host-mapped endpoints via the server-local proxy host so deployments that advertise a public `[server]` `eip` still route proxied traffic to a locally reachable host. Backward compatible: the default preserves the historical behavior. |
+| `resolve_internal` | boolean | `true` | When `true` (default), the server-side reverse-proxy targets the sandbox's internal container IP (Docker bridge) or the provider's internal workload endpoint. When `false`, the proxy targets the **server-local host-mapped port** instead. Use `false` whenever the server process cannot route to sandbox bridge IPs, including a lifecycle server container attached to a Compose/user-defined network while its mounted Docker socket creates sandboxes on Docker's default bridge, or a launchd/systemd user session on macOS where bridge traffic is blocked. On Docker, `false` resolves host-mapped endpoints via the server-local proxy host so deployments that advertise a public `[server]` `eip` still route proxied traffic to a locally reachable host. Backward compatible: the default preserves the historical behavior. |
 
 ---
 
@@ -220,6 +220,7 @@ Configures the **egress sidecar** image and enforcement mode. The server only at
 | `image` | string \| omitted | `null` | OCI image for the egress sidecar. **Required in config** when clients send **`networkPolicy`** (create request). |
 | `mode` | string | `"dns"` | Passed to the sidecar as `OPENSANDBOX_EGRESS_MODE`. Values: **`dns`** — DNS-proxy-based enforcement (CIDR/static IP rules **not** enforced); **`dns+nft`** — adds nftables where available so **CIDR/IP** rules can be enforced. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (especially on Kubernetes). **Default on**; set `false` only when you want IPv6 left up in the netns. Details in [IPv6 and egress](#ipv6-and-egress) below. |
+| `otlp_endpoint` | string \| omitted | `null` | OTLP/HTTP endpoint (**`http://` or `https://` only**) where the egress sidecar exports its OpenTelemetry metrics, injected as `OTEL_EXPORTER_OTLP_ENDPOINT` on both Docker and Kubernetes. Server-side only — the collector address is infrastructure config and is deliberately **not** settable per request. When unset, sidecar metrics are not exported. |
 | `readiness_timeout_seconds` | float | `30.0` | **Docker only.** Maximum time to wait for the egress sidecar health endpoint to become ready. Must be greater than `0`. |
 | `requests` | map string → string \| omitted | `null` | **Kubernetes only.** Resource requests for the generated egress sidecar. |
 | `limits` | map string → string \| omitted | `null` | **Kubernetes only.** Resource limits for the generated egress sidecar. |
@@ -229,9 +230,21 @@ Configures the **egress sidecar** image and enforcement mode. The server only at
 image = "opensandbox/egress:v1.1.7"
 requests = { cpu = "25m", memory = "64Mi" }
 limits = { cpu = "250m", memory = "256Mi" }
+# Optional: export the egress sidecar's OpenTelemetry metrics to an OTLP/HTTP collector.
+# Use a fully qualified service name or an IP (see below).
+# otlp_endpoint = "http://otel-collector.observability.svc.cluster.local:4318"
 ```
 
 Requests and limits can be omitted independently. Invalid or negative Kubernetes resource quantities cause configuration loading to fail. When both settings are omitted, the egress container does not declare resources and namespace `LimitRange` defaults may apply.
+
+### Egress sidecar metrics
+
+When `otlp_endpoint` is configured, the server injects it into every egress sidecar as `OTEL_EXPORTER_OTLP_ENDPOINT` (both Docker and Kubernetes). Notes:
+
+- The endpoint **must** use `http://` or `https://` with a collector host — the sidecar's telemetry client only supports OTLP over HTTP/protobuf; a gRPC endpoint (port 4317) or a host-less URL silently won't work.
+- The value is infrastructure config: it is read only from the server config file and is not settable through the create API or per-request `env`.
+- Use a **fully qualified service name or an IP** (e.g. `otel-collector.observability.svc.cluster.local` on Kubernetes). The sidecar's automatic egress allow rule matches the configured host exactly, while the resolver expands partial service names (e.g. `otel-collector.observability`) to FQDNs the rule does not match, so telemetry would be blocked under a default-deny policy.
+- The sidecar exports **delta** temporality; a collector feeding Prometheus/GMP needs the `deltatocumulative` processor.
 
 ### IPv6 and egress
 

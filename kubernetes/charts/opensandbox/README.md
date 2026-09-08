@@ -2,6 +2,13 @@
 
 This Helm chart bundles both the **OpenSandbox Controller** and **OpenSandbox Server** into a single deployment for simplified installation.
 
+> **Single-active Server default**: The chart deploys one active Lifecycle
+> Server by default. Multi-replica Server HA is not supported yet, including
+> with a shared PostgreSQL database. PostgreSQL-backed Kubernetes HA will be
+> delivered in a separate change. The Server Deployment uses the `Recreate`
+> strategy so an upgrade stops the active Server before starting its
+> replacement; expect a brief API interruption during upgrades.
+
 ## Prerequisites
 
 - Kubernetes 1.21.1+
@@ -72,7 +79,7 @@ The following table lists the configurable parameters of the chart and their def
 | opensandbox-controller.controller.snapshot.resumePullSecret | string | `""` | Secret name injected into resumed sandboxes for pulling snapshot images. |
 | opensandbox-controller.controller.snapshot.snapshotPushSecret | string | `""` | Secret name used by commit Jobs to push snapshot images. |
 | opensandbox-node-agent.enabled | bool | `false` | Whether the node agent is enabled. |
-| opensandbox-server.server.replicaCount | int | `2` | Number of server replicas. |
+| opensandbox-server.server.replicaCount | int | `1` | Number of server replicas. Keep one active server; multi-replica HA is not supported yet. |
 
 ### Override Sub-chart Values
 
@@ -104,7 +111,7 @@ opensandbox-controller:
 
 opensandbox-server:
   server:
-    replicaCount: 2
+    replicaCount: 1
     gateway:
       enabled: true
       host: gateway.example.com

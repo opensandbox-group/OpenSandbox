@@ -128,6 +128,7 @@ def _build_create_workload_context(
             disable_ipv6=egress_config.disable_ipv6,
             resource_requests=egress_config.requests,
             resource_limits=egress_config.limits,
+            otlp_endpoint=egress_config.otlp_endpoint,
         )
 
     return _CreateWorkloadContext(

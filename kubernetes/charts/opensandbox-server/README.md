@@ -2,6 +2,13 @@
 
 OpenSandbox Lifecycle API server: provides sandbox create/delete and other lifecycle APIs, typically used with BatchSandbox/Pool on Kubernetes.
 
+> **Single-active default**: The chart deploys one active Lifecycle Server by
+> default. Multi-replica Server HA is not supported yet, including with a shared
+> PostgreSQL database. PostgreSQL-backed Kubernetes HA will be delivered in a
+> separate change. The Server Deployment uses the `Recreate` strategy so an
+> upgrade stops the active Server before starting its replacement; expect a
+> brief API interruption during upgrades.
+
 ## Prerequisites
 
 - Kubernetes 1.21.1+
@@ -154,7 +161,7 @@ The following table lists the configurable parameters of the chart and their def
 | server.podLabels | object | `{}` | Extra labels for the server pod. |
 | server.podSecurityContext | object | `{}` | Pod-level security context for the server pod. |
 | server.priorityClassName | string | `""` | Priority class name for the server pod. |
-| server.replicaCount | int | `2` | Number of server replicas |
+| server.replicaCount | int | `1` | Number of server replicas. Keep one active server; multi-replica HA is not supported yet. |
 | server.resources | object | `{"limits":{"cpu":"2","memory":"8Gi"},"requests":{"cpu":"1","memory":"4Gi"}}` | Resource requests and limits |
 | server.service.nodePort | string | `""` | Node port to bind when type is not ClusterIP. Empty lets Kubernetes allocate one from the cluster node-port range. |
 | server.service.type | string | `"ClusterIP"` | Service type for the server. Set to NodePort or LoadBalancer to reach the server from outside the cluster. |

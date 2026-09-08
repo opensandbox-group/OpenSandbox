@@ -575,6 +575,20 @@ class TestK8sClient:
         with pytest.raises(Exception, match="network error"):
             c.list_pods("ns")
 
+    def test_read_pod_returns_pod_and_maps_not_found_to_none(self, k8s_runtime_config):
+        c = self._make_client(k8s_runtime_config)
+        pod = MagicMock()
+        c._core_v1_api.read_namespaced_pod.return_value = pod
+
+        assert c.read_pod("ns", "sandbox-0") is pod
+        c._core_v1_api.read_namespaced_pod.assert_called_once_with(
+            namespace="ns",
+            name="sandbox-0",
+        )
+
+        c._core_v1_api.read_namespaced_pod.side_effect = ApiException(status=404)
+        assert c.read_pod("ns", "missing") is None
+
     def test_read_runtime_class_delegates_to_api(self, k8s_runtime_config):
         """read_runtime_class forwards to NodeV1Api.read_runtime_class."""
         c = self._make_client(k8s_runtime_config)
@@ -641,6 +655,13 @@ class TestK8sClient:
         mock_limiter = MagicMock()
         c._read_limiter = mock_limiter
         c.list_pods("ns")
+        mock_limiter.acquire.assert_called_once()
+
+    def test_read_limiter_called_on_read_pod(self, k8s_runtime_config):
+        c = self._make_client(k8s_runtime_config)
+        mock_limiter = MagicMock()
+        c._read_limiter = mock_limiter
+        c.read_pod("ns", "sandbox-0")
         mock_limiter.acquire.assert_called_once()
 
     def test_read_limiter_called_on_read_runtime_class(self, k8s_runtime_config):

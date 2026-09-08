@@ -247,7 +247,7 @@ func TestReconcilePoolRequeuesAfterBackfillPatchFailure(t *testing.T) {
 		latestAllocation: map[string]string{allocatedPod.Name: sandbox.Name},
 	}
 
-	result, err := r.reconcilePool(ctx, pool, []*sandboxv1alpha1.BatchSandbox{sandbox}, []*corev1.Pod{allocatedPod, idlePod})
+	result, err := r.reconcilePool(ctx, pool, []*sandboxv1alpha1.BatchSandbox{sandbox}, []*corev1.Pod{allocatedPod, idlePod}, 2)
 	if err != nil {
 		t.Fatalf("reconcilePool() error = %v, want nil", err)
 	}

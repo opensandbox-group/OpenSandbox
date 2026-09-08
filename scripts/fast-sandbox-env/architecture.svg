@@ -1,0 +1,386 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="2520" viewBox="0 0 1680 2520" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="ab" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#1d4ed8"/></marker>
+    <marker id="ag" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#16a34a"/></marker>
+    <marker id="ap" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#9333ea"/></marker>
+    <marker id="ao" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#ea580c"/></marker>
+    <marker id="as" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#64748b"/></marker>
+  </defs>
+  <style>
+    .t-title{font-size:27px;font-weight:700;fill:#0f172a}
+    .t-sub{font-size:13px;fill:#475569}
+    .t-panel{font-size:16.5px;font-weight:700;fill:#0f172a}
+    .t-box{font-size:12.5px;font-weight:700;fill:#0f172a}
+    .t-body{font-size:10.8px;fill:#334155}
+    .t-small{font-size:9.8px;fill:#64748b}
+    .t-chip{font-size:11.5px;font-weight:600;fill:#0c4a6e}
+    .t-mono{font-size:10.3px;fill:#334155;font-family:ui-monospace,Menlo,Consolas,monospace}
+  </style>
+
+  <rect width="1680" height="2520" fill="#f8fafc"/>
+  <text x="40" y="46" class="t-title">fast-sandbox integration environment (OpenSandbox side) - how it works</text>
+  <text x="40" y="70" class="t-sub">scripts/fast-sandbox-env · two-node kind + KVM passthrough · fast-sandbox@master · firecracker pool with egress attached (Sandbox Actions channel) and P2P delivery (DART) by default · initializes environment + pool only, no sandboxes</text>
+
+  <!-- ================= P1 host topology ================= -->
+  <rect x="40" y="90" width="1600" height="810" rx="14" fill="#f1f5f9" stroke="#334155" stroke-width="2.5"/>
+  <text x="60" y="120" class="t-panel">1. Host and kind cluster topology (steady state after up)</text>
+  <g>
+    <line x1="1150" y1="114" x2="1186" y2="114" stroke="#1d4ed8" stroke-width="2.5"/><text x="1192" y="118" class="t-small">control</text>
+    <line x1="1275" y1="114" x2="1311" y2="114" stroke="#16a34a" stroke-width="2.5"/><text x="1317" y="118" class="t-small">data</text>
+    <line x1="1372" y1="114" x2="1408" y2="114" stroke="#9333ea" stroke-width="2.5" stroke-dasharray="6 3"/><text x="1414" y="118" class="t-small">P2P</text>
+    <line x1="1466" y1="114" x2="1502" y2="114" stroke="#ea580c" stroke-width="2.5"/><text x="1508" y="118" class="t-small">egress</text>
+  </g>
+
+  <!-- left column: host-side assets -->
+  <g>
+    <rect x="60" y="140" width="240" height="106" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="72" y="160" class="t-box">Host devices (passthrough)</text>
+    <text x="72" y="178" class="t-body">/dev/kvm - Firecracker microVMs</text>
+    <text x="72" y="193" class="t-body">/dev/net/tun - per-sandbox tap/gw</text>
+    <text x="72" y="208" class="t-body">/dev/shm - snapshot memory staging</text>
+    <text x="72" y="226" class="t-small">vhost-vsock not mounted (host-dependent)</text>
+
+    <rect x="60" y="258" width="240" height="120" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="72" y="278" class="t-box">XFS StateRoot (loop-mounted)</text>
+    <text x="72" y="296" class="t-body">/var/lib/fast-sandbox from sparse image</text>
+    <text x="72" y="311" class="t-body">(24G default; XFS_STATEROOT=0 off)</text>
+    <text x="72" y="326" class="t-body">cp --reflink probe after mount:</text>
+    <text x="72" y="341" class="t-body">per-sandbox rootfs full copy (~2.5s)</text>
+    <text x="72" y="356" class="t-body">becomes a CoW clone (~ms)</text>
+    <text x="72" y="372" class="t-small">per-node subdirs: control-plane/ worker/</text>
+
+    <rect x="60" y="390" width="240" height="96" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="72" y="410" class="t-box">Docker daemon / kind network</text>
+    <text x="72" y="428" class="t-body">kind node containers x2 share it</text>
+    <text x="72" y="443" class="t-body">MinIO container joins it too:</text>
+    <text x="72" y="458" class="t-body">container IP = in-cluster endpoint</text>
+    <text x="72" y="473" class="t-small">(avoids docker-proxy hairpin issues)</text>
+
+    <rect x="60" y="498" width="240" height="84" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="72" y="518" class="t-box">Sysctl (up/down symmetric)</text>
+    <text x="72" y="536" class="t-mono">fs.inotify.max_user_instances</text>
+    <text x="72" y="551" class="t-mono">  -&gt; 8192 (orig saved to $WORK)</text>
+    <text x="72" y="570" class="t-small">cgroup v2 is a hard kind prerequisite</text>
+
+    <rect x="60" y="594" width="240" height="106" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="72" y="614" class="t-box">Workspace $WORK</text>
+    <text x="72" y="632" class="t-small">default $PWD/.fast-sandbox-env</text>
+    <text x="72" y="650" class="t-body">run.log - full output archive</text>
+    <text x="72" y="665" class="t-body">logs/ - stage logs + failure dumps</text>
+    <text x="72" y="680" class="t-body">gen/ - rendered kind/pool YAML</text>
+    <text x="72" y="695" class="t-small">minio-data/ · sysctl backup</text>
+  </g>
+
+  <!-- cluster-scoped chips -->
+  <g>
+    <rect x="320" y="140" width="310" height="56" rx="8" fill="#e0f2fe" stroke="#0284c7"/>
+    <text x="332" y="161" class="t-chip">CRDs (from checkout config/crd)</text>
+    <text x="332" y="180" class="t-small">sandboxes · sandboxpools · sandboxtemplates</text>
+
+    <rect x="650" y="140" width="310" height="56" rx="8" fill="#e0f2fe" stroke="#0284c7"/>
+    <text x="662" y="161" class="t-chip">RBAC + dev route keys (all-in-one)</text>
+    <text x="662" y="180" class="t-small">Ed25519 route-keys (dev only)</text>
+
+    <rect x="980" y="140" width="310" height="56" rx="8" fill="#e0f2fe" stroke="#0284c7"/>
+    <text x="992" y="161" class="t-chip">ConfigMap: runtime-environments</text>
+    <text x="992" y="180" class="t-small">firecracker runtime profile (RuntimeReady basis)</text>
+
+    <rect x="1310" y="140" width="310" height="56" rx="8" fill="#f3e8ff" stroke="#9333ea"/>
+    <text x="1322" y="161" class="t-chip" fill="#6b21a8">headless Service: dart :9000</text>
+    <text x="1322" y="180" class="t-small">DART peer discovery (dns:dart.fast-sandbox-system)</text>
+  </g>
+
+  <!-- ======== node A ======== -->
+  <g>
+    <rect x="320" y="212" width="630" height="500" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+    <rect x="328" y="218" width="614" height="46" rx="6" fill="#dbeafe"/>
+    <text x="340" y="236" class="t-box">kind node A (control-plane, untainted - both nodes schedule)</text>
+    <text x="340" y="254" class="t-small">passthrough: /dev/kvm · /dev/net/tun · /dev/shm  |  labels: kvm=true · firecracker-node=true (StateRoot below)</text>
+
+    <rect x="328" y="272" width="614" height="52" rx="6" fill="#e2e8f0" stroke="#475569"/>
+    <text x="340" y="291" class="t-box">Pod: fast-sandbox-controller (all-in-one: reconciler + fastpath :9090)</text>
+    <text x="340" y="308" class="t-small">single process, no leader election · pool/fastlet creation + capacity heartbeats · janitor DS on both nodes</text>
+
+    <rect x="328" y="332" width="614" height="80" rx="6" fill="#f0fdf4" stroke="#22c55e"/>
+    <text x="340" y="351" class="t-box">DaemonSet: firecracker-runtime-installer (node assets)</text>
+    <text x="340" y="368" class="t-body">init container downloads firecracker v1.16.1 + jailer + vmlinux 6.1 to hostPath</text>
+    <text x="340" y="383" class="t-body">(6.1 kernel has VMGenID: reseeds CRNG at snapshot restore, avoids execd hangs)</text>
+    <text x="340" y="400" class="t-small">must complete before fastlet starts - pool injects hostPath File mounts; missing binaries break the Pod</text>
+    <line x1="634" y1="412" x2="634" y2="684" stroke="#22c55e" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#ag)"/>
+
+    <rect x="328" y="420" width="614" height="104" rx="6" fill="#faf5ff" stroke="#a855f7"/>
+    <text x="340" y="439" class="t-box">DaemonSet: firecracker-runtime-agent (cluster network, not hostNetwork)</text>
+    <text x="340" y="456" class="t-body">UDS API: PinImage + lease mgmt (shared hostPath)</text>
+    <text x="340" y="471" class="t-body">ARTIFACT_STORE=s3://sandbox-images/publish</text>
+    <text x="340" y="486" class="t-body">Pull creds: registry.json (secret-mounted)</text>
+    <text x="340" y="501" class="t-body">STATE_ROOT=/var/lib/fast-sandbox/firecracker</text>
+    <rect x="628" y="438" width="302" height="78" rx="6" fill="#f3e8ff" stroke="#9333ea"/>
+    <text x="640" y="456" class="t-box" fill="#6b21a8">dart child (P2P gateway)</text>
+    <text x="640" y="471" class="t-body">:8145 client plane (agent pulls via it)</text>
+    <text x="640" y="486" class="t-body">:8147 admin/metrics (health + counters)</text>
+    <text x="640" y="501" class="t-body">:9000 peer (binds podIP, cross-node)</text>
+    <text x="640" y="513" class="t-small">block cache cache/dart-(hostname)</text>
+
+    <rect x="328" y="556" width="614" height="128" rx="6" fill="#ecfeff" stroke="#0891b2"/>
+    <text x="340" y="574" class="t-box">Pod: fastlet (pool-managed · one per node, anti-affinity)</text>
+    <text x="634" y="590" class="t-small" text-anchor="middle">shared Pod netns - loopback 127.0.0.1:18080</text>
+    <rect x="340" y="598" width="280" height="60" rx="6" fill="#cffafe" stroke="#06b6d4"/>
+    <text x="352" y="616" class="t-box">fastlet container</text>
+    <text x="352" y="631" class="t-body">firecracker driver · mounts agent UDS</text>
+    <text x="352" y="646" class="t-body">clones netns/tap slot per sandbox</text>
+    <rect x="650" y="598" width="280" height="60" rx="6" fill="#fff7ed" stroke="#ea580c"/>
+    <text x="662" y="616" class="t-box" fill="#9a3412">egress container (OpenSandbox)</text>
+    <text x="662" y="631" class="t-body">fleet · dns+nft · NET_ADMIN/RAW</text>
+    <text x="662" y="646" class="t-body">nft table opensandbox-fleet (subj_)</text>
+    <line x1="622" y1="628" x2="648" y2="628" stroke="#ea580c" stroke-width="2" marker-start="url(#ao)" marker-end="url(#ao)"/>
+    <rect x="340" y="662" width="590" height="16" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+    <text x="347" y="674" class="t-small" fill="#713f12">microVM slots x5 - restored on demand at sandbox create (guest 172.30.0.3 · execd :44772)</text>
+
+    <rect x="328" y="688" width="614" height="18" rx="4" fill="#f8fafc" stroke="#94a3b8"/>
+    <text x="336" y="701" class="t-small">hostPath: /opt/fast-sandbox/firecracker (binaries) · /run/fast-sandbox/firecracker (UDS) · /var/lib/fast-sandbox</text>
+  </g>
+
+  <!-- ======== node B ======== -->
+  <g>
+    <rect x="990" y="212" width="630" height="500" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+    <rect x="998" y="218" width="614" height="46" rx="6" fill="#dbeafe"/>
+    <text x="1010" y="236" class="t-box">kind node B (worker)</text>
+    <text x="1010" y="254" class="t-small">same passthrough and labels as node A - both nodes schedulable is what makes the P2P topology work</text>
+
+    <rect x="998" y="272" width="614" height="52" rx="6" fill="#f8fafc" stroke="#94a3b8"/>
+    <text x="1010" y="291" class="t-box">State: pool capacity ready, 0 sandboxes</text>
+    <text x="1010" y="308" class="t-small">environment init stops here (no sandbox creation); create later with fastctl / verify-egress</text>
+
+    <rect x="998" y="332" width="614" height="80" rx="6" fill="#f0fdf4" stroke="#22c55e"/>
+    <text x="1010" y="351" class="t-box">DaemonSet: firecracker-runtime-installer</text>
+    <text x="1010" y="368" class="t-body">same assets onto node B: firecracker/jailer/vmlinux to hostPath</text>
+    <text x="1010" y="383" class="t-body">(DaemonSet selects firecracker-node=true nodes)</text>
+    <text x="1010" y="400" class="t-small">downloads: GitHub release + s3 (production: private mirror + pinned)</text>
+
+    <rect x="998" y="420" width="614" height="104" rx="6" fill="#faf5ff" stroke="#a855f7"/>
+    <text x="1010" y="439" class="t-box">DaemonSet: firecracker-runtime-agent + dart child</text>
+    <text x="1010" y="456" class="t-body">identical to A: UDS · PinImage · leases</text>
+    <text x="1010" y="471" class="t-body">cache miss asks peers first, origin last</text>
+    <text x="1010" y="486" class="t-body">readiness probe = UDS POST /v1/health</text>
+    <text x="1010" y="501" class="t-body">(falls back to direct S3 if dart is down)</text>
+    <rect x="1298" y="438" width="302" height="78" rx="6" fill="#f3e8ff" stroke="#9333ea"/>
+    <text x="1310" y="456" class="t-box" fill="#6b21a8">dart child (P2P gateway)</text>
+    <text x="1310" y="471" class="t-body">roster converges via headless svc</text>
+    <text x="1310" y="486" class="t-body">4MiB blocks · cache-&gt;peer-&gt;origin</text>
+    <text x="1310" y="501" class="t-body">cluster origin ~once per block</text>
+    <text x="1310" y="513" class="t-small">falls back to direct S3 (no stall)</text>
+
+    <rect x="998" y="556" width="614" height="128" rx="6" fill="#ecfeff" stroke="#0891b2"/>
+    <text x="1010" y="574" class="t-box">Pod: fastlet (anti-affinity vs A, lands on B)</text>
+    <text x="1305" y="590" class="t-small" text-anchor="middle">shared Pod netns - loopback 127.0.0.1:18080</text>
+    <rect x="1010" y="598" width="280" height="60" rx="6" fill="#cffafe" stroke="#06b6d4"/>
+    <text x="1022" y="616" class="t-box">fastlet container</text>
+    <text x="1022" y="631" class="t-body">same as A: driver + agent UDS</text>
+    <text x="1022" y="646" class="t-body">first create triggers PinImage</text>
+    <rect x="1320" y="598" width="280" height="60" rx="6" fill="#fff7ed" stroke="#ea580c"/>
+    <text x="1332" y="616" class="t-box" fill="#9a3412">egress container (OpenSandbox)</text>
+    <text x="1332" y="631" class="t-body">one instance per fastlet</text>
+    <text x="1332" y="646" class="t-body">policy isolated per subject (subj_)</text>
+    <line x1="1292" y1="628" x2="1318" y2="628" stroke="#ea580c" stroke-width="2" marker-start="url(#ao)" marker-end="url(#ao)"/>
+    <rect x="1010" y="662" width="590" height="16" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+    <text x="1017" y="674" class="t-small" fill="#713f12">microVM slots x5 - first pull on this node served by A's dart peer (default P2P path)</text>
+
+    <rect x="998" y="688" width="614" height="18" rx="4" fill="#f8fafc" stroke="#94a3b8"/>
+    <text x="1006" y="701" class="t-small">hostPath: same as node A (/opt · /run · /var/lib shared host paths)</text>
+  </g>
+
+  <!-- P2P peer connection through the corridor between agent and fastlet pods -->
+  <path d="M 779 520 L 779 540 L 1449 540 L 1449 520" fill="none" stroke="#9333ea" stroke-width="2.2" stroke-dasharray="7 4" marker-end="url(#ap)"/>
+  <rect x="880" y="531" width="470" height="17" rx="4" fill="#ffffff" opacity="0.95"/>
+  <text x="1115" y="543" class="t-small" text-anchor="middle" fill="#6b21a8">DART peer :9000 (discovery: headless svc dns:dart.fast-sandbox-system.svc:9000)</text>
+
+  <!-- XFS shared strip -->
+  <rect x="320" y="728" width="1300" height="42" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-dasharray="6 3"/>
+  <text x="336" y="746" class="t-body" fill="#065f46">per-node state roots on one XFS filesystem: node A binds /var/lib/fast-sandbox/control-plane, node B binds .../worker (same containerPath) - images / agent journal / jails stay private per node</text>
+  <text x="336" y="762" class="t-small" fill="#065f46">reflink CoW still works (same filesystem, per-node subtree); one node's committed cache never satisfies another node's pull - peer -&gt; origin is exercised on EVERY node's first create; down purges both</text>
+
+  <!-- MinIO and artifacts -->
+  <rect x="320" y="786" width="630" height="86" rx="8" fill="#fefce8" stroke="#ca8a04"/>
+  <text x="334" y="806" class="t-box" fill="#713f12">Docker: MinIO (kind network · container-IP:9000 = in-cluster endpoint)</text>
+  <text x="334" y="823" class="t-body">bucket=sandbox-images: publish/index/(sha256(image)).json</text>
+  <text x="334" y="838" class="t-body">-&gt; manifest.json -&gt; rootfs.ext4 / vmstate.snap / memory.snap</text>
+  <text x="334" y="856" class="t-small">publish/pull credentials split; agent only hands out presigned URLs (AK never leaves)</text>
+
+  <rect x="990" y="786" width="630" height="86" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="1004" y="806" class="t-box">up artifacts and assertions</text>
+  <text x="1004" y="823" class="t-body">kind load x7: controller·fastlet·fastlet-proxy·sandbox-proxy</text>
+  <text x="1004" y="838" class="t-body">·janitor·agent·egress (builder only with BUILD_TEMPLATE=1)</text>
+  <text x="1004" y="856" class="t-small">asserts: dartUp=true · roster=node count · pool conditions · actions/status echo</text>
+
+  <!-- ================= P2 up pipeline ================= -->
+  <rect x="40" y="930" width="1600" height="230" rx="14" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="60" y="960" class="t-panel">2. fast-sandbox-env.sh up - stage pipeline (numbers = order, logs in $WORK/logs/)</text>
+  <g>
+    <g><rect x="58" y="976" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="76" cy="994" r="9" fill="#0284c7"/><text x="76" y="998" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">1</text><text x="92" y="998" class="t-chip">preflight tooling</text><text x="70" y="1016" class="t-small">docker/go/kind/kubectl/jq</text><text x="70" y="1030" class="t-small">KVM · cgroup v2 · Linux host</text></g>
+    <g><rect x="284" y="976" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="302" cy="994" r="9" fill="#0284c7"/><text x="302" y="998" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">2</text><text x="318" y="998" class="t-chip">sysctl inotify</text><text x="296" y="1016" class="t-small">max_user_instances -&gt; 8192</text><text x="296" y="1030" class="t-small">backed up, restored on down</text></g>
+    <g><rect x="510" y="976" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="528" cy="994" r="9" fill="#0284c7"/><text x="528" y="998" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">3</text><text x="544" y="998" class="t-chip">fast-sandbox@master</text><text x="522" y="1016" class="t-small">clone if missing, else ff to</text><text x="522" y="1030" class="t-small">origin/master; dirty tree aborts</text></g>
+    <g><rect x="736" y="976" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="754" cy="994" r="9" fill="#0284c7"/><text x="754" y="998" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">4</text><text x="770" y="998" class="t-chip">build images</text><text x="748" y="1016" class="t-small">make images x6 (fast-sandbox)</text><text x="748" y="1030" class="t-small">+ egress (built in this repo)</text></g>
+    <g><rect x="962" y="976" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="980" cy="994" r="9" fill="#0284c7"/><text x="980" y="998" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">5</text><text x="996" y="998" class="t-chip">XFS StateRoot</text><text x="974" y="1016" class="t-small">loop mount + reflink probe</text><text x="974" y="1030" class="t-small">(before kind create)</text></g>
+    <g><rect x="1188" y="976" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="1206" cy="994" r="9" fill="#0284c7"/><text x="1206" y="998" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">6</text><text x="1222" y="998" class="t-chip">kind two nodes</text><text x="1200" y="1016" class="t-small">render kind config + create</text><text x="1200" y="1030" class="t-small">labels · untaint control-plane</text></g>
+    <g><rect x="1414" y="976" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="1432" cy="994" r="9" fill="#0284c7"/><text x="1432" y="998" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">7</text><text x="1448" y="998" class="t-chip">MinIO + bucket</text><text x="1426" y="1016" class="t-small">container joins kind network</text><text x="1426" y="1030" class="t-small">in-cluster reachability check</text></g>
+
+    <g><rect x="58" y="1062" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="76" cy="1080" r="9" fill="#0284c7"/><text x="76" y="1084" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">8</text><text x="92" y="1084" class="t-chip">CRDs + control plane</text><text x="70" y="1102" class="t-small">checkout config/crd + all-in-one</text><text x="70" y="1116" class="t-small">kind load x7 · rollout wait</text></g>
+    <g><rect x="284" y="1062" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="302" cy="1080" r="9" fill="#0284c7"/><text x="302" y="1084" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">9</text><text x="318" y="1084" class="t-chip">credentials</text><text x="296" y="1102" class="t-small">gen-registry compiles</text><text x="296" y="1116" class="t-small">registryconfig (go run)</text></g>
+    <g><rect x="510" y="1062" width="212" height="72" rx="8" fill="#e0f2fe" stroke="#0284c7"/><circle cx="528" cy="1080" r="9" fill="#0284c7"/><text x="528" y="1084" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">10</text><text x="544" y="1084" class="t-chip">installer assets</text><text x="522" y="1102" class="t-small">manifests/node/installer</text><text x="522" y="1116" class="t-small">DS ready = binaries on disk</text></g>
+    <g><rect x="736" y="1062" width="212" height="72" rx="8" fill="#f3e8ff" stroke="#9333ea"/><circle cx="754" cy="1080" r="9" fill="#9333ea"/><text x="754" y="1084" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">11</text><text x="770" y="1084" class="t-chip" fill="#6b21a8">agent + DART</text><text x="748" y="1102" class="t-small">per-pod dart /healthz assert</text><text x="748" y="1116" class="t-small">dartUp · roster = node count</text></g>
+    <g><rect x="962" y="1062" width="212" height="72" rx="8" fill="#fef9c3" stroke="#ca8a04"/><circle cx="980" cy="1080" r="9" fill="#ca8a04"/><text x="980" y="1084" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">12</text><text x="996" y="1084" class="t-chip" fill="#713f12">(optional) template</text><text x="974" y="1102" class="t-small">BUILD_TEMPLATE=1: builder</text><text x="974" y="1116" class="t-small">bakes golden set, publishes</text></g>
+    <g><rect x="1188" y="1062" width="212" height="72" rx="8" fill="#ecfeff" stroke="#0891b2"/><circle cx="1206" cy="1080" r="9" fill="#0891b2"/><text x="1206" y="1084" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">13</text><text x="1222" y="1084" class="t-chip" fill="#155e75">SandboxPool</text><text x="1200" y="1102" class="t-small">render pool YAML (images/caps)</text><text x="1200" y="1116" class="t-small">apply firecracker-egress-pool</text></g>
+    <g><rect x="1414" y="1062" width="212" height="72" rx="8" fill="#ecfeff" stroke="#0891b2"/><circle cx="1432" cy="1080" r="9" fill="#0891b2"/><text x="1432" y="1084" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="700">14</text><text x="1448" y="1084" class="t-chip" fill="#155e75">readiness waits</text><text x="1426" y="1102" class="t-small">fastlet · egress Ready</text><text x="1426" y="1116" class="t-small">pool cond · actions/status</text></g>
+  </g>
+
+  <!-- ================= P3 P2P delivery ================= -->
+  <rect x="40" y="1190" width="1600" height="470" rx="14" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="60" y="1220" class="t-panel">3. On-demand P2P delivery (default data plane) - first sandbox create on node B</text>
+
+  <g>
+    <rect x="70" y="1240" width="170" height="54" rx="8" fill="#e2e8f0" stroke="#475569"/><text x="155" y="1262" class="t-box" text-anchor="middle">fastctl (user side)</text><text x="155" y="1280" class="t-small" text-anchor="middle">fast-sandbox CLI</text>
+    <rect x="300" y="1240" width="170" height="54" rx="8" fill="#e2e8f0" stroke="#475569"/><text x="385" y="1262" class="t-box" text-anchor="middle">fastpath controller</text><text x="385" y="1280" class="t-small" text-anchor="middle">gRPC :9090</text>
+    <rect x="530" y="1240" width="170" height="54" rx="8" fill="#cffafe" stroke="#06b6d4"/><text x="615" y="1262" class="t-box" text-anchor="middle">fastlet-B</text><text x="615" y="1280" class="t-small" text-anchor="middle">pool pod on node B</text>
+    <rect x="760" y="1240" width="170" height="54" rx="8" fill="#faf5ff" stroke="#a855f7"/><text x="845" y="1262" class="t-box" text-anchor="middle">agent-B</text><text x="845" y="1280" class="t-small" text-anchor="middle">UDS management API</text>
+    <rect x="990" y="1240" width="170" height="54" rx="8" fill="#f3e8ff" stroke="#9333ea"/><text x="1075" y="1262" class="t-box" text-anchor="middle" fill="#6b21a8">DART-B</text><text x="1075" y="1280" class="t-small" text-anchor="middle">local P2P gateway</text>
+    <rect x="1220" y="1240" width="170" height="54" rx="8" fill="#f3e8ff" stroke="#9333ea"/><text x="1305" y="1262" class="t-box" text-anchor="middle" fill="#6b21a8">DART-A</text><text x="1305" y="1280" class="t-small" text-anchor="middle">peer on node A</text>
+    <rect x="1450" y="1240" width="170" height="54" rx="8" fill="#fefce8" stroke="#ca8a04"/><text x="1535" y="1262" class="t-box" text-anchor="middle" fill="#713f12">MinIO (origin)</text><text x="1535" y="1280" class="t-small" text-anchor="middle">golden snapshot set</text>
+  </g>
+  <g stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="4 4">
+    <line x1="155" y1="1294" x2="155" y2="1552"/><line x1="385" y1="1294" x2="385" y2="1552"/>
+    <line x1="615" y1="1294" x2="615" y2="1552"/><line x1="845" y1="1294" x2="845" y2="1552"/>
+    <line x1="1075" y1="1294" x2="1075" y2="1552"/><line x1="1305" y1="1294" x2="1305" y2="1552"/>
+    <line x1="1535" y1="1294" x2="1535" y2="1552"/>
+  </g>
+
+  <g>
+    <line x1="155" y1="1322" x2="377" y2="1322" stroke="#1d4ed8" stroke-width="2" marker-end="url(#ab)"/>
+    <text x="266" y="1314" class="t-body" text-anchor="middle">1  fastctl run --pool firecracker-egress-pool --action egress=(policy)</text>
+    <line x1="385" y1="1356" x2="607" y2="1356" stroke="#1d4ed8" stroke-width="2" marker-end="url(#ab)"/>
+    <text x="496" y="1348" class="t-body" text-anchor="middle">2  capacity-heartbeat placement -&gt; Sandbox CR (full pool = ResourceExhausted, no queue)</text>
+    <line x1="615" y1="1390" x2="837" y2="1390" stroke="#1d4ed8" stroke-width="2" marker-end="url(#ab)"/>
+    <text x="726" y="1382" class="t-body" text-anchor="middle">3  PinImage(golden set) - local cache miss triggers on-demand pull</text>
+    <line x1="845" y1="1424" x2="1067" y2="1424" stroke="#9333ea" stroke-width="2" marker-end="url(#ap)"/>
+    <text x="956" y="1416" class="t-body" text-anchor="middle" fill="#6b21a8">4  GET /dart/(presigned S3 URL) - SigV4 signed by the agent</text>
+    <line x1="1075" y1="1458" x2="1297" y2="1458" stroke="#9333ea" stroke-width="2" stroke-dasharray="7 4" marker-end="url(#ap)"/>
+    <text x="1186" y="1450" class="t-body" text-anchor="middle" fill="#6b21a8">5  peer block request (full roster visible, per-block routing)</text>
+    <line x1="1305" y1="1492" x2="1083" y2="1492" stroke="#16a34a" stroke-width="2" stroke-dasharray="7 4" marker-end="url(#ag)"/>
+    <text x="1186" y="1484" class="t-body" text-anchor="middle" fill="#166534">6  blocks cached on A served directly (peer hit)</text>
+    <line x1="1075" y1="1526" x2="1527" y2="1526" stroke="#16a34a" stroke-width="2" marker-end="url(#ag)"/>
+    <text x="1300" y="1518" class="t-body" text-anchor="middle" fill="#166534">7  only missing blocks fetch origin - ~once per 4MiB block cluster-wide</text>
+    <path d="M 845 1544 h 34 v -14" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#as)"/>
+    <text x="892" y="1548" class="t-small">8  commit to node cache (final) -&gt; fastlet reflink-restores the microVM (~33ms)</text>
+  </g>
+
+  <rect x="70" y="1566" width="1550" height="66" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="84" y="1586" class="t-body">Evidence: dart_block_source_total{source=cache|peer|origin} per node at :8147/metrics (WARM_IMAGES=1 asserts at up: origin ~ block total, peer &gt; 0 across 2 nodes)</text>
+  <text x="84" y="1602" class="t-body">Knobs: KIND_SINGLE=1 -&gt; single node, cache-only (poolMin auto 1); WARM_IMAGES=1 -&gt; preheat at pool create (implies BUILD_TEMPLATE=1); default is on-demand</text>
+  <text x="84" y="1618" class="t-small">Cold pull ~80-100s (3.6GiB set) once per environment; later creates on the node: run RPC ~55ms; XFS reflink keeps per-instance rootfs copies at ~ms</text>
+
+  <!-- ================= P4 egress channel ================= -->
+  <rect x="40" y="1700" width="1600" height="440" rx="14" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="60" y="1730" class="t-panel">4. egress actions channel - per-sandbox network policy attached by default</text>
+
+  <rect x="70" y="1750" width="880" height="360" rx="10" fill="#ecfeff" stroke="#0891b2" stroke-width="2"/>
+  <text x="86" y="1774" class="t-box">fastlet Pod zoomed (one per node · managed by firecracker-egress-pool)</text>
+
+  <rect x="90" y="1790" width="380" height="120" rx="8" fill="#cffafe" stroke="#06b6d4"/>
+  <text x="104" y="1812" class="t-box">fastlet container</text>
+  <text x="104" y="1830" class="t-body">- firecracker driver: sandbox create/delete, netns/tap slots</text>
+  <text x="104" y="1846" class="t-body">- lifecycle driver: ordered delivery to the egress Handler</text>
+  <text x="104" y="1862" class="t-body">- probe: infraComponents tcpConnect :18080</text>
+  <text x="104" y="1878" class="t-body">- mounts agent UDS (PinImage / leases)</text>
+  <text x="104" y="1896" class="t-small">policy updates go through fastctl update (re-sends SET_BINDING)</text>
+
+  <rect x="550" y="1790" width="380" height="120" rx="8" fill="#fff7ed" stroke="#ea580c"/>
+  <text x="564" y="1812" class="t-box" fill="#9a3412">egress container (OpenSandbox image, built here)</text>
+  <text x="564" y="1830" class="t-body">- fleet profile: /_fastlet/v1/actions[/status]</text>
+  <text x="564" y="1846" class="t-body">- dns+nft: domain policy + per-subject chains</text>
+  <text x="564" y="1862" class="t-body">- NET_ADMIN/NET_RAW: rules, socket marks</text>
+  <text x="564" y="1878" class="t-body">- binds Pod loopback 127.0.0.1:18080 only</text>
+  <text x="564" y="1896" class="t-small">sidecar profile (no actions surface) not used - pool pins fleet</text>
+
+  <line x1="472" y1="1832" x2="548" y2="1832" stroke="#ea580c" stroke-width="2.2" marker-end="url(#ao)"/>
+  <text x="510" y="1824" class="t-small" text-anchor="middle" fill="#9a3412">SET_BINDING</text>
+  <line x1="548" y1="1862" x2="472" y2="1862" stroke="#ea580c" stroke-width="2.2" marker-end="url(#ao)"/>
+  <text x="510" y="1880" class="t-small" text-anchor="middle" fill="#9a3412">200 / status</text>
+
+  <rect x="90" y="1930" width="380" height="112" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="104" y="1952" class="t-box" fill="#713f12">firecracker microVM (after sandbox create)</text>
+  <text x="104" y="1970" class="t-body">- golden snapshot restore (reflink rootfs · per-clone netns)</text>
+  <text x="104" y="1986" class="t-body">- guest eth0 172.30.0.3 · execd :44772 (baked in image)</text>
+  <text x="104" y="2002" class="t-body">- guest resolver points at slot gateway -&gt; DNS via egress</text>
+  <text x="104" y="2024" class="t-small">CA delivery: egress exports mitm-ca -&gt; guest rootfs pre-boot</text>
+
+  <rect x="550" y="1930" width="380" height="112" rx="8" fill="#ffffff" stroke="#ea580c"/>
+  <text x="564" y="1952" class="t-box" fill="#9a3412">Outbound traffic path (data plane)</text>
+  <text x="564" y="1970" class="t-body">1. guest app -&gt; slot gateway (DNAT into egress)</text>
+  <text x="564" y="1986" class="t-body">2. DNS proxy: domain match -&gt; IP into dyn_v4 set</text>
+  <text x="564" y="2002" class="t-body">3. nft subj_(uid) chain: allowed passes, rest dropped</text>
+  <text x="564" y="2024" class="t-small">per-subject policy + credential vault, mutually isolated</text>
+
+  <line x1="280" y1="1928" x2="280" y2="1914" stroke="#ca8a04" stroke-width="1.8" marker-end="url(#ag)"/>
+  <line x1="740" y1="1914" x2="740" y2="1928" stroke="#ea580c" stroke-width="1.8" marker-end="url(#ao)"/>
+  <text x="510" y="1910" class="t-small" text-anchor="middle" fill="#9a3412">guest egress enters the Pod-netns enforcement chain</text>
+
+  <g>
+    <rect x="980" y="1750" width="640" height="170" rx="10" fill="#fff7ed" stroke="#ea580c"/>
+    <text x="996" y="1774" class="t-box" fill="#9a3412">Lifecycle (per sandbox, fastlet delivers in order to 127.0.0.1:18080)</text>
+    <text x="996" y="1796" class="t-body">1  SET_BINDING: attachment(ip/gateway/hostVeth/privateCidr) + binding.input policy</text>
+    <text x="996" y="1814" class="t-body">   -&gt; deny-first in place + DNAT ready</text>
+    <text x="996" y="1832" class="t-body">2  sandbox.runtime-ready: runtime-ready notice (still deny-first)</text>
+    <text x="996" y="1850" class="t-body">3  sandbox.data-plane-ready: data plane active - policy enforced, vault pushable</text>
+    <text x="996" y="1868" class="t-body">4  REMOVE_BINDING: sandbox delete -&gt; unload that subj_ chain, others untouched</text>
+    <text x="996" y="1890" class="t-small">binding state -&gt; status.actionBindings[egress].state=Ready; egress restart replayed by fastlet (new instanceId)</text>
+
+    <rect x="980" y="1936" width="640" height="174" rx="10" fill="#f8fafc" stroke="#94a3b8"/>
+    <text x="996" y="1960" class="t-box">Assertions at env-init time (built into pool_up, no sandboxes needed)</text>
+    <text x="996" y="1982" class="t-body">- fastlet Pods Ready &gt;= poolMin (anti-affinity, one per node)</text>
+    <text x="996" y="2000" class="t-body">- egress container Ready in every fastlet Pod (image built in this repo)</text>
+    <text x="996" y="2018" class="t-body">- pool condition RuntimeReady=True (runtime-environments resolves firecracker)</text>
+    <text x="996" y="2036" class="t-body">- pool condition InfraReady=True (host-process egress validates)</text>
+    <text x="996" y="2054" class="t-body">- GET /_fastlet/v1/actions/status echoes apiVersion + ready:true + instanceId</text>
+    <text x="996" y="2078" class="t-small">environment init ends here - no sandboxes created; use verify-egress for multi-subject checks</text>
+  </g>
+
+  <!-- ================= P5 defaults / ports / layout ================= -->
+  <rect x="40" y="2180" width="1600" height="300" rx="14" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="60" y="2210" class="t-panel">5. Pool defaults · port reference · repository layout</text>
+
+  <g>
+    <rect x="70" y="2228" width="500" height="234" rx="10" fill="#ecfeff" stroke="#0891b2"/>
+    <text x="86" y="2252" class="t-box" fill="#155e75">SandboxPool: firecracker-egress-pool (manifests/pool)</text>
+    <text x="86" y="2274" class="t-body">runtime: firecracker (immutable after creation)</text>
+    <text x="86" y="2292" class="t-body">capacity: poolMin/poolMax = 2/2 (auto 1/1 when KIND_SINGLE=1)</text>
+    <text x="86" y="2310" class="t-body">podAntiAffinity(hostname) -&gt; one fastlet per node (P2P premise)</text>
+    <text x="86" y="2328" class="t-body">maxSandboxesPerPod: 5 · sandboxResources: 1CPU/512Mi/128pids</text>
+    <text x="86" y="2346" class="t-body">egress sidecar: fleet · dns+nft · NET_ADMIN+NET_RAW</text>
+    <text x="86" y="2364" class="t-body">actionHandlers: egress@18080 (hooks: runtime-ready + data-plane-ready)</text>
+    <text x="86" y="2382" class="t-body">infraComponents: egress host-process (tcpConnect probe 10s)</text>
+    <text x="86" y="2400" class="t-body">warmImages: none by default; WARM_IMAGES=1 renders SBX_IMAGE</text>
+    <text x="86" y="2422" class="t-small">image tokens (e.g. FASTLET_IMAGE) rendered to real tags in $WORK/gen</text>
+
+    <rect x="600" y="2228" width="500" height="234" rx="10" fill="#f8fafc" stroke="#94a3b8"/>
+    <text x="616" y="2252" class="t-box">Port reference</text>
+    <text x="616" y="2276" class="t-mono">9090   fastpath gRPC (port-forward 19090)</text>
+    <text x="616" y="2296" class="t-mono">8080   sandbox-proxy (central proxy)</text>
+    <text x="616" y="2316" class="t-mono">5780   fastlet-proxy (DIRECT route)</text>
+    <text x="616" y="2336" class="t-mono">18080  egress actions (Pod loopback)</text>
+    <text x="616" y="2356" class="t-mono">8145/8147  DART client / admin+metrics</text>
+    <text x="616" y="2376" class="t-mono">9000   DART peer (headless svc)</text>
+    <text x="616" y="2396" class="t-mono">44772  execd (in guest, baked in image)</text>
+    <text x="616" y="2420" class="t-small">MinIO 9000 (host 127.0.0.1 map + in-cluster container IP) · console 9001</text>
+
+    <rect x="1130" y="2228" width="490" height="234" rx="10" fill="#f8fafc" stroke="#94a3b8"/>
+    <text x="1146" y="2252" class="t-box">Repository layout (inside OpenSandbox)</text>
+    <text x="1146" y="2276" class="t-mono">scripts/fast-sandbox-env/</text>
+    <text x="1162" y="2294" class="t-mono">fast-sandbox-env.sh  README.md  architecture.svg</text>
+    <text x="1162" y="2312" class="t-mono">manifests/cluster/kind-cluster.yaml</text>
+    <text x="1162" y="2330" class="t-mono">manifests/node/{firecracker-installer,</text>
+    <text x="1162" y="2348" class="t-mono">  dart-service, runtime-agent}.yaml</text>
+    <text x="1162" y="2366" class="t-mono">manifests/pool/firecracker-egress-pool.yaml</text>
+    <text x="1146" y="2390" class="t-body">Canonical manifests (CRDs/RBAC/control plane)</text>
+    <text x="1146" y="2406" class="t-body">are applied from the fast-sandbox checkout,</text>
+    <text x="1146" y="2422" class="t-body">never duplicated here - they track master</text>
+  </g>
+</svg>

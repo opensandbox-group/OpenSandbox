@@ -67,7 +67,7 @@ opensandbox-server init-config ~/.sandbox.toml --example docker
 
 2. Edit the file for your environment. Full reference: [configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md) (all keys, defaults, validation, env vars).
 
-   Topics covered there include: Docker `network_mode` / `host_ip` (e.g. server in Docker Compose), `[egress]` when clients send `networkPolicy`, `[ingress]`, `[secure_runtime]`, Kubernetes `workload_provider` / `batchsandbox_template_file`, `[agent_sandbox]`, TTL caps, `[renew_intent]`.
+   Topics covered there include: Docker `network_mode` / `host_ip` and `[proxy] resolve_internal` (e.g. server in Docker Compose), `[egress]` when clients send `networkPolicy`, `[ingress]`, `[secure_runtime]`, Kubernetes `workload_provider` / `batchsandbox_template_file`, `[agent_sandbox]`, TTL caps, `[renew_intent]`.
    The server-wide persistence backend is configured under `[store]`; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records. PostgreSQL can be selected for externally managed persistence; see the [store configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#store).
 
 ### PostgreSQL persistence
@@ -206,6 +206,8 @@ Response:
   "entrypoint": ["python", "-m", "http.server", "8000"]
 }
 ```
+
+**Resource limits**: The request above limits the sandbox to 0.5 CPU cores (`500m`) and 512 MiB of memory (`512Mi`). With the Docker runtime, invalid CPU or memory limits return HTTP 400 (`INVALID_PARAMETER`).
 
 **Other lifecycle calls** (same `OPEN-SANDBOX-API-KEY` header): `GET /v1/sandboxes/{id}`, `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume`, `GET /v1/sandboxes/{id}/endpoints/{port}` (append `?use_server_proxy=true` when needed), `POST .../renew-expiration`, `DELETE /v1/sandboxes/{id}`. Full request/response shapes: **Swagger UI** above or OpenAPI under [specs/](/api/).
 

@@ -29,8 +29,8 @@ server:
     # -- Server image tag. Defaults to the chart appVersion when empty.
     tag: "v0.2.2"
 
-  # -- Number of server replicas
-  replicaCount: 2
+  # -- Number of server replicas. Keep one active server; multi-replica HA is not supported yet.
+  replicaCount: 1
 
   # -- Resource requests and limits
   resources:

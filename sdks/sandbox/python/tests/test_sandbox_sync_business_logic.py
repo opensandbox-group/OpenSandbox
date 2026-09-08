@@ -90,6 +90,83 @@ class _DiagnosticsServiceStub:
         )
 
 
+def test_sync_check_ready_limits_final_sleep_to_remaining_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    sleep_calls: list[float] = []
+
+    def _monotonic() -> float:
+        return clock[0]
+
+    def _sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr("opensandbox.sync.sandbox.time.time", _monotonic)
+    monkeypatch.setattr("opensandbox.sync.sandbox.time.monotonic", _monotonic)
+    monkeypatch.setattr("opensandbox.sync.sandbox.time.sleep", _sleep)
+    sbx = SandboxSync(
+        sandbox_id=str(uuid4()),
+        sandbox_service=_Noop(),
+        filesystem_service=_Noop(),
+        command_service=_Noop(),
+        health_service=_Noop(),
+        metrics_service=_Noop(),
+        egress_service=_EgressServiceStub(),
+        diagnostics_service=_DiagnosticsServiceStub(),
+        connection_config=ConnectionConfigSync(),
+        custom_health_check=lambda _: False,
+    )
+
+    with pytest.raises(SandboxReadyTimeoutException):
+        sbx.check_ready(
+            timeout=timedelta(milliseconds=10),
+            polling_interval=timedelta(milliseconds=200),
+        )
+
+    assert sleep_calls == [0.01]
+
+
+def test_sync_check_ready_succeeds_after_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    sleep_calls: list[float] = []
+    calls = {"n": 0}
+
+    def _monotonic() -> float:
+        return clock[0]
+
+    def _sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        clock[0] += seconds
+
+    def _healthy_after_two_failures(_: SandboxSync) -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    monkeypatch.setattr("opensandbox.sync.sandbox.time.monotonic", _monotonic)
+    monkeypatch.setattr("opensandbox.sync.sandbox.time.sleep", _sleep)
+    sbx = SandboxSync(
+        sandbox_id=str(uuid4()),
+        sandbox_service=_Noop(),
+        filesystem_service=_Noop(),
+        command_service=_Noop(),
+        health_service=_Noop(),
+        metrics_service=_Noop(),
+        egress_service=_EgressServiceStub(),
+        diagnostics_service=_DiagnosticsServiceStub(),
+        connection_config=ConnectionConfigSync(),
+        custom_health_check=_healthy_after_two_failures,
+    )
+
+    sbx.check_ready(timeout=timedelta(seconds=1), polling_interval=timedelta(seconds=0.01))
+
+    assert calls["n"] == 3
+    assert sleep_calls == [0.01, 0.01]
+
+
 def test_sync_check_ready_timeout_message_omits_network_configuration_hints() -> None:
     def _always_false(_: SandboxSync) -> bool:
         return False

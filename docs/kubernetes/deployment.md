@@ -56,7 +56,7 @@ Reference the Secret from a values file:
 ```yaml
 # values-server.yaml
 server:
-  replicaCount: 2
+  replicaCount: 1
   env:
     - name: OPENSANDBOX_SERVER_API_KEY
       valueFrom:
@@ -68,6 +68,15 @@ server:
 Use an external secret manager instead of creating the Secret manually in production environments.
 
 The chart installs the server into `opensandbox-system`, while the default `configToml` creates sandbox and pool resources in `opensandbox`. If you change `[kubernetes].namespace` in `configToml`, create that namespace instead of `opensandbox` before submitting workloads.
+
+::: warning Single-active Server default
+The chart defaults to `server.replicaCount: 1`. Keep one active Lifecycle
+Server. Multi-replica Server HA is not supported yet, including with a shared
+PostgreSQL database. PostgreSQL-backed Kubernetes HA will be delivered in a
+separate change. The Server Deployment uses the `Recreate` strategy so an
+upgrade stops the active Server before starting its replacement; expect a brief
+API interruption during upgrades.
+:::
 
 ### Use PostgreSQL for server persistence
 
@@ -107,8 +116,8 @@ configToml: |
 ```
 
 ::: warning
-Snapshot recovery is not coordinated across server replicas. Keep
-`server.replicaCount: 1` when replicas use the same PostgreSQL database.
+PostgreSQL provides shared persistence, but recovery is not coordinated across
+server replicas. Keep `server.replicaCount: 1` when using PostgreSQL.
 :::
 
 ### Install and verify
@@ -152,7 +161,7 @@ curl --fail http://127.0.0.1:8080/health
 |-------|---------|-------|
 | `server.image.repository` | Server image registry and repository | Override for a private mirror or custom build. |
 | `server.image.tag` | Server image version | The release install command pins it to `APP_VERSION`. |
-| `server.replicaCount` | Number of server Pods | Defaults to `2`. |
+| `server.replicaCount` | Number of server Pods | Defaults to `1`; multi-replica Server HA is not supported yet. |
 | `server.env` | Additional container environment variables | Use it with `secretKeyRef` for `OPENSANDBOX_SERVER_API_KEY`. |
 | `configToml` | Complete server configuration | Mounted at `/etc/opensandbox/config.toml`; overriding it replaces the complete default TOML, including the workload namespace. |
 | `server.gateway.enabled` | Deploy the ingress gateway with the server | Defaults to `false`. |

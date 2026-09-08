@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/internal/safego"
@@ -40,20 +39,17 @@ var legacyCommandOutputPattern = regexp.MustCompile(`^[0-9a-f]{32}\.(stdout|stde
 
 // tailStdPipe streams appended log data until the process finishes.
 func (c *Controller) tailStdPipe(file string, onExecute func(text string), done <-chan struct{}) {
-	lastPos := int64(0)
+	var tail commandOutputTail
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	mutex := &sync.Mutex{}
-	var lastWasCR bool
 	for {
 		select {
 		case <-done:
-			c.readFromPos(mutex, file, lastPos, onExecute, true, &lastWasCR)
+			tail.read(file, onExecute, true)
 			return
 		case <-ticker.C:
-			newPos := c.readFromPos(mutex, file, lastPos, onExecute, false, &lastWasCR)
-			lastPos = newPos
+			tail.read(file, onExecute, false)
 		}
 	}
 }
@@ -243,75 +239,59 @@ func (c *Controller) StartCommandOutputJanitor(ctx context.Context) error {
 	return nil
 }
 
-// readFromPos streams new content from a file starting at startPos.
-// lastWasCR persists CRLF detection across calls so a \r\n pair split between
-// two polls does not surface a spurious blank line for the trailing \n.
-func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos int64, onExecute func(string), flushIncomplete bool, lastWasCR *bool) int64 {
-	if !mutex.TryLock() {
-		return -1
-	}
-	defer mutex.Unlock()
+// commandOutputTail retains an unfinished line while reading only appended bytes.
+// Each stdout/stderr tail goroutine owns its own state.
+type commandOutputTail struct {
+	offset    int64
+	pending   bytes.Buffer
+	lastWasCR bool
+}
 
-	file, err := os.Open(filepath)
+func (t *commandOutputTail) read(path string, onExecute func(string), flushIncomplete bool) {
+	file, err := os.Open(path)
 	if err != nil {
-		return startPos
+		return
 	}
 	defer file.Close()
 
-	_, _ = file.Seek(startPos, 0) //nolint:errcheck
+	if _, err := file.Seek(t.offset, io.SeekStart); err != nil {
+		return
+	}
 
 	reader := bufio.NewReader(file)
-	var buffer bytes.Buffer
-	var currentPos int64 = startPos
-	cr := false
-	if lastWasCR != nil {
-		cr = *lastWasCR
-	}
-	defer func() {
-		if lastWasCR != nil {
-			*lastWasCR = cr
-		}
-	}()
-
 	for {
 		b, err := reader.ReadByte()
 		if err != nil {
-			if err == io.EOF {
-				// If buffer has content but no newline, flush if needed, otherwise wait for next read
-				if flushIncomplete && buffer.Len() > 0 {
-					onExecute(buffer.String())
-					buffer.Reset()
-				}
+			if err == io.EOF && flushIncomplete && t.pending.Len() > 0 {
+				onExecute(t.pending.String())
+				t.pending.Reset()
 			}
 			break
 		}
-		currentPos++
+		t.offset++
 
-		// Check if it's a line terminator (\n or \r)
 		if b == '\n' || b == '\r' {
 			switch {
-			case buffer.Len() > 0:
-				// Flush the line content without the terminator
-				onExecute(buffer.String())
-				buffer.Reset()
-			case b == '\n' && cr:
-				// Second half of a \r\n pair; already emitted on \r
+			case t.pending.Len() > 0:
+				onExecute(t.pending.String())
+				t.pending.Reset()
+			case b == '\n' && t.lastWasCR:
+				// The preceding CR already emitted this line.
 			default:
-				// Standalone blank line; surface it so callers see the gap
 				onExecute("\n")
 			}
-			cr = (b == '\r')
+			t.lastWasCR = b == '\r'
 			continue
 		}
 
-		cr = false
-		buffer.WriteByte(b)
+		t.lastWasCR = false
+		t.pending.WriteByte(b)
 	}
-
-	endPos, _ := file.Seek(0, 1)
-	// If the last read position doesn't end with a newline, return buffer start position and wait for next flush
-	if !flushIncomplete && buffer.Len() > 0 {
-		return currentPos - int64(buffer.Len())
+	// Reuse storage within a poll, but release completed long lines between polls.
+	if t.pending.Len() == 0 {
+		t.pending = bytes.Buffer{}
+	} else if t.pending.Cap() > 4096 && t.pending.Len() < t.pending.Cap()/2 {
+		// Keep a short trailing fragment without retaining a completed long line's storage.
+		t.pending = *bytes.NewBuffer(bytes.Clone(t.pending.Bytes()))
 	}
-	return endPos
 }

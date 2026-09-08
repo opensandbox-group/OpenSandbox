@@ -1,0 +1,70 @@
+# kind-cluster.yaml — two-node Kind cluster for the fast-sandbox
+# integration environment.
+#
+# P2P is the standard topology: every node runs a runtime-agent with a
+# node-local DART daemon, and pool fastlets spread one per node
+# (podAntiAffinity), so the second node's artifact pull is served by the
+# first node's DART peer instead of the origin. KIND_SINGLE=1 strips the
+# worker at render time (cache-only, no peer traffic).
+#
+# Host devices passed through into every node container:
+#   /dev/kvm            Firecracker microVMs (required)
+#   /sys/.../kvm        KVM access inside the container
+#   /dev/net/tun        TAP devices for the per-clone netns data plane
+#   /dev/shm            snapshot memory staging (default 64MiB is too small)
+#   /var/lib/fast-sandbox  StateRoot; prepared by fast-sandbox-env.sh up
+#                          (XFS loop image when XFS_STATEROOT=1 so
+#                          per-sandbox rootfs copies are CoW reflinks)
+#
+# Node state roots are PRIVATE per node: each node container binds its
+# own host subdirectory (control-plane/ or worker/) at the same
+# containerPath /var/lib/fast-sandbox, so the runtime-agent image cache
+# (<StateRoot>/images/<sha>), the agent journal (<StateRoot>/agent) and
+# the jails are never shared across nodes — a second node's first pull
+# always goes through DART (peer -> origin) instead of becoming a local
+# hit on the first node's committed files. Both subdirectories live on
+# the same host XFS filesystem, so per-sandbox rootfs reflink copies keep
+# working within each node's subtree (reflink is same-filesystem only).
+#
+# vhost-vsock is intentionally NOT mounted: the firecracker driver probes
+# only /dev/kvm and /dev/net/tun, and hosts without the device fail kind
+# create when docker tries to create the mount source under /sys.
+#
+# Registry mirrors: this file assumes direct Docker Hub access (the
+# installer pulls curlimages/curl, alpine). On blocked hosts set
+# DOCKER_MIRROR="https://mirror.example.com[,https://fallback]" and the
+# render step in fast-sandbox-env.sh injects a containerdConfigPatches
+# block for docker.io before `kind create`.
+#
+# Usage (normally through fast-sandbox-env.sh up):
+#   kind create cluster --config kind-cluster.yaml
+#   kubectl label node <node> sandbox.fast.io/kvm=true
+#   kubectl label node <node> fast-sandbox.io/firecracker-node=true
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: fast-sandbox-integration
+nodes:
+- role: control-plane
+  extraMounts:
+  - hostPath: /dev/kvm
+    containerPath: /dev/kvm
+  - hostPath: /sys/devices/virtual/misc/kvm
+    containerPath: /sys/devices/virtual/misc/kvm
+  - hostPath: /dev/net/tun
+    containerPath: /dev/net/tun
+  - hostPath: /dev/shm
+    containerPath: /dev/shm
+  - hostPath: /var/lib/fast-sandbox/control-plane
+    containerPath: /var/lib/fast-sandbox
+- role: worker
+  extraMounts:
+  - hostPath: /dev/kvm
+    containerPath: /dev/kvm
+  - hostPath: /sys/devices/virtual/misc/kvm
+    containerPath: /sys/devices/virtual/misc/kvm
+  - hostPath: /dev/net/tun
+    containerPath: /dev/net/tun
+  - hostPath: /dev/shm
+    containerPath: /dev/shm
+  - hostPath: /var/lib/fast-sandbox/worker
+    containerPath: /var/lib/fast-sandbox

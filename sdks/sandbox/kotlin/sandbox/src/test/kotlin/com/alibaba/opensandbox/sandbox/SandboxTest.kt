@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
@@ -353,6 +354,31 @@ class SandboxTest {
         assertThrows(SandboxReadyTimeoutException::class.java) {
             sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
         }
+    }
+
+    @Test
+    fun `checkReady timeout should not overshoot by a polling interval`() {
+        every { healthService.ping(sandboxId) } returns false
+
+        val start = System.nanoTime()
+        assertThrows(SandboxReadyTimeoutException::class.java) {
+            sandbox.checkReady(Duration.ofMillis(20), Duration.ofSeconds(2))
+        }
+        val elapsed = Duration.ofNanos(System.nanoTime() - start)
+
+        assertTrue(elapsed < Duration.ofMillis(500), "expected timeout in ~20ms, took ${elapsed.toMillis()}ms")
+    }
+
+    @Test
+    fun `checkReady should reject non-positive polling interval before polling`() {
+        assertThrows(InvalidArgumentException::class.java) {
+            sandbox.checkReady(Duration.ofSeconds(1), Duration.ofMillis(-1))
+        }
+        assertThrows(InvalidArgumentException::class.java) {
+            sandbox.checkReady(Duration.ofSeconds(1), Duration.ZERO)
+        }
+
+        verify(exactly = 0) { healthService.ping(any()) }
     }
 
     @Test

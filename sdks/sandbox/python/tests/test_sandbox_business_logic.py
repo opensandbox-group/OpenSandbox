@@ -166,6 +166,41 @@ async def test_check_ready_succeeds_after_retries_without_real_sleep(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_check_ready_limits_final_sleep_to_remaining_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    sleep_calls: list[float] = []
+
+    def _monotonic() -> float:
+        return clock[0]
+
+    async def _sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        clock[0] += seconds
+
+    async def _always_false(_: Sandbox) -> bool:
+        return False
+
+    monkeypatch.setattr("opensandbox.sandbox.time.time", _monotonic)
+    monkeypatch.setattr("opensandbox.sandbox.time.monotonic", _monotonic)
+    monkeypatch.setattr("opensandbox.sandbox.asyncio.sleep", _sleep)
+    sbx = _make_sandbox(
+        health_service=_HealthServiceStub(),
+        sandbox_service=_SandboxServiceStub(),
+        custom_health_check=_always_false,
+    )
+
+    with pytest.raises(SandboxReadyTimeoutException):
+        await sbx.check_ready(
+            timeout=timedelta(milliseconds=10),
+            polling_interval=timedelta(milliseconds=200),
+        )
+
+    assert sleep_calls == [0.01]
+
+
+@pytest.mark.asyncio
 async def test_check_ready_timeout_raises() -> None:
     async def _always_false(_: Sandbox) -> bool:
         return False

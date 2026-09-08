@@ -58,9 +58,9 @@ def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
     if timeout is None:
         return None
     if isinstance(timeout, timedelta):
-        timeout_ms = int(timeout.total_seconds() * 1000)
-        if timeout_ms < 0:
+        if timeout < timedelta(0):
             raise InvalidArgumentException("timeout must be positive")
+        timeout_ms = int(timeout.total_seconds() * 1000)
         return timeout_ms
     raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
 

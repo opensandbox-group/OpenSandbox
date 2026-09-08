@@ -84,6 +84,38 @@ await sandbox.kill();
 await sandbox.close();
 ```
 
+## Strict Health Check
+
+`CodeInterpreter.create()` blocks until the interpreter is strictly ready, then throws
+`SandboxReadyTimeoutException` if `readyTimeoutSeconds` (default 30s, polled every 200ms)
+expires. An attempt is healthy only when both conditions pass:
+
+- execd answers `GET /ping` on the interpreter's own endpoint.
+- The interpreter runtime (Jupyter kernel gateway) is serving inside the sandbox,
+  verified by probing its listen port (`127.0.0.1:44771`, overridable via `JUPYTER_PORT`)
+  through the execd command API. The port probe cannot be satisfied by short-lived
+  `jupyter kernelspec` setup helpers, and only passes once the server accepts connections.
+
+The runtime check is required because execd serves `/ping` before the sandbox entrypoint
+launches Jupyter. The check applies regardless of the wrapped sandbox's readiness
+settings (`skipHealthCheck: true`, pool acquire, resume).
+
+```ts
+const ci = await CodeInterpreter.create(sandbox, {
+  readyTimeoutSeconds: 60,           // optional
+  healthCheckPollingInterval: 200,   // optional (milliseconds)
+  skipHealthCheck: false,            // set true to opt out
+});
+
+// Re-run the check on demand:
+assert(await ci.isHealthy());
+```
+
+::: tip
+`skipHealthCheck: true` defers readiness to the caller (e.g. pool warmup that manages
+its own health checks); the interpreter may fail on first use.
+:::
+
 ## Runtime Configuration
 
 ### Docker Image

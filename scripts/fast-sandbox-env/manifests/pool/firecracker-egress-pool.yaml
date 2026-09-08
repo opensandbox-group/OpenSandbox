@@ -1,0 +1,139 @@
+# firecracker-egress-pool.yaml — the default SandboxPool of the
+# fast-sandbox integration environment.
+#
+# The two defaults this environment exists for:
+#
+#   egress attached — the OpenSandbox egress sidecar (fleet profile,
+#   dns+nft mode) runs in every fastlet Pod netns. Network policy flows
+#   through the Sandbox Actions channel only: the pool declares egress as
+#   an actionHandlers entry (Pod-loopback targetHTTPPort 18080) and as a
+#   host-process infra component; Fastlet delivers SET_BINDING (attachment
+#   + binding.input policy), sandbox.runtime-ready, sandbox.data-plane-ready
+#   and REMOVE_BINDING to the Handler on 127.0.0.1:18080. The egress
+#   process itself is a container in fastletTemplate sharing the Pod
+#   network namespace (never delivered into or supervised by the guest).
+#
+#   P2P delivery — poolMin=2 with podAntiAffinity keeps ONE fastlet per
+#   node; every node runs the runtime-agent + node-local DART daemon
+#   (runtime-agent.yaml / dart-service.yaml), so artifact pulls flow
+#   cache -> peer -> origin with the origin fetched ~once per 4MiB block
+#   cluster-wide. On a single-node cluster (KIND_SINGLE=1) the render step
+#   lowers poolMin/poolMax to 1 (cache-only, no peer traffic).
+#
+# Loading is on-demand by default: no warmImages, the first sandbox create
+# on each node pulls the golden snapshot set through DART (the P2P event).
+# WARM_IMAGES=1 renders the warmImages stanza to preheat both nodes at
+# pool creation instead.
+#
+# No sandboxes are created by the environment itself — apply-driven
+# capacity only.
+#
+# Tokens rendered by fast-sandbox-env.sh (pool stage, into $WORK/gen):
+#   "@FASTLET_IMAGE@"  "@EGRESS_IMAGE@"  "@POOL_MIN@"  "@POOL_MAX@"
+#   # @WARM_IMAGES@  -> warmImages block when WARM_IMAGES=1
+# (quoted in the template so the file stays valid YAML; the render step
+# substitutes the token including its quotes)
+#
+# Shape mirrors fast-sandbox's config/samples/pool-firecracker-egress.yaml
+# and config/samples/pool-firecracker.yaml on the master branch.
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxPool
+metadata:
+  name: firecracker-egress-pool
+  namespace: fast-sandbox-system
+spec:
+  fastletTemplate:
+    spec:
+      containers:
+      - name: fastlet
+        image: "@FASTLET_IMAGE@"
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
+          value: /run/fast-sandbox/firecracker/runtime.sock
+        volumeMounts:
+        - name: agent-socket
+          mountPath: /run/fast-sandbox/firecracker
+      - name: egress
+        image: "@EGRESS_IMAGE@"
+        # IfNotPresent: the environment kind-loads the image into the
+        # nodes; Always would force a docker.io pull per restart.
+        imagePullPolicy: IfNotPresent
+        # Fleet profile is required: it serves the Sandbox Actions Handler
+        # endpoints (/_fastlet/v1/actions[/status]) that the Fastlet uses.
+        # Without it egress runs the sidecar profile (policy-file driven)
+        # and exposes no actions surface.
+        env:
+        - name: OPENSANDBOX_EGRESS_PROFILE
+          value: "fleet"
+        # dns+nft: DNS-based domain policy plus the per-subject nft rules
+        # (table opensandbox-fleet, subj_ chains). dns-only would neither
+        # block IP-direct traffic nor create the subj_ chains.
+        - name: OPENSANDBOX_EGRESS_MODE
+          value: "dns+nft"
+        # Egress installs nft/iptables rules (DNS redirect + per-subject
+        # sets) and marks sockets; NET_ADMIN covers nft/iptables/SO_MARK,
+        # NET_RAW covers the raw sockets used for DNS response spoofing.
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+        # Platform validation requires non-zero CPU and memory limits on
+        # every sidecar container so the Pod cgroup stays bounded.
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+      volumes:
+      - name: agent-socket
+        hostPath:
+          path: /run/fast-sandbox/firecracker
+          type: DirectoryOrCreate
+      nodeSelector:
+        fast-sandbox.io/firecracker-node: "true"
+      # P2P topology: spread the poolMin fastlets one per node so each
+      # node's on-demand pull exercises the OTHER node's DART peer. On a
+      # single node this is a no-op (only one eligible node exists).
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: sandbox-fastlet
+              topologyKey: kubernetes.io/hostname
+  capacity:
+    poolMin: "@POOL_MIN@"
+    poolMax: "@POOL_MAX@"
+    bufferMin: 0
+    bufferMax: 0
+  maxSandboxesPerPod: 5
+  runtime: firecracker
+  # host-process declaration: no artifact is delivered; Fastlet probes the
+  # Pod-loopback listener (127.0.0.1:18080) before data-plane-ready and
+  # never includes egress in the guest sandbox-init supervisor config.
+  infraComponents:
+  - name: egress
+    delivery: host-process
+    process:
+      command: ["/bin/egress"]
+      healthCheck:
+        tcpConnect: {}
+        timeoutSeconds: 10
+    endpoint:
+      protocol: HTTP
+      port: 18080
+  actionHandlers:
+  - name: egress
+    targetHTTPPort: 18080
+    hooks: [sandbox.runtime-ready, sandbox.data-plane-ready]
+  sandboxResources:
+    cpu: "1"
+    memory: 512Mi
+    pids: 128
+# @WARM_IMAGES@

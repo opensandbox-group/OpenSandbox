@@ -21,6 +21,7 @@ using OpenSandbox.CodeInterpreter.Services;
 using OpenSandbox.Core;
 using OpenSandbox.Internal;
 using OpenSandbox.Models;
+using OpenSandbox.Services;
 using Microsoft.Extensions.Logging;
 
 namespace OpenSandbox.CodeInterpreter.Adapters;
@@ -28,7 +29,7 @@ namespace OpenSandbox.CodeInterpreter.Adapters;
 /// <summary>
 /// Adapter implementation for the codes service.
 /// </summary>
-internal sealed class CodesAdapter : ICodes
+internal sealed class CodesAdapter : ICodes, IExecdHealth
 {
     private readonly HttpClientWrapper _client;
     private readonly HttpClient _sseHttpClient;
@@ -152,11 +153,24 @@ internal sealed class CodesAdapter : ICodes
 
         _logger.LogInformation("Interrupting code execution: {ExecutionId}", executionId);
         var queryParams = new Dictionary<string, string?> { ["id"] = executionId };
-        await _client.DeleteAsync("/code", queryParams, cancellationToken).ConfigureAwait(false);
+        await _client.DeleteAsync("/code", queryParams, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
-    public async IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(
-        RunCodeRequest request,
+    public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _client.GetAsync("/ping", cancellationToken: cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Code interpreter ping failed");
+            return false;
+        }
+    }
+
+    public async IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(        RunCodeRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (request == null)

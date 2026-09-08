@@ -26,7 +26,11 @@ from opensandbox_server.services.snapshot_models import (
     SnapshotState,
     SnapshotStatusRecord,
 )
-from opensandbox_server.services.snapshot_runtime import NoopSnapshotRuntime, SnapshotRuntimeStatus
+from opensandbox_server.services.snapshot_runtime import (
+    NoopSnapshotRuntime,
+    SnapshotRuntimeStatus,
+    SnapshotRuntimeUnsupportedError,
+)
 from opensandbox_server.services.snapshot_service import PersistedSnapshotService
 
 
@@ -88,6 +92,9 @@ class StubSnapshotRuntime:
 
     def create_snapshot_unsupported_message(self) -> str:
         return ""
+
+    def preflight_create_snapshot(self, sandbox_id: str, *, namespace: str | None = None) -> None:
+        return None
 
     def create_snapshot(self, snapshot_id: str, sandbox_id: str, *, namespace: str | None = None):
         self.calls.append((snapshot_id, sandbox_id))
@@ -166,6 +173,33 @@ def test_snapshot_service_rejects_create_when_source_sandbox_not_running(tmp_pat
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["code"] == "SNAPSHOT::INVALID_SOURCE_STATE"
     assert runtime.calls == []
+
+
+def test_snapshot_service_rejects_unsupported_runtime_before_persisting(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    executor = CapturingExecutor()
+
+    def reject_preflight(sandbox_id: str, *, namespace: str | None = None) -> None:
+        raise SnapshotRuntimeUnsupportedError(
+            "gVisor RuntimeClass handler 'runsc' does not support rootfs snapshots."
+        )
+
+    runtime.preflight_create_snapshot = reject_preflight
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=executor,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.create_snapshot("sbx-001", CreateSnapshotRequest(name="checkpoint"))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "SNAPSHOT::UNSUPPORTED_RUNTIME"
+    assert service.list_snapshots(ListSnapshotsRequest()).pagination.total_items == 0
+    assert executor.submitted == []
 
 
 def test_snapshot_service_rejects_create_when_source_sandbox_state_missing(tmp_path) -> None:

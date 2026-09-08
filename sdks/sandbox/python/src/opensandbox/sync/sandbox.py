@@ -442,11 +442,11 @@ class SandboxSync:
             f"Waiting for sandbox {self.id} to pass health check (timeout: {timeout.total_seconds()}s)"
         )
 
-        deadline = time.time() + timeout.total_seconds()
+        deadline = time.monotonic() + timeout.total_seconds()
         attempt = 0
         last_exception: Exception | None = None
 
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             attempt += 1
             logger.debug(f"Health check attempt #{attempt} for sandbox {self.id}")
             try:
@@ -459,7 +459,10 @@ class SandboxSync:
             except Exception as e:
                 last_exception = e
 
-            time.sleep(polling_interval.total_seconds())
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(polling_interval.total_seconds(), remaining))
 
         error_detail = (
             f"Last error: {last_exception}"

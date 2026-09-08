@@ -869,6 +869,23 @@ class BatchSandboxProvider(WorkloadProvider):
             "Resuming": ("RESUMING", "Resuming sandbox"),
             "Failed": ("FAILED", failed_message or "Operation failed"),
         }
+        # A failed task must not be reported as a healthy sandbox. Neither signal below can
+        # see it: `ready` counts Ready PODS, and a Pool pod is Ready before any sandbox is
+        # dispatched to it (that is what pre-warming means), while the Succeed phase is
+        # derived from `Ready > 0` alone. Without this check a sandbox whose entrypoint never
+        # ran is indistinguishable from a healthy one over the API.
+        #
+        # Lifecycle phases stay authoritative: Pausing/Paused/Resuming are driven by an
+        # explicit user operation, and Failed already reports itself with a better message.
+        task_failed = int(status.get("taskFailed") or 0)
+        if task_failed > 0 and phase not in ("Pausing", "Paused", "Resuming", "Failed"):
+            return {
+                "state": "Failed",
+                "reason": "TASK_FAILED",
+                "message": f"{task_failed} sandbox task(s) failed",
+                "last_transition_at": creation_timestamp,
+            }
+
         if phase in phase_map and phase != "Pending":
             reason, message = phase_map[phase]
             return {

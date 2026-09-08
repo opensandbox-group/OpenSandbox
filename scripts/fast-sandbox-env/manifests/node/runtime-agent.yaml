@@ -1,0 +1,121 @@
+# runtime-agent.yaml — node-level firecracker runtime-agent with the DART
+# P2P daemon enabled (adapted from fast-sandbox config/dev/agent-daemonset.yaml).
+#
+# Serves the UDS management API (artifact pull + lease state) that the
+# fastlet firecracker driver talks to; the socket directory and the state
+# root are shared with fastlet pods via hostPath. Each agent also
+# supervises the node-local DART daemon: FAST_SANDBOX_DART_ADDR routes
+# artifact pulls through its prefix cache API, and FAST_SANDBOX_DART_DISCOVER
+# seeds peer discovery through the headless dart Service — together they
+# make P2P the default delivery path (cache -> peer -> origin).
+#
+# Prerequisites (created by fast-sandbox-env.sh up):
+#   - Secret fast-sandbox-agent-registry: the compiled registry
+#     configuration (registryconfig.Compiled JSON) carrying the MinIO
+#     read-only key and endpoint for FAST_SANDBOX_ARTIFACT_STORE.
+#   - ConfigMap fast-sandbox-agent-config: artifact-endpoint override.
+#
+# The image is a render token ("@AGENT_IMAGE@"): fast-sandbox-env.sh
+# substitutes it from IMG_AGENT (IMAGE_AGENT) so image overrides reach the
+# DaemonSet — the file is applied from $WORK/gen, never directly.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: firecracker-runtime-agent
+  namespace: fast-sandbox-system
+  labels:
+    app: fast-sandbox
+    component: firecracker-runtime-agent
+spec:
+  selector:
+    matchLabels:
+      app: fast-sandbox
+      component: firecracker-runtime-agent
+  template:
+    metadata:
+      labels:
+        app: fast-sandbox
+        component: firecracker-runtime-agent
+    spec:
+      nodeSelector:
+        fast-sandbox.io/firecracker-node: "true"
+      # The agent runs on the cluster network (NOT hostNetwork): its dart
+      # child needs the cluster DNS (CoreDNS search domains) to resolve the
+      # headless Service peers. It talks to fastlets over the shared UDS
+      # hostPath and to MinIO over the cluster network. The node hostname
+      # file is mounted read-only for the stable HRW self-id (a regular
+      # pod's hostname is its pod name, not the node).
+      containers:
+      - name: agent
+        image: "@AGENT_IMAGE@"
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
+          value: /run/fast-sandbox/firecracker/runtime.sock
+        - name: FAST_SANDBOX_ARTIFACT_STORE
+          value: s3://sandbox-images/publish
+        - name: FAST_SANDBOX_ARTIFACT_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: fast-sandbox-agent-config
+              key: artifact-endpoint
+              optional: true
+        - name: FAST_SANDBOX_STATE_ROOT
+          value: /var/lib/fast-sandbox/firecracker
+        - name: FAST_SANDBOX_REGISTRY_CONFIG_PATH
+          value: /etc/fast-sandbox/agent/registry.json
+        # DART P2P gateway: non-empty enables the node-local DART child
+        # process and routes artifact pulls through its prefix API. The
+        # image carries the pinned dart binary.
+        - name: FAST_SANDBOX_DART_ADDR
+          value: http://127.0.0.1:8145
+        # Peer discovery via the headless Service (dart-service.yaml); the
+        # agent falls back to direct S3 when DART is unreachable.
+        - name: FAST_SANDBOX_DART_DISCOVER
+          value: dns:dart.fast-sandbox-system.svc.cluster.local:9000
+        # Regular pods get their own cluster IP; the dart peer-listen binds
+        # it and the headless Service hands it out to peers.
+        - name: FAST_SANDBOX_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        securityContext:
+          privileged: true
+        readinessProbe:
+          exec:
+            command: ["/bin/sh", "-ec", "curl -fsS -X POST --unix-socket /run/fast-sandbox/firecracker/runtime.sock -H 'Content-Type: application/json' -d '{\"podUid\":\"$POD_UID\",\"namespace\":\"fast-sandbox-system\"}' http://firecracker-agent/v1/health | grep -q '\"ok\":true'"]
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 3
+        volumeMounts:
+        - name: agent-socket
+          mountPath: /run/fast-sandbox/firecracker
+        - name: agent-state
+          mountPath: /var/lib/fast-sandbox/firecracker
+        - name: agent-registry
+          mountPath: /etc/fast-sandbox/agent
+          readOnly: true
+        - name: node-hostname
+          mountPath: /etc/hostname
+          readOnly: true
+      volumes:
+      - name: agent-socket
+        hostPath:
+          path: /run/fast-sandbox/firecracker
+          type: DirectoryOrCreate
+      - name: agent-state
+        hostPath:
+          path: /var/lib/fast-sandbox/firecracker
+          type: DirectoryOrCreate
+      - name: agent-registry
+        secret:
+          secretName: fast-sandbox-agent-registry
+      # The stable node identity for the HRW keyspace.
+      - name: node-hostname
+        hostPath:
+          path: /etc/hostname
+          type: File

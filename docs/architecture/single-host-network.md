@@ -14,7 +14,7 @@ Detailed routing for a single-host deployment: how execd’s proxy gives every s
 - The Docker runtime binds only the host side of the execd proxy port (labeled `opensandbox.io/embedding-proxy-port`). Callers use `get_endpoint(..., port=X)` to receive `{public_host}:{host_proxy_port}/proxy/{X}`, and execd transparently routes the request back to the sandbox service on port `X`.
 - Because the proxy preserves `Upgrade`, `Connection`, and other HTTP headers, HTTP, Server-Sent Events, and WebSocket traffic share the same mapped host port without additional configuration.
 - With this setup, a single host port per sandbox suffices to reach **all** container ports. You can safely run many sandboxes on one machine without worrying about overlapping host port allocations.
-- When the caller lives inside the same Docker network (e.g., another container or Kubernetes pod), use `get_endpoint(..., resolve_internal=True)` to bypass the host mapping and return the sandbox IP (e.g., `172.17.0.3:5900`) instead.
+- When the caller can actually route to the sandbox's Docker network, use `get_endpoint(..., resolve_internal=True)` to bypass the host mapping and return the sandbox IP (e.g., `172.17.0.3:5900`) instead. Merely running the lifecycle server in a container is not sufficient: a server attached to a Compose network cannot normally route to sandboxes created on Docker's separate default bridge.
 - The diagram above shows the routing path: host traffic hits the proxy port, execd rewrites the request towards the target container port, and upstream services remain isolated within the sandbox.
 
 ## Network modes
@@ -35,3 +35,4 @@ Detailed routing for a single-host deployment: how execd’s proxy gives every s
 - If execd’s proxy port (`44772`) or the optional `8080` host mapping is missing, `get_endpoint` responds with HTTP 500 and a message stating which mapping was unavailable.
 - Always keep the `/proxy/{port}` prefix (including any additional path or query string) when embedding URLs in browser-based clients or SDKs so that execd can correctly dispatch the request.
 - This proxy-based approach means additional ports never need to be published on the host, simplifying firewall management and improving security.
+- When the lifecycle server runs in Docker with the host socket mounted, set `[proxy] resolve_internal = false`, configure `[docker] host_ip`, and make that hostname resolve to the Docker host from the server container. The repository's `server/docker-compose.example.yaml` demonstrates this topology.

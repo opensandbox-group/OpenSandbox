@@ -73,6 +73,39 @@ catch (SandboxException ex)
 }
 ```
 
+## Strict Health Check
+
+`CodeInterpreter.CreateAsync` blocks until the interpreter is strictly ready, then throws
+`SandboxReadyTimeoutException` if `ReadyTimeoutSeconds` (default 30s, polled every 200ms)
+expires. An attempt is healthy only when both conditions pass:
+
+- execd answers `GET /ping` on the interpreter's own endpoint.
+- The interpreter runtime (Jupyter kernel gateway) is serving inside the sandbox,
+  verified by probing its listen port (`127.0.0.1:44771`, overridable via `JUPYTER_PORT`)
+  through the execd command API. The port probe cannot be satisfied by short-lived
+  `jupyter kernelspec` setup helpers, and only passes once the server accepts connections.
+
+The runtime check is required because execd serves `/ping` before the sandbox entrypoint
+launches Jupyter. The check applies regardless of the wrapped sandbox's readiness
+settings (`SkipHealthCheck = true`, pool acquire, resume).
+
+```csharp
+var interpreter = await CodeInterpreter.CreateAsync(sandbox, new CodeInterpreterCreateOptions
+{
+    ReadyTimeoutSeconds = 60,         // optional
+    HealthCheckPollingInterval = 200, // optional (milliseconds)
+    SkipHealthCheck = false           // set true to opt out
+});
+
+// Re-run the check on demand:
+Console.WriteLine(await interpreter.IsHealthyAsync());
+```
+
+::: tip
+`SkipHealthCheck = true` defers readiness to the caller (e.g. pool warmup that manages
+its own health checks); the interpreter may fail on first use.
+:::
+
 ## Logging (ILogger)
 
 The SDK uses `Microsoft.Extensions.Logging` abstractions. Pass your own `ILoggerFactory`

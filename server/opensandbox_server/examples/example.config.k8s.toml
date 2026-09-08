@@ -97,6 +97,11 @@ mode = "dns"
 # Optional Kubernetes resources for the generated egress sidecar. Tune for your workload.
 # requests = { cpu = "25m", memory = "64Mi" }
 # limits = { cpu = "250m", memory = "256Mi" }
+# Optional: export the egress sidecar's OpenTelemetry metrics (OTLP/HTTP only).
+# Use a fully qualified service name or an IP: the sidecar's auto egress allow
+# rule matches the configured host exactly, while the resolver expands partial
+# service names (e.g. otel-collector.observability) to FQDNs the rule misses.
+# otlp_endpoint = "http://otel-collector.observability.svc.cluster.local:4318"
 
 # Renew-on-access. Off by default — see server/README.md.
 [renew_intent]

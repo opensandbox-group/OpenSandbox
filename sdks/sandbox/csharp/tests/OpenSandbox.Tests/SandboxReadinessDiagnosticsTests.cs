@@ -19,12 +19,45 @@ using OpenSandbox.Core;
 using OpenSandbox.Factory;
 using OpenSandbox.Models;
 using OpenSandbox.Services;
+using System.Diagnostics;
 using Xunit;
 
 namespace OpenSandbox.Tests;
 
 public class SandboxReadinessDiagnosticsTests
 {
+    [Fact]
+    public async Task WaitUntilReadyAsync_WhenTimeoutIsShorterThanPollingInterval_DoesNotOvershoot()
+    {
+        // Arrange
+        var healthMock = new Mock<IExecdHealth>();
+        healthMock
+            .Setup(x => x.PingAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var sandbox = await CreateSandboxForReadinessTestAsync(healthMock, useServerProxy: true);
+        var stopwatch = Stopwatch.StartNew();
+
+        // Act
+        try
+        {
+            Func<Task> action = async () =>
+                await sandbox.WaitUntilReadyAsync(new WaitUntilReadyOptions
+                {
+                    ReadyTimeoutSeconds = 1,
+                    PollingIntervalMillis = 5_000
+                });
+
+            // Assert
+            await action.Should().ThrowAsync<SandboxReadyTimeoutException>();
+            stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(3));
+        }
+        finally
+        {
+            await sandbox.DisposeAsync();
+        }
+    }
+
     [Fact]
     public async Task WaitUntilReadyAsync_WhenHealthCheckThrows_OmitsNetworkConfigurationHints()
     {

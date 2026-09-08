@@ -189,6 +189,22 @@ See [Credential Vault](/guides/credential-vault) for full API usage, binding rul
 
 Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). The credential proxy's log lines from mitmdump are piped into the same zap sink at warn level, so they land in the egress log file when `OPENSANDBOX_LOG_OUTPUT` points at one; mitmproxy's own flow logs are not forwarded. OTLP log export is not used.
 
+#### Enabling export from the server
+
+When the server config sets `[egress].otlp_endpoint`, the lifecycle server injects it into every egress sidecar as `OTEL_EXPORTER_OTLP_ENDPOINT` (Docker and Kubernetes alike):
+
+```toml
+[egress]
+otlp_endpoint = "http://otel-collector.observability.svc.cluster.local:4318"
+```
+
+- The endpoint must be an `http://` or `https://` URL with a collector host — the telemetry client only speaks OTLP over HTTP/protobuf, so a gRPC endpoint (port 4317) won't work.
+- Use a **fully qualified service name or an IP**, per the auto-allow note below: partial service names get search-domain-expanded to FQDNs the auto-generated allow rule does not match.
+- The collector address is infrastructure config: it is read only from the server config file and cannot be set per request. When unset, sidecar metrics are not exported.
+- The sidecar exports **delta** temporality; a collector feeding Prometheus/GMP needs the `deltatocumulative` processor.
+
+Full key reference: [server configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
+
 #### DNS latency buckets
 
 `egress.dns.query.duration` is recorded in **seconds** and declares its bucket boundaries
@@ -238,6 +254,38 @@ alert on**: it adds the IPs behind an allowed domain to the dynamic allow set, s
 means the kernel never learned about destinations the policy permits and the chain drops
 them. From inside the sandbox that is indistinguishable from a denial, while
 `egress.policy.denied_total` stays flat — a fail-closed outage with no other signal.
+
+#### Resource usage: node vs sidecar
+
+Two pairs of gauges look interchangeable and are not:
+
+| Metric | Unit | Scope |
+|---|---|---|
+| `egress.system.memory.usage_bytes` | `By` | the **node** |
+| `egress.system.cpu.utilization` | `1` | the **node** |
+| `egress.process.memory.usage_bytes` | `By` | this **sidecar** |
+| `egress.process.cpu.time` | `s` | this **sidecar** |
+
+The `system` pair comes from `/proc/meminfo` and `/proc/stat`, which inside a container
+describe the node. Since the sidecar runs **per sandbox**, every sandbox on a node reports
+the same node figure under its own `sandbox_id` — do not chart these "by sandbox", because
+the series look per-sandbox and are N copies of one number. Use kubelet/cAdvisor or a node
+exporter for node-level data.
+
+The `process` pair is read from the sidecar's own cgroup, so it really is per sandbox.
+`egress.process.cpu.time` is a **cumulative counter of consumed seconds** — query it with
+`rate()`. A sampled ratio would depend on the export interval and could not be compared
+across deployments.
+
+Per-sandbox attribution needs `OPENSANDBOX_EGRESS_SANDBOX_ID` to be set, since that is what
+becomes the `sandbox_id` attribute. Without it every sidecar exports the same attribute set
+and the series from different sandboxes collide in the backend — which makes the `process`
+metrics look flat or flapping rather than absent. Set it when launching the sidecar.
+
+Both `process` metrics are **only present when the sidecar's cgroup is readable** (cgroup v2
+`memory.current` / `cpu.stat`, or v1 `memory.usage_in_bytes` / `cpuacct.usage`). Under a
+runtime that does not expose cgroupfs the series are absent rather than zero, so a flat zero
+is never mistaken for an idle sidecar.
 
 Full metric inventory and attribute semantics: [egress OpenTelemetry reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/opentelemetry.md).
 

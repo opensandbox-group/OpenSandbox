@@ -337,3 +337,20 @@ class CodesAdapterSync(CodesSync):
         except Exception as e:
             logger.error("Failed to interrupt code execution", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def ping(self) -> bool:
+        """
+        Check if the execd code execution service is alive (blocking).
+
+        Uses the shared generated API client so the ping exercises the same
+        HTTP client and endpoint that serve code execution requests.
+        """
+        try:
+            from opensandbox.api.execd.api.health import ping as ping_api
+
+            response_obj = ping_api.sync_detailed(client=self._client)
+            handle_api_error(response_obj, "Ping code interpreter")
+            return True
+        except Exception as e:
+            logger.debug(f"Code interpreter ping failed: {e}")
+            return False

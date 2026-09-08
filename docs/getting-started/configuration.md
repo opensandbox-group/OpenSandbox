@@ -50,6 +50,7 @@ If `server.api_key` is empty, the server runs without authentication. In non-int
 | Section | Description |
 |---------|-------------|
 | `[server]` | Host, port, API key, and general server settings |
+| `[proxy]` | Server-side sandbox proxy target selection; use host mappings when the server cannot route to sandbox IPs |
 | `[docker]` | Docker runtime: `network_mode`, `host_ip`, image registry |
 | `[kubernetes]` | Kubernetes runtime: `workload_provider`, `batchsandbox_template_file` |
 | `[egress]` | Egress sidecar for `networkPolicy` enforcement |

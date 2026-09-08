@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -24,6 +25,15 @@ const CodeInterpreterImage = "opensandbox/code-interpreter:latest"
 
 // CodeInterpreterEntrypoint is the default entrypoint for the code interpreter.
 var CodeInterpreterEntrypoint = []string{"/opt/code-interpreter/code-interpreter.sh"}
+
+// CodeInterpreterRuntimeCheckCommand is the script run inside the sandbox to
+// verify the code interpreter runtime (Jupyter kernel gateway) is actually
+// serving. execd starts serving /ping before the entrypoint launches Jupyter,
+// and the setup stage may run short-lived "jupyter kernelspec" helpers, so a
+// daemon ping or a process-name grep cannot prove the runtime is ready. Probing
+// the Jupyter listen port (127.0.0.1:${JUPYTER_PORT:-44771}, same default as
+// the entrypoint) only passes once the server accepts connections.
+const CodeInterpreterRuntimeCheckCommand = "bash -c 'exec 3<>/dev/tcp/127.0.0.1/${JUPYTER_PORT:-44771}' && exit 0 || exit 1"
 
 // CodeInterpreterCreateOptions configures code interpreter creation.
 type CodeInterpreterCreateOptions struct {
@@ -45,7 +55,8 @@ type CodeInterpreterCreateOptions struct {
 	// Metadata for filtering and tagging.
 	Metadata map[string]string
 
-	// SkipHealthCheck skips the WaitUntilReady call.
+	// SkipHealthCheck skips both readiness checks: the sandbox WaitUntilReady
+	// (execd /ping) call and the code interpreter runtime process check.
 	SkipHealthCheck bool
 
 	// ReadyTimeout overrides the default ready timeout.
@@ -93,7 +104,81 @@ func CreateCodeInterpreter(ctx context.Context, config ConnectionConfig, opts Co
 		return nil, err
 	}
 
-	return &CodeInterpreter{Sandbox: sb}, nil
+	ci := &CodeInterpreter{Sandbox: sb}
+
+	// Strict readiness: execd serving /ping (checked by WaitUntilReady above) is
+	// not enough — execd starts serving before the entrypoint launches Jupyter.
+	// Poll until the interpreter runtime is actually serving.
+	if !opts.SkipHealthCheck {
+		readyTimeout := opts.ReadyTimeout
+		if readyTimeout == 0 {
+			readyTimeout = time.Duration(DefaultReadyTimeoutSeconds) * time.Second
+		}
+		interval := opts.HealthCheckInterval
+		if interval == 0 {
+			interval = DefaultHealthCheckPollingInterval
+		}
+		if err := ci.waitRuntimeReady(ctx, readyTimeout, interval); err != nil {
+			// The caller has no handle to the created sandbox; clean it up
+			// best-effort, mirroring CreateSandbox's readiness-failure path.
+			_ = sb.Kill(context.Background())
+			return nil, err
+		}
+	}
+
+	return ci, nil
+}
+
+// IsHealthy reports whether the code interpreter is strictly healthy: the
+// execd daemon answers /ping and the interpreter runtime (Jupyter kernel
+// gateway) is serving inside the sandbox.
+func (ci *CodeInterpreter) IsHealthy(ctx context.Context) bool {
+	if !ci.Sandbox.IsHealthy(ctx) {
+		return false
+	}
+	exec, err := ci.Sandbox.RunCommand(ctx, CodeInterpreterRuntimeCheckCommand, nil)
+	return err == nil && exec != nil && exec.Error == nil
+}
+
+// waitRuntimeReady polls the runtime check until it passes or the timeout
+// expires.
+func (ci *CodeInterpreter) waitRuntimeReady(ctx context.Context, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		exec, err := ci.Sandbox.RunCommand(ctx, CodeInterpreterRuntimeCheckCommand, nil)
+		switch {
+		case err == nil && (exec == nil || exec.Error == nil):
+			return nil
+		case err != nil:
+			lastErr = err
+		default:
+			lastErr = fmt.Errorf("code interpreter runtime (jupyter) is not serving")
+		}
+
+		// Clamp the sleep to the remaining budget so the final failed check
+		// does not overshoot the timeout by a full polling interval.
+		wait := interval
+		if remaining := time.Until(deadline); remaining < wait {
+			wait = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+
+	return &SandboxReadyTimeoutError{
+		SandboxID: ci.Sandbox.ID(),
+		Elapsed:   timeout.String(),
+		LastErr:   lastErr,
+	}
 }
 
 // Execute runs code in the specified language and returns the structured result.
