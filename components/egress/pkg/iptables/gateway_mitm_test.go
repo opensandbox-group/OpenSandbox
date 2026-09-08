@@ -25,7 +25,7 @@ import (
 
 func TestMitmRedirectScriptV4(t *testing.T) {
 	script := mitmRedirectScript([]MitmRedirectEntry{
-		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1"), HostVeth: "veth-a-p"},
+		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
 	}, 18081, []int{80, 443})
 
 	require.Contains(t, script, "delete table inet "+gatewayMitmNftTable)
@@ -33,11 +33,11 @@ func TestMitmRedirectScriptV4(t *testing.T) {
 	require.Contains(t, script, "add chain inet "+gatewayMitmNftTable+" gw { type nat hook prerouting priority dstnat; }")
 
 	// management-plane exception: sandbox -> gateway must NOT be intercepted
-	require.Contains(t, script, `ip saddr 10.0.0.5 iifname "veth-a-p" ip daddr 10.0.0.1 tcp dport {80,443} return`)
+	require.Contains(t, script, `ip saddr 10.0.0.5 ip daddr 10.0.0.1 tcp dport {80,443} return`)
 	// the interception DNAT targets the gateway veth address, not loopback,
 	// and is bound to the sandbox's veth (a spoofed source IP from another
 	// sandbox's veth is not DNATed and hits the forward master drop instead)
-	require.Contains(t, script, `ip saddr 10.0.0.5 iifname "veth-a-p" tcp dport {80,443} dnat to 10.0.0.1:18081`)
+	require.Contains(t, script, `ip saddr 10.0.0.5 tcp dport {80,443} dnat to 10.0.0.1:18081`)
 }
 
 func TestMitmRedirectScriptV4WithoutVeth(t *testing.T) {
@@ -51,16 +51,16 @@ func TestMitmRedirectScriptV4WithoutVeth(t *testing.T) {
 
 func TestMitmRedirectScriptV6(t *testing.T) {
 	script := mitmRedirectScript([]MitmRedirectEntry{
-		{SandboxIP: netip.MustParseAddr("fd00::5"), Gateway: netip.MustParseAddr("fd00::1"), HostVeth: "veth-a-p"},
+		{SandboxIP: netip.MustParseAddr("fd00::5"), Gateway: netip.MustParseAddr("fd00::1")},
 	}, 18081, []int{80, 443})
 
-	require.Contains(t, script, `ip6 saddr fd00::5 iifname "veth-a-p" ip6 daddr fd00::1 tcp dport {80,443} return`)
-	require.Contains(t, script, `ip6 saddr fd00::5 iifname "veth-a-p" tcp dport {80,443} dnat to fd00::1:18081`)
+	require.Contains(t, script, `ip6 saddr fd00::5 ip6 daddr fd00::1 tcp dport {80,443} return`)
+	require.Contains(t, script, `ip6 saddr fd00::5 tcp dport {80,443} dnat to fd00::1:18081`)
 }
 
 func TestMitmRedirectScriptExtraPortsAndEmpty(t *testing.T) {
 	script := mitmRedirectScript([]MitmRedirectEntry{
-		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1"), HostVeth: "veth-a-p"},
+		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
 	}, 18081, []int{80, 443, 8080})
 	require.Contains(t, script, `tcp dport {80,443,8080} dnat to 10.0.0.1:18081`)
 

@@ -68,8 +68,6 @@ EXT_GW_IP="10.99.0.1"
 EXT_CIDR="10.99.0.0/24"
 EXT_CT_NETNS="osb-fc-ext"
 
-SLOT_DIR="${WORK_DIR}/slot-store"
-RESOLV_DIR="${WORK_DIR}/resolv"
 RULES_DIR="${WORK_DIR}/rules"
 CA_ROOT="${WORK_DIR}/opensandbox"       # mounted at /opt/opensandbox
 VM_ROOTFS="${WORK_DIR}/vm-rootfs.ext4"  # firecracker rootfs image
@@ -166,7 +164,7 @@ require
 
 ARCH="$(uname -m)"
 [ "${ARCH}" = "x86_64" ] || [ "${ARCH}" = "aarch64" ] || fail "unsupported arch: ${ARCH}"
-mkdir -p "${ASSET_DIR}" "${WORK_DIR}" "${SLOT_DIR}" "${RESOLV_DIR}" "${RULES_DIR}" "${CA_ROOT}/mitm-ca"
+mkdir -p "${ASSET_DIR}" "${WORK_DIR}" "${RULES_DIR}" "${CA_ROOT}/mitm-ca"
 
 # ---------------------------------------------------------------------------
 info "Preparing assets (firecracker + kernel + rootfs)"
@@ -296,8 +294,6 @@ FASTLET_CT_ID="$(docker run -d --name "${FASTLET_CT}" \
   --network "${BRIDGE_NET}" --privileged \
   --device /dev/kvm \
   -v /var/run/netns:/var/run/netns:rslave \
-  -v "${SLOT_DIR}:${SLOT_DIR}" \
-  -v "${RESOLV_DIR}:${RESOLV_DIR}" \
   -v "${RULES_DIR}:/var/egress/rules" \
   -v "${CA_ROOT}:/opt/opensandbox" \
   -v "${WORK_DIR}:${WORK_DIR}" \
@@ -376,15 +372,10 @@ printf '%s\n' '10.99.0.9' > "${RULES_DIR}/deny.always"
 
 EGRESS_CT_ID="$(docker run -d --name "${EGRESS_CT}" \
   --network "container:${FASTLET_CT}" --privileged \
-  -v /var/run/netns:/var/run/netns:rslave \
-  -v "${SLOT_DIR}:${SLOT_DIR}" \
-  -v "${RESOLV_DIR}:${RESOLV_DIR}" \
   -v "${RULES_DIR}:/var/egress/rules" \
   -v "${CA_ROOT}:/opt/opensandbox" \
   -v "${MITM_HOME}:/var/lib/mitmproxy" \
   -e OPENSANDBOX_EGRESS_PROFILE=fleet \
-  -e OPENSANDBOX_EGRESS_SLOT_STORE_DIR="${SLOT_DIR}" \
-  -e OPENSANDBOX_EGRESS_SLOT_POLL_INTERVAL=1 \
   -e OPENSANDBOX_EGRESS_DNS_UPSTREAM="${BRIDGE_GW}:${DNS_UPSTREAM_PORT}" \
   -e OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE=allow.test \
   -e OPENSANDBOX_EGRESS_HTTP_ADDR="127.0.0.1:${POLICY_PORT}" \
@@ -463,21 +454,33 @@ create_vm_netns() {
   ip netns exec "${netns}" ip link set "${tap}" up
 }
 
-# write_slot <uid> <ip> <netns> <veth> <gw>
-write_slot() {
-  local uid="$1" ip="$2" netns="$3" veth="$4" gw="$5"
-  printf 'nameserver 8.8.8.8\n' > "${RESOLV_DIR}/${uid}.conf"
-  cat > "${SLOT_DIR}/${uid}.json" <<EOF
-{"id":"${uid}","phase":"Bound","owner":{"sandboxUid":"${uid}","instanceGeneration":1,"assignmentAttempt":1},"ip":"${ip}","hostNetnsPath":"/var/run/netns/${netns}","hostVeth":"${veth}-p","gateway":"${gw}","privateCidr":"10.30.0.0/24","dnsPath":"${RESOLV_DIR}/${uid}.conf"}
+# bind_subject <uid> <ip> <veth> <gw> <policy>: SET_BINDING with the policy
+# (deny-first registration, policy pending until data-plane-ready).
+bind_subject() {
+  local uid="$1" ip="$2" veth="$3" gw="$4" policy="$5"
+  local body encoded
+  encoded="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${policy}")"
+  body="$(cat <<EOF
+{"apiVersion":"sandbox.fast.io/actions/v1","operation":"SET_BINDING","invocationId":"e2e-${uid}-1","sandbox":{"uid":"${uid}"},"revision":{"specGeneration":1,"runtimeInstanceId":"rt-${uid}","attachmentId":"att-${uid}","routeGeneration":1},"attachment":{"network":{"ip":"${ip}","gateway":"${gw}","privateCidr":"10.30.0.0/24","hostVeth":"${veth}-p"}},"binding":{"input":${encoded}}}
 EOF
+)"
+  pod_exec curl -sSf -XPOST "http://127.0.0.1:${POLICY_PORT}/_fastlet/v1/actions" -d "${body}" >/dev/null
 }
 
-# push_policy_vault <uid> <target> <secret>
-push_policy_vault() {
+# activate_subject <uid>: sandbox.data-plane-ready (deny-first -> active).
+activate_subject() {
+  local uid="$1" body
+  body="$(cat <<EOF
+{"apiVersion":"sandbox.fast.io/actions/v1","operation":"LIFECYCLE_HOOK","invocationId":"e2e-${uid}-dpr","sandbox":{"uid":"${uid}"},"revision":{"specGeneration":1,"runtimeInstanceId":"rt-${uid}","attachmentId":"att-${uid}","routeGeneration":1},"hook":{"name":"sandbox.data-plane-ready","sequence":1}}
+EOF
+)"
+  pod_exec curl -sSf -XPOST "http://127.0.0.1:${POLICY_PORT}/_fastlet/v1/actions" -d "${body}" >/dev/null
+}
+
+# push_vault <uid> <target> <secret>: per-subject credential vault (the
+# policy already arrived with SET_BINDING).
+push_vault() {
   local uid="$1" target="$2" secret="$3"
-  pod_exec curl -sSf -H "X-Fast-Sandbox-Uid: ${uid}" -XPUT \
-    "http://127.0.0.1:${POLICY_PORT}/policy" \
-    -d "{\"defaultAction\":\"deny\",\"egress\":[{\"action\":\"allow\",\"target\":\"${target}\"},{\"action\":\"allow\",\"target\":\"10.99.0.2\"}]}" >/dev/null
   # vm2 must not be able to bind vm1's host (per-subject policy isolation):
   # tested BEFORE the real vault exists, so the 400 comes from the policy
   # validation, not from a duplicate-vault ErrExists.
@@ -553,10 +556,10 @@ info "Simulating the VM netns pairs (firecracker taps bridged into the Pod netns
 create_vm_netns "${VM_NETNS1}" veth-fc1 tap-fc1 "${VM_IP1}" 1
 create_vm_netns "${VM_NETNS2}" veth-fc2 tap-fc2 "${VM_IP2}" 0
 
-info "Writing the slots (fastlet observes the bound sandboxes)"
+info "Binding the sandbox subjects (SET_BINDING -> deny-first)"
 T_SLOT_WRITE="$(ts)"
-write_slot vm1 "${VM_IP1}" "${VM_NETNS1}" veth-fc1 10.30.0.1
-write_slot vm2 "${VM_IP2}" "${VM_NETNS2}" veth-fc2 10.30.0.2
+bind_subject vm1 "${VM_IP1}" veth-fc1 10.30.0.1 '{"defaultAction":"deny","egress":[{"action":"allow","target":"'"${VM_TARGET1}"'"},{"action":"allow","target":"10.99.0.2"}]}'
+bind_subject vm2 "${VM_IP2}" veth-fc2 10.30.0.2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"'"${VM_TARGET2}"'"},{"action":"allow","target":"10.99.0.2"}]}'
 wait_for 30 "CA exported by egress" test -s "${CA_ROOT}/mitm-ca/mitmproxy-ca-cert.pem"
 T0_CA_EXPORT="$(ts)"
 for ip in "${VM_IP1}" "${VM_IP2}"; do
@@ -571,19 +574,19 @@ for ip in "${VM_IP1}" "${VM_IP2}"; do
   [ "${local_elapsed}" -lt 30 ] || {
     echo "--- egress container logs (tail) ---"
     docker logs "${EGRESS_CT}" 2>&1 | tail -30
-    echo "--- egress container /var/run/netns view ---"
-    docker exec "${EGRESS_CT}" ls /var/run/netns/ 2>&1 || true
     fail "subject ${ip} did not register (DNAT missing)"
   }
 done
 T_DNAT_READY="$(ts)"
-pass "egress up; CA exported at ${T0_CA_EXPORT}; both subjects registered (DNAT ready at ${T_DNAT_READY})"
+pass "egress up; CA exported at ${T0_CA_EXPORT}; both subjects registered deny-first (DNAT ready at ${T_DNAT_READY})"
 
 # ---------------------------------------------------------------------------
-info "Pushing per-subject policies + credential vaults"
-push_policy_vault vm1 "${VM_TARGET1}" "${VM_SECRET1}"
-push_policy_vault vm2 "${VM_TARGET2}" "${VM_SECRET2}"
-pass "policy + vault pushed (vm1=${VM_TARGET1}/${VM_SECRET1}, vm2=${VM_TARGET2}/${VM_SECRET2})"
+info "Activating policies (data-plane-ready) + pushing credential vaults"
+activate_subject vm1
+activate_subject vm2
+push_vault vm1 "${VM_TARGET1}" "${VM_SECRET1}"
+push_vault vm2 "${VM_TARGET2}" "${VM_SECRET2}"
+pass "policy active + vault pushed (vm1=${VM_TARGET1}/${VM_SECRET1}, vm2=${VM_TARGET2}/${VM_SECRET2})"
 
 # ---------------------------------------------------------------------------
 info "Preparing the VM rootfs images (template copy + CA delivery per VM)"
@@ -699,7 +702,7 @@ pass "deny-path enforced at the Pod INPUT chain in both real VMs"
 echo
 echo "=== phase timing (vm1; all wall-clock on the host unless noted) ==="
 echo "  egress start -> CA export:       $(awk "BEGIN{printf \"%.3f\", ${T0_CA_EXPORT}-${T_EGRESS_START}}")s"
-echo "  slot write -> subjects DNAT:     $(awk "BEGIN{printf \"%.3f\", ${T_DNAT_READY}-${T_SLOT_WRITE}}")s"
+echo "  SET_BINDING -> subjects DNAT:   $(awk "BEGIN{printf \"%.3f\", ${T_DNAT_READY}-${T_SLOT_WRITE}}")s"
 echo "  CA export -> delivery done:      $(awk "BEGIN{printf \"%.3f\", ${T2_DELIVERY_DONE}-${T0_CA_EXPORT}}")s"
 echo "  vm1 InstanceStart -> bootstrap:  $(awk "BEGIN{printf \"%.3f\", ${T4_BOOTSTRAP}-${T3_VM1}}")s   (kernel boot)"
 echo "  vm1 bootstrap -> CA installed:   $(awk "BEGIN{printf \"%.3f\", ${T5_CA_HOST}-${T4_BOOTSTRAP}}")s   (net cfg + CA install)"

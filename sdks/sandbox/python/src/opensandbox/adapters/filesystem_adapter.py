@@ -108,11 +108,7 @@ class FilesystemAdapter(Filesystem):
         base_url = self._get_execd_base_url()
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-            **self.execd_endpoint.headers,
-        }
+        headers = self.execd_endpoint.build_request_headers(self.connection_config)
 
         self._httpx_client = httpx.AsyncClient(
             base_url=base_url,
@@ -121,7 +117,6 @@ class FilesystemAdapter(Filesystem):
             transport=self.connection_config.transport,
         )
 
-        # Execd API does not require authentication
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
@@ -133,11 +128,11 @@ class FilesystemAdapter(Filesystem):
         return f"{protocol}://{self.execd_endpoint.endpoint}"
 
     async def _get_httpx_client(self) -> httpx.AsyncClient:
-        """Return adapter-owned httpx client for execd (no auth required)."""
+        """Return adapter-owned httpx client for execd."""
         return self._httpx_client
 
     async def _get_client(self):
-        """Return the client for execd API (no auth required)."""
+        """Return the client for execd API."""
         return self._client
 
     def _get_execd_url(self, path: str) -> str:

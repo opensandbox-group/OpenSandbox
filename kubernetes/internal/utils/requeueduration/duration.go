@@ -15,7 +15,6 @@
 package requeueduration
 
 import (
-	"fmt"
 	"sync"
 	"time"
 )
@@ -48,11 +47,10 @@ func (dm *DurationStore) Pop(key string) time.Duration {
 	return requeueDuration.Get()
 }
 
-// Duration helps calculate the shortest non-zore duration to requeue
+// Duration helps calculate the shortest non-zero duration to requeue
 type Duration struct {
 	sync.Mutex
 	duration time.Duration
-	message  string
 }
 
 func (rd *Duration) Update(newDuration time.Duration) {
@@ -65,31 +63,8 @@ func (rd *Duration) Update(newDuration time.Duration) {
 	}
 }
 
-func (rd *Duration) UpdateWithMsg(newDuration time.Duration, format string, args ...interface{}) {
-	rd.Lock()
-	defer rd.Unlock()
-	if newDuration > 0 {
-		if rd.duration <= 0 || newDuration < rd.duration {
-			rd.duration = newDuration
-			rd.message = fmt.Sprintf(format, args...)
-		}
-	}
-}
-
-func (rd *Duration) Merge(rd2 *Duration) {
-	rd2.Lock()
-	defer rd2.Unlock()
-	rd.UpdateWithMsg(rd2.duration, "%s", rd2.message)
-}
-
 func (rd *Duration) Get() time.Duration {
 	rd.Lock()
 	defer rd.Unlock()
 	return rd.duration
-}
-
-func (rd *Duration) GetWithMsg() (time.Duration, string) {
-	rd.Lock()
-	defer rd.Unlock()
-	return rd.duration, rd.message
 }

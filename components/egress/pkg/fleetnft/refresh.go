@@ -111,8 +111,9 @@ func activeConntrackTCPState(state string) bool {
 // StartConnectionRefresh keeps each subject's DNS-learned IPs authorized
 // while TCP connections to them are active; the set timeout remains as the
 // grace period after the connection closes. sandboxMir, when non-nil, is
-// invoked per subject with the refreshed IPs so the per-sandbox netns mirror
-// (pkg/sandboxnft) carries identical leases.
+// invoked per subject with the refreshed IPs so a mirror layer (e.g. a
+// per-sandbox netns enforcement) carries identical leases; the fleet profile
+// passes nil (no mirror layer).
 //
 // Renewal is best-effort, per subject: a connection that starts and closes
 // between polls is never observed (needs a later DNS lookup), an entry that
@@ -219,7 +220,7 @@ func (a *Applier) refreshTick(ctx context.Context) {
 func (a *Applier) buildSrcIndexLocked() map[netip.Addr]subject.Subject {
 	idx := make(map[netip.Addr]subject.Subject, len(a.subjects))
 	for s, inst := range a.subjects {
-		idx[inst.slot.IP] = s
+		idx[inst.att.IP] = s
 	}
 	return idx
 }

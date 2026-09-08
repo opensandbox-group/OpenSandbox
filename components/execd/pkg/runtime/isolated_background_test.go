@@ -605,6 +605,56 @@ func TestBackgroundRunLogCappedOnDisk(t *testing.T) {
 	}
 }
 
+// TestSeekIsolatedBackgroundOutput_ClampsCursorPastEOF verifies a cursor beyond
+// the current end of the log returns empty output with the real end offset, so
+// later writes are still delivered on the next poll (#1010).
+func TestSeekIsolatedBackgroundOutput_ClampsCursorPastEOF(t *testing.T) {
+	runner := newTestRunner(t)
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, isolatedBackgroundRunDir)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(runDir, "run-past-eof.log")
+	if err := os.WriteFile(logPath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := &IsolatedBackgroundRun{
+		ID:        "run-past-eof",
+		SessionID: "session-past-eof",
+		logPath:   logPath,
+		logRoot:   dir,
+	}
+	runner.bgRuns.Store(run.ID, run)
+
+	data, cursor, err := runner.SeekIsolatedBackgroundOutput(run.SessionID, run.ID, 10_000_000)
+	if err != nil {
+		t.Fatalf("SeekIsolatedBackgroundOutput: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("data = %q, want empty", data)
+	}
+	if cursor != 5 {
+		t.Errorf("cursor = %d, want 5 (clamped to the end of the log)", cursor)
+	}
+
+	// New output written after the overshooting poll must still be readable.
+	if err := os.WriteFile(logPath, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data, cursor, err = runner.SeekIsolatedBackgroundOutput(run.SessionID, run.ID, cursor)
+	if err != nil {
+		t.Fatalf("SeekIsolatedBackgroundOutput (remainder): %v", err)
+	}
+	if string(data) != " world" {
+		t.Errorf("data = %q, want %q", data, " world")
+	}
+	if cursor != 11 {
+		t.Errorf("cursor = %d, want 11", cursor)
+	}
+}
+
 // TestSeekIsolatedBackgroundOutput_RejectsNegativeCursor verifies the cursor
 // is validated before seeking (the spec declares minimum: 0).
 func TestSeekIsolatedBackgroundOutput_RejectsNegativeCursor(t *testing.T) {

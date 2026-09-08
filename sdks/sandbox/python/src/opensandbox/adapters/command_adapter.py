@@ -63,9 +63,9 @@ def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
     if timeout is None:
         return None
     if isinstance(timeout, timedelta):
-        timeout_ms = int(timeout.total_seconds() * 1000)
-        if timeout_ms < 0:
+        if timeout < timedelta(0):
             raise InvalidArgumentException("timeout must be positive")
+        timeout_ms = int(timeout.total_seconds() * 1000)
         return timeout_ms
     raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
 
@@ -152,13 +152,7 @@ class CommandsAdapter(Commands):
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
 
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-            **self.execd_endpoint.headers,
-        }
-
-        # Execd API does not require authentication
+        headers = self.execd_endpoint.build_request_headers(self.connection_config)
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
@@ -194,7 +188,7 @@ class CommandsAdapter(Commands):
         )
 
     async def _get_client(self):
-        """Return the client for execd API (no auth required)."""
+        """Return the client for execd API."""
         return self._client
 
     def _get_execd_url(self, path: str) -> str:

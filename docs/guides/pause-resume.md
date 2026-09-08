@@ -308,6 +308,18 @@ snapshots are created by the `BatchSandbox` controller and have a controller
 ownerReference to the owning `BatchSandbox`; public snapshots are created by the
 Lifecycle server and do not use that ownerReference.
 
+### Runtime compatibility
+
+The built-in `rootfs-v1` image committer requires a container runtime that
+exposes compatible containerd task pause/resume and writable-snapshot APIs.
+gVisor RuntimeClasses whose handler is `runsc` do not currently satisfy that
+contract. The Lifecycle server rejects public snapshot creation for those
+workloads before it persists a snapshot record or creates a `SandboxSnapshot`
+resource, leaving the running sandbox untouched.
+
+Native gVisor checkpoint/restore requires a dedicated snapshot backend and is
+not provided by the `rootfs-v1` committer.
+
 ### Commit Job
 
 The controller creates a short-lived Kubernetes `Job` for each pause:

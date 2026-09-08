@@ -12,12 +12,37 @@ This page lists the OpenTelemetry metrics currently implemented in egress.
 |---|---|---|---|
 | `egress.dns.query.duration` | Histogram | `s` | Upstream DNS forward latency (recorded for allowed queries). |
 | `egress.dns.query.failed_total` | Counter | - | Queries the proxy could not resolve, by `reason`. |
+| `egress.dns.reply.failed_total` | Counter | - | Reply writes that failed after a decision, by `stage`. A nonzero count means a query was handled but its answer never reached the client. |
 | `egress.policy.denied_total` | Counter | - | Number of DNS queries denied by policy. |
 | `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fleet profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
 | `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
-| `egress.system.memory.usage_bytes` | Observable Gauge | `By` | System memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
-| `egress.system.cpu.utilization` | Observable Gauge | `1` | CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
+| `egress.system.memory.usage_bytes` | Observable Gauge | `By` | **Node** memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
+| `egress.system.cpu.utilization` | Observable Gauge | `1` | **Node** CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
+| `egress.process.memory.usage_bytes` | Observable Gauge | `By` | Memory charged to the sidecar's own cgroup. Only present when cgroupfs is readable. |
+| `egress.process.cpu.time` | Observable Counter | `s` | CPU seconds consumed by the sidecar's own cgroup. Only present when cgroupfs is readable. |
+
+### `system` vs `process`
+
+They measure different things, and the difference matters because this sidecar runs **per
+sandbox**:
+
+- `egress.system.*` comes from gopsutil, i.e. `/proc/meminfo` and `/proc/stat`, which inside
+  a container describe the **node**. Every sandbox on a node therefore publishes the same
+  figure under its own `sandbox_id`. Do not chart these "by sandbox": the series look
+  per-sandbox but are N copies of one node number. Prefer kubelet/cAdvisor or a node
+  exporter for node-level data.
+- `egress.process.*` is read from the sidecar's own cgroup (v2 `memory.current` and
+  `cpu.stat`, falling back to v1 `memory.usage_in_bytes` and `cpuacct.usage`), so it really
+  is per sandbox.
+
+`egress.process.cpu.time` is a **cumulative counter of consumed seconds**, not a sampled
+ratio: use `rate()` on it. A ratio depends on the exporter's sampling interval, so it cannot
+be re-aggregated or compared across differently configured deployments.
+
+Both `process` instruments are **registered only if their cgroup files can be read**. A
+runtime that does not expose cgroupfs — a sandbox pod under `secure_runtime`, for instance —
+gets no series at all, rather than a flat zero that reads like an idle sidecar.
 
 `egress.dns.query.duration` declares its bucket boundaries explicitly:
 
@@ -66,15 +91,21 @@ queried name nor the error text is ever attached:
 
 `egress.nftables.updates.failed_total` covers the other silent failure. Its `operation`
 attribute is one of `static_apply`, `dynamic_add`, `remove`, or — in the fleet profile
-(OSEP-0022) — `deny_first`, `dispatch_update`, `reset`; `dynamic_add` is the one to
+(OSEP-0022) — `deny_first`, `reset`; `dynamic_add` is the one to
 alert on, because a failed add means the kernel never learned about IPs the policy allows,
 so the chain drops traffic that should pass — which looks exactly like a policy denial from
 inside the sandbox while `egress.policy.denied_total` stays flat.
 
-The per-sandbox netns layer (fleet profile) counts its updates under the same operations;
-two expected cases are deliberately NOT counted as failures: a sandbox-layer removal whose
-netns is already destroyed (the rules died with it), and the startup recovery sweep of
-netns that never had a table installed.
+`egress.dns.reply.failed_total` covers the last silent failure class: a query that was
+**handled** (decided, maybe forwarded and answered upstream) whose reply write then failed.
+Until the write error was surfaced, such windows were indistinguishable from "query never
+handled" — the fleet-profile case where guest-originated DNS is answered in the proxy but
+the reply never reaches the sandbox (issue #1704). Its `stage` attribute is one of
+`malformed`, `unknown_source`, `deny`, `upstream_error`, `answer`, and every failure also
+emits a `[dns] reply write failed (stage=… remote=… question=…)` warning with the remote
+address and query name, so the counter pinpoints the condition and the log line the flow.
+Alert on any nonzero value: like `dynamic_add`, an `answer`-stage failure means traffic the
+policy allows is not reaching the client.
 
 A `static_apply` failure happens during startup, where the sidecar logs and exits. Metrics
 leave through a periodic reader and `os.Exit` skips the deferred shutdown, so that path
@@ -85,7 +116,9 @@ sidecar died would never be exported.
 
 All egress metrics may include shared attributes:
 
-- `sandbox_id` from `OPENSANDBOX_EGRESS_SANDBOX_ID` (when set)
+- `sandbox_id` from `OPENSANDBOX_EGRESS_SANDBOX_ID` (when set). Without it the sidecars of
+  different sandboxes export identical attribute sets, so their series collide in the
+  backend — which matters most for the per-sandbox `egress.process.*` gauges.
 - extra key/value attributes from `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (when set)
 
 ## OTEL Endpoint Configuration

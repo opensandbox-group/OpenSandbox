@@ -28,7 +28,7 @@ func TestRegistryLifecycle(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	s := FromSandboxUID("uid-1")
 	key := SubjectKey{NetNSPath: "/var/run/netns/ns1", SourceIP: netip.MustParseAddr("10.0.0.5")}
-	fence := Fencing{SandboxUID: "uid-1", InstanceGeneration: 1, AssignmentAttempt: 1}
+	fence := Fencing{RuntimeInstanceID: "r-1", AttachmentID: "att-1"}
 
 	// absent -> denying on first observation
 	state, err := reg.RegisterAndEnforce(s, key, fence, nil)
@@ -76,8 +76,8 @@ func TestRegistryFencingRebindDiscardsPolicy(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	s := FromSandboxUID("uid-1")
 	key := SubjectKey{SourceIP: netip.MustParseAddr("10.0.0.5")}
-	fence1 := Fencing{SandboxUID: "uid-1", InstanceGeneration: 1, AssignmentAttempt: 1}
-	fence2 := Fencing{SandboxUID: "uid-1", InstanceGeneration: 2, AssignmentAttempt: 1}
+	fence1 := Fencing{RuntimeInstanceID: "r-1", AttachmentID: "att-1"}
+	fence2 := Fencing{RuntimeInstanceID: "r-2", AttachmentID: "att-2"}
 
 	reg.Register(s, key, fence1)
 	pol, err := parsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
@@ -103,7 +103,7 @@ func TestRegistryResolverDispatch(t *testing.T) {
 	ips := []string{"10.0.0.5", "10.0.0.6"}
 	subjects := []Subject{FromSandboxUID("a"), FromSandboxUID("b")}
 	for i, ip := range ips {
-		reg.Register(subjects[i], SubjectKey{SourceIP: netip.MustParseAddr(ip)}, Fencing{SandboxUID: string(subjects[i])})
+		reg.Register(subjects[i], SubjectKey{SourceIP: netip.MustParseAddr(ip)}, Fencing{RuntimeInstanceID: "r-" + string(subjects[i]), AttachmentID: "att-" + string(subjects[i])})
 	}
 	got, ok := reg.Resolve(SubjectKey{SourceIP: netip.MustParseAddr("10.0.0.6")})
 	require.True(t, ok)
@@ -119,7 +119,7 @@ func TestRegistryAlwaysRulesOverlay(t *testing.T) {
 	require.NoError(t, err)
 	reg := NewRegistry([]policy.EgressRule{alwaysDenyRule}, nil)
 	s := FromSandboxUID("a")
-	reg.Register(s, SubjectKey{SourceIP: netip.MustParseAddr("10.0.0.5")}, Fencing{SandboxUID: "a"})
+	reg.Register(s, SubjectKey{SourceIP: netip.MustParseAddr("10.0.0.5")}, Fencing{RuntimeInstanceID: "r-a", AttachmentID: "att-a"})
 	pol, err := parsePolicy(`{"defaultAction":"allow"}`)
 	require.NoError(t, err)
 	require.NoError(t, reg.ApplyPolicy(s, pol))
@@ -129,6 +129,37 @@ func TestRegistryAlwaysRulesOverlay(t *testing.T) {
 	require.NotNil(t, eff)
 	assert.Equal(t, "deny", eff.Evaluate("blocked.example"))
 	assert.Equal(t, "allow", eff.Evaluate("ok.example"))
+}
+
+func TestRegistryUnsetPolicyReturnsToDenyFirst(t *testing.T) {
+	reg := NewRegistry(nil, nil)
+	s := FromSandboxUID("uid-1")
+	key := SubjectKey{SourceIP: netip.MustParseAddr("10.0.0.5")}
+	fence := Fencing{RuntimeInstanceID: "r-1", AttachmentID: "att-1"}
+	reg.Register(s, key, fence)
+	pol, err := parsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, reg.ApplyPolicy(s, pol))
+	require.Equal(t, StateActive, mustState(reg.Get(s)))
+
+	// Fence reports the registered identity (REMOVE_BINDING fencing)
+	gotFence, ok := reg.Fence(s)
+	require.True(t, ok)
+	assert.Equal(t, fence, gotFence)
+
+	// SET_BINDING(null): policy removed, back to deny-first, DNS denies
+	require.NoError(t, reg.UnsetPolicy(s))
+	require.Equal(t, StateDenying, mustState(reg.Get(s)))
+	assert.Nil(t, reg.EffectivePolicy(s))
+	assert.Nil(t, reg.UserPolicy(s))
+
+	// unknown subject
+	err = reg.UnsetPolicy(Subject("s-other"))
+	require.ErrorIs(t, err, ErrUnknownSubject)
+
+	// a later ApplyPolicy re-activates
+	require.NoError(t, reg.ApplyPolicy(s, pol))
+	require.Equal(t, StateActive, mustState(reg.Get(s)))
 }
 
 func parsePolicy(raw string) (*policy.NetworkPolicy, error) {

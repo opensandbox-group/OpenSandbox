@@ -1051,6 +1051,39 @@ def test_egress_config_mode_literal():
     assert cfg.mode == EGRESS_MODE_DNS_NFT
 
 
+def test_egress_config_otlp_endpoint_default_and_http_urls():
+    base = EgressConfig(image="opensandbox/egress:v1")
+    assert base.otlp_endpoint is None
+    for endpoint in (
+        "http://otel-collector.observability:4318",
+        "https://otel-collector.observability:4318",
+    ):
+        cfg = EgressConfig(image="opensandbox/egress:v1", otlp_endpoint=endpoint)
+        assert cfg.otlp_endpoint == endpoint
+
+
+def test_egress_config_empty_otlp_endpoint_normalizes_to_none():
+    cfg = EgressConfig(image="opensandbox/egress:v1", otlp_endpoint="")
+    assert cfg.otlp_endpoint is None
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "grpc://otel-collector:4317",
+        "otel-collector.observability:4318",
+        "unix:///var/run/otel.sock",
+        "http://",
+        "https://",
+        "http:///v1/metrics",
+        "https:///v1/metrics",
+    ],
+)
+def test_egress_config_rejects_non_http_otlp_endpoint(endpoint):
+    with pytest.raises(ValidationError, match=r"otlp_endpoint must be an http\(s\) URL"):
+        EgressConfig(image="opensandbox/egress:v1", otlp_endpoint=endpoint)
+
+
 @pytest.mark.parametrize(
     ("resource_name", "quantity"),
     [

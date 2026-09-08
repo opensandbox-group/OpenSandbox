@@ -255,11 +255,11 @@ func TestRefreshTickNoActiveConnectionsSkipsSubject(t *testing.T) {
 	assert.Empty(t, runner.scripts, "no active connections -> no refresh scripts")
 }
 
-// TestRefreshTickUsesUpdatedDispatchIP: after an unchanged-fencing slot
-// update moved the subject IP (ApplyDispatchUpdate), the refresh bucketing
-// must match conntrack entries against the NEW source IP — otherwise active
-// connections from the new IP never renew their leases.
-func TestRefreshTickUsesUpdatedDispatchIP(t *testing.T) {
+// TestRefreshTickUsesReboundDispatchIP: after a fencing rebind moved the
+// subject IP (new attachment -> ApplyDenyFirst re-registration), the refresh
+// bucketing must match conntrack entries against the NEW source IP —
+// otherwise active connections from the new IP never renew their leases.
+func TestRefreshTickUsesReboundDispatchIP(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
 	s := subject.FromSandboxUID("u-1")
@@ -267,9 +267,11 @@ func TestRefreshTickUsesUpdatedDispatchIP(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
 
-	// the subject's IP moved (unchanged fencing)
+	// the subject's IP moved (rebind: deny-first re-registration wipes the
+	// old leases, then the sandbox re-learns its DNS after re-activation)
 	moved := testSlot("u-1", "10.0.0.7")
-	require.NoError(t, a.ApplyDispatchUpdate(ctx, s, moved))
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, moved))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
 
 	a.conntrack = func(context.Context) ([]conntrackEntry, error) {
 		return []conntrackEntry{

@@ -141,6 +141,8 @@ RUN CGO_ENABLED=0 go build -tags ebpf -trimpath -buildvcs=false \
 
 FROM alpine:latest
 
+RUN apk add --no-cache nss-tools
+
 COPY --from=bwrap-builder --chown=0:0 /build/bwrap/bwrap /usr/local/bin/bwrap
 COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-session-gate /usr/local/libexec/opensandbox-session-gate
 COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-session-gate /opt/opensandbox/opensandbox-session-gate

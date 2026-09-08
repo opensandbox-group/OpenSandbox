@@ -12,7 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+from fastapi import HTTPException
+
 from opensandbox_server.services.docker import port_allocator
+
+
+@pytest.fixture(autouse=True)
+def _clear_port_reservations():
+    with port_allocator._RESERVATION_LOCK:
+        port_allocator._RESERVED_HOST_PORTS.clear()
+    yield
+    with port_allocator._RESERVATION_LOCK:
+        port_allocator._RESERVED_HOST_PORTS.clear()
 
 
 class _FakeSocket:
@@ -53,7 +65,10 @@ def test_allocate_port_bindings_keep_docker_publish_host(monkeypatch) -> None:
 
     bindings = port_allocator.allocate_port_bindings(["8080"])
 
-    assert bindings == {"8080": (port_allocator.DOCKER_PUBLISH_HOST, 45678)}
+    try:
+        assert bindings == {"8080": (port_allocator.DOCKER_PUBLISH_HOST, 45678)}
+    finally:
+        port_allocator.release_port_bindings(bindings)
 
 
 def test_allocate_host_port_respects_custom_range(monkeypatch) -> None:
@@ -74,10 +89,10 @@ def test_allocate_host_port_respects_custom_range(monkeypatch) -> None:
 
 def test_allocate_port_bindings_passes_custom_range(monkeypatch) -> None:
     """allocate_port_bindings forwards custom range to allocate_host_port."""
-    calls: list[tuple[int, int]] = []
+    calls: list[tuple[int, int, int]] = []
 
     def tracked_allocate(min_port=40000, max_port=60000, attempts=50):
-        calls.append((min_port, max_port))
+        calls.append((min_port, max_port, attempts))
         return 41000
 
     monkeypatch.setattr(port_allocator, "allocate_host_port", tracked_allocate)
@@ -88,5 +103,61 @@ def test_allocate_port_bindings_passes_custom_range(monkeypatch) -> None:
         max_port=41100,
     )
 
-    assert calls == [(41000, 41100)]
-    assert bindings == {"8080": (port_allocator.DOCKER_PUBLISH_HOST, 41000)}
+    try:
+        assert calls == [(41000, 41100, 50)]
+        assert bindings == {"8080": (port_allocator.DOCKER_PUBLISH_HOST, 41000)}
+    finally:
+        port_allocator.release_port_bindings(bindings)
+
+
+def test_port_remains_reserved_until_bindings_are_released(monkeypatch) -> None:
+    candidates = iter([45678, 45678, 45679, 45678])
+    monkeypatch.setattr(port_allocator.random, "randint", lambda a, b: next(candidates))
+    monkeypatch.setattr(
+        port_allocator.socket,
+        "socket",
+        lambda family, sock_type: _FakeSocket([]),
+    )
+
+    first: dict[str, tuple[str, int]] = {}
+    second: dict[str, tuple[str, int]] = {}
+    third: dict[str, tuple[str, int]] = {}
+    try:
+        first = port_allocator.allocate_port_bindings(["8080"])
+        second = port_allocator.allocate_port_bindings(["8080"])
+        port_allocator.release_port_bindings(first)
+        third = port_allocator.allocate_port_bindings(["8080"])
+
+        assert first["8080"][1] == 45678
+        assert second["8080"][1] == 45679
+        assert third["8080"][1] == 45678
+    finally:
+        port_allocator.release_port_bindings(first)
+        port_allocator.release_port_bindings(second)
+        port_allocator.release_port_bindings(third)
+
+
+def test_partial_allocation_failure_releases_reserved_ports(monkeypatch) -> None:
+    monkeypatch.setattr(port_allocator.random, "randint", lambda a, b: 45678)
+    monkeypatch.setattr(
+        port_allocator.socket,
+        "socket",
+        lambda family, sock_type: _FakeSocket([]),
+    )
+
+    with pytest.raises(HTTPException):
+        port_allocator.allocate_port_bindings(
+            ["44772", "8080"],
+            min_port=45678,
+            max_port=45678,
+        )
+
+    bindings = port_allocator.allocate_port_bindings(
+        ["8080"],
+        min_port=45678,
+        max_port=45678,
+    )
+    try:
+        assert bindings["8080"][1] == 45678
+    finally:
+        port_allocator.release_port_bindings(bindings)

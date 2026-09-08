@@ -25,10 +25,8 @@ const EnvCredentialVaultTrustedProxyCIDRs = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT
 // Fleet profile: the egress control plane serves N sandboxes
 // sharing one host/network domain; sidecar remains the default profile.
 const (
-	EnvEgressProfile    = "OPENSANDBOX_EGRESS_PROFILE"
-	EnvSlotStoreDir     = "OPENSANDBOX_EGRESS_SLOT_STORE_DIR"
-	EnvSlotPollInterval = "OPENSANDBOX_EGRESS_SLOT_POLL_INTERVAL"
-	EnvPendingPushTTL   = "OPENSANDBOX_EGRESS_PENDING_PUSH_TTL"
+	EnvEgressProfile  = "OPENSANDBOX_EGRESS_PROFILE"
+	EnvPendingPushTTL = "OPENSANDBOX_EGRESS_PENDING_PUSH_TTL"
 )
 
 const (
@@ -38,19 +36,27 @@ const (
 	ProfileFleet = "fleet"
 )
 
-// Fleet-profile HTTP listener and trust model: the listener binds the Pod
-// netns loopback only; the fastlet proxy is the only peer and injects the
-// UID header that routes a push to its subject.
+// Sandbox Actions Handler protocol (fast-sandbox, docs/concepts/
+// sandbox-actions.md): the Fastlet delivers Binding synchronization and
+// Lifecycle Hooks to the egress Handler over two Pod-loopback HTTP endpoints
+// on the action target port.
 const (
-	EgressSubjectUIDHeader         = "X-Fast-Sandbox-Uid"
-	EgressSubjectGenerationHeader  = "X-Fast-Sandbox-Generation"
-	DefaultSlotStoreDir            = "/run/fast-sandbox/network"
-	DefaultPendingPushTTL          = 30
-	DefaultSlotPollIntervalSeconds = 1
-	// DefaultNetnsMountDir is where per-sandbox netns paths are mounted for
-	// host-domain consumers (egress runs nsenter --net=<path> against them);
-	// the deployment precondition of OSEP-0022.
-	DefaultNetnsMountDir = "/var/run/netns"
+	ActionsAPIVersion   = "sandbox.fast.io/actions/v1"
+	ActionsStatusPath   = "/_fastlet/v1/actions/status"
+	ActionsDispatchPath = "/_fastlet/v1/actions"
+
+	HookRuntimeReady   = "sandbox.runtime-ready"
+	HookDataPlaneReady = "sandbox.data-plane-ready"
+)
+
+// Fleet-profile HTTP listener and trust model: the listener binds the Pod
+// netns loopback only; the fastlet proxy and the Fastlet's action dispatcher
+// are the only peers. The proxy injects the UID header that routes a push to
+// its subject; the action dispatcher carries the identity in the envelope.
+const (
+	EgressSubjectUIDHeader        = "X-Fast-Sandbox-Uid"
+	EgressSubjectGenerationHeader = "X-Fast-Sandbox-Generation"
+	DefaultPendingPushTTL         = 30
 )
 
 const (

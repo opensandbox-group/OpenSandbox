@@ -479,6 +479,8 @@ paths:
       description: |
         Returns the current status of a command (foreground or background) by command ID.
         Includes running flag, exit code, error (if any), and start/finish timestamps.
+        Completed command metadata is retained for at least 24 hours and then removed
+        by an hourly cleanup. Running commands are never removed by retention cleanup.
       operationId: getCommandStatus
       tags:
         - Command
@@ -515,6 +517,8 @@ paths:
         tail cursor for the next poll. When no starting line is provided, the full logs are returned.
         Response body is plain text so it can be rendered directly in browsers; the latest line index
         is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+        Completed background command output is retained for at least 24 hours and then
+        removed by an hourly cleanup. Running command output is never removed by retention cleanup.
       operationId: getBackgroundCommandLogs
       tags:
         - Command

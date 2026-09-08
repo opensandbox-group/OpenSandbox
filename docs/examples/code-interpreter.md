@@ -38,7 +38,7 @@ uv pip install opensandbox opensandbox-code-interpreter
 uv run python examples/code-interpreter/main.py
 ```
 
-The script creates a Sandbox + CodeInterpreter, runs a Python code snippet and prints stdout/result, then terminates the remote instance.
+The script creates a Sandbox + CodeInterpreter, runs a Python code snippet and prints stdout/result, then terminates the remote instance. Cleanup is attempted in a `finally` block even if interpreter setup or code execution raises an exception.
 
 ## Environment variables
 

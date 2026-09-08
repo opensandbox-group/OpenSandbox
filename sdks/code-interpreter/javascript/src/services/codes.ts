@@ -46,4 +46,13 @@ export interface Codes {
   ): AsyncIterable<ServerStreamEvent>;
 
   interrupt(contextId: string): Promise<void>;
+
+  /**
+   * Optional execd daemon ping capability.
+   *
+   * Implemented by the default adapter; custom adapters may omit it, in which
+   * case the interpreter falls back to probing execd `/ping` directly from the
+   * sandbox connection config.
+   */
+  ping?(signal?: AbortSignal): Promise<boolean>;
 }

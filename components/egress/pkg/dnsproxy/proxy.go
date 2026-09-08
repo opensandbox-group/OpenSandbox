@@ -170,7 +170,7 @@ func (p *Proxy) Shutdown() error {
 
 func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if len(r.Question) == 0 {
-		_ = w.WriteMsg(new(dns.Msg))
+		p.writeReply(w, r, new(dns.Msg), telemetry.DNSReplyStageMalformed)
 		return
 	}
 	q := r.Question[0]
@@ -187,7 +187,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 			telemetry.RecordDNSDenied()
 			resp := new(dns.Msg)
 			resp.SetRcode(r, dns.RcodeNameError)
-			_ = w.WriteMsg(resp)
+			p.writeReply(w, r, resp, telemetry.DNSReplyStageUnknownSource)
 			return
 		}
 		policyToEval = qp.Policy
@@ -201,7 +201,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 		p.publishBlocked(domain)
 		resp := new(dns.Msg)
 		resp.SetRcode(r, dns.RcodeNameError)
-		_ = w.WriteMsg(resp)
+		p.writeReply(w, r, resp, telemetry.DNSReplyStageDeny)
 		return
 	}
 
@@ -214,7 +214,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 		logOutboundDNS(host, nil, "", err.Error())
 		fail := new(dns.Msg)
 		fail.SetRcode(r, dns.RcodeServerFailure)
-		_ = w.WriteMsg(fail)
+		p.writeReply(w, r, fail, telemetry.DNSReplyStageUpstreamError)
 		return
 	}
 	telemetry.RecordDNSForward(elapsed)
@@ -222,7 +222,23 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
 	}
 	p.maybeNotifyResolvedWith(domain, resp, notifyResolved)
-	_ = w.WriteMsg(resp)
+	p.writeReply(w, r, resp, telemetry.DNSReplyStageAnswer)
+}
+
+// writeReply sends a DNS response and surfaces write failures. A reply can be
+// decided and still never reach the client (e.g. the kernel cannot route it
+// back to a REDIRECTed flow); until the error was reported, such windows were
+// indistinguishable from "query never handled" (issue #1704).
+func (p *Proxy) writeReply(w dns.ResponseWriter, r *dns.Msg, resp *dns.Msg, stage string) {
+	if err := w.WriteMsg(resp); err != nil {
+		telemetry.RecordDNSReplyFailed(stage)
+		qname := "."
+		if len(r.Question) > 0 {
+			qname = normalizeDNSHost(r.Question[0].Name)
+		}
+		log.Warnf("[dns] reply write failed (stage=%s remote=%s question=%q): %v",
+			stage, requestRemoteAddr(w), qname, err)
+	}
 }
 
 // requestRemoteAddr extracts the client IP from a DNS response writer.

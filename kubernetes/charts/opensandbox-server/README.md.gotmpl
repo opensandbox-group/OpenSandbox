@@ -2,6 +2,13 @@
 
 OpenSandbox Lifecycle API server: provides sandbox create/delete and other lifecycle APIs, typically used with BatchSandbox/Pool on Kubernetes.
 
+> **Single-active default**: The chart deploys one active Lifecycle Server by
+> default. Multi-replica Server HA is not supported yet, including with a shared
+> PostgreSQL database. PostgreSQL-backed Kubernetes HA will be delivered in a
+> separate change. The Server Deployment uses the `Recreate` strategy so an
+> upgrade stops the active Server before starting its replacement; expect a
+> brief API interruption during upgrades.
+
 ## Prerequisites
 
 - Kubernetes 1.21.1+

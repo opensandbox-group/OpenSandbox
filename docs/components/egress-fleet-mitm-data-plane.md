@@ -42,16 +42,22 @@ single-vault addon behavior are unchanged.
 - **Deliberate placement change vs the original design**: the original design
   proposed per-sandbox netns OUTPUT REDIRECT installed via `nsenter`. The Pod
   netns placement is strictly better:
-  1. The sandbox-netns OUTPUT filter (`pkg/sandboxnft`) sees the **real
-     destination** — its policy matching stays exact with no rule changes (a
-     sandbox-side DNAT would rewrite the dst before every filter hook saw
-     it).
+  1. The Pod-netns forward hook (and the per-subject INPUT enforcement chain
+     for intercepted traffic) sees the **real destination** — policy matching
+     stays exact with no rule changes (a sandbox-side DNAT would rewrite the
+     dst before every filter hook saw it).
   2. `SO_ORIGINAL_DST` on the mitmdump socket (Pod-netns conntrack original
      tuple) yields the **true target address** — transparent mode needs no
      Host/SNI fallback.
   3. The rule is invisible/tamper-proof to the sandbox (it has no NET_ADMIN
      in the Pod netns), and the egress's own traffic never matches the
      sandbox saddr key (the sidecar's uid-owner exclusion is unnecessary).
+
+  (The earlier per-sandbox netns OUTPUT mirror layer — `pkg/sandboxnft` — was
+  removed when the fleet profile moved to the fast-sandbox Sandbox Actions
+  protocol: the action envelope does not carry the sandbox netns path, and
+  the Pod-netns layers are authoritative for both forwarded and intercepted
+  traffic.)
 - **Enforcement of intercepted traffic (important)**: the DNAT delivers the
   intercepted 80/443 **locally** (INPUT path), so the Pod-netns **forward
   hook never sees it**. The authoritative enforcement for MITM traffic is a
@@ -79,9 +85,9 @@ table inet opensandbox_gateway_mitm
 ```
 
 The table is rebuilt wholesale from the fleet server's in-memory subject map
-on every register/unregister/slot-update; nft batches are transactional, so a
-failed rebuild leaves the previous table live (fail closed at registration:
-the rebuild runs BEFORE the subject is marked registered).
+on every register/unload; nft batches are transactional, so a failed rebuild
+leaves the previous table live (fail closed at registration: the rebuild runs
+BEFORE the subject is marked registered).
 
 ### Lifecycle
 

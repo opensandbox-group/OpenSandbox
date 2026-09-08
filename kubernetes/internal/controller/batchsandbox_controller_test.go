@@ -46,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/strategy"
@@ -702,6 +703,63 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFindBatchSandboxesForPooledPod(t *testing.T) {
+	allocated := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "allocated",
+			Namespace: "default",
+			Annotations: map[string]string{
+				AnnoAllocStatusKey: `{"pods":["pool-pod"]}`,
+			},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "shared-pool"},
+	}
+	released := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "released",
+			Namespace: "default",
+			Annotations: map[string]string{
+				AnnoAllocStatusKey:  `{"pods":["pool-pod"]}`,
+				AnnoAllocReleaseKey: `{"pods":["pool-pod"]}`,
+			},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "shared-pool"},
+	}
+	other := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other",
+			Namespace: "default",
+			Annotations: map[string]string{
+				AnnoAllocStatusKey: `{"pods":["other-pod"]}`,
+			},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "shared-pool"},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testscheme).
+		WithIndex(&sandboxv1alpha1.BatchSandbox{}, fieldindex.IndexNameForPoolRef, fieldindex.PoolRefIndexFunc).
+		WithObjects(allocated, released, other).
+		Build()
+	reconciler := &BatchSandboxReconciler{Client: fakeClient}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "pool-pod",
+		Namespace: "default",
+		Labels:    map[string]string{LabelPoolName: "shared-pool"},
+	}}
+
+	requests := reconciler.findBatchSandboxesForPooledPod(context.Background(), pod)
+
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "default", Name: "allocated"}}}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("findBatchSandboxesForPooledPod() = %v, want %v", requests, want)
+	}
+
+	pod.Labels[LabelPoolName] = "unrelated-pool"
+	if requests := reconciler.findBatchSandboxesForPooledPod(context.Background(), pod); len(requests) != 0 {
+		t.Fatalf("findBatchSandboxesForPooledPod() for unrelated pool = %v, want none", requests)
 	}
 }
 

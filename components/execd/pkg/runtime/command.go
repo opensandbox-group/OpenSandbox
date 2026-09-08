@@ -153,10 +153,13 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		return fmt.Errorf("failed to get stdlog descriptor: %w", err)
 	}
-	defer stdout.Close()
-	defer stderr.Close()
 	stdoutPath := c.stdoutFileName(session)
 	stderrPath := c.stderrFileName(session)
+	defer func() {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		removeCommandOutputFiles(stdoutPath, stderrPath)
+	}()
 
 	startAt := time.Now()
 	log.Info("received command: %v", log.SanitizeCommand(request.Code))

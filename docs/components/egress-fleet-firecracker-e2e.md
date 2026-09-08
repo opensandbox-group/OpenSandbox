@@ -55,7 +55,7 @@ template would trade that for rotation safety.
 1. **Per-VM gateway addresses on each pod veth.** Sharing one gateway IP
    breaks the second VM: its ARP is unanswered under `arp_ignore=1`, packets
    never leave the guest (~10s curl timeouts). Per-VM gateways match real
-   per-VM veths; egress adapts automatically (slot-driven).
+   per-VM veths; egress adapts automatically (per-attachment dispatch).
 2. **Mount `/var/run/netns` with `:rslave`** in both containers: VMs created
    after container start must be visible (default `rprivate` propagation
    hides them; `nsenter` fails).
@@ -80,12 +80,12 @@ template would trade that for rotation safety.
 
 ## Integration contract
 
-- **Slot** (B7): per-VM `ip`/`gateway`/`hostNetnsPath`/`hostVeth`/`dnsPath`.
+- **Subject lifecycle** (Sandbox Actions protocol): per-VM `SET_BINDING` with
+  the policy, `attachment.network` carrying `ip`/`gateway`/`hostVeth`/
+  `privateCidr`; `sandbox.data-plane-ready` activates the subject.
 - **CA delivery**: egress exports `/opt/opensandbox/mitm-ca`; fastlet binds it
   into the VM rootfs pre-boot (e2e: loop-mount write).
-- **resolv**: egress rewrites `slot.dnsPath` → VM `/etc/resolv.conf`
-  (nameserver = VM gateway).
-- **Ordering**: VM netns first (registration `nsenter`s into it), then slot →
-  deny-first + DNAT → policy/vault pushes → guest CA install → trusted TLS.
+- **Ordering**: VM netns first, then `SET_BINDING` → deny-first + DNAT →
+  `data-plane-ready` + vault pushes → guest CA install → trusted TLS.
 - **Guest trust**: `update-ca-certificates` covers curl (~0.6–0.75s);
   production needs JDK/NSS/merged-bundle equivalents.

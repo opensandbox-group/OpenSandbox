@@ -189,6 +189,22 @@ See [Credential Vault](/guides/credential-vault) for full API usage, binding rul
 
 Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). The credential proxy's log lines from mitmdump are piped into the same zap sink at warn level, so they land in the egress log file when `OPENSANDBOX_LOG_OUTPUT` points at one; mitmproxy's own flow logs are not forwarded. OTLP log export is not used.
 
+#### Enabling export from the server
+
+When the server config sets `[egress].otlp_endpoint`, the lifecycle server injects it into every egress sidecar as `OTEL_EXPORTER_OTLP_ENDPOINT` (Docker and Kubernetes alike):
+
+```toml
+[egress]
+otlp_endpoint = "http://otel-collector.observability.svc.cluster.local:4318"
+```
+
+- The endpoint must be an `http://` or `https://` URL with a collector host — the telemetry client only speaks OTLP over HTTP/protobuf, so a gRPC endpoint (port 4317) won't work.
+- Use a **fully qualified service name or an IP**, per the auto-allow note below: partial service names get search-domain-expanded to FQDNs the auto-generated allow rule does not match.
+- The collector address is infrastructure config: it is read only from the server config file and cannot be set per request. When unset, sidecar metrics are not exported.
+- The sidecar exports **delta** temporality; a collector feeding Prometheus/GMP needs the `deltatocumulative` processor.
+
+Full key reference: [server configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
+
 #### DNS latency buckets
 
 `egress.dns.query.duration` is recorded in **seconds** and declares its bucket boundaries
@@ -239,11 +255,46 @@ means the kernel never learned about destinations the policy permits and the cha
 them. From inside the sandbox that is indistinguishable from a denial, while
 `egress.policy.denied_total` stays flat — a fail-closed outage with no other signal.
 
+#### Resource usage: node vs sidecar
+
+Two pairs of gauges look interchangeable and are not:
+
+| Metric | Unit | Scope |
+|---|---|---|
+| `egress.system.memory.usage_bytes` | `By` | the **node** |
+| `egress.system.cpu.utilization` | `1` | the **node** |
+| `egress.process.memory.usage_bytes` | `By` | this **sidecar** |
+| `egress.process.cpu.time` | `s` | this **sidecar** |
+
+The `system` pair comes from `/proc/meminfo` and `/proc/stat`, which inside a container
+describe the node. Since the sidecar runs **per sandbox**, every sandbox on a node reports
+the same node figure under its own `sandbox_id` — do not chart these "by sandbox", because
+the series look per-sandbox and are N copies of one number. Use kubelet/cAdvisor or a node
+exporter for node-level data.
+
+The `process` pair is read from the sidecar's own cgroup, so it really is per sandbox.
+`egress.process.cpu.time` is a **cumulative counter of consumed seconds** — query it with
+`rate()`. A sampled ratio would depend on the export interval and could not be compared
+across deployments.
+
+Per-sandbox attribution needs `OPENSANDBOX_EGRESS_SANDBOX_ID` to be set, since that is what
+becomes the `sandbox_id` attribute. Without it every sidecar exports the same attribute set
+and the series from different sandboxes collide in the backend — which makes the `process`
+metrics look flat or flapping rather than absent. Set it when launching the sidecar.
+
+Both `process` metrics are **only present when the sidecar's cgroup is readable** (cgroup v2
+`memory.current` / `cpu.stat`, or v1 `memory.usage_in_bytes` / `cpuacct.usage`). Under a
+runtime that does not expose cgroupfs the series are absent rather than zero, so a flat zero
+is never mistaken for an idle sidecar.
+
 Full metric inventory and attribute semantics: [egress OpenTelemetry reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/opentelemetry.md).
 
 ## Fleet Profile (multi-sandbox control plane)
 
-> Experimental: design per [OSEP-0022](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0022-multi-sandbox-egress-control-plane.md).
+> Experimental: design per [OSEP-0022](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0022-multi-sandbox-egress-control-plane.md);
+> subject lifecycle follows the fast-sandbox
+> [Sandbox Actions](https://github.com/opensandbox-group/fast-sandbox/blob/master/docs/concepts/sandbox-actions.md)
+> Handler protocol (replacing the earlier slot-store observation).
 
 The default `sidecar` profile serves exactly one sandbox sharing one network
 namespace. The opt-in `fleet` profile (`OPENSANDBOX_EGRESS_PROFILE=fleet`)
@@ -252,33 +303,48 @@ Pod): a single egress process hosts one **subject** per sandbox, each with its
 own policy, credentials, and kernel rules. The sidecar profile and its API are
 unchanged; both profiles are mutually exclusive deployment forms.
 
-- **Identity**: subjects are observed read-only from the fastlet slot store
-  (`OPENSANDBOX_EGRESS_SLOT_STORE_DIR`, default `/run/fast-sandbox/network`)
-  via polling (`OPENSANDBOX_EGRESS_SLOT_POLL_INTERVAL`, seconds). A subject is
-  deny-first from observation until its policy lands.
+- **Identity and lifecycle**: the Fastlet is the sole lifecycle dispatcher.
+  The egress Handler implements `GET /_fastlet/v1/actions/status` (process
+  incarnation probe: a changed `instanceId` makes the Fastlet replay the
+  latest `SET_BINDING` plus reached Hooks) and `POST /_fastlet/v1/actions`
+  (`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`). `SET_BINDING`
+  registers the subject deny-first and stores the input policy as pending;
+  `sandbox.data-plane-ready` applies it (`denying` → `active`). The network
+  identity (source IP, gateway, veth, private CIDR) comes from the action
+  envelope's attachment block. A subject is deny-first from registration
+  until its data-plane-ready Hook succeeds, so policy delivery can be late,
+  never early-open.
 - **Control surface**: the listener binds the Pod netns loopback only
-  (`OPENSANDBOX_EGRESS_HTTP_ADDR`, default `127.0.0.1:18080`). Policy and
+  (`OPENSANDBOX_EGRESS_HTTP_ADDR`, default `127.0.0.1:18080`) and serves the
+  action endpoints plus the proxy-route policy and credential surfaces.
+  Policy rides the Sandbox CRD `actionBindings` (declarative, revisioned);
   credential pushes from the server are routed per subject by the
   `X-Fast-Sandbox-Uid` header (added by fastlet-proxy, the only peer). A push
-  for a UID whose slot has not appeared is cached and applied on registration
-  (`OPENSANDBOX_EGRESS_PENDING_PUSH_TTL`, seconds, default `30`); a stale
-  push carrying a mismatched `X-Fast-Sandbox-Generation` is discarded.
+  for a UID whose binding has not appeared is cached and applied on
+  registration (`OPENSANDBOX_EGRESS_PENDING_PUSH_TTL`, seconds, default
+  `30`); a stale push carrying a mismatched `X-Fast-Sandbox-Generation` is
+  discarded.
 - **DNS**: one shared proxy on loopback `127.0.0.1:15353` (never collides
   with a host DNS service on `:53`); per-subject prerouting REDIRECTs
-  forward sandbox DNS addressed to `slot.Gateway:53` to it, preserving the
-  source IP, and per-query policy is dispatched by source IP.
-- **Enforcement**: nftables `hook forward` in the Pod netns with a
-  drop-by-default master chain; per-subject chains and static sets are swapped
-  atomically. Dynamic DNS-learned sets carry bounded leases. A second,
-  per-sandbox netns OUTPUT chain mirrors each subject's policy as defense in
-  depth (installed from the host via `nsenter --net=<slot.hostNetnsPath>`),
-  and a per-subject connection refresh loop (Pod netns conntrack, bucketed by
-  source IP, every 30s, one batched transaction per tick) keeps the dynamic
-  leases of active connections alive in both layers. Only TCP sessions are
+  forward sandbox DNS addressed to the attachment gateway `:53` to it,
+  preserving the source IP, and per-query policy is dispatched by source IP.
+- **Enforcement**: nftables in the Pod netns. The forward path never issues
+  an explicit `accept` — with `net.bridge.bridge-nf-call-iptables=1` (the
+  fast-sandbox Firecracker bridge topology) an accept verdict returns the
+  frame to the bridge L2 path and drops it before postrouting. Instead,
+  per-subject `hook prerouting` chains mark allowed destinations (`meta mark
+  set 0x2` for allow/dyn set members; an unconditional mark for
+  default-allow policies), and the drop-by-default master forward chain
+  becomes a drop-by-unmarked chain (`policy accept` + `meta mark & 0x2 !=
+  0x2 drop` tail): per-subject deny sets still drop explicitly, unregistered
+  sources and deny-first subjects carry no mark and are denied by the tail.
+  Static sets are swapped atomically; dynamic DNS-learned sets carry bounded
+  leases. A per-subject connection refresh loop (Pod netns conntrack,
+  bucketed by source IP, every 30s, one batched transaction per tick) keeps
+  the dynamic leases of active connections alive. Only TCP sessions are
   renewed; UDP/QUIC (HTTP/3) relies on the DNS lease TTLs — same limitation
-  as the sidecar profile. A sandbox-layer mirror miss marks the IPs pending
-  and redelivers them on the next tick, so a transient failure can never
-  self-lock a subject until the lease expires.
+  as the sidecar profile. Mark `0x2` is distinct from the DNS proxy's
+  `SO_MARK 0x1` bypass.
 - **Encrypted-DNS blocking**: DoT 853 is always dropped in the master chain.
   With `OPENSANDBOX_EGRESS_BLOCK_DOH_443=true`, TCP 443 to the
   `OPENSANDBOX_EGRESS_DOH_BLOCKLIST` IP/CIDR list is dropped too — same
@@ -289,13 +355,15 @@ unchanged; both profiles are mutually exclusive deployment forms.
   > (HTTP/3, DoH-over-UDP) is not intercepted by this mechanism.
 - **Telemetry**: OpenTelemetry metrics are exported exactly as in the sidecar
   profile; nft updates are attributed per fleet operation (`deny_first`,
-  `static_apply`, `dynamic_add`, `dispatch_update`, `reset`, `remove`).
+  `static_apply`, `dynamic_add`, `reset`, `remove`).
 - **Credentials**: memory-only, per subject; complete vault revisions are
   pushed over the proxy route (OSEP-0012 model). No Secret volume, no egress
-  disk state.
-- **Recovery**: on restart, egress wipes stale rules, rescans the slot store
-  (every live subject re-enters `denying`), and the server re-pushes
-  policies.
+  disk state. The action binding input is NOT a secret transport (it is
+  persisted in the Sandbox CRD).
+- **Recovery**: on restart, egress wipes stale rules and serves a new
+  `instanceId`; the Fastlet detects the change and replays every live
+  binding (`SET_BINDING` + reached Hooks), re-entering each subject through
+  deny-first. The server re-pushes credential revisions.
 
 For how policy is applied, how outbound traffic flows through the nftables
 dispatch, and how the credential vault works in the fleet profile, see

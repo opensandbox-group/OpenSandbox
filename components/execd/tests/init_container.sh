@@ -114,7 +114,8 @@ else
 fi
 
 # -------------------------------------------------------------------
-# Test 0: packaged executables and scripts have stable permissions.
+# Test 0: packaged executables and scripts have stable permissions, and the
+# official image carries the NSS tooling bootstrap uses for browser CA trust.
 # -------------------------------------------------------------------
 echo ""
 echo ">> Test 0: packaged executable and script permissions"
@@ -147,10 +148,14 @@ if ! docker run --rm \
         exit 1
       }
     done
+    command -v certutil >/dev/null || {
+      echo "certutil is missing from the official execd image" >&2
+      exit 1
+    }
   '; then
-  fail "test 0: packaged executable or script permissions are invalid"
+  fail "test 0: packaged runtime contract is invalid"
 fi
-echo "PASS: packaged executables and scripts are mode 0755"
+echo "PASS: packaged files are mode 0755 and certutil is available"
 
 # -------------------------------------------------------------------
 # Test 1: execd is PID 1, workload is its child, orphans are reaped,

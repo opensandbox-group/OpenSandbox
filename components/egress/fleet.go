@@ -18,11 +18,17 @@
 //
 // Control flow:
 //
-//	slot store (file) --(poll/watch)--> subject.Controller --(hooks)-->
-//	  fleetPolicyServer: deny-first nft + resolv rewrite, pending-push flush
+//	fastlet action protocol --(SET_BINDING / LIFECYCLE_HOOK / REMOVE_BINDING)-->
+//	  fleetPolicyServer:18080 (loopback): subject lifecycle + deny-first nft,
+//	  policy activation on sandbox.data-plane-ready
 //	proxy route --(UID header)--> fleetPolicyServer:18080 (loopback)
-//	  policy/vault pushes routed per subject
+//	  policy/credential pushes routed per subject (vault memory-only)
 //	DNS: one shared proxy, per-query policy via source IP dispatch
+//
+// Subject lifecycle is driven entirely by the Fastlet (Sandbox Actions
+// Handler protocol); there is no local observation source. On egress restart
+// the Fastlet detects the new handler instanceId and replays every live
+// binding (SET_BINDING + reached Hooks) — no rescan needed.
 package main
 
 import (
@@ -31,7 +37,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,8 +48,6 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
-	"github.com/alibaba/opensandbox/egress/pkg/sandboxnft"
-	"github.com/alibaba/opensandbox/egress/pkg/slotsource"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	"github.com/alibaba/opensandbox/internal/safego"
@@ -74,41 +77,29 @@ func runFleetProfile(ctx context.Context) {
 		}()
 	}
 
-	slotDir := envOrDefault(constants.EnvSlotStoreDir, constants.DefaultSlotStoreDir)
-	pollSec := constants.EnvIntOrDefault(constants.EnvSlotPollInterval, constants.DefaultSlotPollIntervalSeconds)
-	src := slotsource.NewFileSource(slotDir, time.Duration(pollSec)*time.Second)
-	log.Infof("slot store source: %s (poll %ds)", src.Dir(), pollSec)
-
 	alwaysDeny, alwaysAllow, err := policy.LoadAlwaysRuleFiles()
 	if err != nil {
 		log.Fatalf("failed to load always allow/deny rule files: %v", err)
 	}
 
 	podNft := fleetnft.NewApplier(nil, fleetDoHOptions())
-	sandboxNft := sandboxnft.NewApplier(nil, sandboxDoHOptions())
-	nftMgr := &fleetEnforcer{pod: podNft, sandbox: sandboxNft}
 	// Recovery: wipe stale rules from a previous egress generation BEFORE
-	// rescanning, so no dead subject's policy survives into a new sandbox.
+	// serving action requests, so no dead subject's policy survives into a
+	// new sandbox. The Fastlet then detects the new handler instanceId and
+	// replays every live binding through the same registration path.
 	if err := podNft.ApplyReset(ctx); err != nil {
 		log.Fatalf("fleet nftables reset failed: %v", err)
 	}
 	log.Infof("fleet nftables table reset (stale rules cleared)")
-	// The sandbox layer needs the same wipe: sandbox netns can outlive the
-	// egress process, and their OUTPUT tables are the ONLY enforcement for
-	// host-local traffic (never seen by the Pod forward hook). Reset every
-	// netns the previous generation could have installed into — from the
-	// slot store and from the shared netns mount dir.
-	wipeSandboxTables(ctx, src, sandboxNft)
 
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	pendingTTL := time.Duration(constants.EnvIntOrDefault(constants.EnvPendingPushTTL, constants.DefaultPendingPushTTL)) * time.Second
-	fleetSrv := newFleetPolicyServer(ctx, reg, nftMgr, pendingTTL)
-	controller := subject.NewController(reg, fleetSrv)
+	fleetSrv := newFleetPolicyServer(ctx, reg, podNft, pendingTTL)
 
 	// Shared mitmproxy (OSEP-0022 A1): one mitmdump in the Pod netns serving
-	// every sandbox. Started BEFORE the controller so subjects can never
-	// register against a missing interceptor (fail-closed registration);
-	// the per-subject prerouting DNAT is installed by the fleet server on
+	// every sandbox. Started BEFORE the HTTP listener so subjects can never
+	// register against a missing interceptor (fail-closed registration); the
+	// per-subject prerouting DNAT is installed by the fleet server on
 	// registration. A disabled MITM skips the whole block.
 	mitmGate := mitmproxy.NewHealthGate()
 	var fleetMitm *mitmTransparent
@@ -140,8 +131,8 @@ func runFleetProfile(ctx context.Context) {
 	// NOT loopback, so a 127.0.0.1 bind would never receive it; :15353 also
 	// never collides with a host DNS service on :53). Per-subject gateway
 	// REDIRECTs (fleet server's installGatewayDNSRedirect) forward sandbox
-	// DNS addressed to slot.Gateway:53 here; per-query policy is dispatched
-	// by source IP.
+	// DNS addressed to gateway:53 here; per-query policy is dispatched by
+	// source IP.
 	dnsAddr := ":15353"
 	proxy, err := dnsproxy.New(nil, dnsAddr, alwaysDeny, alwaysAllow)
 	if err != nil {
@@ -164,7 +155,7 @@ func runFleetProfile(ctx context.Context) {
 			OnResolved: func(domain string, ips []nftables.ResolvedIP) {
 				addCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
-				if err := nftMgr.AddResolvedIPs(addCtx, s, ips); err != nil {
+				if err := podNft.AddResolvedIPs(addCtx, s, ips); err != nil {
 					log.Warnf("[dns] add resolved IPs to fleet nft failed for subject %s domain %q: %v", s, domain, err)
 				}
 			},
@@ -182,24 +173,18 @@ func runFleetProfile(ctx context.Context) {
 			log.Fatalf("fleet policy server error: %v", err)
 		}
 	})
-	log.Infof("fleet policy server listening on %s (loopback, UID-header routed)", httpAddr)
+	log.Infof("fleet policy server listening on %s (actions + UID-header routed)", httpAddr)
 
 	fleetSrv.StartPendingSweep(ctx)
-	controllerErr := controller.StartWatch(ctx, src)
 
 	// Per-subject connection refresh: active TCP connections keep their
 	// dynamic leases alive (bucketed by source IP from the Pod netns
-	// conntrack table); the sandbox-netns mirror is refreshed in lockstep.
-	nftMgr.StartConnectionRefresh(ctx)
+	// conntrack table).
+	podNft.StartConnectionRefresh(ctx, nil)
 	log.Infof("fleet connection refresh started (bucketed per subject, every 30s)")
 
-	// Block until shutdown or a fatal control-plane failure (slot store
-	// unreadable = fail closed: the daemon must exit, not run unenforced).
-	select {
-	case <-ctx.Done():
-	case err := <-controllerErr:
-		log.Fatalf("subject controller exited: %v", err)
-	}
+	// Block until shutdown.
+	<-ctx.Done()
 	log.Infof("received shutdown signal; shutting down fleet profile")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -215,10 +200,7 @@ func runFleetProfile(ctx context.Context) {
 	}
 	// Enforcement is intentionally NOT removed: the kernel rules keep denying
 	// while the daemon is down (fail closed); the next start wipes them via
-	// ApplyReset before rescannining.
-	if err := <-controllerErr; err != nil {
-		log.Errorf("subject controller error: %v", err)
-	}
+	// ApplyReset before serving.
 	log.Infof("fleet profile shutdown complete")
 	_ = os.Stderr.Sync()
 }
@@ -238,108 +220,4 @@ func fleetDoHOptions() fleetnft.Options {
 		opts.MitmRedirectPort = constants.EnvIntOrDefault(constants.EnvMitmproxyPort, constants.DefaultMitmproxyPort)
 	}
 	return opts
-}
-
-// sandboxDoHOptions mirrors fleetDoHOptions for the per-sandbox netns layer,
-// so both layers carry identical encrypted-DNS blocking.
-func sandboxDoHOptions() sandboxnft.Options {
-	opts := sandboxnft.Options{BlockDoH443: constants.IsTruthy(os.Getenv(constants.EnvBlockDoH443))}
-	if raw := strings.TrimSpace(os.Getenv(constants.EnvDoHBlocklist)); raw != "" {
-		opts.DoHBlocklistV4, opts.DoHBlocklistV6 = parseDoHBlocklist(raw)
-	}
-	return opts
-}
-
-// fleetEnforcer composes the two enforcement layers per subject: the
-// authoritative Pod-netns forward hook (pkg/fleetnft) plus the per-sandbox
-// netns OUTPUT defense in depth (pkg/sandboxnft). It implements the
-// fleetNftApplier surface, so the policy server and the DNS callback stay
-// layer-agnostic. Pod first, sandbox second: the authoritative layer is
-// always in place before the defense-in-depth layer, and a sandbox-layer
-// failure fails the operation (the subject stays denying / on the old
-// policy) instead of activating with a gap.
-type fleetEnforcer struct {
-	pod     *fleetnft.Applier
-	sandbox *sandboxnft.Applier
-}
-
-var _ fleetNftApplier = (*fleetEnforcer)(nil)
-
-func (e *fleetEnforcer) ApplyDenyFirst(ctx context.Context, s subject.Subject, slot slotsource.Slot) error {
-	if err := e.pod.ApplyDenyFirst(ctx, s, slot); err != nil {
-		return err
-	}
-	return e.sandbox.ApplyDenyFirst(ctx, s, slot)
-}
-
-func (e *fleetEnforcer) ApplyPolicy(ctx context.Context, s subject.Subject, pol *policy.NetworkPolicy) error {
-	if err := e.pod.ApplyPolicy(ctx, s, pol); err != nil {
-		return err
-	}
-	return e.sandbox.ApplyPolicy(ctx, s, pol)
-}
-
-// ApplyDispatchUpdate is Pod-netns dispatch plus the sandbox-layer
-// reconciliation: an unchanged-fencing slot update that moved the netns path
-// or gateway must reinstall the subject's sandbox table (with its current
-// policy) so the defense-in-depth layer stays aligned.
-func (e *fleetEnforcer) ApplyDispatchUpdate(ctx context.Context, s subject.Subject, slot slotsource.Slot) error {
-	if err := e.pod.ApplyDispatchUpdate(ctx, s, slot); err != nil {
-		return err
-	}
-	return e.sandbox.ApplySlotUpdate(ctx, s, slot)
-}
-
-func (e *fleetEnforcer) Remove(ctx context.Context, s subject.Subject) error {
-	podErr := e.pod.Remove(ctx, s)
-	// Best effort: the sandbox rules die with the netns; a gone netns is
-	// expected and must never fail the unload.
-	_ = e.sandbox.Remove(ctx, s)
-	return podErr
-}
-
-// AddResolvedIPs mirrors DNS-learned leases into both layers.
-func (e *fleetEnforcer) AddResolvedIPs(ctx context.Context, s subject.Subject, ips []nftables.ResolvedIP) error {
-	if err := e.pod.AddResolvedIPs(ctx, s, ips); err != nil {
-		return err
-	}
-	return e.sandbox.AddResolvedIPs(ctx, s, ips)
-}
-
-// StartConnectionRefresh launches the per-subject refresh loop; the sandbox
-// layer is refreshed in lockstep through the mirror callback.
-func (e *fleetEnforcer) StartConnectionRefresh(ctx context.Context) {
-	e.pod.StartConnectionRefresh(ctx, e.sandbox.AddResolvedIPs)
-}
-
-// wipeSandboxTables deletes the sandbox-layer table in every netns the
-// previous egress generation could have installed into: the slot store is the
-// authoritative list, and the shared netns mount dir covers slots whose files
-// are already gone. Best effort — a missing netns or table is expected.
-func wipeSandboxTables(ctx context.Context, src slotsource.Source, sandboxNft *sandboxnft.Applier) {
-	var paths []string
-	if slots, err := src.List(ctx); err == nil {
-		for _, slot := range slots {
-			paths = append(paths, slot.HostNetnsPath)
-		}
-	} else {
-		log.Warnf("slot store unreadable during recovery (slot-driven sandbox wipe skipped): %v", err)
-	}
-	paths = append(paths, netnsMountEntries()...)
-	sandboxNft.Reset(ctx, paths)
-	log.Infof("fleet sandbox tables reset (%d netns path(s))", len(paths))
-}
-
-// netnsMountEntries lists the shared netns mount dir (OSEP-0022 deployment
-// precondition: /var/run/netns or equivalent).
-func netnsMountEntries() []string {
-	entries, err := os.ReadDir(constants.DefaultNetnsMountDir)
-	if err != nil {
-		return nil
-	}
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, filepath.Join(constants.DefaultNetnsMountDir, e.Name()))
-	}
-	return out
 }

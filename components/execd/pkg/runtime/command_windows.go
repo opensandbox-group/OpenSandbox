@@ -42,6 +42,13 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		return fmt.Errorf("failed to get stdlog descriptor: %w", err)
 	}
+	stdoutPath := c.stdoutFileName(session)
+	stderrPath := c.stderrFileName(session)
+	defer func() {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		removeCommandOutputFiles(stdoutPath, stderrPath)
+	}()
 
 	startAt := time.Now()
 	log.Info("received command: %v", log.SanitizeCommand(request.Code))
@@ -62,11 +69,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	wg.Add(2)
 	safego.Go(func() {
 		defer wg.Done()
-		c.tailStdPipe(c.stdoutFileName(session), request.Hooks.OnExecuteStdout, done)
+		c.tailStdPipe(stdoutPath, request.Hooks.OnExecuteStdout, done)
 	})
 	safego.Go(func() {
 		defer wg.Done()
-		c.tailStdPipe(c.stderrFileName(session), request.Hooks.OnExecuteStderr, done)
+		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
 	})
 
 	err = cmd.Start()
@@ -80,7 +87,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 	kernel := &commandKernel{
 		pid:          cmd.Process.Pid,
+		stdoutPath:   stdoutPath,
+		stderrPath:   stderrPath,
+		startedAt:    startAt,
 		content:      request.Code,
+		running:      true,
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
@@ -90,6 +101,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	wg.Wait()
 	if err != nil {
 		var eName, eValue string
+		eCode := 1
 		var traceback []string
 
 		var exitError *exec.ExitError
@@ -97,6 +109,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			exitCode := exitError.ExitCode()
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
+			eCode = exitCode
 		} else {
 			eName = "CommandExecError"
 			eValue = err.Error()
@@ -110,8 +123,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		})
 
 		log.Error("CommandExecError: error running commands: %v", err)
+		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
+	c.markCommandFinished(session, 0, "")
 	request.Hooks.OnExecuteComplete(time.Since(startAt))
 	return nil
 }

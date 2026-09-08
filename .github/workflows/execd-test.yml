@@ -149,6 +149,11 @@ jobs:
         working-directory: components/execd
         run: bash tests/lifecycle.sh
 
+      - name: MITM CA NSS bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: components/execd
+        run: bash tests/mitm_ca_nss.sh
+
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
         shell: bash

@@ -28,6 +28,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Literal, Optional
+from urllib.parse import urlparse
 
 from kubernetes.utils.quantity import parse_quantity
 from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
@@ -821,6 +822,15 @@ class EgressConfig(BaseModel):
             "(e.g. IPv4-only CNI or experimenting with IPv6 egress despite gaps)."
         ),
     )
+    otlp_endpoint: Optional[str] = Field(
+        default=None,
+        description=(
+            "OTLP/HTTP endpoint (http:// or https://) where the egress sidecar exports its "
+            "OpenTelemetry metrics, injected as OTEL_EXPORTER_OTLP_ENDPOINT. "
+            "Server-side only: the collector address is infrastructure config and cannot be "
+            "set per request. When unset, sidecar metrics are not exported."
+        ),
+    )
     readiness_timeout_seconds: float = Field(
         default=30.0,
         gt=0,
@@ -842,6 +852,20 @@ class EgressConfig(BaseModel):
             "If both are unset, the resources block is omitted (namespace LimitRange defaults may apply)."
         ),
     )
+
+    @field_validator("otlp_endpoint")
+    @classmethod
+    def validate_otlp_endpoint(cls, endpoint: Optional[str]) -> Optional[str]:
+        if not endpoint:
+            return None
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(
+                "otlp_endpoint must be an http(s) URL with a collector host: "
+                "the egress sidecar telemetry client only supports OTLP over HTTP "
+                "and rejects endpoints without a hostname"
+            )
+        return endpoint
 
     @field_validator("requests", "limits")
     @classmethod

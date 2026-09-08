@@ -313,6 +313,17 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                             ),
                         },
                     )
+                if current_state == "Failed":
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail={
+                            "code": SandboxErrorCodes.K8S_POD_FAILED,
+                            "message": (
+                                f"Sandbox {sandbox_id} failed: "
+                                f"{current_message or current_reason or 'no failure details'}"
+                            ),
+                        },
+                    )
 
                 now = time.time()
                 pool_capacity_exhausted = _is_pool_capacity_exhausted_status(

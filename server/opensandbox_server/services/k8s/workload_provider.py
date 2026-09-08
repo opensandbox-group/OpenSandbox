@@ -37,6 +37,7 @@ class EgressWorkloadSettings:
     disable_ipv6: bool
     resource_requests: Optional[Dict[str, str]]
     resource_limits: Optional[Dict[str, str]]
+    otlp_endpoint: Optional[str] = None
 
 
 class WorkloadProvider(ABC):

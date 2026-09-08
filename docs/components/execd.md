@@ -72,6 +72,19 @@ Bash session API (which keeps its existing name for compatibility), and
 isolated sessions. Commands submitted to a fallback session must use syntax
 supported by that image's `sh` implementation.
 
+### Command output retention
+
+Foreground command output is streamed over SSE and its temporary stdout and
+stderr files are removed as soon as streaming completes. Completed command
+metadata and detached background-command output remain available for 24 hours.
+Cleanup runs hourly after that retention window. Running commands are never
+removed by retention cleanup.
+
+The command-output janitor also removes matching files older than 24 hours that
+were left directly under the system temporary directory by earlier execd
+versions. New output is isolated under the `opensandbox-execd` temporary
+subdirectory so command files do not accumulate in the shared directory root.
+
 ## PTY WebSocket access
 
 The first WebSocket attached to `/pty/{session_id}/ws` is the exclusive
@@ -215,6 +228,23 @@ override it.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Fallback OTLP endpoint when metrics-specific endpoint is unset. |
 | `OPENSANDBOX_ID` | Authoritative sandbox id stamped into eBPF audit records (`sandbox_id`) and metrics; the server injects it on Docker/Kubernetes task-template paths. Kubernetes pool allocations that skip the task template (default entrypoint, no env, no init mode) cannot inject it, and the eBPF layer reports `unsupported` attribution on that path. |
 | `OPENSANDBOX_EXECD_METRICS_EXTRA_ATTRS` | Optional extra metric attrs (`k=v,k2=v2`). |
+
+### Transparent MITM CA trust
+
+When transparent MITM is enabled, `bootstrap.sh` installs the exported CA into
+the available system, NSS, and JDK trust stores on a best-effort basis. The
+official execd image includes `certutil` through Alpine's `nss-tools` package,
+so it can update the per-user NSS database used by Chromium and Chrome when
+that image is used directly.
+
+The Docker and Kubernetes runtime injection paths copy execd, `bootstrap.sh`,
+and static helpers into the workload image. They do not copy the execd image's
+dynamic NSS libraries or package database. A custom workload image that needs
+Chromium or Chrome trust must therefore install its native `certutil` package,
+such as `nss-tools` on Alpine or `libnss3-tools` on Debian/Ubuntu. If
+`certutil` is absent, bootstrap logs a warning and continues; other available
+trust-store integrations still run, but Chromium or Chrome may reject the
+intercepted certificate.
 
 ### Lifecycle hook trust boundary
 

@@ -73,6 +73,7 @@ from opensandbox_server.services.docker.metadata import DockerMetadataStore
 from opensandbox_server.services.docker.port_allocator import (
     allocate_port_bindings,
     normalize_port_bindings,
+    release_port_bindings,
 )
 from opensandbox_server.services.windows_common import (
     inject_windows_resource_limits_env,
@@ -763,6 +764,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             )
 
         sidecar_container = None
+        reserved_port_bindings: dict[str, tuple[str, int]] = {}
         runtime_volume_name: Optional[str] = None
         try:
             # For dockur/windows profile, resourceLimits are translated to
@@ -814,6 +816,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 egress_token = generate_egress_token()
                 labels[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] = egress_token
                 sidecar_port_bindings = allocate_port_bindings([*exposed_ports, "18080"], min_port=self.app_config.docker.port_range_min, max_port=self.app_config.docker.port_range_max)
+                reserved_port_bindings = sidecar_port_bindings
                 host_execd_port = sidecar_port_bindings["44772"][1]
                 host_http_port = sidecar_port_bindings["8080"][1]
                 egress_api_binding = sidecar_port_bindings.get("18080")
@@ -857,6 +860,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 )
                 if self.network_mode != HOST_NETWORK_MODE:
                     port_bindings = allocate_port_bindings(exposed_ports, min_port=self.app_config.docker.port_range_min, max_port=self.app_config.docker.port_range_max)
+                    reserved_port_bindings = port_bindings
                     host_execd_port = port_bindings["44772"][1]
                     host_http_port = port_bindings["8080"][1]
                     host_config_kwargs["port_bindings"] = normalize_port_bindings(port_bindings)
@@ -936,6 +940,9 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             self._release_ossfs_mounts(ossfs_mount_keys)
             self._cleanup_managed_volumes(sandbox_id, auto_created_volumes or [])
             raise
+        finally:
+            if reserved_port_bindings:
+                release_port_bindings(reserved_port_bindings)
 
         status_info = SandboxStatus(
             state="Running",

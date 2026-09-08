@@ -34,6 +34,7 @@ var (
 
 	dnsQueryDur     metric.Float64Histogram
 	dnsQueryFailed  metric.Int64Counter
+	dnsReplyFailed  metric.Int64Counter
 	policyDenied    metric.Int64Counter
 	nftUpdates      metric.Int64Counter
 	nftUpdateFailed metric.Int64Counter
@@ -50,6 +51,17 @@ const (
 	DNSFailureRcode         = "rcode"
 )
 
+// Bounded stage values for RecordDNSReplyFailed, mirroring the decision point
+// in serveDNS. A closed set keeps the counter's cardinality fixed: error
+// strings and queried names must never reach an attribute.
+const (
+	DNSReplyStageMalformed     = "malformed"
+	DNSReplyStageUnknownSource = "unknown_source"
+	DNSReplyStageDeny          = "deny"
+	DNSReplyStageUpstreamError = "upstream_error"
+	DNSReplyStageAnswer        = "answer"
+)
+
 // Bounded operation values for RecordNftablesUpdateFailed.
 const (
 	NftOpStaticApply = "static_apply"
@@ -58,7 +70,6 @@ const (
 	// Fleet-profile operations (OSEP-0022).
 	NftOpReset     = "reset"
 	NftOpDenyFirst = "deny_first"
-	NftOpDispatch  = "dispatch_update"
 )
 
 var egressSharedAttrs = sync.OnceValue(func() []attribute.KeyValue {
@@ -130,6 +141,14 @@ func registerEgressMetrics() error {
 	if err != nil {
 		return err
 	}
+	dnsReplyFailed, err = meter.Int64Counter(
+		"egress.dns.reply.failed_total",
+		metric.WithDescription("DNS reply writes that failed after a decision, by stage. "+
+			"A nonzero count means a query was handled but its answer never reached the client."),
+	)
+	if err != nil {
+		return err
+	}
 	policyDenied, err = meter.Int64Counter(
 		"egress.policy.denied_total",
 		metric.WithDescription("DNS policy denials"),
@@ -188,7 +207,57 @@ func registerEgressMetrics() error {
 			return nil
 		}),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	return registerProcessMetrics()
+}
+
+// registerProcessMetrics adds the sidecar's own resource usage, read from its cgroup.
+//
+// The egress.system.* gauges above come from gopsutil, i.e. /proc/meminfo and /proc/stat,
+// which inside a container describe the node. Since this sidecar runs per sandbox, every
+// sandbox on a node publishes the same node figure under its own sandbox_id — series that
+// look per-sandbox but are not. The metrics here are the per-sandbox ones.
+//
+// Registration is conditional: if the cgroup files cannot be read the instruments are not
+// created at all, so a missing source shows up as an absent series rather than a flat zero
+// that reads like real data.
+func registerProcessMetrics() error {
+	if _, ok := processMemoryUsageBytes(); ok {
+		if _, err := meter.Int64ObservableGauge(
+			"egress.process.memory.usage_bytes",
+			metric.WithDescription("Memory currently charged to the egress sidecar's own cgroup."),
+			metric.WithUnit("By"),
+			metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+				if value, ok := processMemoryUsageBytes(); ok {
+					obs.Observe(value, egressMetricOpt())
+				}
+				return nil
+			}),
+		); err != nil {
+			return err
+		}
+	}
+
+	if _, ok := processCPUTimeSeconds(); ok {
+		if _, err := meter.Float64ObservableCounter(
+			"egress.process.cpu.time",
+			metric.WithDescription("CPU seconds consumed by the egress sidecar's own cgroup."),
+			metric.WithUnit("s"),
+			metric.WithFloat64Callback(func(ctx context.Context, obs metric.Float64Observer) error {
+				if seconds, ok := processCPUTimeSeconds(); ok {
+					obs.Observe(seconds, egressMetricOpt())
+				}
+				return nil
+			}),
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // ForceFlush exports pending metrics immediately. Callers that are about to terminate the
@@ -221,6 +290,18 @@ func RecordDNSQueryFailed(reason string) {
 		return
 	}
 	dnsQueryFailed.Add(context.Background(), 1, egressMetricOptWith(attribute.String("reason", reason)))
+}
+
+// RecordDNSReplyFailed counts a reply write that failed after the proxy had
+// already decided the answer. stage must be one of the DNSReplyStage*
+// constants. Together with the per-query reply-write log line this turns
+// "queries handled but answers never reaching the client" — previously a
+// silent window — into an observable condition.
+func RecordDNSReplyFailed(stage string) {
+	if dnsReplyFailed == nil {
+		return
+	}
+	dnsReplyFailed.Add(context.Background(), 1, egressMetricOptWith(attribute.String("stage", stage)))
 }
 
 func RecordDNSDenied() {

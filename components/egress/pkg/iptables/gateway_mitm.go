@@ -33,6 +33,14 @@
 // conntrack original destination). The table is rebuilt wholesale from the
 // in-memory entry list; nft batches are transactional, so a failed rebuild
 // leaves the previous table live and registration stays fail-closed.
+//
+// Rules match the sandbox source IP ONLY — never iifname: with
+// net.bridge.bridge-nf-call-iptables=1 (the fast-sandbox Firecracker bridge
+// topology), frames entering the bridge destined to the bridge itself are
+// pulled into the IP stack with skb->dev = the BRIDGE, so an iifname match
+// on the pod-side veth would never fire and interception would be inert.
+// Source-IP unforgeability rests on IPAM and the sandbox lacking
+// NET_ADMIN/NET_RAW.
 package iptables
 
 import (
@@ -52,10 +60,6 @@ const gatewayMitmNftTable = "opensandbox_gateway_mitm"
 type MitmRedirectEntry struct {
 	SandboxIP netip.Addr
 	Gateway   netip.Addr
-	// HostVeth binds the rule to the sandbox's pod-side veth: a compromised
-	// sandbox forging another subject's source IP must not be DNATed (the
-	// forward master dispatch would drop it via its own iifname match).
-	HostVeth string
 }
 
 // mitmRedirectScript builds the wholesale table rebuild for the given entries.
@@ -71,20 +75,16 @@ func mitmRedirectScript(entries []MitmRedirectEntry, port int, dports []int) str
 		if addr.Is6() {
 			key = "ip6"
 		}
-		iface := ""
-		if e.HostVeth != "" {
-			iface = fmt.Sprintf(" iifname \"%s\"", e.HostVeth)
-		}
 		if e.Gateway.IsValid() {
 			gwKey := "ip6"
 			if e.Gateway.Unmap().Is4() {
 				gwKey = "ip"
 			}
-			fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s%s %s daddr %s tcp dport %s return\n",
-				gatewayMitmNftTable, key, addr, iface, gwKey, e.Gateway.Unmap(), dportList)
+			fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s %s daddr %s tcp dport %s return\n",
+				gatewayMitmNftTable, key, addr, gwKey, e.Gateway.Unmap(), dportList)
 		}
-		fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s%s tcp dport %s dnat to %s:%d\n",
-			gatewayMitmNftTable, key, addr, iface, dportList, e.Gateway.Unmap(), port)
+		fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s tcp dport %s dnat to %s:%d\n",
+			gatewayMitmNftTable, key, addr, dportList, e.Gateway.Unmap(), port)
 	}
 	return b.String()
 }

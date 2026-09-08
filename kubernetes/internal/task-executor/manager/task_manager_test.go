@@ -154,6 +154,14 @@ func cleanupTask(t *testing.T, mgr TaskManager, name string) {
 	t.Logf("Task %s not deleted within timeout during cleanup", name)
 }
 
+// skipIfBinaryMissing skips the test when the given command is not available
+// on the host (e.g. running on a non-Linux/Unix system without sh).
+func skipIfBinaryMissing(t *testing.T, cmd string) {
+	if _, err := exec.LookPath(cmd); err != nil {
+		t.Skipf("%s not found, skipping task manager test", cmd)
+	}
+}
+
 func TestNewTaskManager(t *testing.T) {
 	cfg := &config.Config{
 		DataDir: t.TempDir(),
@@ -1330,9 +1338,7 @@ func TestTaskManager_AsyncStopOnDelete(t *testing.T) {
 }
 
 func TestTaskManager_TimeoutHandling(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not found, skipping timeout test")
-	}
+	skipIfBinaryMissing(t, "sh")
 
 	mgr, _ := setupTestManager(t)
 	mgr.Start(context.Background())

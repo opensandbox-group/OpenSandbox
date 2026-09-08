@@ -152,27 +152,27 @@ setup-test-e2e: install-kind ## Set up a Kind cluster for e2e tests if it does n
 
 .PHONY: test-e2e-core
 test-e2e-core: setup-test-e2e manifests generate fmt vet ## Run only Core-labelled e2e tests
-	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) \
+	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) E2E_LABEL_FILTER=Core \
 		KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter=Core -timeout $(E2E_TIMEOUT) $(GINKGO_ARGS)
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-pause-resume
 test-e2e-pause-resume: setup-test-e2e manifests generate fmt vet ## Run only PauseResume-labelled e2e tests
-	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) \
+	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) E2E_LABEL_FILTER=PauseResume \
 		KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter=PauseResume -timeout $(E2E_TIMEOUT) $(GINKGO_ARGS)
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-main
 test-e2e-main: setup-test-e2e manifests generate fmt vet 
-	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) \
+	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) E2E_LABEL_FILTER= \
 		KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) $(GINKGO_ARGS)
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind. Use GINKGO_ARGS to pass additional arguments.
-	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) \
+	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) E2E_LABEL_FILTER= \
 		KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) $(GINKGO_ARGS)
-	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) \
+	CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG) E2E_LABEL_FILTER= \
 		KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e_task/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) $(GINKGO_ARGS)
 	$(MAKE) cleanup-test-e2e
 	$(MAKE) test-gvisor CONTROLLER_IMG=$(CONTROLLER_IMG) TASK_EXECUTOR_IMG=$(TASK_EXECUTOR_IMG)

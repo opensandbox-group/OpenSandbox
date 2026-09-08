@@ -17,7 +17,6 @@ package runtime
 import (
 	"fmt"
 	"io"
-	"os"
 	"time"
 )
 
@@ -75,6 +74,11 @@ func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 }
 
 // SeekBackgroundCommandOutput returns accumulated stdout/stderr and status for a session.
+//
+// The cursor is a byte offset into the combined output file. A cursor beyond
+// the current end of the file is clamped to the file size, so polling at (or
+// past) the tail returns empty output with the real end offset instead of
+// echoing back an offset that later writes would silently skip.
 func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) ([]byte, int64, error) {
 	kernel := c.commandSnapshot(session)
 	if kernel == nil {
@@ -85,11 +89,23 @@ func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) (
 		return nil, -1, fmt.Errorf("command %s is not running in background", session)
 	}
 
-	file, err := os.Open(kernel.stdoutPath)
+	if cursor < 0 {
+		return nil, -1, fmt.Errorf("cursor cannot be negative")
+	}
+
+	file, err := openCommandOutputForRead(kernel.stdoutPath)
 	if err != nil {
 		return nil, -1, fmt.Errorf("error open combined output file for command %s: %w", session, err)
 	}
 	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, -1, fmt.Errorf("error stat combined output file for command %s: %w", session, err)
+	}
+	if cursor > info.Size() {
+		cursor = info.Size()
+	}
 
 	// Seek to the cursor position
 	_, err = file.Seek(cursor, 0)

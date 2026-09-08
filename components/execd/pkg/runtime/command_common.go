@@ -17,30 +17,39 @@ package runtime
 import (
 	"bufio"
 	"bytes"
-	"fmt"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
+	"regexp"
 	"time"
+
+	"github.com/alibaba/opensandbox/internal/safego"
+
+	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
+
+const (
+	commandOutputDirName       = "opensandbox-execd"
+	commandOutputRetention     = 24 * time.Hour
+	commandOutputSweepInterval = time.Hour
+)
+
+var legacyCommandOutputPattern = regexp.MustCompile(`^[0-9a-f]{32}\.(stdout|stderr|output)$`)
 
 // tailStdPipe streams appended log data until the process finishes.
 func (c *Controller) tailStdPipe(file string, onExecute func(text string), done <-chan struct{}) {
-	lastPos := int64(0)
+	var tail commandOutputTail
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	mutex := &sync.Mutex{}
-	var lastWasCR bool
 	for {
 		select {
 		case <-done:
-			c.readFromPos(mutex, file, lastPos, onExecute, true, &lastWasCR)
+			tail.read(file, onExecute, true)
 			return
 		case <-ticker.C:
-			newPos := c.readFromPos(mutex, file, lastPos, onExecute, false, &lastWasCR)
-			lastPos = newPos
+			tail.read(file, onExecute, false)
 		}
 	}
 }
@@ -64,18 +73,19 @@ func (c *Controller) storeCommandKernel(sessionID string, kernel *commandKernel)
 // It ensures the temp directory exists before opening files, so that commands
 // continue to work even after the /tmp directory has been removed and recreated.
 func (c *Controller) stdLogDescriptor(session string) (io.WriteCloser, io.WriteCloser, error) {
-	logDir := os.TempDir()
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("failed to create temp dir %s: %w", logDir, err)
+	logDir := c.commandOutputDir()
+	if err := ensurePrivateCommandOutputDir(logDir); err != nil {
+		return nil, nil, err
 	}
 
-	stdout, err := os.OpenFile(c.stdoutFileName(session), os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.ModePerm)
+	stdout, err := openNewCommandOutput(c.stdoutFileName(session))
 	if err != nil {
 		return nil, nil, err
 	}
-	stderr, err := os.OpenFile(c.stderrFileName(session), os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.ModePerm)
+	stderr, err := openNewCommandOutput(c.stderrFileName(session))
 	if err != nil {
-		stdout.Close()
+		_ = stdout.Close()
+		removeCommandOutputFiles(c.stdoutFileName(session))
 		return nil, nil, err
 	}
 
@@ -83,96 +93,205 @@ func (c *Controller) stdLogDescriptor(session string) (io.WriteCloser, io.WriteC
 }
 
 func (c *Controller) combinedOutputDescriptor(session string) (io.WriteCloser, error) {
-	logDir := os.TempDir()
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create temp dir %s: %w", logDir, err)
+	logDir := c.commandOutputDir()
+	if err := ensurePrivateCommandOutputDir(logDir); err != nil {
+		return nil, err
 	}
-	return os.OpenFile(c.combinedOutputFileName(session), os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.ModePerm)
+	return openNewCommandOutput(c.combinedOutputFileName(session))
+}
+
+func (c *Controller) commandOutputDir() string {
+	return filepath.Join(os.TempDir(), commandOutputDirName)
 }
 
 // stdoutFileName constructs the stdout log path.
 func (c *Controller) stdoutFileName(session string) string {
-	return filepath.Join(os.TempDir(), session+".stdout")
+	return filepath.Join(c.commandOutputDir(), session+".stdout")
 }
 
 // stderrFileName constructs the stderr log path.
 func (c *Controller) stderrFileName(session string) string {
-	return filepath.Join(os.TempDir(), session+".stderr")
+	return filepath.Join(c.commandOutputDir(), session+".stderr")
 }
 
 func (c *Controller) combinedOutputFileName(session string) string {
-	return filepath.Join(os.TempDir(), session+".output")
+	return filepath.Join(c.commandOutputDir(), session+".output")
 }
 
-// readFromPos streams new content from a file starting at startPos.
-// lastWasCR persists CRLF detection across calls so a \r\n pair split between
-// two polls does not surface a spurious blank line for the trailing \n.
-func (c *Controller) readFromPos(mutex *sync.Mutex, filepath string, startPos int64, onExecute func(string), flushIncomplete bool, lastWasCR *bool) int64 {
-	if !mutex.TryLock() {
-		return -1
+func removeCommandOutputFiles(paths ...string) {
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.Warn("remove command output %s: %v", path, err)
+		}
 	}
-	defer mutex.Unlock()
+}
 
-	file, err := os.Open(filepath)
+func cleanupStaleCommandOutputFiles(dir string, cutoff time.Time, match func(string) bool, protected map[string]struct{}) {
+	directory, err := os.Open(dir)
 	if err != nil {
-		return startPos
+		if !os.IsNotExist(err) {
+			log.Warn("read command output directory %s: %v", dir, err)
+		}
+		return
+	}
+	defer directory.Close()
+
+	for {
+		entries, readErr := directory.Readdir(256)
+		for _, info := range entries {
+			if !info.Mode().IsRegular() || !match(info.Name()) || !info.ModTime().Before(cutoff) {
+				continue
+			}
+			path := filepath.Join(dir, info.Name())
+			if _, ok := protected[path]; ok {
+				continue
+			}
+			removeCommandOutputFiles(path)
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				log.Warn("read command output directory %s: %v", dir, readErr)
+			}
+			return
+		}
+	}
+}
+
+func (c *Controller) protectedCommandOutputPaths() map[string]struct{} {
+	protected := make(map[string]struct{})
+	c.mu.RLock()
+	c.commandClientMap.Range(func(_, value any) bool {
+		kernel, ok := value.(*commandKernel)
+		if !ok {
+			return true
+		}
+		for _, path := range []string{kernel.stdoutPath, kernel.stderrPath} {
+			if path != "" {
+				protected[path] = struct{}{}
+			}
+		}
+		return true
+	})
+	c.mu.RUnlock()
+	return protected
+}
+
+func (c *Controller) cleanupFinishedCommands(cutoff time.Time) {
+	var paths []string
+	c.mu.Lock()
+	c.commandClientMap.Range(func(key, value any) bool {
+		kernel, ok := value.(*commandKernel)
+		if !ok || kernel.running || kernel.finishedAt == nil || !kernel.finishedAt.Before(cutoff) {
+			return true
+		}
+
+		paths = append(paths, kernel.stdoutPath, kernel.stderrPath)
+		c.commandClientMap.Delete(key)
+		return true
+	})
+	c.mu.Unlock()
+	removeCommandOutputFiles(paths...)
+}
+
+func (c *Controller) cleanupOrphanedCommandOutputs(now time.Time) {
+	cutoff := now.Add(-commandOutputRetention)
+	protected := c.protectedCommandOutputPaths()
+	if err := ensurePrivateCommandOutputDir(c.commandOutputDir()); err != nil {
+		log.Warn("skip private command output cleanup: %v", err)
+	} else {
+		cleanupStaleCommandOutputFiles(c.commandOutputDir(), cutoff, legacyCommandOutputPattern.MatchString, protected)
+	}
+	cleanupStaleCommandOutputFiles(os.TempDir(), cutoff, legacyCommandOutputPattern.MatchString, nil)
+}
+
+// StartCommandOutputJanitor bounds command metadata and output retention and
+// removes legacy files that older execd versions placed directly in /tmp.
+func (c *Controller) StartCommandOutputJanitor(ctx context.Context) error {
+	// Create and validate the private directory synchronously, before init mode
+	// launches the sandbox workload. A workload may otherwise pre-create the
+	// fixed temp path and make execd follow an unsafe directory or symlink.
+	if err := ensurePrivateCommandOutputDir(c.commandOutputDir()); err != nil {
+		return err
+	}
+	safego.Go(func() {
+		c.cleanupOrphanedCommandOutputs(time.Now())
+		c.cleanupFinishedCommands(time.Now().Add(-commandOutputRetention))
+		ticker := time.NewTicker(commandOutputSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				c.cleanupFinishedCommands(now.Add(-commandOutputRetention))
+				c.cleanupOrphanedCommandOutputs(now)
+			}
+		}
+	})
+	return nil
+}
+
+// commandOutputTail retains an unfinished line while reading only appended bytes.
+// Each stdout/stderr tail goroutine owns its own state.
+type commandOutputTail struct {
+	offset    int64
+	pending   bytes.Buffer
+	lastWasCR bool
+}
+
+func (t *commandOutputTail) read(path string, onExecute func(string), flushIncomplete bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return
 	}
 	defer file.Close()
 
-	_, _ = file.Seek(startPos, 0) //nolint:errcheck
+	if _, err := file.Seek(t.offset, io.SeekStart); err != nil {
+		return
+	}
 
 	reader := bufio.NewReader(file)
-	var buffer bytes.Buffer
-	var currentPos int64 = startPos
-	cr := false
-	if lastWasCR != nil {
-		cr = *lastWasCR
-	}
-	defer func() {
-		if lastWasCR != nil {
-			*lastWasCR = cr
-		}
-	}()
-
 	for {
 		b, err := reader.ReadByte()
 		if err != nil {
-			if err == io.EOF {
-				// If buffer has content but no newline, flush if needed, otherwise wait for next read
-				if flushIncomplete && buffer.Len() > 0 {
-					onExecute(buffer.String())
-					buffer.Reset()
-				}
+			if err == io.EOF && flushIncomplete && t.pending.Len() > 0 {
+				onExecute(t.pending.String())
+				t.pending.Reset()
 			}
 			break
 		}
-		currentPos++
+		t.offset++
 
-		// Check if it's a line terminator (\n or \r)
 		if b == '\n' || b == '\r' {
 			switch {
-			case buffer.Len() > 0:
-				// Flush the line content without the terminator
-				onExecute(buffer.String())
-				buffer.Reset()
-			case b == '\n' && cr:
-				// Second half of a \r\n pair; already emitted on \r
+			case t.pending.Len() > 0:
+				onExecute(t.pending.String())
+				t.pending.Reset()
+			case b == '\n' && t.lastWasCR:
+				// The preceding CR already emitted this line.
 			default:
-				// Standalone blank line; surface it so callers see the gap
 				onExecute("\n")
 			}
-			cr = (b == '\r')
+			t.lastWasCR = b == '\r'
 			continue
 		}
 
-		cr = false
-		buffer.WriteByte(b)
+		t.lastWasCR = false
+		t.pending.WriteByte(b)
 	}
-
-	endPos, _ := file.Seek(0, 1)
-	// If the last read position doesn't end with a newline, return buffer start position and wait for next flush
-	if !flushIncomplete && buffer.Len() > 0 {
-		return currentPos - int64(buffer.Len())
+	// Reuse storage within a poll, but release completed long lines between polls.
+	if t.pending.Len() == 0 {
+		t.pending = bytes.Buffer{}
+	} else if t.pending.Cap() > 4096 && t.pending.Len() < t.pending.Cap()/2 {
+		// Keep a short trailing fragment without retaining a completed long line's storage.
+		t.pending = *bytes.NewBuffer(bytes.Clone(t.pending.Bytes()))
 	}
-	return endPos
 }

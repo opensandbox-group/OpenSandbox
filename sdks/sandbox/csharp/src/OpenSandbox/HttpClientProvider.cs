@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using OpenSandbox.Config;
+using OpenSandbox.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -32,6 +33,12 @@ public sealed class HttpClientProvider : IDisposable
         _logger.LogDebug("Creating HTTP clients for SDK instance");
         HttpClient = connectionConfig.CreateHttpClient();
         SseHttpClient = connectionConfig.CreateSseHttpClient();
+
+        // These clients are shared by lifecycle and data-plane adapters. Keep
+        // tenant credentials request-scoped so direct execd/egress calls cannot
+        // inherit them through DefaultRequestHeaders.
+        HttpClient.DefaultRequestHeaders.Remove(Constants.ApiKeyHeader);
+        SseHttpClient.DefaultRequestHeaders.Remove(Constants.ApiKeyHeader);
     }
 
     /// <summary>

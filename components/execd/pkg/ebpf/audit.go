@@ -153,9 +153,11 @@ func newObserver(cfg *isolation.EbpfConfig, sandboxID string, cgroupID uint64) (
 		return nil, nil, fmt.Errorf("load audit programs: %w", err)
 	}
 	// Pin the cgroup filter; events outside the sandbox are dropped.
-	if err := spec.RewriteConstants(map[string]interface{}{
-		"target_cgroup": cgroupID,
-	}); err != nil {
+	cgroupConst, ok := spec.Variables["target_cgroup"]
+	if !ok {
+		return nil, nil, fmt.Errorf("audit programs: missing target_cgroup variable")
+	}
+	if err := cgroupConst.Set(cgroupID); err != nil {
 		return nil, nil, fmt.Errorf("set audit cgroup filter: %w", err)
 	}
 

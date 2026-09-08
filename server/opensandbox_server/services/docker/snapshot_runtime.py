@@ -52,6 +52,14 @@ class DockerSnapshotRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 
+    def preflight_create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        return None
+
     def create_snapshot(
         self,
         snapshot_id: str,

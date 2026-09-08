@@ -93,6 +93,8 @@ mode = "direct"
 image = "opensandbox/egress:v1.1.7"
 mode = "dns"
 readiness_timeout_seconds = 30.0
+# Optional: export the egress sidecar's OpenTelemetry metrics (OTLP/HTTP only).
+# otlp_endpoint = "http://otel-collector.observability:4318"
 
 # Renew-on-access. Off by default — see server/README.md.
 [renew_intent]

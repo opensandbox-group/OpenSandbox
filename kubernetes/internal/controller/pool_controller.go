@@ -189,14 +189,18 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 		log.Error(err, "Failed to list pods")
 		return reconcile.Result{}, err
 	}
+	controllerKey := controllerutils.GetControllerKey(pool)
+	podNames := make(map[string]struct{}, len(podList.Items))
 	pods := make([]*corev1.Pod, 0, len(podList.Items))
 	for i := range podList.Items {
 		pod := podList.Items[i]
-		PoolScaleExpectations.ObserveScale(controllerutils.GetControllerKey(pool), expectations.Create, pod.Name)
+		podNames[pod.Name] = struct{}{}
+		PoolScaleExpectations.ObserveScale(controllerKey, expectations.Create, pod.Name)
 		if pod.DeletionTimestamp.IsZero() {
 			pods = append(pods, &pod)
 		}
 	}
+	observeDeletedPods(controllerKey, podNames)
 
 	// List all batch sandboxes  ref to the pool
 	batchSandboxList := &sandboxv1alpha1.BatchSandboxList{}
@@ -216,7 +220,15 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 		batchSandboxes = append(batchSandboxes, &batchSandbox)
 	}
 	log.Info("Pool reconcile", "pool", pool.Name, "pods", len(pods), "batchSandboxes", len(batchSandboxes))
-	return r.reconcilePool(ctx, pool, batchSandboxes, pods)
+	return r.reconcilePool(ctx, pool, batchSandboxes, pods, int32(len(podList.Items)))
+}
+
+func observeDeletedPods(controllerKey string, existingPodNames map[string]struct{}) {
+	for name := range PoolScaleExpectations.GetExpectations(controllerKey)[expectations.Delete] {
+		if _, exists := existingPodNames[name]; !exists {
+			PoolScaleExpectations.ObserveScale(controllerKey, expectations.Delete, name)
+		}
+	}
 }
 
 // confirmPoolUnavailable reads directly from the API server so a stale informer
@@ -327,7 +339,7 @@ func (r *PoolReconciler) removePoolAllocationFinalizerIfUnavailable(
 }
 
 // reconcilePool contains the main reconciliation logic
-func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha1.Pool, batchSandboxes []*sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod) (ctrl.Result, error) {
+func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha1.Pool, batchSandboxes []*sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod, totalPodCnt int32) (ctrl.Result, error) {
 	var result ctrl.Result
 
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -376,15 +388,19 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 		args := &scaleArgs{
 			updateRevision: updateResult.UpdateRevision,
 			pods:           schedulePods,
-			totalPodCnt:    int32(len(pods)),
+			totalPodCnt:    totalPodCnt,
 			allocatedCnt:   int32(len(schedResult.LatestAllocation)),
 			idlePods:       updateResult.IdlePods,
 			toDeletePods:   toDeletePods,
 			supplyCnt:      schedResult.SupplyCnt + updateResult.SupplyUpdateRevision,
 		}
 
-		if err := r.scalePool(ctx, latestPool, args); err != nil {
+		scalePending, err := r.scalePool(ctx, latestPool, args)
+		if err != nil {
 			return err
+		}
+		if scalePending {
+			result = ctrl.Result{RequeueAfter: defaultRetryTime}
 		}
 
 		// 6. Update pool status
@@ -1084,7 +1100,7 @@ type UpdateResult struct {
 	SupplyUpdateRevision int32
 }
 
-func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Pool, args *scaleArgs) error {
+func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Pool, args *scaleArgs) (bool, error) {
 	log := logf.FromContext(ctx)
 	errs := make([]error, 0)
 	pods := args.pods
@@ -1095,7 +1111,7 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 			PoolScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(pool))
 		} else {
 			log.Info("Pool scale is not ready, requeue", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
-			return fmt.Errorf("pool scale is not ready, %v", pool.Name)
+			return true, nil
 		}
 	}
 	schedulableCnt := int32(len(args.pods))
@@ -1103,13 +1119,10 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	allocatedCnt := args.allocatedCnt
 	supplyCnt := args.supplyCnt
 	toDeletePods := args.toDeletePods
-	bufferCnt := schedulableCnt - allocatedCnt
+	bufferCnt := r.countReadyIdlePods(pods, args.idlePods)
 
 	// Calculate desired buffer cnt.
-	desiredBufferCnt := bufferCnt
-	if bufferCnt < pool.Spec.CapacitySpec.BufferMin || bufferCnt > pool.Spec.CapacitySpec.BufferMax {
-		desiredBufferCnt = (pool.Spec.CapacitySpec.BufferMin + pool.Spec.CapacitySpec.BufferMax) / 2
-	}
+	desiredBufferCnt := desiredBufferCount(bufferCnt, pool.Spec.CapacitySpec.BufferMin, pool.Spec.CapacitySpec.BufferMax)
 
 	// Calculate desired schedulable cnt.
 	desiredSchedulableCnt := max(allocatedCnt+supplyCnt+desiredBufferCnt, pool.Spec.CapacitySpec.PoolMin)
@@ -1150,10 +1163,20 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	}
 	if scaleIn > 0 || len(toDeletePods) > 0 {
 		podsToDelete := r.pickPodsToDelete(pods, args.idlePods, args.toDeletePods, scaleIn)
+		maxDeleteCnt := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
+		if int32(len(podsToDelete)) > maxDeleteCnt {
+			podsToDelete = podsToDelete[:maxDeleteCnt]
+		}
 		log.Info("Scaling down pool", "pool", pool.Name, "scaleIn", scaleIn, "toDeletePods", len(toDeletePods), "podsToDelete", len(podsToDelete))
 		for _, pod := range podsToDelete {
 			log.Info("Deleting pool pod", "pool", pool.Name, "pod", pod.Name)
+			controllerKey := controllerutils.GetControllerKey(pool)
+			PoolScaleExpectations.ExpectScale(controllerKey, expectations.Delete, pod.Name)
 			if err := r.Delete(ctx, pod); err != nil {
+				PoolScaleExpectations.ObserveScale(controllerKey, expectations.Delete, pod.Name)
+				if errors.IsNotFound(err) {
+					continue
+				}
 				log.Error(err, "Failed to delete pool pod", "pod", pod.Name)
 				r.Recorder.Eventf(pool, corev1.EventTypeWarning, EventReasonFailedDelete, "Failed to delete pool pod %s: %v", pod.Name, err)
 				errs = append(errs, err)
@@ -1162,7 +1185,7 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 			}
 		}
 	}
-	return gerrors.Join(errs...)
+	return false, gerrors.Join(errs...)
 }
 
 func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision string, pool *sandboxv1alpha1.Pool, pods []*corev1.Pod, schedulePods []*corev1.Pod, podAllocation map[string]string) error {
@@ -1207,36 +1230,76 @@ func (r *PoolReconciler) pickPodsToDelete(pods []*corev1.Pod, idlePodNames []str
 		podMap[pod.Name] = pod
 	}
 
+	selected := make(map[string]struct{})
 	var podsToDelete []*corev1.Pod
 	for _, name := range toDeletePodNames {
 		pod, ok := podMap[name]
-		if !ok {
+		if !ok || !pod.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if _, exists := selected[name]; exists {
 			continue
 		}
 		podsToDelete = append(podsToDelete, pod)
+		selected[name] = struct{}{}
 	}
 
 	var idlePods []*corev1.Pod
 	for _, name := range idlePodNames {
 		pod, ok := podMap[name]
-		if !ok {
+		if !ok || !pod.DeletionTimestamp.IsZero() {
 			continue
 		}
 		idlePods = append(idlePods, pod)
 	}
 	sort.Slice(idlePods, func(i, j int) bool {
-		return idlePods[i].CreationTimestamp.Before(&idlePods[j].CreationTimestamp)
+		iReady := utils.IsPodReady(idlePods[i])
+		jReady := utils.IsPodReady(idlePods[j])
+		if iReady != jReady {
+			return !iReady
+		}
+		if idlePods[i].CreationTimestamp.Equal(&idlePods[j].CreationTimestamp) {
+			return idlePods[i].Name < idlePods[j].Name
+		}
+		return idlePods[i].CreationTimestamp.After(idlePods[j].CreationTimestamp.Time)
 	})
 	for _, pod := range idlePods {
 		if scaleIn <= 0 {
 			break
 		}
-		if pod.DeletionTimestamp == nil {
-			podsToDelete = append(podsToDelete, pod)
+		if _, exists := selected[pod.Name]; exists {
+			continue
 		}
+		podsToDelete = append(podsToDelete, pod)
+		selected[pod.Name] = struct{}{}
 		scaleIn -= 1
 	}
 	return podsToDelete
+}
+
+func desiredBufferCount(readyBufferCnt, bufferMin, bufferMax int32) int32 {
+	if readyBufferCnt < bufferMin {
+		return bufferMin
+	}
+	if readyBufferCnt > bufferMax {
+		return bufferMax
+	}
+	return readyBufferCnt
+}
+
+func (r *PoolReconciler) countReadyIdlePods(pods []*corev1.Pod, idlePodNames []string) int32 {
+	idleNames := make(map[string]struct{}, len(idlePodNames))
+	for _, name := range idlePodNames {
+		idleNames[name] = struct{}{}
+	}
+
+	var count int32
+	for _, pod := range pods {
+		if _, idle := idleNames[pod.Name]; idle && utils.IsPodReady(pod) {
+			count++
+		}
+	}
+	return count
 }
 
 // getScaleMaxUnavailable returns the resolved maxUnavailable value.

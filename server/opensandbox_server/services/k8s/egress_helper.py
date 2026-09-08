@@ -20,11 +20,13 @@ Public entry points: ``prep_execd_init_for_egress``, ``build_security_context_fo
 """
 
 import json
+import shlex
 from typing import Any, Dict, List, Optional
 
 from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
     EGRESS_RULES_ENV,
+    OTEL_EXPORTER_OTLP_ENDPOINT,
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_SANDBOX_ID,
@@ -34,19 +36,26 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.k8s.workload_provider import EgressWorkloadSettings
 
+_IPV6_DISABLE_PATH = "/proc/sys/net/ipv6/conf/all/disable_ipv6"
+
 
 def prep_execd_init_for_egress(exec_install_script: str) -> tuple[str, Dict[str, Any]]:
     """
     Prepare execd init when ``egress.disable_ipv6`` is true: disable IPv6 in the Pod netns, then install.
 
-    Writes ``/proc/sys/.../disable_ipv6`` (no ``sysctl`` binary required). The returned
-    security context dict must be applied to the execd init container (typically via
-    ``build_security_context_from_dict`` in ``security_context``).
+    Writes ``/proc/sys/.../disable_ipv6`` when that path exists (no ``sysctl`` binary
+    required). A missing path is valid for an IPv4-only Pod netns, while a write failure
+    remains fatal. The returned security context dict must be applied to the execd init
+    container (typically via ``build_security_context_from_dict`` in ``security_context``).
 
     Returns:
         ``(prefixed_shell_script, {"privileged": True})``
     """
-    script = f"set -e; echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 && {exec_install_script}"
+    ipv6_disable_path = shlex.quote(_IPV6_DISABLE_PATH)
+    script = (
+        f"set -e; if [ -e {ipv6_disable_path} ]; then "
+        f"echo 1 > {ipv6_disable_path}; fi; {exec_install_script}"
+    )
     return script, {"privileged": True}
 
 
@@ -79,6 +88,7 @@ def apply_egress_to_spec(
     IPv6 is handled in execd init (``prep_execd_init_for_egress``); Pod-level sysctls are not modified.
 
     ``sandbox_id`` is injected as ``OPENSANDBOX_EGRESS_SANDBOX_ID`` when provided.
+    ``egress.otlp_endpoint`` is injected as ``OTEL_EXPORTER_OTLP_ENDPOINT`` when configured.
     """
     if egress_settings is None:
         return
@@ -91,6 +101,10 @@ def apply_egress_to_spec(
         {"name": EGRESS_RULES_ENV, "value": policy_payload},
         {"name": EGRESS_MODE_ENV, "value": egress_settings.mode},
     ]
+    if egress_settings.otlp_endpoint:
+        env.append(
+            {"name": OTEL_EXPORTER_OTLP_ENDPOINT, "value": egress_settings.otlp_endpoint}
+        )
     if sandbox_id:
         env.append({"name": OPENSANDBOX_EGRESS_SANDBOX_ID, "value": sandbox_id})
     if egress_settings.credential_proxy_enabled:

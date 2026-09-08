@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import random
 import socket
+from threading import Lock
 from typing import Dict, Optional
 
 from fastapi import HTTPException, status
@@ -27,6 +28,10 @@ DOCKER_PUBLISH_HOST = "0.0.0.0"
 # publish scope; probing only localhost can miss ports bound on other host
 # interfaces that Docker would later fail to publish.
 PORT_PROBE_HOST = DOCKER_PUBLISH_HOST
+# Keep ports claimed across the gap between the socket probe and Docker start so
+# concurrent sandbox creations in this server process cannot select the same port.
+_RESERVED_HOST_PORTS: set[int] = set()
+_RESERVATION_LOCK = Lock()
 
 
 def normalize_container_port_spec(port_spec: str) -> str:
@@ -72,17 +77,38 @@ def allocate_host_port(
     return None
 
 
+def _reserve_host_port(
+    min_port: int = 40000,
+    max_port: int = 60000,
+    attempts: int = 50,
+) -> Optional[int]:
+    for _ in range(attempts):
+        port = allocate_host_port(
+            min_port=min_port,
+            max_port=max_port,
+            attempts=attempts,
+        )
+        if port is None:
+            return None
+        with _RESERVATION_LOCK:
+            if port in _RESERVED_HOST_PORTS:
+                continue
+            _RESERVED_HOST_PORTS.add(port)
+            return port
+    return None
+
+
 def allocate_port_bindings(
     container_ports: list[str],
     min_port: int = 40000,
     max_port: int = 60000,
 ) -> Dict[str, tuple[str, int]]:
     """Allocate distinct random host ports for each container port spec."""
-    allocated_ports: set[int] = set()
     bindings: Dict[str, tuple[str, int]] = {}
-    for container_port in container_ports:
-        while True:
-            host_port = allocate_host_port(min_port=min_port, max_port=max_port)
+    completed = False
+    try:
+        for container_port in container_ports:
+            host_port = _reserve_host_port(min_port=min_port, max_port=max_port)
             if host_port is None:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -91,8 +117,17 @@ def allocate_port_bindings(
                         "message": "Failed to allocate host ports for sandbox container.",
                     },
                 )
-            if host_port not in allocated_ports:
-                allocated_ports.add(host_port)
-                bindings[container_port] = (DOCKER_PUBLISH_HOST, host_port)
-                break
-    return bindings
+            bindings[container_port] = (DOCKER_PUBLISH_HOST, host_port)
+        completed = True
+        return bindings
+    finally:
+        if not completed:
+            release_port_bindings(bindings)
+
+
+def release_port_bindings(port_bindings: dict[str, tuple[str, int]]) -> None:
+    """Release host ports reserved by allocate_port_bindings."""
+    with _RESERVATION_LOCK:
+        _RESERVED_HOST_PORTS.difference_update(
+            host_port for _, host_port in port_bindings.values()
+        )

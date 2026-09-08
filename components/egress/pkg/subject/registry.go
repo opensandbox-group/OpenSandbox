@@ -156,6 +156,19 @@ func (r *MemoryRegistry) Get(s Subject) (State, bool) {
 	return e.state, true
 }
 
+// Fence returns the fencing recorded at registration. Used to fence terminal
+// cleanup (REMOVE_BINDING): a stale removal for a previous instance of the
+// same UID must not unload the current subject.
+func (r *MemoryRegistry) Fence(s Subject) (Fencing, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.bySubject[s]
+	if !ok {
+		return Fencing{}, false
+	}
+	return e.fence, true
+}
+
 func (r *MemoryRegistry) List() []Subject {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -215,6 +228,25 @@ func (r *MemoryRegistry) EffectiveOf(pol *policy.NetworkPolicy) *policy.NetworkP
 		pol = policy.DefaultDenyPolicy()
 	}
 	return policy.MergeAlwaysOverlay(pol, r.alwaysDeny, r.alwaysAllow)
+}
+
+// UnsetPolicy removes the subject's policy and returns it to deny-first
+// (SET_BINDING with a null input: the binding was removed from a still-live
+// sandbox, so the sandbox must be fully blocked again). The kernel layer must
+// be reset to deny-first BEFORE this call so the transition stays fail-closed
+// (nft commits first, registry follows). Returns ErrUnknownSubject when the
+// subject has no observed binding.
+func (r *MemoryRegistry) UnsetPolicy(s Subject) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.bySubject[s]
+	if !ok {
+		return ErrUnknownSubject
+	}
+	e.user = nil
+	e.effective = nil
+	e.state = StateDenying
+	return nil
 }
 
 func (r *MemoryRegistry) UserPolicy(s Subject) *policy.NetworkPolicy {

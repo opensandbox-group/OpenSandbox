@@ -22,11 +22,13 @@ similar to the Kotlin SDK ExecutionConverter.
 This converter is designed to work with openapi-python-client generated models.
 """
 
+from datetime import timedelta
 from typing import Any
 
 from opensandbox.api.execd.models.run_command_request import (
     RunCommandRequest as ApiRunCommandRequest,
 )
+from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import RunCommandOpts
 
 
@@ -59,6 +61,8 @@ class ExecutionConverter:
 
         timeout_milliseconds = UNSET
         if opts.timeout is not None:
+            if opts.timeout < timedelta(0):
+                raise InvalidArgumentException("timeout must be positive")
             timeout_milliseconds = int(opts.timeout.total_seconds() * 1000)
 
         uid = UNSET
