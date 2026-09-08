@@ -85,7 +85,7 @@ class AgentSandboxProvider(WorkloadProvider):
         self.k8s_client = k8s_client
 
         self.group = "agents.x-k8s.io"
-        self.version = "v1alpha1"
+        self.version = "v1beta1"
         self.plural = "sandboxes"
 
         k8s_config = app_config.kubernetes if app_config else None
@@ -162,7 +162,8 @@ class AgentSandboxProvider(WorkloadProvider):
 
         resource_name = self._resource_name(sandbox_id)
         spec = {
-            "replicas": 1,
+            "operatingMode": "Running",
+            "service": True,
             "shutdownPolicy": self.shutdown_policy,
             "podTemplate": {
                 "metadata": {

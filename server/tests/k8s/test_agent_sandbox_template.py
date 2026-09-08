@@ -64,12 +64,12 @@ class TestAgentSandboxTemplateManager:
         assert manager.template_file_path is None
 
     def test_deep_merge_runtime_overrides_template(self):
-        base = {"spec": {"replicas": 1, "shutdownTime": "old"}}
+        base = {"spec": {"operatingMode": "Running", "shutdownTime": "old"}}
         override = {"spec": {"shutdownTime": "new"}}
 
         result = AgentSandboxTemplateManager._deep_merge(base, override)
 
-        assert result == {"spec": {"replicas": 1, "shutdownTime": "new"}}
+        assert result == {"spec": {"operatingMode": "Running", "shutdownTime": "new"}}
 
     def test_deep_merge_preserves_template_only_fields(self):
         base = {
@@ -82,11 +82,12 @@ class TestAgentSandboxTemplateManager:
                 }
             }
         }
-        override = {"spec": {"replicas": 1}}
+        override = {"spec": {"operatingMode": "Running", "service": True}}
 
         result = AgentSandboxTemplateManager._deep_merge(base, override)
 
-        assert result["spec"]["replicas"] == 1
+        assert result["spec"]["operatingMode"] == "Running"
+        assert result["spec"]["service"] is True
         assert result["spec"]["podTemplate"]["spec"]["nodeSelector"] == {"env": "prod"}
         assert result["spec"]["podTemplate"]["spec"]["tolerations"] == [{"key": "test"}]
 
@@ -130,7 +131,7 @@ class TestAgentSandboxTemplateManager:
 
     def test_get_base_template_returns_copy(self, tmp_path):
         template_file = tmp_path / "template.yaml"
-        template_content = {"spec": {"replicas": 1}}
+        template_content = {"spec": {"operatingMode": "Running"}}
         template_file.write_text(yaml.dump(template_content))
 
         manager = AgentSandboxTemplateManager(str(template_file))

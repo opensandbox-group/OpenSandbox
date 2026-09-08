@@ -85,7 +85,7 @@ class TestAgentSandboxProvider:
         provider = AgentSandboxProvider(mock_k8s_client)
 
         assert provider.group == "agents.x-k8s.io"
-        assert provider.version == "v1alpha1"
+        assert provider.version == "v1beta1"
         assert provider.plural == "sandboxes"
 
     def test_create_workload_builds_correct_manifest_init_mode(self, mock_k8s_client):
@@ -111,14 +111,20 @@ class TestAgentSandboxProvider:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox"}
 
-        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
-        assert body["apiVersion"] == "agents.x-k8s.io/v1alpha1"
+        call_kwargs = mock_k8s_client.create_custom_object.call_args.kwargs
+        assert call_kwargs["group"] == "agents.x-k8s.io"
+        assert call_kwargs["version"] == "v1beta1"
+        assert call_kwargs["plural"] == "sandboxes"
+        body = call_kwargs["body"]
+        assert body["apiVersion"] == "agents.x-k8s.io/v1beta1"
         assert body["kind"] == "Sandbox"
         assert body["metadata"]["name"] == "test-id"
         assert body["metadata"]["namespace"] == "test-ns"
-        assert body["spec"]["replicas"] == 1
+        assert body["spec"]["operatingMode"] == "Running"
+        assert body["spec"]["service"] is True
+        assert "replicas" not in body["spec"]
         assert body["spec"]["shutdownTime"] == "2025-12-31T10:00:00+00:00"
         assert body["spec"]["shutdownPolicy"] == "Delete"
         assert body["spec"]["podTemplate"]["spec"]["automountServiceAccountToken"] is False
@@ -126,6 +132,45 @@ class TestAgentSandboxProvider:
         assert "initContainers" in body["spec"]["podTemplate"]["spec"]
         assert "containers" in body["spec"]["podTemplate"]["spec"]
         assert "volumes" in body["spec"]["podTemplate"]["spec"]
+
+    @pytest.mark.parametrize("expires_at", [None, datetime(2026, 12, 31, tzinfo=timezone.utc)])
+    def test_create_workload_overrides_template_lifecycle(self, mock_k8s_client, expires_at):
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config(shutdown_policy="Retain"))
+        provider.template_manager._template = {
+            "spec": {
+                "operatingMode": "Suspended",
+                "service": False,
+                "shutdownPolicy": "Delete",
+                "shutdownTime": "2025-01-01T00:00:00Z",
+                "podTemplate": {"spec": {"nodeSelector": {"env": "test"}}},
+            }
+        }
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11", auth=None),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={},
+            expires_at=expires_at,
+            execd_image="execd:latest",
+        )
+
+        spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"]
+        assert spec["operatingMode"] == "Running"
+        assert spec["service"] is True
+        assert "replicas" not in spec
+        assert spec["shutdownPolicy"] == "Retain"
+        assert spec["podTemplate"]["spec"]["nodeSelector"] == {"env": "test"}
+        if expires_at is None:
+            assert "shutdownTime" not in spec
+        else:
+            assert spec["shutdownTime"] == expires_at.isoformat()
 
     def test_create_workload_injects_platform_node_selector(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client, _app_config())
@@ -349,7 +394,7 @@ spec:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "sandbox-1234", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
+        assert result == {"name": "sandbox-1234", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox"}
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["metadata"]["name"] == "sandbox-1234"
 
@@ -439,7 +484,7 @@ spec:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox"}
 
     def test_update_expiration_patches_spec(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
