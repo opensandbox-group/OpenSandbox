@@ -54,13 +54,14 @@ spec:
         - |
           FC_VERSION="${FC_VERSION:-v1.16.1}"
           DEST="/opt/fast-sandbox/firecracker"
+          ARCH="$(uname -m)"
+          case "$ARCH" in x86_64) ASSET_ARCH="x86_64";; aarch64) ASSET_ARCH="aarch64";; *) echo "unsupported arch $ARCH" >&2; exit 1;; esac
           # Amazon microvm kernel (Firecracker CI artifact) with ACPI/VMGenID
           # support: the quickstart vmlinux.bin is Linux 4.14, whose CRNG is
           # not reseeded at snapshot resume (execd /command hangs, OpenSandbox
-          # issue #1695).
-          KERNEL_URL="${KERNEL_URL:-https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260722-38359b8055fc-0/x86_64/vmlinux-6.1.176}"
-          ARCH="$(uname -m)"
-          case "$ARCH" in x86_64) ASSET_ARCH="x86_64";; aarch64) ASSET_ARCH="aarch64";; *) echo "unsupported arch $ARCH" >&2; exit 1;; esac
+          # issue #1695). The DEFAULT url is arch-aware (an x86_64 kernel on
+          # an aarch64 host boots nothing); KERNEL_URL overrides it verbatim.
+          KERNEL_URL="${KERNEL_URL:-https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260722-38359b8055fc-0/${ASSET_ARCH}/vmlinux-6.1.176}"
           mkdir -p "$DEST"
           if [[ ! -x "$DEST/firecracker" || ! -x "$DEST/jailer" ]]; then
             TARBALL="/tmp/firecracker-${FC_VERSION}-${ASSET_ARCH}.tgz"

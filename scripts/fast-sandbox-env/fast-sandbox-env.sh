@@ -75,6 +75,10 @@ NS="fast-sandbox-system"
 
 MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
 MINIO_PORT="${MINIO_PORT:-9000}"
+# The container always LISTENS on 9000 (guest side of the publish map and
+# the port kind-network clients use via the container IP); MINIO_PORT only
+# moves the host-side 127.0.0.1 publish.
+MINIO_CONTAINER_PORT=9000
 MINIO_AK="${MINIO_AK:-integration-env}"
 MINIO_SK="${MINIO_SK:-integration-env-secret}"
 MINIO_BUCKET="sandbox-images"
@@ -545,7 +549,7 @@ minio_up() {
 	# issues: pods and the node container talk to the container IP directly,
 	# while 127.0.0.1 publishing keeps host-side mc/curl working.
 	docker run -d --name "$MINIO_CONTAINER" --network "$net" \
-		-p 127.0.0.1:"$MINIO_PORT":9000 -p 127.0.0.1:9001:9001 \
+		-p 127.0.0.1:"$MINIO_PORT":"$MINIO_CONTAINER_PORT" -p 127.0.0.1:9001:9001 \
 		-e MINIO_ROOT_USER="$MINIO_AK" -e MINIO_ROOT_PASSWORD="$MINIO_SK" \
 		-v "$MINIO_DATA:/data" \
 		"$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
@@ -573,7 +577,10 @@ resolve_minio_endpoint() {
 		ips="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{$v.IPAddress}} {{end}}' "$MINIO_CONTAINER")"
 		ip="$(printf '%s' "$ips" | tr ' ' '\n' | grep -A1 -x "^$net$" | tail -1)"
 		[[ -n "$ip" ]] || die "could not find the MinIO IP on network $net (inspect: $ips)"
-		MINIO_ENDPOINT="http://$ip:$MINIO_PORT"
+		# Container port, NOT the host-published MINIO_PORT: kind-network
+		# clients reach the container directly and the S3 API listens on
+		# the fixed container port regardless of the host mapping.
+		MINIO_ENDPOINT="http://$ip:$MINIO_CONTAINER_PORT"
 		log "MinIO endpoint (kind network IP): $MINIO_ENDPOINT"
 	fi
 	local net
@@ -695,6 +702,18 @@ agent_pods() {
 	kubectl -n "$NS" get pods -l component=firecracker-runtime-agent -o jsonpath='{.items[*].metadata.name}' 2>/dev/null
 }
 
+# render_agent_manifest replaces the "@AGENT_IMAGE@" token so IMAGE_AGENT
+# overrides reach the DaemonSet (the script kind-loads $IMG_AGENT; without
+# the render the DS would keep requesting the default tag).
+render_agent_manifest() { # > $GEN_DIR/runtime-agent.yaml
+	local src="$MANIFESTS_DIR/node/runtime-agent.yaml" out="$GEN_DIR/runtime-agent.yaml"
+	mkdir -p "$GEN_DIR"
+	awk -v image="$IMG_AGENT" '{ gsub(/"@AGENT_IMAGE@"/, image); print }' "$src" > "$out"
+	if grep -Eq '^[[:space:]]*[A-Za-z][A-Za-z0-9]*:.*@[A-Z_]+@' "$out"; then
+		die "unrendered token left in $out"
+	fi
+}
+
 dart_roster_ready() { # pod expected-members
 	local pod="$1" expected="$2" members
 	members="$(kubectl exec -n "$NS" "$pod" -- sh -c \
@@ -704,7 +723,8 @@ dart_roster_ready() { # pod expected-members
 
 agent_up() {
 	kubectl apply -f "$MANIFESTS_DIR/node/dart-service.yaml" >/dev/null
-	kubectl apply -f "$MANIFESTS_DIR/node/runtime-agent.yaml" >/dev/null
+	render_agent_manifest
+	kubectl apply -f "$GEN_DIR/runtime-agent.yaml" >/dev/null
 	wait_for "runtime-agent DaemonSet ready" 120 \
 		kubectl -n "$NS" rollout status daemonset/firecracker-runtime-agent --timeout=10s
 
@@ -1021,17 +1041,22 @@ down() {
 	sudo_ rm -rf "$MINIO_DATA"
 	sysctl_restore
 	stateroot_xfs_down
-	# Purge the runtime cache the environment owns: the pull layer treats a
+	# Purge the per-node runtime caches the environment owns (each kind
+	# node binds its own host subdirectory at /var/lib/fast-sandbox — see
+	# manifests/cluster/kind-cluster.yaml). The pull layer treats a
 	# committed cache as FINAL (idempotent, never refreshed), so a rebuilt
 	# SandboxTemplate would otherwise keep being ignored when the StateRoot
-	# survives teardown (e.g. XFS_STATEROOT=0 plain directory).
-	if [[ -d "$XFS_MOUNT_POINT/firecracker" ]]; then
-		log "down: purging node runtime cache under $XFS_MOUNT_POINT/firecracker"
-		sudo_ rm -rf "$XFS_MOUNT_POINT/firecracker/images" \
-			"$XFS_MOUNT_POINT/firecracker/agent" \
-			"$XFS_MOUNT_POINT/firecracker/jails" \
-			"$XFS_MOUNT_POINT/firecracker/cache" 2>/dev/null || true
-	fi
+	# survives teardown (e.g. XFS_STATEROOT=0 plain directories).
+	local node_dir
+	for node_dir in control-plane worker; do
+		if [[ -d "$XFS_MOUNT_POINT/$node_dir/firecracker" ]]; then
+			log "down: purging node runtime cache under $XFS_MOUNT_POINT/$node_dir"
+			sudo_ rm -rf "$XFS_MOUNT_POINT/$node_dir/firecracker/images" \
+				"$XFS_MOUNT_POINT/$node_dir/firecracker/agent" \
+				"$XFS_MOUNT_POINT/$node_dir/firecracker/jails" \
+				"$XFS_MOUNT_POINT/$node_dir/firecracker/cache" 2>/dev/null || true
+		fi
+	done
 	pass "host cleanup complete"
 }
 

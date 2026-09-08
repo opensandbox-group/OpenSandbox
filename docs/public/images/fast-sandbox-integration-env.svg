@@ -47,7 +47,7 @@
     <text x="72" y="326" class="t-body">cp --reflink probe after mount:</text>
     <text x="72" y="341" class="t-body">per-sandbox rootfs full copy (~2.5s)</text>
     <text x="72" y="356" class="t-body">becomes a CoW clone (~ms)</text>
-    <text x="72" y="372" class="t-small">must precede kind create (nodes bind it)</text>
+    <text x="72" y="372" class="t-small">per-node subdirs: control-plane/ worker/</text>
 
     <rect x="60" y="390" width="240" height="96" rx="8" fill="#ffffff" stroke="#94a3b8"/>
     <text x="72" y="410" class="t-box">Docker daemon / kind network</text>
@@ -196,8 +196,8 @@
 
   <!-- XFS shared strip -->
   <rect x="320" y="728" width="1300" height="42" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-dasharray="6 3"/>
-  <text x="336" y="746" class="t-body" fill="#065f46">shared host mount: /var/lib/fast-sandbox (XFS, reflink CoW) - agent cache / per-sandbox rootfs copies / jails must share one filesystem (reflink is same-FS only); both node containers bind the same directory</text>
-  <text x="336" y="762" class="t-small" fill="#065f46">DART block caches stay per-node (cache/dart-hostname); down purges the tree - committed caches are final, stale ones would shadow a rebuilt template</text>
+  <text x="336" y="746" class="t-body" fill="#065f46">per-node state roots on one XFS filesystem: node A binds /var/lib/fast-sandbox/control-plane, node B binds .../worker (same containerPath) - images / agent journal / jails stay private per node</text>
+  <text x="336" y="762" class="t-small" fill="#065f46">reflink CoW still works (same filesystem, per-node subtree); one node's committed cache never satisfies another node's pull - peer -&gt; origin is exercised on EVERY node's first create; down purges both</text>
 
   <!-- MinIO and artifacts -->
   <rect x="320" y="786" width="630" height="86" rx="8" fill="#fefce8" stroke="#ca8a04"/>

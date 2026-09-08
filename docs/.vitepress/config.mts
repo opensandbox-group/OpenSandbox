@@ -101,6 +101,7 @@ export default defineConfig({
             { text: "Client Pool", link: "/guides/client-pool" },
             { text: "SDK Telemetry", link: "/guides/sdk-telemetry" },
             { text: "SDK Tracing (Pool Warmup)", link: "/guides/sdk-tracing" },
+            { text: "fast-sandbox Integration Environment", link: "/guides/fast-sandbox-integration-env" },
           ],
         },
       ],

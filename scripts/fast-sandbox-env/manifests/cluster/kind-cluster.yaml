@@ -16,6 +16,16 @@
 #                          (XFS loop image when XFS_STATEROOT=1 so
 #                          per-sandbox rootfs copies are CoW reflinks)
 #
+# Node state roots are PRIVATE per node: each node container binds its
+# own host subdirectory (control-plane/ or worker/) at the same
+# containerPath /var/lib/fast-sandbox, so the runtime-agent image cache
+# (<StateRoot>/images/<sha>), the agent journal (<StateRoot>/agent) and
+# the jails are never shared across nodes — a second node's first pull
+# always goes through DART (peer -> origin) instead of becoming a local
+# hit on the first node's committed files. Both subdirectories live on
+# the same host XFS filesystem, so per-sandbox rootfs reflink copies keep
+# working within each node's subtree (reflink is same-filesystem only).
+#
 # vhost-vsock is intentionally NOT mounted: the firecracker driver probes
 # only /dev/kvm and /dev/net/tun, and hosts without the device fail kind
 # create when docker tries to create the mount source under /sys.
@@ -44,7 +54,7 @@ nodes:
     containerPath: /dev/net/tun
   - hostPath: /dev/shm
     containerPath: /dev/shm
-  - hostPath: /var/lib/fast-sandbox
+  - hostPath: /var/lib/fast-sandbox/control-plane
     containerPath: /var/lib/fast-sandbox
 - role: worker
   extraMounts:
@@ -56,5 +66,5 @@ nodes:
     containerPath: /dev/net/tun
   - hostPath: /dev/shm
     containerPath: /dev/shm
-  - hostPath: /var/lib/fast-sandbox
+  - hostPath: /var/lib/fast-sandbox/worker
     containerPath: /var/lib/fast-sandbox

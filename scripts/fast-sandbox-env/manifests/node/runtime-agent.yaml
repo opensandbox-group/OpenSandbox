@@ -14,6 +14,10 @@
 #     configuration (registryconfig.Compiled JSON) carrying the MinIO
 #     read-only key and endpoint for FAST_SANDBOX_ARTIFACT_STORE.
 #   - ConfigMap fast-sandbox-agent-config: artifact-endpoint override.
+#
+# The image is a render token ("@AGENT_IMAGE@"): fast-sandbox-env.sh
+# substitutes it from IMG_AGENT (IMAGE_AGENT) so image overrides reach the
+# DaemonSet — the file is applied from $WORK/gen, never directly.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -43,7 +47,7 @@ spec:
       # pod's hostname is its pod name, not the node).
       containers:
       - name: agent
-        image: fast-sandbox/firecracker-runtime-agent:dev
+        image: "@AGENT_IMAGE@"
         imagePullPolicy: IfNotPresent
         env:
         - name: POD_UID
