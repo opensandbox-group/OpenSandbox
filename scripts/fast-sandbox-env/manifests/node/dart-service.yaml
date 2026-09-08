@@ -1,0 +1,30 @@
+# dart-service.yaml — headless Service backing DART peer discovery
+# (adapted from fast-sandbox config/dev/dart-service.yaml).
+#
+# P2P is the default data plane of this environment: every node's
+# runtime-agent spawns a node-local DART daemon, and the daemons discover
+# each other via DNS seeding (dns:dart.fast-sandbox-system.svc.cluster.local:9000).
+# clusterIP: None makes the DNS answer the ready agent pod IPs instead of a
+# stable virtual IP — discovery needs addresses, not load balancing.
+#
+# The DART peer plane binds each agent pod IP (the agent DaemonSet runs on
+# the cluster network, NOT hostNetwork, exactly so this resolution works);
+# peers reach each other across nodes through the CNI.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dart
+  namespace: fast-sandbox-system
+  labels:
+    app: fast-sandbox
+    component: firecracker-runtime-agent
+spec:
+  clusterIP: None
+  selector:
+    app: fast-sandbox
+    component: firecracker-runtime-agent
+  ports:
+  - name: peer
+    port: 9000
+    targetPort: 9000
+    protocol: TCP
