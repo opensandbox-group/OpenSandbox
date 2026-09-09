@@ -362,9 +362,20 @@ func TestPTYWS_ViewerClosesAfterReadOnlyViolationLimit(t *testing.T) {
 		require.Equal(t, model.WSErrCodeReadOnly, f.Code)
 	}
 
-	_ = viewer.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, _, err := viewer.ReadMessage()
-	require.Error(t, err, "viewer should close after repeated read-only violations")
+	// The output pump can send replay after the final READ_ONLY error but
+	// before cancellation closes the socket. Drain it within one deadline;
+	// a timeout or malformed frame must not be mistaken for peer closure.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		frame, err := ptyReadFrame(viewer, time.Until(deadline))
+		if err != nil {
+			var closeErr *websocket.CloseError
+			require.ErrorAs(t, err, &closeErr, "viewer should close after repeated read-only violations")
+			return
+		}
+		require.Equal(t, "replay", frame.Type, "unexpected frame while waiting for viewer closure")
+	}
+	t.Fatal("viewer did not close after repeated read-only violations")
 }
 
 func TestPTYWS_ViewerFlushesOutputBeforeExit(t *testing.T) {
