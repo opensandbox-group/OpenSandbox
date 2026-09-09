@@ -16,6 +16,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -153,6 +154,7 @@ func TestInitExportsConfiguredTemporality(t *testing.T) {
 		sync, observable metrics.AggregationTemporality
 	}{
 		{"", delta, cumulative},
+		{" \t\n", delta, cumulative},
 		{"cumulative", cumulative, cumulative},
 		{"delta", delta, delta},
 		{"lowmemory", delta, cumulative},
@@ -260,6 +262,29 @@ func TestInitExportsConfiguredTemporality(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInitRegistrationFailureClearsProvider(t *testing.T) {
+	preserveTelemetryGlobals(t)
+	endpoint, _ := newTestCollector(t)
+	t.Setenv(envSDKDisabled, "")
+	t.Setenv(envMetricsExporter, "")
+	t.Setenv(envOTLPEndpoint, endpoint)
+	t.Setenv(envOTLPMetricsEndpoint, "")
+	registrationErr := errors.New("registration failed")
+	shutdown, err := Init(context.Background(), Config{
+		ServiceName:     "registration-failure-test",
+		RegisterMetrics: func() error { return registrationErr },
+	})
+	if !errors.Is(err, registrationErr) || shutdown != nil {
+		t.Fatalf("Init returned (%v, %v), want nil shutdown and registration error", shutdown == nil, err)
+	}
+	if _, ok := otel.GetMeterProvider().(noop.MeterProvider); !ok || meterProvider.Load() != nil {
+		t.Fatal("failed Init left an active metrics provider")
+	}
+	if err := ForceFlush(context.Background()); err != nil {
+		t.Fatalf("ForceFlush after failed Init: %v", err)
 	}
 }
 

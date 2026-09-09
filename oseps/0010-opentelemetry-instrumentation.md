@@ -146,7 +146,7 @@ Meter name: **`opensandbox/egress`**.
 
 | Category | Metric name (suggested) | Type | Description |
 |----------|-------------------------|------|-------------|
-| **HTTP** | `ingress.http.request.count` | Counter | Request count by method, status_code, proxy_type (http/websocket) (QPS derivable) |
+| **HTTP** | `ingress.http.request.count` | Counter | Request count by `http_method`, `http_status_code`, `proxy_type` (http/websocket) (QPS derivable) |
 | | `ingress.http.request.duration` | Histogram | Request duration (including routing and proxy) by method, proxy_type |
 | **Routing** | `ingress.routing.resolutions.count` | Counter | Resolutions by result (success/not_found/not_ready/error) |
 | | `ingress.routing.resolution.duration` | Histogram | Time to resolve sandbox target (from cache or API) |

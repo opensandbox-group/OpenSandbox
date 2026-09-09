@@ -97,7 +97,7 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		opts := metricsClientOptions(cfg.DisableEndpointFallback)
 		// Preserve historical aggregation only when no preference is supplied.
 		// Otherwise let the exporter parse the standard environment variable.
-		if os.Getenv(envTemporality) == "" {
+		if strings.TrimSpace(os.Getenv(envTemporality)) == "" {
 			opts = append(opts, otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector))
 		}
 		mexp, err := otlpmetrichttp.New(ctx, opts...)
@@ -116,6 +116,7 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 			if err := cfg.RegisterMetrics(); err != nil {
 				_ = mp.Shutdown(ctx)
 				otel.SetMeterProvider(noop.NewMeterProvider())
+				meterProvider.Store(nil)
 				return nil, err
 			}
 		}
@@ -148,8 +149,7 @@ func buildResource(ctx context.Context, serviceName string, extra []attribute.Ke
 
 // Endpoint precedence: OTEL_EXPORTER_OTLP_*_ENDPOINT -> HOST_IP -> /etc/hostinfo.
 func metricsEnabled(disableEndpointFallback bool) bool {
-	if strings.EqualFold(os.Getenv(envSDKDisabled), "true") ||
-		strings.EqualFold(os.Getenv(envMetricsExporter), "none") {
+	if MetricsDisabled() {
 		return false
 	}
 	if otlpEndpointFromEnv() != "" {
@@ -160,6 +160,14 @@ func metricsEnabled(disableEndpointFallback bool) bool {
 	}
 	_, ok := resolveNodeIP()
 	return ok
+}
+
+// MetricsDisabled reports whether a standard environment switch disables metrics.
+// Exporter initialization and telemetry-specific network policy must use the same
+// decision, so disabling export cannot leave an automatic collector allow rule.
+func MetricsDisabled() bool {
+	return strings.EqualFold(os.Getenv(envSDKDisabled), "true") ||
+		strings.EqualFold(os.Getenv(envMetricsExporter), "none")
 }
 
 func metricsClientOptions(disableEndpointFallback bool) []otlpmetrichttp.Option {

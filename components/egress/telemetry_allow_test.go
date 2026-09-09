@@ -126,3 +126,58 @@ func TestWithTelemetryAllowAppends(t *testing.T) {
 	require.Equal(t, policy.ActionAllow, merged.Evaluate("a.example.com."))
 	require.Equal(t, policy.ActionAllow, merged.Evaluate("collector.example."))
 }
+
+func TestTelemetryDisabledDoesNotAutoAllowCollector(t *testing.T) {
+	for _, key := range []string{"OTEL_SDK_DISABLED", "OTEL_METRICS_EXPORTER"} {
+		for _, source := range []string{"metrics endpoint", "general endpoint", "node IP"} {
+			t.Run(key+"/"+source, func(t *testing.T) {
+				t.Setenv("OTEL_SDK_DISABLED", "")
+				t.Setenv("OTEL_METRICS_EXPORTER", "")
+				t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+				t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+				t.Setenv("HOST_IP", "192.0.2.10")
+				target := "192.0.2.10"
+				if source == "metrics endpoint" {
+					t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "https://collector.example:4318/v1/metrics")
+					target = "collector.example"
+				} else if source == "general endpoint" {
+					t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example:4318")
+					target = "collector.example"
+				}
+				require.Len(t, telemetryAllowRules(), 1, "enabled exporter needs the auto-allow rule")
+				if key == "OTEL_SDK_DISABLED" {
+					t.Setenv(key, "TrUe")
+				} else {
+					t.Setenv(key, "NoNe")
+				}
+				require.Nil(t, telemetryAllowRules())
+				appRule, err := policy.ParseValidatedEgressRule(policy.ActionAllow, "app.example")
+				require.NoError(t, err)
+				existing := []policy.EgressRule{appRule}
+				// Both initial policy construction and subsequent rebuilds use this
+				// overlay path. Neither may reinstate the disabled collector rule.
+				for i := 0; i < 2; i++ {
+					allow := withTelemetryAllow(existing)
+					require.Equal(t, existing, allow)
+					merged := policy.MergeAlwaysOverlay(policy.DefaultDenyPolicy(), nil, allow)
+					require.Equal(t, policy.ActionDeny, merged.Evaluate(target))
+					allowV4, allowV6, _, _ := merged.StaticIPSets()
+					require.Empty(t, allowV4)
+					require.Empty(t, allowV6)
+					require.Equal(t, policy.ActionAllow, merged.Evaluate("app.example"))
+				}
+				// Disabling telemetry must not override an operator's explicit rule.
+				collectorRule, err := policy.ParseValidatedEgressRule(policy.ActionAllow, target)
+				require.NoError(t, err)
+				explicit := []policy.EgressRule{collectorRule}
+				merged := policy.MergeAlwaysOverlay(policy.DefaultDenyPolicy(), nil, withTelemetryAllow(explicit))
+				if source == "node IP" {
+					allowV4, _, _, _ := merged.StaticIPSets()
+					require.Equal(t, []string{target}, allowV4)
+				} else {
+					require.Equal(t, policy.ActionAllow, merged.Evaluate(target))
+				}
+			})
+		}
+	}
+}

@@ -37,6 +37,9 @@ Values are case-insensitive. Other values leave the existing export configuratio
 unchanged; `OTEL_METRICS_EXPORTER` does not select an alternative exporter here.
 These switches do not disable native application logs or execd's local
 `/metrics` and `/metrics/watch` APIs.
+They also suppress the egress sidecar's automatic collector allow rule, including
+when the effective policy is rebuilt. Explicit operator-provided allow rules
+remain in effect.
 
 ## Aggregation temporality
 
@@ -48,7 +51,7 @@ standard aggregation behavior:
 | `cumulative` | Cumulative | Cumulative | Cumulative |
 | `delta` | Delta | Delta | Cumulative |
 | `lowmemory` | Delta | Cumulative | Cumulative |
-| Unset or empty | Delta | Cumulative | Cumulative |
+| Unset, empty, or whitespace-only | Delta | Cumulative | Cumulative |
 
 Values are case-insensitive. An invalid nonempty value uses the upstream
 exporter's cumulative default and produces its configuration warning. Gauges
