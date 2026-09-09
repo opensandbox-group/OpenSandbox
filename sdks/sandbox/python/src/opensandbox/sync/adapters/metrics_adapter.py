@@ -21,6 +21,7 @@ import logging
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -50,12 +51,17 @@ class MetricsAdapterSync(MetricsSync):
         timeout = httpx.Timeout(self.connection_config.request_timeout.total_seconds())
         headers = self.execd_endpoint.build_request_headers(self.connection_config)
 
-        self._client = Client(base_url=base_url, timeout=timeout)
+        self._client = Client(
+            base_url=base_url,
+            timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
+        )
         self._httpx_client = httpx.Client(
             base_url=base_url,
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_httpx_client(self._httpx_client)
 

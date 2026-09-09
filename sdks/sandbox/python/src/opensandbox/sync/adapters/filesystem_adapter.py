@@ -27,6 +27,7 @@ from typing import TypedDict
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -97,8 +98,13 @@ class FilesystemAdapterSync(FilesystemSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
-        self._client = Client(base_url=base_url, timeout=timeout)
+        self._client = Client(
+            base_url=base_url,
+            timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
+        )
         self._client.set_httpx_client(self._httpx_client)
 
     def _get_execd_base_url(self) -> str:
@@ -283,7 +289,11 @@ class FilesystemAdapterSync(FilesystemSync):
 
             multipart_parts.append(("file", (entry.path, content, content_type)))
 
-        return self._httpx_client.post(url, files=multipart_parts)
+        return self._httpx_client.post(
+            url,
+            files=multipart_parts,
+            follow_redirects=False,
+        )
 
     def _write_files_chunked(
         self,
@@ -368,6 +378,7 @@ class FilesystemAdapterSync(FilesystemSync):
             url,
             content=_body(),
             headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+            follow_redirects=False,
         )
 
     def write_file(

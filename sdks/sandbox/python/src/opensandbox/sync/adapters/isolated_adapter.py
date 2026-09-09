@@ -22,6 +22,7 @@ import logging
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.response_handler import (
@@ -186,6 +187,7 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
 
         sse_headers = {
@@ -205,6 +207,7 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
                 pool=None,
             ),
             transport=unwrap_retry_transport(self.connection_config.transport),
+            **build_redirect_client_options(self.connection_config, base_url),
         )
 
     def _get_url(self, path: str) -> str:

@@ -29,6 +29,7 @@ from pydantic import (  # type: ignore[reportMissingImports]
     field_validator,
 )
 
+from opensandbox._httpx import AsyncEventHook
 from opensandbox.transport import RetryAsyncTransport, RetryPolicy
 
 
@@ -71,6 +72,21 @@ class ConnectionConfig(BaseModel):
     )
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"
+    )
+    follow_redirects: bool = Field(
+        default=False,
+        description=(
+            "Whether HTTP clients should follow redirects. Cross-origin redirects strip "
+            "headers prefixed OPEN-SANDBOX- or OPENSANDBOX-, but other sensitive custom "
+            "headers may still be forwarded."
+        ),
+    )
+    event_hooks: dict[str, list[AsyncEventHook]] = Field(
+        default_factory=dict,
+        description=(
+            "Additional httpx event hooks for SDK-created async clients. SDK security "
+            "hooks run after configured request hooks."
+        ),
     )
     transport: httpx.AsyncBaseTransport | None = Field(
         default=None,
