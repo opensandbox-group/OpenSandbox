@@ -133,6 +133,16 @@ try {
 
 The built-in `InMemoryPoolStateStore` is limited to one JavaScript process. To share a pool across processes, provide a distributed `PoolStateStore` whose idle-take, membership, and primary-lock operations are atomic.
 
+`acquireReadyTimeoutSeconds` and `warmupReadyTimeoutSeconds` bound each sandbox's
+health-check phase, including in-flight probes and polling delays. They do not
+bound the entire acquire or warmup operation, such as sandbox creation or
+preparation. Pass an `AbortSignal` to `pool.acquire({ signal })` to cancel an
+in-flight readiness check. Built-in health probes receive the cancellation
+signal; custom health-check callbacks may continue running after timeout or
+cancellation, but their late results are ignored. The pool attempts to kill a
+sandbox that fails readiness and does not hand it to a caller or add it to the
+idle buffer.
+
 ## Usage Examples
 
 ### 1. Lifecycle Management

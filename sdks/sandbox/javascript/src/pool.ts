@@ -18,7 +18,6 @@ import {
   PoolEmptyException,
   PoolNotRunningException,
   PoolStateStoreUnavailableException,
-  SandboxReadyTimeoutException,
 } from "./core/exceptions.js";
 import { InMemoryPoolStateStore } from "./poolStore.js";
 import {
@@ -681,25 +680,11 @@ export class SandboxPool {
     pollingIntervalMillis: number,
     signal?: AbortSignal,
   ): Promise<void> {
-    const deadline = Date.now() + timeoutSeconds * 1000;
-    let attempts = 0;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      signal?.throwIfAborted();
-      attempts += 1;
-      let healthy = false;
-      try {
-        healthy = healthCheck ? await healthCheck(sandbox) : await sandbox.isHealthy();
-      } catch (error) {
-        lastError = error;
-        healthy = false;
-      }
-      if (healthy) return;
-      await sleep(pollingIntervalMillis, signal);
-    }
-    throw new SandboxReadyTimeoutException({
-      message: `Sandbox health check timed out after ${timeoutSeconds}s (${attempts} attempts).`,
-      cause: lastError,
+    await sandbox.waitUntilReady({
+      readyTimeoutSeconds: timeoutSeconds,
+      pollingIntervalMillis,
+      healthCheck,
+      signal,
     });
   }
 
