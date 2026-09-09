@@ -187,7 +187,56 @@ See [Credential Vault](/guides/credential-vault) for full API usage, binding rul
 
 ### Observability (OpenTelemetry)
 
-Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). The credential proxy's log lines from mitmdump are piped into the same zap sink at warn level, so they land in the egress log file when `OPENSANDBOX_LOG_OUTPUT` points at one; mitmproxy's own flow logs are not forwarded. OTLP log export is not used.
+Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). The credential proxy's log lines from mitmdump are piped into the same zap sink at warn level; shadow outcome records described below are consumed as metrics instead. mitmproxy's own flow logs are not forwarded. OTLP log export is not used.
+
+#### Experimental TLS shadow observations
+
+Operators may set `OPENSANDBOX_EGRESS_MITMPROXY_SHADOW=true` directly on the
+egress process to collect `egress.mitm.shadow.requests_total` through the
+existing OTLP exporter. It defaults to off; this is not the public
+`credentialProxy.interceptionMode` option and is not forwarded through SDK
+sandbox environment settings. Enable it only for targeted diagnostic windows:
+it adds host matching and one fixed-format child-process record per sample.
+
+Samples are **HTTPS/443 request-header observations**, not TLS connection
+counts. They reuse the request's existing validated Vault result/ETag check;
+the observer performs no extra Vault lookup, retains no snapshot, and does not
+change TLS interception, credential injection, or rejection. A pooled
+connection may contribute many samples, and a binding change between handshake
+and request may change the projection. Early `ignore_hosts`/no-SNI/ECH opaque
+traffic, failed handshakes (including CA failures), and noncanonical ports are
+not represented. Do not use these samples to estimate total handshake savings
+or to prove OSEP revision acknowledgement or enforcement correctness.
+
+`decision=decrypt|passthrough|unavailable` is a hypothetical SNI/HTTPS-host-scope
+projection at the existing request lookup. Lookup errors are `unavailable`,
+never a successful no-binding result. Network-policy outcomes and DLP coverage
+are not inferred.
+
+| `decision` | `reason` | Meaning at the existing HTTPS/443 request Vault lookup |
+|---|---|---|
+| `decrypt` | `binding_host` | SNI is covered by an HTTPS binding host selector; method/path do not affect this host-level projection |
+| `passthrough` | `no_binding_host` | Validated Vault has no HTTPS selector covering SNI |
+| `passthrough` | `no_vault` | Sidecar active-Vault API returned authoritative absence; not proof of a future startup empty-snapshot transaction |
+| `unavailable` | `unknown_subject_or_vault` | Fleet 404 cannot distinguish an unknown source identity from absent Vault state |
+| `unavailable` | `lookup_failed` | The existing lookup failed; no cached result is used to guess |
+| `unavailable` | `missing_sni`, `invalid_sni` | No usable ASCII SNI in this observed request |
+| `unavailable` | `invalid_snapshot`, `observer_error` | Shadow projection could not interpret the sample |
+
+Only these fixed reasons and decisions plus existing shared attributes are
+exported. No hostname, path, credential, revision, or fleet subject ID is added.
+The Python addon emits a fixed outcome through its existing stdout pipe; Go
+consumes it as a metric instead of forwarding it to the application log sink.
+Unknown outcomes are discarded. Operator addons and the child process remain
+trusted diagnostic producers; this is not an audit record.
+
+Delivery is best effort. Process failure, pipe/log filtering, or exporter
+failure can lose observations; no-exporter deployments must not expect a stored
+log substitute. These are request-weighted observations after TLS termination,
+not ClientHello-time decisions: pooled requests count repeatedly, while opaque
+connections and failed handshakes never reach this hook. Shadow failures never
+change traffic. Evaluate `unavailable` alongside other outcomes rather than
+treating missing samples as successful pass-through.
 
 #### Enabling export from the server
 

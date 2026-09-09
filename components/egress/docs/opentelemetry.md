@@ -69,6 +69,13 @@ per-exchange cap — has bigger problems than a percentile.
 Note both successful and failed lookups feed this histogram, so its tail mixes slow
 resolutions with exhausted retry chains.
 
+## TLS shadow implementation
+
+The system addon emits fixed outcomes through the existing child stdout pipe;
+the Go relay consumes them via `RecordTLSShadow` as bounded-label OTLP samples.
+Unknown outcomes are discarded. The operator contract is maintained in
+[Egress: TLS shadow observations](../../../docs/components/egress.md#experimental-tls-shadow-observations).
+
 ## Failure Signals
 
 `egress.dns.query.failed_total` and `egress.policy.denied_total` answer different

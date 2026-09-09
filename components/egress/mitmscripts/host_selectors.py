@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OSEP-0023 canonical snapshot selectors; not loaded by the system addon yet.
+"""OSEP-0023 canonical snapshot selectors, also used by shadow observations.
 
 Go owns Unicode/IDNA normalization at the control-plane input boundary. This
 module validates the resulting ASCII structure, never reinterpreting U-labels
