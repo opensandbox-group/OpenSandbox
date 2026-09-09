@@ -93,6 +93,7 @@ from opensandbox_server.api.pool import router as pool_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
 from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
 from opensandbox_server.api.network_policy import router as policy_router  # noqa: E402
+from opensandbox_server.api.templates import router as templates_router  # noqa: E402
 from opensandbox_server.integrations.otel import setup_otel_metrics, shutdown_otel_metrics  # noqa: E402
 from opensandbox_server.integrations.renew_intent.proxy_renew import ProxyRenewCoordinator  # noqa: E402
 from opensandbox_server.middleware.auth import AuthMiddleware  # noqa: E402
@@ -130,7 +131,7 @@ async def lifespan(app: FastAPI):
 
         if app_config.runtime.type == "kubernetes":
             # OSEP-0014: the Kubernetes backend validates every enumerable
-            # tenant namespace before serving traffic. Fleets CR readers are
+            # tenant namespace before serving traffic. Fsb CR readers are
             # lazy and must not block a legacy-only deployment at startup.
             try:
                 from opensandbox_server.services.k8s.client import K8sClient
@@ -142,7 +143,7 @@ async def lifespan(app: FastAPI):
                 os._exit(1)
         else:
             logger.warning(
-                "Skipping direct tenant namespace startup validation for the fleets runtime; "
+                "Skipping direct tenant namespace startup validation for the fsb runtime; "
                 "Cluster credentials and CR permissions are checked on first read."
             )
 
@@ -204,6 +205,9 @@ async def lifespan(app: FastAPI):
     sandbox_service.close()
     snapshot_service.close()
     close_snapshot_repository()
+    from opensandbox_server.api.templates import close_template_service  # noqa: E402
+
+    close_template_service()
     if tenant_provider is not None:
         tenant_provider.close()
     await app.state.http_client.aclose()
@@ -248,11 +252,13 @@ app.add_middleware(HttpMetricsMiddleware)
 app.include_router(router)
 app.include_router(devops_router)
 app.include_router(pool_router)
+app.include_router(templates_router)
 app.include_router(proxy_router)
 app.include_router(policy_router)
 app.include_router(router, prefix="/v1")
 app.include_router(devops_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
+app.include_router(templates_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")
 app.include_router(proxy_router, prefix="/v1")
 app.include_router(policy_router, prefix="/v1")
