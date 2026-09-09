@@ -19,6 +19,7 @@ import {
   PoolNotRunningException,
   PoolStateStoreUnavailableException,
 } from "./core/exceptions.js";
+import { ReadinessBudget } from "./internal/readiness.js";
 import { InMemoryPoolStateStore } from "./poolStore.js";
 import {
   AcquirePolicy,
@@ -680,12 +681,31 @@ export class SandboxPool {
     pollingIntervalMillis: number,
     signal?: AbortSignal,
   ): Promise<void> {
-    await sandbox.waitUntilReady({
-      readyTimeoutSeconds: timeoutSeconds,
-      pollingIntervalMillis,
-      healthCheck,
-      signal,
-    });
+    if (typeof sandbox.waitUntilReady === "function") {
+      await sandbox.waitUntilReady({
+        readyTimeoutSeconds: timeoutSeconds,
+        pollingIntervalMillis,
+        healthCheck,
+        signal,
+      });
+      return;
+    }
+
+    // Custom creators may return compatible objects with only isHealthy().
+    const budget = new ReadinessBudget(timeoutSeconds, signal);
+    budget.healthContext(`domain=${this.options.connectionConfig.domain}, useServerProxy=${this.options.connectionConfig.useServerProxy}`);
+    while (true) {
+      try {
+        budget.attempt();
+        const healthy = await budget.run(async () => healthCheck ? await healthCheck(sandbox) : await sandbox.isHealthy());
+        if (healthy) return;
+        budget.record("Health check returned false continuously.");
+      } catch (error) {
+        budget.remaining();
+        budget.record(error);
+      }
+      await budget.pause(pollingIntervalMillis);
+    }
   }
 
   private async renewAcquired(sandbox: Sandbox, timeoutSeconds?: number): Promise<void> {

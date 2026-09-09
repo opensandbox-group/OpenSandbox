@@ -137,11 +137,11 @@ The built-in `InMemoryPoolStateStore` is limited to one JavaScript process. To s
 health-check phase, including in-flight probes and polling delays. They do not
 bound the entire acquire or warmup operation, such as sandbox creation or
 preparation. Pass an `AbortSignal` to `pool.acquire({ signal })` to cancel an
-in-flight readiness check. Built-in health probes receive the cancellation
-signal; custom health-check callbacks may continue running after timeout or
-cancellation, but their late results are ignored. The pool attempts to kill a
-sandbox that fails readiness and does not hand it to a caller or add it to the
-idle buffer.
+in-flight readiness check. SDK health probes receive the cancellation signal.
+Custom health-check callbacks, and `isHealthy()` probes on custom creator objects
+without `waitUntilReady()`, may continue running after timeout or cancellation,
+but their late results are ignored. The pool attempts to kill a sandbox that
+fails readiness and does not hand it to a caller or add it to the idle buffer.
 
 ## Usage Examples
 
