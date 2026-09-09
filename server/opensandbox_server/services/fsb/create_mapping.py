@@ -17,9 +17,9 @@
 
 """Map OpenSandbox CreateSandboxRequest into FastPath v2 CreateSandboxRequest.
 
-The fleets backend accepts a strict subset of the public create contract.
+The fsb backend accepts a strict subset of the public create contract.
 Unsupported fields are rejected with a clear error instead of being silently
-ignored (see OSEP-0007 "Simplified Create").
+ignored.
 """
 
 from __future__ import annotations
@@ -31,23 +31,23 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from opensandbox_server.api.schema import CreateSandboxRequest
-from opensandbox_server.services.fleets.network_policy import normalized_policy
-from opensandbox_server.services.fleets.generated import (
+from opensandbox_server.services.fsb.network_policy import normalized_policy
+from opensandbox_server.services.fsb.generated import (
     fastpath_pb2 as pb2,
 )
 
-#: Public extensions keys accepted by the fleets backend.
+#: Public extensions keys accepted by the fsb backend.
 SUPPORTED_EXTENSION_KEYS = frozenset({"poolRef"})
 
-#: FastPath CreateSandboxRequest has no nullable timeout; fleets requires an explicit one.
+#: FastPath CreateSandboxRequest has no nullable timeout; fsb requires an explicit one.
 ERROR_TIMEOUT_REQUIRED = (
-    "timeout is required on fleets: fast-sandbox persists an absolute "
+    "timeout is required on fsb: fast-sandbox persists an absolute "
     "expires_at in the first Create write and has no non-expiring sandboxes."
 )
 
 
 class UnsupportedFieldError(ValueError):
-    """A CreateSandboxRequest field cannot be honored by the fleets backend."""
+    """A CreateSandboxRequest field cannot be honored by the fsb backend."""
 
     def __init__(self, field: str, reason: str):
         super().__init__(f"{field}: {reason}")
@@ -60,7 +60,7 @@ def map_create_request(
     sandbox_id: str,
     namespace: str,
     *,
-    default_pool_ref: str = "default-pool",
+    fastpath_resource_pool: str = "default-pool",
     now: Optional[datetime] = None,
     expires_at_unix_seconds: Optional[int] = None,
     pool_resources: Optional[dict] = None,
@@ -91,9 +91,9 @@ def map_create_request(
     image = request.image
     if image is None or not image.uri.strip():
         # A fast-sandbox SandboxPool defines Infra Components and resources,
-        # not the workload image, so fleets rejects image-less requests even
+        # not the workload image, so fsb rejects image-less requests even
         # when extensions.poolRef is set.
-        raise UnsupportedFieldError("image", "a non-empty image.uri is required on fleets")
+        raise UnsupportedFieldError("image", "a non-empty image.uri is required on fsb")
 
     if image.auth is not None:
         raise UnsupportedFieldError(
@@ -143,11 +143,66 @@ def map_create_request(
     # Normalize before forwarding: a whitespace-only poolRef must not select
     # an invalid pool, and a padded name must not reach FastPath as-is.
     pool_ref = (extensions.get("poolRef") or "").strip()
-    create.pool_ref = pool_ref or default_pool_ref
+    create.pool_ref = pool_ref or fastpath_resource_pool
 
     # fast-sandbox persists metadata as labels (metadata.sandbox.fast.io/<key>)
     # and validates every entry; reject incompatible keys/values here so users
     # get a clear error instead of a confusing gRPC rejection.
+    _validate_metadata(create.metadata)
+
+    return create
+
+
+def map_template_create_request(
+    request: CreateSandboxRequest,
+    *,
+    sandbox_id: str,
+    namespace: str,
+    image_ref: str,
+    entrypoint: list[str],
+    fastpath_resource_pool: str = "default-pool",
+    now: Optional[datetime] = None,
+    expires_at_unix_seconds: Optional[int] = None,
+) -> pb2.CreateSandboxRequest:
+    """Map a template-mode CreateSandboxRequest to FastPath v2.
+
+    The request validator already rejected the workload-shape fields and
+    required ``timeout``; here the resolved template image reference
+    becomes the FastPath ``image`` and the template's recorded entrypoint
+    becomes the guest command. Idempotency and metadata rules match
+    :func:`map_create_request`.
+    """
+    _reject_unsupported_fields(request)
+    if request.timeout is None:
+        raise UnsupportedFieldError("timeout", ERROR_TIMEOUT_REQUIRED)
+
+    if expires_at_unix_seconds is not None:
+        expires_at = expires_at_unix_seconds
+    else:
+        now = now or datetime.now(timezone.utc)
+        expires_at = int(now.timestamp()) + request.timeout
+
+    create = pb2.CreateSandboxRequest(
+        request_id=sandbox_id,
+        namespace=namespace,
+        image=image_ref,
+        command=list(entrypoint),
+        expires_at_unix_seconds=expires_at,
+        completion=pb2.CREATE_COMPLETION_READY,
+    )
+
+    if request.metadata:
+        create.metadata.update(request.metadata)
+
+    if request.network_policy is not None:
+        create.action_bindings.add(
+            handler="egress", input=json.dumps(normalized_policy(request.network_policy))
+        )
+
+    extensions = request.extensions or {}
+    pool_ref = (extensions.get("poolRef") or "").strip()
+    create.pool_ref = pool_ref or fastpath_resource_pool
+
     _validate_metadata(create.metadata)
 
     return create
@@ -227,10 +282,10 @@ def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
     if request.lifecycle is not None:
         raise UnsupportedFieldError(
             "lifecycle",
-            "lifecycle hooks are not supported by the fleets backend",
+            "lifecycle hooks are not supported by the fsb backend",
         )
     if request.snapshot_id:
-        raise UnsupportedFieldError("snapshotId", "snapshots are not supported on fleets")
+        raise UnsupportedFieldError("snapshotId", "snapshots are not supported on fsb")
     if request.platform is not None:
         raise UnsupportedFieldError("platform", "scheduling is per Fastlet pool, not per sandbox")
     if request.resource_requests is not None:
@@ -251,11 +306,11 @@ def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
     if request.secure_access:
         raise UnsupportedFieldError(
             "secureAccess",
-            "secure access on fleets is deferred to phase 1b; not supported in phase 1a",
+            "secure access on fsb is deferred to phase 1b; not supported in phase 1a",
         )
     for key in request.extensions or {}:
         if key not in SUPPORTED_EXTENSION_KEYS:
             raise UnsupportedFieldError(
                 f"extensions[{key!r}]",
-                "extension keys are rejected unless explicitly supported by fleets",
+                "extension keys are rejected unless explicitly supported by fsb",
             )

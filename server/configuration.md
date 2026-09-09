@@ -107,7 +107,7 @@ Configuration for the server-side reverse-proxy routes.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `type` | string | — | **`docker`** or **`kubernetes`**. Selects which runtime implementation loads. |
-| `execd_image` | string | — | OCI image containing the **execd** binary used to bootstrap command/file access inside the sandbox. |
+| `execd_image` | string | — | OCI image containing the **execd** binary used to bootstrap command/file access inside the sandbox. Docker/Kubernetes run it in-sandbox; the fsb backend injects it into SandboxTemplate golden-image builds. |
 | `execd_run_as_init` | boolean | `false` | Run **execd as the sandbox init** (OSEP-0018): sets `EXECD_INIT` in the sandbox environment so `bootstrap.sh` `exec`s into `execd --init` and execd becomes PID 1 — reaping children, owning the container lifecycle, and exposing the hardening floor. Defaults to `false` (classic background-and-wait topology); intended to be flipped on after validation in production. |
 
 ---
@@ -174,6 +174,22 @@ Kubernetes workloads are created by a **workload provider**. There is **no** `[b
 |-----|------|-------------|
 | `limits` | map string → string | e.g. `{ cpu = "100m", memory = "128Mi" }` |
 | `requests` | map string → string | e.g. `{ cpu = "50m", memory = "64Mi" }` |
+
+---
+
+### fsb (fast-sandbox) settings under `[kubernetes]`
+
+The fsb backend shares the `[kubernetes]` block; the kubernetes runtime also serves fsb (`flt-`) sandboxes side by side, so these fields are always available.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `fastpath_endpoint` | string | `"fast-sandbox-fastpath.opensandbox.svc:9090"` | fast-sandbox Fast-Path Server gRPC endpoint. |
+| `fastpath_timeout_seconds` | number | `30.0` | Per-RPC gRPC deadline for FastPath calls. |
+| `fastpath_wait_ready_seconds` | number | `30.0` | Bounded readiness wait for DataPlaneReady after Create. |
+| `fastpath_resource_pool` | string | `"default-pool"` | Default fast-sandbox SandboxPool when `extensions.poolRef` is unset. |
+| `template_s3_publish_secret` | string | `"sandbox-oss-credentials"` | Secret (in the platform namespace) holding the object-store credentials referenced by server-created SandboxTemplates. |
+
+The fsb backend is always composed under `runtime.type = "kubernetes"`; its sandboxes are created via `templateId` (or `flt-` prefixed lifecycle operations) and use the `[kubernetes].namespace`.
 
 ---
 

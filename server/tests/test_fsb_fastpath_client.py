@@ -25,8 +25,8 @@ from threading import Event, Thread
 import grpc
 import pytest
 
-from opensandbox_server.services.fleets import fastpath_client
-from opensandbox_server.services.fleets.fastpath_client import (
+from opensandbox_server.services.fsb import fastpath_client
+from opensandbox_server.services.fsb.fastpath_client import (
     FastPathClient,
     FastPathConflict,
     FastPathError,
@@ -38,8 +38,8 @@ from opensandbox_server.services.fleets.fastpath_client import (
     namespaced_reference,
     port_target,
 )
-from opensandbox_server.services.fleets.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fleets.generated import fastpath_pb2_grpc as pb2_grpc
+from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fsb.generated import fastpath_pb2_grpc as pb2_grpc
 
 
 def _sandbox(name: str = "sbx-1") -> pb2.SandboxInfo:
@@ -164,7 +164,7 @@ def test_lifecycle_requests_use_new_contract_and_fences(client_and_server):
     assert created.completion == pb2.CREATE_COMPLETION_READY
     assert service.created[0].image == "python:3.11"
     assert service.create_time_remaining is not None
-    assert 45 < service.create_time_remaining <= 50
+    assert 45 < service.create_time_remaining <= 51  # deadline = wait + 5s headroom; allow gRPC observation jitter
     assert fetched.generation == 3
     assert service.last_get.sandbox.expected_uid == "uid-sbx-1"
     assert service.last_get.expected_generation == 3

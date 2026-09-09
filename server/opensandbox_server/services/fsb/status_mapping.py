@@ -27,7 +27,7 @@ retained object maps to Terminated.
 
 from __future__ import annotations
 
-from opensandbox_server.services.fleets.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
 
 
 def map_state(info: pb2.SandboxInfo) -> str:
@@ -46,7 +46,19 @@ def map_state(info: pb2.SandboxInfo) -> str:
         component.state == pb2.INFRA_COMPONENT_STATE_FAILED for component in info.infra_components
     ):
         return "Failed"
-    if any(binding.state == pb2.ACTION_STATE_FAILED for binding in info.action_bindings):
+    # Action bindings (e.g. egress policy delivery) retry transiently, and a
+    # binding reports Failed for the whole delivery window: the sandbox is
+    # still CONVERGING while the data plane is Pending/Publishing — mapping
+    # that to Failed tells clients to delete a sandbox whose execd already
+    # answers. A failed binding only fails the aggregate once the sandbox
+    # left convergence (its data plane settled); before that it stays a
+    # convergence signal (Pending) or, once ready, a running-time failure.
+    if any(
+        binding.state == pb2.ACTION_STATE_FAILED for binding in info.action_bindings
+    ) and info.data_plane.state not in (
+        pb2.DATA_PLANE_STATE_PENDING,
+        pb2.DATA_PLANE_STATE_PUBLISHING,
+    ):
         return "Failed"
     if (
         info.runtime.state == pb2.RUNTIME_STATE_STOPPING
