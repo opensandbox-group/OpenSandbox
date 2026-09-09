@@ -651,10 +651,13 @@ LOG_FILE=$(mktemp)
 export LOG_FILE
 exec 3>&1 4>&2
 exec > >(tee "$LOG_FILE") 2>&1
+tee_pid=$!
 
 set -x
 echo "from-complex-exec"
 exec 1>&3 2>&4 # step record
+# Drain the process substitution before the session captures its environment.
+wait "$tee_pid"
 echo "after-restore"
 `
 

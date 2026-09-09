@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import json
 import os
 from datetime import timedelta
 
@@ -34,6 +35,16 @@ async def _print_execution_logs(execution) -> None:
         print(f"[stderr] {msg.text}")
     if execution.error:
         print(f"[error] {execution.error.name}: {execution.error.value}")
+
+
+def _json_result(execution) -> dict:
+    """Parse the JSON object printed by `claude -p --output-format json`."""
+    stdout = "\n".join(msg.text for msg in execution.logs.stdout)
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        print(f"[warn] expected JSON output, got: {stdout[:200]!r}")
+        return {}
 
 
 async def main() -> None:
@@ -81,6 +92,28 @@ async def main() -> None:
             'claude "Compute 1+1=?."'
         )
         await _print_execution_logs(run_exec)
+
+        # Headless run: -p prints the reply and exits; --output-format json
+        # returns the reply, session_id, and usage metadata as one JSON object.
+        headless_exec = await sandbox.commands.run(
+            'claude -p "Remember this for later: my favorite sandbox number is 42." '
+            "--output-format json"
+        )
+        headless_result = _json_result(headless_exec)
+        print(f"[headless] result: {headless_result.get('result', '')}")
+        session_id = headless_result.get("session_id", "")
+        print(f"[headless] session_id: {session_id}")
+
+        # Resume the same conversation for a follow-up turn: --resume keeps
+        # the context of the previous turns, so the reply recalls "42".
+        if session_id:
+            resume_exec = await sandbox.commands.run(
+                'claude -p "What is my favorite sandbox number? '
+                f'Reply with just the number." --resume "{session_id}" '
+                "--output-format json"
+            )
+            resume_result = _json_result(resume_exec)
+            print(f"[resume] result: {resume_result.get('result', '')}")
 
         await sandbox.kill()
 

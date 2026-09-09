@@ -47,6 +47,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Sandbox
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toSnapshotInfo
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
+import com.alibaba.opensandbox.sandbox.transport.RequestDeadline
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -325,7 +326,13 @@ internal class SandboxesAdapter(
     ): SandboxEndpoint {
         logger.debug("Retrieving sandbox endpoint: {}, port {}", sandboxId, port)
         return try {
-            api.sandboxesSandboxIdEndpointsPortGet(sandboxId, port, useServerProxy).toSandboxEndpoint()
+            RequestDeadline.execute(provider.authenticatedClient) { client ->
+                SandboxesApi(provider.config.getBaseUrl(), client)
+                    .sandboxesSandboxIdEndpointsPortGet(sandboxId, port, useServerProxy).toSandboxEndpoint()
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
         } catch (e: Exception) {
             logger.error("Failed to retrieve sandbox endpoint for sandbox {}", sandboxId, e)
             throw e.toSandboxException()

@@ -178,6 +178,11 @@ Voting rules:
 - maintainers should recuse themselves in case of direct conflicts of interest
 - if a vote ties, the proposal does not pass and the status quo remains
 
+These general voting rules apply to technical disputes and design decisions.
+Maintainer nominations and promotions follow the dedicated electorate and
+approval thresholds specified in
+[Becoming a Maintainer](#becoming-a-maintainer).
+
 ## Reviews and Merge Expectations
 
 The following expectations apply before merge:
@@ -240,24 +245,97 @@ Security issues should follow the private reporting guidance in
 
 ## Becoming a Maintainer
 
-New maintainers are selected based on sustained, high-quality contribution to
-the project.
+OpenSandbox uses an explicit advancement process for contributors seeking
+increased stewardship in the project. This process is adapted from the
+[containerd project governance](https://github.com/containerd/project/blob/main/GOVERNANCE.md)
+to match OpenSandbox's existing roles: Contributor, Maintainer (component
+ownership), and Project Maintainer (repository-wide stewardship).
 
-Signals that someone may be ready for maintainership include:
+Adopting this process retains all existing Maintainers and Project Maintainers
+recorded in [`CODEOWNERS`](.github/CODEOWNERS).
 
-- repeated high-quality code or documentation contributions
-- strong reviews and constructive technical feedback
-- reliable follow-through on owned work
-- good judgment on compatibility, security, and project direction
-- collaborative behavior with contributors and maintainers
+### Expectations and Readiness
 
-The typical process is:
+Maintainership reflects demonstrated trust, consistent follow-through, and
+commitment to the project's long-term health. There is no fixed pull request
+or commit count, and contribution volume alone does not guarantee promotion.
 
-1. nomination by an existing Project Maintainer
-2. discussion among Project Maintainers
-3. no unresolved objections after a reasonable review period, or approval by
-   majority vote if needed
-4. update of `CODEOWNERS` and any other relevant public maintainer records
+Candidates for either **Maintainer** (component scope) or **Project Maintainer**
+(repository-wide scope) are expected to show:
+
+- More than three months of meaningful, sustained involvement in the project.
+- Varied contributions across the project or target component, including code,
+  code reviews, issue triage, documentation, tests, or community support.
+- Sound technical judgment, particularly regarding backward compatibility,
+  security, error handling, and test quality.
+- Collaborative communication and constructive reviews with other contributors.
+
+In addition, candidates for **Project Maintainer** are expected to show:
+
+- Sustained maintenance and leadership across the project.
+- Sound cross-component and project-wide technical judgment.
+- Active stewardship across multiple subsystems, release health, and
+  governance.
+
+### Nomination Process
+
+Advancement is proposed through a public pull request updating
+[`CODEOWNERS`](.github/CODEOWNERS):
+
+1. **Sponsorship**: Any existing Maintainer or Project Maintainer may sponsor a
+   candidate by opening a nomination pull request against `CODEOWNERS` (adding
+   the candidate to specific component paths for Maintainer, or to the fallback
+   `*` list for Project Maintainer). Contributors interested in nomination may
+   ask an existing Maintainer in a public issue or discussion.
+2. **Nomination PR Content**: The pull request description must specify the
+   candidate's GitHub username, the target role and path scope, links to their
+   contributions demonstrating readiness, the list of eligible voting Project
+   Maintainers, and the required approval count.
+3. **Candidate Acceptance**: The candidate must comment on the pull request
+   explicitly accepting the nomination. Candidate acceptance confirms their
+   commitment to the role's responsibilities; it is not counted as an approval
+   vote.
+
+### Discussion and Voting
+
+Nominations are decided through public review and voting on the pull request:
+
+- **Discussion and Voting Period**: The nomination pull request must remain open
+  for at least seven full calendar days from opening. Reaching the approval
+  threshold early does not waive or shorten this period.
+- **Eligible Electorate**: The voting electorate consists of all current
+  Project Maintainers recorded in the fallback `*` rule of
+  [`CODEOWNERS`](.github/CODEOWNERS) on the base branch at the time the
+  nomination pull request is opened. Each eligible Project Maintainer has one
+  vote. Candidates cannot vote on their own nomination, and candidate
+  acceptance is not counted as an approval vote.
+- **Approval Thresholds**:
+  - **Maintainer (component scope)**: Requires affirmative approvals (pull
+    request approval or explicit LGTM) from at least **one-third (1/3)** of the
+    eligible Project Maintainers, rounded up to the nearest whole maintainer.
+  - **Project Maintainer**: Requires affirmative approvals from at least
+    **two-thirds (2/3)** of the eligible Project Maintainers, rounded up to the
+    nearest whole maintainer.
+- **Voting Rules**: Approvals must be affirmative. Maintainers with direct
+  conflicts of interest should recuse themselves. Abstentions, non-responses,
+  or recusals do not count as approvals and do not lower the denominator. These
+  nomination thresholds are separate from the simple majority of participating
+  maintainers used for ordinary technical decisions.
+- **Public Objections**: Any objections or concerns should be discussed
+  publicly in the pull request during the seven-day period. There is no
+  unanimity requirement or individual veto beyond the specified vote.
+
+### Decision and Onboarding
+
+- After the full seven calendar days have passed, a Project Maintainer verifies
+  that the approval threshold has been met and that the candidate has
+  explicitly accepted the nomination. The Project Maintainer then merges the
+  pull request and coordinates the necessary scoped repository permissions.
+- If the threshold is not met, the pull request cannot be merged and is closed
+  without promotion. There is no automatic promotion based solely on time or
+  contribution counts.
+- [`CODEOWNERS`](.github/CODEOWNERS) remains the public record of
+  maintainership.
 
 ## Maintainer Inactivity and Removal
 

@@ -20,7 +20,10 @@ import (
 	"strings"
 )
 
-const EnvCredentialVaultTrustedProxyCIDRs = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS"
+const (
+	EnvCredentialVaultTrustedProxyCIDRs  = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS"
+	EnvCredentialVaultRequireScopedMatch = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH"
+)
 
 // Fleet profile: the egress control plane serves N sandboxes
 // sharing one host/network domain; sidecar remains the default profile.

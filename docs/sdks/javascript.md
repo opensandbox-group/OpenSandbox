@@ -166,7 +166,7 @@ const manual = await Sandbox.create({
 
 ### 2. Custom Health Check
 
-Define custom logic to determine whether the sandbox is ready/healthy. This overrides the default ping check used during readiness checks.
+Define custom logic to determine whether the sandbox is ready/healthy. This overrides the default ping check. Checks must not block the event loop and may continue running after timeout.
 
 ```ts
 const sandbox = await Sandbox.create({

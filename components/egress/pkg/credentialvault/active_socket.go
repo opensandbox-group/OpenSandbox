@@ -35,10 +35,9 @@ func StartActiveSocketServer(
 	return startActiveSocketServer(func(w http.ResponseWriter, _ *http.Request) { activeHandler(w) }, socketPath, socketGID)
 }
 
-// StartActiveSocketServerRequestAware is the fleet-profile variant: the
-// handler receives the request so it can dispatch on clientIp (source IP ->
-// subject -> that subject's vault snapshot). The sidecar handler stays
-// request-unaware and is unchanged.
+// StartActiveSocketServerRequestAware passes the request to active-vault
+// handlers. Sidecar handlers inspect conditional snapshot headers; fleet
+// handlers additionally dispatch clientIp (source IP -> subject -> snapshot).
 func StartActiveSocketServerRequestAware(
 	activeHandler func(http.ResponseWriter, *http.Request),
 	socketPath string,

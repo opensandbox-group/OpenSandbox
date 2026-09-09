@@ -173,7 +173,7 @@ public class SandboxConnectOptions
     public required string SandboxId { get; set; }
 
     /// <summary>
-    /// Gets or sets whether to skip health checks after connecting.
+    /// Skip health checks; required endpoints are still resolved.
     /// </summary>
     public bool SkipHealthCheck { get; set; }
 
@@ -183,12 +183,14 @@ public class SandboxConnectOptions
     public Func<Sandbox, Task<bool>>? HealthCheck { get; set; }
 
     /// <summary>
-    /// Gets or sets the timeout for waiting until ready in seconds.
+    /// Total endpoint publication and health check budget in seconds.
+    /// Custom checks and handlers must return tasks without synchronous blocking.
+    /// Timeout stops awaiting a task but does not guarantee that its work has stopped.
     /// </summary>
     public int? ReadyTimeoutSeconds { get; set; }
 
     /// <summary>
-    /// Gets or sets the health check polling interval in milliseconds.
+    /// Endpoint publication and health check polling interval in milliseconds.
     /// </summary>
     public int? HealthCheckPollingInterval { get; set; }
 }

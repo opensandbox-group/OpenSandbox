@@ -48,6 +48,7 @@ type ConnectionConfig struct {
 	Headers map[string]string
 
 	// HTTPClient is an optional custom HTTP client. If nil, a default is created.
+	// Its transport must honor request context cancellation to bound readiness waits.
 	HTTPClient *http.Client
 
 	// AuthHeader overrides the default lifecycle auth header name.

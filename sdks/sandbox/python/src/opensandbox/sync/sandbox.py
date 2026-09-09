@@ -29,9 +29,9 @@ from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxException,
     SandboxInternalException,
-    SandboxReadyTimeoutException,
 )
 from opensandbox.internal.lifecycle_metrics import report_sandbox_create_metric
+from opensandbox.internal.readiness import ReadinessBudget
 from opensandbox.models.diagnostics import DiagnosticContent
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
@@ -85,6 +85,9 @@ class SandboxSync:
 
     - **Blocking**: Do not call these methods directly from an asyncio event loop thread.
       If you need non-blocking behavior, prefer the async :class:`~opensandbox.sandbox.Sandbox`.
+    - **Readiness timeouts**: Custom health checks and transports cannot be interrupted.
+      They must bound their own blocking work; otherwise timeout is reported only
+      after they return or raise.
     - **Resource cleanup**: :meth:`destroy` terminates the remote sandbox and closes local
       HTTP resources. Use :meth:`close` alone when the sandbox should remain available.
 
@@ -431,54 +434,21 @@ class SandboxSync:
         Wait for the sandbox to pass health checks with polling.
 
         Args:
-            timeout: Maximum time to wait for health check to pass
+            timeout: Health-check budget; see class notes for custom-code limits.
             polling_interval: Time between health check attempts
 
         Raises:
             SandboxReadyTimeoutException: if health check doesn't pass within timeout
             SandboxException: if health check fails
         """
-        logger.info(
-            f"Waiting for sandbox {self.id} to pass health check (timeout: {timeout.total_seconds()}s)"
-        )
+        self._check_ready(ReadinessBudget(timeout, polling_interval))
 
-        deadline = time.monotonic() + timeout.total_seconds()
-        attempt = 0
-        last_exception: Exception | None = None
-
-        while time.monotonic() < deadline:
-            attempt += 1
-            logger.debug(f"Health check attempt #{attempt} for sandbox {self.id}")
-            try:
-                if self.is_healthy():
-                    logger.info(
-                        f"Sandbox {self.id} passed health check after {attempt} attempts"
-                    )
-                    return
-                last_exception = None
-            except Exception as e:
-                last_exception = e
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(polling_interval.total_seconds(), remaining))
-
-        error_detail = (
-            f"Last error: {last_exception}"
-            if last_exception
-            else "Health check returned false continuously"
-        )
-        connection_detail = (
+    def _check_ready(self, budget: ReadinessBudget) -> None:
+        context = (
             f"ConnectionConfig(domain={self.connection_config.get_domain()}, "
             f"use_server_proxy={self.connection_config.use_server_proxy})"
         )
-        final_message = (
-            f"Sandbox health check timed out after {timeout.total_seconds()}s "
-            f"({attempt} attempts). {error_detail}. {connection_detail}."
-        )
-        logger.error(final_message)
-        raise SandboxReadyTimeoutException(final_message)
+        budget.health_sync(self.is_healthy, context)
 
     @classmethod
     def create(
@@ -663,9 +633,9 @@ class SandboxSync:
             sandbox_id: ID of the existing sandbox
             connection_config: Connection configuration
             health_check: Custom sync health check function
-            connect_timeout: Max time to wait for sandbox readiness/health after connecting.
+            connect_timeout: Total endpoint/health-check budget; see class timeout notes.
             health_check_polling_interval: Polling interval used while waiting for readiness/health.
-            skip_health_check: If True, do NOT wait for readiness/health; returned instance may not be ready yet.
+            skip_health_check: Skip health checks; endpoint publication is still awaited.
 
         Returns:
             Connected SandboxSync instance
@@ -676,7 +646,6 @@ class SandboxSync:
         """
         if not sandbox_id:
             raise InvalidArgumentException("Sandbox ID must be specified")
-        # Accept any string identifier.
         sandbox_id = str(sandbox_id)
 
         config = (
@@ -687,12 +656,13 @@ class SandboxSync:
 
         try:
             sandbox_service = factory.create_sandbox_service()
-            execd_endpoint = sandbox_service.get_sandbox_endpoint(
+            budget = ReadinessBudget(connect_timeout, health_check_polling_interval)
+            execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
-            )
-            egress_endpoint = sandbox_service.get_sandbox_endpoint(
+            ))
+            egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-            )
+            ))
 
             sandbox = cls(
                 sandbox_id=sandbox_id,
@@ -711,7 +681,7 @@ class SandboxSync:
             )
 
             if not skip_health_check:
-                sandbox.check_ready(connect_timeout, health_check_polling_interval)
+                sandbox._check_ready(budget)
             else:
                 logger.info(
                     f"Connected to sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
@@ -719,9 +689,9 @@ class SandboxSync:
 
             logger.info(f"Connected to sandbox {sandbox_id}")
             return sandbox
-        except Exception as e:
+        except BaseException as e:
             config.close_transport_if_owned()
-            if isinstance(e, SandboxException):
+            if not isinstance(e, Exception) or isinstance(e, SandboxException):
                 raise
             raise SandboxInternalException(f"Failed to connect to sandbox: {e}") from e
 
@@ -746,14 +716,14 @@ class SandboxSync:
             sandbox_id: ID of the paused sandbox to resume.
             connection_config: Connection configuration (shared transport, headers, timeouts).
             health_check: Optional custom sync health check function (falls back to ping).
-            resume_timeout: Max time to wait for sandbox readiness/health after resuming.
+            resume_timeout: Total endpoint/health-check budget after the resume request
+                completes; see class timeout notes.
             health_check_polling_interval: Polling interval used while waiting for readiness/health.
-            skip_health_check: If True, do NOT wait for readiness/health; returned instance may not be ready yet.
+            skip_health_check: Skip health checks; endpoint publication is still awaited.
         """
         if not sandbox_id:
             raise InvalidArgumentException("Sandbox ID must be specified")
 
-        # Accept any string identifier.
         sandbox_id = str(sandbox_id)
 
         config = (
@@ -767,12 +737,13 @@ class SandboxSync:
             sandbox_service = factory.create_sandbox_service()
             sandbox_service.resume_sandbox(sandbox_id)
 
-            execd_endpoint = sandbox_service.get_sandbox_endpoint(
+            budget = ReadinessBudget(resume_timeout, health_check_polling_interval)
+            execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
-            )
-            egress_endpoint = sandbox_service.get_sandbox_endpoint(
+            ))
+            egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-            )
+            ))
 
             sandbox = cls(
                 sandbox_id=sandbox_id,
@@ -791,16 +762,16 @@ class SandboxSync:
             )
 
             if not skip_health_check:
-                sandbox.check_ready(resume_timeout, health_check_polling_interval)
+                sandbox._check_ready(budget)
             else:
                 logger.info(
                     f"Resumed sandbox {sandbox_id} (skip_health_check=true, sandbox may not be ready yet)"
                 )
 
             return sandbox
-        except Exception as e:
+        except BaseException as e:
             config.close_transport_if_owned()
-            if isinstance(e, SandboxException):
+            if not isinstance(e, Exception) or isinstance(e, SandboxException):
                 raise
             raise SandboxInternalException(f"Failed to resume sandbox: {e}") from e
 

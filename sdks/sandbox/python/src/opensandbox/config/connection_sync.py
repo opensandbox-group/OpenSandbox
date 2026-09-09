@@ -26,6 +26,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from opensandbox.transport import RetryPolicy, RetrySyncTransport
+from opensandbox.transport._deadline_sync import DeadlineSyncTransport
 
 
 class ConnectionConfigSync(BaseModel):
@@ -33,7 +34,7 @@ class ConnectionConfigSync(BaseModel):
     Synchronous connection configuration shared across all sync SDK HTTP clients.
 
     Ownership rules:
-    - If `transport` is not provided, the SDK creates a default HTTPTransport per
+    - If `transport` is not provided, the SDK creates a default transport per
       Sandbox/Manager instance and will close it.
     - If `transport` is provided, the SDK will NOT close it (user owns it).
     """
@@ -63,9 +64,9 @@ class ConnectionConfigSync(BaseModel):
         default=None,
         description=(
             "Shared httpx transport instance used by all HTTP clients within "
-            "a Sandbox/Manager instance. When unset the SDK builds an "
-            "HTTPTransport wrapped by RetrySyncTransport honoring "
-            "`retry_policy`."
+            "a Sandbox/Manager instance. When unset the SDK builds a "
+            "deadline-aware transport honoring `retry_policy`. Caller-provided "
+            "transports must honor request timeouts."
         ),
     )
     retry_policy: RetryPolicy = Field(
@@ -115,36 +116,30 @@ class ConnectionConfigSync(BaseModel):
         client_ip.apply_client_ip(self.headers)
 
     def with_transport_if_missing(self) -> "ConnectionConfigSync":
-        """
-        Ensure a transport exists for this SDK resource.
-
-        When `transport` is missing, return a copy whose `transport` is
-        a retry-wrapped HTTPTransport (unless the policy has no
-        wrapper-only knobs, in which case the raw transport is used).
-        When present, return self unchanged.
-        """
         if self.transport is not None:
             return self
+        ssl_context = httpx.create_ssl_context()
         inner = httpx.HTTPTransport(
+            verify=ssl_context,
             limits=httpx.Limits(
                 max_connections=100,
                 max_keepalive_connections=20,
                 keepalive_expiry=30.0,
             ),
         )
+        bounded = DeadlineSyncTransport(inner, ssl_context)
         wrapped: httpx.BaseTransport
         if self.retry_policy.wraps_transport():
             wrapped = RetrySyncTransport(
-                inner, self.retry_policy, owns_inner=True
+                bounded, self.retry_policy, owns_inner=True
             )
         else:
-            wrapped = inner
+            wrapped = bounded
         config = self.model_copy(update={"transport": wrapped})
         config._owns_transport = True
         return config
 
     def close_transport_if_owned(self) -> None:
-        """Close the transport only if it was created by default_factory."""
         if self.transport is None or not self._owns_transport:
             return
         try:

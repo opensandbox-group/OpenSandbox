@@ -446,7 +446,7 @@ Return a non-nil error from the handler to stop processing the stream early.
 
 ## Client Options
 
-All client constructors accept optional `Option` functions:
+All client constructors accept optional `Option` functions. Custom HTTP clients and health checks must honor context cancellation for timeouts to take effect:
 
 ```go
 client := opensandbox.NewLifecycleClient(url, key,

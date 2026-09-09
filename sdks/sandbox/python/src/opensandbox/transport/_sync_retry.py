@@ -33,6 +33,7 @@ from opensandbox.transport._classify import (
     is_body_replayable,
     outcome_for_response,
 )
+from opensandbox.transport._deadline_sync import DEADLINE_EXTENSION
 from opensandbox.transport._decision import (
     Outcome,
     apply_retry_after_cap,
@@ -84,10 +85,10 @@ class RetrySyncTransport(httpx.BaseTransport):
                 if policy.overall_deadline is not None
                 else None
             )
-            # The terminating condition is the deadline, so always raise
-            # a timeout (mapped to SandboxTimeoutException by the
-            # converter) even when the last attempt failed for another
-            # reason; that failure is preserved as the cause for context.
+            readiness_deadline = request.extensions.get(DEADLINE_EXTENSION)
+            if readiness_deadline is not None:
+                readiness_remaining = timedelta(seconds=readiness_deadline - time.monotonic())
+                remaining = min(remaining, readiness_remaining) if remaining is not None else readiness_remaining
             if remaining is not None and remaining.total_seconds() <= 0:
                 timeout_exc = httpx.ReadTimeout(
                     "retry overall_deadline exceeded before next attempt"
@@ -100,13 +101,6 @@ class RetrySyncTransport(httpx.BaseTransport):
             outcome: Outcome
             exc: BaseException | None = None
             response: httpx.Response | None = None
-            # The sync path cannot wrap the transport call in a
-            # wall-clock deadline (no equivalent of asyncio.wait_for
-            # without extra threads), so per-phase clamps written by
-            # _clamp_attempt_timeout are the enforcement mechanism. A
-            # pathological server that keeps sending body chunks under
-            # the read timeout can still exceed overall_deadline; the
-            # loop re-checks and bails out on the next iteration.
             try:
                 response = self._inner.handle_request(request)
                 outcome = outcome_for_response(response)
@@ -144,12 +138,13 @@ class RetrySyncTransport(httpx.BaseTransport):
                     retries_used, policy, previous_sleep, self._rng
                 )
 
-            # Clamp the sleep to the remaining overall deadline; the
-            # next loop iteration will exit via should_retry().
             if policy.overall_deadline is not None:
                 remaining = policy.overall_deadline - elapsed
                 if sleep_for > remaining:
                     sleep_for = max(remaining, timedelta(0))
+
+            if readiness_deadline is not None:
+                sleep_for = min(sleep_for, timedelta(seconds=max(0, readiness_deadline - time.monotonic())))
 
             request_id = (
                 response.headers.get("X-Request-ID") if response is not None else None

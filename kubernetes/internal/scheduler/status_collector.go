@@ -16,6 +16,8 @@ package scheduler
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/go-logr/logr"
@@ -30,9 +32,8 @@ func newTaskStatusCollector(creator taskClientCreator, logger logr.Logger) taskS
 	return &defaultTaskStatusCollector{creator: creator, logger: logger}
 }
 
-// TODO error
 type taskStatusCollector interface {
-	Collect(ctx context.Context, ipList []string) map[string]*api.Task /*ip<->task*/
+	Collect(ctx context.Context, ipList []string) (map[string]*api.Task, error) /*ip<->task*/
 }
 
 // TODO maybe cache
@@ -41,11 +42,12 @@ type defaultTaskStatusCollector struct {
 	logger  logr.Logger
 }
 
-func (s *defaultTaskStatusCollector) Collect(ctx context.Context, ipList []string) map[string]*api.Task {
+func (s *defaultTaskStatusCollector) Collect(ctx context.Context, ipList []string) (map[string]*api.Task, error) {
 	semaphore := make(chan struct{}, len(ipList))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	ret := make(map[string]*api.Task, len(ipList))
+	var errs []error
 	for idx := range ipList {
 		ip := ipList[idx]
 		semaphore <- struct{}{}
@@ -61,14 +63,26 @@ func (s *defaultTaskStatusCollector) Collect(ctx context.Context, ipList []strin
 			task, err := client.Get(ctx)
 			if err != nil {
 				s.logger.Error(err, "failed to GetTask", "ip", ip)
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("get task status for pod IP %s: %w", ip, err))
+				mu.Unlock()
 			} else if task != nil {
 				mu.Lock()
 				ret[ip] = task
+				mu.Unlock()
+			} else {
+				// Keep an explicit nil entry so callers can distinguish a
+				// confirmed empty task list from a failed query.
+				mu.Lock()
+				ret[ip] = nil
 				mu.Unlock()
 			}
 		}(ip)
 	}
 	wg.Wait()
-	s.logger.Info("Collect task status", "result", utils.DumpJSON(ret))
-	return ret
+	verboseLog := s.logger.V(3)
+	if verboseLog.Enabled() {
+		verboseLog.Info("Collect task status", "result", utils.DumpJSON(ret))
+	}
+	return ret, errors.Join(errs...)
 }

@@ -307,8 +307,7 @@ public sealed class Sandbox : IAsyncDisposable
                 }
                 catch
                 {
-                    // Ignore cleanup failure; surface original error
-                }
+                    }
             }
 
             LifecycleMetricsReporter.ReportSandboxCreate(
@@ -366,21 +365,23 @@ public sealed class Sandbox : IAsyncDisposable
             throw;
         }
 
+        using var budget = new ReadinessBudget(options.ReadyTimeoutSeconds ?? Constants.DefaultReadyTimeoutSeconds, cancellationToken);
+        var interval = options.HealthCheckPollingInterval ?? Constants.DefaultHealthCheckPollingIntervalMillis;
         try
         {
-            var endpoint = await sandboxes.GetSandboxEndpointAsync(
+            var endpoint = await budget.Endpoint(token => sandboxes.GetSandboxEndpointAsync(
                 options.SandboxId,
                 Constants.DefaultExecdPort,
                 connectionConfig.UseServerProxy,
-                cancellationToken).ConfigureAwait(false);
+                token), interval).ConfigureAwait(false);
             var protocol = connectionConfig.Protocol == ConnectionProtocol.Https ? "https" : "http";
             var execdBaseUrl = $"{protocol}://{endpoint.EndpointAddress}";
             var execdHeaders = MergeHeaders(connectionConfig.Headers, endpoint.Headers);
-            var egressEndpoint = await sandboxes.GetSandboxEndpointAsync(
+            var egressEndpoint = await budget.Endpoint(token => sandboxes.GetSandboxEndpointAsync(
                 options.SandboxId,
                 Constants.DefaultEgressPort,
                 connectionConfig.UseServerProxy,
-                cancellationToken).ConfigureAwait(false);
+                token), interval).ConfigureAwait(false);
             var egressBaseUrl = $"{protocol}://{egressEndpoint.EndpointAddress}";
             var egressHeaders = MergeHeaders(connectionConfig.Headers, egressEndpoint.Headers);
 
@@ -420,12 +421,7 @@ public sealed class Sandbox : IAsyncDisposable
 
             if (!options.SkipHealthCheck)
             {
-                await sandbox.WaitUntilReadyAsync(new WaitUntilReadyOptions
-                {
-                    ReadyTimeoutSeconds = options.ReadyTimeoutSeconds ?? Constants.DefaultReadyTimeoutSeconds,
-                    PollingIntervalMillis = options.HealthCheckPollingInterval ?? Constants.DefaultHealthCheckPollingIntervalMillis,
-                    HealthCheck = options.HealthCheck
-                }, cancellationToken).ConfigureAwait(false);
+                await sandbox.CheckReadinessAsync(budget, interval, options.HealthCheck).ConfigureAwait(false);
             }
 
             return sandbox;
@@ -804,59 +800,29 @@ public sealed class Sandbox : IAsyncDisposable
         WaitUntilReadyOptions options,
         CancellationToken cancellationToken = default)
     {
-        _logger.LogDebug("Start readiness check for sandbox {SandboxId} (timeoutSeconds={TimeoutSeconds})", Id, options.ReadyTimeoutSeconds);
-        var timeout = TimeSpan.FromSeconds(options.ReadyTimeoutSeconds);
-        var stopwatch = Stopwatch.StartNew();
-        var attempt = 0;
-        var errorDetail = "Health check returned false continuously.";
+        using var budget = new ReadinessBudget(options.ReadyTimeoutSeconds, cancellationToken);
+        await CheckReadinessAsync(budget, options.PollingIntervalMillis, options.HealthCheck).ConfigureAwait(false);
+    }
 
+    private async Task CheckReadinessAsync(ReadinessBudget budget, int interval, Func<Sandbox, Task<bool>>? healthCheck)
+    {
+        budget.HealthContext($"domain={ConnectionConfig.Domain}, useServerProxy={ConnectionConfig.UseServerProxy}");
         while (true)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (stopwatch.Elapsed > timeout)
-            {
-                var context = $"domain={ConnectionConfig.Domain}, useServerProxy={ConnectionConfig.UseServerProxy}";
-                throw new SandboxReadyTimeoutException(
-                    $"Sandbox health check timed out after {options.ReadyTimeoutSeconds}s ({attempt} attempts). {errorDetail} Connection context: {context}.");
-            }
-            attempt++;
-
             try
             {
-                bool isReady;
-                if (options.HealthCheck != null)
-                {
-                    isReady = await options.HealthCheck(this).ConfigureAwait(false);
-                }
-                else
-                {
-                    isReady = await Health.PingAsync(cancellationToken).ConfigureAwait(false);
-                }
-
-                if (isReady)
-                {
-                    _logger.LogInformation("Sandbox is ready: {SandboxId}", Id);
-                    return;
-                }
-
-                errorDetail = "Health check returned false continuously.";
+                budget.Attempt();
+                var healthy = await budget.Run(token => healthCheck != null
+                    ? healthCheck(this) : Health.PingAsync(token)).ConfigureAwait(false);
+                if (healthy) return;
+                budget.Record(null);
             }
-            catch (Exception ex)
+            catch (Exception error)
             {
-                _logger.LogDebug(ex, "Readiness probe failed for sandbox {SandboxId}", Id);
-                errorDetail = $"Last health check error: {ex.Message}";
+                budget.Remaining();
+                budget.Record(error);
             }
-
-            var remaining = timeout - stopwatch.Elapsed;
-            if (remaining <= TimeSpan.Zero)
-            {
-                continue;
-            }
-
-            var pollingInterval = TimeSpan.FromMilliseconds(options.PollingIntervalMillis);
-            var delay = pollingInterval < remaining ? pollingInterval : remaining;
-            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            await budget.Pause(interval).ConfigureAwait(false);
         }
     }
 

@@ -12,6 +12,7 @@ Thank you for your interest in contributing to OpenSandbox! This guide will help
 - [Coding Standards](#coding-standards)
 - [Testing Guidelines](#testing-guidelines)
 - [Submitting Contributions](#submitting-contributions)
+- [Contributor Advancement](#contributor-advancement)
 - [Communication Channels](#communication-channels)
 
 ## Code of Conduct
@@ -580,6 +581,12 @@ When creating a PR, fill out the template:
 3. **Feedback Loop**: Address review comments
 4. **Approval**: Once approved, a maintainer will merge your PR
 5. **Cleanup**: Delete your feature branch after merge
+
+## Contributor Advancement
+
+OpenSandbox welcomes contributors seeking long-term involvement and project stewardship. The project maintains an explicit advancement process from Contributor to Maintainer (component ownership) and Project Maintainer (repository-wide stewardship).
+
+For details on nominations, eligibility, review periods, and approval thresholds, see [GOVERNANCE.md](GOVERNANCE.md#becoming-a-maintainer).
 
 ## Communication Channels
 

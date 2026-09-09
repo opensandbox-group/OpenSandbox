@@ -32,12 +32,13 @@ import (
 var (
 	meter metric.Meter
 
-	dnsQueryDur     metric.Float64Histogram
-	dnsQueryFailed  metric.Int64Counter
-	dnsReplyFailed  metric.Int64Counter
-	policyDenied    metric.Int64Counter
-	nftUpdates      metric.Int64Counter
-	nftUpdateFailed metric.Int64Counter
+	dnsQueryDur       metric.Float64Histogram
+	dnsQueryFailed    metric.Int64Counter
+	dnsReplyFailed    metric.Int64Counter
+	policyDenied      metric.Int64Counter
+	nftUpdates        metric.Int64Counter
+	nftUpdateFailed   metric.Int64Counter
+	tlsShadowRequests metric.Int64Counter
 
 	lastNftRuleCount atomic.Int64
 )
@@ -145,6 +146,13 @@ func registerEgressMetrics() error {
 		"egress.dns.reply.failed_total",
 		metric.WithDescription("DNS reply writes that failed after a decision, by stage. "+
 			"A nonzero count means a query was handled but its answer never reached the client."),
+	)
+	if err != nil {
+		return err
+	}
+	tlsShadowRequests, err = meter.Int64Counter(
+		"egress.mitm.shadow.requests_total",
+		metric.WithDescription("Request-weighted TLS host-scope projections after the existing vault lookup; not connection counts or enforcement decisions."),
 	)
 	if err != nil {
 		return err
