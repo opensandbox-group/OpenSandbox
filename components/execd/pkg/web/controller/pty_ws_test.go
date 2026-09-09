@@ -366,8 +366,12 @@ func TestPTYWS_ViewerClosesAfterReadOnlyViolationLimit(t *testing.T) {
 	// before cancellation closes the socket. Drain it within one deadline;
 	// a timeout or malformed frame must not be mistaken for peer closure.
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		frame, err := ptyReadFrame(viewer, time.Until(deadline))
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		frame, err := ptyReadFrame(viewer, remaining)
 		if err != nil {
 			var closeErr *websocket.CloseError
 			require.ErrorAs(t, err, &closeErr, "viewer should close after repeated read-only violations")
