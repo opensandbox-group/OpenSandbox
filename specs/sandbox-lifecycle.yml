@@ -46,6 +46,8 @@ tags:
     description: Provision and transition sandboxes through their lifecycle
   - name: Snapshots
     description: Create, list, and delete persistent sandbox snapshots
+  - name: Templates
+    description: Fsb golden-image template management (runtime.type=fsb only)
   - name: Metrics
     description: Best-effort SDK telemetry ingestion for server-side aggregation
 paths:
@@ -57,14 +59,14 @@ paths:
       operationId: getSandboxNetworkPolicy
       summary: Read sandbox network policy
       description: |
-        For Fleets, reads persisted egress Action Binding intent in the tenant's
+        For Fsb, reads persisted egress Action Binding intent in the tenant's
         Sandbox CR, not live enforcement state. An absent binding defaults to
         deny-first when an egress handler is configured; this is not proof of
         enforcement on a pool without that handler. Other backends proxy the
         sandbox-side egress service. Requires lifecycle API authentication.
       responses:
         '200':
-          description: Policy intent (Fleets) or sidecar policy (other backends).
+          description: Policy intent (Fsb) or sidecar policy (other backends).
           headers:
             X-Request-ID:
               $ref: '#/components/headers/XRequestId'
@@ -91,7 +93,7 @@ paths:
       operationId: replaceSandboxNetworkPolicy
       summary: Replace the complete sandbox network policy
       description: |
-        Replaces defaultAction and all rules, rather than merging them. Fleets
+        Replaces defaultAction and all rules, rather than merging them. Fsb
         commits the egress binding through FastPath, preserving unrelated bindings
         with UID/generation conflict protection. Success does not imply handler
         convergence. Other backends proxy the sandbox-side egress service.
@@ -103,7 +105,7 @@ paths:
               $ref: '#/components/schemas/NetworkPolicy'
       responses:
         '200':
-          description: Committed policy intent; Fleets omits enforcementMode.
+          description: Committed policy intent; Fsb omits enforcementMode.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/XRequestId'
@@ -854,6 +856,145 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /templates:
+    post:
+      tags: [Templates]
+      summary: Create a fsb template
+      description: |
+        Declares a golden-image build executed by fast-sandbox.
+        Available on Kubernetes-backed runtimes (`kubernetes` and `fsb`);
+        501 otherwise (e.g. the Docker runtime).
+
+        The build is asynchronous: the response carries `status.phase: Pending`;
+        poll `GET /templates/{templateId}` until `Succeeded` (or `Failed` with
+        `status.message`). Only `Succeeded` templates can back template-based
+        sandbox creation. Kernel, execd and guest init are server-side build
+        inputs supplied from the `[fsb]` configuration, not client fields.
+
+        Templates are tenant-private: every template is scoped to the
+        requester's fast-sandbox namespace.
+      operationId: createTemplate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateFsbTemplateRequest'
+      responses:
+        '201':
+          description: Template build accepted; the phase starts at Pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FsbTemplate'
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/InternalServerError'
+    get:
+      tags: [Templates]
+      summary: List fsb templates
+      description: |
+        Lists the current tenant's templates with optional metadata filtering
+        (AND logic) and pagination. Results never include other tenants'
+        templates.
+      operationId: listTemplates
+      parameters:
+        - name: metadata
+          in: query
+          description: |
+            Arbitrary metadata key-value pairs for filtering, keys and values
+            must be url encoded. Example: `?metadata=project%3DApollo%26env%3Dprod`
+          schema:
+            type: string
+          style: form
+        - name: page
+          in: query
+          description: Page number for pagination
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          description: Number of items per page
+          schema:
+            type: integer
+            minimum: 1
+            default: 20
+      responses:
+        '200':
+          description: Paginated collection of templates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListFsbTemplatesResponse'
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/InternalServerError'
+  /templates/{templateId}:
+    parameters:
+      - name: templateId
+        in: path
+        required: true
+        description: Template identifier (`tpl_<uuid>`)
+        schema:
+          type: string
+          minLength: 1
+    get:
+      tags: [Templates]
+      summary: Get a fsb template
+      description: |
+        Returns one template with its build status. The status is lazily
+        synced from the fast-sandbox SandboxTemplate CRD, so the response
+        reflects the latest build phase.
+      operationId: getTemplate
+      responses:
+        '200':
+          description: Template status and artifact references
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FsbTemplate'
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      tags: [Templates]
+      summary: Delete a fsb template
+      description: |
+        Deletes the catalog row and the backing SandboxTemplate CRD.
+        Sandboxes already created from the template are unaffected: their
+        Sandbox CRs hold their own artifact references.
+      operationId: deleteTemplate
+      responses:
+        '204':
+          description: Template deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/InternalServerError'
 components:
   securitySchemes:
     apiKeyAuth:
@@ -1497,6 +1638,20 @@ components:
             Snapshot identifier to restore from.
             Mutually exclusive with `image`.
 
+        templateId:
+          type: string
+          minLength: 1
+          description: |
+            Fsb (fast-sandbox microVM) template to create the sandbox from; on the
+            `kubernetes` runtime this routes the create to the fsb catalog.
+            Mutually exclusive with `image` and `snapshotId`; in template mode
+            the workload shape is fixed by the template's golden image, so
+            `entrypoint`, `env`, `resourceLimits`, `resourceRequests`,
+            `volumes`, `platform`, `credentialProxy`, `secureAccess` and
+            `lifecycle` are rejected (400), and `timeout` is required.
+            The template must belong to the requester's tenant and be
+            `Succeeded`; anything else yields 404 (no existence leak).
+
         platform:
           $ref: '#/components/schemas/PlatformSpec'
           description: |
@@ -1740,8 +1895,8 @@ components:
     PolicyStatusResponse:
       type: object
       description: |
-        Policy intent for Fleets, or the sidecar policy for other backends.
-        Fleets does not report live enforcement state or enforcementMode.
+        Policy intent for Fsb, or the sidecar policy for other backends.
+        Fsb does not report live enforcement state or enforcementMode.
       properties:
         status:
           type: string
@@ -1752,7 +1907,7 @@ components:
           example: deny_all
         enforcementMode:
           type: string
-          description: Optional sidecar enforcement backend; omitted for Fleets.
+          description: Optional sidecar enforcement backend; omitted for Fsb.
         reason:
           type: string
           description: Optional context returned by the sidecar.
@@ -1976,4 +2131,147 @@ components:
           type: string
           description: OSS access key secret for inline credentials mode.
           minLength: 1
+      additionalProperties: false
+
+    FsbTemplateReadiness:
+      type: object
+      description: Build-side readiness gate for a fsb template.
+      properties:
+        probe:
+          type: string
+          description: |
+            Readiness probe checked first during the golden-image build;
+            e.g. `tcp://127.0.0.1:44772` or `cmd://<command>`.
+        warmupSeconds:
+          type: integer
+          minimum: 0
+          description: Fallback warmup window in seconds (default 60).
+      additionalProperties: false
+
+    CreateFsbTemplateRequest:
+      type: object
+      description: |
+        Request to create a fleets template: a fast-sandbox golden-image build
+        The server persists the build intent, projects it onto a
+        SandboxTemplate CRD, and reports the asynchronous build through the
+        template status. Kernel, execd and guest init are server-side build
+        inputs supplied from the `[fsb]` configuration, not client fields.
+      properties:
+        image:
+          type: string
+          minLength: 1
+          description: Source OCI image reference the golden image is built from.
+        resourceLimits:
+          $ref: '#/components/schemas/ResourceLimits'
+          description: |
+            Guest machine sizing: `cpu` -> guest vCPUs, `memory` -> guest memory,
+            `disk` -> logical size of the guest rootfs (parallel resource keys).
+            The artifact set is stored and P2P-pulled at the `disk` size, so keep
+            it just above the expanded source image. Defaults when omitted:
+            cpu `1`, memory `512Mi`, disk `2Gi`.
+        entrypoint:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: |
+            Guest business command (argv); empty defaults to
+            `["tail", "-f", "/dev/null"]`.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Custom key-value metadata for management, filtering, and tagging.
+        readiness:
+          $ref: '#/components/schemas/FsbTemplateReadiness'
+        publish:
+          type: string
+          minLength: 1
+          description: |
+            S3-compatible publish target for the built artifacts,
+            e.g. `s3://bucket/publish`.
+        format:
+          type: string
+          enum: [native, overlaybd]
+          default: overlaybd
+          description: Storage encoding of the produced snapshot set.
+      required: [image, publish]
+      additionalProperties: false
+
+    FsbTemplateStatus:
+      type: object
+      description: Status of a fsb template build.
+      properties:
+        phase:
+          type: string
+          enum: [Pending, Building, Succeeded, Failed]
+          description: Build lifecycle phase.
+        manifestRef:
+          type: string
+          description: |
+            S3 manifest reference of the published artifacts; present when
+            Succeeded.
+        message:
+          type: string
+          description: Failure reason when phase is Failed.
+      required: [phase]
+      additionalProperties: false
+
+    FsbTemplate:
+      type: object
+      description: |
+        A fsb template: a golden image whose build is declared and executed
+        by fast-sandbox.
+      properties:
+        templateId:
+          type: string
+          description: Server-generated template ID (`tpl_<uuid>`).
+        image:
+          type: string
+          description: Source OCI image reference.
+        resourceLimits:
+          $ref: '#/components/schemas/ResourceLimits'
+        entrypoint:
+          type: array
+          items:
+            type: string
+          description: Guest business command (argv).
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Custom metadata from the creation request.
+        readiness:
+          $ref: '#/components/schemas/FsbTemplateReadiness'
+        publish:
+          type: string
+          description: S3-compatible publish target.
+        format:
+          type: string
+          enum: [native, overlaybd]
+          description: Snapshot storage encoding.
+        status:
+          $ref: '#/components/schemas/FsbTemplateStatus'
+        createdAt:
+          type: string
+          format: date-time
+          description: Creation timestamp (RFC 3339 UTC).
+        updatedAt:
+          type: string
+          format: date-time
+          description: Last update timestamp (RFC 3339 UTC).
+      required: [templateId, image, publish, format, status, createdAt, updatedAt]
+      additionalProperties: false
+
+    ListFsbTemplatesResponse:
+      type: object
+      description: Paginated collection of fsb templates.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FsbTemplate'
+        pagination:
+          $ref: '#/components/schemas/PaginationInfo'
+      required: [items, pagination]
       additionalProperties: false

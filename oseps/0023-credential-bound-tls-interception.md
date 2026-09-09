@@ -231,9 +231,11 @@ Both routes send all matching destinations to mitmdump.
 The system addon selects a credential binding in `requestheaders`, which runs
 after the TLS ClientHello and TLS termination. A request outside binding scope
 returns from the addon unchanged, but HTTPS was already decrypted. The active
-vault is pulled from a private Unix socket and cached for 0.5 seconds. Runtime
-vault writes update the Go store and return before that time-based cache is
-explicitly invalidated.
+vault is pulled from a private Unix socket with a per-request conditional ETag
+check; the full snapshot is reused only when its tag is confirmed. Runtime
+vault writes update the Go store, while the addon observes the update on a
+subsequent request. This is not the push-install acknowledgement protocol
+proposed below.
 
 Static `ignore_hosts` works earlier at ClientHello time and is therefore able
 to preserve opaque TLS, but it is fleet-wide static configuration rather than
@@ -800,8 +802,11 @@ it does not change traffic.
 Implementation has started with the internal host-selector algebra and shared
 Go/Python conformance vectors. The control plane owns non-transitional UTS #46
 normalization; the addon consumes canonical ASCII selectors and matches ASCII
-wire SNI. These helpers are not yet connected to the legacy Vault or TLS hooks.
-The public interception mode remains unavailable until the later phases pass.
+wire SNI. An opt-in request-level shadow observer now reuses the existing Vault
+lookup to project host coverage and exports a separate request-sample counter.
+It performs no ClientHello lookup and does not enable selective interception;
+opaque connections and failed handshakes are outside its observation set. The
+public interception mode remains unavailable until the later phases pass.
 
 1. **Decision telemetry and red tests**
    - Add fail-closed tests that distinguish authoritative empty from lookup

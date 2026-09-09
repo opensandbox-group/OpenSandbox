@@ -129,6 +129,11 @@ class ActiveVaultLookupError(Exception):
 
 _vault_cache: ActiveVault | None = None
 
+# Operator-only diagnostics; no public interception mode is enabled here.
+_tls_shadow_enabled = os.environ.get(
+    "OPENSANDBOX_EGRESS_MITMPROXY_SHADOW", ""
+).strip().lower() in {"1", "true", "on"}
+
 # Fleet profile: one shared mitmdump serving N sandboxes; the active vault is
 # selected by the client's source IP (preserved by the interception DNAT), so
 # the immutable snapshot cache is keyed per client IP. Every flow performs a
@@ -1001,6 +1006,30 @@ def _flow_client_ip(flow: http.HTTPFlow) -> str | None:
         return None
 
 
+def _observe_tls_shadow(
+    flow: http.HTTPFlow, vault: ActiveVault | None, *, lookup_failed: bool = False
+) -> None:
+    if not _tls_shadow_enabled:
+        return
+    try:
+        if flow.request.scheme != "https" or flow.request.port != 443:
+            return
+        from tls_shadow import project
+
+        sni = getattr(getattr(flow, "client_conn", None), "sni", None)
+        outcome = project(
+            sni, None if vault is None else vault.bindings, lookup_failed=lookup_failed
+        )
+        if _fleet_mode_enabled and vault is None and not lookup_failed:
+            # Fleet 404 also means unknown source identity, not just no vault.
+            outcome = "unknown_subject_or_vault"
+        # Fixed vocabulary only: no hostname, revision, subject, path, or secret.
+        ctx.log.warn("credential proxy: tls-shadow " + outcome)
+    except Exception:  # noqa: BLE001 - diagnostics must never change traffic
+        with suppress(Exception):
+            ctx.log.warn("credential proxy: tls-shadow observer_error")
+
+
 def requestheaders(flow: http.HTTPFlow) -> None:
     """Credential proxy phase 1: binding match and request metadata rewrite.
 
@@ -1011,6 +1040,7 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     try:
         vault = _load_active_vault(_flow_client_ip(flow))
     except ActiveVaultLookupError as exc:
+        _observe_tls_shadow(flow, None, lookup_failed=True)
         ctx.log.warn(f"credential proxy: {exc}; request denied")
         _reject_request(
             flow,
@@ -1018,6 +1048,7 @@ def requestheaders(flow: http.HTTPFlow) -> None:
             status_code=503,
         )
         return
+    _observe_tls_shadow(flow, vault)
     if vault is None:
         return
 

@@ -104,7 +104,14 @@ class K8sClient:
         with self._informers_lock:
             return self._informers.get(key)
 
-    def _get_informer(self, group: str, version: str, plural: str, namespace: str) -> Optional[WorkloadInformer]:
+    def _get_informer(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str,
+        event_handler=None,
+    ) -> Optional[WorkloadInformer]:
         """Return the informer for this resource+namespace, starting it lazily."""
         if not self.config.informer_enabled:
             return None
@@ -125,6 +132,7 @@ class K8sClient:
                     resync_period_seconds=self.config.informer_resync_seconds,
                     watch_timeout_seconds=self.config.informer_watch_timeout_seconds,
                     thread_name=f"workload-informer-{plural}-{namespace}",
+                    event_handler=event_handler,
                 )
                 self._informers[key] = informer
                 try:
@@ -134,6 +142,23 @@ class K8sClient:
                     self._informers.pop(key, None)
                     return None
         return informer
+
+    def watch_custom_objects(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        event_handler,
+    ) -> Optional[WorkloadInformer]:
+        """Start (or reuse) a LIST/WATCH informer that feeds ``event_handler``.
+
+        The handler fires for every watch event and for every item of an
+        initial or reconnecting LIST snapshot, turning the informer into an
+        event reactor. Returns None when informers are disabled. The watch
+        stops with ``stop_informers``.
+        """
+        return self._get_informer(group, version, plural, namespace, event_handler)
 
 
     def create_custom_object(

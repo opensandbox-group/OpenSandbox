@@ -47,7 +47,7 @@ def build_endpoint(
             status_code=400,
             detail={
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": "Fleets endpoints require valid namespace, sandbox ID and port.",
+                "message": "Fsb endpoints require valid namespace, sandbox ID and port.",
             },
         )
     if expires is not None:
@@ -55,7 +55,7 @@ def build_endpoint(
             status_code=400,
             detail={
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": "Fleets route scopes do not support the expires parameter.",
+                "message": "Fsb route scopes do not support the expires parameter.",
             },
         )
     if (
@@ -70,13 +70,13 @@ def build_endpoint(
             detail={
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
                 "message": (
-                    "Fleets endpoints require an ingress gateway with header or uri routing "
+                    "Fsb endpoints require an ingress gateway with header or uri routing "
                     "and secure_access signing keys."
                 ),
             },
         )
     signing = ingress.secure_access
-    canonical = f"opensandbox-fleets-route-v1\n{namespace}\n{sandbox_id}\n{port}\n".encode()
+    canonical = f"opensandbox-fsb-route-v1\n{namespace}\n{sandbox_id}\n{port}\n".encode()
     mac = hmac.new(signing.get_active_secret_bytes(), canonical, hashlib.sha256).digest()[:16]
     encoded_namespace, encoded_sandbox, encoded_mac = (
         base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")

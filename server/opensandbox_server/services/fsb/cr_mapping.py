@@ -14,8 +14,8 @@
 # limitations under the License.
 
 from opensandbox_server.api.schema import ImageSpec, Sandbox, SandboxStatus
-from opensandbox_server.services.fleets.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fleets.status_mapping import map_reason, map_state
+from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fsb.status_mapping import map_reason, map_state
 
 METADATA_PREFIX = "metadata.sandbox.fast.io/"
 

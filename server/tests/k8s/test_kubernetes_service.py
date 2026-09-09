@@ -1069,9 +1069,9 @@ class TestWaitForSandboxReady:
         with pytest.raises(HTTPException) as exc_info:
             await k8s_service._wait_for_sandbox_ready(
                 "test-sandbox-id",
-                timeout_seconds=0.02,
-                poll_interval_seconds=0.01,
-                pool_acquisition_timeout_seconds=1,
+                timeout_seconds=2.0,
+                poll_interval_seconds=0.05,
+                pool_acquisition_timeout_seconds=0.2,
             )
 
         assert exc_info.value.status_code == 429

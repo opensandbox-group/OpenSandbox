@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HTTP-to-gRPC integration tests for the fleets runtime."""
+"""HTTP-to-gRPC integration tests for the fsb runtime."""
 
 from concurrent import futures
 from copy import deepcopy
@@ -34,23 +34,21 @@ from opensandbox_server.api import lifecycle, network_policy
 from opensandbox_server.api.schema import RenewSandboxExpirationRequest
 from opensandbox_server.config import (
     AppConfig,
-    FleetsRuntimeConfig,
     IngressConfig,
     KubernetesRuntimeConfig,
     RuntimeConfig,
     ServerConfig,
 )
-from opensandbox_server.services.fleets.fastpath_client import FastPathClient
+from opensandbox_server.services.fsb.fastpath_client import FastPathClient
 from opensandbox_server.services.composite_service import CompositeSandboxService
 from opensandbox_server.services.factory import create_sandbox_service
-from opensandbox_server.services.fleets.fleet_service import FleetSandboxService
+from opensandbox_server.services.fsb.service import FsbSandboxService
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.informer import WorkloadInformer
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
-from opensandbox_server.services.fleets.cr_mapping import METADATA_PREFIX
-from opensandbox_server.services.fleets.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fleets.generated import fastpath_pb2_grpc as pb2_grpc
-from opensandbox_server.services.snapshot_runtime_factory import create_snapshot_runtime
+from opensandbox_server.services.fsb.cr_mapping import METADATA_PREFIX
+from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fsb.generated import fastpath_pb2_grpc as pb2_grpc
 from opensandbox_server.tenants.context import get_current_tenant, set_current_tenant
 from opensandbox_server.tenants.models import TenantEntry
 
@@ -236,7 +234,7 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
 
 
 @pytest.fixture
-def http_fleets(monkeypatch):
+def http_fsb(monkeypatch):
     fake = _FakeFastPathService()
     grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     pb2_grpc.add_FastPathServiceServicer_to_server(fake, grpc_server)
@@ -250,8 +248,8 @@ def http_fleets(monkeypatch):
             api_key="x",
             max_sandbox_timeout_seconds=7200,
         ),
-        runtime=RuntimeConfig(type="fleets", execd_image="ghcr.io/opensandbox/execd:latest"),
-        fleets=FleetsRuntimeConfig(namespace="ns-1"),
+        runtime=RuntimeConfig(type="kubernetes", execd_image="ghcr.io/opensandbox/execd:latest"),
+        kubernetes=KubernetesRuntimeConfig(namespace="ns-1"),
     )
     fastpath = FastPathClient(endpoint=f"127.0.0.1:{port}")
     with patch.object(K8sClient, "_load_config"):
@@ -289,7 +287,7 @@ def http_fleets(monkeypatch):
     api.get_namespaced_custom_object.side_effect = get_cr
     api.list_namespaced_custom_object.side_effect = list_crs
     k8s._custom_objects_api = api
-    service = FleetSandboxService(config, fastpath_client=fastpath, k8s_client=k8s)
+    service = FsbSandboxService(config, fastpath_client=fastpath, k8s_client=k8s)
     monkeypatch.setattr(lifecycle, "sandbox_service", service)
 
     app = FastAPI()
@@ -303,8 +301,8 @@ def http_fleets(monkeypatch):
         grpc_server.stop(None)
 
 
-def test_http_create_calls_fastpath_with_ready_completion(http_fleets):
-    client, fake, service = http_fleets
+def test_http_create_calls_fastpath_with_ready_completion(http_fsb):
+    client, fake, service = http_fsb
     response = client.post(
         "/v1/sandboxes",
         json={
@@ -323,11 +321,11 @@ def test_http_create_calls_fastpath_with_ready_completion(http_fleets):
     assert body["metadata"] == {"team": "agents"}
     assert fake.last_create.request_id == body["id"]
     assert fake.last_create.completion == pb2.CREATE_COMPLETION_READY
-    assert fake.create_time_remaining > service._fleets.wait_ready_timeout_millis / 1000
+    assert fake.create_time_remaining > service._k8s.fastpath_wait_ready_seconds
 
 
-def test_http_create_recovers_an_ambiguous_post_persistence_failure(http_fleets):
-    client, fake, _ = http_fleets
+def test_http_create_recovers_an_ambiguous_post_persistence_failure(http_fsb):
+    client, fake, _ = http_fsb
     fake.abort_create_with = grpc.StatusCode.INTERNAL
 
     response = client.post(
@@ -347,8 +345,8 @@ def test_http_create_recovers_an_ambiguous_post_persistence_failure(http_fleets)
     assert ("ns-1", sandbox_id) in fake.sandboxes
 
 
-def test_http_create_rejects_timeout_pool_mismatch_and_unreadable_extension(http_fleets):
-    client, fake, _ = http_fleets
+def test_http_create_rejects_timeout_pool_mismatch_and_unreadable_extension(http_fsb):
+    client, fake, _ = http_fsb
     base = {
         "image": {"uri": "python:3.11"},
         "entrypoint": ["python"],
@@ -379,8 +377,8 @@ def test_http_create_rejects_timeout_pool_mismatch_and_unreadable_extension(http
     )
 
 
-def test_http_read_and_metadata_patch_use_cr_fields(http_fleets):
-    client, fake, _ = http_fleets
+def test_http_read_and_metadata_patch_use_cr_fields(http_fsb):
+    client, fake, _ = http_fsb
     created = client.post(
         "/v1/sandboxes",
         json={
@@ -419,8 +417,8 @@ def test_http_read_and_metadata_patch_use_cr_fields(http_fleets):
 
 
 @pytest.fixture
-def persisted_fleet(http_fleets):
-    client, fake, service = http_fleets
+def persisted_fsb(http_fsb):
+    client, fake, service = http_fsb
     response = client.post(
         "/v1/sandboxes",
         json={
@@ -436,8 +434,8 @@ def persisted_fleet(http_fleets):
     return client, fake, service, sandbox_id
 
 
-def test_cr_reads_do_not_depend_on_fastpath_and_remain_tenant_scoped(persisted_fleet):
-    client, fake, service, sandbox_id = persisted_fleet
+def test_cr_reads_do_not_depend_on_fastpath_and_remain_tenant_scoped(persisted_fsb):
+    client, fake, service, sandbox_id = persisted_fsb
     fake.get_error_by_namespace["ns-1"] = grpc.StatusCode.UNAVAILABLE
     other = deepcopy(fake.crs[("ns-1", sandbox_id)])
     other["metadata"]["namespace"] = "tenant-a"
@@ -458,8 +456,8 @@ def test_cr_reads_do_not_depend_on_fastpath_and_remain_tenant_scoped(persisted_f
         set_current_tenant(previous)
 
 
-def test_cr_watch_and_fastpath_mutations_refresh_http_reads(persisted_fleet, monkeypatch):
-    client, fake, service, sandbox_id = persisted_fleet
+def test_cr_watch_and_fastpath_mutations_refresh_http_reads(persisted_fsb, monkeypatch):
+    client, fake, service, sandbox_id = persisted_fsb
     k8s = service._cr_reader._client
     k8s.config.informer_enabled = True
     monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
@@ -498,15 +496,15 @@ def test_cr_watch_and_fastpath_mutations_refresh_http_reads(persisted_fleet, mon
     assert client.get("/v1/sandboxes").json()["items"] == []
 
 
-def test_stale_ready_generation_is_not_running(persisted_fleet):
-    client, fake, _, sandbox_id = persisted_fleet
+def test_stale_ready_generation_is_not_running(persisted_fsb):
+    client, fake, _, sandbox_id = persisted_fsb
     cr = fake.crs[("ns-1", sandbox_id)]
     cr["metadata"]["generation"] = 2
     assert client.get(f"/v1/sandboxes/{sandbox_id}").json()["status"]["state"] == "Pending"
 
 
-def test_delete_uses_cr_identity_when_runtime_observation_is_gone(persisted_fleet):
-    client, fake, _, sandbox_id = persisted_fleet
+def test_delete_uses_cr_identity_when_runtime_observation_is_gone(persisted_fsb):
+    client, fake, _, sandbox_id = persisted_fsb
     uid = fake.crs[("ns-1", sandbox_id)]["metadata"]["uid"]
     fake.get_error_by_namespace["ns-1"] = grpc.StatusCode.UNAVAILABLE
     url = f"/v1/sandboxes/{sandbox_id}"
@@ -515,8 +513,8 @@ def test_delete_uses_cr_identity_when_runtime_observation_is_gone(persisted_flee
     assert client.delete(url).status_code == 404
 
 
-def test_http_policy_replace_preserves_bindings_and_fences_updates(persisted_fleet):
-    client, fake, _, sandbox_id = persisted_fleet
+def test_http_policy_replace_preserves_bindings_and_fences_updates(persisted_fsb):
+    client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
     assert client.get(url).json()["policy"] == {"defaultAction": "deny", "egress": []}
     bindings = [
@@ -548,8 +546,8 @@ def test_http_policy_replace_preserves_bindings_and_fences_updates(persisted_fle
     assert client.get(url).json()["policy"] == policy
 
 
-def test_policy_rejects_invalid_input_and_other_tenant(persisted_fleet):
-    client, fake, _, sandbox_id = persisted_fleet
+def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
+    client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
     for policy in ({"defaultAction": "invalid"}, {"egress": [{"action": "allow", "target": " "}]}):
         assert client.put(url, json=policy).status_code == 400
@@ -564,10 +562,10 @@ def test_policy_rejects_invalid_input_and_other_tenant(persisted_fleet):
         set_current_tenant(previous)
 
 
-def test_legacy_policy_route_preserves_body_for_existing_proxy(http_fleets, monkeypatch):
+def test_legacy_policy_route_preserves_body_for_existing_proxy(http_fsb, monkeypatch):
     from starlette.responses import JSONResponse
 
-    client, _, _ = http_fleets
+    client, _, _ = http_fsb
 
     async def proxy(request, sandbox_id, port, path):
         assert (sandbox_id, port, path) == ("legacy-id", 18080, "policy")
@@ -581,38 +579,36 @@ def test_legacy_policy_route_preserves_body_for_existing_proxy(http_fleets, monk
 
 
 @pytest.mark.parametrize(
-    "fleets_config,namespace",
+    "k8s_namespace,expected_namespace",
     [
-        (None, "legacy"),
-        (FleetsRuntimeConfig(), "legacy"),
-        (FleetsRuntimeConfig(namespace="explicit"), "explicit"),
+        ("legacy", "legacy"),
+        (None, "default"),
     ],
 )
-def test_kubernetes_configuration_automatically_composes_fleets(
-    persisted_fleet, fleets_config, namespace
+def test_kubernetes_configuration_automatically_composes_fsb(
+    persisted_fsb, k8s_namespace, expected_namespace
 ):
-    _, _, fleets, _ = persisted_fleet
-    config = fleets._app_config.model_copy(
+    _, _, fsb, _ = persisted_fsb
+    config = fsb._app_config.model_copy(
         update={
             "runtime": RuntimeConfig(type="kubernetes", execd_image="execd:test"),
-            "kubernetes": KubernetesRuntimeConfig(namespace="legacy"),
-            "fleets": fleets_config,
+            "kubernetes": KubernetesRuntimeConfig(namespace=k8s_namespace),
         }
     )
     with patch("opensandbox_server.services.factory.KubernetesSandboxService") as constructor:
-        constructor.return_value.k8s_client = fleets._cr_reader._client
+        constructor.return_value.k8s_client = fsb._cr_reader._client
         service = create_sandbox_service(config=config)
     try:
         assert isinstance(service, CompositeSandboxService)
-        assert service._fleets._resolve_namespace() == namespace
-        assert service._fleets._cr_reader._client is constructor.return_value.k8s_client
+        assert service._fsb._resolve_namespace() == expected_namespace
+        assert service._fsb._cr_reader._client is constructor.return_value.k8s_client
     finally:
         service.close()
 
 
-def test_mixed_list_globally_filters_sorts_and_pages(persisted_fleet, monkeypatch):
-    client, fake, fleets, sandbox_id = persisted_fleet
-    base = fleets.get_sandbox(sandbox_id)
+def test_mixed_list_globally_filters_sorts_and_pages(persisted_fsb, monkeypatch):
+    client, fake, fsb, sandbox_id = persisted_fsb
+    base = fsb.get_sandbox(sandbox_id)
     cr = fake.crs[("ns-1", sandbox_id)]
     cr["metadata"]["creationTimestamp"] = "2026-01-02T00:00:00Z"
     legacy = Mock(spec=KubernetesSandboxService)
@@ -625,7 +621,7 @@ def test_mixed_list_globally_filters_sorts_and_pages(persisted_fleet, monkeypatc
         ),
         base.model_copy(update={"id": "legacy-filtered", "metadata": {"team": "other"}}),
     ]
-    monkeypatch.setattr(lifecycle, "sandbox_service", CompositeSandboxService(legacy, fleets))
+    monkeypatch.setattr(lifecycle, "sandbox_service", CompositeSandboxService(legacy, fsb))
     params = {"pageSize": 2, "metadata": "team=agents", "state": "Running"}
     first = client.get("/v1/sandboxes", params=params).json()
     second = client.get("/v1/sandboxes", params={**params, "page": 2}).json()
@@ -644,20 +640,20 @@ def test_mixed_list_globally_filters_sorts_and_pages(persisted_fleet, monkeypatc
 @pytest.mark.parametrize(
     "failure,expected", [("absent", 200), ("forbidden", 503), ("list404", 503), ("legacy", 503)]
 )
-def test_mixed_list_never_hides_a_backend_failure(persisted_fleet, monkeypatch, failure, expected):
-    client, _, fleets, sandbox_id = persisted_fleet
+def test_mixed_list_never_hides_a_backend_failure(persisted_fsb, monkeypatch, failure, expected):
+    client, _, fsb, sandbox_id = persisted_fsb
     legacy = Mock(spec=KubernetesSandboxService)
     legacy.list_sandbox_objects.return_value = [
-        fleets.get_sandbox(sandbox_id).model_copy(update={"id": "legacy"})
+        fsb.get_sandbox(sandbox_id).model_copy(update={"id": "legacy"})
     ]
-    api = fleets._cr_reader._client.get_custom_objects_api()
+    api = fsb._cr_reader._client.get_custom_objects_api()
     if failure in ("absent", "forbidden"):
         api.get_api_resources.side_effect = ApiException(status=404 if failure == "absent" else 403)
     elif failure == "list404":
         api.list_namespaced_custom_object.side_effect = ApiException(status=404)
     else:
         legacy.list_sandbox_objects.side_effect = ApiException(status=503)
-    monkeypatch.setattr(lifecycle, "sandbox_service", CompositeSandboxService(legacy, fleets))
+    monkeypatch.setattr(lifecycle, "sandbox_service", CompositeSandboxService(legacy, fsb))
     response = client.get("/v1/sandboxes")
     assert response.status_code == expected
     if expected == 200:
@@ -665,17 +661,17 @@ def test_mixed_list_never_hides_a_backend_failure(persisted_fleet, monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_mixed_create_keeps_legacy_semantics(persisted_fleet):
-    _, _, fleets, _ = persisted_fleet
+async def test_mixed_create_keeps_legacy_semantics(persisted_fsb):
+    _, _, fsb, _ = persisted_fsb
     legacy = Mock(spec=KubernetesSandboxService)
-    service = CompositeSandboxService(legacy, fleets)
-    request = Mock()
+    service = CompositeSandboxService(legacy, fsb)
+    request = Mock(template_id=None)
     assert await service.create_sandbox(request) is legacy.create_sandbox.return_value
     legacy.create_sandbox.assert_awaited_once_with(request)
 
 
-def test_http_renew_and_delete_use_uid_fences(http_fleets):
-    client, fake, _ = http_fleets
+def test_http_renew_and_delete_use_uid_fences(http_fsb):
+    client, fake, _ = http_fsb
     created = client.post(
         "/v1/sandboxes",
         json={
@@ -706,8 +702,8 @@ def test_http_renew_and_delete_use_uid_fences(http_fleets):
     assert fake.last_delete.sandbox.expected_uid == f"uid-{sandbox_id}"
 
 
-def test_http_renew_maps_fence_conflict_and_missing_sandbox(http_fleets):
-    client, fake, _ = http_fleets
+def test_http_renew_maps_fence_conflict_and_missing_sandbox(http_fsb):
+    client, fake, _ = http_fsb
     created = client.post(
         "/v1/sandboxes",
         json={
@@ -735,8 +731,8 @@ def test_http_renew_maps_fence_conflict_and_missing_sandbox(http_fleets):
     assert missing_delete.status_code == 404
 
 
-def test_diagnostics_use_new_structured_state(http_fleets):
-    client, fake, service = http_fleets
+def test_diagnostics_use_new_structured_state(http_fsb):
+    client, fake, service = http_fsb
     sandbox_id = client.post(
         "/v1/sandboxes",
         json={
@@ -756,8 +752,8 @@ def test_diagnostics_use_new_structured_state(http_fleets):
     assert '"runtime_state": "99"' in service.get_sandbox_events(sandbox_id)
 
 
-def test_event_diagnostics_enforce_stable_scope_contract(http_fleets):
-    _, _, service = http_fleets
+def test_event_diagnostics_enforce_stable_scope_contract(http_fsb):
+    _, _, service = http_fsb
 
     with pytest.raises(HTTPException) as exc_info:
         service.get_sandbox_event_diagnostics("flt-1", "lifecycle")
@@ -772,8 +768,8 @@ def test_event_diagnostics_enforce_stable_scope_contract(http_fleets):
 
 
 @pytest.mark.parametrize("operation", ["logs", "pause", "resume"])
-def test_unsupported_fleets_operations_are_explicit(http_fleets, operation):
-    _, _, service = http_fleets
+def test_unsupported_fsb_operations_are_explicit(http_fsb, operation):
+    _, _, service = http_fsb
 
     with pytest.raises(HTTPException) as exc_info:
         if operation == "logs":
@@ -787,8 +783,8 @@ def test_unsupported_fleets_operations_are_explicit(http_fleets, operation):
 
 
 @pytest.mark.parametrize("pending", [False, True])
-def test_http_create_handles_capacity_rejection_and_accepted_pending(http_fleets, pending):
-    client, fake, _ = http_fleets
+def test_http_create_handles_capacity_rejection_and_accepted_pending(http_fsb, pending):
+    client, fake, _ = http_fsb
     fake.create_pending = pending
     if not pending:
         fake.reject_create_with = grpc.StatusCode.RESOURCE_EXHAUSTED
@@ -826,8 +822,8 @@ def _gateway_config(mode="header"):
 
 
 @pytest.mark.parametrize("mode", ["header", "uri"])
-def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fleets, monkeypatch, mode):
-    client, _, service = http_fleets
+def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fsb, monkeypatch, mode):
+    client, _, service = http_fsb
     service._app_config.ingress = _gateway_config(mode)
     fastpath = Mock(spec=FastPathClient)
     monkeypatch.setattr(service, "_fastpath", fastpath)
@@ -841,7 +837,7 @@ def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fleets, mon
     finally:
         set_current_tenant(previous)
     assert response.status_code == 200
-    scope = "f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.uo11HjECmnSuCCRF3v-1AQ"
+    scope = "f1.dGVuYW50LWE.c2FuZGJveC0xMjM.44772.k.gtJzW337dCO-kStxh2GPfA"
     body = response.json()
     if mode == "header":
         assert body == {
@@ -855,8 +851,8 @@ def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fleets, mon
 
 
 @pytest.mark.parametrize("port", [8080, 18080])
-def test_endpoint_binds_port_and_default_namespace(http_fleets, port):
-    client, _, service = http_fleets
+def test_endpoint_binds_port_and_default_namespace(http_fsb, port):
+    client, _, service = http_fsb
     service._app_config.ingress = _gateway_config()
     response = client.get(f"/v1/sandboxes/flt-123/endpoints/{port}")
     assert response.status_code == 200
@@ -867,8 +863,8 @@ def test_endpoint_binds_port_and_default_namespace(http_fleets, port):
 @pytest.mark.parametrize(
     "invalid", ["no_gateway", "no_keys", "wildcard", "expires", "port", "identity"]
 )
-def test_endpoint_rejects_unsupported_or_invalid_routes(http_fleets, invalid):
-    _, _, service = http_fleets
+def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
+    _, _, service = http_fsb
     config = service._app_config
     config.ingress = _gateway_config("wildcard" if invalid == "wildcard" else "header")
     if invalid == "no_gateway":
@@ -884,16 +880,27 @@ def test_endpoint_rejects_unsupported_or_invalid_routes(http_fleets, invalid):
     assert exc_info.value.status_code == 400
 
 
-def test_fleets_snapshot_runtime_is_noop(http_fleets):
-    _, _, service = http_fleets
+def test_fsb_snapshot_operations_rejected(http_fsb):
+    """Snapshot operations on fsb (flt-) sandboxes are explicitly rejected
+    at the service layer even though the kubernetes snapshot runtime is
+    available for container-sandbox workloads."""
+    client, fake, service = http_fsb
+    sandbox_id = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+        },
+    ).json()["id"]
 
-    runtime = create_snapshot_runtime(config=service._app_config)
+    response = client.post(f"/v1/sandboxes/{sandbox_id}/snapshots")
+    assert response.status_code in (400, 404, 501)
 
-    assert runtime.supports_create_snapshot() is False
 
-
-def test_background_renew_resolves_tenant_namespace(http_fleets):
-    client, fake, service = http_fleets
+def test_background_renew_resolves_tenant_namespace(http_fsb):
+    client, fake, service = http_fsb
     sandbox_id = client.post(
         "/v1/sandboxes",
         json={
@@ -923,8 +930,8 @@ def test_background_renew_resolves_tenant_namespace(http_fleets):
     assert fake.last_update.sandbox.namespaced_name.namespace == "tenant-a"
 
 
-def test_background_lookup_does_not_treat_fastpath_failure_as_namespace_miss(http_fleets):
-    _, fake, service = http_fleets
+def test_background_lookup_does_not_treat_fastpath_failure_as_namespace_miss(http_fsb):
+    _, fake, service = http_fsb
     fake.get_error_by_namespace["ns-1"] = grpc.StatusCode.UNAVAILABLE
     service.set_tenant_provider(
         SimpleNamespace(list_tenants=lambda: [SimpleNamespace(namespace="tenant-a")])
@@ -944,15 +951,15 @@ def test_background_lookup_does_not_treat_fastpath_failure_as_namespace_miss(htt
 def test_http_create_returns_503_when_fastpath_is_unavailable(monkeypatch):
     config = AppConfig(
         server=ServerConfig(host="0.0.0.0", port=8080, api_key="x"),
-        runtime=RuntimeConfig(type="fleets", execd_image="ghcr.io/opensandbox/execd:latest"),
-        fleets=FleetsRuntimeConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="ghcr.io/opensandbox/execd:latest"),
+        kubernetes=KubernetesRuntimeConfig(
             namespace="ns-1",
             fastpath_endpoint="127.0.0.1:1",
             fastpath_timeout_seconds=1,
         ),
     )
     fastpath = FastPathClient(endpoint="127.0.0.1:1", timeout_seconds=1)
-    service = FleetSandboxService(config, fastpath_client=fastpath)
+    service = FsbSandboxService(config, fastpath_client=fastpath)
     monkeypatch.setattr(lifecycle, "sandbox_service", service)
     app = FastAPI()
     app.include_router(lifecycle.router, prefix="/v1")

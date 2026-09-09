@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for fleets create/status mapping (OSEP-0007 simplified create)."""
+"""Unit tests for fsb create/status mapping."""
 
 from datetime import datetime, timezone
 import json
@@ -33,12 +33,12 @@ from opensandbox_server.api.schema import (
     SandboxLifecycle,
     Volume,
 )
-from opensandbox_server.services.fleets.create_mapping import (
+from opensandbox_server.services.fsb.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
 )
-from opensandbox_server.services.fleets.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fleets.status_mapping import map_reason, map_state
+from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fsb.status_mapping import map_reason, map_state
 
 NOW = datetime(2026, 8, 18, 12, 0, 0, tzinfo=timezone.utc)
 EXPECTED_EXPIRY = int(NOW.timestamp()) + 3600
@@ -67,9 +67,6 @@ def _base_request(**overrides):
     }
     payload.update(overrides)
     return CreateSandboxRequest(**payload)
-
-
-# -- create mapping -----------------------------------------------------------
 
 
 def test_map_create_request_maps_core_fields():
@@ -110,8 +107,6 @@ def test_create_includes_network_policy_in_atomic_intent():
 
 
 def test_map_create_request_strips_pool_ref():
-    # A whitespace-only poolRef must not reach FastPath; a padded name is
-    # normalized before forwarding.
     blank = map_create_request(
         _base_request(extensions={"poolRef": "   "}), "sbx-1", "ns-1", now=NOW
     )
@@ -133,8 +128,6 @@ def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
 @pytest.mark.parametrize(
     "field_name,payload",
     [
-        # snapshotId is mutually exclusive with image at the schema layer, so
-        # build the request image-less to reach the fleets mapping rejection.
         ("snapshotId", {"image": None, "snapshot_id": "snap-1"}),
         ("platform", {"platform": PlatformSpec(os="linux", arch="amd64")}),
         (
@@ -144,9 +137,6 @@ def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
         (
             "credentialProxy",
             {
-                # schema requires networkPolicy when credentialProxy is
-                # enabled; the fleets mapping still rejects credentialProxy
-                # first.
                 "credential_proxy": CredentialProxyConfig(enabled=True),
                 "network_policy": NetworkPolicy(
                     egress=[NetworkRule(action="allow", target="a.com")]
@@ -180,7 +170,6 @@ def test_map_create_request_rejects_image_auth():
 
 
 def test_map_create_request_rejects_missing_image_even_with_pool_ref():
-    # A fast-sandbox SandboxPool does not define the workload image.
     request = _base_request(image=None, extensions={"poolRef": "ml-pool"})
     with pytest.raises(UnsupportedFieldError) as exc_info:
         map_create_request(request, "sbx-1", "ns-1", now=NOW)
@@ -236,8 +225,6 @@ def test_map_create_request_accepts_label_compliant_metadata():
 
 
 def test_map_create_request_reuses_absolute_expiry_on_remap():
-    # A transport retry of the same sandbox_id must reuse the first expiry,
-    # even when the clock has advanced, or FastPath rejects the changed intent.
     first = map_create_request(_base_request(), "sbx-1", "ns-1", now=NOW)
     retry = map_create_request(
         _base_request(),
@@ -352,8 +339,6 @@ def test_map_state_matrix(runtime, data_plane, ready, expected):
 def test_map_state_accounts_for_components_bindings_and_ready_shortcut():
     component_failed = _info(ready=True)
     component_failed.infra_components.add(name="execd", state=pb2.INFRA_COMPONENT_STATE_FAILED)
-    binding_failed = _info(ready=True)
-    binding_failed.action_bindings.add(handler="egress", state=pb2.ACTION_STATE_FAILED)
     explicitly_ready = _info(
         runtime_state=pb2.RUNTIME_STATE_PENDING,
         data_plane_state=pb2.DATA_PLANE_STATE_PENDING,
@@ -361,8 +346,38 @@ def test_map_state_accounts_for_components_bindings_and_ready_shortcut():
     explicitly_ready.ready = True
 
     assert map_state(component_failed) == "Failed"
-    assert map_state(binding_failed) == "Failed"
     assert map_state(explicitly_ready) == "Running"
+
+
+def test_map_state_transient_binding_failure_with_live_runtime():
+    # Bindings (egress policy delivery) report Failed for their whole
+    # delivery window and retry; the data plane is Pending/Publishing while
+    # the sandbox converges. Mapping that window to Failed tells clients to
+    # delete a sandbox whose execd already answers, so a failed binding only
+    # fails the aggregate once the data plane left convergence.
+    converging_binding_failed = _info(
+        runtime_state=pb2.RUNTIME_STATE_CREATING,
+        data_plane_state=pb2.DATA_PLANE_STATE_PENDING,
+    )
+    converging_binding_failed.action_bindings.add(handler="egress", state=pb2.ACTION_STATE_FAILED)
+    assert map_state(converging_binding_failed) == "Pending"
+
+    publishing_binding_failed = _info(
+        runtime_state=pb2.RUNTIME_STATE_READY,
+        data_plane_state=pb2.DATA_PLANE_STATE_PUBLISHING,
+    )
+    publishing_binding_failed.action_bindings.add(
+        handler="egress", state=pb2.ACTION_STATE_FAILED
+    )
+    assert map_state(publishing_binding_failed) == "Pending"
+
+    # Data plane settled but the binding still failed: a running-time
+    # failure of the delivered policy, surfaced as Failed.
+    settled_binding_failed = _info(ready=True)
+    settled_binding_failed.action_bindings.add(
+        handler="egress", state=pb2.ACTION_STATE_FAILED
+    )
+    assert map_state(settled_binding_failed) == "Failed"
 
 
 @pytest.mark.parametrize(
