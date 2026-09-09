@@ -15,15 +15,27 @@
 """Optional OpenTelemetry integration for Server and SDK metrics."""
 
 from opensandbox_server.integrations.otel.metrics import (
+    instrument_lifecycle,
+    instrument_proxy_http,
+    record_access_renew_outcome,
     record_http_request_duration,
+    record_lifecycle_operation,
+    record_proxy_request,
     record_sandbox_create_duration,
+    record_snapshot_operation,
     setup_otel_metrics,
     shutdown_otel_metrics,
 )
 
 __all__ = [
+    "instrument_lifecycle",
+    "instrument_proxy_http",
+    "record_access_renew_outcome",
     "record_http_request_duration",
+    "record_lifecycle_operation",
+    "record_proxy_request",
     "record_sandbox_create_duration",
+    "record_snapshot_operation",
     "setup_otel_metrics",
     "shutdown_otel_metrics",
 ]

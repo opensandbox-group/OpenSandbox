@@ -153,6 +153,11 @@ attribute for error rate, and its buckets for latency percentiles. See the
 [Server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel)
 for the complete `[otel]` settings.
 
+Business metrics — sandbox lifecycle (create, delete, pause, resume, renew),
+snapshots, server-proxy traffic, and access-renew outcomes — are exported under
+the `server.` prefix; the full inventory lives in the
+[Server OpenTelemetry reference](/components/server-opentelemetry).
+
 ### Run the server
 
 ```bash

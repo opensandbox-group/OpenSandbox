@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from fastapi import HTTPException
 
 from opensandbox_server.api.schema import RenewSandboxExpirationRequest
+from opensandbox_server.integrations.otel import record_access_renew_outcome
 from opensandbox_server.integrations.renew_intent.intent import RenewIntent
 from opensandbox_server.integrations.renew_intent.logutil import (
     RENEW_EVENT_FAILED,
@@ -61,16 +62,20 @@ class AccessRenewController:
         try:
             sandbox = self._sandbox_service.get_sandbox(sandbox_id)
         except HTTPException:
+            record_access_renew_outcome("stale")
             return False
 
         if sandbox.status.state.lower() != "running":
+            record_access_renew_outcome("stale")
             return False
 
         if sandbox.expires_at is None:
+            record_access_renew_outcome("dropped")
             return False
 
         extend = self._extension_service.get_access_renew_extend_seconds(sandbox_id)
         if extend is None:
+            record_access_renew_outcome("dropped")
             return False
 
         now = datetime.now(timezone.utc)
@@ -95,6 +100,7 @@ class AccessRenewController:
                 http_status=getattr(exc, "status_code", None),
             )
             logger.warning(f"renew_intent {line} detail={detail_s}", extra=ex)
+            record_access_renew_outcome("dropped")
             return False
         except Exception as exc:
             line, ex = renew_bundle(
@@ -105,6 +111,7 @@ class AccessRenewController:
                 error_type=type(exc).__name__,
             )
             logger.exception(f"renew_intent {line}", extra=ex)
+            record_access_renew_outcome("dropped")
             return False
 
         new_expires_iso = new_expires.isoformat()
@@ -115,6 +122,7 @@ class AccessRenewController:
             new_expires_at=new_expires_iso,
         )
         logger.info(f"renew_intent {line}", extra=ex)
+        record_access_renew_outcome("extended")
         return True
 
     def attempt_renew_sync(self, sandbox_id: str, *, source: str = RENEW_SOURCE_SERVER_PROXY) -> bool:

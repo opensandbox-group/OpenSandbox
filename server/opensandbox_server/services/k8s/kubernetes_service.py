@@ -47,6 +47,7 @@ from opensandbox_server.api.schema import (
     SandboxStatus,
 )
 from opensandbox_server.config import AppConfig, INGRESS_MODE_GATEWAY, SecureAccessConfig, get_config
+from opensandbox_server.integrations.otel import instrument_lifecycle
 from opensandbox_server.services.constants import (
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
@@ -832,6 +833,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     f"controller-driven (TTL) cleanup may not."
                 )
 
+    @instrument_lifecycle("create")
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
         Create a new sandbox using Kubernetes Pod.
@@ -1203,6 +1205,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 },
             ) from e
     
+    @instrument_lifecycle("delete")
     def delete_sandbox(self, sandbox_id: str) -> None:
         """
         Delete a sandbox.
@@ -1296,6 +1299,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     f"sandbox={sandbox_id} | failed to delete managed PVC '{name}': {e}"
                 )
     
+    @instrument_lifecycle("pause")
     def pause_sandbox(self, sandbox_id: str) -> None:
         """
         Pause sandbox by delegating to the workload provider.
@@ -1337,6 +1341,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 },
             )
 
+    @instrument_lifecycle("resume")
     def resume_sandbox(self, sandbox_id: str) -> None:
         """
         Resume sandbox by delegating to the workload provider.
@@ -1400,6 +1405,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         except ValueError:
             return None
 
+    @instrument_lifecycle("renew")
     def renew_expiration(
         self,
         sandbox_id: str,

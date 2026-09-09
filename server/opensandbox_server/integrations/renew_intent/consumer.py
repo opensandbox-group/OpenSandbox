@@ -43,6 +43,7 @@ from opensandbox_server.integrations.renew_intent.logutil import (
     renew_bundle,
 )
 from opensandbox_server.integrations.renew_intent.redis_client import connect_renew_intent_redis_from_config
+from opensandbox_server.integrations.otel import record_access_renew_outcome
 from opensandbox_server.services.extension_service import ExtensionService, require_extension_service
 from opensandbox_server.services.factory import create_sandbox_service
 from opensandbox_server.services.sandbox_service import SandboxService
@@ -245,6 +246,7 @@ class RenewIntentConsumer:
                 if intent is None:
                     continue
                 if self._is_stale(intent.observed_at):
+                    record_access_renew_outcome("stale")
                     continue
                 await self._work_queue.put(
                     RenewWorkItem(
@@ -299,6 +301,7 @@ class RenewIntentConsumer:
                 st.last_success_monotonic is not None
                 and (now - st.last_success_monotonic) < self._min_interval
             ):
+                record_access_renew_outcome("throttled")
                 return
             ok = await asyncio.to_thread(
                 partial(

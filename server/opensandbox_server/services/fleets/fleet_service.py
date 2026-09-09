@@ -45,6 +45,7 @@ from opensandbox_server.api.schema import (
     SandboxStatus,
 )
 from opensandbox_server.config import AppConfig, FleetsRuntimeConfig, KubernetesRuntimeConfig
+from opensandbox_server.integrations.otel import instrument_lifecycle
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
     DiagnosticResult,
@@ -189,6 +190,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
 
     # -- lifecycle ---------------------------------------------------------
 
+    @instrument_lifecycle("create")
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """Create a sandbox through FastPath v2; returns accepted Pending when
         durable intent exists but the data plane is not ready yet.
@@ -323,6 +325,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         return _build_list_sandboxes_response(self.list_sandbox_objects(), request)
 
+    @instrument_lifecycle("delete")
     def delete_sandbox(self, sandbox_id: str) -> None:
         # Runtime observations can disappear before the CR during finalization.
         # Deletion needs durable identity, not a live Fastlet Get observation.
@@ -339,12 +342,15 @@ class FleetSandboxService(SandboxService, ExtensionService):
         finally:
             self._cr_reader.invalidate(namespace)
 
+    @instrument_lifecycle("pause")
     def pause_sandbox(self, sandbox_id: str) -> None:
         raise self._unsupported("pause", status.HTTP_501_NOT_IMPLEMENTED)
 
+    @instrument_lifecycle("resume")
     def resume_sandbox(self, sandbox_id: str) -> None:
         raise self._unsupported("resume", status.HTTP_501_NOT_IMPLEMENTED)
 
+    @instrument_lifecycle("renew")
     def renew_expiration(
         self,
         sandbox_id: str,

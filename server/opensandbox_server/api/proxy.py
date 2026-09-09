@@ -18,6 +18,7 @@ HTTP and WebSocket proxy routes for reaching services inside sandboxes via the l
 
 import hmac
 import logging
+from time import perf_counter
 from collections.abc import AsyncIterator, Mapping
 from typing import Optional
 from urllib.parse import urlsplit
@@ -37,6 +38,7 @@ from websockets.typing import Origin
 from opensandbox_server.api import lifecycle
 from opensandbox_server.config import get_config
 from opensandbox_server.api.schema import Endpoint
+from opensandbox_server.integrations.otel import instrument_proxy_http, record_proxy_request
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_SECURE_ACCESS_HEADER
 from opensandbox_server.tenants.context import set_current_tenant
@@ -312,6 +314,7 @@ def _verify_secure_access(endpoint: Endpoint, caller_headers: Mapping[str, str])
         )
 
 
+@instrument_proxy_http
 async def _proxy_http_request(
     request: Request,
     sandbox_id: str,
@@ -501,13 +504,25 @@ async def _relay_backend_messages(
         cancel_scope.cancel()
 
 
+def _record_ws_proxy(started_at: float, status_code: int) -> None:
+    """Record a proxied websocket session; duration covers the whole session."""
+    record_proxy_request(
+        proxy_type="websocket",
+        method="GET",
+        status_code=status_code,
+        duration_ms=(perf_counter() - started_at) * 1000.0,
+    )
+
+
 async def _proxy_websocket_request(
     websocket: WebSocket,
     sandbox_id: str,
     port: int,
     full_path: str,
 ) -> None:
+    started_at = perf_counter()
     if not await _authenticate_websocket_tenant(websocket):
+        _record_ws_proxy(started_at, 401)
         return
 
     try:
@@ -525,6 +540,7 @@ async def _proxy_websocket_request(
             port,
             exc.detail,
         )
+        _record_ws_proxy(started_at, exc.status_code if exc.status_code == 404 else 502)
         await _fail_client_websocket(
             websocket,
             status.WS_1011_INTERNAL_ERROR,
@@ -535,6 +551,7 @@ async def _proxy_websocket_request(
     try:
         _verify_secure_access(endpoint, dict(websocket.headers))
     except HTTPException:
+        _record_ws_proxy(started_at, 401)
         await _fail_client_websocket(
             websocket,
             status.WS_1008_POLICY_VIOLATION,
@@ -584,6 +601,7 @@ async def _proxy_websocket_request(
                     backend,
                     task_group.cancel_scope,
                 )
+        _record_ws_proxy(started_at, 101)
     except websockets.InvalidStatus as exc:
         logger.warning(
             "Backend websocket handshake failed for sandbox=%s port=%s: %s",
@@ -591,6 +609,7 @@ async def _proxy_websocket_request(
             port,
             exc,
         )
+        _record_ws_proxy(started_at, 502)
         await _fail_client_websocket(websocket, status.WS_1008_POLICY_VIOLATION, "")
     except OSError as exc:
         logger.warning(
@@ -599,6 +618,7 @@ async def _proxy_websocket_request(
             port,
             exc,
         )
+        _record_ws_proxy(started_at, 502)
         await _fail_client_websocket(websocket, status.WS_1011_INTERNAL_ERROR, "")
     except Exception:
         logger.exception(
@@ -606,6 +626,7 @@ async def _proxy_websocket_request(
             sandbox_id,
             port,
         )
+        _record_ws_proxy(started_at, 500)
         await _fail_client_websocket(websocket, status.WS_1011_INTERNAL_ERROR, "")
 
 

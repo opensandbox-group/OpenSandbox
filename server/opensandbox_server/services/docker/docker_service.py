@@ -58,6 +58,10 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
 )
 from opensandbox_server.config import AppConfig, get_config
+from opensandbox_server.integrations.otel import (
+    instrument_lifecycle,
+    record_lifecycle_operation,
+)
 from opensandbox_server.services.docker.docker_diagnostics import DockerDiagnosticsMixin
 from opensandbox_server.services.docker.runtime import (
     DockerRuntimeMixin,
@@ -357,8 +361,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self,
         sandbox_id: str,
         fallback_mount_keys: Optional[list[str]] = None,
+        metric_trigger: str = "expiry",
     ) -> None:
         """Timer callback to terminate expired sandboxes."""
+        started_at = time.perf_counter()
         mount_keys: list[str] = []
         try:
             container = self._get_container_by_sandbox_id(sandbox_id)
@@ -369,6 +375,13 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 if fallback_mount_keys:
                     self._release_ossfs_mounts(fallback_mount_keys)
                 self._metadata_store.delete(sandbox_id)
+                record_lifecycle_operation(
+                    "delete",
+                    runtime="docker",
+                    result="success",
+                    duration_ms=(time.perf_counter() - started_at) * 1000.0,
+                    trigger=metric_trigger,
+                )
             else:
                 with self._expiration_lock:
                     current_expires = self._sandbox_expirations.get(sandbox_id)
@@ -385,12 +398,20 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                         sandbox_id,
                         exc.detail,
                     )
+                    record_lifecycle_operation(
+                        "delete",
+                        runtime="docker",
+                        result="error",
+                        duration_ms=(time.perf_counter() - started_at) * 1000.0,
+                        trigger=metric_trigger,
+                    )
                     retry_at = now + timedelta(seconds=30)
                     self._schedule_expiration(
                         sandbox_id,
                         retry_at,
                         update_expiration=False,
                         fallback_mount_keys=fallback_mount_keys,
+                        metric_trigger=metric_trigger,
                     )
             return
 
@@ -413,16 +434,19 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         except (TypeError, json.JSONDecodeError):
             mount_keys = []
 
+        removal_failed = False
         try:
             state = container.attrs.get("State", {})
             if state.get("Running", False):
                 container.kill()
         except DockerException as exc:
+            removal_failed = True
             logger.warning("Failed to stop expired sandbox %s: %s", sandbox_id, exc)
 
         try:
             container.remove(force=True)
         except DockerException as exc:
+            removal_failed = True
             logger.warning("Failed to remove expired sandbox %s: %s", sandbox_id, exc)
 
         managed_volumes_raw = labels.get(SANDBOX_MANAGED_VOLUMES_LABEL, "[]")
@@ -438,6 +462,13 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._release_ossfs_mounts(mount_keys)
         self._cleanup_managed_volumes(sandbox_id, managed_volumes)
         self._metadata_store.delete(sandbox_id)
+        record_lifecycle_operation(
+            "delete",
+            runtime="docker",
+            result="error" if removal_failed else "success",
+            duration_ms=(time.perf_counter() - started_at) * 1000.0,
+            trigger=metric_trigger,
+        )
 
     def _restore_existing_sandboxes(self) -> None:
         """On startup, rebuild expiration timers for containers already running."""
@@ -511,7 +542,11 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         # Cached mount keys are passed as fallback so that mounts are still
         # released even if the container vanishes between pass 1 and pass 2.
         for sandbox_id, cached_mount_keys in expired_entries:
-            self._expire_sandbox(sandbox_id, fallback_mount_keys=cached_mount_keys)
+            self._expire_sandbox(
+                sandbox_id,
+                fallback_mount_keys=cached_mount_keys,
+                metric_trigger="recovery",
+            )
 
         # Cleanup orphan sidecars (no matching sandbox container)
         for orphan_id in seen_sidecars:
@@ -520,6 +555,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             except HTTPException as exc:
                 if exc.status_code == status.HTTP_404_NOT_FOUND:
                     self._cleanup_egress_sidecar(orphan_id)
+                    record_lifecycle_operation("orphan_cleaned", runtime="docker")
                 else:
                     logger.warning(
                         "Failed to check sandbox %s for orphan sidecar cleanup: %s", orphan_id, exc
@@ -627,6 +663,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             expires_at = calculate_expiration_or_raise(created_at, request.timeout)
         return sandbox_id, created_at, expires_at
 
+    @instrument_lifecycle("create")
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
         Create a new sandbox from a container image using Docker.
@@ -1120,6 +1157,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         container = self._get_container_by_sandbox_id(sandbox_id)
         return self._container_to_sandbox(container, sandbox_id)
 
+    @instrument_lifecycle("delete")
     def delete_sandbox(self, sandbox_id: str) -> None:
         """
         Delete a sandbox using Docker.
@@ -1168,6 +1206,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             self._cleanup_managed_volumes(sandbox_id, managed_volumes)
             self._metadata_store.delete(sandbox_id)
 
+    @instrument_lifecycle("pause")
     def pause_sandbox(self, sandbox_id: str) -> None:
         """
         Pause a running sandbox using Docker.
@@ -1201,6 +1240,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 },
             ) from exc
 
+    @instrument_lifecycle("resume")
     def resume_sandbox(self, sandbox_id: str) -> None:
         """
         Resume a paused sandbox using Docker.
@@ -1248,6 +1288,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         except ValueError:
             return None
 
+    @instrument_lifecycle("renew")
     def renew_expiration(
         self,
         sandbox_id: str,

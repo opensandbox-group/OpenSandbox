@@ -144,6 +144,7 @@ export default defineConfig({
           items: [
             { text: "Overview", link: "/components/" },
             { text: "Server", link: "/components/server" },
+            { text: "Server OpenTelemetry", link: "/components/server-opentelemetry" },
             { text: "Execd", link: "/components/execd" },
             { text: "Ingress", link: "/components/ingress" },
             { text: "Egress", link: "/components/egress" },
