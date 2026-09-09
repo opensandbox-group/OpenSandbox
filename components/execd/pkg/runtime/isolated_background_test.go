@@ -26,6 +26,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func waitForBackgroundRun(
@@ -596,13 +598,11 @@ func TestBackgroundRunLogCappedOnDisk(t *testing.T) {
 		t.Fatal("run record missing")
 	}
 	run := v.(*IsolatedBackgroundRun)
-	info, err := os.Stat(run.logPath)
-	if err != nil {
-		t.Fatalf("stat log: %v", err)
-	}
-	if info.Size() != maxBackgroundLogReadBytes {
-		t.Errorf("log size = %d, want %d (capped)", info.Size(), maxBackgroundLogReadBytes)
-	}
+	// The completion flag is published before the monitor caps the log.
+	require.Eventually(t, func() bool {
+		info, err := os.Stat(run.logPath)
+		return err == nil && info.Size() == maxBackgroundLogReadBytes
+	}, 5*time.Second, 10*time.Millisecond, "completed run log should be capped")
 }
 
 // TestSeekIsolatedBackgroundOutput_ClampsCursorPastEOF verifies a cursor beyond
