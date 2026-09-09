@@ -139,9 +139,28 @@ flowchart LR
 Vault revisions are pushed over the proxy route and held **memory-only** per
 subject (OSEP-0012 model — no Secret volume, nothing written to egress disk).
 The shared mitmdump instance selects the subject's vault by the client's
-source IP (transparent REDIRECT/DNAT preserves it); a revision push rebinds
-in memory and new flows pick up the new credentials. See
+source IP (transparent REDIRECT/DNAT preserves it). It keeps an immutable
+snapshot per subject and conditionally checks the private Unix-socket endpoint
+for every new flow with its opaque `ETag`. An unchanged tag returns `304`
+without rendering or transferring credential material; a changed tag returns
+`200`, the full snapshot, its public revision, and a replacement `ETag`. The
+tag changes even when delete-then-create resets the public revision to `1`, so
+recreation cannot accidentally validate a pre-delete snapshot. Consequently, the
+first flow after a successful create, patch, or delete acknowledgement observes
+that mutation without a timer or cache-expiry sleep. See
 [fleet-mitm-data-plane](../../../docs/components/egress-fleet-mitm-data-plane.md).
+
+`404` has one explicit meaning for the addon: there is no active vault for the
+selected subject, so any older cached snapshot is removed and the flow remains
+ordinary non-credentialed egress. Transport timeout/refusal, `5xx`, malformed
+JSON/schema, an invalid `ETag`, or a non-advancing tag after a conditional
+request are lookup failures, not "no vault". Those failures discard the
+unconfirmed cached plaintext snapshot and fail closed for **all intercepted
+traffic**, including hosts that would not match any credential binding. The
+addon returns a local `503` when the request body is safely buffered, or kills
+a streamed/unknown-length flow before it can reach upstream. Operators should
+therefore treat the private credential-proxy socket as a hard availability
+dependency whenever transparent interception is enabled.
 
 ```mermaid
 sequenceDiagram
@@ -155,11 +174,22 @@ sequenceDiagram
 
     S->>P: PUT /v1/sandboxfleets/{sid}/egress/credential-vault (full revision)
     P->>E: forward (UID header -> subject)
-    E->>V: replace revision (memory-only, new flows rebind)
+    E->>V: atomically replace revision (memory-only)
+    V-->>E: mutation response acknowledges active revision
     C->>M: HTTP(S) flow (DNAT preserves source IP)
     M->>M: script: client source IP -> subject -> subject's vault
-    M->>V: resolve credential/binding for the flow
-    V-->>M: credential (active snapshot)
+    M->>V: GET _active + If-None-Match cached opaque ETag
+    alt snapshot tag unchanged
+        V-->>M: 304 + ETag (reuse immutable snapshot)
+    else snapshot tag changed
+        V-->>M: 200 + ETag + active snapshot
+    else no active vault
+        V-->>M: 404 (clear cached snapshot)
+    else lookup/protocol failure
+        V--xM: timeout/refused/5xx/invalid payload or revision
+        M--xC: 503 or connection termination (no upstream forwarding)
+    end
+    M->>M: resolve credential/binding from one flow-fixed snapshot
     M-->>C: proxied flow with credential applied
 ```
 
@@ -174,6 +204,10 @@ sequenceDiagram
 | Unload (REMOVE_BINDING) | chain + all sets removed in one transaction; stale fence ignored |
 | Egress restart | stale rules wiped (ApplyReset); new instanceId triggers Fastlet replay of SET_BINDING + reached Hooks |
 | Unregistered source | unmarked -> master-chain tail drop — denied before the binding is ever observed |
+| Vault snapshot unchanged | per-flow conditional UDS check returns `304`; cached immutable snapshot is reused without retransmitting secrets |
+| Vault snapshot changed | opaque-tag compare and snapshot render occur under one store read lock; `200` + replacement `ETag` atomically replaces the subject cache |
+| Vault deleted / no active vault | `404` clears any cached snapshot; the flow proceeds without credential injection |
+| Vault lookup or protocol failure | fail-closed before upstream: buffered request receives `503`; streamed, chunked, or HTTP/2 unknown-length request is killed |
 | Malformed action envelope | rejected (never silently ignored); the subject is never activated |
 | data-plane-ready without pending policy | failed (protocol violation) — the subject stays denying |
 

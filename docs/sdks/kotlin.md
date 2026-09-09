@@ -143,7 +143,7 @@ Sandbox manual = Sandbox.builder()
 
 ### 2. Custom Health Check
 
-Define custom logic to determine if the sandbox is healthy. This overrides the default ping check.
+Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Set timeouts within custom checks; the SDK cannot interrupt them.
 
 ```java
 Sandbox sandbox = Sandbox.builder()

@@ -298,6 +298,18 @@ Background run semantics:
 
 Overlay upper dirs live under `upper_root` (default `/var/lib/execd/isolation`).
 
+Because isolated-session state lives only in execd's memory, every upper dir
+left under `upper_root` when execd exits is orphaned. On startup execd
+reclaims leftover session directories under `upper_root` — session state never
+survives a restart, so nothing legitimate is lost. Only directories with the
+execd session layout (`<id>/upper`) are removed; if `upper_root` points at a
+directory shared with other data, unrelated children are never touched
+(`upper_root` should still be a dedicated directory). Residue that cannot be
+removed yet — e.g. an upper still referenced by a mount from the previous
+lifetime — stays counted toward `upper_max_bytes` and is retried by the idle
+collector. In pooled / pre-provisioned sandboxes this also prevents one
+occupant's session data from leaking to the next.
+
 ```json
 { "workspace": { "path": "/workspace", "mode": "overlay" } }
 ```

@@ -549,16 +549,16 @@ else
   echo "${out}" | grep -qi "x-api-key: secret-v2" || fail "mitm must inject subject b's credential over TLS; got: ${out}"
   pass "HTTPS data plane (TLS interception + per-subject injection)"
 
-  # Vault revision update reaches the data plane: PATCH the credential, wait
-  # out the addon's 0.5s cache TTL, and assert the NEW value is injected.
+  # A successful PATCH acknowledges the active revision. The very next
+  # intercepted request must use the new credential without a cache-expiry
+  # sleep.
   code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-Fast-Sandbox-Uid: a" -XPATCH \
     "http://127.0.0.1:${POLICY_PORT}/credential-vault" \
     -d '{"credentials":{"replace":[{"name":"k","source":{"type":"inline","value":"secret-v1-new"}}]}}')"
   [ "${code}" = "200" ] || fail "vault PATCH must succeed, got ${code}"
-  sleep 1  # the addon vault cache TTL is 0.5s
   out="$(ip netns exec osb-sandbox-a curl -s -m 5 -H 'Host: ext.test' http://10.99.0.2/)"
-  echo "${out}" | grep -qi "x-api-key: secret-v1-new" || fail "PATCHed credential must be injected after TTL; got: ${out}"
-  pass "vault revision update reaches the data plane (PATCH -> injected)"
+  echo "${out}" | grep -qi "x-api-key: secret-v1-new" || fail "PATCHed credential must be injected immediately after acknowledgement; got: ${out}"
+  pass "vault revision acknowledgement reaches the next intercepted request"
 
   # Interception-set precision: :8080 is outside {80,443}, so it must go
   # DIRECT (client=10.10.0.5, the sandbox IP) with no credential injection.

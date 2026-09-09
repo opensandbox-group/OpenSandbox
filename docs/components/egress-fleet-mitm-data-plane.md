@@ -109,26 +109,34 @@ vault snapshot:
 
 ```
 GET /credential-vault/_active?clientIp=10.0.0.5
+If-None-Match: "<opaque-active-snapshot-tag>"
 ```
 
 - egress (inside the socket handler): `registry.Resolve(SubjectKey{SourceIP:
-  ip})` → subject → that subject's vault `ActiveSnapshot()`; unknown IP →
-  404 (addon treats as no-vault, no injection).
-- Sidecar compatibility: the sidecar's request-unaware handler is unchanged;
-  the fleet variant is `StartActiveSocketServerRequestAware` (the socket
-  server itself is shared infrastructure).
+  ip})` → subject → that subject's conditional active snapshot; an unchanged
+  tag returns 304 without rendering credentials, a changed tag returns 200
+  with the full snapshot and a replacement ETag, and unknown IP/no vault
+  returns 404. The opaque tag changes across delete-then-create even when the
+  public vault revision resets to 1.
+- Sidecar compatibility: both profiles use the request-aware socket helper for
+  conditional requests. The legacy request-unaware helper remains available to
+  existing callers; the socket server itself is shared infrastructure.
 - All subject vaults live in the same egress process, so one socket trivially
   serves every subject.
 
 ## Addon changes (`mitmscripts/system.py`)
 
 - `_load_active_vault(client_ip)` — in fleet mode (`OPENSANDBOX_EGRESS_PROFILE
-  =fleet`) the 0.5s cache is keyed by client IP; the sidecar path uses the
-  single shared cache, unchanged.
+  =fleet`) the immutable cache is keyed by client IP; the sidecar path uses one
+  shared cache. Every new flow conditionally validates its cached opaque tag,
+  and only a changed tag transfers the full secret-bearing snapshot.
 - Call sites pass `flow.client_conn.peername[0]` (defensive: missing peername
-  ⇒ no dispatch key ⇒ no vault).
+  ⇒ lookup failure ⇒ request denied).
 - 404 / unknown subject ⇒ no vault for the flow (credentials not injected;
   traffic still proxied).
+- Timeout/refusal, 5xx, malformed payload/ETag, and other lookup failures clear
+  that cache entry and deny all intercepted traffic before upstream (buffered
+  request: 503; streamed or unknown-length request: flow killed).
 - Env knob `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` unchanged; the fleet socket
   path defaults to the same location (per-Pod, one egress process).
 

@@ -23,7 +23,10 @@
 #      (which otherwise stalls LLM-style small-chunk streams).
 #   2. Acts as Credential Proxy when the egress sidecar has an active
 #      Credential Vault revision, read from the Go sidecar over a private Unix
-#      socket. Credential values are never logged; response header values
+#      socket. Every new flow conditionally checks the cached snapshot tag;
+#      only a changed tag transfers a full snapshot. Lookup or protocol failures
+#      fail closed for all intercepted requests, including hosts outside any
+#      binding scope. Credential values are never logged; response header values
 #      containing them are redacted. Response bodies are not rewritten.
 #      Processing is split across hooks because stream_large_bodies=1m streams
 #      bodies above 1 MiB upstream before the `request` hook fires: binding
@@ -51,25 +54,25 @@
 from __future__ import annotations
 
 import http.client as http_client
+import ipaddress
 import json
 import os
 import re
 import socket
-import time
+from contextlib import suppress
 from typing import Any
 from urllib.parse import quote, quote_plus, unquote
 
 from mitmproxy import ctx, http
 from mitmproxy.tls import ClientHelloData
 
-
 CREDENTIAL_PROXY_SOCKET_ENV = "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET"
 DEFAULT_CREDENTIAL_PROXY_SOCKET = "/run/opensandbox/credential-proxy/active.sock"
 ACTIVE_VAULT_PATH = "/credential-vault/_active"
-VAULT_CACHE_TTL_SECONDS = 0.5
 FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
 FLOW_BINDING_KEY = "opensandbox_credential_binding"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
+FLOW_REJECTION_KEY = "opensandbox_credential_rejected"
 HEADER_SUBSTITUTION_DENYLIST = {
     "host",
     "content-length",
@@ -85,6 +88,25 @@ HEADER_SUBSTITUTION_DENYLIST = {
     "x-forwarded-host",
     "x-forwarded-proto",
 }
+ACTIVE_VAULT_HEADER_RESERVED_NAMES = {
+    "host",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "te",
+    "trailer",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+}
+_ACTIVE_VAULT_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
+_ACTIVE_VAULT_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_PERCENT_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
 
 
 class ActiveVault:
@@ -93,24 +115,34 @@ class ActiveVault:
         revision: int,
         bindings: list[dict[str, Any]],
         redactions: list[str],
+        etag: str = "",
     ) -> None:
         self.revision = revision
         self.bindings = bindings
         self.redactions = redactions
+        self.etag = etag
+
+
+class ActiveVaultLookupError(Exception):
+    """The active vault could not be validated for this flow."""
 
 
 _vault_cache: ActiveVault | None = None
-_vault_cache_loaded_at = 0.0
+
+# Operator-only diagnostics; no public interception mode is enabled here.
+_tls_shadow_enabled = os.environ.get(
+    "OPENSANDBOX_EGRESS_MITMPROXY_SHADOW", ""
+).strip().lower() in {"1", "true", "on"}
 
 # Fleet profile: one shared mitmdump serving N sandboxes; the active vault is
 # selected by the client's source IP (preserved by the interception DNAT), so
-# the 0.5s cache is keyed per client IP. The sidecar profile keeps the single
-# shared cache and never uses these. The per-IP cache is bounded: legitimate
-# entries are bounded by the sandbox count, but spoofed source IPs could grow
-# it without limit, so it is dropped wholesale past the cap.
+# the immutable snapshot cache is keyed per client IP. Every flow performs a
+# conditional snapshot-tag check; the full secret-bearing snapshot is transferred
+# only when its opaque tag changes. The sidecar profile keeps one shared cache.
+# The per-IP cache is bounded because spoofed source IPs could otherwise grow
+# it without limit.
 _fleet_mode_enabled = False
-_vault_cache_by_ip: dict[str, ActiveVault | None] = {}
-_vault_cache_by_ip_loaded_at: dict[str, float] = {}
+_vault_cache_by_ip: dict[str, ActiveVault] = {}
 _VAULT_CACHE_MAX_IPS = 4096
 
 
@@ -182,35 +214,40 @@ def _load_active_vault(client_ip: str | None = None) -> ActiveVault | None:
 
 
 def _load_active_vault_shared() -> ActiveVault | None:
-    global _vault_cache, _vault_cache_loaded_at
-    now = time.monotonic()
-    if _vault_cache is not None and now - _vault_cache_loaded_at < VAULT_CACHE_TTL_SECONDS:
-        return _vault_cache
-
-    vault = _fetch_active_vault(None)
+    global _vault_cache
+    try:
+        vault = _fetch_active_vault(None, _vault_cache)
+    except ActiveVaultLookupError:
+        # Never retain a potentially revoked plaintext snapshot after the
+        # proxy can no longer confirm its opaque tag.
+        _vault_cache = None
+        raise
     _vault_cache = vault
-    _vault_cache_loaded_at = now
     return vault
 
 
 def _load_active_vault_for_ip(client_ip: str | None) -> ActiveVault | None:
     if not client_ip:
-        return None
-    global _vault_cache_by_ip, _vault_cache_by_ip_loaded_at
-    now = time.monotonic()
-    if len(_vault_cache_by_ip) >= _VAULT_CACHE_MAX_IPS:
+        raise ActiveVaultLookupError("fleet vault lookup requires a client IP")
+    if client_ip not in _vault_cache_by_ip and len(_vault_cache_by_ip) >= _VAULT_CACHE_MAX_IPS:
         _vault_cache_by_ip.clear()
-        _vault_cache_by_ip_loaded_at.clear()
-    if client_ip in _vault_cache_by_ip and now - _vault_cache_by_ip_loaded_at[client_ip] < VAULT_CACHE_TTL_SECONDS:
-        return _vault_cache_by_ip[client_ip]
-
-    vault = _fetch_active_vault(client_ip)
-    _vault_cache_by_ip[client_ip] = vault
-    _vault_cache_by_ip_loaded_at[client_ip] = now
+    cached = _vault_cache_by_ip.get(client_ip)
+    try:
+        vault = _fetch_active_vault(client_ip, cached)
+    except ActiveVaultLookupError:
+        _vault_cache_by_ip.pop(client_ip, None)
+        raise
+    if vault is None:
+        _vault_cache_by_ip.pop(client_ip, None)
+    else:
+        _vault_cache_by_ip[client_ip] = vault
     return vault
 
 
-def _fetch_active_vault(client_ip: str | None = None) -> ActiveVault | None:
+def _fetch_active_vault(
+    client_ip: str | None = None,
+    cached: ActiveVault | None = None,
+) -> ActiveVault | None:
     socket_path = (
         os.environ.get(CREDENTIAL_PROXY_SOCKET_ENV, "").strip()
         or DEFAULT_CREDENTIAL_PROXY_SOCKET
@@ -222,38 +259,306 @@ def _fetch_active_vault(client_ip: str | None = None) -> ActiveVault | None:
         path = f"{ACTIVE_VAULT_PATH}?clientIp={quote(client_ip)}"
     connection = UnixSocketHTTPConnection(socket_path, timeout=0.25)
     try:
-        connection.request("GET", path)
+        headers = {}
+        if cached is not None:
+            if not cached.etag:
+                raise ActiveVaultLookupError("cached active vault has no ETag")
+            headers["If-None-Match"] = cached.etag
+        connection.request("GET", path, headers=headers)
         response = connection.getresponse()
         body = response.read()
-        if response.status == 404:
-            if _fleet_mode_enabled and client_ip:
-                # an unknown source IP is an anomaly in the fleet profile
-                # (every sandbox is a registered subject with a vault by
-                # design); record it instead of failing silently
-                ctx.log.warn(
-                    f"credential proxy: no subject for clientIp {client_ip} "
-                    "(fleet dispatch miss; no credentials injected)"
+        if response.status == 304:
+            if cached is None:
+                raise ActiveVaultLookupError(
+                    "active vault returned 304 without a cached snapshot"
                 )
+            if response.getheader("ETag") != cached.etag:
+                raise ActiveVaultLookupError("active vault 304 response has an invalid ETag")
+            return cached
+        if response.status == 404:
             return None
         if response.status != 200:
-            ctx.log.warn(
-                f"credential proxy: active vault lookup failed with HTTP {response.status}"
+            raise ActiveVaultLookupError(
+                f"active vault lookup returned HTTP {response.status}"
             )
-            return None
         payload = json.loads(body.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001 - mitm addon must not crash traffic handling
-        ctx.log.warn(f"credential proxy: active vault lookup failed: {exc}")
-        return None
+        vault = _parse_active_vault(payload)
+        etag = _validate_active_vault_etag(response.getheader("ETag"))
+        if cached is not None and etag == cached.etag:
+            raise ActiveVaultLookupError(
+                "active vault tag did not advance after a conditional lookup"
+            )
+        vault.etag = etag
+        return vault
+    except ActiveVaultLookupError:
+        raise
+    except Exception as exc:
+        raise ActiveVaultLookupError(f"active vault lookup failed: {exc}") from exc
     finally:
-        connection.close()
+        with suppress(Exception):
+            connection.close()
 
-    bindings = payload.get("bindings") or []
-    redactions = [v for v in (payload.get("redactions") or []) if isinstance(v, str) and v]
+
+def _parse_active_vault(payload: Any) -> ActiveVault:
+    if not isinstance(payload, dict):
+        raise ActiveVaultLookupError("active vault payload must be an object")
+    revision = payload.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
+        raise ActiveVaultLookupError("active vault revision must be a positive integer")
+    bindings = payload.get("bindings")
+    if not isinstance(bindings, list) or any(not isinstance(item, dict) for item in bindings):
+        raise ActiveVaultLookupError("active vault bindings must be a list of objects")
+    redactions = payload.get("redactions", [])
+    if not isinstance(redactions, list) or any(
+        not isinstance(value, str) or not value for value in redactions
+    ):
+        raise ActiveVaultLookupError("active vault redactions must be non-empty strings")
+
+    redaction_set = set(redactions)
+    normalized_bindings: list[dict[str, Any]] = []
+    for index, binding in enumerate(bindings):
+        name = binding.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} name must be a non-empty string"
+            )
+
+        match = binding.get("match")
+        if not isinstance(match, dict):
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} match must be an object"
+            )
+        host_field = f"binding {index} match.hosts"
+        hosts = [
+            _normalize_active_vault_host(host, host_field)
+            for host in _normalize_active_vault_strings(match.get("hosts"), host_field)
+        ]
+        schemes = _normalize_active_vault_strings(
+            match.get("schemes"), f"binding {index} match.schemes", str.lower
+        )
+        if any(scheme not in {"http", "https"} for scheme in schemes):
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} match.schemes contains an unsupported scheme"
+            )
+        methods = _normalize_active_vault_strings(
+            match.get("methods"), f"binding {index} match.methods", str.upper
+        )
+        paths = _normalize_active_vault_strings(
+            match.get("paths"), f"binding {index} match.paths"
+        )
+        if any(not path.startswith("/") for path in paths):
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} match.paths must start with /"
+            )
+
+        raw_headers = binding.get("headers")
+        if raw_headers is None:
+            raw_headers = []
+        if not isinstance(raw_headers, list) or any(
+            not isinstance(header, dict) for header in raw_headers
+        ):
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} headers must be a list of objects"
+            )
+        normalized_headers: list[dict[str, str]] = []
+        for header_index, header in enumerate(raw_headers):
+            header_name = header.get("name")
+            header_value = header.get("value")
+            if not isinstance(header_name, str) or not header_name.strip():
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} header {header_index} name "
+                    "must be a non-empty string"
+                )
+            header_name = header_name.strip()
+            if _ACTIVE_VAULT_HEADER_NAME_RE.fullmatch(header_name) is None:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} header {header_index} name "
+                    "is not a valid HTTP field name"
+                )
+            if header_name.lower() in ACTIVE_VAULT_HEADER_RESERVED_NAMES:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} header {header_index} name "
+                    "is reserved"
+                )
+            if not isinstance(header_value, str):
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} header {header_index} value "
+                    "must be a string"
+                )
+            if header_value and header_value not in redaction_set:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} header {header_index} value "
+                    "is missing from redactions"
+                )
+            normalized_headers.append({"name": header_name, "value": header_value})
+
+        raw_substitutions = binding.get("substitutions")
+        if raw_substitutions is None:
+            raw_substitutions = []
+        if not isinstance(raw_substitutions, list) or any(
+            not isinstance(substitution, dict) for substitution in raw_substitutions
+        ):
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} substitutions must be a list of objects"
+            )
+        normalized_substitutions: list[dict[str, Any]] = []
+        for substitution_index, substitution in enumerate(raw_substitutions):
+            placeholder = substitution.get("placeholder")
+            value = substitution.get("value")
+            if not isinstance(placeholder, str) or not placeholder.strip():
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} substitution {substitution_index} "
+                    "placeholder must be a non-empty string"
+                )
+            if not isinstance(value, str):
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} substitution {substitution_index} "
+                    "value must be a string"
+                )
+            surfaces = _normalize_active_vault_strings(
+                substitution.get("in"),
+                f"binding {index} substitution {substitution_index} in",
+                str.lower,
+            )
+            if any(
+                surface not in {"path", "query", "header", "body"}
+                for surface in surfaces
+            ):
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} substitution {substitution_index} "
+                    "contains an unsupported surface"
+                )
+            missing_redactions = (
+                _active_snapshot_substitution_redaction_variants(value) - redaction_set
+            )
+            if missing_redactions:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} substitution {substitution_index} "
+                    "value representations are missing from redactions"
+                )
+            if placeholder not in redaction_set:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} substitution {substitution_index} "
+                    "placeholder is missing from redactions"
+                )
+            normalized_substitutions.append(
+                {"placeholder": placeholder, "value": value, "in": surfaces}
+            )
+
+        normalized_bindings.append(
+            {
+                "name": name.strip(),
+                "match": {
+                    "schemes": schemes,
+                    "hosts": hosts,
+                    "methods": methods,
+                    "paths": paths,
+                },
+                "headers": normalized_headers,
+                "substitutions": normalized_substitutions,
+            }
+        )
     return ActiveVault(
-        revision=int(payload.get("revision") or 0),
-        bindings=bindings,
-        redactions=redactions,
+        revision=revision,
+        bindings=normalized_bindings,
+        redactions=list(redactions),
     )
+
+
+def _normalize_active_vault_strings(
+    value: Any,
+    field: str,
+    normalize: Any | None = None,
+) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ActiveVaultLookupError(f"active vault {field} must be a non-empty list")
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ActiveVaultLookupError(
+                f"active vault {field} must contain non-empty strings"
+            )
+        item = item.strip()
+        normalized.append(normalize(item) if normalize is not None else item)
+    return normalized
+
+
+def _normalize_active_vault_host(value: str, field: str) -> str:
+    host = value.strip().lower()
+    host = host.removesuffix(".")
+    if not host or "://" in host or "/" in host:
+        raise ActiveVaultLookupError(f"active vault {field} contains an invalid host")
+
+    if host.startswith("*."):
+        suffix = host[2:]
+        if not suffix or "*" in suffix or _active_vault_host_is_ip(suffix):
+            raise ActiveVaultLookupError(
+                f"active vault {field} contains an invalid wildcard host"
+            )
+        if not _active_vault_host_is_fqdn(suffix):
+            raise ActiveVaultLookupError(
+                f"active vault {field} contains an invalid wildcard host"
+            )
+        return f"*.{suffix}"
+
+    if "*" in host or _active_vault_host_is_ip(host):
+        raise ActiveVaultLookupError(f"active vault {field} contains an invalid host")
+    if not _active_vault_host_is_fqdn(host):
+        raise ActiveVaultLookupError(f"active vault {field} contains an invalid host")
+    return host
+
+
+def _active_vault_host_is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _active_vault_host_is_fqdn(host: str) -> bool:
+    return (
+        len(host) <= 253
+        and "." in host
+        and all(_ACTIVE_VAULT_HOST_LABEL_RE.fullmatch(label) for label in host.split("."))
+    )
+
+
+def _active_snapshot_substitution_redaction_variants(value: str) -> set[str]:
+    url_encoded = quote(value, safe="")
+    form_encoded = quote_plus(value, safe="")
+    variants = {
+        value,
+        url_encoded,
+        _lowercase_percent_escapes(url_encoded),
+        form_encoded,
+        _lowercase_percent_escapes(form_encoded),
+        _go_json_encoded_string_content(value),
+        json.dumps(value)[1:-1],
+    }
+    variants.discard("")
+    return variants
+
+
+def _lowercase_percent_escapes(value: str) -> str:
+    return _PERCENT_ESCAPE_RE.sub(lambda match: f"%{match.group(1).lower()}", value)
+
+
+def _go_json_encoded_string_content(value: str) -> str:
+    encoded = json.dumps(value, ensure_ascii=False)[1:-1]
+    return (
+        encoded.replace("<", r"\u003c")
+        .replace(">", r"\u003e")
+        .replace("&", r"\u0026")
+        .replace("\u2028", r"\u2028")
+        .replace("\u2029", r"\u2029")
+    )
+
+
+def _validate_active_vault_etag(value: str | None) -> str:
+    if value is None or re.fullmatch(r'"[A-Za-z0-9._~-]{1,128}"', value) is None:
+        raise ActiveVaultLookupError("active vault response has an invalid ETag")
+    return value
 
 
 def _request_host(flow: http.HTTPFlow) -> str:
@@ -422,7 +727,7 @@ def _request_may_be_streamed(flow: http.HTTPFlow) -> bool:
     Streaming is enabled whenever the body is expected to exceed
     ``stream_large_bodies`` (1 MiB), either up front (known Content-Length)
     or mid-upload once buffered bytes cross the threshold (chunked or
-    HTTP/2 bodies without Content-Length). A 403 response cannot be served
+    HTTP/2 bodies without Content-Length). A local response cannot be served
     for such flows (mitmproxy 11.0.2 raises ``NotImplementedError``), so
     they must be killed instead.
     """
@@ -435,7 +740,11 @@ def _request_may_be_streamed(flow: http.HTTPFlow) -> bool:
     return "transfer-encoding" in flow.request.headers
 
 
-def _reject_request(flow: http.HTTPFlow, body: bytes) -> None:
+def _reject_request(
+    flow: http.HTTPFlow,
+    body: bytes,
+    status_code: int = 403,
+) -> None:
     """Terminate a request before it is forwarded upstream.
 
     mitmproxy 11.0.2 refuses to serve a locally-set response while a request
@@ -443,23 +752,21 @@ def _reject_request(flow: http.HTTPFlow, body: bytes) -> None:
     ``NotImplementedError`` once ``flow.response`` is set, and streaming is
     enabled as soon as a body is known to exceed ``stream_large_bodies``
     (1 MiB) — either up front via Content-Length or mid-upload for chunked
-    bodies. A 403 response is therefore only safe when the body size is
+    bodies. A local response is therefore only safe when the body size is
     fully known; otherwise the flow is killed, which closes the client
     connection without forwarding anything.
     """
+    flow.metadata[FLOW_REJECTION_KEY] = True
     if _request_may_be_streamed(flow):
         if flow.killable:
             flow.kill()
         return
-    flow.response = http.Response.make(403, body, {"content-type": "text/plain"})
+    flow.response = http.Response.make(status_code, body, {"content-type": "text/plain"})
 
 
 def _flow_rejected(flow: http.HTTPFlow) -> bool:
-    """True if the flow was terminated by :func:`_reject_request` (403
-    response or killed flow)."""
-    if flow.error is not None:
-        return True
-    return flow.response is not None and getattr(flow.response, "status_code", None) == 403
+    """True if the flow was terminated by :func:`_reject_request`."""
+    return bool(flow.metadata.get(FLOW_REJECTION_KEY))
 
 
 def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] | None:
@@ -699,6 +1006,30 @@ def _flow_client_ip(flow: http.HTTPFlow) -> str | None:
         return None
 
 
+def _observe_tls_shadow(
+    flow: http.HTTPFlow, vault: ActiveVault | None, *, lookup_failed: bool = False
+) -> None:
+    if not _tls_shadow_enabled:
+        return
+    try:
+        if flow.request.scheme != "https" or flow.request.port != 443:
+            return
+        from tls_shadow import project
+
+        sni = getattr(getattr(flow, "client_conn", None), "sni", None)
+        outcome = project(
+            sni, None if vault is None else vault.bindings, lookup_failed=lookup_failed
+        )
+        if _fleet_mode_enabled and vault is None and not lookup_failed:
+            # Fleet 404 also means unknown source identity, not just no vault.
+            outcome = "unknown_subject_or_vault"
+        # Fixed vocabulary only: no hostname, revision, subject, path, or secret.
+        ctx.log.warn("credential proxy: tls-shadow " + outcome)
+    except Exception:  # noqa: BLE001 - diagnostics must never change traffic
+        with suppress(Exception):
+            ctx.log.warn("credential proxy: tls-shadow observer_error")
+
+
 def requestheaders(flow: http.HTTPFlow) -> None:
     """Credential proxy phase 1: binding match and request metadata rewrite.
 
@@ -706,7 +1037,18 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     made: with ``stream_large_bodies=1m`` the ``request`` hook fires only
     after a body above 1 MiB has been streamed upstream.
     """
-    vault = _load_active_vault(_flow_client_ip(flow))
+    try:
+        vault = _load_active_vault(_flow_client_ip(flow))
+    except ActiveVaultLookupError as exc:
+        _observe_tls_shadow(flow, None, lookup_failed=True)
+        ctx.log.warn(f"credential proxy: {exc}; request denied")
+        _reject_request(
+            flow,
+            b"credential proxy unavailable\n",
+            status_code=503,
+        )
+        return
+    _observe_tls_shadow(flow, vault)
     if vault is None:
         return
 
@@ -746,8 +1088,8 @@ def requestheaders(flow: http.HTTPFlow) -> None:
     flow.metadata[FLOW_BINDING_KEY] = binding
     # Persist the redactions of the matched revision: body substitutions run
     # later in the request hook, and reloading the vault there could return a
-    # different revision (0.5s cache TTL), leaving substituted credentials
-    # unredactable in response headers.
+    # different revision after a runtime mutation, leaving substituted
+    # credentials unredactable in response headers.
     flow.metadata[FLOW_VAULT_REDACTIONS_KEY] = list(vault.redactions)
 
     substituted_surfaces = _apply_requestheaders_substitutions(flow, binding)

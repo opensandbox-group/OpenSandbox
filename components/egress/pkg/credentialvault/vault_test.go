@@ -15,12 +15,26 @@
 package credentialvault
 
 import (
+	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
 )
+
+type countingCredentialSource struct {
+	resolves *atomic.Int32
+}
+
+func (s *countingCredentialSource) Type() string { return "counting" }
+
+func (s *countingCredentialSource) Resolve(_ context.Context) (string, error) {
+	s.resolves.Add(1)
+	return "resolved-secret", nil
+}
 
 func mustMarshal(v any) json.RawMessage {
 	data, err := json.Marshal(v)
@@ -79,6 +93,94 @@ func TestCredentialVaultCreateSanitizesAndRendersActiveSnapshot(t *testing.T) {
 	require.Equal(t, int64(1), payload.Revision)
 	require.Equal(t, []InjectionHeader{{Name: "Private-Token", Value: "secret-token"}}, payload.Bindings[0].Headers)
 	require.Contains(t, payload.Redactions, "secret-token")
+}
+
+func TestCredentialVaultActiveSnapshotIfChanged(t *testing.T) {
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	_, err := store.Create(testCredentialVaultRequest(), pol)
+	require.NoError(t, err)
+
+	snapshot, tag, changed, err := store.ActiveSnapshotIfChanged(context.Background(), "")
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotEmpty(t, tag)
+	require.Equal(t, int64(1), snapshot.Revision)
+	require.Contains(t, snapshot.Redactions, "secret-token")
+
+	snapshot, unchangedTag, changed, err := store.ActiveSnapshotIfChanged(context.Background(), tag)
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.Equal(t, tag, unchangedTag)
+	require.Equal(t, int64(1), snapshot.Revision)
+	require.Empty(t, snapshot.Bindings)
+	require.Empty(t, snapshot.Redactions)
+
+	_, err = store.Patch(MutationRequest{
+		Credentials: &CredentialMutationSet{Replace: []Credential{{
+			Name:   "gitlab-token",
+			Source: mustMarshal(map[string]string{"type": "inline", "value": "new-secret-token"}),
+		}}},
+	}, pol)
+	require.NoError(t, err)
+
+	snapshot, updatedTag, changed, err := store.ActiveSnapshotIfChanged(context.Background(), tag)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotEqual(t, tag, updatedTag)
+	require.Equal(t, int64(2), snapshot.Revision)
+	require.Contains(t, snapshot.Redactions, "new-secret-token")
+}
+
+func TestCredentialVaultUnchangedRevisionDoesNotResolveCredentialSources(t *testing.T) {
+	var resolves atomic.Int32
+	registry := NewSourceRegistry()
+	registry.Register("counting", func(_ json.RawMessage) (CredentialSource, error) {
+		return &countingCredentialSource{resolves: &resolves}, nil
+	})
+	store := NewStoreWithRegistry(nil, func() bool { return true }, registry)
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	req := testCredentialVaultRequest()
+	req.Credentials[0].Source = json.RawMessage(`{"type":"counting"}`)
+	_, err := store.Create(req, pol)
+	require.NoError(t, err)
+
+	_, tag, changed, err := store.ActiveSnapshotIfChanged(context.Background(), "")
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, int32(1), resolves.Load())
+
+	_, unchangedTag, changed, err := store.ActiveSnapshotIfChanged(context.Background(), tag)
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.Equal(t, tag, unchangedTag)
+	require.Equal(t, int32(1), resolves.Load(), "304 path must not render credential material")
+}
+
+func TestCredentialVaultActiveTagChangesWhenRevisionResetsAfterRecreate(t *testing.T) {
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	_, err := store.Create(testCredentialVaultRequest(), pol)
+	require.NoError(t, err)
+	first, firstTag, changed, err := store.ActiveSnapshotIfChanged(context.Background(), "")
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, int64(1), first.Revision)
+
+	require.NoError(t, store.Delete())
+	recreated := testCredentialVaultRequest()
+	recreated.Credentials[0].Source = mustMarshal(map[string]string{
+		"type": "inline", "value": "recreated-secret",
+	})
+	_, err = store.Create(recreated, pol)
+	require.NoError(t, err)
+
+	second, secondTag, changed, err := store.ActiveSnapshotIfChanged(context.Background(), firstTag)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, int64(1), second.Revision)
+	require.NotEqual(t, firstTag, secondTag)
+	require.Contains(t, second.Redactions, "recreated-secret")
 }
 
 func TestCredentialVaultRendersScopedSubstitutions(t *testing.T) {
@@ -146,6 +248,68 @@ func TestCredentialVaultAllowsDefaultAllowPolicyForCompatibility(t *testing.T) {
 	state, err := store.Create(testCredentialVaultRequest(), pol)
 	require.NoError(t, err)
 	require.Len(t, state.Bindings, 1)
+}
+
+func TestCredentialVaultScopedMatchEnforcementRejectsImplicitMethodOrPath(t *testing.T) {
+	t.Setenv(constants.EnvCredentialVaultRequireScopedMatch, "true")
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+
+	req := testCredentialVaultRequest()
+	req.Bindings[0].Match.Methods = nil
+	_, err := store.Create(req, pol)
+	require.ErrorContains(t, err, "match.methods must be explicit")
+
+	req = testCredentialVaultRequest()
+	req.Bindings[0].Match.Paths = nil
+	_, err = store.Create(req, pol)
+	require.ErrorContains(t, err, "match.paths must be explicit")
+
+	req = testCredentialVaultRequest()
+	req.Bindings[0].Match.Paths = []string{"/*"}
+	_, err = store.Create(req, pol)
+	require.ErrorContains(t, err, "match.paths must not contain /*")
+
+	state, err := store.Create(testCredentialVaultRequest(), pol)
+	require.NoError(t, err)
+	require.Equal(t, []string{"GET"}, state.Bindings[0].Match.Methods)
+	require.Equal(t, []string{"/api/v8/*"}, state.Bindings[0].Match.Paths)
+}
+
+func TestCredentialVaultScopedMatchEnforcementAppliesToPatch(t *testing.T) {
+	t.Setenv(constants.EnvCredentialVaultRequireScopedMatch, "true")
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	_, err := store.Create(testCredentialVaultRequest(), pol)
+	require.NoError(t, err)
+
+	wideBinding := testCredentialVaultRequest().Bindings[0]
+	wideBinding.Name = "wide-binding"
+	wideBinding.Match.Methods = nil
+	wideBinding.Match.Paths = nil
+	_, err = store.Patch(MutationRequest{
+		Bindings: &BindingMutationSet{Add: []Binding{wideBinding}},
+	}, pol)
+	require.ErrorContains(t, err, "match.methods must be explicit")
+
+	state, err := store.Sanitized()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), state.Revision)
+	require.Len(t, state.Bindings, 1)
+}
+
+func TestCredentialVaultKeepsCompatibilityDefaultsWhenScopedMatchEnforcementIsOff(t *testing.T) {
+	t.Setenv(constants.EnvCredentialVaultRequireScopedMatch, "")
+	store := NewStore(nil, func() bool { return true })
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+	req := testCredentialVaultRequest()
+	req.Bindings[0].Match.Methods = nil
+	req.Bindings[0].Match.Paths = nil
+
+	state, err := store.Create(req, pol)
+	require.NoError(t, err)
+	require.Equal(t, []string{"GET", "POST", "PUT", "PATCH", "DELETE"}, state.Bindings[0].Match.Methods)
+	require.Equal(t, []string{"/*"}, state.Bindings[0].Match.Paths)
 }
 
 func TestCredentialVaultDefaultAllowRespectsExplicitDenyRule(t *testing.T) {

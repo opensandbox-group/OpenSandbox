@@ -285,6 +285,20 @@ def test_postgresql_store_validates_pool_size():
         )
 
 
+def test_postgresql_store_snapshot_recovery_interval_is_positive():
+    config = PostgreSQLStoreConfig(
+        dsn=SecretStr("postgresql://localhost/opensandbox"),
+    )
+
+    assert config.snapshot_recovery_interval_seconds == 15
+
+    with pytest.raises(ValueError):
+        PostgreSQLStoreConfig(
+            dsn=SecretStr("postgresql://localhost/opensandbox"),
+            snapshot_recovery_interval_seconds=0,
+        )
+
+
 def test_renew_intent_defaults():
     cfg = AppConfig(runtime=RuntimeConfig(type="docker", execd_image="opensandbox/execd:latest"))
     ar = cfg.renew_intent

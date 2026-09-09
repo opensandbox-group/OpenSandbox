@@ -49,6 +49,156 @@ func TestNewUpperManager_EmptyRoot(t *testing.T) {
 	}
 }
 
+func TestNewUpperManager_ReclaimsStaleChildren(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "isolation")
+
+	// Simulate a previous execd lifetime: one session-layout residue with
+	// payload, one bare session-layout residue, and unrelated children that
+	// a shared upper_root must never lose.
+	staleID := "00000000000000000000000000000001"
+	staleUpper := filepath.Join(root, staleID, "upper")
+	if err := os.MkdirAll(staleUpper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, staleID, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleUpper, "residue.bin"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bareID := "00000000000000000000000000000002"
+	if err := os.MkdirAll(filepath.Join(root, bareID, "upper"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, bareID, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "junk.txt"), []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "shared-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr, err := NewUpperManager(root, 8<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range []string{
+		filepath.Join(root, staleID),
+		filepath.Join(root, bareID),
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale session dir %s should be reclaimed at startup", p)
+		}
+	}
+
+	// Children without the execd session layout must survive the sweep.
+	for _, p := range []string{
+		filepath.Join(root, "junk.txt"),
+		filepath.Join(root, "shared-data"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("unrecognized child %s must not be touched: %v", p, err)
+		}
+	}
+
+	if usage, err := mgr.Usage(); err != nil || usage != 0 {
+		t.Errorf("Usage() = (%d, %v), want (0, nil) after reclamation", usage, err)
+	}
+
+	mgr.mu.Lock()
+	tracked := len(mgr.entries)
+	mgr.mu.Unlock()
+	if tracked != 0 {
+		t.Errorf("tracked entries after reclamation = %d, want 0", tracked)
+	}
+}
+
+func TestUpperManager_ReclaimStaleFailureRetainedForGC(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "isolation")
+	staleID := "00000000000000000000000000000003"
+	staleUpper := filepath.Join(root, staleID, "upper")
+	if err := os.MkdirAll(staleUpper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, staleID, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleUpper, "residue.bin"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A mount or permission error can block reclamation at startup. The
+	// sweep must keep such residue tracked so the collector retries it.
+	mgr := &UpperManager{
+		root:      root,
+		maxBytes:  8 << 30,
+		removeAll: func(string) error { return errors.New("device or resource busy") },
+		entries:   make(map[string]*UpperEntry),
+	}
+	mgr.reclaimStale()
+
+	mgr.mu.Lock()
+	e := mgr.entries[staleID]
+	mgr.mu.Unlock()
+	if e == nil {
+		t.Fatal("failed reclamation must remain tracked for a GC retry")
+	}
+	if e.InUse {
+		t.Fatal("stale residue must be registered as released")
+	}
+	usage, err := mgr.Usage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage < 5 {
+		t.Errorf("Usage() = %d, want residue bytes counted", usage)
+	}
+
+	mgr.removeAll = os.RemoveAll
+	freed, err := mgr.CollectWithErrors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(freed) != 1 || freed[0] != staleID {
+		t.Fatalf("CollectWithErrors freed %v, want [%s]", freed, staleID)
+	}
+	if _, err := os.Stat(filepath.Join(root, staleID)); !os.IsNotExist(err) {
+		t.Error("retried reclamation should remove the residue")
+	}
+}
+
+func TestUpperManager_UsageSkipsMissingUpper(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	id, upper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a partially removed residue entry: the tracked upper dir is
+	// gone from disk but still registered.
+	if err := os.RemoveAll(filepath.Dir(upper)); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := mgr.Usage()
+	if err != nil {
+		t.Fatalf("Usage() error = %v, want nil for missing upper dir", err)
+	}
+	if usage != 0 {
+		t.Errorf("Usage() = %d, want 0 for missing upper dir", usage)
+	}
+
+	mgr.mu.Lock()
+	_, tracked := mgr.entries[id]
+	mgr.mu.Unlock()
+	if !tracked {
+		t.Fatal("entry should stay tracked for a GC retry")
+	}
+}
+
 func TestUpperManager_Allocate(t *testing.T) {
 	mgr := newTestUpperManager(t)
 

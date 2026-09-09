@@ -284,9 +284,9 @@ func (s *fleetPolicyServer) Handler() http.Handler {
 // handleCredentialVaultActive is the fleet-profile active vault API: one
 // shared socket, dispatch inside. The addon carries the flow's client IP
 // (REDIRECT/DNAT preserves the source), and the handler resolves clientIp ->
-// subject -> that subject's vault snapshot. Unknown IPs 404 (the addon treats
-// that as no-vault, no injection). The sidecar's single-vault handler is
-// unchanged.
+// subject -> that subject's vault snapshot. Unknown IPs and subjects without a
+// vault return 404. Conditional requests return 304 when the subject's opaque
+// active-snapshot tag is unchanged.
 func (s *fleetPolicyServer) handleCredentialVaultActive(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(r.URL.Query().Get("clientIp"))
 	if raw == "" {
@@ -303,12 +303,7 @@ func (s *fleetPolicyServer) handleCredentialVaultActive(w http.ResponseWriter, r
 		http.Error(w, "no subject for clientIp", http.StatusNotFound)
 		return
 	}
-	snapshot, err := s.vaultFor(subj).ActiveSnapshot()
-	if err != nil {
-		credentialvault.WriteError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, snapshot)
+	handleActiveVaultSnapshot(w, r, s.vaultFor(subj))
 }
 
 // subjectOf extracts and validates the routing header. The proxy is the only

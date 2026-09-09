@@ -704,7 +704,7 @@ func Test_collectTaskStatus(t *testing.T) {
 			// Create mock task status collector
 			mockCollector := NewMocktaskStatusCollector(ctl)
 			if len(tt.expectedCollectIPs) > 0 {
-				mockCollector.EXPECT().Collect(gomock.Any(), tt.expectedCollectIPs).Return(tt.mockReturnTasks).Times(1)
+				mockCollector.EXPECT().Collect(gomock.Any(), tt.expectedCollectIPs).Return(tt.mockReturnTasks, nil).Times(1)
 			}
 
 			// Create scheduler with mock collector

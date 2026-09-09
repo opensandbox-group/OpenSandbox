@@ -183,7 +183,8 @@ test("Sandbox.create aborts a readiness check and cleans up the sandbox", async 
   } finally {
     clearTimeout(timeout);
   }
-  assert.equal(healthSignal, controller.signal);
+  assert.equal(healthSignal.aborted, true);
+  assert.equal(healthSignal.reason, controller.signal.reason);
   assert.deepEqual(deleted, ["sandbox-test-id"]);
   finishDelete();
 });

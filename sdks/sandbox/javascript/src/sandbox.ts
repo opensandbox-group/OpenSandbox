@@ -49,7 +49,7 @@ import type {
   SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
-import { SandboxReadyTimeoutException } from "./core/exceptions.js";
+import { ReadinessBudget } from "./internal/readiness.js";
 
 const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
 
@@ -215,6 +215,7 @@ export interface SandboxCreateOptions {
   skipHealthCheck?: boolean;
   /**
    * Optional custom readiness check used by {@link Sandbox.waitUntilReady}.
+   * Custom checks are not cancelled on timeout.
    *
    * If provided, the SDK will call this function during readiness checks instead of
    * using the default `execd` ping check.
@@ -239,19 +240,21 @@ export interface SandboxConnectOptions {
   sandboxId: SandboxId;
 
   /**
-   * Skip readiness checks after connecting.
+   * Skip health checks after connecting; required endpoints are still resolved.
    */
   skipHealthCheck?: boolean;
   /**
    * Optional custom readiness check used by {@link Sandbox.waitUntilReady}.
+   * Custom checks are not cancelled on timeout.
    */
   healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>;
   /**
-   * Max time to wait for readiness.
+   * Total budget for endpoint publication and health checks.
+   * Custom checks and adapters must not block the event loop.
    */
   readyTimeoutSeconds?: number;
   /**
-   * Polling interval for readiness checks (milliseconds).
+   * Polling interval for endpoint publication and health checks (milliseconds).
    */
   healthCheckPollingInterval?: number;
   /**
@@ -264,23 +267,6 @@ function throwIfAborted(signal?: AbortSignal): void {
   signal?.throwIfAborted();
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
-  throwIfAborted(signal);
-
-  return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
-      reject(signal.reason);
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
 
 function toImageSpec(
   image: NonNullable<SandboxCreateOptions["image"]>
@@ -540,7 +526,7 @@ export class Sandbox {
               await sandboxes.deleteSandbox(sandboxId);
             }
           } catch {
-            // Best-effort cleanup after cancellation.
+            // Preserve the caller's abort error if sandbox cleanup fails.
           } finally {
             await connectionConfig.closeTransport().catch(() => undefined);
           }
@@ -551,7 +537,7 @@ export class Sandbox {
         try {
           await sandboxes.deleteSandbox(sandboxId);
         } catch {
-          // Ignore cleanup failure; surface original error.
+          // Preserve the original creation error if sandbox cleanup fails.
         }
       }
       await connectionConfig.closeTransport();
@@ -580,19 +566,15 @@ export class Sandbox {
       throw err;
     }
 
+    const budget = new ReadinessBudget(opts.readyTimeoutSeconds ?? DEFAULT_READY_TIMEOUT_SECONDS, opts.signal);
+    const interval = opts.healthCheckPollingInterval ?? DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS;
     try {
-      const endpoint = await sandboxes.getSandboxEndpoint(
-        opts.sandboxId,
-        DEFAULT_EXECD_PORT,
-        connectionConfig.useServerProxy,
-        opts.signal,
-      );
-      const egressEndpoint = await sandboxes.getSandboxEndpoint(
-        opts.sandboxId,
-        DEFAULT_EGRESS_PORT,
-        connectionConfig.useServerProxy,
-        opts.signal,
-      );
+      const endpoint = await budget.endpoint(signal => sandboxes.getSandboxEndpoint(
+        opts.sandboxId, DEFAULT_EXECD_PORT, connectionConfig.useServerProxy, signal,
+      ), interval);
+      const egressEndpoint = await budget.endpoint(signal => sandboxes.getSandboxEndpoint(
+        opts.sandboxId, DEFAULT_EGRESS_PORT, connectionConfig.useServerProxy, signal,
+      ), interval);
       const execdBaseUrl = `${connectionConfig.protocol}://${endpoint.endpoint}`;
       const egressBaseUrl = `${connectionConfig.protocol}://${egressEndpoint.endpoint}`;
       const execdStack =
@@ -626,15 +608,7 @@ export class Sandbox {
       });
 
       if (!(opts.skipHealthCheck ?? false)) {
-        await sbx.waitUntilReady({
-          readyTimeoutSeconds:
-            opts.readyTimeoutSeconds ?? DEFAULT_READY_TIMEOUT_SECONDS,
-          pollingIntervalMillis:
-            opts.healthCheckPollingInterval ??
-            DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS,
-          healthCheck: opts.healthCheck,
-          signal: opts.signal,
-        });
+        await sbx.checkReadiness(budget, interval, opts.healthCheck);
       }
 
       return sbx;
@@ -785,54 +759,33 @@ export class Sandbox {
     return `${this.connectionConfig.protocol}://${ep.endpoint}`;
   }
 
+  private async checkReadiness(
+    budget: ReadinessBudget,
+    interval: number,
+    healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>,
+  ): Promise<void> {
+    budget.healthContext(`domain=${this.connectionConfig.domain}, useServerProxy=${this.connectionConfig.useServerProxy}`);
+    while (true) {
+      try {
+        budget.attempt();
+        const healthy = await budget.run(async signal => healthCheck ? await healthCheck(this) : await this.health.ping(signal));
+        if (healthy) return;
+        budget.record("Health check returned false continuously.");
+      } catch (error) {
+        budget.remaining();
+        budget.record(error);
+      }
+      await budget.pause(interval);
+    }
+  }
+
   async waitUntilReady(opts: {
     readyTimeoutSeconds: number;
     pollingIntervalMillis: number;
     healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>;
     signal?: AbortSignal;
   }): Promise<void> {
-    const deadline = Date.now() + opts.readyTimeoutSeconds * 1000;
-    let attempt = 0;
-    let errorDetail = "Health check returned false continuously.";
-
-    const buildTimeoutMessage = () => {
-      const context = `domain=${this.connectionConfig.domain}, useServerProxy=${this.connectionConfig.useServerProxy}`;
-      return `Sandbox health check timed out after ${opts.readyTimeoutSeconds}s (${attempt} attempts). ${errorDetail} Connection context: ${context}.`;
-    };
-
-    // Wait until execd becomes reachable and passes health check.
-    while (true) {
-      throwIfAborted(opts.signal);
-      if (Date.now() >= deadline) break;
-      attempt++;
-      try {
-        if (opts.healthCheck) {
-          const ok = await opts.healthCheck(this);
-          throwIfAborted(opts.signal);
-          if (ok) {
-            return;
-          }
-        } else {
-          const ok = await this.health.ping(opts.signal);
-          throwIfAborted(opts.signal);
-          if (ok) {
-            return;
-          }
-        }
-        errorDetail = "Health check returned false continuously.";
-      } catch (err) {
-        throwIfAborted(opts.signal);
-        const message = err instanceof Error ? err.message : String(err);
-        errorDetail = `Last health check error: ${message}`;
-      }
-      // Clamp the sleep to the remaining budget so the final failed check
-      // does not overshoot the timeout by a full polling interval.
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      await sleep(Math.min(opts.pollingIntervalMillis, remaining), opts.signal);
-    }
-    throw new SandboxReadyTimeoutException({
-      message: buildTimeoutMessage(),
-    });
+    const budget = new ReadinessBudget(opts.readyTimeoutSeconds, opts.signal);
+    await this.checkReadiness(budget, opts.pollingIntervalMillis, opts.healthCheck);
   }
 }

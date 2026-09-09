@@ -23,6 +23,7 @@ import httpx
 
 from opensandbox.adapters.converter.response_handler import handle_api_error
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.internal.readiness import constrain_readiness_request
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.services.health import HealthSync
 
@@ -43,6 +44,7 @@ class HealthAdapterSync(HealthSync):
 
         self._client = Client(base_url=base_url, timeout=timeout)
         self._httpx_client = httpx.Client(
+            event_hooks={"request": [constrain_readiness_request]},
             base_url=base_url,
             headers=headers,
             timeout=timeout,
