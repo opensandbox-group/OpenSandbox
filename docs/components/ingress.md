@@ -59,6 +59,9 @@ endpoint return HTTP 404; they do not stop the Ingress data plane.
 
 The following OpenTelemetry metrics are emitted when OTLP metrics are enabled:
 
+See [component telemetry configuration](/guides/component-telemetry) for endpoint
+selection, standard disable switches, and cumulative/delta export settings.
+
 - `ingress.upstream.connect.count` and `ingress.upstream.connect.duration`,
   labeled only by connection result and proxy type.
 - `ingress.network.shadow.*` gauges for attempts, signal failures, distinct

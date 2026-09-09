@@ -382,6 +382,9 @@ OTLP metrics export is enabled when either endpoint is set:
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
 - `OTEL_EXPORTER_OTLP_ENDPOINT`
 
+For node-IP fallback behavior, standard disable switches, supported transport,
+and cumulative/delta export settings, see [component telemetry configuration](/guides/component-telemetry).
+
 ### Local Metrics Endpoints
 
 - `GET /metrics`: point-in-time host metrics snapshot

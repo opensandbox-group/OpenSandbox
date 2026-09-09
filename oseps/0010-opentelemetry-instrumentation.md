@@ -155,7 +155,7 @@ Meter name: **`opensandbox/egress`**.
 | **System** | `ingress.system.cpu.usage` | Gauge | CPU usage |
 | | `ingress.system.memory.usage_bytes` | Gauge | Memory usage |
 
-Note: Ingress typically returns 200 (success), 400 (bad request), 404 (sandbox not found), 502 (upstream error), 503 (sandbox not ready); aggregate by `http.status_code` for error-rate monitoring.
+Note: Ingress typically returns 200 (success), 400 (bad request), 404 (sandbox not found), 502 (upstream error), 503 (sandbox not ready); aggregate by `http_status_code` for error-rate monitoring.
 
 Metric namespaces are `execd.*`, `egress.*`, and `ingress.*` for easy filtering in a shared backend. **Execd (current implementation)** attaches `sandbox_id` from `OPENSANDBOX_ID` when set; ingress obtains sandbox-related identifiers from routing context where applicable.
 
@@ -278,9 +278,23 @@ Policy **deny** is not represented in this log (use **`egress.policy.denied_tota
   - **Do not** set `TracerProvider` for production use; omit or use a no-op tracer provider.
 
 - **OTLP exporter**  
-  Support HTTP and gRPC OTLP endpoints via environment variables:
+  The current shared exporter supports OTLP HTTP/protobuf. gRPC transport remains
+  unimplemented; setting `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` does not select it.
+  Configure HTTP endpoints via environment variables:
   - `OTEL_EXPORTER_OTLP_ENDPOINT` (or per-signal `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`).
-  - If unset, do not export or use a Noop provider to avoid connection errors.
+  - R5 calls for no export when unconfigured. The current execd/egress/ingress
+    implementation retains a historical `HOST_IP:4318` / `/etc/hostinfo` fallback
+    for compatibility. `OTEL_SDK_DISABLED=true` or `OTEL_METRICS_EXPORTER=none`
+    explicitly disables export, taking precedence over both explicit endpoints
+    and this fallback. Components may opt out of fallback with the shared
+    `DisableEndpointFallback` configuration field.
+  - `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` accepts `cumulative`,
+    `delta`, and `lowmemory` using the upstream exporter's semantics. When unset,
+    synchronous counters/histograms retain delta temporality and observable
+    counters retain cumulative temporality. Prometheus-style pipelines need
+    cumulative export or Collector `deltatocumulative` conversion.
+  - See [component telemetry configuration](../docs/guides/component-telemetry.md)
+    for current deployment behavior and process-environment configuration.
 
 - **Environment variables**  
   Support at least (names follow OpenTelemetry conventions where applicable):

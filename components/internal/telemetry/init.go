@@ -67,6 +67,9 @@ const (
 	envOTLPMetricsEndpoint = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 	envOTLPEndpoint        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	envHostIP              = "HOST_IP"
+	envSDKDisabled         = "OTEL_SDK_DISABLED"
+	envMetricsExporter     = "OTEL_METRICS_EXPORTER"
+	envTemporality         = "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"
 	otlpHTTPPort           = "4318"
 	hostInfoPath           = "/etc/hostinfo"
 )
@@ -91,9 +94,12 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	)
 
 	if metricsEnabled(cfg.DisableEndpointFallback) {
-		opts := append(metricsClientOptions(cfg.DisableEndpointFallback),
-			otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector),
-		)
+		opts := metricsClientOptions(cfg.DisableEndpointFallback)
+		// Preserve historical aggregation only when no preference is supplied.
+		// Otherwise let the exporter parse the standard environment variable.
+		if os.Getenv(envTemporality) == "" {
+			opts = append(opts, otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector))
+		}
 		mexp, err := otlpmetrichttp.New(ctx, opts...)
 		if err != nil {
 			return nil, err
@@ -113,6 +119,9 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 				return nil, err
 			}
 		}
+	} else {
+		otel.SetMeterProvider(noop.NewMeterProvider())
+		meterProvider.Store(nil)
 	}
 
 	shutdown = func(ctx context.Context) error {
@@ -139,6 +148,10 @@ func buildResource(ctx context.Context, serviceName string, extra []attribute.Ke
 
 // Endpoint precedence: OTEL_EXPORTER_OTLP_*_ENDPOINT -> HOST_IP -> /etc/hostinfo.
 func metricsEnabled(disableEndpointFallback bool) bool {
+	if strings.EqualFold(os.Getenv(envSDKDisabled), "true") ||
+		strings.EqualFold(os.Getenv(envMetricsExporter), "none") {
+		return false
+	}
 	if otlpEndpointFromEnv() != "" {
 		return true
 	}
@@ -201,9 +214,8 @@ func firstEndpoint(primary, fallback string) string {
 	return strings.TrimSpace(fallback)
 }
 
-// deltaTemporalitySelector returns delta temporality for monotonic instruments
-// (Counter, Histogram, ObservableCounter). Gauges and UpDownCounters keep
-// the default cumulative semantics.
+// deltaTemporalitySelector preserves the historical default: delta for synchronous
+// Counter and Histogram, cumulative for observable instruments and UpDownCounters.
 func deltaTemporalitySelector(kind sdkmetric.InstrumentKind) metricdata.Temporality {
 	switch kind {
 	case sdkmetric.InstrumentKindCounter,
