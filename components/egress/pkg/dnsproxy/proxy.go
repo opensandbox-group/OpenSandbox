@@ -65,8 +65,10 @@ type Proxy struct {
 	// queryPolicySelector, when set, resolves the per-query policy (and
 	// per-query resolved-IP callback) from the client's source address. This
 	// is the fast-sandbox-profile dispatch seam: one shared listener, N
-	// subject policies. nil keeps the single-policy behavior unchanged.
-	queryPolicySelector func(remoteAddr netip.Addr) *QueryPolicy
+	// subject policies. nil keeps the single-policy behavior unchanged. A nil
+	// result denies the query (fail closed); the returned denyReason carries
+	// the selector's actual reason for the denial log.
+	queryPolicySelector func(remoteAddr netip.Addr) (*QueryPolicy, string)
 
 	// Hosts whose successful outbound DNS log line should be suppressed (audit
 	// errors are still logged). Loaded once at startup; nil means "log all".
@@ -180,11 +182,18 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	policyToEval := p.currentPolicy()
 	notifyResolved := p.onResolved
 	if sel := p.queryPolicySelector; sel != nil {
-		qp := sel(requestRemoteAddr(w))
+		qp, denyReason := sel(requestRemoteAddr(w))
 		if qp == nil {
-			// Unknown source: fail closed (NXDOMAIN), never fall back to a
-			// default policy that could open the subject.
+			// Fail closed (NXDOMAIN), never fall back to a default policy
+			// that could open the subject. The selector supplies the actual
+			// denial reason; the denial is logged here only, in a single
+			// layer, so the reason stays accurate and is not duplicated.
+			if denyReason == "" {
+				denyReason = "unknown source"
+			}
 			telemetry.RecordDNSDenied()
+			log.Warnf("[dns] denied query (remote=%s question=%q reason=%s)",
+				requestRemoteAddr(w), host, denyReason)
 			resp := new(dns.Msg)
 			resp.SetRcode(r, dns.RcodeNameError)
 			p.writeReply(w, r, resp, telemetry.DNSReplyStageUnknownSource)
@@ -199,6 +208,8 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if policyToEval != nil && policyToEval.Evaluate(domain) == policy.ActionDeny {
 		telemetry.RecordDNSDenied()
 		p.publishBlocked(domain)
+		log.Warnf("[dns] denied by policy (remote=%s question=%q)",
+			requestRemoteAddr(w), host)
 		resp := new(dns.Msg)
 		resp.SetRcode(r, dns.RcodeNameError)
 		p.writeReply(w, r, resp, telemetry.DNSReplyStageDeny)
@@ -272,8 +283,9 @@ type QueryPolicy struct {
 // SetQueryPolicySelector installs the per-query policy dispatch (fast-sandbox
 // profile). Passing nil restores the single-policy behavior; the selector is
 // invoked on the serveDNS goroutine. A nil *QueryPolicy result denies the
-// query (fail closed).
-func (p *Proxy) SetQueryPolicySelector(sel func(remoteAddr netip.Addr) *QueryPolicy) {
+// query (fail closed); the returned denyReason describes why and is included
+// in the denial log (empty falls back to "unknown source").
+func (p *Proxy) SetQueryPolicySelector(sel func(remoteAddr netip.Addr) (*QueryPolicy, string)) {
 	p.queryPolicySelector = sel
 }
 

@@ -310,7 +310,7 @@ func TestServeDNSReplyWriteFailuresAreSurfaced(t *testing.T) {
 			effectivePolicy: policy.DefaultDenyPolicy(),
 			userPolicy:      policy.DefaultDenyPolicy(),
 		}
-		proxy.SetQueryPolicySelector(func(netip.Addr) *QueryPolicy { return nil })
+		proxy.SetQueryPolicySelector(func(netip.Addr) (*QueryPolicy, string) { return nil, "" })
 		w := newFailingWriter("10.0.0.9")
 		proxy.serveDNS(w, newQuery())
 		require.Equal(t, 1, w.attempts, "fail-closed reply must be attempted exactly once")
@@ -335,8 +335,8 @@ func TestServeDNSReplyWriteFailuresAreSurfaced(t *testing.T) {
 		proxy := selectorProxy(t)
 		allowPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
 		require.NoError(t, err)
-		proxy.SetQueryPolicySelector(func(netip.Addr) *QueryPolicy {
-			return &QueryPolicy{Policy: allowPol}
+		proxy.SetQueryPolicySelector(func(netip.Addr) (*QueryPolicy, string) {
+			return &QueryPolicy{Policy: allowPol}, ""
 		})
 		w := newFailingWriter("10.0.0.9")
 		proxy.serveDNS(w, newQuery())

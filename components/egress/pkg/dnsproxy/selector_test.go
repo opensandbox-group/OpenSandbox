@@ -98,14 +98,14 @@ func TestQueryPolicySelectorDispatch(t *testing.T) {
 	allowPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
 	require.NoError(t, err)
 
-	proxy.SetQueryPolicySelector(func(remote netip.Addr) *QueryPolicy {
+	proxy.SetQueryPolicySelector(func(remote netip.Addr) (*QueryPolicy, string) {
 		switch remote.String() {
 		case "10.0.0.5":
-			return &QueryPolicy{Policy: allowPol}
+			return &QueryPolicy{Policy: allowPol}, ""
 		case "10.0.0.6":
-			return &QueryPolicy{Policy: policy.DefaultDenyPolicy()}
+			return &QueryPolicy{Policy: policy.DefaultDenyPolicy()}, ""
 		default:
-			return nil
+			return nil, "unknown source"
 		}
 	})
 
@@ -137,7 +137,7 @@ func TestQueryPolicySelectorPerQueryOnResolved(t *testing.T) {
 		domain string
 		ips    []nftables.ResolvedIP
 	}, 1)
-	proxy.SetQueryPolicySelector(func(remote netip.Addr) *QueryPolicy {
+	proxy.SetQueryPolicySelector(func(remote netip.Addr) (*QueryPolicy, string) {
 		return &QueryPolicy{
 			Policy: allowPol,
 			OnResolved: func(domain string, ips []nftables.ResolvedIP) {
@@ -146,7 +146,7 @@ func TestQueryPolicySelectorPerQueryOnResolved(t *testing.T) {
 					ips    []nftables.ResolvedIP
 				}{domain, ips}
 			},
-		}
+		}, ""
 	})
 
 	w := &fakeRespWriter{remote: addrFromIP("10.0.0.5")}

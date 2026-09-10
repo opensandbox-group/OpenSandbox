@@ -138,17 +138,15 @@ func runFastSandboxProfile(ctx context.Context) {
 	if err != nil {
 		log.Fatalf("failed to init dns proxy: %v", err)
 	}
-	proxy.SetQueryPolicySelector(func(remote netip.Addr) *dnsproxy.QueryPolicy {
+	proxy.SetQueryPolicySelector(func(remote netip.Addr) (*dnsproxy.QueryPolicy, string) {
 		s, ok := reg.Resolve(subject.SubjectKey{SourceIP: remote})
 		if !ok {
 			// Unknown source: deny (fail closed), never a default policy.
-			log.Warnf("[dns] query from unknown source %s denied (fail closed)", remote)
-			return nil
+			return nil, "unknown source"
 		}
 		eff := reg.EffectivePolicy(s)
 		if eff == nil {
-			log.Warnf("[dns] query from subject %s (source %s) denied: no effective policy", s, remote)
-			return nil
+			return nil, "no effective policy for subject " + string(s)
 		}
 		return &dnsproxy.QueryPolicy{
 			Policy: eff,
@@ -159,7 +157,7 @@ func runFastSandboxProfile(ctx context.Context) {
 					log.Warnf("[dns] add resolved IPs to fast-sandbox nft failed for subject %s domain %q: %v", s, domain, err)
 				}
 			},
-		}
+		}, ""
 	})
 	if err := proxy.Start(ctx); err != nil {
 		log.Fatalf("failed to start dns proxy: %v", err)
