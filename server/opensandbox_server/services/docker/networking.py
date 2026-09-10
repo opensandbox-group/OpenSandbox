@@ -65,9 +65,15 @@ logger = logging.getLogger(__name__)
 
 
 # Docker creates ``/.dockerenv``; Podman (rootful and rootless) creates
-# ``/run/.containerenv`` instead and exports ``container=podman``.
+# ``/run/.containerenv`` instead and exports ``container=podman``. Only the
+# values container runtimes actually set count: a generic ``CONTAINER=build``
+# on a bare-metal host must not switch endpoint resolution to
+# ``[docker].host_ip``.
 _CONTAINER_MARKER_FILES = ("/.dockerenv", "/run/.containerenv")
 _CONTAINER_ENV_VARS = ("container", "CONTAINER")
+_CONTAINER_RUNTIME_VALUES = frozenset(
+    {"podman", "docker", "oci", "lxc", "lxc-libvirt", "systemd-nspawn"}
+)
 
 
 def _running_inside_docker_container() -> bool:
@@ -79,7 +85,10 @@ def _running_inside_docker_container() -> bool:
     """
     if any(os.path.exists(marker) for marker in _CONTAINER_MARKER_FILES):
         return True
-    return any(os.environ.get(name) for name in _CONTAINER_ENV_VARS)
+    return any(
+        os.environ.get(name, "").strip().lower() in _CONTAINER_RUNTIME_VALUES
+        for name in _CONTAINER_ENV_VARS
+    )
 
 
 def _docker_error_indicates_unsupported_ipv6_sysctls(exc: DockerException) -> bool:
