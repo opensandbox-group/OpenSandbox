@@ -196,3 +196,36 @@ func TestServerStreamEventSummary(t *testing.T) {
 		})
 	}
 }
+
+func TestRunCommandArgvValidation(t *testing.T) {
+	for _, body := range []string{`{}`, `{"command":"echo", "argv":["tool"]}`, `{"command":"", "argv":["tool"]}`, `{"argv":[]}`, `{"argv":null}`, `{"argv":[""]}`, `{"argv":["tool",null]}`, `{"argv":["tool","\u0000"]}`} {
+		var req RunCommandRequest
+		err := json.Unmarshal([]byte(body), &req)
+		if err == nil {
+			err = req.Validate()
+		}
+		require.Error(t, err, body)
+	}
+	var req RunCommandRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"argv":["tool","","$HOME"]}`), &req))
+	require.NoError(t, req.Validate())
+}
+
+func TestCommandAndSessionCwdUseTheirOwnEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing")
+	t.Setenv("ARGV_DIR", missing)
+	envFile := filepath.Join(t.TempDir(), "envs")
+	require.NoError(t, os.WriteFile(envFile, []byte("ARGV_DIR="+dir+"\n"), 0600))
+	t.Setenv("EXECD_ENVS", envFile)
+	for _, req := range []RunCommandRequest{{Command: "pwd"}, {Argv: []string{"tool"}}} {
+		req.Cwd = "$ARGV_DIR"
+		require.NoError(t, req.Validate())
+		req.Envs = map[string]string{"ARGV_DIR": missing}
+		require.Error(t, req.Validate())
+	}
+	session := RunInSessionRequest{Command: "pwd", Cwd: "$ARGV_DIR"}
+	require.Error(t, session.Validate())
+	t.Setenv("ARGV_DIR", dir)
+	require.NoError(t, session.Validate())
+}

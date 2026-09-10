@@ -286,6 +286,10 @@ export default defineConfig({
               text: "Snapshot Store Migration",
               link: "/reference/snapshot-store-migration",
             },
+            {
+              text: "Code Interpreter Image Migration",
+              link: "/reference/code-interpreter-image-migration",
+            },
           ],
         },
       ],

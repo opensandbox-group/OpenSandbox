@@ -29,7 +29,6 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
-	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
@@ -51,18 +50,14 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.Code))
-	cmd := exec.CommandContext(ctx, "cmd", "/C", request.Code)
-	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
-	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Dir = cwd
-	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	done := make(chan struct{}, 1)
 	var wg sync.WaitGroup
@@ -90,7 +85,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,
 		startedAt:    startAt,
-		content:      request.Code,
+		content:      request.commandContent(),
 		running:      true,
 		isBackground: false,
 	}
@@ -144,18 +139,14 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	stderrPath := c.combinedOutputFileName(session)
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.Code))
-	cmd := exec.CommandContext(ctx, "cmd", "/C", request.Code)
-	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
-	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
-	cmd.Dir = cwd
 	cmd.Stdout = pipe
 	cmd.Stderr = pipe
-	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	devNull, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0) // best-effort, ignore error
 	cmd.Stdin = devNull
@@ -173,7 +164,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	kernel := &commandKernel{
 		pid:          cmd.Process.Pid,
-		content:      request.Code,
+		content:      request.commandContent(),
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,
 		startedAt:    startAt,
@@ -210,4 +201,8 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	request.Hooks.OnExecuteComplete(time.Since(startAt))
 	return nil
+}
+
+func newShellCommand(ctx context.Context, code string) *exec.Cmd {
+	return exec.CommandContext(ctx, "cmd", "/C", code)
 }

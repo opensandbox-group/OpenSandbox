@@ -86,9 +86,10 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     body: RunCommandRequest,
 ) -> Response[ErrorResponse | ServerStreamEvent]:
-    """Execute shell command
+    """Execute shell command or native argv
 
-     Executes a shell command and streams the output in real-time using SSE (Server-Sent Events).
+     Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply
+    exactly one input mode.
     The command can run in foreground or background mode. The response includes stdout, stderr,
     execution status, and completion events.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
@@ -96,7 +97,8 @@ def sync_detailed(
     with specific user/group IDs, and `envs` to inject environment variables.
 
     Args:
-        body (RunCommandRequest): Request to execute a shell command
+        body (RunCommandRequest): Execute exactly one of command (shell text) or argv (native
+            arguments).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -122,9 +124,10 @@ def sync(
     client: AuthenticatedClient | Client,
     body: RunCommandRequest,
 ) -> ErrorResponse | ServerStreamEvent | None:
-    """Execute shell command
+    """Execute shell command or native argv
 
-     Executes a shell command and streams the output in real-time using SSE (Server-Sent Events).
+     Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply
+    exactly one input mode.
     The command can run in foreground or background mode. The response includes stdout, stderr,
     execution status, and completion events.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
@@ -132,7 +135,8 @@ def sync(
     with specific user/group IDs, and `envs` to inject environment variables.
 
     Args:
-        body (RunCommandRequest): Request to execute a shell command
+        body (RunCommandRequest): Execute exactly one of command (shell text) or argv (native
+            arguments).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -153,9 +157,10 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     body: RunCommandRequest,
 ) -> Response[ErrorResponse | ServerStreamEvent]:
-    """Execute shell command
+    """Execute shell command or native argv
 
-     Executes a shell command and streams the output in real-time using SSE (Server-Sent Events).
+     Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply
+    exactly one input mode.
     The command can run in foreground or background mode. The response includes stdout, stderr,
     execution status, and completion events.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
@@ -163,7 +168,8 @@ async def asyncio_detailed(
     with specific user/group IDs, and `envs` to inject environment variables.
 
     Args:
-        body (RunCommandRequest): Request to execute a shell command
+        body (RunCommandRequest): Execute exactly one of command (shell text) or argv (native
+            arguments).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -187,9 +193,10 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     body: RunCommandRequest,
 ) -> ErrorResponse | ServerStreamEvent | None:
-    """Execute shell command
+    """Execute shell command or native argv
 
-     Executes a shell command and streams the output in real-time using SSE (Server-Sent Events).
+     Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply
+    exactly one input mode.
     The command can run in foreground or background mode. The response includes stdout, stderr,
     execution status, and completion events.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
@@ -197,7 +204,8 @@ async def asyncio(
     with specific user/group IDs, and `envs` to inject environment variables.
 
     Args:
-        body (RunCommandRequest): Request to execute a shell command
+        body (RunCommandRequest): Execute exactly one of command (shell text) or argv (native
+            arguments).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

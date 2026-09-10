@@ -53,7 +53,7 @@ Generated OpenAPI clients live beside handwritten adapters. Generated code handl
 
 The code-interpreter SDKs build on the sandbox SDKs and `execd` code execution APIs. They manage code execution contexts and expose language-oriented code execution helpers.
 
-The official code-interpreter image is under `sandboxes/code-interpreter/`. It provides Python, Java, Node.js, and Go runtimes, and Jupyter kernels for Python, Java, TypeScript/JavaScript, Go, and Bash. Exact language versions are image-controlled and selected through environment variables such as `PYTHON_VERSION`, `JAVA_VERSION`, `NODE_VERSION`, and `GO_VERSION`.
+The official code-interpreter image is maintained in [opensandbox-group/sandbox-images](https://github.com/opensandbox-group/sandbox-images) (previously located under `sandboxes/code-interpreter/`; see [Migration Reference](/reference/code-interpreter-image-migration)). It provides Python, Java, Node.js, and Go runtimes, and Jupyter kernels for Python, Java, TypeScript/JavaScript, Go, and Bash. Exact language versions are image-controlled and selected through environment variables such as `PYTHON_VERSION`, `JAVA_VERSION`, `NODE_VERSION`, and `GO_VERSION`.
 
 ### 1.3 CLI and MCP
 

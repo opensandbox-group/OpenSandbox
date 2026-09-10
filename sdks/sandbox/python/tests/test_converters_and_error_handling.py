@@ -510,6 +510,16 @@ def test_execution_converter_to_api_run_command_request() -> None:
     assert "cwd" not in d4
 
 
+    argv = ["tool", "", "a b", "$HOME", "x'y", "中文"]
+    native = ExecutionConverter.to_api_run_command_request(
+        argv, RunCommandOpts(background=True, working_directory="$DIR", envs={"DIR": "/tmp"})
+    ).to_dict()
+    assert native == {"argv": argv, "background": True, "cwd": "$DIR", "envs": {"DIR": "/tmp"}}
+    for invalid in ([], [""], ["tool", "\0"], ["tool", None], ("tool", "arg"), None, 123):
+        with pytest.raises(InvalidArgumentException):
+            ExecutionConverter.to_api_run_command_request(invalid, RunCommandOpts())
+
+
 def test_run_command_opts_validates_gid_requires_uid() -> None:
     with pytest.raises(ValueError, match="uid is required when gid is provided"):
         RunCommandOpts(gid=1000)

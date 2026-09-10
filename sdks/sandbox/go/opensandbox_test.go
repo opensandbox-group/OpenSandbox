@@ -2491,33 +2491,30 @@ func TestStreamSSE_HandlerError(t *testing.T) {
 }
 
 func TestRunCommand_WithEnvs(t *testing.T) {
-	ssePayload := `{"type":"stdout","text":"bar","timestamp":1000}` + "\n\n" +
-		`{"type":"execution_complete","timestamp":1001,"execution_time":5}` + "\n\n"
+	for _, input := range []RunCommandRequest{{Command: "echo $FOO"}, {Argv: []string{"tool", "", "a b", "$HOME", "x'y"}}} {
+		input.Envs = map[string]string{"FOO": "bar", "BAZ": "qux"}
+		ssePayload := `{"type":"stdout","text":"bar","timestamp":1000}` + "\n\n" +
+			`{"type":"execution_complete","timestamp":1001,"execution_time":5}` + "\n\n"
 
-	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var req RunCommandRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+			var req RunCommandRequest
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(body, &req))
+			require.Equal(t, input.Command != "", strings.Contains(string(body), `"command"`))
+			require.Equal(t, input.Command, req.Command)
+			require.Equal(t, input.Argv, req.Argv)
 
-		if req.Envs == nil {
-			require.FailNow(t, "expected Envs to be set")
-		}
-		if req.Envs["FOO"] != "bar" {
-			assert.Fail(t, fmt.Sprintf("Envs[FOO] = %q, want bar", req.Envs["FOO"]))
-		}
-		if req.Envs["BAZ"] != "qux" {
-			assert.Fail(t, fmt.Sprintf("Envs[BAZ] = %q, want qux", req.Envs["BAZ"]))
-		}
+			require.Equal(t, input.Envs, req.Envs)
 
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(ssePayload))
-	})
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(ssePayload))
+		})
 
-	err := client.RunCommand(context.Background(), RunCommandRequest{
-		Command: "echo $FOO",
-		Envs:    map[string]string{"FOO": "bar", "BAZ": "qux"},
-	}, func(event StreamEvent) error { return nil })
-	require.NoErrorf(t, err, "RunCommand with Envs")
+		err := client.RunCommand(context.Background(), input, func(event StreamEvent) error { return nil })
+		require.NoErrorf(t, err, "RunCommand with Envs")
+	}
 }
 
 func TestRunCommand_Background(t *testing.T) {

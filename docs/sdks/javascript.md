@@ -166,7 +166,7 @@ const manual = await Sandbox.create({
 
 ### 2. Custom Health Check
 
-Define custom logic to determine whether the sandbox is ready/healthy. This overrides the default ping check used during readiness checks.
+Define custom logic to determine whether the sandbox is ready/healthy. This overrides the default ping check. Checks must not block the event loop and may continue running after timeout.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -200,6 +200,15 @@ await sandbox.commands.run(
   handlers,
 );
 ```
+
+To execute a native program without shell parsing, pass an argument list. On Linux,
+this example prints literal `$HOME` and keeps `hello world` as one argument:
+
+```ts
+await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"]);
+```
+
+Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
 
 ### 4. Comprehensive File Operations
 

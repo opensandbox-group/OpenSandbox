@@ -12,6 +12,7 @@ Thank you for your interest in contributing to OpenSandbox! This guide will help
 - [Coding Standards](#coding-standards)
 - [Testing Guidelines](#testing-guidelines)
 - [Submitting Contributions](#submitting-contributions)
+- [Contributor Advancement](#contributor-advancement)
 - [Communication Channels](#communication-channels)
 
 ## Code of Conduct
@@ -135,14 +136,14 @@ OpenSandbox/
 ├── server/                   # Sandbox server (Python/FastAPI)
 ├── components/
 │   └── execd/                # Execution daemon (Go/Beego)
-├── sandboxes/                # Sandbox implementations
-│   └── code-interpreter/     # Code Interpreter sandbox
 ├── examples/                 # Example integrations
 ├── docs/                     # Documentation
 ├── tests/                    # Cross-component tests
 │   └── e2e/                  # End-to-end tests
 └── scripts/                  # Build and utility scripts
 ```
+
+To contribute to sandbox environment images (such as `code-interpreter`), see [opensandbox-group/sandbox-images](https://github.com/opensandbox-group/sandbox-images).
 
 ## Development Workflow
 
@@ -580,6 +581,12 @@ When creating a PR, fill out the template:
 3. **Feedback Loop**: Address review comments
 4. **Approval**: Once approved, a maintainer will merge your PR
 5. **Cleanup**: Delete your feature branch after merge
+
+## Contributor Advancement
+
+OpenSandbox welcomes contributors seeking long-term involvement and project stewardship. The project maintains an explicit advancement process from Contributor to Maintainer (component ownership) and Project Maintainer (repository-wide stewardship).
+
+For details on nominations, eligibility, review periods, and approval thresholds, see [GOVERNANCE.md](GOVERNANCE.md#becoming-a-maintainer).
 
 ## Communication Channels
 

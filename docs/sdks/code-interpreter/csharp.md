@@ -14,7 +14,7 @@ This SDK requires a Docker image containing the Code Interpreter runtime environ
 Node.js, and others.
 
 For supported languages and versions, see the
-[Environment Documentation](https://github.com/opensandbox-group/OpenSandbox/tree/main/sandboxes/code-interpreter).
+[Environment Documentation](https://github.com/opensandbox-group/sandbox-images).
 
 ## Installation
 

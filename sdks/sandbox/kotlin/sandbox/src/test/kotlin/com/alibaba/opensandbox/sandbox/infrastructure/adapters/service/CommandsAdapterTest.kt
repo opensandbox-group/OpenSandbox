@@ -32,6 +32,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toComma
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
@@ -77,6 +78,21 @@ class CommandsAdapterTest {
     fun tearDown() {
         mockWebServer.shutdown()
         httpClientProvider.close()
+    }
+
+    @Test
+    fun `native argv preserves arguments and omits shell command`() {
+        val argv = listOf("tool", "", "a b", "$" + "HOME", "x'y")
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1}""" + "\n"),
+        )
+        commandsAdapter.run(RunCommandRequest.builder().argv(argv).workingDirectory("$" + "DIR").build())
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertTrue("command" !in body)
+        assertEquals(argv, body["argv"]?.jsonArray?.map { it.jsonPrimitive.content })
+        assertThrows<IllegalArgumentException> { RunCommandRequest.builder().command("echo").argv(argv).build() }
+        assertThrows<IllegalArgumentException> { RunCommandRequest.builder().argv(emptyList()).build() }
+        assertEquals("$" + "DIR", body["cwd"]?.jsonPrimitive?.content)
     }
 
     @Test
@@ -129,6 +145,7 @@ class CommandsAdapterTest {
         assertEquals("POST", recordedRequest.method)
         val requestBodyJson = Json.parseToJsonElement(recordedRequest.body.readUtf8()).jsonObject
         assertEquals("echo Hello", requestBodyJson["command"]?.jsonPrimitive?.content)
+        assertTrue("argv" !in requestBodyJson)
         assertEquals(1000, requestBodyJson["uid"]?.jsonPrimitive?.intOrNull)
         assertEquals(1000, requestBodyJson["gid"]?.jsonPrimitive?.intOrNull)
         val envs = requestBodyJson["envs"]?.jsonObject
@@ -422,6 +439,7 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
         assertEquals("POST", recordedRequest.method)
         val requestBodyJson = Json.parseToJsonElement(recordedRequest.body.readUtf8()).jsonObject
         assertEquals("echo Hello", requestBodyJson["command"]?.jsonPrimitive?.content)
+        assertTrue("argv" !in requestBodyJson)
         assertEquals("/workspace", requestBodyJson["cwd"]?.jsonPrimitive?.content)
         assertEquals(5000L, requestBodyJson["timeout"]?.jsonPrimitive?.content?.toLong())
     }

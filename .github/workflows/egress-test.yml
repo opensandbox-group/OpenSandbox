@@ -59,6 +59,14 @@ jobs:
         run: |
           go test ./...
 
+      - name: Run timed nft element regression
+        working-directory: components/egress
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables
+          go test -c -o /tmp/egress-nft.test ./pkg/nftables
+          sudo env OPENSANDBOX_NFT_TEST=1 /tmp/egress-nft.test -test.run '^TestDynamicElementRenewal$' -test.v
+
       - name: Run mitmscripts unit and runtime tests
         working-directory: components/egress
         run: |

@@ -143,7 +143,7 @@ Sandbox manual = Sandbox.builder()
 
 ### 2. Custom Health Check
 
-Define custom logic to determine if the sandbox is healthy. This overrides the default ping check.
+Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Set timeouts within custom checks; the SDK cannot interrupt them.
 
 ```java
 Sandbox sandbox = Sandbox.builder()
@@ -187,6 +187,17 @@ RunCommandRequest request = RunCommandRequest.builder()
 
 sandbox.commands().run(request);
 ```
+
+To execute a native program without shell parsing, pass an argument list. On Linux,
+this example prints literal `$HOME` and keeps `hello world` as one argument:
+
+```java
+sandbox.commands().run(RunCommandRequest.builder()
+    .argv(List.of("printf", "%s\n", "$HOME", "hello world"))
+    .build());
+```
+
+Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
 
 ### 4. Comprehensive File Operations
 

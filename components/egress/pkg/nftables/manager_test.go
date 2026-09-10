@@ -247,7 +247,9 @@ func TestRefreshActiveConnections_RenewsKnownActiveIP(t *testing.T) {
 	}, m))
 
 	require.Len(t, scripts, 2)
-	require.Equal(t, "add element inet opensandbox dyn_allow_v4 { 1.1.1.1 timeout 360s }\n", scripts[1])
+	require.Equal(t, "add element inet opensandbox dyn_allow_v4 { 1.1.1.1 }\n"+
+		"delete element inet opensandbox dyn_allow_v4 { 1.1.1.1 }\n"+
+		"add element inet opensandbox dyn_allow_v4 { 1.1.1.1 timeout 360s }\n", scripts[1])
 }
 
 func TestRefreshActiveConnections_RenewsOnceAfterConnectionCloses(t *testing.T) {
@@ -267,8 +269,24 @@ func TestRefreshActiveConnections_RenewsOnceAfterConnectionCloses(t *testing.T) 
 	require.NoError(t, m.tracker.refreshActiveConnections(context.Background(), nil, m))
 
 	require.Len(t, scripts, 3)
-	require.Equal(t, "add element inet opensandbox dyn_allow_v6 { 2001:db8::1 timeout 360s }\n", scripts[1])
+	require.Equal(t, "add element inet opensandbox dyn_allow_v6 { 2001:db8::1 }\n"+
+		"delete element inet opensandbox dyn_allow_v6 { 2001:db8::1 }\n"+
+		"add element inet opensandbox dyn_allow_v6 { 2001:db8::1 timeout 360s }\n", scripts[1])
 	require.Equal(t, scripts[1], scripts[2])
+}
+
+func TestRefreshActiveConnections_DoesNotExtendFailedRenewal(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	manager := NewManagerWithRunner(func(context.Context, string) ([]byte, error) { return nil, nil })
+	manager.tracker.now = func() time.Time { return now }
+	address := netip.MustParseAddr("192.0.2.1")
+	require.NoError(t, manager.AddResolvedIPs(context.Background(), []ResolvedIP{{Addr: address, TTL: time.Minute}}))
+	expiresAt := manager.tracker.dynamicIPs[address]
+	now = now.Add(30 * time.Second)
+	manager.run = func(context.Context, string) ([]byte, error) { return nil, fmt.Errorf("nft failed") }
+	require.Error(t, manager.tracker.refreshActiveConnections(context.Background(), []tcpConnection{{remote: address, state: "ESTABLISHED"}}, manager))
+	require.Equal(t, expiresAt, manager.tracker.dynamicIPs[address])
+	require.Empty(t, manager.tracker.previousActiveIPs)
 }
 
 func TestApplyStatic_ClearsTrackedDynamicIPs(t *testing.T) {

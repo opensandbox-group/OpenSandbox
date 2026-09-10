@@ -26,8 +26,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// This is the fixed T5 subset of opensandbox-group/fast-sandbox FastPath v2
-// at revision e22078237542eea4c0ce17aed938cf96bd352520. Field numbers and the
+// This is the ResolveEndpoint subset of opensandbox-group/fast-sandbox FastPath v2
+// at revision 11b21bf6a6ce730d48ea6e3e3d0050db2607ae49. Field numbers and the
 // fully-qualified RPC name must remain wire-compatible with that source.
 type FastPathServiceClient interface {
 	ResolveEndpoint(ctx context.Context, in *ResolveEndpointRequest, opts ...grpc.CallOption) (*ResolveEndpointResponse, error)
@@ -55,8 +55,8 @@ func (c *fastPathServiceClient) ResolveEndpoint(ctx context.Context, in *Resolve
 // All implementations must embed UnimplementedFastPathServiceServer
 // for forward compatibility.
 //
-// This is the fixed T5 subset of opensandbox-group/fast-sandbox FastPath v2
-// at revision e22078237542eea4c0ce17aed938cf96bd352520. Field numbers and the
+// This is the ResolveEndpoint subset of opensandbox-group/fast-sandbox FastPath v2
+// at revision 11b21bf6a6ce730d48ea6e3e3d0050db2607ae49. Field numbers and the
 // fully-qualified RPC name must remain wire-compatible with that source.
 type FastPathServiceServer interface {
 	ResolveEndpoint(context.Context, *ResolveEndpointRequest) (*ResolveEndpointResponse, error)

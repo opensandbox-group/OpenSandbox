@@ -9,6 +9,10 @@ Complete demonstration of running Python code using the Code Interpreter SDK.
 
 ## Getting Code Interpreter image
 
+::: info Image Source
+The container image source and environment definitions are maintained in [opensandbox-group/sandbox-images](https://github.com/opensandbox-group/sandbox-images).
+:::
+
 Pull the prebuilt image from a registry:
 
 ```shell
@@ -251,3 +255,4 @@ uv run python examples/code-interpreter/main_use_pool.py
 ## References
 
 - [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/code-interpreter)
+- [Code Interpreter Image Repository](https://github.com/opensandbox-group/sandbox-images)

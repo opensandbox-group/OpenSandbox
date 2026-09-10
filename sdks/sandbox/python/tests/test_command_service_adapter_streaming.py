@@ -363,3 +363,14 @@ async def test_run_foreground_command_still_waits_for_terminator() -> None:
 
     with pytest.raises(SandboxConnectionException):
         await adapter.run("sleep 1", opts=RunCommandOpts(background=False))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", [("tool", "arg"), None, 123])
+async def test_run_rejects_unsupported_command_types(command) -> None:
+    cfg = ConnectionConfig(protocol="http", transport=_SseTransport())
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    with pytest.raises(InvalidArgumentException, match="shell text or an argv list"):
+        await adapter.run(command)

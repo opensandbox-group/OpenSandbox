@@ -434,7 +434,7 @@ async def _assert_parallel_endpoint_resolution(
 
 @pytest.mark.parametrize("flow", ["create", "connect", "resume"])
 @pytest.mark.asyncio
-async def test_sandbox_resolves_endpoints_in_parallel(
+async def test_sandbox_endpoint_resolution_order(
     monkeypatch: pytest.MonkeyPatch, flow: str
 ) -> None:
     gate = _GatedEndpointServiceStub()
@@ -507,7 +507,19 @@ async def test_sandbox_resolves_endpoints_in_parallel(
             connection_config=ConnectionConfig(),
         )
 
-    await _assert_parallel_endpoint_resolution(gate, _op)
+    if flow == "create":
+        await _assert_parallel_endpoint_resolution(gate, _op)
+    else:
+        task = asyncio.create_task(_op())
+        await asyncio.wait_for(gate.execd_entered.wait(), timeout=1)
+        try:
+            assert not gate.egress_entered.is_set()
+        finally:
+            gate.release.set()
+        sandbox = await asyncio.wait_for(task, timeout=1)
+        assert gate.egress_entered.is_set()
+        await sandbox.close()
+
 
 
 @pytest.mark.parametrize("flow", ["create", "connect", "resume"])

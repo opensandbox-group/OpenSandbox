@@ -36,7 +36,6 @@ Required:
                         server
                         docker/execd
                         docker/nodeagent
-                        docker/code-interpreter
                         docker/ingress
                         docker/egress
                         k8s/controller
@@ -397,11 +396,6 @@ case "$TARGET" in
     DISPLAY_NAME="Component Image nodeagent"
     WORKFLOW_HINT=".github/workflows/publish-components.yml"
     TARGET_PATH_FILTERS=("components/nodeagent" "components/internal")
-    ;;
-  docker/code-interpreter)
-    DISPLAY_NAME="Component Image code-interpreter"
-    WORKFLOW_HINT=".github/workflows/publish-components.yml"
-    TARGET_PATH_FILTERS=("sandboxes/code-interpreter")
     ;;
   docker/ingress)
     DISPLAY_NAME="Component Image ingress"

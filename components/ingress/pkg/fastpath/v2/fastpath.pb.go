@@ -120,14 +120,11 @@ func (x *NamespacedName) GetName() string {
 }
 
 type SandboxReference struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Reference:
-	//
-	//	*SandboxReference_SandboxUid
-	//	*SandboxReference_NamespacedName
-	Reference     isSandboxReference_Reference `protobuf_oneof:"reference"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	NamespacedName *NamespacedName        `protobuf:"bytes,2,opt,name=namespaced_name,json=namespacedName,proto3" json:"namespaced_name,omitempty"`
+	ExpectedUid    string                 `protobuf:"bytes,3,opt,name=expected_uid,json=expectedUid,proto3" json:"expected_uid,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *SandboxReference) Reset() {
@@ -160,46 +157,19 @@ func (*SandboxReference) Descriptor() ([]byte, []int) {
 	return file_fastpath_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *SandboxReference) GetReference() isSandboxReference_Reference {
+func (x *SandboxReference) GetNamespacedName() *NamespacedName {
 	if x != nil {
-		return x.Reference
+		return x.NamespacedName
 	}
 	return nil
 }
 
-func (x *SandboxReference) GetSandboxUid() string {
+func (x *SandboxReference) GetExpectedUid() string {
 	if x != nil {
-		if x, ok := x.Reference.(*SandboxReference_SandboxUid); ok {
-			return x.SandboxUid
-		}
+		return x.ExpectedUid
 	}
 	return ""
 }
-
-func (x *SandboxReference) GetNamespacedName() *NamespacedName {
-	if x != nil {
-		if x, ok := x.Reference.(*SandboxReference_NamespacedName); ok {
-			return x.NamespacedName
-		}
-	}
-	return nil
-}
-
-type isSandboxReference_Reference interface {
-	isSandboxReference_Reference()
-}
-
-type SandboxReference_SandboxUid struct {
-	SandboxUid string `protobuf:"bytes,1,opt,name=sandbox_uid,json=sandboxUid,proto3,oneof"`
-}
-
-type SandboxReference_NamespacedName struct {
-	NamespacedName *NamespacedName `protobuf:"bytes,2,opt,name=namespaced_name,json=namespacedName,proto3,oneof"`
-}
-
-func (*SandboxReference_SandboxUid) isSandboxReference_Reference() {}
-
-func (*SandboxReference_NamespacedName) isSandboxReference_Reference() {}
 
 type EndpointTarget struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -284,14 +254,13 @@ func (*EndpointTarget_ComponentName) isEndpointTarget_Target() {}
 func (*EndpointTarget_Port) isEndpointTarget_Target() {}
 
 type ResolveEndpointRequest struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	Sandbox           *SandboxReference      `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
-	Target            *EndpointTarget        `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
-	AccessMode        EndpointAccessMode     `protobuf:"varint,3,opt,name=access_mode,json=accessMode,proto3,enum=fastpath.v2.EndpointAccessMode" json:"access_mode,omitempty"`
-	WaitUntilReady    bool                   `protobuf:"varint,4,opt,name=wait_until_ready,json=waitUntilReady,proto3" json:"wait_until_ready,omitempty"`
-	WaitTimeoutMillis int32                  `protobuf:"varint,5,opt,name=wait_timeout_millis,json=waitTimeoutMillis,proto3" json:"wait_timeout_millis,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Sandbox            *SandboxReference      `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
+	Target             *EndpointTarget        `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	AccessMode         EndpointAccessMode     `protobuf:"varint,3,opt,name=access_mode,json=accessMode,proto3,enum=fastpath.v2.EndpointAccessMode" json:"access_mode,omitempty"`
+	ExpectedGeneration int64                  `protobuf:"varint,4,opt,name=expected_generation,json=expectedGeneration,proto3" json:"expected_generation,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ResolveEndpointRequest) Reset() {
@@ -345,16 +314,69 @@ func (x *ResolveEndpointRequest) GetAccessMode() EndpointAccessMode {
 	return EndpointAccessMode_CENTRAL_PROXY
 }
 
-func (x *ResolveEndpointRequest) GetWaitUntilReady() bool {
+func (x *ResolveEndpointRequest) GetExpectedGeneration() int64 {
 	if x != nil {
-		return x.WaitUntilReady
+		return x.ExpectedGeneration
 	}
-	return false
+	return 0
 }
 
-func (x *ResolveEndpointRequest) GetWaitTimeoutMillis() int32 {
+type ResolvedEndpoint struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ComponentName string                 `protobuf:"bytes,1,opt,name=component_name,json=componentName,proto3" json:"component_name,omitempty"`
+	Protocol      string                 `protobuf:"bytes,2,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	Port          uint32                 `protobuf:"varint,3,opt,name=port,proto3" json:"port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolvedEndpoint) Reset() {
+	*x = ResolvedEndpoint{}
+	mi := &file_fastpath_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolvedEndpoint) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolvedEndpoint) ProtoMessage() {}
+
+func (x *ResolvedEndpoint) ProtoReflect() protoreflect.Message {
+	mi := &file_fastpath_proto_msgTypes[4]
 	if x != nil {
-		return x.WaitTimeoutMillis
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolvedEndpoint.ProtoReflect.Descriptor instead.
+func (*ResolvedEndpoint) Descriptor() ([]byte, []int) {
+	return file_fastpath_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ResolvedEndpoint) GetComponentName() string {
+	if x != nil {
+		return x.ComponentName
+	}
+	return ""
+}
+
+func (x *ResolvedEndpoint) GetProtocol() string {
+	if x != nil {
+		return x.Protocol
+	}
+	return ""
+}
+
+func (x *ResolvedEndpoint) GetPort() uint32 {
+	if x != nil {
+		return x.Port
 	}
 	return 0
 }
@@ -362,21 +384,18 @@ func (x *ResolveEndpointRequest) GetWaitTimeoutMillis() int32 {
 type ResolveEndpointResponse struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	SandboxUid           string                 `protobuf:"bytes,1,opt,name=sandbox_uid,json=sandboxUid,proto3" json:"sandbox_uid,omitempty"`
-	Target               *EndpointTarget        `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
-	ComponentName        string                 `protobuf:"bytes,3,opt,name=component_name,json=componentName,proto3" json:"component_name,omitempty"`
-	Protocol             string                 `protobuf:"bytes,4,opt,name=protocol,proto3" json:"protocol,omitempty"`
-	ResolvedPort         uint32                 `protobuf:"varint,5,opt,name=resolved_port,json=resolvedPort,proto3" json:"resolved_port,omitempty"`
-	ProxyEndpoint        string                 `protobuf:"bytes,6,opt,name=proxy_endpoint,json=proxyEndpoint,proto3" json:"proxy_endpoint,omitempty"`
-	RequiredHeaders      map[string]string      `protobuf:"bytes,7,rep,name=required_headers,json=requiredHeaders,proto3" json:"required_headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	RouteGeneration      int64                  `protobuf:"varint,8,opt,name=route_generation,json=routeGeneration,proto3" json:"route_generation,omitempty"`
-	ExpiresAtUnixSeconds int64                  `protobuf:"varint,9,opt,name=expires_at_unix_seconds,json=expiresAtUnixSeconds,proto3" json:"expires_at_unix_seconds,omitempty"`
+	Endpoint             *ResolvedEndpoint      `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	ProxyEndpoint        string                 `protobuf:"bytes,3,opt,name=proxy_endpoint,json=proxyEndpoint,proto3" json:"proxy_endpoint,omitempty"`
+	RequiredHeaders      map[string]string      `protobuf:"bytes,4,rep,name=required_headers,json=requiredHeaders,proto3" json:"required_headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	RouteGeneration      int64                  `protobuf:"varint,5,opt,name=route_generation,json=routeGeneration,proto3" json:"route_generation,omitempty"`
+	ExpiresAtUnixSeconds int64                  `protobuf:"varint,6,opt,name=expires_at_unix_seconds,json=expiresAtUnixSeconds,proto3" json:"expires_at_unix_seconds,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ResolveEndpointResponse) Reset() {
 	*x = ResolveEndpointResponse{}
-	mi := &file_fastpath_proto_msgTypes[4]
+	mi := &file_fastpath_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -388,7 +407,7 @@ func (x *ResolveEndpointResponse) String() string {
 func (*ResolveEndpointResponse) ProtoMessage() {}
 
 func (x *ResolveEndpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fastpath_proto_msgTypes[4]
+	mi := &file_fastpath_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -401,7 +420,7 @@ func (x *ResolveEndpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveEndpointResponse.ProtoReflect.Descriptor instead.
 func (*ResolveEndpointResponse) Descriptor() ([]byte, []int) {
-	return file_fastpath_proto_rawDescGZIP(), []int{4}
+	return file_fastpath_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ResolveEndpointResponse) GetSandboxUid() string {
@@ -411,32 +430,11 @@ func (x *ResolveEndpointResponse) GetSandboxUid() string {
 	return ""
 }
 
-func (x *ResolveEndpointResponse) GetTarget() *EndpointTarget {
+func (x *ResolveEndpointResponse) GetEndpoint() *ResolvedEndpoint {
 	if x != nil {
-		return x.Target
+		return x.Endpoint
 	}
 	return nil
-}
-
-func (x *ResolveEndpointResponse) GetComponentName() string {
-	if x != nil {
-		return x.ComponentName
-	}
-	return ""
-}
-
-func (x *ResolveEndpointResponse) GetProtocol() string {
-	if x != nil {
-		return x.Protocol
-	}
-	return ""
-}
-
-func (x *ResolveEndpointResponse) GetResolvedPort() uint32 {
-	if x != nil {
-		return x.ResolvedPort
-	}
-	return 0
 }
 
 func (x *ResolveEndpointResponse) GetProxyEndpoint() string {
@@ -474,34 +472,32 @@ const file_fastpath_proto_rawDesc = "" +
 	"\x0efastpath.proto\x12\vfastpath.v2\"B\n" +
 	"\x0eNamespacedName\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"\x8a\x01\n" +
-	"\x10SandboxReference\x12!\n" +
-	"\vsandbox_uid\x18\x01 \x01(\tH\x00R\n" +
-	"sandboxUid\x12F\n" +
-	"\x0fnamespaced_name\x18\x02 \x01(\v2\x1b.fastpath.v2.NamespacedNameH\x00R\x0enamespacedNameB\v\n" +
-	"\treference\"Y\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"{\n" +
+	"\x10SandboxReference\x12D\n" +
+	"\x0fnamespaced_name\x18\x02 \x01(\v2\x1b.fastpath.v2.NamespacedNameR\x0enamespacedName\x12!\n" +
+	"\fexpected_uid\x18\x03 \x01(\tR\vexpectedUid\"Y\n" +
 	"\x0eEndpointTarget\x12'\n" +
 	"\x0ecomponent_name\x18\x01 \x01(\tH\x00R\rcomponentName\x12\x14\n" +
 	"\x04port\x18\x02 \x01(\rH\x00R\x04portB\b\n" +
-	"\x06target\"\xa2\x02\n" +
+	"\x06target\"\xf9\x01\n" +
 	"\x16ResolveEndpointRequest\x127\n" +
 	"\asandbox\x18\x01 \x01(\v2\x1d.fastpath.v2.SandboxReferenceR\asandbox\x123\n" +
 	"\x06target\x18\x02 \x01(\v2\x1b.fastpath.v2.EndpointTargetR\x06target\x12@\n" +
 	"\vaccess_mode\x18\x03 \x01(\x0e2\x1f.fastpath.v2.EndpointAccessModeR\n" +
-	"accessMode\x12(\n" +
-	"\x10wait_until_ready\x18\x04 \x01(\bR\x0ewaitUntilReady\x12.\n" +
-	"\x13wait_timeout_millis\x18\x05 \x01(\x05R\x11waitTimeoutMillis\"\x8a\x04\n" +
+	"accessMode\x12/\n" +
+	"\x13expected_generation\x18\x04 \x01(\x03R\x12expectedGeneration\"i\n" +
+	"\x10ResolvedEndpoint\x12%\n" +
+	"\x0ecomponent_name\x18\x01 \x01(\tR\rcomponentName\x12\x1a\n" +
+	"\bprotocol\x18\x02 \x01(\tR\bprotocol\x12\x12\n" +
+	"\x04port\x18\x03 \x01(\rR\x04port\"\xa8\x03\n" +
 	"\x17ResolveEndpointResponse\x12\x1f\n" +
 	"\vsandbox_uid\x18\x01 \x01(\tR\n" +
-	"sandboxUid\x123\n" +
-	"\x06target\x18\x02 \x01(\v2\x1b.fastpath.v2.EndpointTargetR\x06target\x12%\n" +
-	"\x0ecomponent_name\x18\x03 \x01(\tR\rcomponentName\x12\x1a\n" +
-	"\bprotocol\x18\x04 \x01(\tR\bprotocol\x12#\n" +
-	"\rresolved_port\x18\x05 \x01(\rR\fresolvedPort\x12%\n" +
-	"\x0eproxy_endpoint\x18\x06 \x01(\tR\rproxyEndpoint\x12d\n" +
-	"\x10required_headers\x18\a \x03(\v29.fastpath.v2.ResolveEndpointResponse.RequiredHeadersEntryR\x0frequiredHeaders\x12)\n" +
-	"\x10route_generation\x18\b \x01(\x03R\x0frouteGeneration\x125\n" +
-	"\x17expires_at_unix_seconds\x18\t \x01(\x03R\x14expiresAtUnixSeconds\x1aB\n" +
+	"sandboxUid\x129\n" +
+	"\bendpoint\x18\x02 \x01(\v2\x1d.fastpath.v2.ResolvedEndpointR\bendpoint\x12%\n" +
+	"\x0eproxy_endpoint\x18\x03 \x01(\tR\rproxyEndpoint\x12d\n" +
+	"\x10required_headers\x18\x04 \x03(\v29.fastpath.v2.ResolveEndpointResponse.RequiredHeadersEntryR\x0frequiredHeaders\x12)\n" +
+	"\x10route_generation\x18\x05 \x01(\x03R\x0frouteGeneration\x125\n" +
+	"\x17expires_at_unix_seconds\x18\x06 \x01(\x03R\x14expiresAtUnixSeconds\x1aB\n" +
 	"\x14RequiredHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*A\n" +
@@ -524,25 +520,26 @@ func file_fastpath_proto_rawDescGZIP() []byte {
 }
 
 var file_fastpath_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_fastpath_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_fastpath_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_fastpath_proto_goTypes = []any{
 	(EndpointAccessMode)(0),         // 0: fastpath.v2.EndpointAccessMode
 	(*NamespacedName)(nil),          // 1: fastpath.v2.NamespacedName
 	(*SandboxReference)(nil),        // 2: fastpath.v2.SandboxReference
 	(*EndpointTarget)(nil),          // 3: fastpath.v2.EndpointTarget
 	(*ResolveEndpointRequest)(nil),  // 4: fastpath.v2.ResolveEndpointRequest
-	(*ResolveEndpointResponse)(nil), // 5: fastpath.v2.ResolveEndpointResponse
-	nil,                             // 6: fastpath.v2.ResolveEndpointResponse.RequiredHeadersEntry
+	(*ResolvedEndpoint)(nil),        // 5: fastpath.v2.ResolvedEndpoint
+	(*ResolveEndpointResponse)(nil), // 6: fastpath.v2.ResolveEndpointResponse
+	nil,                             // 7: fastpath.v2.ResolveEndpointResponse.RequiredHeadersEntry
 }
 var file_fastpath_proto_depIdxs = []int32{
 	1, // 0: fastpath.v2.SandboxReference.namespaced_name:type_name -> fastpath.v2.NamespacedName
 	2, // 1: fastpath.v2.ResolveEndpointRequest.sandbox:type_name -> fastpath.v2.SandboxReference
 	3, // 2: fastpath.v2.ResolveEndpointRequest.target:type_name -> fastpath.v2.EndpointTarget
 	0, // 3: fastpath.v2.ResolveEndpointRequest.access_mode:type_name -> fastpath.v2.EndpointAccessMode
-	3, // 4: fastpath.v2.ResolveEndpointResponse.target:type_name -> fastpath.v2.EndpointTarget
-	6, // 5: fastpath.v2.ResolveEndpointResponse.required_headers:type_name -> fastpath.v2.ResolveEndpointResponse.RequiredHeadersEntry
+	5, // 4: fastpath.v2.ResolveEndpointResponse.endpoint:type_name -> fastpath.v2.ResolvedEndpoint
+	7, // 5: fastpath.v2.ResolveEndpointResponse.required_headers:type_name -> fastpath.v2.ResolveEndpointResponse.RequiredHeadersEntry
 	4, // 6: fastpath.v2.FastPathService.ResolveEndpoint:input_type -> fastpath.v2.ResolveEndpointRequest
-	5, // 7: fastpath.v2.FastPathService.ResolveEndpoint:output_type -> fastpath.v2.ResolveEndpointResponse
+	6, // 7: fastpath.v2.FastPathService.ResolveEndpoint:output_type -> fastpath.v2.ResolveEndpointResponse
 	7, // [7:8] is the sub-list for method output_type
 	6, // [6:7] is the sub-list for method input_type
 	6, // [6:6] is the sub-list for extension type_name
@@ -555,10 +552,6 @@ func file_fastpath_proto_init() {
 	if File_fastpath_proto != nil {
 		return
 	}
-	file_fastpath_proto_msgTypes[1].OneofWrappers = []any{
-		(*SandboxReference_SandboxUid)(nil),
-		(*SandboxReference_NamespacedName)(nil),
-	}
 	file_fastpath_proto_msgTypes[2].OneofWrappers = []any{
 		(*EndpointTarget_ComponentName)(nil),
 		(*EndpointTarget_Port)(nil),
@@ -569,7 +562,7 @@ func file_fastpath_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fastpath_proto_rawDesc), len(file_fastpath_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

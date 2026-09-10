@@ -34,7 +34,6 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
-	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
 
 const bashShell = "bash"
@@ -162,12 +161,8 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.Code))
-	// --noprofile/--norc are no-ops for `bash -c`, so shellCommand is not used here.
-	shell := getShell()
-	cmd := exec.CommandContext(ctx, shell, "-c", request.Code)
-	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
-	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve request cwd %s: %w", request.Cwd, err)
 	}
@@ -184,8 +179,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
-	cmd.Dir = cwd
 
 	done := make(chan struct{}, 1)
 	var wg sync.WaitGroup
@@ -219,7 +212,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		stderrPath:   stderrPath,
 		startedAt:    startAt,
 		running:      true,
-		content:      request.Code,
+		content:      request.commandContent(),
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
@@ -323,17 +316,13 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	defer stopSignals()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.Code))
-	// --noprofile/--norc are no-ops for `bash -c`, so shellCommand is not used here.
-	shell := getShell()
-	cmd := exec.CommandContext(ctx, shell, "-c", request.Code)
-	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
-	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
-	cmd.Dir = cwd
+
 	// Configure credentials and process group
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
@@ -347,7 +336,6 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	cmd.Stdout = pipe
 	cmd.Stderr = pipe
-	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	// use DevNull as stdin so interactive programs exit immediately.
 	devNull, err := os.Open(os.DevNull)
@@ -363,7 +351,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		stderrPath:   stderrPath,
 		startedAt:    startAt,
 		running:      true,
-		content:      request.Code,
+		content:      request.commandContent(),
 		isBackground: true,
 	}
 	if err != nil {
@@ -410,4 +398,8 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	request.Hooks.OnExecuteComplete(time.Since(startAt))
 	return nil
+}
+
+func newShellCommand(ctx context.Context, code string) *exec.Cmd {
+	return exec.CommandContext(ctx, getShell(), "-c", code)
 }

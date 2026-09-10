@@ -329,7 +329,7 @@ manual = await Sandbox.create(
 
 ### 2. Custom Health Check
 
-Define custom logic to determine if the sandbox is healthy. This overrides the default ping check.
+Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
 
 ```python
 async def custom_health_check(sbx: Sandbox) -> bool:
@@ -380,6 +380,15 @@ result = await sandbox.commands.run(
     handlers=handlers
 )
 ```
+
+To execute a native program without shell parsing, pass an argument list. On Linux,
+this example prints literal `$HOME` and keeps `hello world` as one argument:
+
+```python
+result = await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"])
+```
+
+Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
 
 ### 4. Comprehensive File Operations
 
@@ -454,7 +463,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
-| `transport`       | Shared httpx transport (pool/proxy/retry)  | SDK-created per instance     | -                      |
+| `transport`       | Shared httpx transport (pool/proxy/retry); custom transports must honor request timeouts  | SDK-created per instance     | -                      |
 | `retry_policy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
 | `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |

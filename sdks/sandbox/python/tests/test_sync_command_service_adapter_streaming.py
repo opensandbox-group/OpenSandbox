@@ -307,3 +307,13 @@ def test_sync_run_foreground_command_still_waits_for_terminator() -> None:
 
     with pytest.raises(SandboxConnectionException):
         adapter.run("sleep 1", opts=RunCommandOpts(background=False))
+
+
+@pytest.mark.parametrize("command", [("tool", "arg"), None, 123])
+def test_run_rejects_unsupported_command_types(command) -> None:
+    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport())
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    with pytest.raises(InvalidArgumentException, match="shell text or an argv list"):
+        adapter.run(command)

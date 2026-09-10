@@ -34,6 +34,7 @@ from opensandbox.adapters.converter.sandbox_model_converter import (
 )
 from opensandbox.api.lifecycle.types import UNSET
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.internal.readiness import constrain_readiness_request
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
@@ -93,6 +94,7 @@ class SandboxesAdapterSync(SandboxesSync):
         )
 
         self._httpx_client = httpx.Client(
+            event_hooks={"request": [constrain_readiness_request]},
             base_url=self.connection_config.get_base_url(),
             headers=headers,
             timeout=timeout,

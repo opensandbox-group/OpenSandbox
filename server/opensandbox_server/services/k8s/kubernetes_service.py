@@ -1170,7 +1170,16 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         except Exception as e:
             logger.error(f"Error getting sandbox {sandbox_id}: {e}")
             raise _build_k8s_api_error("get sandbox", e) from e
-    
+
+    def list_sandbox_objects(self) -> list[Sandbox]:
+        workloads = self.workload_provider.list_workloads(
+            namespace=self._resolve_namespace(),
+            label_selector=SANDBOX_ID_LABEL,
+        )
+        return [
+            _build_sandbox_from_workload(workload, self.workload_provider) for workload in workloads
+        ]
+
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         """
         List sandboxes with filtering and pagination.
@@ -1182,17 +1191,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             ListSandboxesResponse: Paginated list of sandboxes
         """
         try:
-            label_selector = SANDBOX_ID_LABEL
-            workloads = self.workload_provider.list_workloads(
-                namespace=self._resolve_namespace(),
-                label_selector=label_selector,
-            )
-            sandboxes = [
-                _build_sandbox_from_workload(w, self.workload_provider)
-                for w in workloads
-            ]
-            
-            return _build_list_sandboxes_response(sandboxes, request)
+            return _build_list_sandboxes_response(self.list_sandbox_objects(), request)
             
         except Exception as e:
             logger.error(f"Error listing sandboxes: {e}")

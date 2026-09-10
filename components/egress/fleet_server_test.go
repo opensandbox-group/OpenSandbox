@@ -863,6 +863,18 @@ func TestFleetServerActiveVaultClientIPDispatch(t *testing.T) {
 	srv.handleCredentialVaultActive(rec, httptest.NewRequest(http.MethodGet, "/credential-vault/_active?clientIp=10.0.0.5", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), `"revision":1`)
+	initialTag := rec.Header().Get("ETag")
+	require.NotEmpty(t, initialTag)
+
+	// A conditional lookup for the active snapshot tag avoids rendering and
+	// retransmitting the subject's credentials.
+	req := httptest.NewRequest(http.MethodGet, "/credential-vault/_active?clientIp=10.0.0.5", nil)
+	req.Header.Set("If-None-Match", initialTag)
+	rec = httptest.NewRecorder()
+	srv.handleCredentialVaultActive(rec, req)
+	require.Equal(t, http.StatusNotModified, rec.Code)
+	require.Empty(t, rec.Body.String())
+	require.Equal(t, initialTag, rec.Header().Get("ETag"))
 
 	// subject B has no vault: 404 (the addon treats it as no-vault)
 	rec = httptest.NewRecorder()

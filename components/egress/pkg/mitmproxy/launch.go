@@ -28,6 +28,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
@@ -186,6 +187,10 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 		line := strings.TrimRight(scanner.Text(), " \t\r")
 		msg, ok := credentialProxyMessage(line)
 		if !ok {
+			continue
+		}
+		if strings.HasPrefix(msg, "credential proxy: tls-shadow ") {
+			telemetry.RecordTLSShadow(strings.TrimPrefix(msg, "credential proxy: tls-shadow "))
 			continue
 		}
 		log.Warnf("[mitmproxy] %s", msg)

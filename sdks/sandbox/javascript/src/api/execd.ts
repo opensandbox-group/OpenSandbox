@@ -225,8 +225,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Execute shell command
-         * @description Executes a shell command and streams the output in real-time using SSE (Server-Sent Events).
+         * Execute shell command or native argv
+         * @description Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply exactly one input mode.
          *     The command can run in foreground or background mode. The response includes stdout, stderr,
          *     execution status, and completion events.
          *     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
@@ -256,6 +256,8 @@ export interface paths {
          * Get command running status
          * @description Returns the current status of a command (foreground or background) by command ID.
          *     Includes running flag, exit code, error (if any), and start/finish timestamps.
+         *     Completed command metadata is retained for at least 24 hours and then removed
+         *     by an hourly cleanup. Running commands are never removed by retention cleanup.
          */
         get: operations["getCommandStatus"];
         put?: never;
@@ -282,6 +284,8 @@ export interface paths {
          *     tail cursor for the next poll. When no starting line is provided, the full logs are returned.
          *     Response body is plain text so it can be rendered directly in browsers; the latest line index
          *     is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+         *     Completed background command output is retained for at least 24 hours and then
+         *     removed by an hourly cleanup. Running command output is never removed by retention cleanup.
          */
         get: operations["getBackgroundCommandLogs"];
         put?: never;
@@ -1004,15 +1008,24 @@ export interface components {
              */
             code: string;
         };
-        /** @description Request to execute a shell command */
+        /** @description Execute exactly one of command (shell text) or argv (native arguments). */
         RunCommandRequest: {
             /**
-             * @description Shell command to execute
+             * @description Shell command to execute. Mutually exclusive with argv.
              * @example ls -la /workspace
              */
-            command: string;
+            command?: string;
             /**
-             * @description Working directory for command execution
+             * @description Executable and literal arguments, mutually exclusive with command. argv[0] must be non-empty; NUL is invalid and arguments are not shell-expanded. Relative paths use cwd; bare names search absolute entries in the child PATH. Windows uses standard argument encoding and adds .exe to extensionless names; batch files require a shell.
+             * @example [
+             *       "python3",
+             *       "-c",
+             *       "print('hello')"
+             *     ]
+             */
+            argv?: string[];
+            /**
+             * @description Working directory, defaulting to the daemon directory. Expands $NAME and ${NAME} using the command environment, and leading ~ using the daemon user's home. Undefined variables fail validation.
              * @example /workspace
              */
             cwd?: string;
@@ -1041,7 +1054,7 @@ export interface components {
              */
             gid?: number;
             /**
-             * @description Environment variables injected into the command process.
+             * @description Literal request values overriding EXECD_ENVS and daemon variables, in that order. Names are case-insensitive on Windows.
              * @example {
              *       "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
              *       "PYTHONUNBUFFERED": "1"
@@ -1050,7 +1063,7 @@ export interface components {
             envs?: {
                 [key: string]: string;
             };
-        };
+        } & (unknown | unknown);
         /** @description Command execution status (foreground or background) */
         CommandStatusResponse: {
             /**

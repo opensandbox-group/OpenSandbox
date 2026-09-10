@@ -16,8 +16,11 @@ package sandbox
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,11 +31,64 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 type fakeFastPathResolver struct {
 	requests []*fastpathv2.ResolveEndpointRequest
 	now      time.Time
+}
+
+type wireFastPathService struct {
+	fastpathv2.UnimplementedFastPathServiceServer
+	request  []byte
+	response *fastpathv2.ResolveEndpointResponse
+}
+
+func (s *wireFastPathService) ResolveEndpoint(_ context.Context, request *fastpathv2.ResolveEndpointRequest) (*fastpathv2.ResolveEndpointResponse, error) {
+	encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	if hex.EncodeToString(encoded) != hex.EncodeToString(s.request) {
+		return nil, status.Error(codes.InvalidArgument, "request does not match Python wire fixture")
+	}
+	return s.response, nil
+}
+
+func TestFleetsProviderMatchesPythonWireContractOverGRPC(t *testing.T) {
+	fixtureBytes, err := os.ReadFile("../fastpath/v2/testdata/resolve_endpoint.json")
+	require.NoError(t, err)
+	var fixture map[string]string
+	require.NoError(t, json.Unmarshal(fixtureBytes, &fixture))
+	requestBytes, err := hex.DecodeString(fixture["request_hex"])
+	require.NoError(t, err)
+	responseBytes, err := hex.DecodeString(fixture["response_hex"])
+	require.NoError(t, err)
+	response := &fastpathv2.ResolveEndpointResponse{}
+	require.NoError(t, proto.Unmarshal(responseBytes, response))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := grpc.NewServer()
+	fastpathv2.RegisterFastPathServiceServer(server, &wireFastPathService{request: requestBytes, response: response})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	provider, err := NewFleetsProvider(listener.Addr().String(), time.Second, "direct-fastlet-proxy")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	provider.now = func() time.Time { return time.Unix(2_000_000_000, 0) }
+	require.NoError(t, provider.Start(ctx))
+	info, err := provider.ResolveEndpoint(ctx, EndpointTarget{Namespace: "tenant-a", SandboxID: "sandbox-123", Port: ExecdPort})
+	require.NoError(t, err)
+	require.Equal(t, "http://fastlet:5780/v1/sandboxes/uid-123/ports/44772", info.UpstreamURL)
+	require.Equal(t, "issued-credential", info.UpstreamHeaders.Get(FastSandboxCredential))
+	require.Equal(t, time.Unix(2_000_000_060, 0), info.ExpiresAt)
+}
+
+func TestFleetsProviderMapsUnreadyPreconditionToRetryableError(t *testing.T) {
+	err := mapFastPathError(status.Error(codes.FailedPrecondition, "Sandbox interaction is not Ready"))
+	require.ErrorIs(t, err, ErrSandboxNotReady)
 }
 
 func (f *fakeFastPathResolver) ResolveEndpoint(_ context.Context, request *fastpathv2.ResolveEndpointRequest, _ ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
@@ -62,9 +118,10 @@ func TestFleetsProviderMapsTargetsAndCachesByNamespace(t *testing.T) {
 
 	require.Len(t, resolver.requests, 2)
 	for _, request := range resolver.requests {
-		require.Equal(t, "execd", request.GetTarget().GetComponentName())
+		require.Equal(t, uint32(ExecdPort), request.GetTarget().GetPort())
+		require.Empty(t, request.GetTarget().GetComponentName())
 		require.Equal(t, fastpathv2.EndpointAccessMode_CENTRAL_PROXY, request.GetAccessMode())
-		require.True(t, request.GetWaitUntilReady())
+		require.Zero(t, request.GetExpectedGeneration())
 	}
 }
 

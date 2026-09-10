@@ -39,7 +39,7 @@ func InitFlags() {
 	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "OSEP-0011 and fleets route-scope verification keys: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
 	flag.StringVar(&FastPathEndpoint, "fastpath-endpoint", "", "FastPath v2 gRPC endpoint; a non-empty value enables fleets routing")
 	flag.StringVar(&FastPathAccessMode, "fastpath-access-mode", "direct-fastlet-proxy", "FastPath fleets data-plane mode: central-proxy or direct-fastlet-proxy")
-	flag.IntVar(&FastPathWaitTimeoutMillis, "fastpath-wait-timeout-millis", 2000, "Bounded FastPath readiness wait for one ingress request")
+	flag.IntVar(&FastPathWaitTimeoutMillis, "fastpath-wait-timeout-millis", 2000, "FastPath ResolveEndpoint RPC timeout for one ingress request")
 
 	flag.DurationVar(&NetworkReadinessShadowWindow, "network-readiness-shadow-window", time.Minute, "Shadow connectivity assessment window")
 	flag.IntVar(&NetworkReadinessShadowMaxTargets, "network-readiness-shadow-max-targets", 1024, "Maximum distinct upstream targets retained per shadow window")

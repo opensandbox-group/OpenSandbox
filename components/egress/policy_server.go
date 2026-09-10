@@ -110,7 +110,7 @@ func startPolicyServer(
 		if err != nil {
 			return nil, fmt.Errorf("lookup credential proxy user %q: %w", mitmproxy.RunAsUser, err)
 		}
-		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServer(handler.handleCredentialVaultActive, socketPath, int(mitmGID))
+		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServerRequestAware(handler.handleCredentialVaultActive, socketPath, int(mitmGID))
 		if err != nil {
 			return nil, fmt.Errorf("credential vault active socket: %w", err)
 		}
@@ -402,13 +402,8 @@ func (s *policyServer) handleCredentialVaultBinding(w http.ResponseWriter, name 
 	http.Error(w, "binding not found", http.StatusNotFound)
 }
 
-func (s *policyServer) handleCredentialVaultActive(w http.ResponseWriter) {
-	snapshot, err := s.credentialVault.ActiveSnapshot()
-	if err != nil {
-		credentialvault.WriteError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, snapshot)
+func (s *policyServer) handleCredentialVaultActive(w http.ResponseWriter, r *http.Request) {
+	handleActiveVaultSnapshot(w, r, s.credentialVault)
 }
 
 func (s *policyServer) handleGet(w http.ResponseWriter) {

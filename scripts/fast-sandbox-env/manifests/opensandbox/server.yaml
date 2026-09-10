@@ -1,0 +1,194 @@
+# server.yaml — OpenSandbox lifecycle server (source-built) for the
+# fast-sandbox integration ecosystem.
+#
+# runtime.type = "kubernetes": the server creates sandboxes through
+# fast-sandbox FastPath gRPC (the all-in-one control plane of this cluster),
+# reads sandbox.fast.io/v1alpha2 Sandbox CRs through the in-cluster
+# ServiceAccount, and issues signed gateway routes ([ingress] gateway mode +
+# secure_access) consumed by ingress-gateway.yaml.
+#
+# execd itself is NOT delivered by the server in fsb mode: it is baked
+# into the SandboxTemplate golden image (EXECD template input). The
+# runtime.execd_image value below only satisfies the required config field.
+#
+# Tokens rendered by fast-sandbox-env.sh (opensandbox stage, into $WORK/gen):
+#   @SERVER_IMAGE@  @SERVER_API_KEY@  @SIGNING_KEY@  @FASTPATH_ENDPOINT@
+#   @FLEETS_NAMESPACE@  @POOL_NAME@  @EXECD_IMAGE@  @GATEWAY_ADDRESS@
+#   @SERVER_NODEPORT@ (bare: renders to an integer nodePort)
+# Quotes live in the template (config.toml strings need them); only the
+# bare token is substituted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opensandbox-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opensandbox-server
+  namespace: opensandbox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opensandbox-server-ecosystem
+rules:
+  # Fleets Get/List reads sandbox.fast.io/v1alpha2 Sandbox CRs through the
+  # LIST/WATCH cache; writes go through FastPath, so read verbs suffice.
+  - apiGroups: ["sandbox.fast.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+  # Template management: the server projects each catalog row
+  # onto a SandboxTemplate CR and lazily syncs the build status on reads.
+  - apiGroups: ["sandbox.fast.io"]
+    resources: ["sandboxtemplates"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  # Basic pod visibility for diagnostics surfaced by the fsb adapter.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opensandbox-server-ecosystem
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: opensandbox-server-ecosystem
+subjects:
+  - kind: ServiceAccount
+    name: opensandbox-server
+    namespace: opensandbox-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensandbox-server-config
+  namespace: opensandbox-system
+data:
+  config.toml: |
+    [server]
+    host = "0.0.0.0"
+    port = 80
+    api_key = "@SERVER_API_KEY@"
+
+    [log]
+    level = "INFO"
+
+    [runtime]
+    type = "kubernetes"
+    execd_image = "@EXECD_IMAGE@"
+
+    [kubernetes]
+    # One block serves both backends: CR reads (informer settings) and the
+    # fleets (fast-sandbox) settings. Sandboxes are created in the pool's
+    # namespace so poolRef resolves; execd comes from runtime.execd_image
+    # above (the server injects it into server-created SandboxTemplates).
+    namespace = "@FLEETS_NAMESPACE@"
+    fastpath_endpoint = "@FASTPATH_ENDPOINT@"
+    fastpath_resource_pool = "@POOL_NAME@"
+    fastpath_wait_ready_seconds = 30.0
+    template_s3_publish_secret = "sandbox-oss-credentials"
+    informer_enabled = true
+
+    # Gateway-mode ingress: endpoints are signed f1.* route scopes verified
+    # by the ingress gateway (same key ring as --secure-access-keys there).
+    [ingress]
+    mode = "gateway"
+
+    [ingress.gateway]
+    address = "@GATEWAY_ADDRESS@"
+
+    [ingress.gateway.route]
+    mode = "header"
+
+    [ingress.secure_access]
+    active_key = "a"
+
+    [[ingress.secure_access.keys]]
+    key_id = "a"
+    key = "@SIGNING_KEY@"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensandbox-server
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/name: opensandbox-server
+    app.kubernetes.io/part-of: opensandbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opensandbox-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opensandbox-server
+        app.kubernetes.io/part-of: opensandbox
+    spec:
+      serviceAccountName: opensandbox-server
+      containers:
+        - name: main
+          image: "@SERVER_IMAGE@"
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/opensandbox/config.toml"]
+          env:
+            - name: SANDBOX_CONFIG_PATH
+              value: /etc/opensandbox/config.toml
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/opensandbox/config.toml
+              subPath: config.toml
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+      volumes:
+        - name: config
+          configMap:
+            name: opensandbox-server-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-server
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/name: opensandbox-server
+spec:
+  # NodePort is mapped to the host by the kind extraPortMappings rendered
+  # from SERVER_HOST_PORT (default 127.0.0.1:8080 -> node port 30880).
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+      nodePort: @SERVER_NODEPORT@
+  selector:
+    app.kubernetes.io/name: opensandbox-server

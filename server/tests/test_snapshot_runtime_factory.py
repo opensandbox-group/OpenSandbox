@@ -15,8 +15,15 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import SecretStr
 
-from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, RuntimeConfig
+from opensandbox_server.config import (
+    AppConfig,
+    KubernetesRuntimeConfig,
+    PostgreSQLStoreConfig,
+    RuntimeConfig,
+    StoreConfig,
+)
 from opensandbox_server.services.docker.snapshot_runtime import DockerSnapshotRuntime
 from opensandbox_server.services.k8s.snapshot_runtime import KubernetesSnapshotRuntime
 from opensandbox_server.services.snapshot_runtime_factory import create_snapshot_runtime
@@ -41,6 +48,7 @@ def test_create_snapshot_runtime_selects_kubernetes_runtime() -> None:
     runtime = create_snapshot_runtime(config, k8s_client=k8s_client)
 
     assert isinstance(runtime, KubernetesSnapshotRuntime)
+    assert runtime._postgresql_ha_enabled is False
 
 
 def test_create_snapshot_runtime_uses_kubernetes_snapshot_create_timeout() -> None:
@@ -57,6 +65,24 @@ def test_create_snapshot_runtime_uses_kubernetes_snapshot_create_timeout() -> No
 
     assert isinstance(runtime, KubernetesSnapshotRuntime)
     assert runtime._wait_timeout_seconds == 1234
+
+
+def test_postgresql_kubernetes_runtime_enables_ha_recovery() -> None:
+    config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+        kubernetes=KubernetesRuntimeConfig(namespace="default"),
+        store=StoreConfig(
+            type="postgresql",
+            postgresql=PostgreSQLStoreConfig(
+                dsn=SecretStr("postgresql://postgres:postgres@localhost/opensandbox"),
+            ),
+        ),
+    )
+
+    runtime = create_snapshot_runtime(config, k8s_client=object())
+
+    assert isinstance(runtime, KubernetesSnapshotRuntime)
+    assert runtime._postgresql_ha_enabled is True
 
 
 def test_create_snapshot_runtime_requires_docker_client_for_docker() -> None:

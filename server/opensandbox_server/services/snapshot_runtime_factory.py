@@ -41,6 +41,7 @@ def create_snapshot_runtime(
         return DockerSnapshotRuntime(docker_client)
 
     if runtime_type == "kubernetes":
+
         from opensandbox_server.services.k8s.client import K8sClient
         from opensandbox_server.services.k8s.snapshot_runtime import KubernetesSnapshotRuntime
 
@@ -53,6 +54,7 @@ def create_snapshot_runtime(
             k8s_client,
             namespace=namespace,
             wait_timeout_seconds=kubernetes_config.snapshot_create_timeout_seconds,
+            postgresql_ha_enabled=active_config.store.type == "postgresql",
         )
 
     raise ValueError(f"Unsupported snapshot runtime type: {runtime_type}")

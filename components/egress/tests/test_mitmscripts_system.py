@@ -14,10 +14,17 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import http.server
 import importlib.util
 import json
 import os
+import socket
+import socketserver
 import sys
+import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -142,6 +149,75 @@ def _load_system_module() -> Any:
     return module
 
 
+class _ScriptedVaultResponse:
+    def __init__(
+        self,
+        status: int,
+        body: bytes = b"",
+        etag: str | None = None,
+        read_error: Exception | None = None,
+    ) -> None:
+        self.status = status
+        self.body = body
+        self.etag = etag
+        self.read_error = read_error
+
+    def read(self) -> bytes:
+        if self.read_error is not None:
+            raise self.read_error
+        return self.body
+
+    def getheader(self, name: str) -> str | None:
+        return self.etag if name.lower() == "etag" else None
+
+
+def _scripted_vault_connection(
+    steps: list[_ScriptedVaultResponse | Exception],
+    calls: list[tuple[str, str, dict[str, str]]],
+) -> type:
+    class FakeConnection:
+        def __init__(self, socket_path: str, timeout: float) -> None:
+            self.socket_path = socket_path
+            self.timeout = timeout
+
+        def request(
+            self, method: str, path: str, headers: dict[str, str] | None = None
+        ) -> None:
+            calls.append((method, path, dict(headers or {})))
+
+        def getresponse(self) -> _ScriptedVaultResponse:
+            step = steps.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
+
+        def close(self) -> None:
+            pass
+
+    return FakeConnection
+
+
+def _vault_payload(revision: int, value: str = "secret-token") -> bytes:
+    return json.dumps(
+        {
+            "revision": revision,
+            "bindings": [
+                {
+                    "name": "gitlab-api",
+                    "match": {
+                        "schemes": ["https"],
+                        "hosts": ["code.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/api/v8/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": value}],
+                }
+            ],
+            "redactions": [value],
+        }
+    ).encode("utf-8")
+
+
 class SystemAddonRedactionTest(unittest.TestCase):
     def test_load_active_vault_reads_unix_socket(self) -> None:
         system = _load_system_module()
@@ -157,6 +233,12 @@ class SystemAddonRedactionTest(unittest.TestCase):
                         "bindings": [
                             {
                                 "name": "gitlab-api",
+                                "match": {
+                                    "schemes": ["https"],
+                                    "hosts": ["code.example.com"],
+                                    "methods": ["GET"],
+                                    "paths": ["/api/v8/*"],
+                                },
                                 "headers": [
                                     {"name": "Private-Token", "value": "secret-token"}
                                 ],
@@ -166,11 +248,16 @@ class SystemAddonRedactionTest(unittest.TestCase):
                     }
                 ).encode("utf-8")
 
+            def getheader(self, name: str) -> str | None:
+                return '"7"' if name.lower() == "etag" else None
+
         class FakeConnection:
             def __init__(self, socket_path: str, timeout: float) -> None:
                 calls.append(("init", socket_path, timeout))
 
-            def request(self, method: str, path: str) -> None:
+            def request(
+                self, method: str, path: str, headers: dict[str, str] | None = None
+            ) -> None:
                 calls.append(("request", method, path))
 
             def getresponse(self) -> FakeResponse:
@@ -203,24 +290,29 @@ class SystemAddonRedactionTest(unittest.TestCase):
 
     def test_fleet_mode_active_vault_cache_keyed_by_client_ip(self) -> None:
         system = _load_system_module()
-        fetches: list[str] = []
+        requests: list[tuple[str, dict[str, str]]] = []
 
         class FakeResponse:
-            status = 200
+            def __init__(self, status: int) -> None:
+                self.status = status
 
             def read(self) -> bytes:
                 return json.dumps({"revision": 7, "bindings": []}).encode("utf-8")
+
+            def getheader(self, name: str) -> str | None:
+                return '"7"' if name.lower() == "etag" else None
 
         class FakeConnection:
             def __init__(self, socket_path: str, timeout: float) -> None:
                 pass
 
-            def request(self, method: str, path: str) -> None:
-                pass
+            def request(
+                self, method: str, path: str, headers: dict[str, str] | None = None
+            ) -> None:
+                requests.append((path, dict(headers or {})))
 
             def getresponse(self) -> FakeResponse:
-                fetches.append("fetch")
-                return FakeResponse()
+                return FakeResponse(200 if len(requests) in {1, 3} else 304)
 
             def close(self) -> None:
                 pass
@@ -230,19 +322,26 @@ class SystemAddonRedactionTest(unittest.TestCase):
         os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fleet"
         system.UnixSocketHTTPConnection = FakeConnection
         system._vault_cache_by_ip = {}
-        system._vault_cache_by_ip_loaded_at = {}
         system._set_fleet_mode_from_env()
         try:
-            self.assertIsNotNone(system._load_active_vault("10.0.0.5"))
-            # cached within TTL: no second fetch for the same client
-            self.assertIsNotNone(system._load_active_vault("10.0.0.5"))
-            self.assertEqual(1, len(fetches))
-            # a different client IP fetches its own vault
-            self.assertIsNotNone(system._load_active_vault("10.0.0.6"))
-            self.assertEqual(2, len(fetches))
-            # no client IP -> no dispatch key, no fetch, no injection
-            self.assertIsNone(system._load_active_vault(None))
-            self.assertEqual(2, len(fetches))
+            first = system._load_active_vault("10.0.0.5")
+            second = system._load_active_vault("10.0.0.5")
+            other = system._load_active_vault("10.0.0.6")
+            self.assertIs(first, second)
+            self.assertIsNot(first, other)
+            self.assertEqual(
+                [
+                    (f"{system.ACTIVE_VAULT_PATH}?clientIp=10.0.0.5", {}),
+                    (
+                        f"{system.ACTIVE_VAULT_PATH}?clientIp=10.0.0.5",
+                        {"If-None-Match": '"7"'},
+                    ),
+                    (f"{system.ACTIVE_VAULT_PATH}?clientIp=10.0.0.6", {}),
+                ],
+                requests,
+            )
+            with self.assertRaises(system.ActiveVaultLookupError):
+                system._load_active_vault(None)
         finally:
             system.UnixSocketHTTPConnection = old_connection
             if old_profile is None:
@@ -253,24 +352,29 @@ class SystemAddonRedactionTest(unittest.TestCase):
 
     def test_sidecar_mode_uses_shared_cache(self) -> None:
         system = _load_system_module()
-        fetches: list[str] = []
+        requests: list[dict[str, str]] = []
 
         class FakeResponse:
-            status = 200
+            def __init__(self, status: int) -> None:
+                self.status = status
 
             def read(self) -> bytes:
                 return json.dumps({"revision": 7, "bindings": []}).encode("utf-8")
+
+            def getheader(self, name: str) -> str | None:
+                return '"7"' if name.lower() == "etag" else None
 
         class FakeConnection:
             def __init__(self, socket_path: str, timeout: float) -> None:
                 pass
 
-            def request(self, method: str, path: str) -> None:
-                pass
+            def request(
+                self, method: str, path: str, headers: dict[str, str] | None = None
+            ) -> None:
+                requests.append(dict(headers or {}))
 
             def getresponse(self) -> FakeResponse:
-                fetches.append("fetch")
-                return FakeResponse()
+                return FakeResponse(200 if len(requests) == 1 else 304)
 
             def close(self) -> None:
                 pass
@@ -280,13 +384,12 @@ class SystemAddonRedactionTest(unittest.TestCase):
         os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
         system.UnixSocketHTTPConnection = FakeConnection
         system._vault_cache = None
-        system._vault_cache_loaded_at = 0.0
         try:
             system._set_fleet_mode_from_env()
-            self.assertIsNotNone(system._load_active_vault("10.0.0.5"))
-            self.assertIsNotNone(system._load_active_vault("10.0.0.6"))
-            # sidecar: one shared cache, one fetch regardless of client IP
-            self.assertEqual(1, len(fetches))
+            first = system._load_active_vault("10.0.0.5")
+            second = system._load_active_vault("10.0.0.6")
+            self.assertIs(first, second)
+            self.assertEqual([{}, {"If-None-Match": '"7"'}], requests)
         finally:
             system.UnixSocketHTTPConnection = old_connection
             if old_profile is None:
@@ -305,11 +408,16 @@ class SystemAddonRedactionTest(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps({"revision": 7, "bindings": []}).encode("utf-8")
 
+            def getheader(self, name: str) -> str | None:
+                return '"7"' if name.lower() == "etag" else None
+
         class FakeConnection:
             def __init__(self, socket_path: str, timeout: float) -> None:
                 pass
 
-            def request(self, method: str, path: str) -> None:
+            def request(
+                self, method: str, path: str, headers: dict[str, str] | None = None
+            ) -> None:
                 requests.append(path)
 
             def getresponse(self) -> FakeResponse:
@@ -323,7 +431,6 @@ class SystemAddonRedactionTest(unittest.TestCase):
         os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fleet"
         system.UnixSocketHTTPConnection = FakeConnection
         system._vault_cache_by_ip = {}
-        system._vault_cache_by_ip_loaded_at = {}
         system._set_fleet_mode_from_env()
         try:
             system._load_active_vault("10.10.0.5")
@@ -349,11 +456,16 @@ class SystemAddonRedactionTest(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps({"revision": 7, "bindings": []}).encode("utf-8")
 
+            def getheader(self, name: str) -> str | None:
+                return '"7"' if name.lower() == "etag" else None
+
         class FakeConnection:
             def __init__(self, socket_path: str, timeout: float) -> None:
                 pass
 
-            def request(self, method: str, path: str) -> None:
+            def request(
+                self, method: str, path: str, headers: dict[str, str] | None = None
+            ) -> None:
                 requests.append(path)
 
             def getresponse(self) -> FakeResponse:
@@ -389,11 +501,16 @@ class SystemAddonRedactionTest(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps({"revision": 7, "bindings": []}).encode("utf-8")
 
+            def getheader(self, name: str) -> str | None:
+                return '"7"' if name.lower() == "etag" else None
+
         class FakeConnection:
             def __init__(self, socket_path: str, timeout: float) -> None:
                 pass
 
-            def request(self, method: str, path: str) -> None:
+            def request(
+                self, method: str, path: str, headers: dict[str, str] | None = None
+            ) -> None:
                 fetches.append("fetch")
 
             def getresponse(self) -> FakeResponse:
@@ -407,7 +524,6 @@ class SystemAddonRedactionTest(unittest.TestCase):
         os.environ["OPENSANDBOX_EGRESS_PROFILE"] = "fleet"
         system.UnixSocketHTTPConnection = FakeConnection
         system._vault_cache_by_ip = {}
-        system._vault_cache_by_ip_loaded_at = {}
         system._set_fleet_mode_from_env()
         try:
             # spoofed source IPs must not grow the cache without bound: past
@@ -425,6 +541,623 @@ class SystemAddonRedactionTest(unittest.TestCase):
             else:
                 os.environ["OPENSANDBOX_EGRESS_PROFILE"] = old_profile
             system._set_fleet_mode_from_env()
+
+    def test_conditional_lookup_replaces_cache_only_for_new_snapshot_tag(self) -> None:
+        system = _load_system_module()
+        calls: list[tuple[str, str, dict[str, str]]] = []
+        steps = [
+            _ScriptedVaultResponse(200, _vault_payload(7, "old-secret"), '"7"'),
+            _ScriptedVaultResponse(200, _vault_payload(8, "new-secret"), '"8"'),
+        ]
+        system.UnixSocketHTTPConnection = _scripted_vault_connection(steps, calls)
+        system._vault_cache = None
+
+        first = system._load_active_vault()
+        second = system._load_active_vault()
+
+        self.assertEqual(7, first.revision)
+        self.assertEqual(8, second.revision)
+        self.assertEqual(["new-secret"], second.redactions)
+        self.assertEqual(
+            [
+                ("GET", system.ACTIVE_VAULT_PATH, {}),
+                (
+                    "GET",
+                    system.ACTIVE_VAULT_PATH,
+                    {"If-None-Match": '"7"'},
+                ),
+            ],
+            calls,
+        )
+
+    def test_not_found_clears_cached_snapshot(self) -> None:
+        system = _load_system_module()
+        calls: list[tuple[str, str, dict[str, str]]] = []
+        steps = [
+            _ScriptedVaultResponse(200, _vault_payload(7), '"7"'),
+            _ScriptedVaultResponse(404),
+        ]
+        system.UnixSocketHTTPConnection = _scripted_vault_connection(steps, calls)
+        system._vault_cache = None
+
+        self.assertIsNotNone(system._load_active_vault())
+        self.assertIsNone(system._load_active_vault())
+        self.assertIsNone(system._vault_cache)
+
+    def test_fleet_not_found_clears_only_the_selected_client_cache(self) -> None:
+        system = _load_system_module()
+        system._set_fleet_mode(True)
+        vault_a = system.ActiveVault(7, [], ["secret-a"], '"7"')
+        vault_b = system.ActiveVault(11, [], ["secret-b"], '"11"')
+        system._vault_cache_by_ip = {
+            "10.0.0.5": vault_a,
+            "10.0.0.6": vault_b,
+        }
+        calls: list[tuple[str, str, dict[str, str]]] = []
+        system.UnixSocketHTTPConnection = _scripted_vault_connection(
+            [
+                _ScriptedVaultResponse(404),
+                _ScriptedVaultResponse(304, etag='"11"'),
+            ],
+            calls,
+        )
+
+        self.assertIsNone(system._load_active_vault("10.0.0.5"))
+        self.assertIs(system._load_active_vault("10.0.0.6"), vault_b)
+        self.assertNotIn("10.0.0.5", system._vault_cache_by_ip)
+        self.assertIs(system._vault_cache_by_ip["10.0.0.6"], vault_b)
+
+    def test_transport_and_http_errors_are_not_treated_as_no_vault(self) -> None:
+        scenarios = {
+            "timeout": TimeoutError("socket stalled"),
+            "refused": ConnectionRefusedError("socket unavailable"),
+            "server-error": _ScriptedVaultResponse(503, b"do-not-log-this-body"),
+            "truncated": _ScriptedVaultResponse(
+                200,
+                etag='"7"',
+                read_error=ConnectionResetError("unexpected EOF"),
+            ),
+        }
+        for name, step in scenarios.items():
+            with self.subTest(name=name):
+                system = _load_system_module()
+                calls: list[tuple[str, str, dict[str, str]]] = []
+                system.UnixSocketHTTPConnection = _scripted_vault_connection(
+                    [step], calls
+                )
+                system._set_fleet_mode(False)
+                system._vault_cache = system.ActiveVault(
+                    7, [], ["revoked-secret"], '"cached-7"'
+                )
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._load_active_vault()
+                self.assertIsNone(system._vault_cache)
+
+    def test_invalid_active_vault_payloads_fail_closed(self) -> None:
+        invalid_payloads = {
+            "malformed-json": b'{"revision":7,"secret":"do-not-log"',
+            "non-object": b"[]",
+            "zero-revision": b'{"revision":0,"bindings":[]}',
+            "boolean-revision": b'{"revision":true,"bindings":[]}',
+            "bindings-not-list": b'{"revision":7,"bindings":{}}',
+            "binding-not-object": b'{"revision":7,"bindings":[1]}',
+            "redactions-not-list": b'{"revision":7,"bindings":[],"redactions":{}}',
+            "empty-redaction": b'{"revision":7,"bindings":[],"redactions":[""]}',
+        }
+        for name, payload in invalid_payloads.items():
+            with self.subTest(name=name):
+                system = _load_system_module()
+                calls: list[tuple[str, str, dict[str, str]]] = []
+                system.UnixSocketHTTPConnection = _scripted_vault_connection(
+                    [_ScriptedVaultResponse(200, payload, '"7"')], calls
+                )
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._fetch_active_vault()
+
+    def test_deeply_invalid_active_vault_payloads_clear_cache(self) -> None:
+        def corrupt_binding(mutator) -> bytes:
+            payload = json.loads(_vault_payload(8, "new-secret"))
+            mutator(payload["bindings"][0])
+            return json.dumps(payload).encode("utf-8")
+
+        def with_substitution(
+            *, include_placeholder_redaction: bool = True, **updates: Any
+        ) -> bytes:
+            substitution = {
+                "placeholder": "__secret__",
+                "value": "new-secret",
+                "in": ["query"],
+            }
+            substitution.update(updates)
+            payload = json.loads(_vault_payload(8, "new-secret"))
+            binding = payload["bindings"][0]
+            binding["substitutions"] = [substitution]
+            binding["headers"] = []
+            if include_placeholder_redaction:
+                payload["redactions"].append(substitution["placeholder"])
+            return json.dumps(payload).encode("utf-8")
+
+        invalid_payloads = {
+            "blank-binding-name": corrupt_binding(
+                lambda binding: binding.__setitem__("name", " ")
+            ),
+            "missing-match": corrupt_binding(lambda binding: binding.pop("match")),
+            "hosts-empty": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("hosts", [])
+            ),
+            "hosts-not-strings": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("hosts", [7])
+            ),
+            "hosts-overbroad-wildcard": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("hosts", ["*.com"])
+            ),
+            "hosts-bare-wildcard": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("hosts", ["*"])
+            ),
+            "hosts-embedded-wildcard": corrupt_binding(
+                lambda binding: binding["match"].__setitem__(
+                    "hosts", ["foo*bar.example.com"]
+                )
+            ),
+            "hosts-ipv4": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("hosts", ["127.0.0.1"])
+            ),
+            "hosts-ipv6": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("hosts", ["2001:db8::1"])
+            ),
+            "hosts-wildcard-ip": corrupt_binding(
+                lambda binding: binding["match"].__setitem__(
+                    "hosts", ["*.127.0.0.1"]
+                )
+            ),
+            "hosts-scheme": corrupt_binding(
+                lambda binding: binding["match"].__setitem__(
+                    "hosts", ["https://example.com"]
+                )
+            ),
+            "hosts-path": corrupt_binding(
+                lambda binding: binding["match"].__setitem__(
+                    "hosts", ["example.com/path"]
+                )
+            ),
+            "hosts-single-label": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("hosts", ["localhost"])
+            ),
+            "hosts-leading-hyphen": corrupt_binding(
+                lambda binding: binding["match"].__setitem__(
+                    "hosts", ["-bad.example.com"]
+                )
+            ),
+            "hosts-trailing-hyphen": corrupt_binding(
+                lambda binding: binding["match"].__setitem__(
+                    "hosts", ["bad-.example.com"]
+                )
+            ),
+            "schemes-empty": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("schemes", [])
+            ),
+            "unsupported-scheme": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("schemes", ["ftp"])
+            ),
+            "methods-blank": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("methods", [""])
+            ),
+            "paths-not-rooted": corrupt_binding(
+                lambda binding: binding["match"].__setitem__("paths", ["v1/*"])
+            ),
+            "headers-not-list": corrupt_binding(
+                lambda binding: binding.__setitem__("headers", {})
+            ),
+            "header-name-blank": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [{"name": "", "value": "new-secret"}]
+                )
+            ),
+            "header-value-not-string": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [{"name": "x-api-key", "value": 7}]
+                )
+            ),
+            "header-value-not-redacted": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [{"name": "x-api-key", "value": "unredacted"}]
+                )
+            ),
+            "header-name-newline": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [{"name": "x-bad\nname", "value": "new-secret"}]
+                )
+            ),
+            "header-name-space": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [{"name": "x bad", "value": "new-secret"}]
+                )
+            ),
+            "header-name-colon": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [{"name": "x:bad", "value": "new-secret"}]
+                )
+            ),
+            "header-name-host-reserved": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [{"name": "Host", "value": "new-secret"}]
+                )
+            ),
+            "header-name-content-length-reserved": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [
+                        {"name": "Content-Length", "value": "new-secret"}
+                    ]
+                )
+            ),
+            "header-name-mixed-case-reserved": corrupt_binding(
+                lambda binding: binding.__setitem__(
+                    "headers", [{"name": "hOsT", "value": "new-secret"}]
+                )
+            ),
+            "substitution-placeholder-blank": with_substitution(placeholder=""),
+            "substitution-value-not-string": with_substitution(value=7),
+            "substitution-surfaces-empty": with_substitution(**{"in": []}),
+            "substitution-surface-unsupported": with_substitution(**{"in": ["cookie"]}),
+            "substitution-value-not-redacted": with_substitution(value="unredacted"),
+            "substitution-placeholder-not-redacted": with_substitution(
+                include_placeholder_redaction=False
+            ),
+        }
+        for name, payload in invalid_payloads.items():
+            with self.subTest(name=name):
+                system = _load_system_module()
+                old_cache = system.ActiveVault(
+                    7, [], ["old-secret"], '"cached-tag"'
+                )
+                system._vault_cache = old_cache
+                calls: list[tuple[str, str, dict[str, str]]] = []
+                system.UnixSocketHTTPConnection = _scripted_vault_connection(
+                    [_ScriptedVaultResponse(200, payload, '"new-tag"')], calls
+                )
+
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._load_active_vault()
+
+                self.assertIsNone(system._vault_cache)
+
+    def test_deeply_invalid_snapshot_denies_buffered_and_streamed_requests(self) -> None:
+        invalid_headers = {
+            "unredacted-value": ("x-api-key", "unredacted-secret"),
+            "newline": ("x-bad\nname", "new-secret"),
+            "space": ("x bad", "new-secret"),
+            "colon": ("x:bad", "new-secret"),
+            "host": ("Host", "new-secret"),
+            "content-length": ("Content-Length", "new-secret"),
+            "mixed-case-reserved": ("hOsT", "new-secret"),
+        }
+        for name, (header_name, header_value) in invalid_headers.items():
+            for streamed in (False, True):
+                with self.subTest(name=name, streamed=streamed):
+                    payload = json.loads(_vault_payload(8, "new-secret"))
+                    payload["bindings"][0]["headers"] = [
+                        {"name": header_name, "value": header_value}
+                    ]
+                    malformed = json.dumps(payload).encode("utf-8")
+                    system = _load_system_module()
+                    old_cache = system.ActiveVault(
+                        7, [], ["old-secret"], '"cached-tag"'
+                    )
+                    system._vault_cache = old_cache
+                    calls: list[tuple[str, str, dict[str, str]]] = []
+                    system.UnixSocketHTTPConnection = _scripted_vault_connection(
+                        [_ScriptedVaultResponse(200, malformed, '"new-tag"')], calls
+                    )
+                    flow = _Flow()
+                    flow.response = None
+                    flow.request.stream = streamed
+                    if not streamed:
+                        flow.request.headers["Content-Length"] = "0"
+
+                    system.requestheaders(flow)
+
+                    self.assertIsNone(system._vault_cache)
+                    self.assertIsNot(system._vault_cache, old_cache)
+                    self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+                    if streamed:
+                        self.assertTrue(flow.killed)
+                        self.assertIsNone(flow.response)
+                    else:
+                        self.assertFalse(flow.killed)
+                        self.assertEqual(503, flow.response.status_code)
+
+    def test_overbroad_host_snapshot_denies_before_binding_selection(self) -> None:
+        payload = json.loads(_vault_payload(8, "new-secret"))
+        payload["bindings"][0]["match"]["hosts"] = ["*.com"]
+        malformed = json.dumps(payload).encode("utf-8")
+
+        for streamed in (False, True):
+            with self.subTest(streamed=streamed):
+                system = _load_system_module()
+                old_cache = system.ActiveVault(
+                    7, [], ["old-secret"], '"cached-tag"'
+                )
+                system._vault_cache = old_cache
+                calls: list[tuple[str, str, dict[str, str]]] = []
+                system.UnixSocketHTTPConnection = _scripted_vault_connection(
+                    [_ScriptedVaultResponse(200, malformed, '"new-tag"')], calls
+                )
+                flow = _Flow()
+                flow.response = None
+                flow.request.pretty_host = "attacker.com"
+                flow.request.host = "attacker.com"
+                flow.request.stream = streamed
+                if not streamed:
+                    flow.request.headers["Content-Length"] = "0"
+
+                system.requestheaders(flow)
+
+                self.assertIsNone(system._vault_cache)
+                self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+                self.assertNotIn(system.FLOW_BINDING_KEY, flow.metadata)
+                self.assertNotIn("x-api-key", flow.request.headers)
+                if streamed:
+                    self.assertTrue(flow.killed)
+                    self.assertIsNone(flow.response)
+                else:
+                    self.assertFalse(flow.killed)
+                    self.assertEqual(503, flow.response.status_code)
+
+    def test_active_vault_parser_normalizes_safe_deep_snapshot(self) -> None:
+        system = _load_system_module()
+        vault = system._parse_active_vault(
+            {
+                "revision": 7,
+                "bindings": [
+                    {
+                        "name": " normalized ",
+                        "match": {
+                            "schemes": [" HTTPS "],
+                            "hosts": [
+                                " CODE.EXAMPLE.COM. ",
+                                " *.Sub.Example.Com. ",
+                            ],
+                            "methods": [" get "],
+                            "paths": [" /v1/* "],
+                        },
+                        "headers": None,
+                        "substitutions": None,
+                    }
+                ],
+                "redactions": [],
+            }
+        )
+
+        self.assertEqual(
+            {
+                "name": "normalized",
+                "match": {
+                    "schemes": ["https"],
+                    "hosts": ["code.example.com", "*.sub.example.com"],
+                    "methods": ["GET"],
+                    "paths": ["/v1/*"],
+                },
+                "headers": [],
+                "substitutions": [],
+            },
+            vault.bindings[0],
+        )
+
+    def test_substitution_requires_every_go_redaction_representation(self) -> None:
+        system = _load_system_module()
+        value = 'space + "quote" \\ café😀 &'
+        placeholder = "__complex_secret__"
+        variants = system._active_snapshot_substitution_redaction_variants(value)
+        self.assertEqual(
+            {
+                value,
+                "space%20%2B%20%22quote%22%20%5C%20caf%C3%A9%F0%9F%98%80%20%26",
+                "space%20%2b%20%22quote%22%20%5c%20caf%c3%a9%f0%9f%98%80%20%26",
+                "space+%2B+%22quote%22+%5C+caf%C3%A9%F0%9F%98%80+%26",
+                "space+%2b+%22quote%22+%5c+caf%c3%a9%f0%9f%98%80+%26",
+                'space + \\"quote\\" \\\\ café😀 \\u0026',
+                'space + \\"quote\\" \\\\ caf\\u00e9\\ud83d\\ude00 &',
+            },
+            variants,
+        )
+
+        def payload(redactions: list[str]) -> bytes:
+            return json.dumps(
+                {
+                    "revision": 8,
+                    "bindings": [
+                        {
+                            "name": "substitution-api",
+                            "match": {
+                                "schemes": ["https"],
+                                "hosts": ["code.example.com"],
+                                "methods": ["GET"],
+                                "paths": ["/api/v8/*"],
+                            },
+                            "headers": [],
+                            "substitutions": [
+                                {
+                                    "placeholder": placeholder,
+                                    "value": value,
+                                    "in": ["query"],
+                                }
+                            ],
+                        }
+                    ],
+                    "redactions": redactions,
+                }
+            ).encode("utf-8")
+
+        all_redactions = [placeholder, *variants]
+        self.assertIsNotNone(
+            system._parse_active_vault(json.loads(payload(all_redactions)))
+        )
+
+        for missing in variants:
+            with self.subTest(missing=missing):
+                system = _load_system_module()
+                system._vault_cache = system.ActiveVault(
+                    7, [], ["old-secret"], '"cached-tag"'
+                )
+                calls: list[tuple[str, str, dict[str, str]]] = []
+                system.UnixSocketHTTPConnection = _scripted_vault_connection(
+                    [
+                        _ScriptedVaultResponse(
+                            200,
+                            payload(
+                                [
+                                    redaction
+                                    for redaction in all_redactions
+                                    if redaction != missing
+                                ]
+                            ),
+                            '"new-tag"',
+                        )
+                    ],
+                    calls,
+                )
+
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._load_active_vault()
+
+                self.assertIsNone(system._vault_cache)
+
+    def test_encoded_substitution_echo_is_redacted_from_response_header(self) -> None:
+        system = _load_system_module()
+        value = 'space + "quote" \\ café😀 &'
+        placeholder = "__complex_secret__"
+        redactions = [
+            placeholder,
+            *system._active_snapshot_substitution_redaction_variants(value),
+        ]
+        vault = system._parse_active_vault(
+            {
+                "revision": 8,
+                "bindings": [
+                    {
+                        "name": "substitution-api",
+                        "match": {
+                            "schemes": ["https"],
+                            "hosts": ["code.example.com"],
+                            "methods": ["GET"],
+                            "paths": ["/api/v8/*"],
+                        },
+                        "headers": [],
+                        "substitutions": [
+                            {
+                                "placeholder": placeholder,
+                                "value": value,
+                                "in": ["query"],
+                            }
+                        ],
+                    }
+                ],
+                "redactions": redactions,
+            }
+        )
+        system._load_active_vault = lambda _client_ip=None: vault
+        flow = _Flow()
+        flow.request.path = f"/api/v8/projects?token={placeholder}"
+        encoded = system.quote(value, safe="")
+        flow.response.headers["x-token-echo"] = f"prefix {encoded} suffix"
+
+        system.requestheaders(flow)
+        system.responseheaders(flow)
+
+        self.assertEqual(
+            "prefix [REDACTED] suffix", flow.response.headers.get("x-token-echo")
+        )
+        self.assertNotIn(encoded, "\n".join(system.ctx.log.messages))
+
+    def test_invalid_etag_and_revision_regression_fail_closed(self) -> None:
+        system = _load_system_module()
+        cached = system.ActiveVault(7, [], ["old-secret"], '"7"')
+        scenarios = {
+            "missing-etag": _ScriptedVaultResponse(200, _vault_payload(8), None),
+            "malformed-etag": _ScriptedVaultResponse(
+                200, _vault_payload(8), '"bad tag"'
+            ),
+            "same-revision-200": _ScriptedVaultResponse(
+                200, _vault_payload(7), '"7"'
+            ),
+            "bad-304-etag": _ScriptedVaultResponse(304, etag='"8"'),
+        }
+        for name, response in scenarios.items():
+            with self.subTest(name=name):
+                calls: list[tuple[str, str, dict[str, str]]] = []
+                system.UnixSocketHTTPConnection = _scripted_vault_connection(
+                    [response], calls
+                )
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._fetch_active_vault(cached=cached)
+
+        calls = []
+        system.UnixSocketHTTPConnection = _scripted_vault_connection(
+            [_ScriptedVaultResponse(304, etag='"7"')], calls
+        )
+        with self.assertRaises(system.ActiveVaultLookupError):
+            system._fetch_active_vault(cached=None)
+
+        calls = []
+        system.UnixSocketHTTPConnection = _scripted_vault_connection(
+            [_ScriptedVaultResponse(200, _vault_payload(1), '"recreated"')], calls
+        )
+        recreated = system._fetch_active_vault(cached=cached)
+        self.assertEqual(1, recreated.revision)
+        self.assertEqual('"recreated"', recreated.etag)
+
+    def test_lookup_failure_returns_503_without_forwarding_small_request(self) -> None:
+        system = _load_system_module()
+
+        def fail_lookup(_client_ip=None):
+            raise system.ActiveVaultLookupError("active vault lookup timed out")
+
+        system._load_active_vault = fail_lookup
+        flow = _Flow()
+        flow.response = None
+        flow.request.headers["Content-Length"] = "0"
+
+        system.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(503, flow.response.status_code)
+        self.assertEqual("credential proxy unavailable\n", flow.response.body)
+        self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+        self.assertFalse(flow.killed)
+
+    def test_lookup_failure_kills_requests_that_may_be_streamed(self) -> None:
+        scenarios = {
+            "already-streaming": {"stream": True},
+            "chunked": {"transfer-encoding": "chunked"},
+            "http2-unknown-length": {"http_version": "HTTP/2"},
+            "large-already-streaming": {
+                "stream": True,
+                "content-length": str(2 << 20),
+            },
+        }
+        for name, config in scenarios.items():
+            with self.subTest(name=name):
+                system = _load_system_module()
+
+                def fail_lookup(_client_ip=None, _system=system):
+                    raise _system.ActiveVaultLookupError("active vault lookup failed")
+
+                system._load_active_vault = fail_lookup
+                flow = _Flow()
+                flow.response = None
+                flow.request.stream = bool(config.get("stream", False))
+                flow.request.http_version = str(
+                    config.get("http_version", flow.request.http_version)
+                )
+                for header in ("transfer-encoding", "content-length"):
+                    if header in config:
+                        flow.request.headers[header] = str(config[header])
+
+                system.requestheaders(flow)
+
+                self.assertTrue(flow.killed)
+                self.assertIsNone(flow.response)
+                self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
 
     def test_request_injection_log_does_not_include_secret_value(self) -> None:
         system = _load_system_module()
@@ -493,6 +1226,182 @@ class SystemAddonRedactionTest(unittest.TestCase):
         system.responseheaders(flow)
 
         self.assertEqual("prefix [REDACTED] suffix", flow.response.headers.get("x-token-echo"))
+
+
+@unittest.skipUnless(
+    hasattr(socket, "AF_UNIX") and hasattr(socketserver, "UnixStreamServer"),
+    "Unix domain sockets are unavailable on this platform",
+)
+class SystemAddonUnixSocketIntegrationTest(unittest.TestCase):
+    def test_snapshot_tag_protocol_concurrency_and_failure_modes(self) -> None:
+        system = _load_system_module()
+        state: dict[str, Any] = {
+            "mode": "normal",
+            "revision": 7,
+            "value": "secret-v7",
+            "requests": 0,
+        }
+        state_lock = threading.Lock()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                with state_lock:
+                    state["requests"] += 1
+                    mode = state["mode"]
+                    revision = state["revision"]
+                    value = state["value"]
+
+                if mode == "stall":
+                    time.sleep(0.4)
+                if mode == "server-error":
+                    body = b"secret-bearing diagnostic must not reach addon logs"
+                    self.send_response(503)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self._write(body)
+                    return
+                if mode == "malformed":
+                    body = json.dumps(
+                        {
+                            "revision": 9,
+                            "bindings": [
+                                {
+                                    "name": "deeply-malformed",
+                                    "match": {
+                                        "schemes": ["https"],
+                                        "hosts": ["code.example.com"],
+                                        "methods": ["GET"],
+                                        "paths": ["/*"],
+                                    },
+                                    "headers": [
+                                        {
+                                            "name": "x-api-key",
+                                            "value": "unredacted-secret",
+                                        }
+                                    ],
+                                }
+                            ],
+                            "redactions": [],
+                        }
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("ETag", '"deeply-malformed"')
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self._write(body)
+                    return
+
+                etag = f'"{revision}"'
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.end_headers()
+                    return
+                body = _vault_payload(revision, value)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("ETag", etag)
+                self.end_headers()
+                self._write(body)
+
+            def _write(self, body: bytes) -> None:
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, _format: str, *args: Any) -> None:
+                pass
+
+        unix_server = socketserver.UnixStreamServer
+
+        class ThreadingUnixServer(socketserver.ThreadingMixIn, unix_server):
+            daemon_threads = True
+            request_queue_size = 128
+
+        with tempfile.TemporaryDirectory(prefix="opensandbox-vault-") as tmp_dir:
+            socket_path = str(Path(tmp_dir) / "active.sock")
+            server = ThreadingUnixServer(socket_path, Handler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            old_socket = os.environ.get(system.CREDENTIAL_PROXY_SOCKET_ENV)
+            old_profile = os.environ.get("OPENSANDBOX_EGRESS_PROFILE")
+            os.environ[system.CREDENTIAL_PROXY_SOCKET_ENV] = socket_path
+            os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
+            system._set_fleet_mode_from_env()
+            system._vault_cache = None
+            closed = False
+            try:
+                initial = system._load_active_vault()
+                unchanged = system._load_active_vault()
+                self.assertIs(initial, unchanged)
+                self.assertEqual(7, initial.revision)
+
+                with state_lock:
+                    state["revision"] = 8
+                    state["value"] = "secret-v8"
+                updated = system._load_active_vault()
+                self.assertEqual(8, updated.revision)
+                self.assertEqual(["secret-v8"], updated.redactions)
+
+                # A local UDS opaque-tag check has a deliberately generous CI
+                # ceiling: 64 concurrent 304s must complete within two seconds
+                # (at least 32 checks/s), while transferring no secret payload.
+                started = time.monotonic()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+                    results = list(
+                        pool.map(
+                            lambda _index: system._fetch_active_vault(cached=updated),
+                            range(64),
+                        )
+                    )
+                elapsed = time.monotonic() - started
+                self.assertLess(elapsed, 2.0)
+                self.assertTrue(all(vault is updated for vault in results))
+
+                for mode in ("server-error", "malformed"):
+                    with self.subTest(mode=mode):
+                        with state_lock:
+                            state["mode"] = mode
+                        with self.assertRaises(system.ActiveVaultLookupError):
+                            system._fetch_active_vault(cached=updated)
+
+                with state_lock:
+                    state["mode"] = "stall"
+                flow = _Flow()
+                flow.response = None
+                flow.request.headers["Content-Length"] = "0"
+                started = time.monotonic()
+                system.requestheaders(flow)
+                self.assertLess(time.monotonic() - started, 0.9)
+                self.assertEqual(503, flow.response.status_code)
+                self.assertIsNone(system._vault_cache)
+                self.assertNotIn(
+                    "secret-bearing diagnostic",
+                    "\n".join(system.ctx.log.messages),
+                )
+
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+                closed = True
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._fetch_active_vault(cached=updated)
+            finally:
+                if not closed:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+                if old_socket is None:
+                    os.environ.pop(system.CREDENTIAL_PROXY_SOCKET_ENV, None)
+                else:
+                    os.environ[system.CREDENTIAL_PROXY_SOCKET_ENV] = old_socket
+                if old_profile is None:
+                    os.environ.pop("OPENSANDBOX_EGRESS_PROFILE", None)
+                else:
+                    os.environ["OPENSANDBOX_EGRESS_PROFILE"] = old_profile
+                system._set_fleet_mode_from_env()
 
 
 class SystemAddonSubstitutionTest(unittest.TestCase):
@@ -875,6 +1784,17 @@ class SystemAddonPathTraversalTest(unittest.TestCase):
 
         self.assertNotIn("Private-Token", flow.request.headers._values)
 
+    def test_method_outside_scope_no_injection(self) -> None:
+        """A matching host and path do not override the binding's method scope."""
+        system = self._make_system_with_vault()
+        flow = _Flow()
+        flow.request.method = "POST"
+        flow.request.path = "/api/v8/projects/123/variables"
+
+        system.requestheaders(flow)
+
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+
     def test_double_encoded_path_outside_binding_scope_is_allowed(self) -> None:
         """Ambiguous paths pass through when no credential binding matches."""
         system = self._make_system_with_vault()
@@ -1239,7 +2159,7 @@ class SystemAddonStreamingTest(unittest.TestCase):
 
     def test_body_substitution_redactions_from_matched_revision(self) -> None:
         """Redactions must come from the vault revision matched at
-        requestheaders time, not from a later reload (0.5s cache TTL)."""
+        requestheaders time, not from a later runtime mutation."""
         system = _load_system_module()
         system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
             1,
@@ -1270,7 +2190,7 @@ class SystemAddonStreamingTest(unittest.TestCase):
         flow.request.content = b'{"client_secret":"__body_secret__"}'
 
         system.requestheaders(flow)
-        # Vault changes (e.g. cache TTL expiry) before the body arrives.
+        # The vault changes before the body arrives.
         system._load_active_vault = lambda _client_ip=None: system.ActiveVault(2, [], ["new-secret"])
 
         system.request(flow)

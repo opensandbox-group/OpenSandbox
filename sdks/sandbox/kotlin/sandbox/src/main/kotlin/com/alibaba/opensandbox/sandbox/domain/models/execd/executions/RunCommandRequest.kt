@@ -33,6 +33,7 @@ import kotlin.time.toJavaDuration
  */
 class RunCommandRequest private constructor(
     val command: String,
+    val argv: List<String>?,
     val background: Boolean,
     val workingDirectory: String?,
     val timeout: Duration?,
@@ -48,6 +49,7 @@ class RunCommandRequest private constructor(
 
     class Builder {
         private var command: String? = null
+        private var argv: List<String>? = null
         private var background: Boolean = false
         private var workingDirectory: String? = null
         private var timeout: Duration? = null
@@ -59,6 +61,14 @@ class RunCommandRequest private constructor(
         fun command(command: String): Builder {
             require(command.isNotBlank()) { "Command cannot be blank" }
             this.command = command
+            return this
+        }
+
+        fun argv(argv: List<String>): Builder {
+            require(argv.isNotEmpty() && argv[0].isNotEmpty() && argv.none { '\u0000' in it }) {
+                "Argv requires a non-empty executable and strings without NUL"
+            }
+            this.argv = argv.toList()
             return this
         }
 
@@ -124,10 +134,12 @@ class RunCommandRequest private constructor(
         }
 
         fun build(): RunCommandRequest {
-            val commandValue = command ?: throw IllegalArgumentException("Command must be specified")
+            require((command != null) != (argv != null)) { "Exactly one of command or argv is required" }
+            val commandValue = command.orEmpty()
             require(gid == null || uid != null) { "Uid is required when gid is provided" }
             return RunCommandRequest(
                 command = commandValue,
+                argv = argv,
                 background = background,
                 workingDirectory = workingDirectory,
                 timeout = timeout,

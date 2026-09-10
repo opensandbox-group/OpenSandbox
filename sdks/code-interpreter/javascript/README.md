@@ -7,7 +7,7 @@ A TypeScript/JavaScript SDK for executing code in secure, isolated sandboxes. It
 
 This SDK requires a Docker image containing the Code Interpreter runtime environment. You must use the `opensandbox/code-interpreter` image (or a derivative) which includes pre-installed runtimes for Python, Java, Go, Node.js, etc.
 
-For detailed information about supported languages and versions, please refer to the [Environment Documentation](../../../sandboxes/code-interpreter/README.md).
+For detailed information about supported languages and versions, please refer to the [Environment Documentation](https://github.com/opensandbox-group/sandbox-images).
 
 ## Installation
 

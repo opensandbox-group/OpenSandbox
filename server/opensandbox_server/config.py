@@ -687,7 +687,40 @@ class KubernetesRuntimeConfig(BaseModel):
     )
     namespace: Optional[str] = Field(
         default=None,
-        description="Namespace used for sandbox workloads.",
+        description=(
+            "Kubernetes / fast-sandbox namespace for workload reads and "
+            "sandbox creation when no tenant is configured. With [tenants] "
+            "enabled, each tenant maps to its own namespace."
+        ),
+    )
+    # -- fsb (fast-sandbox) backend --------------------------------------
+    # Shared with the kubernetes runtime, which also serves fsb (flt-)
+    # sandboxes side by side; unused fields are harmless per provider.
+    fastpath_endpoint: str = Field(
+        default="fast-sandbox-fastpath.opensandbox.svc:9090",
+        description="fast-sandbox Fast-Path Server gRPC endpoint.",
+    )
+    fastpath_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Per-RPC gRPC deadline for FastPath calls.",
+    )
+    fastpath_wait_ready_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Bounded readiness wait for DataPlaneReady after Create.",
+    )
+    fastpath_resource_pool: str = Field(
+        default="default-pool",
+        description="Default fast-sandbox SandboxPool when extensions.poolRef is unset.",
+    )
+    template_s3_publish_secret: str = Field(
+        default="sandbox-oss-credentials",
+        min_length=1,
+        description=(
+            "Secret (in the platform namespace) holding the object-store "
+            "credentials referenced by server-created SandboxTemplates."
+        ),
     )
     workload_provider: Optional[str] = Field(
         default=None,
@@ -905,7 +938,7 @@ class EgressConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    """Runtime selection (docker, kubernetes, etc.)."""
+    """Runtime selection (docker or kubernetes)."""
 
     type: Literal["docker", "kubernetes"] = Field(
         ...,
@@ -913,7 +946,13 @@ class RuntimeConfig(BaseModel):
     )
     execd_image: str = Field(
         ...,
-        description="Container image that contains the execd binary for sandbox initialization.",
+        description=(
+            "Container image that contains the execd binary for sandbox "
+            "initialization. Docker/Kubernetes run it in-sandbox; the fsb "
+            "runtime injects it into SandboxTemplate golden-image builds "
+            "(the template builder bakes the runtime files into the guest "
+            "rootfs)."
+        ),
         min_length=1,
     )
     execd_run_as_init: bool = Field(
@@ -1122,6 +1161,14 @@ class PostgreSQLStoreConfig(BaseModel):
         default=5.0,
         gt=0,
         description="Maximum time in seconds to wait for a pooled PostgreSQL connection.",
+    )
+    snapshot_recovery_interval_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        description=(
+            "Interval between unfinished snapshot recovery scans when PostgreSQL is paired "
+            "with the Kubernetes runtime. This controls takeover latency, not correctness."
+        ),
     )
 
     @model_validator(mode="after")

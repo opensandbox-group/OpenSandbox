@@ -50,6 +50,9 @@ class SandboxService(ABC):
     def set_tenant_provider(self, provider: object) -> None:
         """Inject tenant provider (no-op for non-K8s implementations)."""
 
+    def close(self) -> None:
+        """Release service-owned background readers and connections."""
+
     @staticmethod
     def generate_sandbox_id() -> str:
         """

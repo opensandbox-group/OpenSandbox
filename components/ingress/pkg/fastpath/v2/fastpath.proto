@@ -4,8 +4,8 @@ package fastpath.v2;
 
 option go_package = "github.com/alibaba/opensandbox/ingress/pkg/fastpath/v2;fastpathv2";
 
-// This is the fixed T5 subset of opensandbox-group/fast-sandbox FastPath v2
-// at revision e22078237542eea4c0ce17aed938cf96bd352520. Field numbers and the
+// This is the ResolveEndpoint subset of opensandbox-group/fast-sandbox FastPath v2
+// at revision 11b21bf6a6ce730d48ea6e3e3d0050db2607ae49. Field numbers and the
 // fully-qualified RPC name must remain wire-compatible with that source.
 service FastPathService {
   rpc ResolveEndpoint(ResolveEndpointRequest) returns (ResolveEndpointResponse);
@@ -17,10 +17,8 @@ message NamespacedName {
 }
 
 message SandboxReference {
-  oneof reference {
-    string sandbox_uid = 1;
-    NamespacedName namespaced_name = 2;
-  }
+  NamespacedName namespaced_name = 2;
+  string expected_uid = 3;
 }
 
 message EndpointTarget {
@@ -39,18 +37,20 @@ message ResolveEndpointRequest {
   SandboxReference sandbox = 1;
   EndpointTarget target = 2;
   EndpointAccessMode access_mode = 3;
-  bool wait_until_ready = 4;
-  int32 wait_timeout_millis = 5;
+  int64 expected_generation = 4;
+}
+
+message ResolvedEndpoint {
+  string component_name = 1;
+  string protocol = 2;
+  uint32 port = 3;
 }
 
 message ResolveEndpointResponse {
   string sandbox_uid = 1;
-  EndpointTarget target = 2;
-  string component_name = 3;
-  string protocol = 4;
-  uint32 resolved_port = 5;
-  string proxy_endpoint = 6;
-  map<string, string> required_headers = 7;
-  int64 route_generation = 8;
-  int64 expires_at_unix_seconds = 9;
+  ResolvedEndpoint endpoint = 2;
+  string proxy_endpoint = 3;
+  map<string, string> required_headers = 4;
+  int64 route_generation = 5;
+  int64 expires_at_unix_seconds = 6;
 }

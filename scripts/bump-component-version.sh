@@ -15,11 +15,19 @@
 
 # Bump component image versions across the project (image refs like component:vX.Y.Z).
 # For ingress, also updates gateway image tag in kubernetes/charts/opensandbox-server/values.yaml.
+#
+# External image pins:
+# OpenSandbox does not own or release the code-interpreter sandbox image, which is maintained
+# in https://github.com/opensandbox-group/sandbox-images. However, code-interpreter is
+# retained here to support updating consumer image pins across documentation, examples, and
+# tests when new external image versions are released.
+#
 # Usage: from repo root:
 #   ./scripts/bump-component-version.sh egress v1.0.2
 #   ./scripts/bump-component-version.sh execd v1.0.7
 #   ./scripts/bump-component-version.sh ingress v1.0.6
-#   ./scripts/bump-component-version.sh v1.0.2              # same as: egress v1.0.2
+#   ./scripts/bump-component-version.sh code-interpreter v1.1.0   # bumps external consumer image pins
+#   ./scripts/bump-component-version.sh v1.0.2                   # same as: egress v1.0.2
 
 set -euo pipefail
 
@@ -41,6 +49,7 @@ else
   echo "Example: $0 egress v1.0.2" >&2
   echo "Example: $0 execd 1.0.7" >&2
   echo "Example: $0 ingress v1.0.6" >&2
+  echo "Example: $0 code-interpreter v1.1.0  # updates external consumer image pins" >&2
   echo "Example: $0 image-committer v0.1.0" >&2
   exit 1
 fi

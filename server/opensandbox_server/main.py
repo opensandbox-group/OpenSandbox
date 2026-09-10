@@ -92,6 +92,8 @@ from opensandbox_server.api.metrics import router as metrics_router  # noqa: E40
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
 from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
+from opensandbox_server.api.network_policy import router as policy_router  # noqa: E402
+from opensandbox_server.api.templates import router as templates_router  # noqa: E402
 from opensandbox_server.integrations.otel import setup_otel_metrics, shutdown_otel_metrics  # noqa: E402
 from opensandbox_server.integrations.renew_intent.proxy_renew import ProxyRenewCoordinator  # noqa: E402
 from opensandbox_server.middleware.auth import AuthMiddleware  # noqa: E402
@@ -127,19 +129,23 @@ async def lifespan(app: FastAPI):
         tenant_provider.start()
         sandbox_service.set_tenant_provider(tenant_provider)
 
-        # OSEP-0014: startup MUST validate all tenant namespaces exist and
-        # are accessible before serving traffic (fail-fast). Multi-tenancy is
-        # Kubernetes-only, which validate_tenant_config() already enforces.
-        # Providers that cannot enumerate tenants (HTTP) skip with a warning
-        # instead of silently validating an empty set.
-        try:
-            from opensandbox_server.services.k8s.client import K8sClient
+        if app_config.runtime.type == "kubernetes":
+            # OSEP-0014: the Kubernetes backend validates every enumerable
+            # tenant namespace before serving traffic. Fsb CR readers are
+            # lazy and must not block a legacy-only deployment at startup.
+            try:
+                from opensandbox_server.services.k8s.client import K8sClient
 
-            core_v1_api = K8sClient(app_config.kubernetes).get_core_v1_api()
-            validate_tenant_namespaces_on_startup(tenant_provider, core_v1_api)
-        except Exception as exc:
-            logger.error("Tenant namespace validation failed: %s", exc)
-            os._exit(1)
+                core_v1_api = K8sClient(app_config.kubernetes).get_core_v1_api()
+                validate_tenant_namespaces_on_startup(tenant_provider, core_v1_api)
+            except Exception as exc:
+                logger.error("Tenant namespace validation failed: %s", exc)
+                os._exit(1)
+        else:
+            logger.warning(
+                "Skipping direct tenant namespace startup validation for the fsb runtime; "
+                "Cluster credentials and CR permissions are checked on first read."
+            )
 
     from anyio.to_thread import current_default_thread_limiter
 
@@ -196,8 +202,12 @@ async def lifespan(app: FastAPI):
     if consumer is not None:
         await consumer.stop()
     shutdown_otel_metrics()
+    sandbox_service.close()
     snapshot_service.close()
     close_snapshot_repository()
+    from opensandbox_server.api.templates import close_template_service  # noqa: E402
+
+    close_template_service()
     if tenant_provider is not None:
         tenant_provider.close()
     await app.state.http_client.aclose()
@@ -242,12 +252,16 @@ app.add_middleware(HttpMetricsMiddleware)
 app.include_router(router)
 app.include_router(devops_router)
 app.include_router(pool_router)
+app.include_router(templates_router)
 app.include_router(proxy_router)
+app.include_router(policy_router)
 app.include_router(router, prefix="/v1")
 app.include_router(devops_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
+app.include_router(templates_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")
 app.include_router(proxy_router, prefix="/v1")
+app.include_router(policy_router, prefix="/v1")
 
 DEFAULT_ERROR_CODE = "GENERAL::UNKNOWN_ERROR"
 DEFAULT_ERROR_MESSAGE = "An unexpected error occurred."

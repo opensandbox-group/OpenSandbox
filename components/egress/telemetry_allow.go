@@ -28,8 +28,12 @@ import (
 // neither is set, the exporter fallback node IP (HOST_IP / /etc/hostinfo). A
 // set-but-unparseable endpoint never falls back to the node IP, so no rule is
 // injected. Operators can still block the target via deny.always, which takes
-// precedence. Returns nil when no OTLP destination is configured.
+// precedence. Returns nil when metrics are explicitly disabled or no OTLP
+// destination is configured.
 func telemetryAllowRules() []policy.EgressRule {
+	if inttelemetry.MetricsDisabled() {
+		return nil
+	}
 	host, port, ok := inttelemetry.OTLPEndpointHostPort()
 	if !ok {
 		if inttelemetry.OTLPEndpointEnvSet() {

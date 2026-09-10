@@ -253,3 +253,38 @@ test("execd client error message carries unstructured JSON error body", async ()
     },
   );
 });
+
+test("native argv preserves literals and execution options", async () => {
+  const argv = ["tool", "", "a b", "$HOME", "x'y", "中文"];
+  for (const background of [false, true]) {
+    let body;
+    const adapter = new CommandsAdapter({}, {
+      baseUrl: "http://localhost",
+      fetch: async (_url, init) => {
+        body = JSON.parse(init.body);
+        return new Response('data: {"type":"execution_complete"}\n\n', {headers: {"content-type": "text/event-stream"}});
+      },
+    });
+    await adapter.run(argv, {background, workingDirectory: "$DIR", envs: {DIR: "/tmp"}, timeoutSeconds: 2});
+    assert.deepEqual(body, {argv, background, cwd: "$DIR", envs: {DIR: "/tmp"}, timeout: 2000});
+    await assert.rejects(adapter.run([]), /argv/);
+    await assert.rejects(adapter.run(["tool", "\0"]), /argv/);
+  }
+});
+
+test("native argv rejects invalid inputs before transport", async () => {
+  const sparse = ["tool"];
+  sparse.length = 2;
+  let requests = 0;
+  const adapter = new CommandsAdapter({}, {
+    baseUrl: "http://localhost",
+    fetch: async () => { requests++; throw new Error("unexpected request"); },
+  });
+  for (const input of [null, 123, {0: "tool", length: 1}, sparse, [], [""], ["tool", null], ["tool", "\0"]]) {
+    await assert.rejects(adapter.run(input), /argv requires/);
+    await assert.rejects(async () => {
+      for await (const _ of adapter.runStream(input)) { /* consume */ }
+    }, /argv requires/);
+  }
+  assert.equal(requests, 0);
+});

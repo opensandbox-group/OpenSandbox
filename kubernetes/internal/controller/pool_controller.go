@@ -577,6 +577,35 @@ func (r *PoolReconciler) calculateRevision(pool *sandboxv1alpha1.Pool) (string, 
 	return hex.EncodeToString(revision[:8]), nil
 }
 
+// shouldReconcilePoolForBatchSandboxUpdate filters updates that affect pool allocation.
+func shouldReconcilePoolForBatchSandboxUpdate(e event.UpdateEvent) bool {
+	oldObj, okOld := e.ObjectOld.(*sandboxv1alpha1.BatchSandbox)
+	newObj, okNew := e.ObjectNew.(*sandboxv1alpha1.BatchSandbox)
+	if !okOld || !okNew {
+		return false
+	}
+	if newObj.Spec.PoolRef == "" {
+		return false
+	}
+	oldVal := oldObj.Annotations[AnnoAllocReleaseKey]
+	newVal := newObj.Annotations[AnnoAllocReleaseKey]
+	if oldVal != newVal {
+		return true
+	}
+	// Trigger reconcile when PoolRef changes, e.g. auto-assign resolves "*" to a concrete Pool.
+	if oldObj.Spec.PoolRef != newObj.Spec.PoolRef {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldObj.Spec.Replicas, newObj.Spec.Replicas) {
+		return true
+	}
+	// Trigger reconcile when sandbox enters terminating state (DeletionTimestamp is set).
+	if oldObj.DeletionTimestamp.IsZero() && !newObj.DeletionTimestamp.IsZero() {
+		return true
+	}
+	return false
+}
+
 // SetupWithManager sets up the controller with the Manager.
 // Todo pod deletion expectations
 func (r *PoolReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
@@ -592,29 +621,7 @@ func (r *PoolReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconci
 			}
 			return bsb.Spec.PoolRef != ""
 		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldObj, okOld := e.ObjectOld.(*sandboxv1alpha1.BatchSandbox)
-			newObj, okNew := e.ObjectNew.(*sandboxv1alpha1.BatchSandbox)
-			if !okOld || !okNew {
-				return false
-			}
-			if newObj.Spec.PoolRef == "" {
-				return false
-			}
-			oldVal := oldObj.Annotations[AnnoAllocReleaseKey]
-			newVal := newObj.Annotations[AnnoAllocReleaseKey]
-			if oldVal != newVal {
-				return true
-			}
-			if oldObj.Spec.Replicas != newObj.Spec.Replicas {
-				return true
-			}
-			// Trigger reconcile when sandbox enters terminating state (DeletionTimestamp is set).
-			if oldObj.DeletionTimestamp.IsZero() && !newObj.DeletionTimestamp.IsZero() {
-				return true
-			}
-			return false
-		},
+		UpdateFunc: shouldReconcilePoolForBatchSandboxUpdate,
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			bsb, ok := e.Object.(*sandboxv1alpha1.BatchSandbox)
 			if !ok {

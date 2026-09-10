@@ -119,7 +119,7 @@ Data flow per create (cached artifacts): `OpenSandbox → gRPC Fast-Path → in-
 | --- | --- | --- |
 | `POST/GET /templates`, `GET/DELETE /templates/{templateId}` | fleets | tenant-scoped; 201 + `Pending` async build |
 | `POST /sandboxes` | shared | existing route; `templateId` field selects template-based (fleets) creation |
-| `GET/PATCH/DELETE /sandboxes/{id}/networkpolicy` | shared | policy proxy; fleets rewrites the egress binding, other backends proxy the sandbox-side sidecar |
+| `GET/PUT/PATCH/DELETE /sandboxes/{id}/networkpolicy` | shared | policy proxy; fleets rewrites the egress binding, other backends proxy the sandbox-side sidecar; PATCH/DELETE remain proposed |
 | `GET/DELETE /sandboxes/{id}`, list, renew, metadata, endpoints | shared | dispatched by ID prefix |
 | `pause` / `resume` / snapshots / logs | — | unsupported on fleets |
 
@@ -139,7 +139,7 @@ The "reused" areas reuse *different* things. There is **no server-side exec API 
 | Area | Reused | Built for `fleets` |
 | --- | --- | --- |
 | Lifecycle (get/delete/renew/list/metadata) | Public routes + `SandboxService` ABC | Map to FastPath v2; adapt pagination/error semantics; dispatch by ID prefix |
-| execd exec/file | `specs/execd-api.yaml` (client → execd:44772) is backend-agnostic | Declare Pool Infra Component `execd`; map port 44772 → `component_name = "execd"` |
+| execd exec/file | `specs/execd-api.yaml` (client → execd:44772) is backend-agnostic | Bake execd into the workload image/template; resolve raw port `44772`, without a runtime `execd` Infra Component |
 | egress `network_policy` | `NetworkPolicy` schema; `egress-api.yaml` shapes | Serialize to an `egress` action binding; serve runtime CRUD via policy proxy |
 | Endpoint resolution | `get_endpoint` → stable `Endpoint` | Tenant-scoped handle before readiness; lazy FastPath route resolution on traffic |
 
@@ -180,7 +180,7 @@ Validation (server-side, at the same point as the existing `CreateSandboxRequest
 | 429 | pool capacity unavailable before acquisition timeout; `Retry-After` |
 | 503 | template artifact or FastPath temporarily unavailable |
 
-Mapping to FastPath `CreateRequest` (template mode):
+Mapping to FastPath `CreateSandboxRequest` (template mode):
 
 | Client field | FastPath mapping |
 | --- | --- |
@@ -339,18 +339,21 @@ Templates are **tenant-private**: every row is scoped by `namespace` (the tenant
 
 Runtime policy operations are served by the server under the shared route **`/sandboxes/{sandboxId}/networkpolicy`**, dispatched by sandbox ID prefix:
 
-- **fleets** (`flt-`): the server itself is the implementation — `GetSandbox` (read current `egress` binding) + `UpdateSandbox(ReplaceActionBindings)` (rewrite). Policy never reaches the sandbox side directly.
+- **fleets** (`flt-`): the server reads the current `egress` binding from the tenant-scoped Sandbox CR and writes it through `UpdateSandbox(ReplaceActionBindings)`. FastPath `GetSandbox` does not return binding inputs. Policy management traffic never reaches the sandbox side directly.
 - **docker / kubernetes**: the same route acts as a server-side reverse proxy to the sandbox-side sidecar (port 18080), preserving the existing sandbox-side contract for SDK callers.
 
 Request and response shapes are **reused from `specs/egress-api.yaml`** (`PolicyStatusResponse`, `NetworkRule`), so SDK callers see the same JSON regardless of backend.
 
 | Method | Request body | Success | Semantics |
 | --- | --- | --- | --- |
-| GET | — | 200 `PolicyStatusResponse` | Read current policy; for fleets, read the `egress` binding — empty/absent binding reported as allow-all (`mode: allow_all`) |
+| GET | — | 200 `PolicyStatusResponse` | Read persisted policy intent; the Actions egress handler resets an empty/absent binding to deny-first (`mode: deny_all`), not allow-all |
+| PUT | `NetworkPolicy` | 200 `PolicyStatusResponse` | Replace the complete policy, including `defaultAction`; retain unrelated action bindings in declaration order |
 | PATCH | `array[NetworkRule]` (minItems 1) | 200 `PolicyStatusResponse` | Merge per egress-api semantics: read current, merge incoming (first target wins; incoming overrides existing), replace whole binding |
 | DELETE | `array[string]` targets (minItems 1) | 200 `PolicyStatusResponse` | Remove rules by target (idempotent; missing targets ignored), replace whole binding |
 
-Errors: `400` (malformed rule/target), `401`, `403` (other-tenant sandbox), `404` (unknown sandbox), `409` (binding update conflict), `503` + `Retry-After` (FastPath unavailable). For fleets, the proxy waits for the update to be accepted (`committed_generation`) but not for handler convergence; the `egress` binding is the only binding this revision manages — other bindings are preserved and rewritten in declaration order. PATCH/DELETE removing the last rule clears the binding (`input: null`), which the Actions protocol delivers as removal.
+Errors: `400` (malformed rule/target), `401`, `404` (unknown or other-tenant sandbox), `409` (binding update conflict), `503` + `Retry-After` (FastPath unavailable). For fleets, the proxy waits for the update to be accepted (`committed_generation`) but not for handler convergence; writes are fenced by Sandbox UID and generation. Removing the last rule must preserve `defaultAction`: an empty allow policy is not equivalent to removing the binding, which resets the handler to deny-first.
+
+**Current integration scope:** Create with `networkPolicy`, GET and full-replacement PUT reproduce the integration script's policy create/read/update flow. PATCH/DELETE rule operations above remain a proposal, not an implemented requirement for this increment. The response describes committed intent; it does not assert live enforcement or invent an `enforcementMode`. A configured and healthy egress Action Handler is required for enforcement. Template catalog APIs and other unimplemented proposal features are not acceptance gates for this increment.
 
 ### Egress / Network Policy
 
@@ -363,7 +366,7 @@ Mapping: `networkPolicy` serializes directly into `actionBindings[{handler: "egr
 Notes:
 
 - Enforcement runs in the egress handler process; co-located sandboxes with different policies are isolated by handler state keyed on sandbox identity in the binding revision
-- Enforcement capability (FQDN vs CIDR, DNS mediation) is a property of the deployed handler image, not of the OpenSandbox contract; the proxy reports the effective `enforcementMode` in `PolicyStatusResponse`, and a pool/template that cannot enforce a requested policy must fail explicitly at Create
+- Enforcement capability (FQDN vs CIDR, DNS mediation) is a property of the deployed handler image, not of the OpenSandbox contract. Reading the persisted binding cannot determine the effective `enforcementMode`; the server omits it. FastPath rejects bindings without a matching Pool handler, and handler readiness participates in aggregate sandbox readiness
 - `credential_proxy` is not supported on `fleets` in any phase
 
 ### Status Mapping
@@ -395,10 +398,10 @@ All other extension keys are rejected. fast-sandbox `failure_policy` is not expo
 
 - The fast-sandbox control plane (Fast-Path Servers, Reconcilers, Sandbox Proxy), Fastlet pools, egress handler, and NodeJanitor must be deployed separately (by the user or via OpenSandbox-provided Helm charts)
 - fast-sandbox uses its own CRD types (`Sandbox`, `SandboxPool`, `SandboxTemplate`, group `sandbox.fast.io/v1alpha2`); OpenSandbox does not manipulate them directly (except creating/deleting `SandboxTemplate` on behalf of the template API)
-- execd is injected via fast-sandbox's **Infra Component** mechanism, pinned by OCI digest on the Pool; execd runs without `EXECD_ACCESS_TOKEN` — FastPath route credentials protect the upstream hop, OpenSandbox protects its public gateway, application `Authorization` passes through
+- execd is installed at image/template build time and started inside the sandbox; it is **not** injected or supervised as a runtime Infra Component. Ingress resolves raw port `44772`, and execd `/ping` is the end-to-end availability check (runtime readiness alone does not prove the process is listening). Do not declare that port as a Pool Infra Component: FastPath rejects raw-port access to declared component ports. Execd runs without `EXECD_ACCESS_TOKEN` — FastPath route credentials protect the upstream hop, OpenSandbox protects its public gateway, application `Authorization` passes through
 - Per-sandbox egress is the egress handler's job, not Kubernetes NetworkPolicy; runtime mutation goes through the policy proxy
 - **Tenant isolation** relies on fast-sandbox namespaces (`ListSandboxes` is namespace-only); `FleetSandboxService` must map each tenant to a distinct namespace on every call and carry an authenticated namespace claim into stable routes and background renew work, or reject `[tenants]` configuration
-- **Fleets configuration** (`[fleets]`): `fastpath_endpoint` (gRPC address), `default_pool_ref` (default SandboxPool for template mode; overridable per request via `extensions.poolRef`), `execd_component_name` (default `execd`), and `endpoint_access_mode` / `require_ingress_gateway` for the ingress adapter
+- **Fleets configuration** (`[fleets]`): `fastpath_endpoint` (gRPC address), `default_pool_ref` (default SandboxPool; overridable per request via `extensions.poolRef`), and ingress gateway/access-mode settings. No execd component-name setting is needed for template-provided execd
 - `get_sandbox_logs` is unsupported on fleets (execd has no sandbox-entrypoint log endpoint); `inspect`/events are backed by `GetSandboxDiagnostics` (lifecycle events only)
 
 ### Risks and Mitigations
@@ -424,8 +427,8 @@ Single implementation track (the earlier phase 1a/1b split is obsolete: network 
 - **Service seam and coexistence**: `FleetSandboxService(SandboxService, ExtensionService)`, enable alongside other runtimes in `factory.py`, `FleetsRuntimeConfig`, `NoopSnapshotRuntime`, `flt-` ID prefix routing on shared lifecycle routes
 - **FastPath v2 client**: Create / Get / Delete / Update / List / Diagnostics / ResolveEndpoint / GetPool / ListPools
 - **Template-mode Create**: add `templateId` to `CreateSandboxRequest` with the mutual-exclusion validator; `templateId` (tenant-scoped row, `Succeeded`) → artifact reference; `pool_ref` = `extensions.poolRef` or configured `default_pool_ref`; one absolute expiry, metadata, `networkPolicy` → egress binding, renew extension → reserved metadata key; idempotent across retries; ambiguous-error recovery returns accepted `Pending`
-- **Ingress contract and fleets provider**: lazy tenant-scoped `get_endpoint`; gateway resolves namespace + port + complete upstream route on traffic; 44772 → component `execd`; raw ports otherwise; 503 while Pending
-- **Policy proxy**: `GET/PATCH/DELETE /sandboxes/{id}/networkpolicy` — fleets backed by `GetSandbox` + `UpdateSandbox(ReplaceActionBindings)`, other backends proxied to the sandbox-side sidecar
+- **Ingress contract and fleets provider**: lazy tenant-scoped `get_endpoint`; gateway resolves namespace + port + complete upstream route on traffic; raw ports including execd `44772`; 503 while Pending; verify execd readiness through the gateway
+- **Policy proxy**: `GET/PUT /sandboxes/{id}/networkpolicy` — fleets backed by tenant-scoped Sandbox CR reads + `UpdateSandbox(ReplaceActionBindings)`, other backends proxied to the sandbox-side sidecar; PATCH/DELETE rule operations are deferred
 - **Lifecycle semantics**: get/delete/renew/list/metadata; reserved metadata kept private; FastPath pages exhausted before filtering and page/total calculation; preflight Delete 404; status/NotFound mapping as specified
 - **Exit criteria**: one server serves `fleets` and another runtime side by side; full SDK flow (template build → create → exec → file → policy update → delete) passes on a Kind cluster without SDK changes, including a Create that initially returns `Pending`; tenant isolation, background renewal, list pagination/totals, `network_policy` create + policy-proxy CRUD, and actual-NotFound behavior verified
 
@@ -460,7 +463,7 @@ Single implementation track (the earlier phase 1a/1b split is obsolete: network 
 ## Infrastructure Needed
 
 - **CI/CD**: Kind cluster with fast-sandbox (Fast-Path, Reconcilers, Sandbox Proxy, Fastlet pool, egress handler, NodeJanitor), MinIO, and a KVM build node for template builds
-- **Documentation**: fleets deployment guide; template build guide; execd-as-Infra-Component setup; egress handler setup; compatibility matrix
+- **Documentation**: fleets deployment guide; template build guide including baked-in execd; egress handler setup; compatibility matrix
 - **Helm Charts** (optional): unified charts deploying OpenSandbox Server + fast-sandbox components
 - **Cross-repo coordination**: fast-sandbox maintainers for `GetSandbox` NotFound normalization and the egress action handler contract
 

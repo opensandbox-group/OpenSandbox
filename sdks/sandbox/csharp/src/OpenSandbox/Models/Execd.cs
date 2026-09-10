@@ -114,7 +114,11 @@ public class RunCommandRequest
     /// Gets or sets the command to run.
     /// </summary>
     [JsonPropertyName("command")]
-    public required string Command { get; set; }
+    public string? Command { get; set; }
+
+    /// <summary>Native executable and literal arguments; mutually exclusive with Command.</summary>
+    [JsonPropertyName("argv")]
+    public IReadOnlyList<string>? Argv { get; set; }
 
     /// <summary>
     /// Gets or sets the working directory.

@@ -19,9 +19,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
 // UpperManager manages upper directories for overlay workspaces.
@@ -40,7 +43,12 @@ type UpperEntry struct {
 	InUse    bool
 }
 
-// NewUpperManager creates an upper directory manager.
+// NewUpperManager creates an upper directory manager. As part of startup it
+// reclaims stale session directories left under root by a previous execd
+// lifetime: the session table lives only in memory, so every execd-allocated
+// child of root is orphaned by definition and gets removed. Children without
+// the execd session layout are left untouched (root is operator-configured
+// and must stay safe to point at a directory shared with other data).
 func NewUpperManager(root string, maxBytes int64) (*UpperManager, error) {
 	if root == "" {
 		return nil, errors.New("upper: root path is required")
@@ -48,12 +56,68 @@ func NewUpperManager(root string, maxBytes int64) (*UpperManager, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("upper: create root %s: %w", root, err)
 	}
-	return &UpperManager{
+	m := &UpperManager{
 		root:      root,
 		maxBytes:  maxBytes,
 		removeAll: os.RemoveAll,
 		entries:   make(map[string]*UpperEntry),
-	}, nil
+	}
+	m.reclaimStale()
+	return m, nil
+}
+
+// reclaimStale is a startup-only sweep that removes session directories
+// left under root by a previous execd lifetime (crash, OOM, container
+// restart, or a pooled sandbox whose agent is restarted between occupants).
+// Session state is memory-only and dies with the process, so no correct
+// behavior depends on stale upper directories surviving a restart; leaving
+// them would leak disk and expose one occupant's session data to the next.
+// Call it only before the manager tracks any live entry.
+//
+// Only children with the execd-allocated layout (a directory containing an
+// upper/ subdirectory) are reclaimed: upper_root is operator-configured,
+// and pointing it at a directory shared with other data — valid before this
+// sweep existed — must not erase unrelated children on upgrade.
+//
+// Children whose removal fails — e.g. an upper still referenced by a mount
+// from the previous lifetime — are registered as released entries so the
+// collector retries them once the blocker is gone and usage accounting keeps
+// counting their bytes toward upper_max_bytes.
+func (m *UpperManager) reclaimStale() {
+	children, err := os.ReadDir(m.root)
+	if err != nil {
+		log.Warn("upper: list stale entries under %s: %v", m.root, err)
+		return
+	}
+
+	var removed int
+	var failed int
+	var skipped int
+	for _, child := range children {
+		path := filepath.Join(m.root, child.Name())
+		if !dirExists(filepath.Join(path, "upper")) {
+			// Not an execd-allocated session directory; never touch it.
+			skipped++
+			continue
+		}
+		if err := m.removeAll(path); err != nil {
+			failed++
+			log.Warn("upper: reclaim stale session dir %s: %v", path, err)
+			m.entries[child.Name()] = &UpperEntry{
+				UpperDir: filepath.Join(path, "upper"),
+				WorkDir:  filepath.Join(path, "work"),
+				InUse:    false,
+			}
+			continue
+		}
+		removed++
+	}
+	if removed > 0 || failed > 0 || skipped > 0 {
+		log.Info(
+			"upper: reclaimed %d stale session dir(s) under %s (%d failed, %d unrecognized skipped)",
+			removed, m.root, failed, skipped,
+		)
+	}
 }
 
 // ErrUpperLimitExceeded is returned when the upper directory size limit is exceeded.
@@ -165,11 +229,17 @@ func (m *UpperManager) Usage() (int64, error) {
 }
 
 // usageLocked calculates usage without acquiring the mutex. Caller must hold m.mu.
+// Entries whose upper directory no longer exists (e.g. a stale residue entry
+// partially removed before a GC retry) contribute zero instead of failing the
+// whole sum.
 func (m *UpperManager) usageLocked() (int64, error) {
 	var total int64
 	for _, e := range m.entries {
 		size, err := dirSize(e.UpperDir)
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return 0, err
 		}
 		total += size
@@ -196,6 +266,12 @@ func newSessionID() string {
 		return fmt.Sprintf("fallback-%d", os.Getpid())
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// dirExists reports whether path is an existing directory.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // dirSize walks a directory and returns total bytes used.

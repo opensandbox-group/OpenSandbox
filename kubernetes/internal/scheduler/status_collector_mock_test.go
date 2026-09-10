@@ -37,11 +37,12 @@ func (m *MocktaskStatusCollector) EXPECT() *MocktaskStatusCollectorMockRecorder 
 }
 
 // Collect mocks base method.
-func (m *MocktaskStatusCollector) Collect(ctx context.Context, ipList []string) map[string]*api.Task {
+func (m *MocktaskStatusCollector) Collect(ctx context.Context, ipList []string) (map[string]*api.Task, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Collect", ctx, ipList)
 	ret0, _ := ret[0].(map[string]*api.Task)
-	return ret0
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // Collect indicates an expected call of Collect.

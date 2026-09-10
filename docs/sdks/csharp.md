@@ -184,6 +184,15 @@ await sandbox.Commands.RunAsync(
 );
 ```
 
+To execute a native program without shell parsing, pass an argument list. On Linux,
+this example prints literal `$HOME` and keeps `hello world` as one argument:
+
+```csharp
+await sandbox.Commands.RunAsync(new[] { "printf", "%s\n", "$HOME", "hello world" });
+```
+
+Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
+
 For background commands, you can poll status and incremental logs:
 
 ```csharp
@@ -468,7 +477,7 @@ guidance, and Git/curl examples.
 - `RunCommandOptions.TimeoutSeconds` controls command execution timeout for command runs.
 - `RunInSessionOptions.TimeoutSeconds` controls command execution timeout for session runs.
 - `SandboxCreateOptions.TimeoutSeconds` controls sandbox server-side TTL.
-- `ReadyTimeoutSeconds` controls how long `CreateAsync` / `ConnectAsync` waits for readiness.
+- `ReadyTimeoutSeconds` controls readiness waits. For `ConnectAsync` / `ResumeAsync`, endpoint discovery and health checks share this timeout. Blocking custom code can delay timeout reporting.
 - The SDK does not automatically retry failed API requests; implement retries in caller code where appropriate.
 
 ### 7. Resource Cleanup
