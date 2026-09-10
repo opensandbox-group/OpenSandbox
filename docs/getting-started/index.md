@@ -100,7 +100,7 @@ if __name__ == "__main__":
 ```
 
 ::: tip
-Install the Code Interpreter SDK separately: `pip install opensandbox-code-interpreter`
+Install the Code Interpreter SDK separately: `pip install opensandbox-code-interpreter`. The `opensandbox/code-interpreter` container image is maintained at [opensandbox-group/sandbox-images](https://github.com/opensandbox-group/sandbox-images).
 :::
 
 ## 4. Try the CLI

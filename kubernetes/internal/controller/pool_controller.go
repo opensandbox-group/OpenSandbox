@@ -592,6 +592,10 @@ func shouldReconcilePoolForBatchSandboxUpdate(e event.UpdateEvent) bool {
 	if oldVal != newVal {
 		return true
 	}
+	// Trigger reconcile when PoolRef changes, e.g. auto-assign resolves "*" to a concrete Pool.
+	if oldObj.Spec.PoolRef != newObj.Spec.PoolRef {
+		return true
+	}
 	if !equality.Semantic.DeepEqual(oldObj.Spec.Replicas, newObj.Spec.Replicas) {
 		return true
 	}

@@ -46,7 +46,7 @@ func TestBuildExecuteCommandRequestForwardsEnvsBackground(t *testing.T) {
 	ctrl := &CodeInterpretingController{}
 	envs := map[string]string{"FOO": "bar"}
 	req := model.RunCommandRequest{
-		Command:    "echo hi",
+		Argv:       []string{"tool", "", "$HOME"},
 		Background: true,
 		Envs:       envs,
 	}
@@ -54,6 +54,8 @@ func TestBuildExecuteCommandRequestForwardsEnvsBackground(t *testing.T) {
 	execReq := ctrl.buildExecuteCommandRequest(req)
 
 	require.Equal(t, runtime.BackgroundCommand, execReq.Language)
+	require.Equal(t, req.Argv, execReq.Argv)
+	require.Empty(t, execReq.Code)
 	require.True(t, reflect.DeepEqual(execReq.Envs, envs), "expected envs to be forwarded")
 }
 

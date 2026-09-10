@@ -825,7 +825,7 @@ def test_snapshot_service_recovers_deleting_snapshot(tmp_path) -> None:
     assert repo.get("snap-delete") is None
 
 
-def test_snapshot_service_rejects_fleets_without_persisting_or_calling_legacy(tmp_path) -> None:
+def test_snapshot_service_rejects_fsb_without_persisting_or_calling_legacy(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = StubSnapshotRuntime()
     service = PersistedSnapshotService(

@@ -799,6 +799,14 @@ it does not change traffic.
 
 ### Phased Implementation
 
+The proxy-side transaction receiver is an in-memory foundation: it validates
+generation/epoch/digest identities, stages immutable bytes, and implements
+commit, abort, and metadata-only readback. It is not connected to the live addon
+or an IPC endpoint yet. The next integration must supply complete snapshot
+validation, authenticated transport, Go-side reconciliation, and connection
+fences before acknowledging public Vault mutations. Existing request processing
+continues to use the conditional ETag lookup until that integration is ready.
+
 Implementation has started with the internal host-selector algebra and shared
 Go/Python conformance vectors. The control plane owns non-transitional UTS #46
 normalization; the addon consumes canonical ASCII selectors and matches ASCII

@@ -72,6 +72,36 @@ Bash session API (which keeps its existing name for compatibility), and
 isolated sessions. Commands submitted to a fallback session must use syntax
 supported by that image's `sh` implementation.
 
+### Command execution
+
+`POST /command` runs a command in foreground or background mode. Supply either
+`command` for shell syntax (such as pipelines and redirection) or `argv` to
+execute a program directly with literal arguments.
+
+```json
+{
+  "argv": ["python3", "-c", "import sys; print(sys.argv[1:])", "a b", "$HOME"],
+  "cwd": "$WORKSPACE",
+  "envs": {"WORKSPACE": "/workspace"}
+}
+```
+
+`argv` preserves arguments literally, including empty strings; `$HOME` in this
+example is not expanded. Relative executable paths use `cwd`; bare names
+search absolute entries in the child `PATH`. Use `./tool` to run a local
+executable.
+
+Both modes use the environment priority request `envs` > `EXECD_ENVS` > daemon
+environment. Request values are literal. `cwd` expands `$NAME` and `${NAME}`
+using that environment, and leading `~` using the daemon user's home.
+Undefined variables fail validation; omitted `cwd` inherits the daemon
+directory.
+
+On Windows, environment names are case-insensitive and arguments use standard
+Windows encoding. Batch files require a shell; use absolute paths instead of
+drive-relative paths such as `C:tool.exe`. See the [OpenAPI reference](/api/)
+for field constraints and executable lookup details.
+
 ### Command output retention
 
 Foreground command output is streamed over SSE and its temporary stdout and
@@ -224,6 +254,7 @@ override it.
 | `EXECD_INIT` | Init-mode switch read by `bootstrap.sh`: when truthy (`1`/`true`/`yes`/`on`), the script `exec`s `execd --init -- <user command>` so execd becomes PID 1; see [Init mode](#init-mode). Unset preserves the classic background-and-wait topology. |
 | `EXECD_CLONE3_COMPAT` | Linux clone3 compatibility switch (see below). |
 | `EXECD_LOG_FILE` | Optional log output file path; default is stdout. |
+| `EXECD_ENVS` | Optional file of `KEY=VALUE` lines supplying command environment variables. Values expand daemon environment variables; blank lines and `#` comments are ignored. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Preferred OTLP metrics endpoint. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Fallback OTLP endpoint when metrics-specific endpoint is unset. |
 | `OPENSANDBOX_ID` | Authoritative sandbox id stamped into eBPF audit records (`sandbox_id`) and metrics; the server injects it on Docker/Kubernetes task-template paths. Lifecycle Pool requests always schedule a task template and receive this value. Direct BatchSandbox resources that omit the task template cannot inject it, and the eBPF layer reports `unsupported` attribution on that path. |
@@ -381,6 +412,9 @@ OTLP metrics export is enabled when either endpoint is set:
 
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
 - `OTEL_EXPORTER_OTLP_ENDPOINT`
+
+For node-IP fallback behavior, standard disable switches, supported transport,
+and cumulative/delta export settings, see [component telemetry configuration](/guides/component-telemetry).
 
 ### Local Metrics Endpoints
 

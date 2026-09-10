@@ -136,14 +136,14 @@ OpenSandbox/
 ├── server/                   # Sandbox server (Python/FastAPI)
 ├── components/
 │   └── execd/                # Execution daemon (Go/Beego)
-├── sandboxes/                # Sandbox implementations
-│   └── code-interpreter/     # Code Interpreter sandbox
 ├── examples/                 # Example integrations
 ├── docs/                     # Documentation
 ├── tests/                    # Cross-component tests
 │   └── e2e/                  # End-to-end tests
 └── scripts/                  # Build and utility scripts
 ```
+
+To contribute to sandbox environment images (such as `code-interpreter`), see [opensandbox-group/sandbox-images](https://github.com/opensandbox-group/sandbox-images).
 
 ## Development Workflow
 

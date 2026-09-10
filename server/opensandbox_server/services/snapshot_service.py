@@ -128,7 +128,7 @@ class PersistedSnapshotService(SnapshotService):
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
                 detail={
                     "code": "SNAPSHOT::NOT_IMPLEMENTED",
-                    "message": "Fleets does not support sandbox snapshots.",
+                    "message": "Fsb does not support sandbox snapshots.",
                 },
             )
         self._ensure_source_sandbox_running(sandbox)

@@ -141,7 +141,7 @@ its own health checks); the interpreter may fail on first use.
 
 The Code Interpreter SDK relies on a specialized environment. Ensure your sandbox provider has the `opensandbox/code-interpreter` image available.
 
-For detailed information about supported languages and versions, please refer to the [Environment Documentation](https://github.com/opensandbox-group/OpenSandbox/tree/main/sandboxes/code-interpreter).
+For detailed information about supported languages and versions, please refer to the [Environment Documentation](https://github.com/opensandbox-group/sandbox-images).
 
 ### Troubleshooting: `pip: command not found`
 

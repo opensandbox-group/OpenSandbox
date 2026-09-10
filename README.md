@@ -268,7 +268,6 @@ For more details, please refer to the [examples documentation](docs/examples/ind
 | [`components/execd/`](components/execd/README.md) | Sandbox execution daemon (commands and file operations)          |
 | [`components/ingress/`](components/ingress/README.md) | Sandbox traffic ingress proxy                                    |
 | [`components/egress/`](components/egress/README.md) | Sandbox network egress control                                   |
-| [`sandboxes/`](sandboxes/) | Runtime sandbox implementations                                   |
 | [`examples/`](examples/) | Runnable example code                                            |
 | [`docs/examples/`](docs/examples/index.md) | Example documentation and use cases                              |
 | [`oseps/`](oseps/README.md) | OpenSandbox Enhancement Proposals                                |

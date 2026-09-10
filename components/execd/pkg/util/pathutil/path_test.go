@@ -16,6 +16,7 @@ package pathutil
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -47,6 +48,8 @@ func TestExpandPath_EnvVarInMiddle(t *testing.T) {
 }
 
 func TestExpandPathWithEnv_RequestOverrideHasHigherPriority(t *testing.T) {
+	// Different casing identifies one variable on Windows and two on Unix.
+	t.Setenv("workdir", "lowercase")
 	t.Setenv("WORKDIR", "from-process")
 
 	got, err := ExpandPathWithEnv("base/$WORKDIR", map[string]string{
@@ -54,6 +57,14 @@ func TestExpandPathWithEnv_RequestOverrideHasHigherPriority(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join("base", "from-request"), got)
+	got, err = ExpandPathWithEnv("$workdir", map[string]string{"WORKDIR": "from-request"})
+	require.NoError(t, err)
+	expected := "lowercase"
+	if runtime.GOOS == "windows" {
+		expected = "from-request"
+	}
+	require.Equal(t, expected, got)
+
 }
 
 func TestExpandPathWithEnv_CanResolveVarOnlyInOverride(t *testing.T) {

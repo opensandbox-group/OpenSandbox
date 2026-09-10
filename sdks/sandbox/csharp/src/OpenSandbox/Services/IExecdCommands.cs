@@ -22,6 +22,19 @@ namespace OpenSandbox.Services;
 /// </summary>
 public interface IExecdCommands
 {
+    /// <summary>Runs native executable arguments without shell expansion.</summary>
+    IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(
+        IReadOnlyList<string> argv,
+        RunCommandOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Runs native executable arguments and collects the result.</summary>
+    Task<Execution> RunAsync(
+        IReadOnlyList<string> argv,
+        RunCommandOptions? options = null,
+        ExecutionHandlers? handlers = null,
+        CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Runs a command and streams server events (SSE).
     /// This is the lowest-level API for command execution.

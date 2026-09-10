@@ -188,6 +188,17 @@ RunCommandRequest request = RunCommandRequest.builder()
 sandbox.commands().run(request);
 ```
 
+To execute a native program without shell parsing, pass an argument list. On Linux,
+this example prints literal `$HOME` and keeps `hello world` as one argument:
+
+```java
+sandbox.commands().run(RunCommandRequest.builder()
+    .argv(List.of("printf", "%s\n", "$HOME", "hello world"))
+    .build());
+```
+
+Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
+
 ### 4. Comprehensive File Operations
 
 Manage files and directories, including read, write, list, delete, and search.

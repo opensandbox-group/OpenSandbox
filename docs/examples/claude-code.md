@@ -70,7 +70,7 @@ Add `--fork-session` to `--resume` / `--continue` to create a new session ID ins
 There is no terminal to answer permission prompts in a `-p` run: requests that would prompt are denied, so a task that needs a tool (file edits, shell commands) can fail. Two common remedies for agent workloads:
 
 - `--dangerously-skip-permissions` (equivalent to `--permission-mode bypassPermissions`) runs tools without prompts — a common choice inside an ephemeral OpenSandbox container, where the sandbox itself is the isolation boundary.
-- `--permission-prompts none` stays fail-closed: anything not covered by your permission rules is denied instead of executed.
+- `--permission-mode dontAsk` stays fail-closed: only tools pre-approved by your permission rules run — the standard pattern for locked-down CI. (`--permission-prompts none`, Claude Code v2.1.259+, is the print-mode equivalent.)
 
 ::: warning The interactive UI needs a TTY
 The interactive REPL (`claude "..."`) renders its UI, including permission prompts, on a terminal. Through a plain command pipe there is no way to answer a prompt, so the run can wait indefinitely. Use `-p` for scripted runs, or drive the interactive UI over a [PTY session](/components/execd).

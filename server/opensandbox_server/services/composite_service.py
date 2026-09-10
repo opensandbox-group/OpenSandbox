@@ -30,7 +30,7 @@ from opensandbox_server.api.schema import (
 )
 from opensandbox_server.services.diagnostics import DiagnosticResult
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.fleets.fleet_service import FleetSandboxService
+from opensandbox_server.services.fsb.service import FsbSandboxService
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
 from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
 from opensandbox_server.services.sandbox_service import SandboxService
@@ -39,27 +39,32 @@ logger = logging.getLogger(__name__)
 
 
 class CompositeSandboxService(SandboxService, ExtensionService):
-    def __init__(self, kubernetes: KubernetesSandboxService, fleets: FleetSandboxService):
+    def __init__(self, kubernetes: KubernetesSandboxService, fsb: FsbSandboxService):
         self._kubernetes = kubernetes
-        self._fleets = fleets
+        self._fsb = fsb
 
-    def _backend(self, sandbox_id: str) -> KubernetesSandboxService | FleetSandboxService:
-        return self._fleets if sandbox_id.startswith("flt-") else self._kubernetes
+    def _backend(self, sandbox_id: str) -> KubernetesSandboxService | FsbSandboxService:
+        return self._fsb if sandbox_id.startswith("flt-") else self._kubernetes
 
     def set_tenant_provider(self, provider: object) -> None:
         self._kubernetes.set_tenant_provider(provider)
-        self._fleets.set_tenant_provider(provider)
+        self._fsb.set_tenant_provider(provider)
 
     def close(self) -> None:
-        self._fleets.close()
+        self._fsb.close()
         self._kubernetes.close()
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+        # templateId is the unambiguous fsb selector: fsb sandboxes are
+        # the microVM catalog and coexist with the container-sandbox
+        # workload provider; every other create stays with it.
+        if (request.template_id or "").strip():
+            return await self._fsb.create_sandbox(request)
         return await self._kubernetes.create_sandbox(request)
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
-            objects = self._kubernetes.list_sandbox_objects() + self._fleets.list_sandbox_objects()
+            objects = self._kubernetes.list_sandbox_objects() + self._fsb.list_sandbox_objects()
             objects.sort(key=lambda sandbox: sandbox.id)
             return _build_list_sandboxes_response(objects, request)
         except HTTPException:
@@ -112,10 +117,10 @@ class CompositeSandboxService(SandboxService, ExtensionService):
         return self._backend(sandbox_id).get_access_renew_extend_seconds(sandbox_id)
 
     def get_network_policy(self, sandbox_id: str) -> dict:
-        return self._fleets.get_network_policy(sandbox_id)
+        return self._fsb.get_network_policy(sandbox_id)
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
-        return self._fleets.replace_network_policy(sandbox_id, policy)
+        return self._fsb.replace_network_policy(sandbox_id, policy)
 
     def get_sandbox_log_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
         return self._backend(sandbox_id).get_sandbox_log_diagnostics(sandbox_id, scope)

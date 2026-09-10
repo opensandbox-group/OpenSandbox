@@ -36,7 +36,7 @@ import (
 
 const (
 	agentSandboxGroup    = "agents.x-k8s.io"
-	agentSandboxVersion  = "v1alpha1"
+	agentSandboxVersion  = "v1beta1"
 	agentSandboxResource = "sandboxes"
 
 	agentSandboxConditionReady = "Ready"

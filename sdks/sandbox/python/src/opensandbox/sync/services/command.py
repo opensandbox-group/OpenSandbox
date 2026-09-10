@@ -46,19 +46,19 @@ class CommandsSync(Protocol):
 
     def run(
         self,
-        command: str,
+        command: str | list[str],
         *,
         opts: RunCommandOpts | None = None,
         handlers: ExecutionHandlersSync | None = None,
     ) -> Execution:
         """
-        Execute a shell command in the sandbox environment.
+        Execute shell text or native executable arguments in the sandbox.
 
         The command can be executed in streaming mode (SSE) based on request configuration
         and optional handlers.
 
         Args:
-            command: Shell command text to execute
+            command: Shell text or a native argv list
             opts: Command execution options (e.g. background, working_directory)
             handlers: Optional handlers for streaming events
 

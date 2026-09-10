@@ -118,9 +118,9 @@ runtime** and its **client libraries**:
   (Python, JavaScript, Kotlin/JVM, .NET, Go — each for the
   products that ship SDKs).
 
-**Sandbox template images are explicitly excluded.** Images under
-`sandboxes/` (currently only `sandboxes/code-interpreter`) provide
-the runtime environment *inside* a user's sandbox and are chosen
+**Sandbox template images are explicitly excluded.** Images such as
+`opensandbox/code-interpreter` provide the runtime environment
+*inside* a user's sandbox and are chosen
 by the user at sandbox-creation time. They version independently
 of the umbrella: a user may run umbrella `1.4.0` with a
 `code-interpreter` image tagged `v1.0.2` or `v1.1.0`, or vice
@@ -129,7 +129,9 @@ is governed by the sandbox lifecycle API, not by umbrella
 versioning. The `code-interpreter` **SDK library**
 (`opensandbox-code-interpreter` etc.) is a client for that API
 and *is* part of the umbrella; it is not the same thing as the
-`sandboxes/code-interpreter` image.
+`opensandbox/code-interpreter` image.
+
+> **Migration note**: The standalone `code-interpreter` image source historically located at `sandboxes/code-interpreter/` has been migrated to its own repository at [opensandbox-group/sandbox-images](https://github.com/opensandbox-group/sandbox-images) (see `docs/reference/code-interpreter-image-migration.md`). The SDK libraries remain in this monorepo.
 
 **No component versions exist separately.** Any change that ships
 triggers a new umbrella snapshot; the component participates by
@@ -261,7 +263,7 @@ images:
   # execd, ingress, egress, image-committer, controller,
   # task-executor.
   #
-  # Sandbox template images (e.g. sandboxes/code-interpreter) are
+  # Sandbox template images (e.g. opensandbox/code-interpreter) are
   # NOT part of the umbrella. They are runtime-selectable by users
   # and version independently; see "Scope of the umbrella" below.
   execd:          { image: docker.io/opensandbox/execd,          tag: "release-1.4.0", digest: "sha256:…" }

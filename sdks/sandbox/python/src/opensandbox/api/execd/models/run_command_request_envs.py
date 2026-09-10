@@ -27,10 +27,11 @@ T = TypeVar("T", bound="RunCommandRequestEnvs")
 
 @_attrs_define
 class RunCommandRequestEnvs:
-    """Environment variables injected into the command process.
+    """Literal request values overriding EXECD_ENVS and daemon variables, in that order. Names are case-insensitive on
+    Windows.
 
-    Example:
-        {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'PYTHONUNBUFFERED': '1'}
+        Example:
+            {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'PYTHONUNBUFFERED': '1'}
 
     """
 

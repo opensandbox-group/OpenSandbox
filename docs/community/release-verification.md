@@ -151,9 +151,16 @@ three official registries:
 | GitHub Container Registry | `ghcr.io/opensandbox-group/opensandbox/<component>` |
 | Alibaba Cloud Container Registry | `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/<component>` |
 
-The component can be `execd`, `code-interpreter`, `ingress`, `egress`,
-`controller`, `task-executor`, `image-committer`, or `nodeagent`. The server
-image uses the component name `server`.
+The component can be `execd`, `ingress`, `egress`, `controller`,
+`task-executor`, `image-committer`, or `nodeagent`. The server image uses the
+component name `server`.
+
+::: tip Code Interpreter Image Verification
+The standalone `code-interpreter` environment image is published and maintained from [opensandbox-group/sandbox-images](https://github.com/opensandbox-group/sandbox-images).
+- **Existing image releases** (such as `v1.1.0` and earlier) continue using the OpenSandbox workflow identity (`.github/workflows/publish-components.yml`).
+- **New releases** from `opensandbox-group/sandbox-images` use its `release.yml` workflow identity.
+Users and operators verifying signatures or provenance for new releases must follow the verification documentation in [opensandbox-group/sandbox-images](https://github.com/opensandbox-group/sandbox-images).
+:::
 
 ```bash
 IMAGE="docker.io/opensandbox/execd"

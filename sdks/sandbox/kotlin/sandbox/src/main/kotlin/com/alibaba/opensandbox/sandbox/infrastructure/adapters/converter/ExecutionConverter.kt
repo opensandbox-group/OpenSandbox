@@ -25,7 +25,8 @@ import com.alibaba.opensandbox.sandbox.api.models.execd.RunCommandRequest as Api
 object ExecutionConverter {
     fun RunCommandRequest.toApiRunCommandRequest(): ApiRunCommandRequest {
         return ApiRunCommandRequest(
-            command = command,
+            command = command.takeIf { argv == null },
+            argv = argv,
             background = background,
             cwd = workingDirectory,
             timeout = timeout?.toCommandTimeoutMillis(),

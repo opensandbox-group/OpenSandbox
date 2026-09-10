@@ -48,11 +48,12 @@ type CodeContextRequest struct {
 	Cwd      string `json:"cwd,omitempty"`
 }
 
-// RunCommandRequest represents a shell command execution request.
+// RunCommandRequest selects shell text or native executable arguments.
 type RunCommandRequest struct {
-	Command    string `json:"command" validate:"required"`
-	Cwd        string `json:"cwd,omitempty"`
-	Background bool   `json:"background,omitempty"`
+	Command    string   `json:"command,omitempty"`
+	Argv       []string `json:"argv,omitempty"`
+	Cwd        string   `json:"cwd,omitempty"`
+	Background bool     `json:"background,omitempty"`
 	// TimeoutMs caps execution duration; 0 uses server default.
 	TimeoutMs int64 `json:"timeout,omitempty" validate:"omitempty,gte=1"`
 
@@ -61,7 +62,51 @@ type RunCommandRequest struct {
 	Envs map[string]string `json:"envs,omitempty"`
 }
 
+// UnmarshalJSON rejects missing, conflicting or null command inputs.
+func (r *RunCommandRequest) UnmarshalJSON(data []byte) error {
+	type request RunCommandRequest
+	var decoded request
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, commandSet := fields["command"]
+	_, argvSet := fields["argv"]
+	if commandSet == argvSet || commandSet && decoded.Command == "" || argvSet && decoded.Argv == nil {
+		return errors.New("exactly one of non-empty command or argv is required")
+	}
+	if argvSet {
+		var args []json.RawMessage
+		if err := json.Unmarshal(fields["argv"], &args); err != nil {
+			return err
+		}
+		for _, arg := range args {
+			if string(arg) == "null" {
+				return errors.New("argv elements must be strings")
+			}
+		}
+	}
+	*r = RunCommandRequest(decoded)
+	return nil
+}
+
 func (r *RunCommandRequest) Validate() error {
+	if (r.Command != "") == (r.Argv != nil) {
+		return errors.New("exactly one of command or argv is required")
+	}
+	if r.Argv != nil {
+		if len(r.Argv) == 0 || r.Argv[0] == "" {
+			return errors.New("argv must contain a non-empty executable")
+		}
+		for _, arg := range r.Argv {
+			if strings.ContainsRune(arg, 0) {
+				return errors.New("argv must not contain NUL")
+			}
+		}
+	}
 	validate := validator.New()
 	if err := validate.Struct(r); err != nil {
 		return err
@@ -69,7 +114,7 @@ func (r *RunCommandRequest) Validate() error {
 	if r.Gid != nil && r.Uid == nil {
 		return errors.New("uid is required when gid is provided")
 	}
-	return runtime.ValidateWorkingDirWithEnv(r.Cwd, r.Envs)
+	return runtime.ValidateCommandWorkingDir(r.Cwd, r.Envs)
 }
 
 type ServerStreamEventType string

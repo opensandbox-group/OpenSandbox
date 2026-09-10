@@ -59,6 +59,9 @@ endpoint return HTTP 404; they do not stop the Ingress data plane.
 
 The following OpenTelemetry metrics are emitted when OTLP metrics are enabled:
 
+See [component telemetry configuration](/guides/component-telemetry) for endpoint
+selection, standard disable switches, and cumulative/delta export settings.
+
 - `ingress.upstream.connect.count` and `ingress.upstream.connect.duration`,
   labeled only by connection result and proxy type.
 - `ingress.network.shadow.*` gauges for attempts, signal failures, distinct
@@ -322,7 +325,7 @@ TAG=local VERSION=1.2.3 GIT_COMMIT=abc BUILD_TIME=2025-01-01T00:00:00Z bash buil
 ## Runtime Requirements
 - Access to Kubernetes API (in-cluster or via KUBECONFIG).
 - If `--provider-type=batchsandbox`: BatchSandbox CRs in any namespace with `sandbox.opensandbox.io/endpoints` annotation containing Pod IPs.
-- If `--provider-type=agent-sandbox`: AgentSandbox CRs in any namespace with `status.serviceFQDN` populated.
+- If `--provider-type=agent-sandbox`: agent-sandbox >= v0.5.0 serving `agents.x-k8s.io/v1beta1`, with `Ready=True` and `status.serviceFQDN` populated. Set `spec.service: true` for service creation (the OpenSandbox server sets this automatically). See [compatibility and migration](/examples/agent-sandbox#compatibility-and-migration).
 - If `--fastpath-endpoint` is set: network access to FastPath v2 and a matching
   `--secure-access-keys` key ring shared with the OpenSandbox server.
 

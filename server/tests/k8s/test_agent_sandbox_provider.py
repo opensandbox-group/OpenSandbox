@@ -20,7 +20,7 @@ import pytest
 from fastapi import HTTPException
 from kubernetes.client import ApiException
 
-from opensandbox_server.api.schema import ImageSpec, NetworkPolicy, NetworkRule, PlatformSpec
+from opensandbox_server.api.schema import ImageAuth, ImageSpec, NetworkPolicy, NetworkRule, PlatformSpec
 from opensandbox_server.config import (
     AppConfig,
     AgentSandboxRuntimeConfig,
@@ -38,6 +38,9 @@ from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
 )
 from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+from opensandbox_server.services.k8s.image_pull_secret_helper import (
+    IMAGE_AUTH_SECRET_PREFIX,
+)
 from opensandbox_server.services.k8s.workload_provider import EgressWorkloadSettings
 from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_TOKEN
 
@@ -85,7 +88,7 @@ class TestAgentSandboxProvider:
         provider = AgentSandboxProvider(mock_k8s_client)
 
         assert provider.group == "agents.x-k8s.io"
-        assert provider.version == "v1alpha1"
+        assert provider.version == "v1beta1"
         assert provider.plural == "sandboxes"
 
     def test_create_workload_builds_correct_manifest_init_mode(self, mock_k8s_client):
@@ -111,14 +114,20 @@ class TestAgentSandboxProvider:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox"}
 
-        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
-        assert body["apiVersion"] == "agents.x-k8s.io/v1alpha1"
+        call_kwargs = mock_k8s_client.create_custom_object.call_args.kwargs
+        assert call_kwargs["group"] == "agents.x-k8s.io"
+        assert call_kwargs["version"] == "v1beta1"
+        assert call_kwargs["plural"] == "sandboxes"
+        body = call_kwargs["body"]
+        assert body["apiVersion"] == "agents.x-k8s.io/v1beta1"
         assert body["kind"] == "Sandbox"
         assert body["metadata"]["name"] == "test-id"
         assert body["metadata"]["namespace"] == "test-ns"
-        assert body["spec"]["replicas"] == 1
+        assert body["spec"]["operatingMode"] == "Running"
+        assert body["spec"]["service"] is True
+        assert "replicas" not in body["spec"]
         assert body["spec"]["shutdownTime"] == "2025-12-31T10:00:00+00:00"
         assert body["spec"]["shutdownPolicy"] == "Delete"
         assert body["spec"]["podTemplate"]["spec"]["automountServiceAccountToken"] is False
@@ -126,6 +135,45 @@ class TestAgentSandboxProvider:
         assert "initContainers" in body["spec"]["podTemplate"]["spec"]
         assert "containers" in body["spec"]["podTemplate"]["spec"]
         assert "volumes" in body["spec"]["podTemplate"]["spec"]
+
+    @pytest.mark.parametrize("expires_at", [None, datetime(2026, 12, 31, tzinfo=timezone.utc)])
+    def test_create_workload_overrides_template_lifecycle(self, mock_k8s_client, expires_at):
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config(shutdown_policy="Retain"))
+        provider.template_manager._template = {
+            "spec": {
+                "operatingMode": "Suspended",
+                "service": False,
+                "shutdownPolicy": "Delete",
+                "shutdownTime": "2025-01-01T00:00:00Z",
+                "podTemplate": {"spec": {"nodeSelector": {"env": "test"}}},
+            }
+        }
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11", auth=None),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={},
+            expires_at=expires_at,
+            execd_image="execd:latest",
+        )
+
+        spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"]
+        assert spec["operatingMode"] == "Running"
+        assert spec["service"] is True
+        assert "replicas" not in spec
+        assert spec["shutdownPolicy"] == "Retain"
+        assert spec["podTemplate"]["spec"]["nodeSelector"] == {"env": "test"}
+        if expires_at is None:
+            assert "shutdownTime" not in spec
+        else:
+            assert spec["shutdownTime"] == expires_at.isoformat()
 
     def test_create_workload_injects_platform_node_selector(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client, _app_config())
@@ -349,7 +397,7 @@ spec:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "sandbox-1234", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
+        assert result == {"name": "sandbox-1234", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox"}
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["metadata"]["name"] == "sandbox-1234"
 
@@ -439,7 +487,7 @@ spec:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox"}
+        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox"}
 
     def test_update_expiration_patches_spec(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
@@ -802,6 +850,176 @@ spec:
         assert endpoint.endpoint == "svc.example.com:9000"
         assert endpoint.headers is None
 
+
+    # ===== Image Auth / Pull Secrets Tests =====
+
+    def test_supports_image_auth_returns_true(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config())
+        assert provider.supports_image_auth() is True
+
+    def test_create_workload_with_image_auth_injects_image_pull_secrets(
+        self, mock_k8s_client
+    ):
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config())
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "uid-123"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(
+                uri="registry.example.com/img:tag",
+                auth=ImageAuth(username="user", password="pass"),
+            ),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pull_secrets = body["spec"]["podTemplate"]["spec"].get("imagePullSecrets")
+        assert pull_secrets == [{"name": f"{IMAGE_AUTH_SECRET_PREFIX}-test-id"}]
+
+    def test_create_workload_with_image_auth_preserves_template_pull_secrets(
+        self, mock_k8s_client, tmp_path
+    ):
+        # The template merge replaces lists wholesale, so the per-request
+        # secret must be appended to the merged spec, not assigned to the
+        # pre-merge pod spec — otherwise template-provided imagePullSecrets
+        # (e.g. for pulling a private execd image) are dropped.
+        template_file = tmp_path / "agent_template.yaml"
+        template_file.write_text(
+            """
+spec:
+  podTemplate:
+    spec:
+      imagePullSecrets:
+        - name: template-regcred
+"""
+        )
+        app_config = _app_config()
+        app_config.agent_sandbox.template_file = str(template_file)
+        provider = AgentSandboxProvider(mock_k8s_client, app_config)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "uid-123"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(
+                uri="registry.example.com/img:tag",
+                auth=ImageAuth(username="user", password="pass"),
+            ),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pull_secrets = body["spec"]["podTemplate"]["spec"]["imagePullSecrets"]
+        assert pull_secrets == [
+            {"name": "template-regcred"},
+            {"name": f"{IMAGE_AUTH_SECRET_PREFIX}-test-id"},
+        ]
+
+    def test_create_workload_with_image_auth_creates_secret(self, mock_k8s_client):
+        # CR name gets a "sandbox-" prefix for digit-leading ids; the Secret's
+        # ownerReference must carry the CR name (not sandbox_id) or K8s GC
+        # deletes the Secret while the sandbox is still running.
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config())
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test-id", "uid": "uid-abc"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(
+                uri="registry.example.com/img:tag",
+                auth=ImageAuth(username="user", password="pass"),
+            ),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        mock_k8s_client.create_secret.assert_called_once()
+        call_kwargs = mock_k8s_client.create_secret.call_args.kwargs
+        assert call_kwargs["namespace"] == "test-ns"
+        secret = call_kwargs["body"]
+        assert secret.type == "kubernetes.io/dockerconfigjson"
+        assert secret.metadata.name == f"{IMAGE_AUTH_SECRET_PREFIX}-test-id"
+        ref = secret.metadata.owner_references[0]
+        assert ref.uid == "uid-abc"
+        assert ref.kind == "Sandbox"
+        assert ref.name == "sandbox-test-id"
+
+    def test_create_workload_without_image_auth_skips_secret(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config())
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "uid-123"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        mock_k8s_client.create_secret.assert_not_called()
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        assert "imagePullSecrets" not in body["spec"]["podTemplate"]["spec"]
+
+    def test_create_workload_with_image_auth_secret_failure_rolls_back_sandbox(
+        self, mock_k8s_client
+    ):
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config())
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "uid-123"}
+        }
+        mock_k8s_client.create_secret.side_effect = ApiException(status=403)
+
+        with pytest.raises(ApiException):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(
+                    uri="registry.example.com/img:tag",
+                    auth=ImageAuth(username="user", password="pass"),
+                ),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+            )
+
+        mock_k8s_client.delete_custom_object.assert_called_once_with(
+            group=provider.group,
+            version=provider.version,
+            namespace="test-ns",
+            plural=provider.plural,
+            name="test-id",
+            grace_period_seconds=0,
+        )
 
 class TestAgentSandboxProviderExecdInit:
     """AgentSandboxProvider execd init container resource tests"""

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -32,10 +33,10 @@ func envMapFromProcessAndOverrides(envOverrides map[string]string) map[string]st
 		if len(parts) != 2 {
 			continue
 		}
-		out[parts[0]] = parts[1]
+		out[EnvKey(parts[0])] = parts[1]
 	}
 	for k, v := range envOverrides {
-		out[k] = v
+		out[EnvKey(k)] = v
 	}
 	return out
 }
@@ -52,7 +53,7 @@ func validateEnvVars(path string, env map[string]string) error {
 		if name == "" {
 			name = m[2]
 		}
-		if _, ok := env[name]; !ok {
+		if _, ok := env[EnvKey(name)]; !ok {
 			missingSet[name] = struct{}{}
 		}
 	}
@@ -80,7 +81,7 @@ func ExpandPathWithEnv(path string, envOverrides map[string]string) (string, err
 	}
 
 	expanded := os.Expand(path, func(key string) string {
-		return env[key]
+		return env[EnvKey(key)]
 	})
 	if expanded == "~" || strings.HasPrefix(expanded, "~/") || strings.HasPrefix(expanded, `~\`) {
 		home, err := os.UserHomeDir()
@@ -108,4 +109,13 @@ func ExpandAbsPath(path string) (string, error) {
 		return "", err
 	}
 	return filepath.Abs(expanded)
+}
+
+// EnvKey normalizes environment variable names for the current platform.
+// Windows names are case-insensitive; Unix names are preserved.
+func EnvKey(key string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(key)
+	}
+	return key
 }

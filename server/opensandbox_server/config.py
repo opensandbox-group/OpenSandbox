@@ -687,7 +687,40 @@ class KubernetesRuntimeConfig(BaseModel):
     )
     namespace: Optional[str] = Field(
         default=None,
-        description="Namespace used for sandbox workloads.",
+        description=(
+            "Kubernetes / fast-sandbox namespace for workload reads and "
+            "sandbox creation when no tenant is configured. With [tenants] "
+            "enabled, each tenant maps to its own namespace."
+        ),
+    )
+    # -- fsb (fast-sandbox) backend --------------------------------------
+    # Shared with the kubernetes runtime, which also serves fsb (flt-)
+    # sandboxes side by side; unused fields are harmless per provider.
+    fastpath_endpoint: str = Field(
+        default="fast-sandbox-fastpath.opensandbox.svc:9090",
+        description="fast-sandbox Fast-Path Server gRPC endpoint.",
+    )
+    fastpath_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Per-RPC gRPC deadline for FastPath calls.",
+    )
+    fastpath_wait_ready_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Bounded readiness wait for DataPlaneReady after Create.",
+    )
+    fastpath_resource_pool: str = Field(
+        default="default-pool",
+        description="Default fast-sandbox SandboxPool when extensions.poolRef is unset.",
+    )
+    template_s3_publish_secret: str = Field(
+        default="sandbox-oss-credentials",
+        min_length=1,
+        description=(
+            "Secret (in the platform namespace) holding the object-store "
+            "credentials referenced by server-created SandboxTemplates."
+        ),
     )
     workload_provider: Optional[str] = Field(
         default=None,
@@ -905,15 +938,21 @@ class EgressConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    """Runtime selection (docker, kubernetes, fleets, etc.)."""
+    """Runtime selection (docker or kubernetes)."""
 
-    type: Literal["docker", "kubernetes", "fleets"] = Field(
+    type: Literal["docker", "kubernetes"] = Field(
         ...,
         description="Active sandbox runtime implementation.",
     )
     execd_image: str = Field(
         ...,
-        description="Container image that contains the execd binary for sandbox initialization.",
+        description=(
+            "Container image that contains the execd binary for sandbox "
+            "initialization. Docker/Kubernetes run it in-sandbox; the fsb "
+            "runtime injects it into SandboxTemplate golden-image builds "
+            "(the template builder bakes the runtime files into the guest "
+            "rootfs)."
+        ),
         min_length=1,
     )
     execd_run_as_init: bool = Field(
@@ -926,37 +965,6 @@ class RuntimeConfig(BaseModel):
             "topology); intended to be flipped on after a few releases once "
             "the init mode is validated in production."
         ),
-    )
-
-
-class FleetsRuntimeConfig(BaseModel):
-    """fleets (fast-sandbox) runtime configuration (OSEP-0007, Phase 1a)."""
-
-    fastpath_endpoint: str = Field(
-        default="fast-sandbox-fastpath.opensandbox.svc:9090",
-        description="fast-sandbox Fast-Path Server gRPC endpoint.",
-    )
-    fastpath_timeout_seconds: float = Field(
-        default=30.0,
-        ge=1.0,
-        description="Per-RPC gRPC deadline for FastPath calls.",
-    )
-    wait_ready_timeout_millis: int = Field(
-        default=30000,
-        ge=1000,
-        description="Bounded readiness wait for DataPlaneReady after Create.",
-    )
-    namespace: str = Field(
-        default="default",
-        min_length=1,
-        description=(
-            "fast-sandbox namespace used when no tenant is configured. "
-            "With [tenants] enabled, each tenant maps to its own namespace."
-        ),
-    )
-    default_pool_ref: str = Field(
-        default="default-pool",
-        description="Default SandboxPool when extensions.poolRef is unset.",
     )
 
 
@@ -1270,7 +1278,6 @@ class AppConfig(BaseModel):
     runtime: RuntimeConfig = Field(..., description="Sandbox runtime configuration.")
     kubernetes: Optional[KubernetesRuntimeConfig] = None
     agent_sandbox: Optional["AgentSandboxRuntimeConfig"] = None
-    fleets: Optional[FleetsRuntimeConfig] = None
     ingress: Optional[IngressConfig] = None
     docker: DockerConfig = Field(default_factory=DockerConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
@@ -1305,9 +1312,6 @@ class AppConfig(BaseModel):
                 raise ValueError(
                     "agent_sandbox block requires kubernetes.workload_provider = 'agent-sandbox'."
                 )
-        elif self.runtime.type == "fleets":
-            if self.fleets is None:
-                self.fleets = FleetsRuntimeConfig()
         else:
             raise ValueError(f"Unsupported runtime type '{self.runtime.type}'.")
         return self

@@ -81,7 +81,7 @@ def _infer_foreground_exit_code(execution: Execution) -> int | None:
     return None
 
 
-def _build_run_command_request_body(command: str, opts: RunCommandOpts):
+def _build_run_command_request_body(command: str | list[str], opts: RunCommandOpts):
     return ExecutionConverter.to_api_run_command_request(command, opts)
 
 
@@ -246,17 +246,17 @@ class CommandsAdapter(Commands):
 
     async def run(
         self,
-        command: str,
+        command: str | list[str],
         *,
         opts: RunCommandOpts | None = None,
         handlers: ExecutionHandlers | None = None,
     ) -> Execution:
-        """Execute a shell command within the sandbox.
+        """Execute shell text or native executable arguments in the sandbox.
 
         This method uses direct httpx streaming to handle SSE responses
         from the execd service.
         """
-        if not command.strip():
+        if isinstance(command, str) and not command.strip():
             raise InvalidArgumentException("Command cannot be empty")
 
         try:
@@ -273,7 +273,7 @@ class CommandsAdapter(Commands):
             )
 
         except Exception as e:
-            logger.error(f"Failed to run command (length: {len(command)})", exc_info=e)
+            logger.error("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def interrupt(self, execution_id: str) -> None:

@@ -17,6 +17,7 @@ package runtime
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
@@ -54,7 +55,7 @@ func loadExtraEnvFromFile() map[string]string {
 			log.Warn("EXECD_ENVS: skip malformed line: %s", line)
 			continue
 		}
-		envs[kv[0]] = os.ExpandEnv(kv[1])
+		envs[pathutil.EnvKey(kv[0])] = os.ExpandEnv(kv[1])
 	}
 
 	return envs
@@ -70,12 +71,12 @@ func mergeEnvs(base []string, extra map[string]string) []string {
 	for _, kv := range base {
 		pair := strings.SplitN(kv, "=", 2)
 		if len(pair) == 2 {
-			merged[pair[0]] = pair[1]
+			merged[pathutil.EnvKey(pair[0])] = pair[1]
 		}
 	}
 
 	for k, v := range extra {
-		merged[k] = v
+		merged[pathutil.EnvKey(k)] = v
 	}
 
 	out := make([]string, 0, len(merged))
@@ -88,16 +89,16 @@ func mergeEnvs(base []string, extra map[string]string) []string {
 
 // mergeExtraEnvs merges environment maps from file and request-level overrides.
 func mergeExtraEnvs(fromFile, fromRequest map[string]string) map[string]string {
-	if len(fromRequest) == 0 {
+	if len(fromRequest) == 0 && runtime.GOOS != goosWindows {
 		return fromFile
 	}
 
 	merged := make(map[string]string, len(fromFile)+len(fromRequest))
 	for k, v := range fromFile {
-		merged[k] = v
+		merged[pathutil.EnvKey(k)] = v
 	}
 	for k, v := range fromRequest {
-		merged[k] = v
+		merged[pathutil.EnvKey(k)] = v
 	}
 
 	return merged

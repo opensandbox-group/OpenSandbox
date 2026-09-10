@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Optional
 
 from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, get_config
-from opensandbox_server.services.snapshot_runtime import NoopSnapshotRuntime, SnapshotRuntime
+from opensandbox_server.services.snapshot_runtime import SnapshotRuntime
 
 
 def create_snapshot_runtime(
@@ -41,6 +41,7 @@ def create_snapshot_runtime(
         return DockerSnapshotRuntime(docker_client)
 
     if runtime_type == "kubernetes":
+
         from opensandbox_server.services.k8s.client import K8sClient
         from opensandbox_server.services.k8s.snapshot_runtime import KubernetesSnapshotRuntime
 
@@ -55,11 +56,6 @@ def create_snapshot_runtime(
             wait_timeout_seconds=kubernetes_config.snapshot_create_timeout_seconds,
             postgresql_ha_enabled=active_config.store.type == "postgresql",
         )
-
-    if runtime_type == "fleets":
-        # fast-sandbox does not support snapshots (explicit non-goal); the
-        # server must still start with snapshot operations cleanly unsupported.
-        return NoopSnapshotRuntime()
 
     raise ValueError(f"Unsupported snapshot runtime type: {runtime_type}")
 

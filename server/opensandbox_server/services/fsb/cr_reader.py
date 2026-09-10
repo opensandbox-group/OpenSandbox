@@ -51,7 +51,7 @@ class SandboxCRReader:
             raise HTTPException(
                 404,
                 detail={
-                    "code": SandboxErrorCodes.FLEETS_SANDBOX_NOT_FOUND,
+                    "code": SandboxErrorCodes.FSB_SANDBOX_NOT_FOUND,
                     "message": "Sandbox not found.",
                 },
             )
@@ -74,12 +74,12 @@ class SandboxCRReader:
 
     @staticmethod
     def _read_error(exc: Exception) -> HTTPException:
-        logger.warning("Fleets Sandbox CR read failed: %s", exc)
+        logger.warning("Fsb Sandbox CR read failed: %s", exc)
         return HTTPException(
             503,
             detail={
-                "code": SandboxErrorCodes.FLEETS_API_ERROR,
-                "message": "Fleets Sandbox CRs are unavailable.",
+                "code": SandboxErrorCodes.FSB_API_ERROR,
+                "message": "Fsb Sandbox CRs are unavailable.",
             },
         )
 

@@ -41,6 +41,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonPar
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toCommandTimeoutMillis
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
+import kotlinx.serialization.json.Json
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -64,6 +65,7 @@ internal class CommandsAdapter(
         private const val SESSION_PATH_SEGMENT = "session"
     }
 
+    private val commandJson = Json(jsonParser) { explicitNulls = false }
     private val logger = LoggerFactory.getLogger(CommandsAdapter::class.java)
     private val execdBaseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
     private val execdApiClient =
@@ -83,7 +85,7 @@ internal class CommandsAdapter(
         )
 
     override fun run(request: RunCommandRequest): Execution {
-        if (request.command.isEmpty()) {
+        if (request.argv == null && request.command.isEmpty()) {
             throw InvalidArgumentException("Command cannot be empty")
         }
         try {
@@ -91,7 +93,7 @@ internal class CommandsAdapter(
                 Request.Builder()
                     .url("$execdBaseUrl$RUN_COMMAND_PATH")
                     .post(
-                        jsonParser.encodeToString(request.toApiRunCommandRequest()).toRequestBody("application/json".toMediaType()),
+                        commandJson.encodeToString(request.toApiRunCommandRequest()).toRequestBody("application/json".toMediaType()),
                     )
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()

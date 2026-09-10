@@ -396,9 +396,9 @@ paths:
 
   /command:
     post:
-      summary: Execute shell command
+      summary: Execute shell command or native argv
       description: |
-        Executes a shell command and streams the output in real-time using SSE (Server-Sent Events).
+        Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply exactly one input mode.
         The command can run in foreground or background mode. The response includes stdout, stderr,
         execution status, and completion events.
         Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
@@ -1899,17 +1899,30 @@ components:
 
     RunCommandRequest:
       type: object
-      required:
-        - command
-      description: Request to execute a shell command
+      # Nest oneOf under allOf so openapi-python-client preserves RunCommandRequest.
+      allOf:
+        - oneOf:
+            - required: [command]
+            - required: [argv]
+      description: Execute exactly one of command (shell text) or argv (native arguments).
       properties:
         command:
           type: string
-          description: Shell command to execute
+          minLength: 1
+          description: Shell command to execute. Mutually exclusive with argv.
           example: ls -la /workspace
+        argv:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: |
+            Executable and literal arguments, mutually exclusive with command. argv[0] must be non-empty; NUL is invalid and arguments are not shell-expanded. Relative paths use cwd; bare names search absolute entries in the child PATH. Windows uses standard argument encoding and adds .exe to extensionless names; batch files require a shell.
+          example: [python3, -c, "print('hello')"]
         cwd:
           type: string
-          description: Working directory for command execution
+          description: |
+            Working directory, defaulting to the daemon directory. Expands $NAME and ${NAME} using the command environment, and leading ~ using the daemon user's home. Undefined variables fail validation.
           example: /workspace
         background:
           type: boolean
@@ -1937,7 +1950,8 @@ components:
           example: 1000
         envs:
           type: object
-          description: Environment variables injected into the command process.
+          description: |
+            Literal request values overriding EXECD_ENVS and daemon variables, in that order. Names are case-insensitive on Windows.
           additionalProperties:
             type: string
           example:

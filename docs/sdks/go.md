@@ -75,6 +75,9 @@ func main() {
 
 ### Run a command with streaming output
 
+The low-level client exposes each event as JSON in `event.Data`. Import
+`encoding/json` and decode it before printing command output:
+
 ```go
 exec := opensandbox.NewExecdClient("http://localhost:9090", "your-execd-token")
 
@@ -82,17 +85,33 @@ err := exec.RunCommand(ctx, opensandbox.RunCommandRequest{
     Command: "echo 'Hello from sandbox!'",
     Timeout: 30000,
 }, func(event opensandbox.StreamEvent) error {
-    switch event.Event {
+    var message struct{ Type, Text string }
+    if err := json.Unmarshal([]byte(event.Data), &message); err != nil {
+        return err
+    }
+    switch message.Type {
     case "stdout":
-        fmt.Print(event.Data)
+        fmt.Println(message.Text)
     case "stderr":
-        fmt.Fprintf(os.Stderr, "%s", event.Data)
+        fmt.Fprintln(os.Stderr, message.Text)
     case "execution_complete":
-        fmt.Println("\n[done]")
+        fmt.Println("[done]")
     }
     return nil
 })
 ```
+
+For native execution, replace the request above with the following. On Linux,
+it prints literal `$HOME` and keeps `hello world` as one argument:
+
+```go
+opensandbox.RunCommandRequest{
+    Argv:    []string{"printf", "%s\n", "$HOME", "hello world"},
+    Timeout: 30000,
+}
+```
+
+Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
 
 ### Check egress policy
 

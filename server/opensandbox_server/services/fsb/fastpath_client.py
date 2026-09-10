@@ -36,10 +36,10 @@ from typing import Optional
 
 import grpc
 
-from opensandbox_server.services.fleets.generated import (
+from opensandbox_server.services.fsb.generated import (
     fastpath_pb2 as fastpath_pb2,
 )
-from opensandbox_server.services.fleets.generated import (
+from opensandbox_server.services.fsb.generated import (
     fastpath_pb2_grpc as fastpath_pb2_grpc,
 )
 

@@ -14,7 +14,7 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 - `kubernetes/`: Kubernetes operator, CRDs, task-executor, Helm charts, and Kind e2e tests
 - `cli/`: `osb` command-line client and bundled CLI skills
 - `tests/`: cross-language end-to-end SDK tests
-- `docs/`, `examples/`, `sandboxes/`, `oseps/`: documentation, samples, images/environments, and proposals
+- `docs/`, `examples/`, `oseps/`: documentation, samples, and proposals
 
 ## Routing
 

@@ -82,6 +82,20 @@ func TestPoolBatchSandboxUpdateFilters(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "pool-ref-auto-assign-resolved",
+			update: func(e *event.UpdateEvent) {
+				e.ObjectOld.(*sandboxv1alpha1.BatchSandbox).Spec.PoolRef = "*"
+			},
+			want: true,
+		},
+		{
+			name: "pool-ref-reassigned",
+			update: func(e *event.UpdateEvent) {
+				e.ObjectNew.(*sandboxv1alpha1.BatchSandbox).Spec.PoolRef = "other-pool"
+			},
+			want: true,
+		},
+		{
 			name: "entering-terminating-state",
 			update: func(e *event.UpdateEvent) {
 				timestamp := metav1.Now()

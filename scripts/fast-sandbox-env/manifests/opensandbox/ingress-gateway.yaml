@@ -1,0 +1,103 @@
+# ingress-gateway.yaml — OpenSandbox ingress gateway (source-built) for the
+# fast-sandbox integration ecosystem.
+#
+# Fleets provider (Phase 1a): the gateway resolves f1.* route scopes issued
+# by the lifecycle server through FastPath v2 ResolveEndpoint
+# (--fastpath-endpoint), verifying the scope MAC with the shared
+# --secure-access-keys ring (the same key the server signs with in
+# server.yaml's [ingress.secure_access]). Direct fastlet access mode is
+# fine here: gateway and fastlet pods share the cluster Pod network.
+#
+# The gateway needs no Kubernetes CR access in fsb-only mode (routes are
+# resolved through FastPath, not the informer cache), so its ServiceAccount
+# carries no bindings.
+#
+# Tokens rendered by fast-sandbox-env.sh (opensandbox stage, into $WORK/gen):
+#   @INGRESS_IMAGE@  @SIGNING_KEY@  @FASTPATH_ENDPOINT@  @FLEETS_NAMESPACE@
+#   @GATEWAY_NODEPORT@ (bare: renders to an integer nodePort)
+# Quotes live in the template; only the bare token is substituted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opensandbox-ingress-gateway
+  namespace: opensandbox-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensandbox-ingress-gateway
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/name: opensandbox-ingress-gateway
+    app.kubernetes.io/part-of: opensandbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opensandbox-ingress-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opensandbox-ingress-gateway
+        app.kubernetes.io/part-of: opensandbox
+    spec:
+      serviceAccountName: opensandbox-ingress-gateway
+      containers:
+        - name: main
+          image: "@INGRESS_IMAGE@"
+          imagePullPolicy: IfNotPresent
+          args:
+            - --namespace=@FLEETS_NAMESPACE@
+            - --port=28888
+            - --provider-type=fsb
+            - --mode=header
+            - --log-level=info
+            - --fastpath-endpoint=@FASTPATH_ENDPOINT@
+            # Must match the server's [ingress.secure_access] key ring
+            # (key_id "a", base64 secret) rendered in server.yaml.
+            - --secure-access-keys=a=@SIGNING_KEY@
+          ports:
+            - name: http
+              containerPort: 28888
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /status.ok
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /status.ok
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-ingress-gateway
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/name: opensandbox-ingress-gateway
+spec:
+  # NodePort is mapped to the host by the kind extraPortMappings rendered
+  # from GATEWAY_HOST_PORT (default 127.0.0.1:8081 -> node port 30881).
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+      nodePort: @GATEWAY_NODEPORT@
+  selector:
+    app.kubernetes.io/name: opensandbox-ingress-gateway

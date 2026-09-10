@@ -13,18 +13,22 @@ test: vet ## Run tests
 
 ##@ Linter
 
+# Go installs tools in GOBIN, or in the first GOPATH entry's bin directory.
+GO_BIN = $(or $(shell go env GOBIN),$(shell go env GOPATH | cut -d: -f1)/bin)
+GOLANGCI_LINT ?= $(or $(shell command -v golangci-lint 2>/dev/null),$(GO_BIN)/golangci-lint)
+
 .PHONY: install-golint
 install-golint:
-	@if ! command -v golangci-lint &> /dev/null; then \
-  		echo "installing golangci-lint..."; \
-  		go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
-  	else \
-  	    echo "golangci-lint already installed"; \
+	@if ! command -v "$(GOLANGCI_LINT)" >/dev/null 2>&1; then \
+		echo "installing golangci-lint..."; \
+		go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
+	else \
+		echo "golangci-lint already installed"; \
 	fi
 
 .PHONY: golint
 golint: fmt install-golint
-	golangci-lint run -v --fix ./...
+	"$(GOLANGCI_LINT)" run -v --fix ./...
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")

@@ -16,37 +16,40 @@
 # fast-sandbox-env.sh — one-command fast-sandbox integration environment,
 # driven from the OpenSandbox repository.
 #
-# Builds the fast-sandbox Firecracker chain on a bare-metal Linux KVM host
+# Builds the full OpenSandbox ecosystem on a bare-metal Linux KVM host
 # (fast-sandbox checked out at master): two-node kind cluster with KVM
 # passthrough → CRDs + all-in-one control plane → MinIO artifact store →
 # node runtime installers → runtime-agent + node-local DART daemons (P2P
 # is the default data plane) → the firecracker-egress-pool SandboxPool
 # with the OpenSandbox egress sidecar attached through the Sandbox Actions
-# channel.
+# channel → the source-built OpenSandbox lifecycle server (fsb runtime)
+# and ingress gateway → an end-to-end verify (create through the server
+# API, execd /ping through the signed gateway route, delete).
 #
-# The environment initializes capacity only: NO sandboxes are created.
-# Create them afterwards with fast-sandbox's own tooling (fastctl /
-# scripts/integration-env.sh verify-egress) against the same cluster.
+# Everything is source-built from this repository plus fast-sandbox@master,
+# except the execd image baked into the SandboxTemplate golden image
+# (EXECD, published image by default).
 #
 # Usage:
-#   ./scripts/fast-sandbox-env/fast-sandbox-env.sh up       # full environment + pool
+#   ./scripts/fast-sandbox-env/fast-sandbox-env.sh up       # full environment + pool + server/ingress + verify
 #   ./scripts/fast-sandbox-env/fast-sandbox-env.sh pool     # re-apply the pool only
-#   ./scripts/fast-sandbox-env/fast-sandbox-env.sh status   # component/pool/DART health
+#   ./scripts/fast-sandbox-env/fast-sandbox-env.sh status   # component/pool/DART/OpenSandbox health
 #   ./scripts/fast-sandbox-env/fast-sandbox-env.sh down     # teardown, host left clean
 #   ./scripts/fast-sandbox-env/fast-sandbox-env.sh up --auto-clean   # down on failure
 #
 # Environment overrides (all optional):
 #   WORK                 workspace + logs        (default $PWD/.fast-sandbox-env)
-#   FSB_DIR              fast-sandbox checkout  (default sibling ../fast-sandbox;
-#                        cloned from FSB_GIT_URL when missing)
+#   FSB_DIR              fast-sandbox checkout  (default $WORK/fast-sandbox —
+#                        env-owned clone, created from FSB_GIT_URL when missing)
 #   FSB_GIT_URL / FSB_REF                       (default opensandbox-group/fast-sandbox, master)
 #   KIND_CLUSTER / KIND_NODE_IMAGE / KIND_RETAIN / KIND_SINGLE
 #   DOCKER_MIRROR        comma list injected as docker.io containerd mirrors
-#   MINIO_PORT / MINIO_AK / MINIO_SK / MINIO_IMAGE / MINIO_ENDPOINT
+#   MINIO_PORT / MINIO_CONSOLE_PORT / MINIO_AK / MINIO_SK / MINIO_IMAGE / MINIO_ENDPOINT
 #   IMAGE_<NAME>         fast-sandbox component image tags
 #   EGRESS_IMAGE         egress image tag        (default docker.io/opensandbox/egress:latest)
-#   BUILD_TEMPLATE=1     also build the SandboxTemplate golden image (off by default)
-#   WARM_IMAGES=1        preheat pool warmImages (implies BUILD_TEMPLATE=1)
+#   SERVER_IMAGE / INGRESS_IMAGE  OpenSandbox server/ingress image tags
+#   SERVER_HOST_PORT / GATEWAY_HOST_PORT  host-side publishes (default 8080/8081)
+#   WARM_IMAGES=1        preheat pool warmImages (default: on-demand first-sandbox pull)
 #   SBX_IMAGE / EXECD    template build inputs   (default alpine:3.19 / opensandbox/execd:1.1.0)
 #   POOL_MIN / POOL_MAX  pool capacity           (default 2/2; auto 1/1 when KIND_SINGLE=1)
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
@@ -64,7 +67,9 @@ WORK="${WORK:-$PWD/.fast-sandbox-env}"
 LOGS_DIR="$WORK/logs"
 GEN_DIR="$WORK/gen"
 
-FSB_DIR="${FSB_DIR:-$OSB_ROOT/../fast-sandbox}"
+# Env-owned fast-sandbox clone under $WORK (independent of any checkout
+# outside the workspace); FSB_DIR still overrides for an existing one.
+FSB_DIR="${FSB_DIR:-$WORK/fast-sandbox}"
 FSB_GIT_URL="${FSB_GIT_URL:-https://github.com/opensandbox-group/fast-sandbox.git}"
 FSB_REF="${FSB_REF:-master}"
 
@@ -79,6 +84,9 @@ MINIO_PORT="${MINIO_PORT:-9000}"
 # the port kind-network clients use via the container IP); MINIO_PORT only
 # moves the host-side 127.0.0.1 publish.
 MINIO_CONTAINER_PORT=9000
+# Console (human-only UI) listens on 9001 in-container; the host-side
+# publish is overridable because 9001 is a common host-port collision.
+MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
 MINIO_AK="${MINIO_AK:-integration-env}"
 MINIO_SK="${MINIO_SK:-integration-env-secret}"
 MINIO_BUCKET="sandbox-images"
@@ -88,11 +96,9 @@ MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"   # auto-derived from the kind network
 
 SBX_IMAGE="${SBX_IMAGE:-alpine:3.19}"
 EXECD="${EXECD:-opensandbox/execd:1.1.0}"
-SBX_TEMPLATE="ai-office-sandbox"
-BUILD_TEMPLATE="${BUILD_TEMPLATE:-0}"
-# WARM_IMAGES=1 preheats the pool (implies BUILD_TEMPLATE=1). Default 0:
-# on-demand is the standard flow — the first sandbox create on each node
-# pulls the artifact set through DART (peer distribution across nodes).
+# WARM_IMAGES=1 preheats the pool instead of the default on-demand flow
+# (warmImages reference the template id: the exact per-template index key).
+# (first sandbox create on each node pulls the artifact set through DART).
 WARM_IMAGES="${WARM_IMAGES:-0}"
 
 POOL_NAME="${POOL_NAME:-firecracker-egress-pool}"
@@ -116,6 +122,30 @@ IMG_JANITOR="${IMAGE_JANITOR:-fast-sandbox/janitor:dev}"
 IMG_BUILDER="${IMAGE_BUILDER:-fast-sandbox/sandboxtemplate-builder:dev}"
 IMG_AGENT="${IMAGE_AGENT:-fast-sandbox/firecracker-runtime-agent:dev}"
 IMG_EGRESS="${EGRESS_IMAGE:-docker.io/opensandbox/egress:latest}"
+
+# --- OpenSandbox server + ingress gateway (source-built) ----------------------
+# Fixed shape of this environment: no knobs, the full stack always runs.
+
+OSB_NS="opensandbox-system"
+IMG_SERVER="${SERVER_IMAGE:-docker.io/opensandbox/server:env}"
+IMG_INGRESS="${INGRESS_IMAGE:-docker.io/opensandbox/ingress:env}"
+# FastPath v2 of this cluster's all-in-one control plane (in-cluster DNS).
+FASTPATH_ENDPOINT="fast-sandbox-fastpath.fast-sandbox-system.svc:9090"
+SERVER_API_KEY="fast-sandbox-env"
+# Shared f1.* route-scope signing key (server [ingress.secure_access] and
+# ingress --secure-access-keys), generated once per workdir so re-applies
+# keep previously issued routes verifiable.
+SIGNING_KEY_FILE="$WORK/opensandbox-signing-key"
+# Host-side publish (kind extraPortMappings on the control-plane node, bound
+# to 127.0.0.1 only): Service NodePorts -> server :80 / gateway :28888.
+# Overridable because host port collisions are environment-specific.
+SERVER_HOST_PORT="${SERVER_HOST_PORT:-8080}"
+GATEWAY_HOST_PORT="${GATEWAY_HOST_PORT:-8081}"
+SERVER_NODEPORT=30880
+GATEWAY_NODEPORT=30881
+GATEWAY_ADDRESS="127.0.0.1:$GATEWAY_HOST_PORT"
+SERVER_URL="http://127.0.0.1:$SERVER_HOST_PORT"
+GATEWAY_URL="http://127.0.0.1:$GATEWAY_HOST_PORT"
 
 # Node labels: sandbox.fast.io/kvm is hardcoded by the SandboxTemplate
 # reconciler; fast-sandbox.io/firecracker-node selects installer/agent/fastlet.
@@ -233,7 +263,7 @@ failure_dump() {
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(MINIO|KIND|FSB_|SBX|IMG_|EGRESS|EXECD|WORK|POOL|BUILD_|WARM|XFS)' || true
+		env | grep -E '^(MINIO|KIND|FSB_|SBX|IMG_|EGRESS|EXECD|WORK|POOL|SERVER|INGRESS|WARM|XFS)' || true
 		echo "--- fast-sandbox checkout ---"
 		git -C "$FSB_DIR" rev-parse HEAD 2>&1 || true
 		echo "--- kind-create.log (tail) ---"
@@ -253,6 +283,16 @@ failure_dump() {
 		echo "--- builder pods + logs (tail) ---"
 		kubectl get pods -n "$NS" -l sandbox.fast.io/sandboxtemplate --show-labels 2>&1 || true
 		kubectl logs -n "$NS" -l sandbox.fast.io/sandboxtemplate --tail=80 2>&1 || true
+		echo "--- SandboxTemplates (status carries the build failure reason) ---"
+		kubectl get sandboxtemplates -n "$NS" -o yaml 2>&1 || true
+		echo "--- recent events ($NS) ---"
+		kubectl get events -n "$NS" --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+		echo "--- OpenSandbox pods ($OSB_NS) ---"
+		kubectl get pods -n "$OSB_NS" -o wide 2>&1 || true
+		echo "--- server logs (tail) ---"
+		kubectl logs -n "$OSB_NS" deploy/opensandbox-server --tail=80 2>&1 || true
+		echo "--- ingress gateway logs (tail) ---"
+		kubectl logs -n "$OSB_NS" deploy/opensandbox-ingress-gateway --tail=80 2>&1 || true
 		echo "--- pool ---"
 		kubectl get sandboxpool -n "$NS" -o yaml 2>&1 || true
 		echo "--- minio docker logs (tail) ---"
@@ -309,6 +349,10 @@ ensure_tool() { # name
 	command -v "$name" >/dev/null 2>&1 || die "$name installation failed"
 }
 
+host_port_busy() { # port -> 0 when something already listens on 127.0.0.1:<port>
+	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
 preflight() {
 	[[ "$(uname -s)" == "Linux" ]] \
 		|| die "this environment requires a Linux host with KVM (run it on the remote development VM)"
@@ -327,6 +371,25 @@ preflight() {
 		die "docker cgroup Version is 1; kind requires cgroup v2. Enable it with the kernel cmdline 'systemd.unified_cgroup_hierarchy=1' and reboot"
 	fi
 	[[ -e /dev/kvm ]] || die "/dev/kvm is missing on this host (KVM required)"
+	# The workspace filesystem carries docker images (built), the XFS
+	# StateRoot loop file (sparse, up to 24G), MinIO artifacts (~4G per
+	# template build) and node snapshot caches; MinIO refuses writes
+	# below its free-disk threshold, so guard it here with a clear error.
+	local min_free_kb=$((30 * 1024 * 1024)) free_kb
+	free_kb="$(df -Pk "$WORK" 2>/dev/null | awk 'NR==2 {print $4}')"
+	[[ "$free_kb" =~ ^[0-9]+$ ]] || die "cannot determine free disk space on $WORK"
+	if (( free_kb < min_free_kb )); then
+		die "only $((free_kb / 1024 / 1024))G free on $WORK (need 30G: images + XFS StateRoot + MinIO artifacts); free space (docker system prune / old kind clusters) or point WORK at a bigger volume"
+	fi
+	# Fail fast on busy host ports instead of dying at the docker bind or
+	# kind create. MinIO culprits: a leftover MinIO container; 8080/8081 are
+	# published by the kind node for the server / ingress gateway.
+	local port
+	for port in "$MINIO_PORT" "$MINIO_CONSOLE_PORT" "$SERVER_HOST_PORT" "$GATEWAY_HOST_PORT"; do
+		if host_port_busy "$port"; then
+			die "127.0.0.1:$port is already in use (check 'ss -ltnp' / 'docker ps'); free it, or set MINIO_PORT / MINIO_CONSOLE_PORT / SERVER_HOST_PORT / GATEWAY_HOST_PORT"
+		fi
+	done
 	docker pull -q "$MINIO_IMAGE" >/dev/null
 	docker pull -q minio/mc >/dev/null
 	pass "preflight"
@@ -363,9 +426,19 @@ ensure_fsb() {
 		log "cloning fast-sandbox ($FSB_GIT_URL) into $FSB_DIR"
 		git clone "$FSB_GIT_URL" "$FSB_DIR" || die "clone failed; check FSB_GIT_URL / network"
 	fi
+	# An existing checkout keeps its original origin; repoint it when
+	# FSB_GIT_URL targets a different source (e.g. a fork branch), so the
+	# fetch/ff-merge below run against the intended remote.
+	local current_url
+	current_url="$(git -C "$FSB_DIR" remote get-url origin)"
+	if [[ "$current_url" != "$FSB_GIT_URL" ]]; then
+		log "fast-sandbox origin: $current_url -> $FSB_GIT_URL"
+		git -C "$FSB_DIR" remote set-url origin "$FSB_GIT_URL" \
+			|| die "could not repoint fast-sandbox origin at $FSB_GIT_URL"
+	fi
 	rm -rf "$FSB_GEN_DIR"
 	[[ -z "$(git -C "$FSB_DIR" status --porcelain)" ]] \
-		|| die "fast-sandbox checkout at $FSB_DIR has local changes; stash/commit them or point FSB_DIR at a clean checkout"
+		|| die "fast-sandbox checkout at $FSB_DIR has local changes; delete it to re-clone or point FSB_DIR at a clean checkout"
 	git -C "$FSB_DIR" fetch -q origin "$FSB_REF" || die "git fetch origin $FSB_REF failed"
 	git -C "$FSB_DIR" checkout -q "$FSB_REF" || die "git checkout $FSB_REF failed"
 	git -C "$FSB_DIR" merge -q --ff-only "origin/$FSB_REF" \
@@ -392,7 +465,21 @@ build_images() {
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
 		-f "$OSB_ROOT/components/egress/Dockerfile" -t "$IMG_EGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "egress image build failed"
-	pass "images built (7 fast-sandbox + egress)"
+	log "building the OpenSandbox server image ($IMG_SERVER)"
+	# The server Dockerfile is self-contained under server/ (uv sync
+	# against the lockfile); context is the server directory.
+	# shellcheck disable=SC2086
+	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		-f "$OSB_ROOT/server/Dockerfile" -t "$IMG_SERVER" "$OSB_ROOT/server" >/dev/null \
+		|| die "server image build failed"
+	log "building the OpenSandbox ingress image ($IMG_INGRESS)"
+	# Like egress, the ingress Dockerfile COPYs components/ingress and
+	# components/internal paths, so the context is the repo root.
+	# shellcheck disable=SC2086
+	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		-f "$OSB_ROOT/components/ingress/Dockerfile" -t "$IMG_INGRESS" "$OSB_ROOT" >/dev/null \
+		|| die "ingress image build failed"
+	pass "images built (fast-sandbox + OpenSandbox)"
 }
 
 # --- stage: XFS StateRoot (reflink CoW per-sandbox rootfs) ------------------------------
@@ -495,6 +582,30 @@ render_kind_config() { # > $GEN_DIR/kind-cluster.yaml
 		rm -f "$block_file"
 		log "docker.io containerd mirrors injected: $endpoints"
 	fi
+	# Publish the lifecycle server and the ingress gateway on the host
+	# through NodePorts + extraPortMappings on the control-plane node (the
+	# standard kind pattern). The mappings exist only when the cluster is
+	# created with them; reusing a cluster built without them means the
+	# services stay cluster-internal.
+	local ports_file="$GEN_DIR/osb-ports-block.yaml"
+	{
+		echo '  extraPortMappings:'
+		echo "  - containerPort: $SERVER_NODEPORT"
+		echo "    hostPort: $SERVER_HOST_PORT"
+		echo '    listenAddress: 127.0.0.1'
+		echo '    protocol: TCP'
+		echo "  - containerPort: $GATEWAY_NODEPORT"
+		echo "    hostPort: $GATEWAY_HOST_PORT"
+		echo '    listenAddress: 127.0.0.1'
+		echo '    protocol: TCP'
+	} > "$ports_file"
+	awk -v block_file="$ports_file" '
+		NR == FNR { block = block $0 "\n"; next }
+		/^- role: control-plane/ && !done { print; printf "%s", block; done = 1; next }
+		{ print }
+	' "$ports_file" "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+	rm -f "$ports_file"
+	log "server on 127.0.0.1:$SERVER_HOST_PORT, gateway on 127.0.0.1:$GATEWAY_HOST_PORT (NodePorts $SERVER_NODEPORT/$GATEWAY_NODEPORT)"
 }
 
 kind_up() {
@@ -549,7 +660,7 @@ minio_up() {
 	# issues: pods and the node container talk to the container IP directly,
 	# while 127.0.0.1 publishing keeps host-side mc/curl working.
 	docker run -d --name "$MINIO_CONTAINER" --network "$net" \
-		-p 127.0.0.1:"$MINIO_PORT":"$MINIO_CONTAINER_PORT" -p 127.0.0.1:9001:9001 \
+		-p 127.0.0.1:"$MINIO_PORT":"$MINIO_CONTAINER_PORT" -p 127.0.0.1:"$MINIO_CONSOLE_PORT":9001 \
 		-e MINIO_ROOT_USER="$MINIO_AK" -e MINIO_ROOT_PASSWORD="$MINIO_SK" \
 		-v "$MINIO_DATA:/data" \
 		"$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
@@ -758,15 +869,7 @@ agent_up() {
 	pass "runtime-agent healthy + DART daemons up, roster=$expected_members (P2P default)"
 }
 
-# --- stage (optional): SandboxTemplate golden image --------------------------------------------
-
-template_succeeded() {
-	[[ "$(kubectl_get "sandboxtemplate/$SBX_TEMPLATE" '{.status.phase}')" == "Succeeded" ]]
-}
-
-template_failed() {
-	[[ "$(kubectl_get "sandboxtemplate/$SBX_TEMPLATE" '{.status.phase}')" == "Failed" ]]
-}
+# --- stage (server-driven): SandboxTemplate golden image -----------------------
 
 wait_succeeded() { # description attempts probe probe_failed
 	local description="$1" attempts="$2" probe="$3" probe_failed="$4" attempt=0
@@ -785,6 +888,29 @@ wait_succeeded() { # description attempts probe probe_failed
 	pass "$description"
 }
 
+# The template build is driven through the OpenSandbox server's /templates
+# API: the server persists the catalog row and projects it onto
+# a SandboxTemplate CRD in $NS. The build itself still runs in fast-sandbox
+# (controller -> builder Pod), so the builder image must be in the cluster.
+TEMPLATE_ID=""
+
+_template_phase() {
+	server_api GET "/templates/$TEMPLATE_ID" 2>/dev/null | jq -r '.status.phase // empty'
+}
+
+template_succeeded() {
+	[[ "$(_template_phase)" == "Succeeded" ]]
+}
+
+template_failed() {
+	local phase message
+	phase="$(_template_phase)"
+	[[ "$phase" == "Failed" ]] || return 1
+	message="$(server_api GET "/templates/$TEMPLATE_ID" 2>/dev/null | jq -r '.status.message // empty')"
+	log "template Failed: ${message:-<no message>}"
+	return 0
+}
+
 template_up() {
 	log "building the sandboxtemplate-builder image"
 	# shellcheck disable=SC2086
@@ -792,21 +918,30 @@ template_up() {
 		-f "$FSB_DIR/build/Dockerfile.sandboxtemplate-builder" "$FSB_DIR" >/dev/null \
 		|| die "sandboxtemplate-builder image build failed"
 	kind load docker-image "$IMG_BUILDER" --name "$KIND_CLUSTER" >/dev/null
-	# Render SBX_IMAGE / EXECD into the fast-sandbox sample so the
-	# documented overrides really select what gets built.
-	local template_spec="$GEN_DIR/sandboxtemplate-firecracker.yaml"
-	sed -e "s|^  image: .*|  image: $SBX_IMAGE|" \
-		-e "s|^  execd: .*|  execd: $EXECD|" \
-		"$FSB_DIR/config/samples/sandboxtemplate-firecracker.yaml" > "$template_spec"
-	grep -q "^  image: $SBX_IMAGE\$" "$template_spec" || die "could not render image=$SBX_IMAGE into the template spec"
-	grep -q "^  execd: $EXECD\$" "$template_spec" || die "could not render execd=$EXECD into the template spec"
-	kubectl apply -f "$template_spec" >/dev/null
+	local body created
+	body="$(jq -n --arg image "$SBX_IMAGE" --arg publish "s3://$MINIO_BUCKET/publish" '{
+		image: $image,
+		publish: $publish,
+		format: "native",
+		resourceLimits: {cpu: "1", memory: "512Mi", disk: "2Gi"},
+		readiness: {warmupSeconds: 15},
+		metadata: {origin: "fast-sandbox-env"}
+	}')"
+	log "verify: creating the golden-image template via the server API (image=$SBX_IMAGE)"
+	created="$(server_api POST /templates "$body" 2>/dev/null)" \
+		|| fail "POST /templates failed against $SERVER_URL: $(curl -sS -m 60 -X POST \
+			-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" -H "Content-Type: application/json" \
+			-d "$body" "$SERVER_URL/templates" 2>&1 | head -c 400)"
+	TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.templateId')"
+	printf '%s' "$TEMPLATE_ID" > "$WORK/template-id"
+	[[ -n "$TEMPLATE_ID" && "$TEMPLATE_ID" != "null" ]] || fail "template create response carried no templateId"
+	log "template id=$TEMPLATE_ID"
 	wait_succeeded "template phase=Succeeded" 300 template_succeeded template_failed
 	local manifest_ref
-	manifest_ref="$(kubectl_get "sandboxtemplate/$SBX_TEMPLATE" '{.status.manifestRef}')"
+	manifest_ref="$(server_api GET "/templates/$TEMPLATE_ID" | jq -r '.status.manifestRef // empty')"
 	[[ -n "$manifest_ref" ]] || fail "template manifestRef is empty"
 	log "template manifestRef: $manifest_ref"
-	pass "SandboxTemplate Succeeded + artifacts published"
+	pass "SandboxTemplate Succeeded + artifacts published (via server API)"
 }
 
 # --- stage: SandboxPool (egress attached, P2P spread) --------------------------------------------
@@ -879,7 +1014,7 @@ render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
 	# flavors; image tags never contain awk-special replacement chars.
 	awk -v fastlet="$IMG_FASTLET" -v egress="$IMG_EGRESS" \
 		-v pool_min="$POOL_MIN" -v pool_max="$POOL_MAX" \
-		-v warm="$WARM_IMAGES" -v image="$SBX_IMAGE" '
+		-v warm="$WARM_IMAGES" -v image="$TEMPLATE_ID" '
 		{ gsub(/"@FASTLET_IMAGE@"/, fastlet)
 		  gsub(/"@EGRESS_IMAGE@"/, egress)
 		  gsub(/"@POOL_MIN@"/, pool_min)
@@ -922,7 +1057,7 @@ p2p_evidence() { # description
 	local description="$1"
 	local pods pod manifest_ref manifest_key build_dir expected_blocks=0
 	local origin_total=0 peer_total=0 cache_total=0 size source value active_nodes=0 node_total
-	manifest_ref="$(kubectl_get "sandboxtemplate/$SBX_TEMPLATE" '{.status.manifestRef}')"
+	manifest_ref="$(server_api GET "/templates/$TEMPLATE_ID" 2>/dev/null | jq -r '.status.manifestRef // empty')"
 	manifest_key="${manifest_ref#s3://$MINIO_BUCKET/}"
 	build_dir="$(dirname "$manifest_key")"
 	local object
@@ -962,6 +1097,257 @@ dart_source_counters() { # pod -> "<source> <value>" lines
 			match($0, /source="[^"]+"/); s = substr($0, RSTART + 8, RLENGTH - 9)
 			match($0, /} [0-9]+$/); print s, substr($0, RSTART + 2)
 		}'
+}
+
+# --- stage: OpenSandbox server + ingress gateway --------------------------------
+
+# The f1.* route-scope signing key is generated once per workdir (not per
+# up run): a re-apply of the manifests must keep the key stable, or
+# previously issued routes would stop verifying against the gateway.
+osb_signing_key() {
+	if [[ ! -s "$SIGNING_KEY_FILE" ]]; then
+		openssl rand -base64 32 | tr -d '\n' > "$SIGNING_KEY_FILE"
+	fi
+	cat "$SIGNING_KEY_FILE"
+}
+
+# render_opensandbox replaces the @TOKEN@ placeholders of the server /
+# ingress gateway manifests. Unlike the pool render (which substitutes the
+# token together with its quotes so scalars keep natural YAML types), the
+# quotes live in these templates: the embedded config.toml strings need
+# their quotes preserved, so only the bare token is replaced.
+render_opensandbox() { # <src> <out>
+	local src="$1" out="$2"
+	mkdir -p "$GEN_DIR"
+	awk -v server_image="$IMG_SERVER" -v ingress_image="$IMG_INGRESS" \
+		-v api_key="$SERVER_API_KEY" -v signing_key="$(osb_signing_key)" \
+		-v fastpath="$FASTPATH_ENDPOINT" -v fleet_ns="$NS" -v pool="$POOL_NAME" \
+		-v execd="$EXECD" -v gateway="$GATEWAY_ADDRESS" \
+		-v server_np="$SERVER_NODEPORT" -v gateway_np="$GATEWAY_NODEPORT" '
+		{ gsub(/@SERVER_IMAGE@/, server_image)
+		  gsub(/@INGRESS_IMAGE@/, ingress_image)
+		  gsub(/@SERVER_API_KEY@/, api_key)
+		  gsub(/@SIGNING_KEY@/, signing_key)
+		  gsub(/@FASTPATH_ENDPOINT@/, fastpath)
+		  gsub(/@FLEETS_NAMESPACE@/, fleet_ns)
+		  gsub(/@POOL_NAME@/, pool)
+		  gsub(/@EXECD_IMAGE@/, execd)
+		  gsub(/@GATEWAY_ADDRESS@/, gateway)
+		  gsub(/@SERVER_NODEPORT@/, server_np)
+		  gsub(/@GATEWAY_NODEPORT@/, gateway_np)
+		  print }
+	' "$src" > "$out"
+	# Leftover-token guard: match only value positions (key: ...@T@...),
+	# never the header comments that document the tokens themselves.
+	if grep -Eq '^[[:space:]]*[A-Za-z][A-Za-z0-9]*:.*@[A-Z_]+@' "$out"; then
+		die "unrendered token left in $out"
+	fi
+}
+
+opensandbox_up() {
+	kind load docker-image "$IMG_SERVER" --name "$KIND_CLUSTER" >/dev/null
+	kind load docker-image "$IMG_INGRESS" --name "$KIND_CLUSTER" >/dev/null
+	render_opensandbox "$MANIFESTS_DIR/opensandbox/server.yaml" "$GEN_DIR/osb-server.yaml"
+	render_opensandbox "$MANIFESTS_DIR/opensandbox/ingress-gateway.yaml" "$GEN_DIR/osb-ingress-gateway.yaml"
+	kubectl apply -f "$GEN_DIR/osb-server.yaml" >/dev/null
+	kubectl apply -f "$GEN_DIR/osb-ingress-gateway.yaml" >/dev/null
+	wait_for "server deployment ready" 180 \
+		kubectl -n "$OSB_NS" rollout status deploy/opensandbox-server --timeout=10s
+	wait_for "ingress gateway deployment ready" 180 \
+		kubectl -n "$OSB_NS" rollout status deploy/opensandbox-ingress-gateway --timeout=10s
+	# The gateway fails startup without a FastPath gRPC connection, so a
+	# ready deployment already proves control-plane reachability.
+	wait_for "server /health on 127.0.0.1:$SERVER_HOST_PORT" 60 \
+		curl -fsS -m 5 "$SERVER_URL/health"
+	wait_for "gateway /status.ok on 127.0.0.1:$GATEWAY_HOST_PORT" 60 \
+		curl -fsS -m 5 "$GATEWAY_URL/status.ok"
+	pass "server + ingress gateway up (fsb runtime, gateway routes signed with key 'a')"
+}
+
+# server_api wraps the lifecycle API with the configured API key.
+server_api() { # method path [json-body]
+	local method="$1" path="$2" body="${3:-}"
+	if [[ -n "$body" ]]; then
+		curl -fsS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-H "Content-Type: application/json" -d "$body" "$SERVER_URL$path"
+	else
+		curl -fsS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" "$SERVER_URL$path"
+	fi
+}
+
+# The server assigns the sandbox id (CreateSandboxRequest carries none);
+# the verify probes share it through VERIFY_ID.
+VERIFY_ID=""
+
+verify_sandbox_gone() {
+	! server_api GET "/sandboxes/$VERIFY_ID" >/dev/null 2>&1
+}
+
+verify_policy_enforced() {
+	local out
+	out="$(server_api GET "/sandboxes/$VERIFY_ID/networkpolicy" 2>/dev/null)" || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.mode // empty')" == "enforcing" ]] || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.policy.egress[0].target // empty')" == "example.com" ]]
+}
+
+verify_policy_updated() {
+	local out
+	out="$(server_api GET "/sandboxes/$VERIFY_ID/networkpolicy" 2>/dev/null)" || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.mode // empty')" == "enforcing" ]] || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.policy.egress[0].target // empty')" == "github.com" ]]
+}
+
+# opensandbox_verify drives the full wire-up end to end: server API create
+# (fsb) -> FastPath -> fastlet -> firecracker sandbox (golden image with
+# execd, egress attached) -> signed gateway route -> ingress ResolveEndpoint
+# -> fastlet-proxy -> guest execd /ping -> delete.
+# verify_one_sandbox creates one sandbox through the server API and polls
+# execd /ping through the signed gateway route at 10ms intervals until 200:
+# availability is measured from the client, not from the CR status chain.
+# The CR state is sampled once at ping time to show observation lag.
+verify_one_sandbox() { # <label> <ping-budget-ms>
+	local label="$1" budget="$2" body created t0 t1 t2 route code attempt=0
+	t0="$(now_ms)"
+	# Default egress policy on every verify sandbox: the create carries it
+	# into the egress action binding (SET_BINDING -> nft rules in the fastlet
+	# Pod netns), so the policy chain is exercised on every create, not just
+	# the network. /ping itself is inbound through the gateway and unaffected.
+	body="$(jq -n --arg template "$TEMPLATE_ID" '{
+		templateId: $template,
+		timeout: 3600,
+		networkPolicy: {
+			defaultAction: "deny",
+			egress: [
+				{action: "allow", target: "example.com"},
+				{action: "allow", target: "*.opensandbox.ai"}
+			]
+		},
+		metadata: {origin: "fast-sandbox-env-verify"}
+	}')"
+	log "verify ($label): creating a sandbox via the server API (templateId=$TEMPLATE_ID)"
+	created="$(server_api POST /sandboxes "$body" 2>/dev/null)" \
+		|| fail "POST /sandboxes failed against $SERVER_URL: $(curl -sS -m 60 -X POST \
+			-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" -H "Content-Type: application/json" \
+			-d "$body" "$SERVER_URL/sandboxes" 2>&1 | head -c 400)"
+	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
+	[[ -n "$VERIFY_ID" && "$VERIFY_ID" != "null" ]] || fail "create response carried no id"
+	t1="$(now_ms)"
+	# Availability = execd /ping 200 through the signed gateway route
+	# (127.0.0.1:8081 -> ingress -> ResolveEndpoint -> fastlet-proxy -> guest
+	# execd :44772). Poll at 10ms; no waiting on CR status convergence.
+	while :; do
+		route="$(server_api GET "/sandboxes/$VERIFY_ID/endpoints/44772" 2>/dev/null \
+			| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
+		if [[ -n "$route" ]]; then
+			code="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
+				-H "OpenSandbox-Ingress-To: $route" "$GATEWAY_URL/ping" 2>/dev/null || true)"
+			[[ "$code" == "200" ]] && break
+		fi
+		attempt=$((attempt + 1))
+		if (( attempt * 10 >= budget )); then
+			fail "execd /ping did not return 200 within ${budget}ms (last code=${code:-none}, route=${route:-none})"
+		fi
+		sleep 0.01
+	done
+	t2="$(now_ms)"
+	# The jq filter lives in a variable first: its literal parentheses
+	# inside the single-quoted program trip older bash's $( ) parser when
+	# embedded in a command substitution directly.
+	local state raw raw_filter
+	raw_filter='{rt:.status.runtime.state,dp:.status.dataPlane.state,infra:[.status.infraComponents[]?|{n:.name,s:.state}],bind:[.status.actionBindings[]?|{h:.handler,s:.state}],ready:(.status.conditions[]?|select(.type=="Ready")|.status)}'
+	state="$(server_api GET "/sandboxes/$VERIFY_ID" 2>/dev/null | jq -r '.status.state // empty')"
+	raw="$(kubectl -n "$NS" get sandbox "$VERIFY_ID" -o json 2>/dev/null | jq -c "$raw_filter")"
+	log "verify ($label): $VERIFY_ID access via ingress gateway: curl -H \"OpenSandbox-Ingress-To: $route\" $GATEWAY_URL/ping"
+	log "verify ($label): $VERIFY_ID create POST $(( (t1 - t0) / 1000000 ))ms, POST->execd /ping 200 $(( (t2 - t1) / 1000000 ))ms (${attempt} polls @10ms), total $(( (t2 - t0) / 1000000 ))ms"
+	log "verify ($label): CR at ping: server=$state raw=${raw:-unreachable}"
+	pass "execd /ping 200 through the signed gateway route (44772)"
+	wait_for "egress policy enforcing (networkPolicy -> egress action binding -> nft)" 120 verify_policy_enforced
+	# Exercise the policy UPDATE path: PUT -> UpdateSandbox(ReplaceActionBindings)
+	# -> fastlet re-SET_BINDING -> egress hot-swaps the nft rules.
+	local put_body
+	put_body="$(jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "github.com"}]}')"
+	server_api PUT "/sandboxes/$VERIFY_ID/networkpolicy" "$put_body" >/dev/null \
+		|| fail "PUT networkpolicy failed for $VERIFY_ID: $(printf '%s' "$put_body" | head -c 200)"
+	wait_for "policy update converged (PUT -> ReplaceActionBindings -> egress)" 120 verify_policy_updated
+	# The policy waits burn a few seconds: sample the CR state again to show
+	# whether an early Failed observation converged to Running.
+	local state_final
+	state_final="$(server_api GET "/sandboxes/$VERIFY_ID" 2>/dev/null | jq -r '.status.state // empty')"
+	log "verify ($label): $VERIFY_ID CR state final: ${state_final:-unknown}"
+}
+
+# verify_lifecycle_ops exercises the remaining sandbox lifecycle surface
+# against the live stack on one sandbox: get, list, metadata merge-patch
+# (upsert + delete via null), and renew-expiration.
+verify_lifecycle_ops() { # <sandbox-id>
+	local id="$1" out expected_expires new_expires
+	out="$(server_api GET "/sandboxes/$id")" || fail "GET /sandboxes/$id failed"
+	[[ "$(printf '%s' "$out" | jq -r '.id')" == "$id" ]] || fail "GET returned wrong id: $out"
+	pass "lifecycle: GET /sandboxes/{id}"
+
+	out="$(server_api GET "/sandboxes?page=1&pageSize=50")" || fail "GET /sandboxes failed"
+	[[ "$(printf '%s' "$out" | jq -r --arg id "$id" '.items[]?.id | select(. == $id)' | head -1)" == "$id" ]] \
+		|| fail "list does not contain $id: $(printf '%s' "$out" | jq -c '.pagination')"
+	pass "lifecycle: GET /sandboxes (list contains the verify sandbox)"
+
+	# JSON Merge Patch (RFC 7396): non-null upserts, null deletes.
+	server_api PATCH "/sandboxes/$id/metadata" '{"env":"verify","stage":"lifecycle-ops"}' >/dev/null \
+		|| fail "PATCH metadata upsert failed"
+	out="$(server_api GET "/sandboxes/$id")"
+	[[ "$(printf '%s' "$out" | jq -r '.metadata.env')" == "verify" \
+		&& "$(printf '%s' "$out" | jq -r '.metadata.stage')" == "lifecycle-ops" ]] \
+		|| fail "metadata upsert not visible: $(printf '%s' "$out" | jq -c '.metadata')"
+	server_api PATCH "/sandboxes/$id/metadata" '{"stage":null}' >/dev/null \
+		|| fail "PATCH metadata delete failed"
+	out="$(server_api GET "/sandboxes/$id")"
+	[[ "$(printf '%s' "$out" | jq -r '.metadata.stage')" == "null" \
+		&& "$(printf '%s' "$out" | jq -r '.metadata.env')" == "verify" ]] \
+		|| fail "metadata delete not visible: $(printf '%s' "$out" | jq -c '.metadata')"
+	pass "lifecycle: PATCH metadata (upsert + null-delete via JSON Merge Patch)"
+
+	# Renew: new expiresAt must be future and later than the current one.
+	# The create used timeout=3600, so now+2h always qualifies.
+	expected_expires="$(server_api GET "/sandboxes/$id" | jq -r '.expiresAt')"
+	new_expires="$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+	if [[ -z "$new_expires" ]]; then
+		# BSD date fallback (dev hosts running macOS); GNU is authoritative.
+		new_expires="$(date -u -v+2H +%Y-%m-%dT%H:%M:%SZ)"
+	fi
+	out="$(server_api POST "/sandboxes/$id/renew-expiration" "{\"expiresAt\": \"$new_expires\"}")" \
+		|| fail "renew-expiration failed for $new_expires: $(printf '%s' "$out" | head -c 200)"
+	out="$(server_api GET "/sandboxes/$id")"
+	[[ "$(printf '%s' "$out" | jq -r '.expiresAt')" == "$new_expires" ]] \
+		|| fail "renewed expiresAt not visible: expected $new_expires got $(printf '%s' "$out" | jq -r '.expiresAt')"
+	pass "lifecycle: POST renew-expiration ($expected_expires -> $new_expires)"
+}
+
+opensandbox_verify() {
+	# Cold create first: on cold fastlets it pulls the golden image through
+	# DART (the slowest path, generous budget). Then warm creates: the second
+	# may still pull on the OTHER node (served by the first node's DART
+	# peer); once both nodes cache the set, the remaining creates must be
+	# sub-second.
+	local ids=() id label index
+	verify_one_sandbox "cold #1" 600000
+	ids+=("$VERIFY_ID")
+	verify_one_sandbox "warm #2" 600000
+	ids+=("$VERIFY_ID")
+	for index in 3 4 5 6; do
+		verify_one_sandbox "warm #$index" 120000
+		ids+=("$VERIFY_ID")
+	done
+	pass "end-to-end: SDK API -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
+	verify_lifecycle_ops "${ids[0]}"
+	for id in "${ids[@]}"; do
+		VERIFY_ID="$id"
+		server_api DELETE "/sandboxes/$id" >/dev/null \
+			|| log "verify cleanup: DELETE failed; remove $id manually"
+	done
+	for id in "${ids[@]}"; do
+		VERIFY_ID="$id"
+		wait_for "verify sandbox $id deleted" 120 verify_sandbox_gone
+	done
+	pass "verify sandboxes cleaned up"
 }
 
 # --- status / summary ---------------------------------------------------------------------
@@ -1008,6 +1394,17 @@ status() {
 	echo
 	log "status: MinIO"
 	docker ps --filter "name=$MINIO_CONTAINER" --format '{{.Names}} {{.Status}}' 2>/dev/null || true
+	echo
+	log "status: OpenSandbox ($OSB_NS)"
+	if kubectl get namespace "$OSB_NS" >/dev/null 2>&1; then
+		kubectl -n "$OSB_NS" get pods -o wide
+		printf '  server health:  %s\n' "$(curl -fsS -m 5 "$SERVER_URL/health" >/dev/null 2>&1 && echo OK || echo unreachable)"
+		printf '  gateway health: %s\n' "$(curl -fsS -m 5 "$GATEWAY_URL/status.ok" >/dev/null 2>&1 && echo OK || echo unreachable)"
+		printf '  server URL:     %s (header OPEN-SANDBOX-API-KEY: %s)\n' "$SERVER_URL" "$SERVER_API_KEY"
+		printf '  gateway URL:    %s (header routing, signed f1.* scopes)\n' "$GATEWAY_URL"
+	else
+		echo "  (not deployed)"
+	fi
 }
 
 env_summary() {
@@ -1017,8 +1414,11 @@ env_summary() {
 	printf '  %-22s %s\n' "MinIO endpoint" "$MINIO_ENDPOINT"
 	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
 	printf '  %-22s %s\n' "P2P" "DART daemons=$(printf '%s' "$(agent_pods)" | wc -w | tr -d ' ') (on-demand pulls: cache -> peer -> origin)"
-	printf '  %-22s %s\n' "template phase" "$(kubectl_get "sandboxtemplate/$SBX_TEMPLATE" '{.status.phase}' 2>/dev/null || echo '(not built: BUILD_TEMPLATE=1)')"
+	printf '  %-22s %s\n' "template" "${TEMPLATE_ID:-n/a} ($(if [[ -n "$TEMPLATE_ID" ]]; then _template_phase || echo unknown; else echo "not built"; fi))"
 	printf '  %-22s %s\n' "StateRoot fs" "$(findmnt -no FSTYPE "$XFS_MOUNT_POINT" 2>/dev/null || echo 'plain directory (full copy per sandbox)')"
+	printf '  %-22s %s\n' "server" "$IMG_SERVER -> $SERVER_URL (fsb runtime)"
+	printf '  %-22s %s\n' "ingress gateway" "$IMG_INGRESS -> $GATEWAY_URL (fsb provider, header mode)"
+	printf '  %-22s %s\n' "fastpath" "$FASTPATH_ENDPOINT"
 	printf '  %-22s %s\n' "logs" "$LOGS_DIR"
 }
 
@@ -1034,7 +1434,9 @@ down() {
 	docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true
 	[[ -z "$(docker ps -a --filter "name=$MINIO_CONTAINER" --format '{{.Names}}' || true)" ]] \
 		|| fail "MinIO container still present"
-	rm -f "$WORK/agent-registry.json"
+	# The OpenSandbox server + ingress gateway live entirely inside the kind
+	# cluster and are torn down with it; only the signing key outlives it here.
+	rm -f "$WORK/agent-registry.json" "$SIGNING_KEY_FILE"
 	rm -rf "$GEN_DIR" "$FSB_GEN_DIR"
 	# Root-owned MinIO object store (written by the container); leaving it
 	# behind pollutes the host and breaks later docker build contexts.
@@ -1066,20 +1468,23 @@ usage() {
 	cat <<'EOF'
 usage: fast-sandbox-env.sh [--auto-clean] {up|down|status|pool}
 
-  up       initialize the environment: fast-sandbox@master images, two-node
-           kind cluster (KVM), MinIO, control plane, firecracker node assets,
-           runtime-agent + DART (P2P), then the firecracker-egress-pool
-           SandboxPool (egress attached, P2P spread). No sandboxes created.
+  up       initialize the full environment: fast-sandbox@master images,
+           two-node kind cluster (KVM), MinIO, control plane, firecracker
+           node assets, runtime-agent + DART (P2P), SandboxTemplate golden
+           image, firecracker-egress-pool (egress attached), the
+           source-built OpenSandbox server + ingress gateway, and an
+           end-to-end verify (create -> gateway route -> execd /ping).
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
-  status   nodes / pods / pool / DART P2P counters / MinIO health
+  status   nodes / pods / pool / DART P2P counters / MinIO / OpenSandbox health
   down     teardown: kind cluster + MinIO + sysctl + XFS StateRoot + caches
 
   --auto-clean  on up failure, run down automatically before dumping logs
 
 Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
-DOCKER_MIRROR, MINIO_*, EGRESS_IMAGE, IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX,
-BUILD_TEMPLATE=1, WARM_IMAGES=1, SBX_IMAGE, EXECD, XFS_STATEROOT=0,
-SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1. See the header of this script.
+DOCKER_MIRROR, MINIO_*, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
+IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, WARM_IMAGES=1, SBX_IMAGE, EXECD,
+XFS_STATEROOT=0, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1.
+See the header of this script.
 EOF
 	exit 1
 }
@@ -1106,8 +1511,9 @@ case "$ACTION" in
 			go version
 			docker --version
 			echo "cluster=$KIND_CLUSTER single=$KIND_SINGLE minio=$MINIO_IMAGE port=$MINIO_PORT bucket=$MINIO_BUCKET"
-			echo "sbxImage=$SBX_IMAGE execd=$EXECD warmImages=$WARM_IMAGES buildTemplate=$BUILD_TEMPLATE"
+			echo "sbxImage=$SBX_IMAGE execd=$EXECD warmImages=$WARM_IMAGES"
 			echo "pool=$POOL_NAME poolMin=$POOL_MIN egress=$IMG_EGRESS"
+			echo "server=$IMG_SERVER ingress=$IMG_INGRESS fastpath=$FASTPATH_ENDPOINT"
 			echo "images: controller=$IMG_CONTROLLER agent=$IMG_AGENT"
 		} > "$LOGS_DIR/environment.txt" 2>&1 || true
 		if [[ -n "$(kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" || true)" ]] \
@@ -1119,12 +1525,11 @@ case "$ACTION" in
 			log "leftover resources detected; cleaning and rebuilding"
 			down
 		fi
-		[[ "$WARM_IMAGES" == "1" && "$BUILD_TEMPLATE" != "1" ]] && BUILD_TEMPLATE=1
 		trap 'on_error up' ERR
 		run_stage "preflight + tooling" preflight
 		run_stage "sysctl (fs.inotify)" sysctl_set
 		run_stage "fast-sandbox checkout @$FSB_REF" ensure_fsb
-		run_stage "build images (fast-sandbox + egress)" build_images
+		run_stage "build images (fast-sandbox + OpenSandbox)" build_images
 		run_stage "XFS StateRoot (reflink)" stateroot_xfs_up
 		run_stage "render kind config" render_kind_config
 		run_stage "kind cluster (KVM passthrough + labels)" kind_up
@@ -1134,14 +1539,14 @@ case "$ACTION" in
 		run_stage "credentials (publish/pull)" credentials_up
 		run_stage "firecracker node assets" installer_up
 		run_stage "runtime-agent + DART (P2P)" agent_up
-		if [[ "$BUILD_TEMPLATE" == "1" ]]; then
-			run_stage "SandboxTemplate build" template_up
-		fi
+		run_stage "OpenSandbox server + ingress gateway" opensandbox_up
+		run_stage "SandboxTemplate build (server API)" template_up
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
+		run_stage "end-to-end verify (templateId create -> gateway -> execd /ping)" opensandbox_verify
 		trap - ERR
 		stage_summary
 		env_summary
-		highlight "== up complete: pool ready with egress attached; create sandboxes with fast-sandbox tooling =="
+		highlight "== up complete: server=$SERVER_URL (header OPEN-SANDBOX-API-KEY: $SERVER_API_KEY), gateway=$GATEWAY_URL =="
 		;;
 	pool)
 		exec > >(tee -a "$WORK/run.log") 2>&1

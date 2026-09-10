@@ -37,6 +37,7 @@ type ExecuteResultHook struct {
 type ExecuteCodeRequest struct {
 	Language Language          `json:"language"`
 	Code     string            `json:"code"`
+	Argv     []string          `json:"argv,omitempty"`
 	Context  string            `json:"context"`
 	Timeout  time.Duration     `json:"timeout"`
 	Cwd      string            `json:"cwd"`

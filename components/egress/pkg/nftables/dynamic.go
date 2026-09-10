@@ -73,22 +73,20 @@ func buildRefreshResolvedIPsScript(table string, ips []netip.Addr) string {
 }
 
 func buildResolvedIPElementsScript(table string, elements []ResolvedIP) string {
-	var v4, v6 []string
+	var script strings.Builder
 	for _, element := range elements {
 		addr := element.Addr.Unmap()
-		value := fmt.Sprintf("%s timeout %ds", addr, int(element.TTL/time.Second))
+		var setName string
 		if addr.Is4() {
-			v4 = append(v4, value)
+			setName = dynAllowV4Set
 		} else if addr.Is6() {
-			v6 = append(v6, value)
+			setName = dynAllowV6Set
+		} else {
+			continue
 		}
+		fmt.Fprintf(&script, "add element inet %s %s { %s }\n", table, setName, addr)
+		fmt.Fprintf(&script, "delete element inet %s %s { %s }\n", table, setName, addr)
+		fmt.Fprintf(&script, "add element inet %s %s { %s timeout %ds }\n", table, setName, addr, int(element.TTL/time.Second))
 	}
-	var b strings.Builder
-	if len(v4) > 0 {
-		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", table, dynAllowV4Set, strings.Join(v4, ", "))
-	}
-	if len(v6) > 0 {
-		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", table, dynAllowV6Set, strings.Join(v6, ", "))
-	}
-	return b.String()
+	return script.String()
 }

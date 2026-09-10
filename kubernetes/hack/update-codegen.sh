@@ -18,7 +18,11 @@ set -o nounset
 set -o pipefail
 
 SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
-CODEGEN_PKG=${CODEGEN_PKG:-$(cd "${SCRIPT_ROOT}"; go env GOPATH)/pkg/mod/k8s.io/code-generator@v0.33.0}
+
+GOBIN="$(go env GOBIN)"
+export GOBIN="${GOBIN:-$(go env GOPATH | cut -d: -f1)/bin}"
+
+CODEGEN_PKG="${CODEGEN_PKG:-$(go env GOMODCACHE)/k8s.io/code-generator@v0.33.0}"
 
 if [ ! -d "${CODEGEN_PKG}" ]; then
     echo "code-generator not found at ${CODEGEN_PKG}"

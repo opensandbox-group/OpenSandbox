@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FleetSandboxService: fast-sandbox (fleets) runtime backend (OSEP-0007).
+"""FsbSandboxService: fast-sandbox (fsb) runtime backend.
 
 FastPath owns mutations and live runtime operations. Kubernetes LIST/WATCH
 provides the persisted Sandbox fields and eventually convergent observations.
@@ -44,18 +44,19 @@ from opensandbox_server.api.schema import (
     Sandbox,
     SandboxStatus,
 )
-from opensandbox_server.config import AppConfig, FleetsRuntimeConfig, KubernetesRuntimeConfig
+from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
     DiagnosticResult,
     unsupported_scope_error,
 )
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.fleets.create_mapping import (
+from opensandbox_server.services.fsb.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
+    map_template_create_request,
 )
-from opensandbox_server.services.fleets.fastpath_client import (
+from opensandbox_server.services.fsb.fastpath_client import (
     FastPathClient,
     FastPathConflict,
     FastPathError,
@@ -64,12 +65,13 @@ from opensandbox_server.services.fleets.fastpath_client import (
     FastPathResourceExhausted,
     FastPathUnavailable,
 )
-from opensandbox_server.services.fleets.endpoint import build_endpoint
-from opensandbox_server.services.fleets.cr_reader import SandboxCRReader
-from opensandbox_server.services.fleets.cr_mapping import sandbox_from_cr
-from opensandbox_server.services.fleets.network_policy import normalized_policy, policy_status
-from opensandbox_server.services.fleets.generated import fastpath_pb2 as pb2
-from opensandbox_server.services.fleets.status_mapping import map_reason, map_state
+from opensandbox_server.services.fsb.endpoint import build_endpoint
+from opensandbox_server.services.fsb.cr_reader import SandboxCRReader
+from opensandbox_server.services.fsb.cr_mapping import sandbox_from_cr
+from opensandbox_server.services.fsb.network_policy import normalized_policy, policy_status
+from opensandbox_server.services.templates.template_service import FsbTemplateService
+from opensandbox_server.services.fsb.generated import fastpath_pb2 as pb2
+from opensandbox_server.services.fsb.status_mapping import map_reason, map_state
 from opensandbox_server.services.sandbox_service import SandboxService
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
@@ -81,38 +83,42 @@ from opensandbox_server.services.validators import (
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
 
 
-class FleetSandboxService(SandboxService, ExtensionService):
-    """sandbox fleets runtime backed by the fast-sandbox FastPath v2 API."""
+class FsbSandboxService(SandboxService, ExtensionService):
+    """sandbox fsb runtime backed by the fast-sandbox FastPath v2 API."""
 
     def __init__(
         self,
         config: AppConfig,
         fastpath_client: Optional[FastPathClient] = None,
         k8s_client: Optional[K8sClient] = None,
+        template_service: Optional[FsbTemplateService] = None,
     ):
         self._app_config = config
-        fleets_config = config.fleets or FleetsRuntimeConfig()
-        if (
-            "namespace" not in fleets_config.model_fields_set
-            and config.kubernetes
-            and config.kubernetes.namespace
-        ):
-            fleets_config = fleets_config.model_copy(
-                update={"namespace": config.kubernetes.namespace}
-            )
-        self._fleets = fleets_config
+        # The fsb backend shares the [kubernetes] block: CR reads and the
+        # fast-sandbox (FastPath) settings live side by side there.
+        self._k8s = config.kubernetes or KubernetesRuntimeConfig()
         self._fastpath = fastpath_client or FastPathClient(
-            endpoint=fleets_config.fastpath_endpoint,
-            timeout_seconds=fleets_config.fastpath_timeout_seconds,
+            endpoint=self._k8s.fastpath_endpoint,
+            timeout_seconds=self._k8s.fastpath_timeout_seconds,
         )
         self._tenant_provider = None  # type: ignore[assignment]
-        self._cr_reader = SandboxCRReader(
-            config.kubernetes or KubernetesRuntimeConfig(), k8s_client
-        )
+        self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
+        self._template_service = template_service
 
     def close(self) -> None:
         self._cr_reader.close()
+        if self._template_service is not None:
+            self._template_service.close()
         self._fastpath.close()
+
+    def resolve_template_service(self) -> FsbTemplateService:
+        """Lazily create the shared template service."""
+        if self._template_service is None:
+            self._template_service = FsbTemplateService(self._app_config)
+            # Keep template rows converged even without /templates traffic
+            # (template-mode create resolves against the synced row).
+            self._template_service.start_background_sync()
+        return self._template_service
 
     @staticmethod
     def generate_sandbox_id() -> str:
@@ -131,7 +137,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
         tenant = get_current_tenant()
         if tenant is not None:
             return tenant.namespace
-        return self._fleets.namespace
+        return self._k8s.namespace or "default"
 
     def _resolve_namespace_for_lookup(self, sandbox_id: str) -> str:
         """Resolve namespace with a cross-namespace fallback for background work.
@@ -146,12 +152,13 @@ class FleetSandboxService(SandboxService, ExtensionService):
         if tenant is not None:
             return tenant.namespace
 
-        namespaces = [self._fleets.namespace]
+        default_namespace = self._k8s.namespace or "default"
+        namespaces = [default_namespace]
         if self._tenant_provider is not None:
             namespaces.extend(
                 entry.namespace
                 for entry in self._tenant_provider.list_tenants()
-                if entry.namespace != self._fleets.namespace
+                if entry.namespace != default_namespace
             )
         for namespace in namespaces:
             try:
@@ -162,7 +169,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
                 raise self._fastpath_http_error(exc) from exc
             return namespace
 
-        return self._fleets.namespace
+        return self._k8s.namespace or "default"
 
     def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
         """Return the resource profile declared by the selected SandboxPool."""
@@ -172,7 +179,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
-                    "code": SandboxErrorCodes.FLEETS_POOL_NOT_FOUND,
+                    "code": SandboxErrorCodes.FSB_POOL_NOT_FOUND,
                     "message": f"SandboxPool {pool_ref!r} not found in namespace {namespace!r}.",
                 },
             )
@@ -204,47 +211,76 @@ class FleetSandboxService(SandboxService, ExtensionService):
 
     def _create_sandbox_sync(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         created_at = datetime.now(timezone.utc)
-        try:
-            create_request = map_create_request(
-                request,
-                sandbox_id=self.generate_sandbox_id(),
-                namespace=self._resolve_namespace(),
-                default_pool_ref=self._fleets.default_pool_ref,
+        # Template mode: the resolved artifact reference becomes
+        # the FastPath image; workload shape comes from the golden image.
+        template_entrypoint: Optional[list[str]] = None
+        if (request.template_id or "").strip():
+            image_ref, template_entrypoint = (
+                self.resolve_template_service().resolve_template_artifact(
+                    request.template_id.strip()
+                )
             )
-        except UnsupportedFieldError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": SandboxErrorCodes.INVALID_PARAMETER,
-                    "message": str(exc),
-                },
-            ) from exc
+            try:
+                create_request = map_template_create_request(
+                    request,
+                    sandbox_id=self.generate_sandbox_id(),
+                    namespace=self._resolve_namespace(),
+                    image_ref=image_ref,
+                    entrypoint=template_entrypoint,
+                    fastpath_resource_pool=self._k8s.fastpath_resource_pool,
+                )
+            except UnsupportedFieldError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": str(exc),
+                    },
+                ) from exc
+        else:
+            try:
+                create_request = map_create_request(
+                    request,
+                    sandbox_id=self.generate_sandbox_id(),
+                    namespace=self._resolve_namespace(),
+                    fastpath_resource_pool=self._k8s.fastpath_resource_pool,
+                )
+            except UnsupportedFieldError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": str(exc),
+                    },
+                ) from exc
+            pool_resources = self._pool_resources(
+                create_request.namespace, create_request.pool_ref
+            )
+            try:
+                create_request = map_create_request(
+                    request,
+                    sandbox_id=create_request.request_id,
+                    namespace=create_request.namespace,
+                    fastpath_resource_pool=self._k8s.fastpath_resource_pool,
+                    expires_at_unix_seconds=create_request.expires_at_unix_seconds,
+                    pool_resources=pool_resources,
+                )
+            except UnsupportedFieldError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": str(exc),
+                    },
+                ) from exc
 
         namespace = create_request.namespace
         sandbox_id = create_request.request_id
-        pool_resources = self._pool_resources(namespace, create_request.pool_ref)
-        try:
-            create_request = map_create_request(
-                request,
-                sandbox_id=sandbox_id,
-                namespace=namespace,
-                default_pool_ref=self._fleets.default_pool_ref,
-                expires_at_unix_seconds=create_request.expires_at_unix_seconds,
-                pool_resources=pool_resources,
-            )
-        except UnsupportedFieldError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": SandboxErrorCodes.INVALID_PARAMETER,
-                    "message": str(exc),
-                },
-            ) from exc
 
         try:
             response = self._fastpath.create_sandbox(
                 create_request,
-                wait_timeout_millis=self._fleets.wait_ready_timeout_millis,
+                wait_timeout_millis=int(self._k8s.fastpath_wait_ready_seconds * 1000),
             )
         except (FastPathInvalidArgument, FastPathConflict, FastPathNotFound) as exc:
             raise self._fastpath_http_error(exc) from exc
@@ -270,6 +306,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
             expires_at=datetime.fromtimestamp(
                 create_request.expires_at_unix_seconds, tz=timezone.utc
             ),
+            entrypoint=template_entrypoint,
         )
 
     def _build_create_response(
@@ -280,6 +317,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
         sandbox_id: str,
         created_at: datetime,
         expires_at: datetime,
+        entrypoint: Optional[list[str]] = None,
     ) -> CreateSandboxResponse:
         return CreateSandboxResponse(
             id=sandbox_id,
@@ -294,7 +332,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
             platform=None,
             expiresAt=expires_at,
             createdAt=created_at,
-            entrypoint=request.entrypoint,
+            entrypoint=entrypoint if entrypoint is not None else request.entrypoint,
         )
 
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
@@ -532,8 +570,8 @@ class FleetSandboxService(SandboxService, ExtensionService):
         return HTTPException(
             status_code=status_code,
             detail={
-                "code": SandboxErrorCodes.FLEETS_UNSUPPORTED,
-                "message": f"{feature} is not supported on fleets (OSEP-0007 Phase 1a).",
+                "code": SandboxErrorCodes.FSB_UNSUPPORTED,
+                "message": f"{feature} is not supported on fsb.",
             },
         )
 
@@ -544,7 +582,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 headers={"Retry-After": "1"},
                 detail={
-                    "code": SandboxErrorCodes.FLEETS_API_ERROR,
+                    "code": SandboxErrorCodes.FSB_API_ERROR,
                     "message": "FastPath pool capacity is temporarily unavailable.",
                 },
             )
@@ -552,7 +590,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
             return HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
-                    "code": SandboxErrorCodes.FLEETS_SANDBOX_NOT_FOUND,
+                    "code": SandboxErrorCodes.FSB_SANDBOX_NOT_FOUND,
                     "message": "Sandbox not found.",
                 },
             )
@@ -568,7 +606,7 @@ class FleetSandboxService(SandboxService, ExtensionService):
             return HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
-                    "code": SandboxErrorCodes.FLEETS_API_ERROR,
+                    "code": SandboxErrorCodes.FSB_API_ERROR,
                     "message": exc.message,
                 },
             )
@@ -576,14 +614,14 @@ class FleetSandboxService(SandboxService, ExtensionService):
             return HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
-                    "code": SandboxErrorCodes.FLEETS_API_ERROR,
+                    "code": SandboxErrorCodes.FSB_API_ERROR,
                     "message": "FastPath backend unavailable.",
                 },
             )
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
-                "code": SandboxErrorCodes.FLEETS_API_ERROR,
+                "code": SandboxErrorCodes.FSB_API_ERROR,
                 "message": exc.message,
             },
         )
@@ -597,4 +635,4 @@ def _enum_name(enum_type, value: int) -> str:
         return str(value)
 
 
-__all__ = ["FleetSandboxService"]
+__all__ = ["FsbSandboxService"]
