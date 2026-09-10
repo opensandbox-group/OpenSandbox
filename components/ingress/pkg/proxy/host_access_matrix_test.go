@@ -137,7 +137,7 @@ func TestMatrix_NoAccessVerification_URI(t *testing.T) {
 		assert.Equal(t, "/v1/status", h.requestURI)
 	})
 
-	t.Run("OSEP-shaped path re-parsed with legacy (strip must not apply)", func(t *testing.T) {
+	t.Run("signed-shaped path re-parsed with legacy (strip must not apply)", func(t *testing.T) {
 		// Syntactically valid signed prefix; for unsecured sandbox full path must be legacy-interpreted.
 		path := fmt.Sprintf("/%s/3000/%s/%s/extra/segment", testIDNoAccess, exp, goodSig)
 		r := httptest.NewRequest(http.MethodGet, "http://i"+path, nil)
@@ -150,7 +150,7 @@ func TestMatrix_NoAccessVerification_URI(t *testing.T) {
 		assert.Equal(t, "/"+exp+"/"+goodSig+"/extra/segment", h.requestURI)
 	})
 
-	t.Run("OSEP shape plus OpenSandbox-Secure-Access header", func(t *testing.T) {
+	t.Run("signed shape plus OpenSandbox-Secure-Access header", func(t *testing.T) {
 		path := fmt.Sprintf("/%s/3000/%s/%s/api", testIDNoAccess, exp, goodSig)
 		r := httptest.NewRequest(http.MethodGet, "http://i"+path, nil)
 		r.Header.Set(signature.OpenSandboxSecureAccessCanonical, "noise")

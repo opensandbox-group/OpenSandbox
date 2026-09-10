@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	// OpenSandboxSecureAccessHeader is the OSEP-0011 header field name; use
-	// OpenSandboxSecureAccessCanonical when looking up the HTTP header map.
+	// OpenSandboxSecureAccessHeader is the secure-access header field name;
+	// use OpenSandboxSecureAccessCanonical when looking up the HTTP header map.
 	OpenSandboxSecureAccessHeader = "OpenSandbox-Secure-Access"
 )
 
@@ -48,12 +48,6 @@ func SecureAccessHeaderInfo(r *http.Request) (present bool, value string) {
 	return true, strings.TrimSpace(vs[0])
 }
 
-// SecureAccessHeaderFromRequest returns the trimmed first field value, or "" if absent.
-func SecureAccessHeaderFromRequest(r *http.Request) string {
-	_, v := SecureAccessHeaderInfo(r)
-	return v
-}
-
 func secureAccessTokenEqualConstantTime(a, b string) bool {
 	if len(a) != len(b) {
 		return false
@@ -76,9 +70,10 @@ type IngressAccessInput struct {
 	Verifier                  *Verifier
 }
 
-// CheckIngressSecureAccess applies OSEP-0011: if OpenSandbox-Secure-Access is
-// present, compare to annotation token (constant-time) and 401 on mismatch
-// (no route-signature fallback). If absent, verify route signature+expiry.
+// CheckIngressSecureAccess enforces secure access: if OpenSandbox-Secure-Access
+// is present, compare to the annotation token (constant-time) and 401 on
+// mismatch (no route-signature fallback). If absent, verify route
+// signature+expiry.
 func CheckIngressSecureAccess(in IngressAccessInput) error {
 	if !in.Secure {
 		return nil
@@ -100,20 +95,15 @@ func CheckIngressSecureAccess(in IngressAccessInput) error {
 	return ErrSignatureRequired
 }
 
+// HTTPStatusForIngressErr maps secure-access errors to response statuses.
 func HTTPStatusForIngressErr(err error) int {
 	if err == nil {
 		return 0
 	}
-	if errors.Is(err, ErrUnauthorized) {
-		return http.StatusUnauthorized
-	}
-	if errors.Is(err, ErrAccessExpired) {
-		return http.StatusUnauthorized
-	}
-	if errors.Is(err, ErrSecureHeaderMismatch) {
-		return http.StatusUnauthorized
-	}
-	if errors.Is(err, ErrSignatureRequired) {
+	if errors.Is(err, ErrUnauthorized) ||
+		errors.Is(err, ErrAccessExpired) ||
+		errors.Is(err, ErrSecureHeaderMismatch) ||
+		errors.Is(err, ErrSignatureRequired) {
 		return http.StatusUnauthorized
 	}
 	if errors.Is(err, ErrVerifierNotConfigured) {

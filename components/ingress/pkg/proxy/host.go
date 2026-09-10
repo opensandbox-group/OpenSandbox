@@ -27,13 +27,6 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 )
 
-type Mode string
-
-const (
-	ModeHeader Mode = "header"
-	ModeURI    Mode = "uri"
-)
-
 func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
 	start := time.Now()
 	host, status, err := p.doGetSandboxHostDefinition(r)
@@ -89,7 +82,10 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 
 	need := endpoint.AccessVerificationRequired()
 
-	if p.mode == ModeURI && !need && pr.uriParsedAsOSEP {
+	// The sandbox does not require secure access, so a four-segment signed path
+	// must not have its leading segments stripped: re-parse as legacy and keep
+	// the full path for the upstream.
+	if p.mode == ModeURI && !need && pr.signedRoute {
 		pr, err = parseURILegacy(r.URL.Path)
 		if err != nil {
 			return nil, ingressRouteErrHTTPStatus(err), err
@@ -170,7 +166,8 @@ func (p *Proxy) parseRequestedURIRoute(r *http.Request) (parsedRoute, int, error
 	if err != nil {
 		return pr, 0, err
 	}
-	if pr.uriParsedAsOSEP {
+	// Signed routes carry four leading route segments; legacy routes two.
+	if pr.signedRoute {
 		pr.requestRawPath = escapedPathSuffix(r.URL.EscapedPath(), 4)
 	} else {
 		pr.requestRawPath = escapedPathSuffix(r.URL.EscapedPath(), 2)

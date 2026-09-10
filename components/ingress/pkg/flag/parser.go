@@ -19,28 +19,32 @@ import (
 	"time"
 )
 
-var (
-	deprecatedNamespace string
-)
+// deprecatedNamespace is kept so old command lines with --namespace still parse.
+// Ingress watches sandbox resources across all namespaces.
+var deprecatedNamespace string
 
 func InitFlags() {
+	// Core server options.
 	flag.StringVar(&LogLevel, "log-level", "info", "Server log level")
-	flag.IntVar(&Port, "port", 28888, "Server listening port (default: 28888)")
+	flag.IntVar(&Port, "port", 28888, "Server listening port")
 	flag.StringVar(&deprecatedNamespace, "namespace", "opensandbox", "Deprecated compatibility flag (ingress now watches sandbox resources across all namespaces)")
-	flag.StringVar(&ProviderType, "provider-type", "batchsandbox", "The sandbox provider type (default: batchsandbox)")
-	flag.StringVar(&Mode, "mode", "header", "The sandbox service discovery mode (default: header)")
+	flag.StringVar(&ProviderType, "provider-type", "batchsandbox", "The sandbox provider type")
+	flag.StringVar(&Mode, "mode", "header", "The sandbox service discovery mode")
 
-	flag.BoolVar(&RenewIntentEnabled, "renew-intent-enabled", false, "Enable publishing renew-intent events to Redis (OSEP-0009)")
+	// Renew-intent publishing.
+	flag.BoolVar(&RenewIntentEnabled, "renew-intent-enabled", false, "Enable publishing renew-intent events to Redis")
 	flag.StringVar(&RenewIntentRedisDSN, "renew-intent-redis-dsn", "redis://127.0.0.1:6379/0", "Redis DSN for renew-intent queue")
 	flag.StringVar(&RenewIntentQueueKey, "renew-intent-queue-key", "opensandbox:renew:intent", "Redis List key for renew-intent payloads")
 	flag.IntVar(&RenewIntentQueueMaxLen, "renew-intent-queue-max-len", 0, "Max renew-intent queue length (0 = no cap)")
 	flag.IntVar(&RenewIntentMinIntervalSec, "renew-intent-min-interval", 60, "Min seconds between publishing intents for the same sandbox (client-side throttle)")
 
-	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "OSEP-0011 and fleets route-scope verification keys: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
+	// Secure access (signed routes) and FastPath (fleets) routing.
+	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "Verification keys for signed ingress routes and fleets route scopes: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
 	flag.StringVar(&FastPathEndpoint, "fastpath-endpoint", "", "FastPath v2 gRPC endpoint; a non-empty value enables fleets routing")
 	flag.StringVar(&FastPathAccessMode, "fastpath-access-mode", "direct-fastlet-proxy", "FastPath fleets data-plane mode: central-proxy or direct-fastlet-proxy")
 	flag.IntVar(&FastPathWaitTimeoutMillis, "fastpath-wait-timeout-millis", 2000, "FastPath ResolveEndpoint RPC timeout for one ingress request")
 
+	// Network-readiness shadow assessment.
 	flag.DurationVar(&NetworkReadinessShadowWindow, "network-readiness-shadow-window", time.Minute, "Shadow connectivity assessment window")
 	flag.IntVar(&NetworkReadinessShadowMaxTargets, "network-readiness-shadow-max-targets", 1024, "Maximum distinct upstream targets retained per shadow window")
 	flag.Uint64Var(&NetworkReadinessShadowMinAttempts, "network-readiness-shadow-min-attempts", 20, "Minimum connection attempts required for a shadow assessment")

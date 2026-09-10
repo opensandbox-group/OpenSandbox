@@ -69,7 +69,7 @@ func TestGetSandboxHostDefinition_HeaderSecureSig(t *testing.T) {
 func TestGetSandboxHostDefinition_HeaderSecureHeaderBypassSignedShape(t *testing.T) {
 	sb := "gamma"
 	port := 7777
-	// 9 characters: 8-hex + 1 key id (header bypasses HMAC, but must parse as OSEP-0011)
+	// 9 characters: 8-hex + 1 key id (header bypasses HMAC, but must match the signed-route format)
 	sig := "aabbccdd" + "1"
 	e := "0"
 	label := fmt.Sprintf("%s-%d-%s-%s", sb, port, e, sig)

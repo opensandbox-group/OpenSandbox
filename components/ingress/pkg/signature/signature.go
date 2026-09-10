@@ -83,49 +83,49 @@ func ParseKeys(s string) (map[string][]byte, error) {
 
 const maxExpiresB36Len = 13
 
-// ParseExpiresB36 parses OSEP expires_b36 (FormatUint(sec, 36), no leading zeros; "0" for zero).
+// ParseExpiresB36 parses the base36 expires segment (FormatUint(sec, 36), no leading zeros; "0" for zero).
 func ParseExpiresB36(s string) (uint64, error) {
 	if s == "" {
-		return 0, fmt.Errorf("empty expires_b36")
+		return 0, errors.New("empty expires_b36")
 	}
 	if len(s) > maxExpiresB36Len {
-		return 0, fmt.Errorf("expires_b36 too long")
+		return 0, errors.New("expires_b36 too long")
 	}
 	for _, c := range s {
 		if c >= 'A' && c <= 'Z' {
-			return 0, fmt.Errorf("expires_b36 must be lowercase [0-9a-z]")
+			return 0, errors.New("expires_b36 must be lowercase [0-9a-z]")
 		}
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
-			return 0, fmt.Errorf("invalid character in expires_b36")
+			return 0, errors.New("invalid character in expires_b36")
 		}
 	}
 	if len(s) > 1 && s[0] == '0' {
-		return 0, fmt.Errorf("expires_b36 must not have leading zeros")
+		return 0, errors.New("expires_b36 must not have leading zeros")
 	}
 	return strconv.ParseUint(s, 36, 64)
 }
 
-// ValidateSignatureFormat checks OSEP-0011 route signature: 8 hex + 1 key_id [0-9a-z] (9 chars).
+// ValidateSignatureFormat checks the signed route signature: 8 hex + 1 key_id [0-9a-z] (9 chars).
 func ValidateSignatureFormat(signature string) error {
 	if len(signature) != 9 {
 		return fmt.Errorf("signature must be 9 characters, got %d", len(signature))
 	}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		c := signature[i]
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return fmt.Errorf("signature hex8 must be lowercase hex")
+			return errors.New("signature hex8 must be lowercase hex")
 		}
 	}
 	c := signature[8]
 	if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
-		return fmt.Errorf("signed_key_id must be [0-9a-z]")
+		return errors.New("signed_key_id must be [0-9a-z]")
 	}
 	return nil
 }
 
 func ParsePortSegment(portStr string) (int, error) {
 	if len(portStr) > 1 && portStr[0] == '0' {
-		return 0, fmt.Errorf("port must not have leading zeros")
+		return 0, errors.New("port must not have leading zeros")
 	}
 	p, err := strconv.Atoi(portStr)
 	if err != nil || p < 1 || p > 65535 {
@@ -144,7 +144,7 @@ func ParseRouteToken(s string) (sandboxID string, port int, expiresB36, signatur
 	case 2:
 		sandboxID = parts[0]
 		if sandboxID == "" {
-			return "", 0, "", "", fmt.Errorf("empty sandbox_id")
+			return "", 0, "", "", errors.New("empty sandbox_id")
 		}
 		p, perr := ParsePortSegment(parts[1])
 		if perr != nil {
@@ -170,7 +170,7 @@ func ParseRouteToken(s string) (sandboxID string, port int, expiresB36, signatur
 		}
 		sandboxID = strings.Join(parts[:len(parts)-3], "-")
 		if sandboxID == "" {
-			return "", 0, "", "", fmt.Errorf("empty sandbox_id")
+			return "", 0, "", "", errors.New("empty sandbox_id")
 		}
 		return sandboxID, p, expiresB36, signature, nil
 	}
@@ -194,7 +194,7 @@ func ExpectedHex8(inner []byte) string {
 	sum := sha256.Sum256(inner)
 	const hex = "0123456789abcdef"
 	out := make([]byte, 8)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		b := sum[i]
 		out[i*2] = hex[b>>4]
 		out[i*2+1] = hex[b&0x0f]
@@ -234,8 +234,4 @@ func (v *Verifier) VerifySignature(signature, sandboxID string, port int, expire
 		return fmt.Errorf("%w: signature mismatch", ErrUnauthorized)
 	}
 	return nil
-}
-
-func HTTPStatusForErr(err error) int {
-	return HTTPStatusForIngressErr(err)
 }

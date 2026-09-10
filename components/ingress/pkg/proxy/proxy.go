@@ -37,6 +37,16 @@ import (
 
 const httpScheme = "http"
 
+// Mode selects how the target sandbox is discovered from an incoming request.
+type Mode string
+
+const (
+	// ModeHeader resolves the target from the OpenSandbox-Ingress-To header or Host.
+	ModeHeader Mode = "header"
+	// ModeURI resolves the target from leading URI path segments.
+	ModeURI Mode = "uri"
+)
+
 type Proxy struct {
 	sandboxProvider      sandbox.Provider
 	mode                 Mode
@@ -349,18 +359,18 @@ func (w *statusCapturingResponseWriter) Flush() {
 	}
 }
 
+// getClientIP prefers the first X-Forwarded-For hop, then X-Real-IP, and
+// finally falls back to the remote address.
 func (p *Proxy) getClientIP(r *http.Request) string {
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if len(r.Header.Get(XForwardedFor)) != 0 {
-		xff := r.Header.Get(XForwardedFor)
-		s := strings.Index(xff, ", ")
-		if s == -1 {
-			s = len(r.Header.Get(XForwardedFor))
+	if xff := r.Header.Get(XForwardedFor); xff != "" {
+		if idx := strings.Index(xff, ", "); idx != -1 {
+			return xff[:idx]
 		}
-		clientIP = xff[:s]
-	} else if len(r.Header.Get(XRealIP)) != 0 {
-		clientIP = r.Header.Get(XRealIP)
+		return xff
 	}
-
+	if realIP := r.Header.Get(XRealIP); realIP != "" {
+		return realIP
+	}
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return clientIP
 }

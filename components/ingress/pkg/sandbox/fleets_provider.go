@@ -34,16 +34,23 @@ import (
 )
 
 const (
-	ExecdPort                 = 44772
-	EgressPort                = 18080
-	FastSandboxCredential     = "X-Fast-Sandbox-Route-Credential"
-	FastSandboxProxyError     = "X-Fast-Sandbox-Proxy-Error"
+	// Reserved component ports inside a sandbox.
+	ExecdPort  = 44772
+	EgressPort = 18080
+
+	// FastPath proxy response headers.
+	FastSandboxCredential = "X-Fast-Sandbox-Route-Credential"
+	FastSandboxProxyError = "X-Fast-Sandbox-Proxy-Error"
+
+	// Proxy-error values marking a stale or otherwise unusable cached route.
 	fastSandboxStaleRoute     = "stale_route"
 	fastSandboxCredentialFail = "credential_rejected"
 	fastSandboxRouteMissing   = "route_unavailable"
 	fastSandboxUpstreamFailed = "upstream_unavailable"
-	fastPathConnectTimeout    = 5 * time.Second
-	routeCacheSweepInterval   = time.Minute
+
+	// Connection and cache maintenance timings.
+	fastPathConnectTimeout  = 5 * time.Second
+	routeCacheSweepInterval = time.Minute
 )
 
 type FastPathResolver interface {

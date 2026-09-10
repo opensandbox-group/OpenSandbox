@@ -155,8 +155,6 @@ func main() {
 	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), mux); err != nil {
 		log.Panicf("Error starting http server: %v", err)
 	}
-
-	panic("unreachable")
 }
 
 func newNetworkReadiness(config connectivity.TrackerConfig) (connectivity.Observer, http.Handler, error) {

@@ -27,7 +27,7 @@ import (
 )
 
 var (
-	// defaultWebSocketDialer is a dialer with all fields set to the default zero values.
+	// defaultWebSocketDialer dials backends when no explicit dialer is set.
 	defaultWebSocketDialer = websocket.DefaultDialer
 
 	// defaultUpgrader specifies the parameters for upgrading an HTTP
@@ -58,18 +58,14 @@ type WebSocketProxy struct {
 	// unmodified request.
 	backend func(*http.Request) *url.URL
 
-	//  dialer contains options for connecting to the backend WebSocket server.
-	//  If nil, DefaultDialer is used.
+	// dialer contains options for connecting to the backend WebSocket server.
+	// If nil, DefaultDialer is used.
 	dialer *websocket.Dialer
 
-	// upgrader specifies the parameters for upgrading a incoming HTTP
+	// upgrader specifies the parameters for upgrading an incoming HTTP
 	// connection to a WebSocket connection. If nil, DefaultUpgrader is used.
 	upgrader *websocket.Upgrader
 }
-
-// ProxyHandler returns a new http.Handler interface that reverse proxies the
-// request to the given target.
-func ProxyHandler(target *url.URL) http.Handler { return NewWebSocketProxy(target, nil) }
 
 // NewWebSocketProxy returns a new Websocket reverse proxy that rewrites the
 // URL's to the scheme, host and base path provider in target.
@@ -161,7 +157,7 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		w.director(r, requestHeader)
 	}
 
-	// Connect to the backend URL, also pass the headers we get from the requst
+	// Connect to the backend URL, also pass the headers we get from the request
 	// together with the Forwarded headers we prepared above.
 	connBackend, resp, err := dialer.Dial(backendURL.String(), requestHeader)
 	if err != nil && resp != nil && w.responseObserver != nil {
@@ -242,7 +238,6 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		message = "WebSocketProxy: Error when copying from backend to client: %v"
 	case err = <-errBackend:
 		message = "WebSocketProxy: Error when copying from client to backend: %v"
-
 	}
 	if e, ok := err.(*websocket.CloseError); !ok || e.Code == websocket.CloseAbnormalClosure { //nolint:errorlint
 		Logger.With(slogger.Field{Key: "error", Value: err}).Errorf(message, err)

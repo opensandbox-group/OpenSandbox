@@ -16,6 +16,7 @@ package flag
 
 import "time"
 
+// Core server options.
 var (
 	// LogLevel controls the router log verbosity.
 	LogLevel string
@@ -23,24 +24,42 @@ var (
 	// Port controls the HTTP listener port.
 	Port int
 
-	// ProviderType specifies the sandbox provider type (e.g., batchsandbox).
+	// ProviderType specifies the sandbox provider type (batchsandbox, agent-sandbox, fleets).
 	ProviderType string
 
-	// Mode specifies the sandbox service discovery mode (e.g., header, uri).
+	// Mode specifies the sandbox service discovery mode (header or uri).
 	Mode string
+)
 
+// Renew-intent publishing: ingress records observed traffic so the lifecycle
+// server can extend soon-to-expire sandboxes.
+var (
 	RenewIntentEnabled        bool
 	RenewIntentRedisDSN       string
 	RenewIntentQueueKey       string
 	RenewIntentQueueMaxLen    int
 	RenewIntentMinIntervalSec int
+)
 
+// Secure access (signed routes) and FastPath (fleets) routing.
+var (
+	// SecureAccessKeys holds the shared verification keys for signed ingress
+	// routes and fleets route scopes: "a=base64,b=base64".
 	SecureAccessKeys string
 
-	FastPathEndpoint          string
-	FastPathAccessMode        string
-	FastPathWaitTimeoutMillis int
+	// FastPathEndpoint is the FastPath v2 gRPC endpoint; non-empty enables fleets routing.
+	FastPathEndpoint string
 
+	// FastPathAccessMode selects the fleets data-plane mode (central-proxy or direct-fastlet-proxy).
+	FastPathAccessMode string
+
+	// FastPathWaitTimeoutMillis bounds one FastPath ResolveEndpoint RPC per ingress request.
+	FastPathWaitTimeoutMillis int
+)
+
+// Network-readiness shadow assessment: connectivity observations are aggregated
+// per fixed window and only reported (never used to remove traffic).
+var (
 	NetworkReadinessShadowWindow               time.Duration
 	NetworkReadinessShadowMaxTargets           int
 	NetworkReadinessShadowMinAttempts          uint64

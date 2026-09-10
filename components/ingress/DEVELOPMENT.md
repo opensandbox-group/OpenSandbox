@@ -1,7 +1,7 @@
 # Development Guide (Quick)
 
 ## Prerequisites
-- Go 1.24+
+- Go 1.25+
 - Docker (optional, for image build)
 - Access to a Kubernetes cluster with BatchSandbox CRD installed.
 
@@ -13,9 +13,8 @@ go mod tidy && go mod vendor
 
 ## Build & Run
 ```bash
-make build          # binary at bin/ingress with ldflags version info
-./bin/ingress \
-  --namespace <target-namespace> \
+make build          # binary at bin/router with ldflags version info
+./bin/router \
   --port 28888 \
   --log-level info
 ```
@@ -37,9 +36,13 @@ docker build \
 
 ## Key Paths
 - `main.go` — entrypoint, HTTP routes, provider initialization.
-- `pkg/proxy/` — HTTP/WebSocket reverse proxy logic.
-- `pkg/sandbox/` — Sandbox provider abstraction and BatchSandbox implementation.
-- `version/` — build metadata (ldflags).
+- `pkg/flag/` — command-line flags and defaults.
+- `pkg/proxy/` — HTTP/WebSocket reverse proxy logic and route parsing.
+- `pkg/sandbox/` — sandbox provider abstraction (BatchSandbox, AgentSandbox, fleets/FastPath).
+- `pkg/signature/`, `pkg/routescope/` — signed-route and fleets route-scope verification.
+- `pkg/renewintent/` — renew-intent event publishing to Redis.
+- `pkg/telemetry/` — OpenTelemetry metrics.
+- `vendor/github.com/alibaba/opensandbox/internal/version` — build metadata (ldflags).
 
 ## Tips
 - Health check: `/status.ok`

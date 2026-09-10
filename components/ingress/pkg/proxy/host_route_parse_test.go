@@ -27,7 +27,7 @@ func TestParseURIRoute_TwoSegmentsNoSignature(t *testing.T) {
 	assert.Equal(t, 8080, pr.port)
 	assert.Equal(t, "", pr.signature)
 	assert.Equal(t, "/", pr.requestURI)
-	assert.False(t, pr.uriParsedAsOSEP)
+	assert.False(t, pr.signedRoute)
 }
 
 func TestParseURIRoute_LegacyLeadingZeroPortRejected(t *testing.T) {
@@ -35,7 +35,7 @@ func TestParseURIRoute_LegacyLeadingZeroPortRejected(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestParseURIRoute_OSEPFourSegmentsWithSig(t *testing.T) {
+func TestParseURIRoute_SignedFourSegmentsWithSig(t *testing.T) {
 	exp, sig := "1a2b3c", "01234567a"
 	pr, err := parseURIRoute("/sb/9090/" + exp + "/" + sig + "/extra/path")
 	assert.NoError(t, err)
@@ -44,5 +44,5 @@ func TestParseURIRoute_OSEPFourSegmentsWithSig(t *testing.T) {
 	assert.Equal(t, exp, pr.expiresB36)
 	assert.Equal(t, sig, pr.signature)
 	assert.Equal(t, "/extra/path", pr.requestURI)
-	assert.True(t, pr.uriParsedAsOSEP)
+	assert.True(t, pr.signedRoute)
 }

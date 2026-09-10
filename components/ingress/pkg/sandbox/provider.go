@@ -26,13 +26,14 @@ const (
 	ProviderTypeAgentSandbox ProviderType = "agent-sandbox"
 	ProviderTypeFleets       ProviderType = "fleets"
 
-	sandboxNameIndex string = "sandbox-name"
+	// sandboxNameIndex indexes sandbox resources by metadata.name.
+	sandboxNameIndex = "sandbox-name"
 
 	// AnnotationAccessToken marks a sandbox that requires signed ingress routes when non-empty.
 	AnnotationAccessToken = "opensandbox.io/secure-access-token"
 )
 
-func (tpy ProviderType) String() string { return string(tpy) }
+func (t ProviderType) String() string { return string(t) }
 
 var (
 	// ErrSandboxNotFound indicates the sandbox resource does not exist

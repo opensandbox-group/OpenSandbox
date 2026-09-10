@@ -17,26 +17,28 @@ package proxy
 import "net/http"
 
 var (
+	// Standard forwarding headers.
 	XRealIP         = http.CanonicalHeaderKey("X-Real-IP")
 	XForwardedFor   = http.CanonicalHeaderKey("X-Forwarded-For")
 	XForwardedProto = http.CanonicalHeaderKey("X-Forwarded-Proto")
 
+	// OpenSandbox routing headers.
 	SandboxIngress = http.CanonicalHeaderKey("OpenSandbox-Ingress-To")
-	// DeprecatedSandboxIngress is the deprecated header name
-	// Deprecated
+
+	// DeprecatedSandboxIngress is the pre-rename routing header.
+	//
+	// Deprecated: use SandboxIngress instead.
 	DeprecatedSandboxIngress = http.CanonicalHeaderKey("OPEN-SANDBOX-INGRESS")
 
-	AccessControlAllowOrigin  = http.CanonicalHeaderKey("Access-Control-Allow-Origin")
 	ReverseProxyServerPowerBy = http.CanonicalHeaderKey("Reverse-Proxy-Server-PowerBy")
 
+	// WebSocket handshake headers passed through to the upgrader.
 	SecWebSocketProtocol   = http.CanonicalHeaderKey("Sec-WebSocket-Protocol")
 	SecWebSocketKey        = http.CanonicalHeaderKey("Sec-WebSocket-Key")
 	SecWebSocketVersion    = http.CanonicalHeaderKey("Sec-WebSocket-Version")
 	SecWebSocketExtensions = http.CanonicalHeaderKey("Sec-WebSocket-Extensions")
-	Cookie                 = http.CanonicalHeaderKey("Cookie")
 	SetCookie              = http.CanonicalHeaderKey("Set-Cookie")
 	Host                   = http.CanonicalHeaderKey("Host")
-	Origin                 = http.CanonicalHeaderKey("Origin")
 
 	// Hop-by-hop headers per RFC 7230 §6.1 — must not be forwarded by proxies.
 	HopByHopConnection       = http.CanonicalHeaderKey("Connection")
