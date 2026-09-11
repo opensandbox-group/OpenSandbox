@@ -26,6 +26,7 @@ import java.time.OffsetDateTime
  * - Running: Sandbox is running and ready to accept requests
  * - Pausing: Sandbox is in the process of pausing
  * - Paused: Sandbox has been paused while retaining its state
+ * - Resuming: Sandbox is in the process of resuming from Paused
  * - Stopping: Sandbox is being terminated
  * - Terminated: Sandbox has been successfully terminated
  * - Failed: Sandbox encountered a critical error
@@ -34,7 +35,8 @@ import java.time.OffsetDateTime
  * - Pending → Running (after creation completes)
  * - Running → Pausing (when pause is requested)
  * - Pausing → Paused (pause operation completes)
- * - Paused → Running (when resume is requested)
+ * - Paused → Resuming (when resume is requested)
+ * - Resuming → Running (resume operation completes)
  * - Running/Paused → Stopping (when kill is requested or TTL expires)
  * - Stopping → Terminated (kill/timeout operation completes)
  * - Pending/Running/Paused → Failed (on error)
@@ -47,6 +49,7 @@ object SandboxState {
     const val RUNNING = "Running"
     const val PAUSING = "Pausing"
     const val PAUSED = "Paused"
+    const val RESUMING = "Resuming"
     const val STOPPING = "Stopping"
     const val TERMINATED = "Terminated"
     const val FAILED = "Failed"
@@ -56,10 +59,10 @@ object SandboxState {
 /**
  * Filter criteria for listing sandboxes.
  *
- * @property states Filter by sandbox states (e.g., RUNNING, PAUSED)
+ * @property states Filter by sandbox states (e.g., [SandboxState.RUNNING], [SandboxState.PAUSED])
  * @property metadata Filter by metadata key-value pairs
  * @property pageSize Number of items per page
- * @property page Page number (0-indexed)
+ * @property page Page number (1-indexed)
  */
 class SandboxFilter private constructor(
     val states: List<String>?,
@@ -930,7 +933,7 @@ class PagedSandboxInfos(
 /**
  * Pagination metadata.
  *
- * @property page Current page number (0-indexed)
+ * @property page Current page number (1-indexed)
  * @property pageSize Number of items per page
  * @property totalItems Total number of items across all pages
  * @property totalPages Total number of pages

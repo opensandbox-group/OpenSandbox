@@ -238,10 +238,10 @@ class ConnectionConfig private constructor(
 
     fun getBaseUrl(): String {
         val currentDomain = getDomain()
-        // Python semantics:
+        // Python-compatible semantics, plus normalization:
         // - If `domain` includes a scheme, treat it as a full base URL (without `/v1`) and append `/v1`.
         // - If `domain` does not include a scheme, build `protocol://domain/v1`.
-        // Also normalize trailing slashes and avoid duplicating `/v1`.
+        // - Beyond Python, trailing slashes are normalized and a duplicated `/v1` is avoided.
         if (currentDomain.startsWith("http://") || currentDomain.startsWith("https://")) {
             val trimmed = currentDomain.removeSuffix("/")
             return if (trimmed.endsWith("/$API_VERSION")) trimmed else "$trimmed/$API_VERSION"

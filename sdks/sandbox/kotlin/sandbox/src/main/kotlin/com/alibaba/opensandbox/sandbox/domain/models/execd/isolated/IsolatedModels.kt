@@ -109,6 +109,9 @@ data class IsolatedRunOpts(
 
 /**
  * Handle returned when a run is started with `background: true`.
+ *
+ * [startedAt] is required by the execd spec but parsed as nullable so older
+ * execd builds that omit it do not fail the response.
  */
 data class IsolatedBackgroundRun(
     val sessionId: String,
@@ -118,6 +121,9 @@ data class IsolatedBackgroundRun(
 
 /**
  * Lifecycle state of an isolated background run.
+ *
+ * [startedAt] is required by the execd spec but parsed as nullable so older
+ * execd builds that omit it do not fail the response.
  */
 data class IsolatedRunStatus(
     val sessionId: String,

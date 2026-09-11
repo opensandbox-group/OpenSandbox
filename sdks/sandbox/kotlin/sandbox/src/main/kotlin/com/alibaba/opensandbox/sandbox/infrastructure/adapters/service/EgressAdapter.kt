@@ -480,7 +480,5 @@ internal class EgressAdapter(
 
     private fun JsonObject.optionalStringArray(name: String): List<String>? = optionalArray(name)?.map { it.requiredStringValue() }
 
-    private fun JsonObject.optionalIntArray(name: String): List<Int>? = optionalArray(name)?.map { it.jsonPrimitive.int }
-
     private fun JsonElement.requiredStringValue(): String = jsonPrimitive.content
 }

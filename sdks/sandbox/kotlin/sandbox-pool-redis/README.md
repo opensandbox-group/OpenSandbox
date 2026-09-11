@@ -80,7 +80,10 @@ try {
   interval no greater than `primaryLockTtl / 3`. A slow warmup therefore does not block
   lock renewal. Configure the TTL with enough margin for Redis latency, process pauses,
   and scheduling jitter.
-- Redis outages are surfaced as `PoolStateStoreUnavailableException`; the pool does not silently bypass shared state.
+- Store-level Redis failures are surfaced as `PoolStateStoreUnavailableException`. The pool
+  does not silently bypass shared state on the store path; however, under acquire policies
+  that allow fallthrough (`DIRECT_CREATE`, `RETRY_NEXT_IDLE_THEN_CREATE`), a store outage
+  degrades to direct sandbox creation (see OSEP-0005) rather than failing the acquire.
 
 TODO: If production deployments need stronger protection against accidental mixed pool definitions,
 add an optional pool definition version or fingerprint check that fails fast when nodes sharing the

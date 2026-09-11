@@ -26,8 +26,9 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 /**
  * Template for creating sandboxes in the pool (replenish and direct-create).
  *
- * Pool always uses a fixed 24h timeout for created sandboxes; other parameters
- * are taken from this spec. Defaults align with [Sandbox.Builder].
+ * Created sandboxes use the idle timeout configured on the pool
+ * (`PoolConfig.idleTimeout`, default 24h); other parameters are taken from
+ * this spec. Defaults align with [Sandbox.Builder].
  *
  * @property imageSpec Container image specification (required).
  * @property entrypoint Entrypoint command (default: tail -f /dev/null).

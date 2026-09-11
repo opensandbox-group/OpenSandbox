@@ -157,7 +157,7 @@ class ExecutionComplete(
      */
     val timestamp: Long,
     /**
-     * Execution time in mills
+     * Total execution time in milliseconds.
      */
     val executionTimeInMillis: Long,
 )

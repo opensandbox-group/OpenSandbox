@@ -282,7 +282,8 @@ class SandboxConnectionException(
     )
 
 /**
- * Thrown when the operation times out waiting for the sandbox to become ready.
+ * Thrown when the sandbox is determined to be unhealthy, e.g. a custom health
+ * check keeps reporting failure while the sandbox is running.
  */
 class SandboxUnhealthyException(
     message: String? = null,

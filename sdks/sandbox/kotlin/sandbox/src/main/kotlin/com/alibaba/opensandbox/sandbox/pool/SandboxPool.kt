@@ -165,6 +165,10 @@ class SandboxPool internal constructor(
      * thousands of mutually incompatible endpoint routes are not accumulated in one giant pool.
      * An explicitly user-provided connection pool is still honored. Health probes are
      * single-attempt because the DelayQueue owns health retry, interval, and TTL.
+     *
+     * Note: when [sharedConnectionPool] is set, [poolConnectionConfig] equals
+     * [connectionConfig], so both branches below produce the same value; the
+     * conditional is kept to make the sharing intent explicit.
      */
     private val warmupConnectionConfig: ConnectionConfig =
         if (sharedConnectionPool == null) {

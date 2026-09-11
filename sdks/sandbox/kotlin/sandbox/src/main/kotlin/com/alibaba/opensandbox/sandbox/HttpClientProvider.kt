@@ -71,7 +71,7 @@ class HttpClientProvider(
             return builder
         }
 
-    // 1. Explicit lazy definition to allow checking initialization status
+    // Lazy so close() can check whether the client was ever initialized
     private val httpClientLazy =
         lazy {
             baseBuilder
@@ -99,7 +99,7 @@ class HttpClientProvider(
 
     internal val singleAttemptClient: OkHttpClient by singleAttemptClientLazy
 
-    // 2. Explicit lazy definition for authenticated client
+    // Lazy so close() can check whether the client was ever initialized
     private val authenticatedClientLazy =
         lazy {
             baseBuilder
@@ -112,7 +112,7 @@ class HttpClientProvider(
 
     val authenticatedClient: OkHttpClient by authenticatedClientLazy
 
-    // 3. Explicit lazy definition for SSE client
+    // Lazy so close() can check whether the client was ever initialized.
     //
     // The SSE client deliberately disables all automatic retries: streaming
     // command POSTs are not safely replayable and could start a command twice
@@ -276,7 +276,6 @@ class HttpClientProvider(
      * Closes the underlying HTTP client and releases resources.
      */
     override fun close() {
-        // Now we can pass the specific backing fields to check initialization
         shutdownClientQuietly(httpClientLazy, "http client")
         shutdownClientQuietly(authenticatedClientLazy, "authenticated client")
         shutdownClientQuietly(sseClientLazy, "sse client")

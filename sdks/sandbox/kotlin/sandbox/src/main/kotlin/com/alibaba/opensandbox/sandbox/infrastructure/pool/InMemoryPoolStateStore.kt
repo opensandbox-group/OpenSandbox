@@ -30,9 +30,12 @@ import java.util.concurrent.ConcurrentLinkedQueue
 /**
  * In-memory implementation of [PoolStateStore] for single-node use.
  *
- * Concurrency is provided entirely by concurrent data structures:
- * - Per-pool state uses [ConcurrentHashMap] (sandboxId -> [IdleEntry]) and
- *   [ConcurrentLinkedQueue] (FIFO sandboxIds). No external lock.
+ * Concurrency model:
+ * - Per-pool idle state uses [ConcurrentHashMap] (sandboxId -> [IdleEntry]) and
+ *   [ConcurrentLinkedQueue] (FIFO sandboxIds).
+ * - Cross-step sequences (put, take, destroy-state transitions, clear) are
+ *   additionally guarded by a store-wide monitor, so compound operations are
+ *   atomic with respect to each other.
  * - Primary lock is a no-op: single-node mode always treats the caller as leader
  *   ([tryAcquirePrimaryLock]/[renewPrimaryLock] return true, [releasePrimaryLock] is no-op).
  *

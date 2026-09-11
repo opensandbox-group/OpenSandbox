@@ -16,7 +16,13 @@
 
 package com.alibaba.opensandbox.sandbox.domain.models.sandboxes
 
-/** Command executed by execd before the user entrypoint starts. */
+/**
+ * Command executed by execd before the user entrypoint starts.
+ *
+ * [timeoutSeconds] is optional; the server applies its own default (60s) when
+ * omitted. Values outside the server-accepted range (1..10800 for pre-start
+ * hooks) are rejected by the server.
+ */
 class LifecycleHook private constructor(
     val command: List<String>,
     val timeoutSeconds: Int?,
@@ -52,7 +58,13 @@ class LifecycleHook private constructor(
     }
 }
 
-/** Named command scheduled by execd while the sandbox is running. */
+/**
+ * Named command scheduled by execd while the sandbox is running.
+ *
+ * [timeoutSeconds] is optional; the server applies its own default (60s) when
+ * omitted. Values outside the server-accepted range (1..300 for periodic
+ * hooks) are rejected by the server.
+ */
 class PeriodicLifecycleHook private constructor(
     val name: String,
     val schedule: String,

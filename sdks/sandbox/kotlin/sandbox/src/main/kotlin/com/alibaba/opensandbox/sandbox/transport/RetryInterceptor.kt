@@ -90,10 +90,11 @@ class RetryInterceptor
                 }
 
                 // Clamp per-attempt timeouts: apply perAttemptTimeout and remaining
-                // overallDeadline, whichever is tighter. OkHttp chain.with*Timeout
-                // returns a new Chain with the timeout lowered (not raised), so
-                // default values from the caller's OkHttpClient are preserved when
-                // these knobs are unset.
+                // overallDeadline, whichever is tighter. Note: OkHttp
+                // chain.with*Timeout *replaces* the previous value (it can
+                // raise as well as lower it), so a policy value larger than
+                // the client baseline raises the effective timeout for this
+                // attempt.
                 var effectiveChain = chain
                 val perAttemptMs = computePerAttemptTimeoutMs(elapsedBefore)
                 if (perAttemptMs != null) {

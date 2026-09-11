@@ -36,7 +36,8 @@ import java.util.concurrent.TimeUnit
  *
  * ## Key Features
  *
- * - **Multi-language Code Execution**: Support for Python, JavaScript, Bash, Java, Kotlin
+ * - **Multi-language Code Execution**: Support for Python, Java, Go, TypeScript, Bash, JavaScript
+ *   (see [SupportedLanguage])
  * - **Session Management**: Persistent execution contexts with variable state
  * - **Sandbox Integration**: Full access to underlying sandbox file system and command execution
  * - **Streaming Execution**: Real-time code execution with output streaming
@@ -76,7 +77,7 @@ import java.util.concurrent.TimeUnit
  * )
  *
  * // Always clean up resources
- * interpreter.kill()
+ * interpreter.sandbox().kill()
  * interpreter.sandbox().close()
  * ```
  */
@@ -84,8 +85,6 @@ class CodeInterpreter internal constructor(
     private val sandbox: Sandbox,
     private val codeService: Codes,
 ) {
-    private val logger = LoggerFactory.getLogger(CodeInterpreter::class.java)
-
     /**
      * Provides access to the underlying sandbox instance.
      */
@@ -334,7 +333,6 @@ class CodeInterpreter internal constructor(
      * // Then wrap it with code interpreter capabilities
      * val interpreter = CodeInterpreter.builder()
      *     .fromSandbox(sandbox)
-     *     .connectionConfig(customConfig)  // Optional
      *     .build()
      *
      * // Use the interpreter

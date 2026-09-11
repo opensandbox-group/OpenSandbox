@@ -103,8 +103,6 @@ class Sandbox internal constructor(
     private val httpClientProvider: HttpClientProvider,
     private val diagnosticsService: Diagnostics,
 ) : AutoCloseable {
-    private val logger = LoggerFactory.getLogger(Sandbox::class.java)
-
     /**
      * Provides access to file system operations within the sandbox.
      *
@@ -531,10 +529,11 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Gets the current status of this sandbox.
+     * Gets the externally reachable endpoint for a service port exposed by this sandbox.
      *
-     * @return Current sandbox status including state and metadata
-     * @throws SandboxException if status cannot be retrieved
+     * @param port The port number to get the endpoint for
+     * @return Endpoint information including address and access headers
+     * @throws SandboxException if the endpoint cannot be retrieved
      */
     fun getEndpoint(port: Int): SandboxEndpoint {
         return sandboxService.getSandboxEndpoint(id, port, httpClientProvider.config.useServerProxy)
@@ -555,9 +554,10 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Gets the current status of this sandbox.
+     * Gets current resource usage metrics for this sandbox.
      *
-     * @return Current sandbox status including state and metadata
+     * @return Metrics including CPU and memory usage
+     * @throws SandboxException if metrics cannot be retrieved
      */
     fun getMetrics(): SandboxMetrics {
         return metricsService.getMetrics(id)

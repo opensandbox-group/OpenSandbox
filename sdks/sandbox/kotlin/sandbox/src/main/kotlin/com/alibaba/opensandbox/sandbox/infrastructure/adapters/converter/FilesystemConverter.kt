@@ -27,9 +27,6 @@ import com.alibaba.opensandbox.sandbox.api.models.execd.ReplaceFileContentItem a
 
 /**
  * Converter between domain models and API models for filesystem operations.
- *
- * @author ninan
- * @since 2025/12/2
  */
 object FilesystemConverter {
     /**

@@ -49,7 +49,6 @@ object SupportedLanguage {
  *
  * @property id Unique identifier for this execution context
  * @property language Programming language for this context (e.g., "python", "javascript")
- * @property cwd Current working directory for code execution
  */
 class CodeContext private constructor(
     val id: String?,
@@ -105,7 +104,6 @@ class CodeContext private constructor(
  * val context = CodeContext.builder()
  *     .id("session-123")
  *     .language("python")
- *     .cwd("/workspace")
  *     .build()
  * val request = RunCodeRequest.builder()
  *     .code("import pandas as pd; df = pd.read_csv('data.csv')")
@@ -114,7 +112,8 @@ class CodeContext private constructor(
  * ```
  *
  * @property code The source code to execute
- * @property context Optional execution context. If null, a temporary context will be created
+ * @property context Execution context. Defaults to a Python context; the server
+ * resolves it to the default per-language session, whose state persists across runs
  */
 class RunCodeRequest private constructor(
     val code: String,

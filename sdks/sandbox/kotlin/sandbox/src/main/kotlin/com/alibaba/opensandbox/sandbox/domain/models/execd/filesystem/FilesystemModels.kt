@@ -31,6 +31,7 @@ import java.time.OffsetDateTime
  * @property size Size of the file in bytes (0 for directories)
  * @property modifiedAt Timestamp when the entry was last modified
  * @property createdAt Timestamp when the entry was created
+ * @property type Entry type: `file`, `directory`, `symlink`, or `other` (null when the server omits it)
  */
 class EntryInfo(
     val path: String,
@@ -172,7 +173,9 @@ class MoveEntry private constructor(
  * Request to set permissions/ownership of a file or directory.
  *
  * Updates the permissions and/or ownership of an existing file or directory
- * without modifying its content. Only specified properties will be changed.
+ * without modifying its content. Note that `mode` is always sent with the
+ * request (the execd API requires it), so leaving it at the default `755`
+ * also rewrites the file mode. `owner` and `group` are only sent when set.
  *
  * @property path Target path of the file or directory to modify
  * @property owner New owner username (null to keep current owner)
