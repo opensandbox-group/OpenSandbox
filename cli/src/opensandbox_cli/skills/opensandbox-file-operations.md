@@ -119,6 +119,7 @@ Rules:
 
 - use `upload` when the source file is on the host
 - use `download` when the destination should be written to the host filesystem
+- downloads replace the destination only on success; failures and interruptions preserve the existing file
 - use `write` and `cat` only when the operation stays entirely inside the sandbox
 
 ## Metadata and Permissions

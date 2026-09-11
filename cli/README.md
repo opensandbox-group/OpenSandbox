@@ -220,6 +220,9 @@ osb file replace <sandbox-id> /workspace/app.py --old old --new new -o json
 osb file chmod <sandbox-id> /workspace/script.sh --mode 755 -o json
 ```
 
+Downloads replace the local file only on success; a failed or interrupted
+download preserves any existing file. See the [CLI guide](../docs/cli/index.md#work-with-files).
+
 ### Manage runtime egress policy
 
 Inspect current policy:
