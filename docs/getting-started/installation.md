@@ -9,13 +9,17 @@ description: Install OpenSandbox server, SDKs, CLI, and MCP server across all su
 
 The OpenSandbox server is a FastAPI-based service that manages sandbox lifecycles. It supports Docker and Kubernetes runtimes.
 
-```bash
-# Install from PyPI
-uv pip install opensandbox-server
+::: code-group
 
-# Or with pip
+```bash [pip]
 pip install opensandbox-server
 ```
+
+```bash [uv]
+uv pip install opensandbox-server
+```
+
+:::
 
 **Requirements:**
 - Python 3.10+
@@ -99,11 +103,17 @@ dotnet add package Alibaba.OpenSandbox.CodeInterpreter
 
 The `osb` CLI provides terminal-based sandbox management.
 
-```bash
+::: code-group
+
+```bash [pip]
 pip install opensandbox-cli
-# or
+```
+
+```bash [uv]
 uv tool install opensandbox-cli
 ```
+
+:::
 
 See the [CLI reference](/cli/) for the full command set.
 
@@ -111,8 +121,19 @@ See the [CLI reference](/cli/) for the full command set.
 
 The MCP server exposes sandbox operations to MCP-capable clients like Claude Code and Cursor.
 
-```bash
+::: code-group
+
+```bash [pip]
 pip install opensandbox-mcp
+```
+
+```bash [uv]
+uv pip install opensandbox-mcp
+```
+
+:::
+
+```bash
 opensandbox-mcp --domain localhost:8080 --protocol http
 ```
 

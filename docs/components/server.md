@@ -49,9 +49,17 @@ Metadata keys under the reserved prefix `opensandbox.io/` are system-managed and
 
 Install from PyPI. For local development, clone the repo and run `uv sync` in `server/`.
 
-```bash
+::: code-group
+
+```bash [pip]
+pip install opensandbox-server
+```
+
+```bash [uv]
 uv pip install opensandbox-server
 ```
+
+:::
 
 ### Configuration
 

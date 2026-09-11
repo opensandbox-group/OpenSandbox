@@ -19,19 +19,21 @@ It uses the OpenSandbox Python SDK under the hood and is intended to be the shor
 
 ## Install
 
-Choose one:
+::: code-group
 
-```bash
+```bash [pip]
 pip install opensandbox-cli
 ```
 
-```bash
+```bash [uv]
 uv tool install opensandbox-cli
 ```
 
-```bash
+```bash [pipx]
 pipx install opensandbox-cli
 ```
+
+:::
 
 Confirm the install:
 
